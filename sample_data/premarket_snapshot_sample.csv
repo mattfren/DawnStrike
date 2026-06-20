@@ -1,0 +1,9 @@
+ticker,company,previous_close,premarket_price,premarket_high,premarket_low,premarket_volume,dollar_volume,gap_pct,float_shares,market_cap,spread_pct,short_float_pct,has_news,catalyst_headline,catalyst_url,current_halt,recent_offering,reverse_split_90d,source,as_of_timestamp
+NOVA,NovaPulse Therapeutics,2.75,5.20,5.35,3.60,1500000,7800000.0,89.0909090909091,18000000,94000000,1.2,18.5,true,FDA fast-track catalyst,,false,false,false,sample,2026-06-18T09:25:00-04:00
+RIFT,RiftGrid Robotics,1.65,2.40,2.48,1.90,420000,1008000.0,45.45454545454545,29000000,69600000,2.4,9.0,true,Robotics contract,,false,false,false,sample,2026-06-18T09:25:00-04:00
+HALT,HaltPoint Bio,1.20,3.10,3.25,2.90,900000,2790000.0,158.33333333333334,12000000,37200000,1.5,12.0,true,Halt pending news,,true,false,false,sample,2026-06-18T09:25:00-04:00
+THIN,ThinTape Energy,0.95,1.10,1.18,1.02,25000,27500.0,15.789473684210535,8000000,8800000,3.0,4.0,false,,,false,false,false,sample,2026-06-18T09:25:00-04:00
+SUBP,SubPenny Mining,0.18,0.42,0.46,0.30,2500000,1050000.0,133.33333333333331,6000000,2520000,8.5,22.0,true,Reverse split follow-through,,false,false,true,sample,2026-06-18T09:25:00-04:00
+MOON,MoonArc Devices,1.80,7.80,8.05,6.10,1100000,8580000.0,333.33333333333337,42000000,327600000,4.4,6.5,false,,,false,false,false,sample,2026-06-18T09:25:00-04:00
+OFFER,OfferLab Pharma,2.90,4.60,4.85,4.05,850000,3910000.0,58.620689655172406,24000000,110400000,1.9,15.0,true,Offering priced,,false,true,false,sample,2026-06-18T09:25:00-04:00
+WIDE,WideSpread AI,4.20,6.20,6.55,5.80,700000,4340000.0,47.619047619047606,36000000,223200000,7.8,11.0,true,AI partnership,,false,false,false,sample,2026-06-18T09:25:00-04:00

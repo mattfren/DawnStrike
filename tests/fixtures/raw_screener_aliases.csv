@@ -1,0 +1,5 @@
+Symbol,Name,Last,Prev Close,High,Low,Pre-Market Volume,News,URL,Timestamp,Float,Market Cap,Short Float %,Spread %,Halted,Offering
+NOVA,Nova Therapeutics,$5.20,$2.75,$5.45,$3.25,"1,500,000",FDA phase 2 data,https://example.test/nova,2026-06-20T08:45:00-05:00,10000000,80000000,14,0.9,false,false
+RIFT,Rift Battery,$2.40,$1.65,$2.55,$1.80,425000,Strategic supply agreement,https://example.test/rift,2026-06-20T08:46:00-05:00,24000000,120000000,9,1.1,false,false
+WIDE,Wide Microcap,$6.80,$4.30,$7.15,$5.95,720000,Low float sympathy move,,2026-06-20T08:47:00-05:00,850000,9500000,22,7.5,false,false
+HALT,Halt Robotics,$3.10,$1.20,$3.35,$2.80,900000,Trading halt pending news,https://example.test/halt,2026-06-20T08:48:00-05:00,2200000,18000000,31,2.4,true,false

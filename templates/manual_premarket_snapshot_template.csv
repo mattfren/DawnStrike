@@ -1,0 +1,4 @@
+ticker,company,previous_close,premarket_price,premarket_high,premarket_low,premarket_volume,dollar_volume,gap_pct,float_shares,market_cap,spread_pct,short_float_pct,has_news,catalyst_headline,catalyst_url,current_halt,recent_offering,reverse_split_90d,source,as_of_timestamp
+NOVA,NovaPulse Therapeutics,2.75,5.20,5.35,3.60,1500000,,,18000000,94000000,1.2,18.5,true,FDA fast-track catalyst,,false,false,false,manual_upload,2026-06-18T09:25:00-04:00
+RIFT,RiftGrid Robotics,1.65,2.40,2.48,1.90,420000,,,29000000,69600000,2.4,9.0,true,Robotics contract,,false,false,false,manual_upload,2026-06-18T09:25:00-04:00
+WIDE,WideSpread AI,4.20,6.20,6.55,5.80,700000,,,36000000,223200000,7.8,11.0,true,AI partnership,,false,false,false,manual_upload,2026-06-18T09:25:00-04:00
