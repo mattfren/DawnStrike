@@ -75,6 +75,10 @@ from intraday_scanner.services.performance_service import (
     build_performance_report,
     format_performance_report,
 )
+from intraday_scanner.services.premarket_intelligence import (
+    evaluate_intelligence_outcomes,
+    write_intelligence_outcome_outputs,
+)
 from intraday_scanner.services.provider_health_service import (
     record_health_check,
     record_health_status,
@@ -159,6 +163,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     manual_audit.add_argument("--db-path", default=None)
     manual_audit.add_argument("--out-dir", required=True)
     manual_audit.add_argument("--persist", action="store_true")
+
+    intelligence_outcomes = subparsers.add_parser(
+        "evaluate-intelligence-outcomes",
+        help="Evaluate intelligence classifications against saved outcome prices",
+    )
+    intelligence_outcomes.add_argument("--db-path", default=None)
+    intelligence_outcomes.add_argument("--out-dir", default="outputs/intelligence_outcomes")
+    intelligence_outcomes.add_argument("--run-id", default=None)
+    intelligence_outcomes.add_argument("--min-samples", type=int, default=20)
+    intelligence_outcomes.add_argument("--persist", action="store_true")
 
     shadow_report = subparsers.add_parser(
         "free-shadow-report", help="Build the cumulative Free Shadow Mode report"
@@ -548,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_import_manual_outcomes(args)
         if args.command == "audit-manual-outcomes":
             return _run_audit_manual_outcomes(args)
+        if args.command == "evaluate-intelligence-outcomes":
+            return _run_evaluate_intelligence_outcomes(args)
         if args.command == "free-shadow-report":
             return _run_free_shadow_report(args)
         if args.command == "build-free-universe":
@@ -754,6 +770,21 @@ def _run_audit_manual_outcomes(args: argparse.Namespace) -> int:
     print(json.dumps(result["summary"], indent=2, sort_keys=True))
     print(f"Wrote manual audit trades to {paths['trades']}")
     print(f"Wrote manual audit summary to {paths['summary']}")
+    return 0
+
+
+def _run_evaluate_intelligence_outcomes(args: argparse.Namespace) -> int:
+    config = load_config(database_path=Path(args.db_path) if args.db_path else None)
+    result = evaluate_intelligence_outcomes(
+        store=SQLiteScanStore(config.database_path),
+        run_id=args.run_id,
+        min_samples=args.min_samples,
+        persist=args.persist,
+    )
+    paths = write_intelligence_outcome_outputs(result, args.out_dir)
+    print(json.dumps(result["summary"], indent=2, sort_keys=True))
+    print(f"Wrote intelligence outcomes to {paths['rows']}")
+    print(f"Wrote intelligence summary to {paths['summary']}")
     return 0
 
 

@@ -277,6 +277,21 @@ class SQLiteScanStore:
                         created_at TEXT NOT NULL,
                         payload_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS intelligence_outcomes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT,
+                        ticker TEXT NOT NULL,
+                        evaluated_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_intelligence_outcomes_run_ticker
+                    ON intelligence_outcomes(run_id, ticker);
+                    CREATE TABLE IF NOT EXISTS intelligence_outcome_summary (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT,
+                        created_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS shadow_reports (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         created_at TEXT NOT NULL,
@@ -488,6 +503,30 @@ class SQLiteScanStore:
                 }
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load latest scan: {exc}") from exc
+
+    def load_scan(self, run_id: str) -> dict[str, object] | None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                run = connection.execute(
+                    "SELECT * FROM scan_runs WHERE id = ? LIMIT 1", (run_id,)
+                ).fetchone()
+                if run is None:
+                    return None
+                candidates = self._load_payloads(connection, "ranked_candidates", run_id)
+                top = self._load_payloads(connection, "top_explosive", run_id)
+                avoid = self._load_payloads(connection, "avoid_list", run_id)
+                return {
+                    "run_id": run_id,
+                    "summary": json.loads(str(run["summary_json"])),
+                    "config": json.loads(str(run["config_json"])),
+                    "ranked_candidates": candidates,
+                    "top_explosive": top,
+                    "avoid_list": avoid,
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scan: {exc}") from exc
 
     def load_scan_history(self, limit: int = 50) -> list[dict[str, Any]]:
         self.initialize()
@@ -1531,6 +1570,83 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load manual audit summary: {exc}") from exc
 
+    def persist_intelligence_outcomes(
+        self,
+        summary: dict[str, Any],
+        rows: list[dict[str, Any]],
+        *,
+        run_id: str | None = None,
+    ) -> None:
+        self.initialize()
+        resolved_run_id = run_id or str(summary.get("run_id") or "")
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT INTO intelligence_outcomes
+                        (run_id, ticker, evaluated_at, payload_json)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            resolved_run_id,
+                            str(row.get("ticker", "")),
+                            str(row.get("evaluated_at", "")),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO intelligence_outcome_summary
+                    (run_id, created_at, payload_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        resolved_run_id,
+                        str(summary.get("created_at", "")),
+                        json.dumps(summary, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist intelligence outcomes: {exc}") from exc
+
+    def load_intelligence_outcomes(self, limit: int = 1000) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM intelligence_outcomes
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load intelligence outcomes: {exc}") from exc
+
+    def load_latest_intelligence_outcome_summary(self) -> dict[str, Any] | None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM intelligence_outcome_summary
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                return json.loads(str(row["payload_json"])) if row else None
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not load intelligence outcome summary: {exc}"
+            ) from exc
+
     def persist_shadow_report(self, report: dict[str, Any]) -> None:
         self.initialize()
         try:
@@ -1691,7 +1807,26 @@ def _recommendation_payload(row: dict[str, Any], result: ScanResult) -> dict[str
         "component_scores": row.get("score_breakdown"),
         "thesis": _thesis(row),
         "catalyst_summary": row.get("catalyst_headline") or "No catalyst headline available.",
+        "catalyst_tier": row.get("catalyst_tier") or "",
+        "catalyst_quality_summary": row.get("catalyst_summary") or "",
         "catalyst_url": row.get("catalyst_url") or "",
+        "action": row.get("action") or "",
+        "classification": row.get("classification") or "",
+        "predicted_action": row.get("predicted_action") or "",
+        "entry_trigger": row.get("entry_trigger") or "",
+        "confirmation_needed": row.get("confirmation_needed"),
+        "invalidation": row.get("invalidation") or "",
+        "target_1": row.get("target_1") or "",
+        "target_2": row.get("target_2") or "",
+        "risk_level": row.get("risk_level") or "",
+        "premarket_structure": row.get("premarket_structure") or "",
+        "structure_notes": row.get("structure_notes") or "",
+        "float_rotation": row.get("float_rotation") or "",
+        "float_rotation_label": row.get("float_rotation_label") or "",
+        "do_not_buy_if": row.get("do_not_buy_if") or "",
+        "data_confidence_score": row.get("data_confidence_score"),
+        "data_warnings": row.get("data_warnings") or "",
+        "field_sources": row.get("field_sources") or "",
         "risk_flags": row.get("risk_flags") or "",
         "breakout_trigger": row.get("breakout_trigger"),
         "pullback_zone_low": _pullback_part(row.get("pullback_zone"), 0),

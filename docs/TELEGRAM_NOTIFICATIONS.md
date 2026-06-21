@@ -4,19 +4,25 @@ Dawnstrike Telegram messages are compact research/watchlist notifications. They
 do not place orders, submit trades, store broker credentials, or provide
 financial advice.
 
-Supported operator labels are `WATCH`, `BREAKOUT`, `CAUTION`, `AVOID`,
-`OUTCOME NEEDED`, and `MANUAL REVIEW`.
+Supported operator labels include `🟢 Opening Breakout Candidate`,
+`🔥 Momentum Continuation Watch`, `👀 Watch Only`, `🟡 Needs Confirmation`,
+`❌ Avoid / Gap-and-Crap Risk`, `OUTCOME NEEDED`, and `MANUAL REVIEW`.
 
 ## Compact Message Example
 
 ```text
-🚀 Dawnstrike Watchlist
-⏱ 8:15 CT | 3 picks | Source: manual/web
+🚀 DAWNSTRIKE WATCHLIST
+Data: ✅ 4 candidates | ⚠️ 0 issues
+Time: 8:15 CT | Source: manual/web
 
-1) NOVA — 88.1 | +89% | $5.20
-   🎯 Trigger $5.48 | 🛑 $3.20
-   📰 FDA phase 2 data
-   ⚠️ Risk: none
+1. 🟢 NOVA — Opening Breakout Candidate
+Premarket: $5.20 | Gap: +89% | Score: 88
+Catalyst: Tier A — FDA Phase 2 Data
+Structure: Strong
+Plan: Trade only over $5.48 confirmation
+Stop: $5.12
+Targets: $6.00 / $6.75
+Avoid if: Fails VWAP or rejects opening range
 
 🚫 Avoid: 1
 Research only. No orders placed.
@@ -74,3 +80,7 @@ One cycle sends at most:
 4. Summary, only when enabled
 
 No-data cycles send one short source-check message instead of noisy follow-ups.
+That message includes `No usable rows found`, sources tried, the top failure
+reason when known, and the next step:
+`try again during premarket or drop CSV into data\inbox\screener`. No outcome
+reminder is sent when no picks exist.

@@ -53,6 +53,19 @@ def test_web_config_loading():
     assert any(source.type == "public_table_url" for source in config.sources)
 
 
+def test_example_web_config_uses_practical_source_hierarchy():
+    config = load_web_sources_config("config/web_sources.example.yaml")
+    sources = {source.name: source for source in config.sources}
+
+    assert "stockanalysis.com" in config.allowed_domains
+    assert sources["local_inbox"].enabled is True
+    assert sources["stockanalysis_premarket"].enabled is True
+    assert sources["tradingview_premarket"].enabled is True
+    assert sources["nasdaq_symbols"].enabled is True
+    assert sources["barchart_premarket"].enabled is False
+    assert sources["barchart_premarket_browser"].enabled is False
+
+
 def test_domain_allowlist_enforcement():
     ensure_allowed_url("https://allowed.test/fixture", allowed_domains=("allowed.test",))
 
@@ -116,6 +129,143 @@ def test_table_normalization_and_lineage():
     assert rows[0]["data_source_kind"] == "web_url"
     assert rows[0]["source_url"] == "https://allowed.test/fixture"
     assert "url_table_unverified" in rows[0]["coverage_warning"]
+
+
+def test_stockanalysis_fixture_normalizes_without_previous_close(tmp_path):
+    source = WebSourceConfig(
+        name="stockanalysis_premarket",
+        type="public_table_url",
+        enabled=True,
+        url="https://stockanalysis.com/markets/premarket/",
+        fixture_path="tests/fixtures/stockanalysis_premarket.html",
+    )
+    config = WebCollectionConfig(
+        enabled=True,
+        respect_robots=True,
+        user_agent="test",
+        timeout_seconds=1,
+        rate_limit_seconds=0,
+        save_raw=True,
+        allowed_domains=("stockanalysis.com",),
+        sources=(source,),
+    )
+
+    result = web_collection_service.ingest_public_table(
+        url=source.url,
+        source=source,
+        config=config,
+        out_dir=tmp_path / "stockanalysis",
+    )
+    rows = list(read_snapshot_csv(result["paths"]["premarket_snapshot"]))
+
+    assert result["status"] == "success"
+    assert result["rows_normalized"] == 2
+    assert rows[0].ticker == "NOVA"
+    assert rows[0].previous_close == 0
+    assert rows[0].gap_pct == 89.47
+    assert rows[0].premarket_high == rows[0].premarket_price
+    assert "previous_close_unavailable" in rows[0].coverage_warning
+
+
+def test_tradingview_fixture_normalizes_source_specific_shape(tmp_path):
+    source = WebSourceConfig(
+        name="tradingview_premarket",
+        type="public_table_url",
+        enabled=True,
+        url="https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/",
+        fixture_path="tests/fixtures/tradingview_premarket_extracted.html",
+    )
+    config = WebCollectionConfig(
+        enabled=True,
+        respect_robots=True,
+        user_agent="test",
+        timeout_seconds=1,
+        rate_limit_seconds=0,
+        save_raw=True,
+        allowed_domains=("tradingview.com",),
+        sources=(source,),
+    )
+
+    result = web_collection_service.ingest_public_table(
+        url=source.url,
+        source=source,
+        config=config,
+        out_dir=tmp_path / "tradingview",
+    )
+    rows = list(read_snapshot_csv(result["paths"]["premarket_snapshot"]))
+
+    assert result["status"] == "success"
+    assert result["rows_normalized"] == 2
+    assert rows[0].ticker == "CAST"
+    assert rows[0].company == "FreeCast, Inc."
+    assert rows[0].premarket_price == 11.88
+    assert rows[0].premarket_volume == 37_000_000
+    assert rows[0].market_cap == 333_630_000
+
+
+def test_marketwatch_fixture_reports_clear_missing_fields(tmp_path):
+    source = WebSourceConfig(
+        name="marketwatch_movers",
+        type="public_table_url",
+        enabled=True,
+        url="https://www.marketwatch.com/tools/us-market-movers",
+        fixture_path="tests/fixtures/marketwatch_movers.html",
+    )
+    config = WebCollectionConfig(
+        enabled=True,
+        respect_robots=True,
+        user_agent="test",
+        timeout_seconds=1,
+        rate_limit_seconds=0,
+        save_raw=True,
+        allowed_domains=("marketwatch.com",),
+        sources=(source,),
+    )
+
+    result = web_collection_service.ingest_public_table(
+        url=source.url,
+        source=source,
+        config=config,
+        out_dir=tmp_path / "marketwatch",
+    )
+
+    assert result["status"] == "no_valid_rows"
+    assert result["rejection_reason_counts"]["missing_volume"] == 1
+    assert Path(result["paths"]["rejected_rows"]).exists()
+    assert Path(result["paths"]["normalization_debug"]).exists()
+
+
+def test_investing_fixture_normalizes_or_reports_debug(tmp_path):
+    source = WebSourceConfig(
+        name="investing_premarket",
+        type="public_table_url",
+        enabled=True,
+        url="https://www.investing.com/equities/pre-market",
+        fixture_path="tests/fixtures/investing_premarket.html",
+    )
+    config = WebCollectionConfig(
+        enabled=True,
+        respect_robots=True,
+        user_agent="test",
+        timeout_seconds=1,
+        rate_limit_seconds=0,
+        save_raw=True,
+        allowed_domains=("investing.com",),
+        sources=(source,),
+    )
+
+    result = web_collection_service.ingest_public_table(
+        url=source.url,
+        source=source,
+        config=config,
+        out_dir=tmp_path / "investing",
+    )
+    rows = list(read_snapshot_csv(result["paths"]["premarket_snapshot"]))
+
+    assert result["status"] == "success"
+    assert rows[0].ticker == "IVST"
+    assert rows[0].premarket_volume == 450_000
+    assert result["rejection_reason_counts"] == {}
 
 
 def test_browser_table_fixture_extracts_rows(tmp_path):
@@ -244,7 +394,8 @@ def test_web_ingest_missing_required_fields_reports_failure(tmp_path):
     )
 
     assert result["status"] == "no_valid_rows"
-    assert "missing required market columns" in ";".join(result["warnings"])
+    assert "gap/change percent or previous close is required" in ";".join(result["warnings"])
+    assert result["rejection_reason_counts"]["missing_gap_or_previous_close"] == 1
 
 
 def test_halt_and_sec_fixture_collection(tmp_path):
@@ -439,16 +590,11 @@ def test_telegram_test_output_and_rows_do_not_expose_secrets(tmp_path, monkeypat
     assert chat_id not in persisted_text
 
 
-def test_web_auto_collect_uses_local_inbox_before_public_table(tmp_path, monkeypatch):
+def test_web_auto_collect_preserves_local_inbox_priority(tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     shutil.copy2(RAW_SCREENER, inbox / "raw.csv")
     config_path = _write_web_config(tmp_path, local_inbox=inbox)
-    monkeypatch.setattr(
-        web_collection_service,
-        "ingest_public_table",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("public table should not run")),
-    )
 
     result = web_collection_service.web_auto_collect(
         config_path=config_path,
@@ -460,6 +606,9 @@ def test_web_auto_collect_uses_local_inbox_before_public_table(tmp_path, monkeyp
     assert result["status"] == "success"
     assert result["source_summary"]["candidate_count"] == 4
     assert result["rows"][0]["ticker"]
+    nova = next(row for row in result["rows"] if row["ticker"] == "NOVA")
+    assert nova["source"] == "screener_import"
+    assert "raw.csv" in nova["source_lineage"]
     assert not (inbox / "raw.csv").exists()
     assert Path(result["source_summary"]["attempts"][0]["raw_archive_path"]).exists()
 
@@ -479,6 +628,49 @@ def test_web_auto_collect_public_table_source_health_and_dashboard_loader(tmp_pa
     assert result["status"] == "success"
     assert dashboard["web_automation_status"]["latest_source_summary"]["candidate_count"] == 2
     assert dashboard["web_automation_status"]["source_health"]
+
+
+def test_web_auto_collect_dedupe_prefers_higher_quality_row():
+    rows = web_collection_service._dedupe_rows(
+        [
+            {
+                "ticker": "DUPL",
+                "source": "local_inbox",
+                "premarket_price": "",
+                "gap_pct": "",
+                "premarket_volume": "",
+                "dollar_volume": 0,
+                "as_of_timestamp": "2026-06-20T08:00:00-05:00",
+            },
+            {
+                "ticker": "DUPL",
+                "source": "stockanalysis_premarket",
+                "premarket_price": 5.0,
+                "gap_pct": 25.0,
+                "premarket_volume": 200000,
+                "dollar_volume": 1_000_000,
+                "as_of_timestamp": "2026-06-20T08:01:00-05:00",
+            },
+        ]
+    )
+
+    assert rows[0]["source"] == "stockanalysis_premarket"
+
+
+def test_web_source_doctor_writes_rejection_debug_artifacts(tmp_path):
+    config_path = _write_source_reliability_config(tmp_path)
+
+    result = web_collection_service.web_source_doctor(
+        config_path=config_path,
+        out_dir=tmp_path / "doctor",
+        print_rows=False,
+    )
+
+    assert result["status"] == "complete"
+    assert result["rejection_reason_counts"]["missing_volume"] == 1
+    assert (tmp_path / "doctor" / "rejected_rows.csv").exists()
+    assert (tmp_path / "doctor" / "extracted_rows.csv").exists()
+    assert (tmp_path / "doctor" / "normalization_debug.json").exists()
 
 
 def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
@@ -519,7 +711,8 @@ def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
     assert out.count("[dry-run:console]") == 1
     assert "📡 Dawnstrike Source Check" in out
     assert "No usable rows found." in out
-    assert "Drop CSV into data\\inbox\\screener" in out
+    assert "try again during premarket or drop CSV into data\\inbox\\screener" in out
+    assert "📥 Outcome Data Needed" not in out
     assert "📊 Dawnstrike Summary" not in out
 
 
@@ -551,8 +744,10 @@ def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, ca
     )
 
     out = capsys.readouterr().out
-    assert "🚀 Dawnstrike Watchlist" in out
-    assert "🎯 Trigger" in out
+    assert "🚀 DAWNSTRIKE WATCHLIST" in out
+    assert "Plan:" in out
+    assert "Targets:" in out
+    assert "Avoid if:" in out
     assert "👀 Manual Monitor Needed" in out
     assert "📥 Outcome Data Needed" in out
     assert "Research only. No orders placed." in out
@@ -645,6 +840,51 @@ def _write_web_config(
                 "  - name: sec_edgar",
                 "    type: sec_edgar",
                 "    enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_source_reliability_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "source_reliability.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "enabled: true",
+                "respect_robots: true",
+                "user_agent: test",
+                "timeout_seconds: 1",
+                "rate_limit_seconds: 0",
+                "save_raw: true",
+                "allowed_domains:",
+                "  - stockanalysis.com",
+                "  - tradingview.com",
+                "  - marketwatch.com",
+                "  - investing.com",
+                "sources:",
+                "  - name: stockanalysis_premarket",
+                "    type: public_table_url",
+                "    enabled: true",
+                "    url: https://stockanalysis.com/markets/premarket/",
+                "    fixture_path: tests/fixtures/stockanalysis_premarket.html",
+                "  - name: tradingview_premarket",
+                "    type: public_table_url",
+                "    enabled: true",
+                "    url: https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/",
+                "    fixture_path: tests/fixtures/tradingview_premarket_extracted.html",
+                "  - name: marketwatch_movers",
+                "    type: public_table_url",
+                "    enabled: true",
+                "    url: https://www.marketwatch.com/tools/us-market-movers",
+                "    fixture_path: tests/fixtures/marketwatch_movers.html",
+                "  - name: investing_premarket",
+                "    type: public_table_url",
+                "    enabled: true",
+                "    url: https://www.investing.com/equities/pre-market",
+                "    fixture_path: tests/fixtures/investing_premarket.html",
             ]
         )
         + "\n",

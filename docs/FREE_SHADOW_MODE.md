@@ -83,6 +83,11 @@ py -m intraday_scanner.cli audit-manual-outcomes `
   --out-dir outputs\shadow_audit_YYYY-MM-DD `
   --persist
 
+py -m intraday_scanner.cli evaluate-intelligence-outcomes `
+  --db-path data\shadow.sqlite `
+  --out-dir outputs\intelligence_outcomes_YYYY-MM-DD `
+  --persist
+
 py -m intraday_scanner.cli free-shadow-report `
   --db-path data\shadow.sqlite `
   --out-dir outputs\shadow_report `

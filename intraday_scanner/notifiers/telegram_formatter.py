@@ -49,10 +49,11 @@ def format_morning_watchlist(
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
 ) -> str:
     picks = ranked[:3]
-    source = _source_label(source_summary)
+    issues = _issue_count(ranked, avoid)
     lines = [
-        "🚀 Dawnstrike Watchlist",
-        f"⏱ {get_operator_time_label(timezone)} | {len(ranked)} picks | Source: {source}",
+        "🚀 DAWNSTRIKE WATCHLIST",
+        f"Data: ✅ {len(ranked)} candidates | ⚠️ {issues} issues",
+        f"Time: {get_operator_time_label(timezone)} | Source: {_source_label(source_summary)}",
         "",
     ]
     if not picks:
@@ -60,19 +61,27 @@ def format_morning_watchlist(
         return _clip("\n".join(lines), max_chars)
     for index, row in enumerate(picks, start=1):
         ticker = _text(row.get("ticker"), "n/a")
+        emoji, action = _action_parts(row.get("action") or row.get("classification"))
+        catalyst = _catalyst_line(row)
+        structure = _text(row.get("premarket_structure"), "unknown").title()
+        fallback_plan = f"Wait for confirmation over {format_price(row.get('breakout_trigger'))}"
+        plan = _text(row.get("entry_trigger"), fallback_plan)
+        stop = _text(row.get("invalidation"), format_price(row.get("invalidation_level")))
+        target_1 = _text(row.get("target_1"), format_price(row.get("first_target")))
+        target_2 = _text(row.get("target_2"), format_price(row.get("stretch_target")))
+        avoid_if = _text(row.get("do_not_buy_if"), _risk_text(row))
+        lines.append(f"{index}. {emoji} {ticker} — {action}")
         lines.append(
-            f"{index}) {ticker} — {format_score(row.get('score'))} | "
-            f"{format_percent(row.get('gap_pct'))} | {format_price(row.get('premarket_price'))}"
+            f"Premarket: {format_price(row.get('premarket_price'))} | "
+            f"Gap: {format_percent(row.get('gap_pct'))} | "
+            f"Score: {format_score(row.get('score'))}"
         )
-        lines.append(
-            f"   🎯 Trigger {format_price(row.get('breakout_trigger'))} | "
-            f"🛑 {format_price(row.get('invalidation_level'))}"
-        )
-        catalyst = _truncate(_text(row.get("catalyst_headline"), ""), 60)
-        if catalyst:
-            lines.append(f"   📰 {catalyst}")
-        risk = _risk_text(row)
-        lines.append(f"   ⚠️ Risk: {risk}")
+        lines.append(f"Catalyst: {catalyst}")
+        lines.append(f"Structure: {structure}")
+        lines.append(f"Plan: {plan}")
+        lines.append(f"Stop: {stop}")
+        lines.append(f"Targets: {target_1} / {target_2}")
+        lines.append(f"Avoid if: {avoid_if}")
         lines.append("")
     extra = len(ranked) - len(picks)
     if extra > 0:
@@ -151,11 +160,14 @@ def format_daily_summary(summary: dict[str, Any]) -> str:
 
 def format_source_check(source_summary: dict[str, Any]) -> str:
     attempts = list(source_summary.get("attempts") or [])
+    top_reason = _text(source_summary.get("top_failure_reason"), "")
     lines = [
         "📡 Dawnstrike Source Check",
         "No usable rows found.",
-        "Tried:",
     ]
+    if top_reason:
+        lines.append(f"Top reason: {top_reason.replace('_', ' ')}")
+    lines.extend(["", "Sources tried:"])
     if not attempts:
         lines.append("- no enabled candidate sources")
     else:
@@ -169,8 +181,7 @@ def format_source_check(source_summary: dict[str, Any]) -> str:
         [
             "",
             "Next:",
-            "Drop CSV into data\\inbox\\screener",
-            "or enable another source.",
+            "try again during premarket or drop CSV into data\\inbox\\screener",
         ]
     )
     return "\n".join(lines)
@@ -237,6 +248,34 @@ def _risk_text(row: dict[str, Any]) -> str:
         raw = ", ".join(str(item) for item in raw if item)
     text = str(raw or "").strip().strip(";")
     return text if text else "none"
+
+
+def _action_parts(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return "🟡", "Needs Confirmation"
+    first = text.split(maxsplit=1)[0]
+    if first in {"🟢", "🔥", "👀", "🟡", "❌"}:
+        return first, text[len(first) :].strip() or text
+    return "🟡", text
+
+
+def _catalyst_line(row: dict[str, Any]) -> str:
+    tier = _text(row.get("catalyst_tier"), "C")
+    summary = _text(
+        row.get("catalyst_summary") or row.get("catalyst_headline"),
+        "No clear catalyst",
+    )
+    return f"Tier {tier} — {_truncate(summary, 60)}"
+
+
+def _issue_count(ranked: list[dict[str, Any]], avoid: list[dict[str, Any]]) -> int:
+    warnings = 0
+    for row in ranked:
+        raw = str(row.get("data_warnings") or "").strip()
+        if raw:
+            warnings += len([part for part in raw.replace(",", ";").split(";") if part.strip()])
+    return warnings + len(avoid)
 
 
 def _number(value: Any) -> float | None:

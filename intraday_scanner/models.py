@@ -95,6 +95,33 @@ CANDIDATE_COLUMNS = [
     "stretch_target",
     "risk_flags",
     "best_exit_bias",
+    "action",
+    "classification",
+    "predicted_action",
+    "catalyst_tier",
+    "catalyst_summary",
+    "catalyst_confidence",
+    "catalyst_risk_flags",
+    "premarket_structure",
+    "structure_notes",
+    "float_rotation",
+    "float_rotation_label",
+    "entry_trigger",
+    "confirmation_needed",
+    "invalidation",
+    "target_1",
+    "target_2",
+    "risk_level",
+    "why_this_matters",
+    "do_not_buy_if",
+    "data_confidence_score",
+    "data_warnings",
+    "field_sources",
+    "historical_win_rate",
+    "average_max_gain",
+    "average_drawdown",
+    "similar_setup_count",
+    "probability_note",
     "score_breakdown",
     "avoid_reasons",
     "source",
@@ -342,13 +369,14 @@ class ScoredCandidate:
     score_breakdown: dict[str, float]
     is_avoid: bool
     avoid_reasons: list[str] = field(default_factory=list)
+    intelligence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ticker(self) -> str:
         return self.snapshot.ticker
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "rank": self.rank,
             "ticker": self.snapshot.ticker,
             "company": self.snapshot.company,
@@ -390,6 +418,8 @@ class ScoredCandidate:
             "raw_file_path": self.snapshot.raw_file_path,
             "imported_at": self.snapshot.imported_at,
         }
+        payload.update(self.intelligence)
+        return payload
 
 
 @dataclass(frozen=True)

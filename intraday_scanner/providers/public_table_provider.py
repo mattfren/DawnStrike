@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -29,11 +30,19 @@ TABLE_COLUMN_SIGNALS = {
     "price",
     "premarket price",
     "pre-market price",
+    "pre-mkt price",
+    "pre mkt price",
+    "pre-mkt gap %",
+    "pre mkt gap %",
+    "pre-mkt vol",
+    "pre mkt vol",
     "change %",
     "gap %",
+    "chg %",
     "volume",
     "premarket volume",
     "market cap",
+    "mkt cap",
     "float",
     "news",
     "headline",
@@ -41,12 +50,23 @@ TABLE_COLUMN_SIGNALS = {
     "low",
     "previous close",
     "prev close",
+    "relative volume",
+    "rel volume",
+    "rel vol",
 }
 
 ALIASES = {
     "ticker": ["ticker", "symbol"],
     "company": ["company", "name", "security", "security name"],
-    "premarket_price": ["premarket_price", "premarket price", "pre-market price", "price", "last"],
+    "premarket_price": [
+        "premarket_price",
+        "premarket price",
+        "pre-market price",
+        "pre-mkt price",
+        "pre mkt price",
+        "price",
+        "last",
+    ],
     "previous_close": ["previous_close", "previous close", "prev close", "prev_close", "close"],
     "premarket_high": ["premarket_high", "premarket high", "pre-market high", "high"],
     "premarket_low": ["premarket_low", "premarket low", "pre-market low", "low"],
@@ -54,15 +74,31 @@ ALIASES = {
         "premarket_volume",
         "premarket volume",
         "pre-market volume",
+        "pre-mkt vol",
+        "pre mkt vol",
         "volume",
+        "vol",
     ],
-    "gap_pct": ["gap_pct", "gap %", "change %", "% change"],
+    "gap_pct": [
+        "gap_pct",
+        "gap %",
+        "pre-mkt gap %",
+        "pre mkt gap %",
+        "premarket change %",
+        "pre-market change %",
+        "change %",
+        "% change",
+        "chg %",
+        "pre-mkt chg %",
+        "pre mkt chg %",
+    ],
     "float_shares": ["float_shares", "float shares", "float"],
-    "market_cap": ["market_cap", "market cap"],
+    "market_cap": ["market_cap", "market cap", "mkt cap"],
     "spread_pct": ["spread_pct", "spread %", "spread"],
     "short_float_pct": ["short_float_pct", "short float", "short float %"],
     "catalyst_headline": ["catalyst_headline", "headline", "news", "catalyst"],
     "catalyst_url": ["catalyst_url", "url", "link", "source url", "source_url"],
+    "relative_volume": ["relative volume", "rel volume", "rel vol", "relative_volume"],
 }
 
 
@@ -72,6 +108,13 @@ class ExtractedTable:
     headers: list[str]
     rows: list[dict[str, str]]
     score: int
+
+
+class _RowRejected(DataProviderError):
+    def __init__(self, reason: str, detail: str):
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
 
 
 def ingest_public_table(
@@ -120,14 +163,20 @@ def ingest_public_table(
             _persist_failure(store, fetch, failure)
         return failure
 
-    rows, warnings = normalize_public_table_rows(
+    rows, warnings, normalization_debug = normalize_public_table_rows_with_debug(
         best,
         source_name=source.name,
         source_url=fetch.url,
         raw_file_path=str(raw_path if config.save_raw else ""),
     )
     snapshot_path = output_dir / "premarket_snapshot.csv"
+    extracted_rows_path = output_dir / "extracted_rows.csv"
+    rejected_rows_path = output_dir / "rejected_rows.csv"
+    debug_path = output_dir / "normalization_debug.json"
     _write_snapshot(snapshot_path, rows)
+    _write_dynamic_csv(extracted_rows_path, normalization_debug["extracted_rows"])
+    _write_dynamic_csv(rejected_rows_path, normalization_debug["rejected_rows"])
+    write_json(debug_path, normalization_debug)
     summary = {
         "status": "success" if rows else "no_valid_rows",
         "run_id": fetch.run_id,
@@ -139,9 +188,14 @@ def ingest_public_table(
         "selected_table_score": best.score,
         "rows_extracted": sum(len(table.rows) for table in tables),
         "rows_normalized": len(rows),
+        "rows_rejected": len(normalization_debug["rejected_rows"]),
+        "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "warnings": warnings,
         "paths": {
             "extracted_tables": str(extracted_path),
+            "extracted_rows": str(extracted_rows_path),
+            "rejected_rows": str(rejected_rows_path),
+            "normalization_debug": str(debug_path),
             "premarket_snapshot": str(snapshot_path),
             "raw_source": str(raw_path if config.save_raw else ""),
         },
@@ -224,12 +278,31 @@ def normalize_public_table_rows(
     source_url: str,
     raw_file_path: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    rows, warnings, _debug = normalize_public_table_rows_with_debug(
+        table,
+        source_name=source_name,
+        source_url=source_url,
+        raw_file_path=raw_file_path,
+    )
+    return rows, warnings
+
+
+def normalize_public_table_rows_with_debug(
+    table: ExtractedTable,
+    *,
+    source_name: str,
+    source_url: str,
+    raw_file_path: str = "",
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
     imported_at = utc_now_iso()
     normalized: list[dict[str, Any]] = []
     warnings: list[str] = []
-    for raw in table.rows:
+    rejected_rows: list[dict[str, Any]] = []
+    reason_counts: dict[str, int] = {}
+    extracted_rows = _flatten_extracted_rows(table, source_name)
+    for index, raw in enumerate(table.rows):
         try:
-            row = _normalize_row(
+            row, row_warnings = _normalize_row(
                 raw,
                 source_name=source_name,
                 source_url=source_url,
@@ -238,10 +311,47 @@ def normalize_public_table_rows(
             )
             SnapshotRow.from_mapping(row, source=source_name)
             normalized.append(row)
+            warnings.extend(f"{row['ticker']}: {warning}" for warning in row_warnings)
+        except _RowRejected as exc:
+            ticker = _text(_alias(raw, "ticker")) or "unknown"
+            reason_counts[exc.reason] = reason_counts.get(exc.reason, 0) + 1
+            warnings.append(f"{ticker}: {exc.detail}")
+            rejected_rows.append(
+                _rejected_row(
+                    source_name=source_name,
+                    row_index=index,
+                    reason=exc.reason,
+                    detail=exc.detail,
+                    raw=raw,
+                )
+            )
         except (DataProviderError, ValueError) as exc:
             ticker = _text(_alias(raw, "ticker")) or "unknown"
+            reason = _classify_rejection(str(exc))
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
             warnings.append(f"{ticker}: {exc}")
-    return normalized, warnings
+            rejected_rows.append(
+                _rejected_row(
+                    source_name=source_name,
+                    row_index=index,
+                    reason=reason,
+                    detail=str(exc),
+                    raw=raw,
+                )
+            )
+    debug = {
+        "source": source_name,
+        "table_index": table.index,
+        "headers": table.headers,
+        "rows_extracted": len(table.rows),
+        "rows_normalized": len(normalized),
+        "rows_rejected": len(rejected_rows),
+        "rejection_reason_counts": reason_counts,
+        "extracted_rows": extracted_rows,
+        "rejected_rows": rejected_rows,
+        "warnings": warnings,
+    }
+    return normalized, warnings, debug
 
 
 def write_extracted_tables(path: str | Path, tables: list[ExtractedTable]) -> None:
@@ -279,60 +389,58 @@ def _normalize_row(
     source_url: str,
     raw_file_path: str,
     imported_at: str,
-) -> dict[str, Any]:
-    ticker = _text(_alias(row, "ticker")).upper()
+) -> tuple[dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    ticker, company_hint = _normalize_ticker_and_company(
+        _alias(row, "ticker"),
+        _alias(row, "company"),
+        source_name,
+    )
     if not ticker:
-        raise DataProviderError("ticker/symbol is required")
+        raise _RowRejected("missing_ticker", "ticker/symbol is required")
     price = _required_number(_alias(row, "premarket_price"), "price/last/premarket_price")
     volume = int(_required_number(_alias(row, "premarket_volume"), "volume"))
     gap_pct = _optional_number(_alias(row, "gap_pct"))
     previous_close = _optional_number(_alias(row, "previous_close"))
-    if previous_close is None and gap_pct is not None and gap_pct != -100:
-        previous_close = price / (1 + (gap_pct / 100))
+    if gap_pct is None and previous_close is None:
+        raise _RowRejected(
+            "missing_gap_or_previous_close",
+            "gap/change percent or previous close is required",
+        )
     high = _optional_number(_alias(row, "premarket_high"))
     low = _optional_number(_alias(row, "premarket_low"))
-    missing_required = [
-        name
-        for name, value in {
-            "previous_close": previous_close,
-            "premarket_high": high,
-            "premarket_low": low,
-        }.items()
-        if value is None
-    ]
-    if missing_required:
-        raise DataProviderError(
-            "missing required market columns: " + ", ".join(missing_required)
-        )
-    assert previous_close is not None
-    assert high is not None
-    assert low is not None
-    previous_close_value = float(previous_close)
-    high_value = float(high)
-    low_value = float(low)
+    if previous_close is None:
+        warnings.append("previous_close_unavailable")
+    previous_close_value = "" if previous_close is None else round(float(previous_close), 6)
+    if high is None or low is None:
+        warnings.append("premarket_range_unavailable_price_used")
+    high_value = float(high) if high is not None else price
+    low_value = float(low) if low is not None else price
     headline = _text(_alias(row, "catalyst_headline"))
     coverage = [
         "url_table_unverified",
         "halt_status_unverified",
         "sec_risk_unverified",
+        *warnings,
     ]
     float_shares = _optional_number(_alias(row, "float_shares"))
     market_cap = _optional_number(_alias(row, "market_cap"))
     short_float = _optional_number(_alias(row, "short_float_pct"))
+    relative_volume = _optional_number(_alias(row, "relative_volume"))
     optional_missing = sum(
         value is None for value in (float_shares, market_cap, short_float)
     ) + 3
-    return {
+    normalized = {
         "ticker": ticker,
-        "company": _text(_alias(row, "company")) or ticker,
-        "previous_close": round(previous_close_value, 6),
+        "company": company_hint or ticker,
+        "previous_close": previous_close_value,
         "premarket_price": price,
         "premarket_high": high_value,
         "premarket_low": low_value,
         "premarket_volume": volume,
         "dollar_volume": round(price * volume, 2),
         "gap_pct": round(
-            gap_pct if gap_pct is not None else _gap_pct(price, previous_close_value),
+            gap_pct if gap_pct is not None else _gap_pct(price, float(previous_close or 0)),
             4,
         ),
         "float_shares": "" if float_shares is None else float_shares,
@@ -359,6 +467,9 @@ def _normalize_row(
         "imported_at": imported_at,
         "source_url": source_url,
     }
+    if relative_volume is not None:
+        normalized["relative_volume"] = relative_volume
+    return normalized, warnings
 
 
 def _failure(fetch: FetchResult, out_dir: Path, reason: str) -> dict[str, Any]:
@@ -405,6 +516,52 @@ def _write_snapshot(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _write_dynamic_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames or ["empty"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _flatten_extracted_rows(table: ExtractedTable, source_name: str) -> list[dict[str, Any]]:
+    rows = []
+    for index, raw in enumerate(table.rows):
+        flattened = {
+            "source": source_name,
+            "table_index": table.index,
+            "table_score": table.score,
+            "row_index": index,
+            "headers": json.dumps(table.headers),
+        }
+        flattened.update({f"raw_{key}": value for key, value in raw.items()})
+        rows.append(flattened)
+    return rows
+
+
+def _rejected_row(
+    *,
+    source_name: str,
+    row_index: int,
+    reason: str,
+    detail: str,
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "source": source_name,
+        "row_index": row_index,
+        "reason": reason,
+        "detail": detail,
+        "ticker": _text(_alias(raw, "ticker")),
+        "raw_json": json.dumps(raw, sort_keys=True),
+    }
+
+
 def _alias(row: dict[str, Any], key: str) -> Any:
     lookup = {_clean_header(raw_key): value for raw_key, value in row.items()}
     for alias in ALIASES[key]:
@@ -414,7 +571,9 @@ def _alias(row: dict[str, Any], key: str) -> Any:
 
 
 def _clean_header(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip().lower()
+    text = str(value or "").replace("\xa0", " ")
+    text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 def _text(value: Any) -> str:
@@ -424,15 +583,28 @@ def _text(value: Any) -> str:
 def _required_number(value: Any, column: str) -> float:
     parsed = _optional_number(value)
     if parsed is None:
-        raise DataProviderError(f"{column} is required")
+        if "price" in column or "last" in column:
+            raise _RowRejected("missing_price", f"{column} is required")
+        if "volume" in column:
+            raise _RowRejected("missing_volume", f"{column} is required")
+        raise _RowRejected("invalid_numeric_format", f"{column} is required")
     return parsed
 
 
 def _optional_number(value: Any) -> float | None:
     if value in {None, ""}:
         return None
-    text = str(value).strip().replace("$", "").replace(",", "").replace("%", "")
-    if not text or text in {"-", "N/A", "n/a"}:
+    text = (
+        str(value)
+        .strip()
+        .replace("\xa0", " ")
+        .replace("−", "-")
+        .replace("$", "")
+        .replace(",", "")
+        .replace("%", "")
+    )
+    text = re.sub(r"\b(usd|us\$|eur|gbp|cad)\b", "", text, flags=re.IGNORECASE).strip()
+    if not text or text in {"-", "—", "N/A", "n/a"}:
         return None
     multiplier = 1.0
     suffix = text[-1:].lower()
@@ -442,13 +614,66 @@ def _optional_number(value: Any) -> float | None:
     try:
         return float(text) * multiplier
     except ValueError as exc:
-        raise DataProviderError(f"could not parse number {value!r}") from exc
+        raise _RowRejected(
+            "invalid_numeric_format", f"could not parse number {value!r}"
+        ) from exc
 
 
 def _gap_pct(price: float, previous_close: float) -> float:
     if previous_close <= 0:
         return 0.0
     return ((price - previous_close) / previous_close) * 100
+
+
+def _normalize_ticker_and_company(
+    raw_ticker: Any,
+    raw_company: Any,
+    source_name: str,
+) -> tuple[str, str]:
+    ticker_text = _text(raw_ticker)
+    company_text = _text(raw_company)
+    if ":" in ticker_text and " " not in ticker_text:
+        ticker_text = ticker_text.rsplit(":", 1)[-1]
+    if "tradingview" in source_name.lower() and ticker_text:
+        parsed_ticker, parsed_company = _split_tradingview_symbol(ticker_text)
+        ticker_text = parsed_ticker
+        company_text = company_text or parsed_company
+    ticker = re.sub(r"[^A-Za-z0-9.\-]", "", ticker_text).upper()
+    return ticker, company_text.strip()
+
+
+def _split_tradingview_symbol(value: str) -> tuple[str, str]:
+    text = " ".join(value.split())
+    if not text:
+        return "", ""
+    first_token = text.split(" ", 1)[0]
+    match = re.match(r"^([A-Z][A-Z0-9.]{0,5})(?=[A-Z][a-z])(.+)$", first_token)
+    if match:
+        ticker = match.group(1)
+        company = match.group(2)
+        if " " in text:
+            company = f"{company} {text.split(' ', 1)[1]}"
+        return ticker, company.strip()
+    return first_token, text.split(" ", 1)[1] if " " in text else ""
+
+
+def _classify_rejection(detail: str) -> str:
+    lowered = detail.lower()
+    if "ticker" in lowered or "symbol" in lowered:
+        return "missing_ticker"
+    if "price" in lowered or "last" in lowered:
+        return "missing_price"
+    if "volume" in lowered:
+        return "missing_volume"
+    if "gap" in lowered or "previous close" in lowered:
+        return "missing_gap_or_previous_close"
+    if "parse number" in lowered or "numeric" in lowered:
+        return "invalid_numeric_format"
+    if "login" in lowered or "captcha" in lowered or "anti-bot" in lowered:
+        return "blocked_or_login_required"
+    if "no_candidate_table" in lowered or "no visible candidate" in lowered:
+        return "no_candidate_table"
+    return "unknown_columns"
 
 
 class _TableParser(HTMLParser):

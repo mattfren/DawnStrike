@@ -9,7 +9,7 @@ It does not place orders, submit trades, store broker trading credentials,
 bypass logins, solve CAPTCHAs, bypass paywalls, or fabricate missing market
 data.
 
-## Enable One Candidate Source
+## Candidate Source Hierarchy
 
 Copy the example config:
 
@@ -17,11 +17,16 @@ Copy the example config:
 Copy-Item config\web_sources.example.yaml config\web_sources.yaml
 ```
 
-At least one candidate source is required for picks:
+At least one candidate source is required for picks. Dawnstrike tries enabled
+candidate sources in this practical order and dedupes by ticker:
 
-- `local_inbox`
-- `public_table_url`
-- `browser_table_url`
+1. `local_inbox`
+2. `stockanalysis_premarket`
+3. `tradingview_premarket`
+4. `tradingview_premarket_browser`
+5. `marketwatch_movers`
+6. `investing_premarket`
+7. `barchart_premarket_browser`
 
 The safest source is `local_inbox`, enabled by default:
 
@@ -30,6 +35,12 @@ data\inbox\screener
 ```
 
 Drop a screener CSV into that folder before running the daemon.
+
+`stockanalysis_premarket` is the preferred public table to try first. TradingView
+is enabled as a candidate source and uses source-specific mapping for columns
+such as pre-market price, pre-market volume, pre-market gap percent, market cap,
+and relative volume. Barchart is optional/browser-only by default because it
+often requires login, CAPTCHA, or anti-bot review.
 
 `nasdaq_symbols` is universe-only. It helps build a symbol universe, but it does
 not generate premarket mover picks by itself. SEC and halt sources are
@@ -43,17 +54,22 @@ Run this when no picks appear:
 py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --out-dir outputs\source_doctor --print
 ```
 
-The doctor lists enabled sources, classifies each as candidate, universe, or
-enrichment, checks whether the local inbox has files, safely tests enabled
-public table sources, and writes:
+Run source doctor during actual premarket hours when possible. The doctor lists
+enabled sources, classifies each as candidate, universe, or enrichment, checks
+whether the local inbox has files, safely tests enabled public table sources,
+and writes:
 
 ```text
 outputs\source_doctor\source_doctor.json
+outputs\source_doctor\extracted_rows.csv
+outputs\source_doctor\rejected_rows.csv
+outputs\source_doctor\normalization_debug.json
 ```
 
-If Barchart returns `no_candidate_table`, the page likely did not expose a
-static public table. Use a local CSV, enable another allowed candidate source,
-or install the optional browser extractor.
+If a source returns `no_candidate_table`, `missing_volume`,
+`missing_gap_or_previous_close`, or `blocked_or_login_required`, no rows are
+fabricated. Use a local CSV, try again during premarket, or enable another
+allowed public source.
 
 ## Optional Browser Source
 
@@ -103,6 +119,9 @@ scripts\run_web_telegram_daemon.bat
 - `outputs\web_auto\...\source_summary.json`
 - `outputs\web_auto\...\data_quality_report.json`
 - `outputs\source_doctor\source_doctor.json`
+- `outputs\source_doctor\extracted_rows.csv`
+- `outputs\source_doctor\rejected_rows.csv`
+- `outputs\source_doctor\normalization_debug.json`
 
 SQLite persists fetch runs, source health, raw artifacts, normalized rows, scan
 runs, and notification attempts.

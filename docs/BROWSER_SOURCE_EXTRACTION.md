@@ -45,3 +45,11 @@ BROWSER_EXTRACTOR_NOT_AVAILABLE: run py -m pip install -e ".[browser]" and py -m
 
 Browser data is public, unverified shadow data. Dawnstrike still has no order
 execution path.
+
+Current source guidance:
+
+- Prefer `stockanalysis_premarket` before browser sources.
+- Use TradingView static/browser sources only with the built-in source-specific
+  mapping; TradingView table headers can differ from normal screener exports.
+- Keep Barchart browser disabled unless you explicitly want to test it. Barchart
+  often blocks public extraction with login, CAPTCHA, or anti-bot review.

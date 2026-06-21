@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.formula import FORMULA_VERSION, evaluate_formula
 from intraday_scanner.models import ScanResult, ScoredCandidate, SnapshotRow, utc_now_iso
+from intraday_scanner.services.premarket_intelligence import (
+    ACTION_AVOID,
+    build_premarket_intelligence,
+)
 
 
-def score_universe(rows: list[SnapshotRow], config: ScannerConfig) -> ScanResult:
-    scored = [score_snapshot(row, config) for row in rows]
+def score_universe(
+    rows: list[SnapshotRow],
+    config: ScannerConfig,
+    *,
+    historical_outcomes: list[dict[str, Any]] | None = None,
+) -> ScanResult:
+    scored = [
+        score_snapshot(row, config, historical_outcomes=historical_outcomes) for row in rows
+    ]
     ranked_candidates = sorted(
         [candidate for candidate in scored if not candidate.is_avoid],
         key=lambda candidate: (candidate.score, candidate.dollar_volume),
@@ -39,14 +51,37 @@ def score_universe(rows: list[SnapshotRow], config: ScannerConfig) -> ScanResult
     )
 
 
-def score_snapshot(row: SnapshotRow, config: ScannerConfig) -> ScoredCandidate:
+def score_snapshot(
+    row: SnapshotRow,
+    config: ScannerConfig,
+    *,
+    historical_outcomes: list[dict[str, Any]] | None = None,
+) -> ScoredCandidate:
     formula = evaluate_formula(row, config)
     breakout_trigger = round(row.premarket_high * 1.005, 4)
     pullback_low = row.premarket_price * 0.94
     pullback_high = row.premarket_price * 0.98
     invalidation = row.premarket_low * 0.985
     first_target = row.premarket_price + max(row.premarket_price - invalidation, 0) * 1.5
-    stretch_target = row.premarket_price + max(row.premarket_high - row.premarket_low, 0) * 1.25
+    range_stretch_target = (
+        row.premarket_price + max(row.premarket_high - row.premarket_low, 0) * 1.25
+    )
+    stretch_target = max(range_stretch_target, first_target * 1.08)
+    intelligence = build_premarket_intelligence(
+        row,
+        formula,
+        config,
+        breakout_trigger=breakout_trigger,
+        invalidation_level=round(invalidation, 4),
+        first_target=round(first_target, 4),
+        stretch_target=round(stretch_target, 4),
+        historical_outcomes=historical_outcomes,
+    )
+    intelligence_payload = intelligence.to_dict()
+    is_intelligence_avoid = intelligence.action == ACTION_AVOID
+    avoid_reasons = list(formula.avoid_reasons)
+    if is_intelligence_avoid and "intelligence_gap_and_crap_risk" not in avoid_reasons:
+        avoid_reasons.append("intelligence_gap_and_crap_risk")
 
     return ScoredCandidate(
         rank=0,
@@ -69,8 +104,9 @@ def score_snapshot(row: SnapshotRow, config: ScannerConfig) -> ScoredCandidate:
         risk_flags=formula.risk_flags,
         best_exit_bias=formula.best_exit_bias,
         score_breakdown=formula.score_breakdown,
-        is_avoid=bool(formula.avoid_reasons),
-        avoid_reasons=formula.avoid_reasons,
+        is_avoid=bool(avoid_reasons),
+        avoid_reasons=avoid_reasons,
+        intelligence=intelligence_payload,
     )
 
 
@@ -99,6 +135,7 @@ def _assign_ranks(candidates: list[ScoredCandidate]) -> list[ScoredCandidate]:
             score_breakdown=candidate.score_breakdown,
             is_avoid=candidate.is_avoid,
             avoid_reasons=candidate.avoid_reasons,
+            intelligence=candidate.intelligence,
         )
         for index, candidate in enumerate(candidates, start=1)
     ]

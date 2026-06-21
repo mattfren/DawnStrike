@@ -9,15 +9,49 @@ save_raw: true
 allowed_domains:
   - nasdaqtrader.com
   - sec.gov
+  - stockanalysis.com
+  - www.stockanalysis.com
   - barchart.com
+  - www.barchart.com
   - marketwatch.com
+  - www.marketwatch.com
   - investing.com
+  - www.investing.com
   - tradingview.com
+  - www.tradingview.com
 sources:
   - name: local_inbox
     type: local_inbox
     enabled: true
     path: data\inbox\screener
+
+  - name: stockanalysis_premarket
+    type: public_table_url
+    enabled: true
+    url: "https://stockanalysis.com/markets/premarket/"
+
+  - name: tradingview_premarket
+    type: public_table_url
+    enabled: true
+    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
+
+  - name: tradingview_premarket_browser
+    type: browser_table_url
+    enabled: false
+    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
+    wait_selector: "table, [role='grid'], [data-field-key]"
+    wait_seconds: 10
+    max_rows: 150
+
+  - name: marketwatch_movers
+    type: public_table_url
+    enabled: false
+    url: "https://www.marketwatch.com/tools/us-market-movers"
+
+  - name: investing_premarket
+    type: public_table_url
+    enabled: false
+    url: "https://www.investing.com/equities/pre-market"
 
   - name: barchart_premarket
     type: public_table_url
@@ -32,11 +66,6 @@ sources:
     wait_selector: "table, [role='grid'], .bc-table-scrollable-inner"
     wait_seconds: 10
     max_rows: 150
-
-  - name: tradingview_premarket
-    type: public_table_url
-    enabled: false
-    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
 
   - name: nasdaq_symbols
     type: nasdaq_symbol_directory

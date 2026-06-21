@@ -33,7 +33,9 @@ class FormulaResult:
 
 
 def evaluate_formula(row: SnapshotRow, config: ScannerConfig) -> FormulaResult:
-    gap_pct = _gap_pct(row.premarket_price, row.previous_close)
+    gap_pct = row.gap_pct if row.previous_close <= 0 and row.gap_pct else _gap_pct(
+        row.premarket_price, row.previous_close
+    )
     dollar_volume = row.premarket_price * row.premarket_volume
     float_rotation_pct = _float_rotation_pct(row)
     range_position_pct = _range_position_pct(row)
@@ -188,7 +190,8 @@ def _risk_flags(
 
     if row.previous_close <= 0:
         risk_flags.append("no_previous_close")
-        avoid_reasons.append("no_previous_close")
+        if row.gap_pct <= 0:
+            avoid_reasons.append("no_previous_close")
     if row.premarket_volume <= 0:
         risk_flags.append("zero_volume")
         avoid_reasons.append("zero_volume")
@@ -233,7 +236,7 @@ def _risk_penalty(
         penalty += 28
     if row.reverse_split_90d:
         penalty += 8
-    if row.previous_close <= 0:
+    if row.previous_close <= 0 and row.gap_pct <= 0:
         penalty += 35
     if row.premarket_volume <= 0:
         penalty += 30

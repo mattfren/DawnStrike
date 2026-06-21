@@ -300,13 +300,59 @@ def _default_web_config_data() -> dict[str, Any]:
         "timeout_seconds": 15,
         "rate_limit_seconds": 5,
         "save_raw": True,
-        "allowed_domains": ["nasdaqtrader.com", "sec.gov"],
+        "allowed_domains": [
+            "nasdaqtrader.com",
+            "sec.gov",
+            "stockanalysis.com",
+            "www.stockanalysis.com",
+            "tradingview.com",
+            "www.tradingview.com",
+            "marketwatch.com",
+            "www.marketwatch.com",
+            "investing.com",
+            "www.investing.com",
+            "barchart.com",
+            "www.barchart.com",
+        ],
         "sources": [
             {
                 "name": "local_inbox",
                 "type": "local_inbox",
                 "path": "data/inbox/screener",
                 "enabled": True,
+            },
+            {
+                "name": "stockanalysis_premarket",
+                "type": "public_table_url",
+                "url": "https://stockanalysis.com/markets/premarket/",
+                "enabled": True,
+            },
+            {
+                "name": "tradingview_premarket",
+                "type": "public_table_url",
+                "url": (
+                    "https://www.tradingview.com/markets/stocks-usa/"
+                    "market-movers-pre-market-gainers/"
+                ),
+                "enabled": True,
+            },
+            {
+                "name": "marketwatch_movers",
+                "type": "public_table_url",
+                "url": "https://www.marketwatch.com/tools/us-market-movers",
+                "enabled": False,
+            },
+            {
+                "name": "investing_premarket",
+                "type": "public_table_url",
+                "url": "https://www.investing.com/equities/pre-market",
+                "enabled": False,
+            },
+            {
+                "name": "barchart_premarket_browser",
+                "type": "browser_table_url",
+                "url": "https://www.barchart.com/stocks/pre-market-trading",
+                "enabled": False,
             },
             {"name": "nasdaq_symbols", "type": "nasdaq_symbol_directory", "enabled": True},
             {"name": "nasdaq_halts", "type": "nasdaq_trade_halts_rss", "enabled": False},

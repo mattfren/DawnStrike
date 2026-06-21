@@ -26,12 +26,14 @@ py -m intraday_scanner.cli import-manual-snapshot --input templates\manual_prema
 py -m intraday_scanner.cli free-shadow-scan --snapshot outputs\shadow_manual_snapshot\premarket_snapshot.csv --db-path data\shadow.sqlite --out-dir outputs\shadow_scan --persist --print
 py -m intraday_scanner.cli import-manual-outcomes --input templates\manual_outcomes_template.csv --db-path data\shadow.sqlite --persist
 py -m intraday_scanner.cli audit-manual-outcomes --db-path data\shadow.sqlite --out-dir outputs\shadow_audit --persist
+py -m intraday_scanner.cli evaluate-intelligence-outcomes --db-path data\shadow.sqlite --out-dir outputs\intelligence_outcomes --persist
 py -m intraday_scanner.cli free-shadow-report --db-path data\shadow.sqlite --out-dir outputs\shadow_report --persist
 ```
 
 See `docs\SCREENER_AUTOMATION.md`, `docs\FREE_SHADOW_MODE.md`, `docs\MANUAL_UPLOADS.md`,
 `docs\E2E_AUTOMATION.md`, `docs\NOTIFICATION_ONLY_WORKFLOW.md`,
-`docs\FREE_DATA_PIPELINE.md`, and `docs\DATA_QUALITY.md`.
+`docs\FREE_DATA_PIPELINE.md`, `docs\DATA_QUALITY.md`, and
+`docs\PREMARKET_INTELLIGENCE.md`.
 
 Notification-only automation:
 
@@ -52,10 +54,13 @@ py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.examp
 Use `--notify telegram` after setting `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_CHAT_ID`. Telegram messages use compact emoji-based text, not raw JSON.
 At least one candidate source is required for picks: `local_inbox`,
-`public_table_url`, or `browser_table_url`. `nasdaq_symbols` is universe-only
-and does not generate premarket picks. If a public page such as Barchart returns
-`no_candidate_table`, run `web-source-doctor`, use a local CSV, enable another
-candidate source, or install the optional browser extractor:
+`public_table_url`, or `browser_table_url`. The practical source hierarchy is
+local inbox first, then StockAnalysis, TradingView, optional MarketWatch,
+optional Investing.com, and Barchart browser only as a disabled fallback.
+`nasdaq_symbols` is universe-only and does not generate premarket picks. If a
+public page such as Barchart returns `no_candidate_table` or a login/CAPTCHA
+block, run `web-source-doctor`, use a local CSV, enable another candidate
+source, or install the optional browser extractor:
 
 ```powershell
 py -m pip install -e ".[browser]"
@@ -63,7 +68,7 @@ py -m playwright install chromium
 ```
 
 Public URL and browser-rendered data are unverified shadow data. Dawnstrike has
-no order execution path. See `docs\WEB_AUTO_PILOT.md`,
+no order execution path and does not bypass protected pages. See `docs\WEB_AUTO_PILOT.md`,
 `docs\TELEGRAM_NOTIFICATIONS.md`, `docs\URL_INGESTION.md`, and
 `docs\BROWSER_SOURCE_EXTRACTION.md`.
 
@@ -118,6 +123,16 @@ Use the `Run Center` tab to run the local workflow from the web UI:
 ## Dawnstrike Formula
 
 The scanner uses a versioned research equation, currently `dawnstrike-v2.0`, that combines gap behavior, liquidity thrust, float rotation, range control, catalyst/squeeze pressure, execution quality, data quality, and risk penalties. See `docs\FORMULA.md`.
+
+## Premarket Intelligence Layer
+
+Every output row now includes a simple action label, catalyst tier, premarket
+structure read, float-rotation label, confirmation-first opening plan, data
+confidence score, data warnings, and probability fields. Labels include
+`🟢 Opening Breakout Candidate`, `🔥 Momentum Continuation Watch`,
+`👀 Watch Only`, `🟡 Needs Confirmation`, and
+`❌ Avoid / Gap-and-Crap Risk`. Dawnstrike does not generate blind premarket
+buy-now calls. See `docs\PREMARKET_INTELLIGENCE.md`.
 
 ## Expectancy Model
 

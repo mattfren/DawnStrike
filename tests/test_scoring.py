@@ -57,3 +57,34 @@ def test_no_previous_close_and_zero_volume_are_safe():
     assert "no_previous_close" in scored.avoid_reasons
     assert "zero_volume" in scored.risk_flags
     assert scored.data_quality_score < 8
+
+
+def test_supplied_gap_pct_is_used_when_previous_close_missing():
+    row = read_snapshot_csv("sample_data/premarket_snapshot_sample.csv")[0]
+    public_row = type(row)(
+        ticker="WEBG",
+        company="Web Gap",
+        premarket_price=5.0,
+        previous_close=0.0,
+        premarket_high=5.0,
+        premarket_low=5.0,
+        premarket_volume=500_000,
+        float_shares=None,
+        market_cap=50_000_000,
+        spread_pct=1.0,
+        short_float_pct=None,
+        has_news=False,
+        current_halt=False,
+        recent_offering=False,
+        reverse_split_90d=False,
+        source="stockanalysis_premarket",
+        as_of_timestamp=row.as_of_timestamp,
+        dollar_volume=2_500_000,
+        gap_pct=42.0,
+    )
+
+    scored = score_snapshot(public_row, ScannerConfig())
+
+    assert scored.gap_pct == 42.0
+    assert "no_previous_close" in scored.risk_flags
+    assert "no_previous_close" not in scored.avoid_reasons

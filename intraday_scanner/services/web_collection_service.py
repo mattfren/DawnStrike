@@ -41,7 +41,6 @@ from intraday_scanner.providers.sec_edgar_provider import (
 )
 from intraday_scanner.providers.web_source_base import (
     WebSourceConfig,
-    enabled_sources,
     get_source,
     load_web_sources_config,
     require_enabled,
@@ -63,6 +62,16 @@ from intraday_scanner.services.time_utils import get_market_date
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 WEB_OUT_ROOT = Path("outputs/web_auto")
+
+SOURCE_PRIORITY = (
+    "local_inbox",
+    "stockanalysis_premarket",
+    "tradingview_premarket",
+    "tradingview_premarket_browser",
+    "marketwatch_movers",
+    "investing_premarket",
+    "barchart_premarket_browser",
+)
 
 
 def web_build_universe(
@@ -186,8 +195,10 @@ def web_auto_collect(
     if local_result["summary"]["status"] not in {"success", "empty"}:
         failures.append(local_result["summary"])
 
-    if not rows:
-        for source in enabled_sources(config, "public_table_url"):
+    for source in _ordered_candidate_sources(config):
+        if source.type == "local_inbox":
+            continue
+        if source.type == "public_table_url":
             result = ingest_public_table(
                 url=source.url,
                 source=source,
@@ -197,16 +208,7 @@ def web_auto_collect(
                 persist=persist,
                 print_rows=False,
             )
-            source_attempts.append(result)
-            if result.get("status") == "success":
-                rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
-                break
-            failures.append(result)
-            if "not in configured allowed_domains" in str(result.get("failure_reason", "")):
-                blocked_source_count += 1
-
-    if not rows:
-        for source in enabled_sources(config, "browser_table_url"):
+        elif source.type == "browser_table_url":
             result = ingest_browser_table(
                 source=source,
                 config=config,
@@ -215,13 +217,15 @@ def web_auto_collect(
                 persist=persist,
                 print_rows=False,
             )
-            source_attempts.append(result)
-            if result.get("status") == "success":
-                rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
-                break
+        else:
+            continue
+        source_attempts.append(result)
+        if result.get("status") == "success":
+            rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
+        else:
             failures.append(result)
-            if "not in configured allowed_domains" in str(result.get("failure_reason", "")):
-                blocked_source_count += 1
+        if "not in configured allowed_domains" in str(result.get("failure_reason", "")):
+            blocked_source_count += 1
 
     halt_summary = _maybe_collect_halts(config, output_dir, store if persist else None, persist)
     halt_events = list(halt_summary.get("events") or [])
@@ -247,6 +251,8 @@ def web_auto_collect(
         "rows_normalized": sum(int(item.get("rows_normalized") or 0) for item in source_attempts),
         "candidate_count": len(deduped),
         "source_failures": len(failures),
+        "top_failure_reason": _top_failure_reason(failures, source_attempts),
+        "rejection_reason_counts": _merge_rejection_counts(source_attempts),
         "unknown_field_counts": _unknown_field_counts(source_attempts),
         "blocked_source_count": blocked_source_count,
         "attempts": source_attempts,
@@ -502,12 +508,14 @@ def web_source_doctor(
     rows: list[dict[str, Any]] = []
     for source in config.sources:
         rows.append(_doctor_source(source, config, output_dir))
+    normalization_debug = _write_source_doctor_debug(output_dir, rows)
     result = {
         "status": "complete",
         "created_at": utc_now_iso(),
         "config_path": str(config_path),
         "browser_extractor": browser_extractor_status(),
         "source_operability": source_operability_status(config),
+        "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "sources": rows,
     }
     write_json(output_dir / "source_doctor.json", result)
@@ -765,9 +773,46 @@ def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[st
         "status": str(result.get("status") or "unknown"),
         "rows_extracted": int(result.get("rows_extracted") or 0),
         "rows_normalized": int(result.get("rows_normalized") or 0),
+        "rows_rejected": int(result.get("rows_rejected") or 0),
+        "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
+        "paths": dict(result.get("paths") or {}),
         "failure_reason": reason,
         "next_action": _next_action_for_result(base, result, reason),
     }
+
+
+def _write_source_doctor_debug(
+    output_dir: Path,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    extracted_rows: list[dict[str, Any]] = []
+    rejected_rows: list[dict[str, Any]] = []
+    per_source_debug: list[dict[str, Any]] = []
+    reason_counts: dict[str, int] = {}
+    for source in sources:
+        paths = dict(source.get("paths") or {})
+        extracted_rows.extend(_read_dynamic_csv(paths.get("extracted_rows", "")))
+        rejected = _read_dynamic_csv(paths.get("rejected_rows", ""))
+        rejected_rows.extend(rejected)
+        debug_value = str(paths.get("normalization_debug") or "")
+        if debug_value and Path(debug_value).exists():
+            debug_path = Path(debug_value)
+            debug = json.loads(debug_path.read_text(encoding="utf-8"))
+            per_source_debug.append(debug)
+        for row in rejected:
+            reason = str(row.get("reason") or "unknown_columns")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    _write_dynamic_csv(output_dir / "extracted_rows.csv", extracted_rows)
+    _write_dynamic_csv(output_dir / "rejected_rows.csv", rejected_rows)
+    payload = {
+        "created_at": utc_now_iso(),
+        "sources": per_source_debug,
+        "rows_extracted": len(extracted_rows),
+        "rows_rejected": len(rejected_rows),
+        "rejection_reason_counts": reason_counts,
+    }
+    write_json(output_dir / "normalization_debug.json", payload)
+    return payload
 
 
 def _collect_local_inbox(
@@ -1024,6 +1069,20 @@ def _candidate_sources(config: Any) -> list[WebSourceConfig]:
     return [source for source in config.sources if _source_classification(source) == "candidate"]
 
 
+def _ordered_candidate_sources(config: Any) -> list[WebSourceConfig]:
+    enabled = [source for source in _candidate_sources(config) if source.enabled]
+    return sorted(enabled, key=lambda source: (_source_priority(source.name), source.name))
+
+
+def _source_priority(source_name: str) -> int:
+    if source_name in {"manual_upload", "screener_import", "local_inbox"}:
+        return SOURCE_PRIORITY.index("local_inbox")
+    try:
+        return SOURCE_PRIORITY.index(source_name)
+    except ValueError:
+        return len(SOURCE_PRIORITY)
+
+
 def _only_universe_or_enrichment_enabled(config: Any) -> bool:
     enabled = [source for source in config.sources if source.enabled]
     return bool(enabled) and not any(
@@ -1134,6 +1193,29 @@ def _write_snapshot(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _read_dynamic_csv(path: str | Path) -> list[dict[str, Any]]:
+    if not path:
+        return []
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return []
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _write_dynamic_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames or ["empty"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_ticker: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -1141,15 +1223,25 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not ticker:
             continue
         current = by_ticker.get(ticker)
-        if current is None or str(row.get("as_of_timestamp") or "") >= str(
-            current.get("as_of_timestamp") or ""
-        ):
+        candidate = dict(row, ticker=ticker)
+        if current is None or _dedupe_rank(candidate) > _dedupe_rank(current):
             by_ticker[ticker] = dict(row, ticker=ticker)
     return sorted(
         by_ticker.values(),
         key=lambda row: _float(row.get("dollar_volume")),
         reverse=True,
     )
+
+
+def _dedupe_rank(row: dict[str, Any]) -> tuple[int, int, str]:
+    quality = sum(
+        1
+        for key in ("premarket_price", "gap_pct", "premarket_volume")
+        if _float(row.get(key)) > 0
+    )
+    source_score = len(SOURCE_PRIORITY) - _source_priority(str(row.get("source") or ""))
+    timestamp = str(row.get("as_of_timestamp") or row.get("imported_at") or "")
+    return quality, source_score, timestamp
 
 
 def _data_quality_report(
@@ -1169,6 +1261,8 @@ def _data_quality_report(
         "candidate_count": len(rows),
         "warnings": warnings[:50],
         "source_failures": failures,
+        "top_failure_reason": source_summary.get("top_failure_reason", ""),
+        "rejection_reason_counts": source_summary.get("rejection_reason_counts", {}),
         "summary": source_summary,
     }
 
@@ -1183,6 +1277,33 @@ def _unknown_field_counts(source_attempts: list[dict[str, Any]]) -> dict[str, in
                     counts.get("missing_required_market_columns", 0) + 1
                 )
     return counts
+
+
+def _merge_rejection_counts(source_attempts: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for attempt in source_attempts:
+        for reason, count in dict(attempt.get("rejection_reason_counts") or {}).items():
+            counts[str(reason)] = counts.get(str(reason), 0) + int(count or 0)
+    return counts
+
+
+def _top_failure_reason(
+    failures: list[dict[str, Any]],
+    source_attempts: list[dict[str, Any]],
+) -> str:
+    rejection_counts = _merge_rejection_counts(source_attempts)
+    if rejection_counts:
+        return sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
+    for failure in failures:
+        reason = str(
+            failure.get("failure_reason")
+            or failure.get("reason")
+            or failure.get("status")
+            or ""
+        ).strip()
+        if reason:
+            return reason
+    return ""
 
 
 def _compact_summary(summary: dict[str, Any]) -> dict[str, Any]:

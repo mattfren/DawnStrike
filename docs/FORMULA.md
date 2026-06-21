@@ -18,6 +18,11 @@ The current equation version is `dawnstrike-v2.0`. Scores are clamped to `0-100`
 
 This is not a return forecast, trading recommendation, or order engine. It is a prioritization model for aggressive intraday research and paper-audit review.
 
+The Premarket Intelligence Layer sits on top of this score. It assigns a
+confirmation-first action label from catalyst quality, structure, liquidity,
+float rotation, price band, and risk flags; score alone is not enough for a
+trade classification.
+
 ## Components
 
 - `gap_curve`: rewards meaningful premarket gaps while reducing credit for extreme, less credible gaps.
@@ -38,6 +43,17 @@ This is not a return forecast, trading recommendation, or order engine. It is a 
 - `setup_grade`
 - `volatility_signature`
 - `equation_version`
+- `action`
+- `catalyst_tier`
+- `premarket_structure`
+- `entry_trigger`
+- `invalidation`
+- `target_1`
+- `target_2`
+- `data_confidence_score`
+- `data_warnings`
+- `historical_win_rate`
+- `similar_setup_count`
 
 ## Calibration Path
 

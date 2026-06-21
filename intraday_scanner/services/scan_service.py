@@ -42,10 +42,24 @@ class ScanService:
             snapshots, report = enrich_snapshots(snapshots, config, self.enrichment_providers)
             if self.store is not None:
                 record_enrichment_health(self.store, report)
-        result = score_universe(snapshots, config)
+        result = score_universe(
+            snapshots,
+            config,
+            historical_outcomes=self._historical_intelligence_outcomes(),
+        )
         if persist:
             if self.store is None:
                 raise ValueError("persist=True requires a store")
             self.store.persist_scan_result(result)
             LOGGER.info("Persisted scan run %s", result.run_id)
         return result
+
+    def _historical_intelligence_outcomes(self) -> list[dict[str, object]]:
+        if self.store is None or not hasattr(self.store, "load_intelligence_outcomes"):
+            return []
+        try:
+            loaded = self.store.load_intelligence_outcomes(limit=5000)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - history must not block a live scan
+            LOGGER.exception("Could not load historical intelligence outcomes")
+            return []
+        return list(loaded or [])

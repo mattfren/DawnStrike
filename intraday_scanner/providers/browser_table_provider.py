@@ -12,7 +12,7 @@ from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
 from intraday_scanner.providers.public_table_provider import (
     ExtractedTable,
     extract_html_tables,
-    normalize_public_table_rows,
+    normalize_public_table_rows_with_debug,
     select_best_table,
     write_extracted_tables,
 )
@@ -122,7 +122,7 @@ def ingest_browser_table(
             rows=best.rows[:max_rows],
             score=best.score,
         )
-    rows, warnings = normalize_public_table_rows(
+    rows, warnings, normalization_debug = normalize_public_table_rows_with_debug(
         best,
         source_name=source.name,
         source_url=source.url or source.fixture_path,
@@ -140,7 +140,13 @@ def ingest_browser_table(
             if part
         )
     snapshot_path = output_dir / "premarket_snapshot.csv"
+    extracted_rows_path = output_dir / "extracted_rows.csv"
+    rejected_rows_path = output_dir / "rejected_rows.csv"
+    debug_path = output_dir / "normalization_debug.json"
     _write_snapshot(snapshot_path, rows)
+    _write_dynamic_csv(extracted_rows_path, normalization_debug["extracted_rows"])
+    _write_dynamic_csv(rejected_rows_path, normalization_debug["rejected_rows"])
+    write_json(debug_path, normalization_debug)
     summary = {
         "status": "success" if rows else "no_valid_rows",
         "run_id": source.name,
@@ -152,9 +158,14 @@ def ingest_browser_table(
         "selected_table_score": best.score,
         "rows_extracted": sum(len(table.rows) for table in tables),
         "rows_normalized": len(rows),
+        "rows_rejected": len(normalization_debug["rejected_rows"]),
+        "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "warnings": warnings,
         "paths": {
             "extracted_tables": str(extracted_path),
+            "extracted_rows": str(extracted_rows_path),
+            "rejected_rows": str(rejected_rows_path),
+            "normalization_debug": str(debug_path),
             "premarket_snapshot": str(snapshot_path),
             "raw_source": str(raw_path if config.save_raw else ""),
         },
@@ -277,6 +288,19 @@ def _failure(
 def _write_snapshot(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_dynamic_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames or ["empty"])
         writer.writeheader()
         writer.writerows(rows)
 
