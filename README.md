@@ -30,7 +30,27 @@ py -m intraday_scanner.cli free-shadow-report --db-path data\shadow.sqlite --out
 ```
 
 See `docs\SCREENER_AUTOMATION.md`, `docs\FREE_SHADOW_MODE.md`, `docs\MANUAL_UPLOADS.md`,
+`docs\E2E_AUTOMATION.md`, `docs\NOTIFICATION_ONLY_WORKFLOW.md`,
 `docs\FREE_DATA_PIPELINE.md`, and `docs\DATA_QUALITY.md`.
+
+Notification-only automation:
+
+```powershell
+py -m intraday_scanner.cli automation-run --mode once --config config\automation.example.yaml --db-path data\shadow_real.sqlite --out-root outputs\automation --notify
+py -m intraday_scanner.cli automation-daemon --config config\automation.example.yaml --db-path data\shadow_real.sqlite --out-root outputs\automation --notify
+```
+
+Web Auto-Pilot with Telegram-ready notifications:
+
+```powershell
+py -m intraday_scanner.cli web-auto-collect --config config\web_sources.example.yaml --db-path data\shadow_real.sqlite --out-dir outputs\web_auto\today --persist --print
+py -m intraday_scanner.cli telegram-test --dry-run --db-path data\shadow_real.sqlite
+py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.example.yaml --automation-config config\automation.example.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify console --dry-run --max-cycles 1
+```
+
+Use `--notify telegram` after setting `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID`. See `docs\WEB_AUTO_PILOT.md` and
+`docs\TELEGRAM_NOTIFICATIONS.md`.
 
 ## Install
 

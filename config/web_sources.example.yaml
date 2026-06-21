@@ -1,0 +1,35 @@
+enabled: true
+respect_robots: true
+user_agent: "DawnstrikeResearchBot/0.1 contact: YOUR_EMAIL_HERE"
+timeout_seconds: 15
+rate_limit_seconds: 5
+save_raw: true
+allowed_domains:
+  - nasdaqtrader.com
+  - sec.gov
+  - barchart.com
+  - marketwatch.com
+  - investing.com
+  - tradingview.com
+sources:
+  - name: nasdaq_symbols
+    type: nasdaq_symbol_directory
+    enabled: true
+  - name: nasdaq_halts
+    type: nasdaq_trade_halts_rss
+    enabled: true
+  - name: sec_edgar
+    type: sec_edgar
+    enabled: true
+  - name: barchart_premarket
+    type: public_table_url
+    enabled: false
+    url: "https://www.barchart.com/stocks/pre-market-trading"
+  - name: tradingview_premarket
+    type: public_table_url
+    enabled: false
+    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
+  - name: local_inbox
+    type: local_inbox
+    enabled: true
+    path: data\inbox\screener

@@ -11,6 +11,7 @@ from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.notifiers.email import EmailNotifier
 from intraday_scanner.notifiers.webhooks import DiscordWebhookNotifier, TelegramNotifier
+from intraday_scanner.notifiers.windows import WindowsLocalNotifier
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -33,6 +34,8 @@ def build_notifiers(config: ScannerConfig) -> list[BaseNotifier]:
             notifiers.append(DiscordWebhookNotifier(config))
         elif channel == "telegram":
             notifiers.append(TelegramNotifier(config))
+        elif channel == "windows":
+            notifiers.append(WindowsLocalNotifier())
         else:
             raise NotificationError(f"Unknown notifier channel: {channel}")
     return notifiers
@@ -144,6 +147,19 @@ def dispatch_events(
                 continue
             if dry_run:
                 print(f"[dry-run:{notifier.channel}] {event.title}: {event.body}")
+                store.record_notification(
+                    event_key=notification_key,
+                    channel=notifier.channel,
+                    run_id=_payload_run_id(event.payload),
+                    ticker=event.ticker,
+                    payload={
+                        "title": event.title,
+                        "body": event.body,
+                        "channel_hint": event.channel_hint,
+                        "payload": event.payload or {},
+                        "dry_run": True,
+                    },
+                )
                 sent += 1
                 continue
             else:

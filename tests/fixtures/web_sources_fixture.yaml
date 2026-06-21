@@ -1,0 +1,32 @@
+enabled: true
+respect_robots: true
+user_agent: "DawnstrikeResearchBot/0.1 test"
+timeout_seconds: 2
+rate_limit_seconds: 0
+save_raw: true
+allowed_domains:
+  - allowed.test
+  - nasdaqtrader.com
+  - sec.gov
+sources:
+  - name: local_inbox
+    type: local_inbox
+    enabled: true
+    path: tests\fixtures\empty_screener_inbox
+  - name: fixture_public_table
+    type: public_table_url
+    enabled: true
+    url: "https://allowed.test/fixture"
+    fixture_path: tests\fixtures\public_table_fixture.html
+  - name: nasdaq_symbols
+    type: nasdaq_symbol_directory
+    enabled: true
+    fixture_path: tests\fixtures\nasdaq_symbols_fixture.txt
+  - name: nasdaq_halts
+    type: nasdaq_trade_halts_rss
+    enabled: true
+    fixture_path: tests\fixtures\halt_rss_fixture.xml
+  - name: sec_edgar
+    type: sec_edgar
+    enabled: true
+    fixture_path: tests\fixtures\sec_submissions_fixture.json

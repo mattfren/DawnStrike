@@ -1,0 +1,7 @@
+Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
+NOVA|Nova Labs Common Stock|Q|N|N|100|N|N
+RIFT|Rift Bio Common Stock|Q|N|N|100|N|N
+WIDEW|Wide Warrants|Q|N|N|100|N|N
+FUND|Example ETF|Q|N|N|100|Y|N
+TEST|Test Issue Common Stock|Q|Y|N|100|N|N
+File Creation Time: 0620202618:00

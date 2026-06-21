@@ -505,30 +505,31 @@ def _match_recommendation(
     ticker = _text(row.get("ticker")).upper()
     date_value = _text(row.get("date"))
     entry_time = _normalize_entry_time(date_value, _text(row.get("entry_time")))
-    same_symbol_day = [
-        rec
-        for rec in recommendations
-        if _text(rec.get("ticker")).upper() == ticker
-        and str(rec.get("timestamp", "")).startswith(date_value)
-    ]
+    same_symbol_day = []
+    for rec in recommendations:
+        if _text(rec.get("ticker")).upper() != ticker:
+            continue
+        recommendation_time = _recommendation_time_for_date(rec, date_value)
+        if recommendation_time:
+            same_symbol_day.append((rec, recommendation_time))
     if same_symbol_day and all(
-        _parse_time(str(rec.get("timestamp", ""))) > _parse_time(entry_time)
-        for rec in same_symbol_day
+        _parse_time(recommendation_time) > _parse_time(entry_time)
+        for _rec, recommendation_time in same_symbol_day
     ):
-        first_time = min(str(rec.get("timestamp", "")) for rec in same_symbol_day)
+        first_time = min(recommendation_time for _rec, recommendation_time in same_symbol_day)
         raise SnapshotValidationError(
             f"{ticker} outcome entry_time {entry_time} is before recommendation {first_time}"
         )
     candidates = [
-        rec
-        for rec in same_symbol_day
-        if _parse_time(str(rec.get("timestamp", ""))) <= _parse_time(entry_time)
+        (rec, recommendation_time)
+        for rec, recommendation_time in same_symbol_day
+        if _parse_time(recommendation_time) <= _parse_time(entry_time)
     ]
     if not candidates:
         raise SnapshotValidationError(
             f"No saved recommendation exists for {ticker} on {date_value} before {entry_time}"
         )
-    return sorted(candidates, key=lambda item: str(item.get("timestamp", "")), reverse=True)[0]
+    return sorted(candidates, key=lambda item: item[1], reverse=True)[0][0]
 
 
 def _trade_base(row: dict[str, Any]) -> dict[str, Any]:
@@ -745,6 +746,14 @@ def _normalize_entry_time(date_value: str, raw: str) -> str:
     if raw:
         return raw
     raise SnapshotValidationError("entry_time is required")
+
+
+def _recommendation_time_for_date(rec: dict[str, Any], date_value: str) -> str:
+    for key in ("timestamp", "recorded_at", "source_as_of_timestamp"):
+        value = str(rec.get(key) or "")
+        if value.startswith(date_value):
+            return value
+    return ""
 
 
 def _parse_time(value: str) -> datetime:

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Nasdaq Trade Halts</title>
+    <item>
+      <title>Trade Halt - HALT</title>
+      <pubDate>Sat, 20 Jun 2026 14:31:00 GMT</pubDate>
+      <description>Symbol: HALT; Reason Code: T1; Status: Halted</description>
+    </item>
+  </channel>
+</rss>

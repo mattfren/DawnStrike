@@ -252,6 +252,10 @@ def _build_state(
     manual_audit_summary = dict(data.get("manual_audit_summary", {}) or {})
     screener_automation_status = dict(data.get("screener_automation_status", {}) or {})
     screener_automation_runs = list(data.get("screener_automation_runs", []) or [])
+    automation_status = dict(data.get("automation_status", {}) or {})
+    web_automation_status = dict(data.get("web_automation_status", {}) or {})
+    automation_runs = list(data.get("automation_runs", []) or [])
+    recent_notifications = list(data.get("recent_notifications", []) or [])
     recent_alerts = list(data.get("recent_alerts", []) or [])
     monitor_events = list(data.get("monitor_events", []) or [])
     recommendation_history = list(data.get("recommendation_history", []) or [])
@@ -283,6 +287,10 @@ def _build_state(
         "manual_audit_summary": manual_audit_summary,
         "screener_automation_status": screener_automation_status,
         "screener_automation_runs": screener_automation_runs,
+        "automation_status": automation_status,
+        "web_automation_status": web_automation_status,
+        "automation_runs": automation_runs,
+        "recent_notifications": recent_notifications,
         "shadow_mode": bool(data.get("shadow_mode") or shadow_report or manual_outcomes),
         "recent_alerts": recent_alerts,
         "monitor_events": monitor_events,
@@ -1493,10 +1501,24 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
     manual_audit = list(state.get("manual_audit_trades") or [])
     automation = dict(state.get("screener_automation_status") or {})
     automation_runs = list(state.get("screener_automation_runs") or [])
+    e2e_status = dict(state.get("automation_status") or {})
+    web_status = dict(state.get("web_automation_status") or {})
+    e2e_runs = list(state.get("automation_runs") or [])
+    latest_e2e = dict(e2e_status.get("latest_run") or {})
+    latest_notification = dict(e2e_status.get("latest_notification") or {})
+    latest_web = dict(web_status.get("latest_source_summary") or {})
     latest_run = dict(automation.get("latest_auto_shadow_run") or {})
     run_summary = dict(latest_run.get("scan_summary") or {})
     normalization = dict(latest_run.get("normalization") or {})
-    if not (report or uploads or outcomes or automation or state.get("shadow_mode")):
+    if not (
+        report
+        or uploads
+        or outcomes
+        or automation
+        or e2e_status
+        or web_status
+        or state.get("shadow_mode")
+    ):
         st.markdown('<div class="ds-section">Free Shadow Mode</div>', unsafe_allow_html=True)
         st.caption(
             "Drop an exported screener CSV or text table into `data\\inbox\\screener`. "
@@ -1558,6 +1580,86 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
             ),
         ]
         st.markdown(_step_strip(source_cards), unsafe_allow_html=True)
+    if e2e_status:
+        st.markdown('<div class="ds-section">Notification automation</div>', unsafe_allow_html=True)
+        e2e_cards = [
+            (
+                "Latest run",
+                _friendly(str(latest_e2e.get("status") or "No run")),
+                str(latest_e2e.get("run_type") or "automation"),
+            ),
+            (
+                "Latest notice",
+                str(latest_notification.get("title") or "None"),
+                str(latest_notification.get("channel_hint") or "notification"),
+            ),
+            (
+                "Missing outcomes",
+                _format_number(len(list(e2e_status.get("missing_outcomes") or []))),
+                "Reminder triggers when files are absent",
+            ),
+            (
+                "Logs",
+                _short_path(e2e_status.get("logs_path") or "logs"),
+                "Automation log folder",
+            ),
+        ]
+        st.markdown(_step_strip(e2e_cards), unsafe_allow_html=True)
+        health = list(e2e_status.get("health") or [])
+        if health:
+            with st.expander("Automation health checklist", expanded=False):
+                _table(health, ["check", "status", "detail"])
+    if web_status:
+        st.markdown('<div class="ds-section">Web Auto-Pilot</div>', unsafe_allow_html=True)
+        counts = dict(web_status.get("counts") or {})
+        telegram = dict(web_status.get("telegram_status") or {})
+        candidate_count = latest_web.get(
+            "candidate_count",
+            counts.get("latest_candidate_count", 0),
+        )
+        web_cards = [
+            (
+                "Source status",
+                _friendly(str(latest_web.get("status") or "No run")),
+                f"{_format_number(candidate_count)} candidates",
+            ),
+            (
+                "Failures",
+                _format_number(counts.get("source_failures", 0)),
+                "Blocked or unavailable sources are logged",
+            ),
+            (
+                "SEC / halts",
+                (
+                    f"{_format_number(counts.get('sec_risk_events', 0))} / "
+                    f"{_format_number(counts.get('halt_events', 0))}"
+                ),
+                "Risk enrichment events",
+            ),
+            (
+                "Telegram",
+                _format_number(telegram.get("telegram_notifications", 0)),
+                "Persisted Telegram notifications",
+            ),
+        ]
+        st.markdown(_step_strip(web_cards), unsafe_allow_html=True)
+        if latest_web.get("snapshot_path"):
+            st.caption(f"Latest web snapshot: `{_short_path(latest_web.get('snapshot_path'))}`")
+        warnings = list((web_status.get("ai_data_warnings") or [])[:3])
+        if warnings:
+            st.warning(
+                "AI/data warnings: "
+                + "; ".join(str(item.get("warning") or item) for item in warnings)
+            )
+        with st.expander("Web source details", expanded=False):
+            _table(
+                list(web_status.get("source_health") or [])[:8],
+                ["checked_at", "source", "status", "detail"],
+            )
+            _table(
+                list(web_status.get("fetch_results") or [])[:8],
+                ["source", "status", "row_count", "failure_reason", "artifact_path"],
+            )
     if latest_run:
         warnings = normalization.get("warnings") or []
         if warnings:
@@ -1635,6 +1737,31 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
                     "normalized_path",
                     "scan_run_id",
                     "out_dir",
+                ],
+            )
+    if e2e_runs:
+        with st.expander("Notification automation history", expanded=False):
+            _table(
+                e2e_runs[:8],
+                [
+                    "run_type",
+                    "status",
+                    "started_at",
+                    "completed_at",
+                    "out_dir",
+                ],
+            )
+    notifications = list(e2e_status.get("notifications") or state.get("recent_notifications") or [])
+    if notifications:
+        with st.expander("Latest notifications", expanded=False):
+            _table(
+                notifications[:8],
+                [
+                    "sent_at",
+                    "channel",
+                    "ticker",
+                    "title",
+                    "channel_hint",
                 ],
             )
 

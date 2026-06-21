@@ -9,6 +9,8 @@ __pycache__/
 outputs/
 logs/
 .streamlit/secrets.toml
+config/web_sources.yaml
+config/automation.yaml
 data/raw/
 data/cache/
 data/inbox/screener/*
@@ -19,6 +21,13 @@ data/failed/screener/*
 !data/failed/screener/.gitkeep
 data/manual/*
 !data/manual/.gitkeep
+data/inbox/outcomes/*
+!data/inbox/outcomes/.gitkeep
+data/processed/outcomes/*
+!data/processed/outcomes/.gitkeep
+data/failed/outcomes/*
+!data/failed/outcomes/.gitkeep
 data/*.sqlite
 data/*.sqlite3
 data/universe_*.csv
+data/universe_*.json

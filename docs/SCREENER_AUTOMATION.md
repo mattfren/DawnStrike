@@ -116,3 +116,8 @@ data warnings.
 
 Use these picks as a paper validation aid. If you trade manually in a broker,
 Dawnstrike is still not executing or managing that trade.
+
+For full notification-only automation, use `docs\E2E_AUTOMATION.md`. That layer
+consumes this screener inbox, persists official calls, sends top-pick
+notifications, requests outcomes, audits outcomes when available, and sends the
+daily summary.

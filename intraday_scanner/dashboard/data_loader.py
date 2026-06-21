@@ -10,7 +10,9 @@ from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.reporting import read_csv_dicts, read_scan_summary
 from intraday_scanner.scoring import score_universe
+from intraday_scanner.services.e2e_automation_service import automation_status
 from intraday_scanner.services.screener_automation import screener_automation_status
+from intraday_scanner.services.web_collection_service import web_automation_status
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -59,6 +61,10 @@ def load_sqlite(db_path: str | Path) -> dict[str, Any]:
     latest["manual_audit_summary"] = store.load_latest_manual_audit_summary() or {}
     latest["screener_automation_runs"] = store.load_screener_automation_runs()
     latest["screener_automation_status"] = screener_automation_status(store=store)
+    latest["automation_runs"] = store.load_automation_runs()
+    latest["recent_notifications"] = store.load_recent_notifications()
+    latest["automation_status"] = automation_status(store)
+    latest["web_automation_status"] = web_automation_status(store)
     latest["recent_alerts"] = store.load_recent_alerts()
     latest["monitor_events"] = store.load_recent_monitor_events()
     latest["recommendation_history"] = store.load_recommendation_theses()

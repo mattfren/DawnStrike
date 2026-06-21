@@ -1,0 +1,50 @@
+timezone: America/Chicago
+market_timezone: America/New_York
+db_path: data\shadow_real.sqlite
+out_root: outputs\automation
+web_sources_config: config\web_sources.example.yaml
+notification_channels:
+  - console
+  - discord
+  - telegram
+  - email
+screener_sources:
+  - name: local_inbox
+    type: inbox
+    path: data\inbox\screener
+    enabled: true
+  - name: url_barchart
+    type: url
+    url: ""
+    enabled: false
+  - name: url_tradingview
+    type: url
+    url: ""
+    enabled: false
+normalizer:
+  preferred: deterministic
+  fallback: codex-cli
+schedule:
+  morning_scan_time_ct: "08:10"
+  market_open_monitor_time_ct: "08:30"
+  lunch_check_time_ct: "11:30"
+  close_check_time_ct: "15:00"
+  eod_report_time_ct: "15:10"
+monitor:
+  enabled: true
+  interval_seconds: 60
+  max_symbols: 5
+  risk_drop_pct: 8
+  reject_premarket_high_pct: 3
+  volume_collapse_ratio: 0.35
+outcomes:
+  mode: manual_file_or_reminder
+  inbox: data\inbox\outcomes
+  reminder_if_missing: true
+notifications:
+  dedupe: true
+  send_top_picks: true
+  send_failures: true
+  send_lunch_reminder: true
+  send_close_reminder: true
+  send_daily_summary: true

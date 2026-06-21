@@ -1,0 +1,16 @@
+{
+  "ticker": "OFFER",
+  "cik": "0001234567",
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0001234567-26-000001", "0001234567-26-000002"],
+      "filingDate": ["2026-06-20", "2026-06-18"],
+      "form": ["S-3", "8-K"],
+      "primaryDocument": ["s3.htm", "8k.htm"],
+      "primaryDocDescription": [
+        "Shelf registration statement for possible offering",
+        "Current report announces customer contract"
+      ]
+    }
+  }
+}

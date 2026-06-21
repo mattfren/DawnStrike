@@ -44,6 +44,15 @@ from intraday_scanner.services.alert_service import (
     persist_deduped_alerts,
 )
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
+from intraday_scanner.services.e2e_automation_service import (
+    automation_daemon,
+    automation_monitor_open,
+    automation_morning,
+    automation_outcomes,
+    automation_run,
+    automation_summary,
+    safe_url_ingest_screener,
+)
 from intraday_scanner.services.free_shadow_mode import (
     audit_manual_outcomes,
     build_free_shadow_report,
@@ -80,6 +89,15 @@ from intraday_scanner.services.screener_automation import (
 from intraday_scanner.services.setup_monitor import run_setup_monitor
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
+from intraday_scanner.services.web_collection_service import (
+    telegram_test,
+    web_auto_collect,
+    web_build_universe,
+    web_collect_halts,
+    web_collect_sec_risk,
+    web_ingest_public_table,
+    web_telegram_daemon,
+)
 from intraday_scanner.snapshot_builder import main as snapshot_builder_main
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -211,6 +229,138 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["none", "codex-cli", "openai-api"],
         default="none",
     )
+
+    url_ingest = subparsers.add_parser(
+        "url-ingest-screener",
+        help="Safely ingest a public allowed HTML table into a raw screener CSV",
+    )
+    url_ingest.add_argument("--url", required=True)
+    url_ingest.add_argument("--out", required=True)
+    url_ingest.add_argument("--allowed-domain", action="append", dest="allowed_domains")
+    url_ingest.add_argument("--timeout-seconds", type=float, default=10.0)
+
+    web_build_universe_parser = subparsers.add_parser(
+        "web-build-universe", help="Build a filtered free U.S. common-stock universe"
+    )
+    web_build_universe_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    web_build_universe_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_build_universe_parser.add_argument("--out", default="data/universe_us_common.csv")
+    web_build_universe_parser.add_argument("--persist", action="store_true")
+
+    web_halts = subparsers.add_parser(
+        "web-collect-halts", help="Collect Nasdaq Trader trade halt events"
+    )
+    web_halts.add_argument("--config", default="config/web_sources.example.yaml")
+    web_halts.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_halts.add_argument("--out-dir", default="outputs/web_halts")
+    web_halts.add_argument("--persist", action="store_true")
+
+    web_sec = subparsers.add_parser(
+        "web-collect-sec-risk", help="Collect SEC filing risk events for candidates"
+    )
+    web_sec.add_argument("--config", default="config/web_sources.example.yaml")
+    web_sec.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_sec.add_argument("--out-dir", default="outputs/web_sec")
+    web_sec.add_argument("--tickers", default=None)
+    web_sec.add_argument("--persist", action="store_true")
+
+    web_table = subparsers.add_parser(
+        "web-ingest-public-table",
+        help="Safely ingest an allowed public table into a canonical snapshot",
+    )
+    web_table.add_argument("--url", required=True)
+    web_table.add_argument("--config", default="config/web_sources.example.yaml")
+    web_table.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_table.add_argument("--out-dir", required=True)
+    web_table.add_argument("--persist", action="store_true")
+    web_table.add_argument("--print", action="store_true", dest="print_rows")
+    web_table.add_argument("--allow-unlisted-url", action="store_true")
+
+    web_auto = subparsers.add_parser(
+        "web-auto-collect", help="Collect local/web candidates and produce a snapshot"
+    )
+    web_auto.add_argument("--config", default="config/web_sources.example.yaml")
+    web_auto.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_auto.add_argument("--out-dir", default="outputs/web_auto")
+    web_auto.add_argument("--persist", action="store_true")
+    web_auto.add_argument("--print", action="store_true", dest="print_rows")
+
+    telegram = subparsers.add_parser("telegram-test", help="Send or dry-run a Telegram test")
+    telegram.add_argument("--db-path", default="data/shadow_real.sqlite")
+    telegram.add_argument("--dry-run", action="store_true")
+
+    web_daemon = subparsers.add_parser(
+        "web-telegram-daemon", help="Run the web auto-pilot notification daemon"
+    )
+    web_daemon.add_argument("--config", default="config/web_sources.example.yaml")
+    web_daemon.add_argument("--automation-config", default="config/automation.example.yaml")
+    web_daemon.add_argument("--db-path", default="data/shadow_real.sqlite")
+    web_daemon.add_argument("--out-root", default="outputs/web_telegram")
+    web_daemon.add_argument(
+        "--ai-mode",
+        choices=["none", "codex-cli", "openai-api"],
+        default="none",
+    )
+    web_daemon.add_argument("--notify", default="console")
+    web_daemon.add_argument("--dry-run", action="store_true")
+    web_daemon.add_argument("--max-cycles", type=int, default=None)
+    web_daemon.add_argument("--poll-seconds", type=int, default=60)
+    web_daemon.add_argument("--date", default=None)
+
+    def add_automation_common(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--config", default="config/automation.example.yaml")
+        command.add_argument("--db-path", default=None)
+        command.add_argument("--out-root", default=None)
+        command.add_argument("--date", default=None)
+
+    automation_run_parser = subparsers.add_parser(
+        "automation-run",
+        help="Run the notification-only automation orchestrator",
+    )
+    automation_run_parser.add_argument(
+        "--mode",
+        choices=["once", "daemon", "dry-run"],
+        required=True,
+    )
+    add_automation_common(automation_run_parser)
+    automation_run_parser.add_argument("--notify", action="store_true")
+    automation_run_parser.add_argument("--max-cycles", type=int, default=None)
+    automation_run_parser.add_argument("--poll-seconds", type=int, default=60)
+
+    automation_morning_parser = subparsers.add_parser(
+        "automation-morning", help="Run the automated morning Free Shadow scan"
+    )
+    add_automation_common(automation_morning_parser)
+    automation_morning_parser.add_argument("--notify", action="store_true")
+
+    automation_monitor = subparsers.add_parser(
+        "automation-monitor-open", help="Run market-open monitor automation"
+    )
+    add_automation_common(automation_monitor)
+    automation_monitor.add_argument("--snapshot", default=None)
+    automation_monitor.add_argument("--max-iterations", type=int, default=1)
+    automation_monitor.add_argument("--notify", action="store_true")
+
+    automation_outcomes_parser = subparsers.add_parser(
+        "automation-outcomes", help="Import/audit outcomes or send outcome reminders"
+    )
+    add_automation_common(automation_outcomes_parser)
+    automation_outcomes_parser.add_argument("--notify", action="store_true")
+
+    automation_summary_parser = subparsers.add_parser(
+        "automation-summary", help="Send the daily automation summary notification"
+    )
+    add_automation_common(automation_summary_parser)
+    automation_summary_parser.add_argument("--notify", action="store_true")
+
+    automation_daemon_parser = subparsers.add_parser(
+        "automation-daemon", help="Run or dry-run the automation daemon loop"
+    )
+    add_automation_common(automation_daemon_parser)
+    automation_daemon_parser.add_argument("--dry-run", action="store_true")
+    automation_daemon_parser.add_argument("--max-cycles", type=int, default=None)
+    automation_daemon_parser.add_argument("--poll-seconds", type=int, default=60)
+    automation_daemon_parser.add_argument("--notify", action="store_true")
 
     live = subparsers.add_parser("live-scan", help="Run a provider-backed live scan")
     live.add_argument("--provider", choices=["alpaca"], default="alpaca")
@@ -397,6 +547,34 @@ def main(argv: list[str] | None = None) -> int:
             return _run_watch_screener_inbox(args)
         if args.command == "auto-shadow-daily":
             return _run_auto_shadow_daily(args)
+        if args.command == "url-ingest-screener":
+            return _run_url_ingest_screener(args)
+        if args.command == "web-build-universe":
+            return _run_web_build_universe(args)
+        if args.command == "web-collect-halts":
+            return _run_web_collect_halts(args)
+        if args.command == "web-collect-sec-risk":
+            return _run_web_collect_sec_risk(args)
+        if args.command == "web-ingest-public-table":
+            return _run_web_ingest_public_table(args)
+        if args.command == "web-auto-collect":
+            return _run_web_auto_collect(args)
+        if args.command == "telegram-test":
+            return _run_telegram_test(args)
+        if args.command == "web-telegram-daemon":
+            return _run_web_telegram_daemon(args)
+        if args.command == "automation-run":
+            return _run_automation_run(args)
+        if args.command == "automation-morning":
+            return _run_automation_morning(args)
+        if args.command == "automation-monitor-open":
+            return _run_automation_monitor_open(args)
+        if args.command == "automation-outcomes":
+            return _run_automation_outcomes(args)
+        if args.command == "automation-summary":
+            return _run_automation_summary(args)
+        if args.command == "automation-daemon":
+            return _run_automation_daemon(args)
         if args.command == "live-scan":
             return _run_live_scan(args)
         if args.command == "morning-run":
@@ -665,6 +843,181 @@ def _run_auto_shadow_daily(args: argparse.Namespace) -> int:
         ai_normalizer=args.ai_normalizer,
     )
     print(json.dumps(_printable_auto_shadow_result(result), indent=2, sort_keys=True))
+    return 0
+
+
+def _run_url_ingest_screener(args: argparse.Namespace) -> int:
+    path = safe_url_ingest_screener(
+        url=args.url,
+        out_dir=args.out,
+        allowed_domains=tuple(args.allowed_domains or []),
+        timeout_seconds=args.timeout_seconds,
+    )
+    print(json.dumps({"status": "success", "path": str(path)}, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_build_universe(args: argparse.Namespace) -> int:
+    result = web_build_universe(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_path=args.out,
+        persist=args.persist,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_collect_halts(args: argparse.Namespace) -> int:
+    result = web_collect_halts(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        persist=args.persist,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_collect_sec_risk(args: argparse.Namespace) -> int:
+    tickers = [ticker.strip() for ticker in str(args.tickers or "").split(",") if ticker.strip()]
+    result = web_collect_sec_risk(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        tickers=tickers or None,
+        persist=args.persist,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_ingest_public_table(args: argparse.Namespace) -> int:
+    result = web_ingest_public_table(
+        url=args.url,
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        print_rows=args.print_rows,
+        allow_unlisted_url=args.allow_unlisted_url,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_auto_collect(args: argparse.Namespace) -> int:
+    result = web_auto_collect(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        print_rows=args.print_rows,
+    )
+    print(json.dumps({key: value for key, value in result.items() if key != "rows"}, indent=2))
+    return 0
+
+
+def _run_telegram_test(args: argparse.Namespace) -> int:
+    result = telegram_test(db_path=args.db_path, dry_run=args.dry_run)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_telegram_daemon(args: argparse.Namespace) -> int:
+    result = web_telegram_daemon(
+        config_path=args.config,
+        automation_config_path=args.automation_config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        ai_mode=args.ai_mode,
+        notify=args.notify,
+        dry_run=args.dry_run,
+        max_cycles=args.max_cycles,
+        poll_seconds=args.poll_seconds,
+        run_date=args.date,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_run(args: argparse.Namespace) -> int:
+    result = automation_run(
+        mode=args.mode,
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        notify=args.notify,
+        max_cycles=args.max_cycles,
+        poll_seconds=args.poll_seconds,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_morning(args: argparse.Namespace) -> int:
+    result = automation_morning(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        notify=args.notify,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_monitor_open(args: argparse.Namespace) -> int:
+    result = automation_monitor_open(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        snapshot=args.snapshot,
+        max_iterations=args.max_iterations,
+        notify=args.notify,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_outcomes(args: argparse.Namespace) -> int:
+    result = automation_outcomes(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        notify=args.notify,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_summary(args: argparse.Namespace) -> int:
+    result = automation_summary(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        notify=args.notify,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_automation_daemon(args: argparse.Namespace) -> int:
+    result = automation_daemon(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_root=args.out_root,
+        run_date=args.date,
+        notify=args.notify,
+        dry_run=args.dry_run,
+        max_cycles=args.max_cycles,
+        poll_seconds=args.poll_seconds,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

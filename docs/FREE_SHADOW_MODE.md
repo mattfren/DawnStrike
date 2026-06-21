@@ -34,6 +34,9 @@ snapshot, run summary, top paper picks, avoid list, and data warnings.
 See `docs\SCREENER_AUTOMATION.md` for aliases, folder flow, and Windows task
 shortcuts.
 
+For notification-only mode, see `docs\E2E_AUTOMATION.md` and
+`docs\NOTIFICATION_ONLY_WORKFLOW.md`.
+
 ## Manual Workflow
 
 ```powershell

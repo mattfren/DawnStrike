@@ -8,6 +8,7 @@ mean the data is complete or provider-validated.
 
 - `sample` or `fixture`: bundled files for software testing.
 - `manual`: user-uploaded screener or outcome rows.
+- `web_url`: public table rows collected from an explicitly allowed URL.
 - `free_api`: free provider data, when configured.
 - `paid`: reserved for paid data sources, not used by Free Shadow Mode.
 
@@ -17,6 +18,14 @@ Manual uploads often miss float, short float, market cap, halt status, offering
 status, reverse splits, and catalyst URLs. Dawnstrike records a
 `coverage_warning` and `missing_enrichment_count` instead of inventing those
 fields.
+
+Public URL rows are marked `url_table_unverified`. If a table is missing price,
+previous close, high, low, or volume, Dawnstrike skips the row or reports
+failure. It does not create fake market data to make a scan run.
+
+Official APIs, direct CSV exports, and broker/data-provider feeds are better
+than scraping because their fields are more stable and their permissions are
+clearer. Web table ingestion is a fallback for research and paper validation.
 
 ## No Lookahead
 

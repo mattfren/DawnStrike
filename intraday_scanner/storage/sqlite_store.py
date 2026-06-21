@@ -152,6 +152,94 @@ class SQLiteScanStore:
                         checked_at TEXT NOT NULL,
                         detail TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS web_fetch_runs (
+                        id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        source_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        url TEXT,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS web_fetch_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        row_count INTEGER NOT NULL,
+                        artifact_path TEXT,
+                        failure_reason TEXT,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS source_health (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        checked_at TEXT NOT NULL,
+                        detail TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS raw_source_artifacts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        artifact_kind TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        content_type TEXT,
+                        byte_count INTEGER NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS normalized_source_rows (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        as_of_timestamp TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS halt_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_key TEXT NOT NULL UNIQUE,
+                        ticker TEXT NOT NULL,
+                        event_time TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS sec_risk_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_key TEXT NOT NULL UNIQUE,
+                        ticker TEXT NOT NULL,
+                        filed_at TEXT NOT NULL,
+                        form_type TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ai_research_runs (
+                        id TEXT PRIMARY KEY,
+                        mode TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ai_research_outputs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        classification TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ai_data_warnings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        ticker TEXT,
+                        warning TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS manual_snapshot_uploads (
                         id TEXT PRIMARY KEY,
                         created_at TEXT NOT NULL,
@@ -205,6 +293,15 @@ class SQLiteScanStore:
                         normalized_path TEXT,
                         out_dir TEXT,
                         scan_run_id TEXT,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS automation_runs (
+                        id TEXT PRIMARY KEY,
+                        run_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        out_dir TEXT,
                         payload_json TEXT NOT NULL
                     );
                     """
@@ -565,6 +662,37 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not record notification: {exc}") from exc
 
+    def load_recent_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT event_key, run_id, ticker, channel, sent_at, payload_json
+                    FROM notifications_sent
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                notifications = []
+                for row in rows:
+                    payload = json.loads(str(row["payload_json"]))
+                    notifications.append(
+                        {
+                            "event_key": str(row["event_key"]),
+                            "run_id": str(row["run_id"] or ""),
+                            "ticker": str(row["ticker"] or ""),
+                            "channel": str(row["channel"]),
+                            "sent_at": str(row["sent_at"]),
+                            **payload,
+                        }
+                    )
+                return notifications
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load notifications: {exc}") from exc
+
     def record_alert(
         self,
         *,
@@ -757,6 +885,451 @@ class SQLiteScanStore:
                 return [dict(row) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load provider health: {exc}") from exc
+
+    def persist_web_fetch_run(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO web_fetch_runs
+                    (id, source, source_type, status, started_at, completed_at, url,
+                     payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload.get("run_id", "")),
+                        str(payload.get("source", "")),
+                        str(payload.get("source_type", "")),
+                        str(payload.get("status", "")),
+                        str(payload.get("started_at", "")),
+                        str(payload.get("completed_at", "")),
+                        str(payload.get("url", "")),
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist web fetch run: {exc}") from exc
+
+    def persist_web_fetch_result(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO web_fetch_results
+                    (run_id, source, status, row_count, artifact_path, failure_reason,
+                     payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload.get("run_id", "")),
+                        str(payload.get("source", "")),
+                        str(payload.get("status", "")),
+                        int(payload.get("row_count") or 0),
+                        str(payload.get("artifact_path", "")),
+                        str(payload.get("failure_reason", "")),
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist web fetch result: {exc}") from exc
+
+    def record_source_health(
+        self,
+        source: str,
+        status: str,
+        checked_at: str,
+        detail: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO source_health
+                    (source, status, checked_at, detail, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source,
+                        status,
+                        checked_at,
+                        detail,
+                        json.dumps(payload or {}, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not record source health: {exc}") from exc
+
+    def persist_raw_source_artifact(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO raw_source_artifacts
+                    (run_id, source, artifact_kind, path, content_type, byte_count,
+                     sha256, created_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload.get("run_id", "")),
+                        str(payload.get("source", "")),
+                        str(payload.get("artifact_kind", "")),
+                        str(payload.get("path", "")),
+                        str(payload.get("content_type", "")),
+                        int(payload.get("byte_count") or 0),
+                        str(payload.get("sha256", "")),
+                        str(payload.get("created_at", "")),
+                        json.dumps(dict(payload.get("metadata") or {}), sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist raw source artifact: {exc}") from exc
+
+    def persist_normalized_source_rows(
+        self, run_id: str, source: str, rows: list[dict[str, Any]]
+    ) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT INTO normalized_source_rows
+                        (run_id, source, ticker, as_of_timestamp, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            source,
+                            str(row.get("ticker", "")),
+                            str(row.get("as_of_timestamp", "")),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist normalized source rows: {exc}") from exc
+
+    def load_web_fetch_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM web_fetch_runs
+                    ORDER BY started_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load web fetch runs: {exc}") from exc
+
+    def load_web_fetch_results(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM web_fetch_results
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load web fetch results: {exc}") from exc
+
+    def load_source_health(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT source, status, checked_at, detail, payload_json
+                    FROM source_health
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [
+                    {
+                        "source": str(row["source"]),
+                        "status": str(row["status"]),
+                        "checked_at": str(row["checked_at"]),
+                        "detail": str(row["detail"]),
+                        **json.loads(str(row["payload_json"])),
+                    }
+                    for row in rows
+                ]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load source health: {exc}") from exc
+
+    def load_raw_source_artifacts(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT run_id, source, artifact_kind, path, content_type, byte_count,
+                           sha256, created_at, metadata_json
+                    FROM raw_source_artifacts
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [
+                    {
+                        "run_id": str(row["run_id"]),
+                        "source": str(row["source"]),
+                        "artifact_kind": str(row["artifact_kind"]),
+                        "path": str(row["path"]),
+                        "content_type": str(row["content_type"] or ""),
+                        "byte_count": int(row["byte_count"]),
+                        "sha256": str(row["sha256"]),
+                        "created_at": str(row["created_at"]),
+                        "metadata": json.loads(str(row["metadata_json"])),
+                    }
+                    for row in rows
+                ]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load raw source artifacts: {exc}") from exc
+
+    def load_normalized_source_rows(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM normalized_source_rows
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load normalized source rows: {exc}") from exc
+
+    def persist_halt_events(self, events: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for event in events:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO halt_events
+                        (event_key, ticker, event_time, status, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(event.get("event_key", "")),
+                            str(event.get("ticker", "")),
+                            str(event.get("event_time", "")),
+                            str(event.get("status", "")),
+                            json.dumps(event, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist halt events: {exc}") from exc
+
+    def load_halt_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM halt_events
+                    ORDER BY event_time DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load halt events: {exc}") from exc
+
+    def persist_sec_risk_events(self, events: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for event in events:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO sec_risk_events
+                        (event_key, ticker, filed_at, form_type, severity, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(event.get("event_key", "")),
+                            str(event.get("ticker", "")),
+                            str(event.get("filed_at", "")),
+                            str(event.get("form_type", "")),
+                            str(event.get("severity", "")),
+                            json.dumps(event, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist SEC risk events: {exc}") from exc
+
+    def load_sec_risk_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM sec_risk_events
+                    ORDER BY filed_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load SEC risk events: {exc}") from exc
+
+    def persist_ai_research(
+        self,
+        run: dict[str, Any],
+        outputs: list[dict[str, Any]],
+        warnings: list[dict[str, Any]],
+    ) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO ai_research_runs
+                    (id, mode, status, started_at, completed_at, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(run.get("run_id", "")),
+                        str(run.get("mode", "")),
+                        str(run.get("status", "")),
+                        str(run.get("started_at", "")),
+                        str(run.get("completed_at", "")),
+                        json.dumps(run, sort_keys=True),
+                    ),
+                )
+                for output in outputs:
+                    connection.execute(
+                        """
+                        INSERT INTO ai_research_outputs
+                        (run_id, ticker, classification, payload_json)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            str(run.get("run_id", "")),
+                            str(output.get("ticker", "")),
+                            str(output.get("classification", "")),
+                            json.dumps(output, sort_keys=True),
+                        ),
+                    )
+                for warning in warnings:
+                    connection.execute(
+                        """
+                        INSERT INTO ai_data_warnings
+                        (run_id, ticker, warning, created_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(run.get("run_id", "")),
+                            str(warning.get("ticker", "")),
+                            str(warning.get("warning", "")),
+                            str(warning.get("created_at", "")),
+                            json.dumps(warning, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AI research output: {exc}") from exc
+
+    def load_ai_research_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM ai_research_runs
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AI research runs: {exc}") from exc
+
+    def load_ai_research_outputs(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM ai_research_outputs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AI research outputs: {exc}") from exc
+
+    def load_ai_data_warnings(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM ai_data_warnings
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AI data warnings: {exc}") from exc
 
     def persist_manual_snapshot_upload(
         self,
@@ -1052,6 +1625,47 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load screener automation runs: {exc}") from exc
 
+    def persist_automation_run(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO automation_runs
+                    (id, run_type, status, started_at, completed_at, out_dir, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload.get("run_id", "")),
+                        str(payload.get("run_type", "")),
+                        str(payload.get("status", "")),
+                        str(payload.get("started_at", "")),
+                        str(payload.get("completed_at", "")),
+                        str(payload.get("out_dir", "")),
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist automation run: {exc}") from exc
+
+    def load_automation_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM automation_runs
+                    ORDER BY started_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load automation runs: {exc}") from exc
+
     def _load_payloads(
         self, connection: sqlite3.Connection, table: str, run_id: str
     ) -> list[dict[str, Any]]:
@@ -1069,6 +1683,7 @@ def _recommendation_payload(row: dict[str, Any], result: ScanResult) -> dict[str
     return {
         "scan_id": result.run_id,
         "timestamp": row.get("as_of_timestamp") or result.created_at,
+        "source_as_of_timestamp": row.get("as_of_timestamp") or "",
         "recorded_at": result.created_at,
         "rank": row.get("rank"),
         "ticker": row.get("ticker"),
