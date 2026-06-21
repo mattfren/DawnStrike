@@ -43,6 +43,16 @@ from intraday_scanner.services.alert_service import (
     alerts_from_news_and_filings,
     persist_deduped_alerts,
 )
+from intraday_scanner.services.alpha_cycle_service import (
+    alpha_cycle,
+    alpha_doctor,
+    alpha_learn,
+    alpha_monitor,
+    alpha_morning,
+    alpha_outcomes,
+    alpha_report,
+    alpha_status,
+)
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.e2e_automation_service import (
     automation_daemon,
@@ -334,6 +344,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_daemon.add_argument("--poll-seconds", type=int, default=60)
     web_daemon.add_argument("--date", default=None)
 
+    alpha_morning_parser = subparsers.add_parser(
+        "alpha-morning", help="Run the AlphaOps morning research cycle"
+    )
+    alpha_morning_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_morning_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_morning_parser.add_argument("--out-dir", default="outputs/alpha_morning")
+    alpha_morning_parser.add_argument("--notify", default="console")
+    alpha_morning_parser.add_argument("--dry-run", action="store_true")
+
+    alpha_cycle_parser = subparsers.add_parser(
+        "alpha-cycle", help="Run one AlphaOps collect-score-notify cycle"
+    )
+    alpha_cycle_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_cycle_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_cycle_parser.add_argument("--out-dir", default="outputs/alpha_cycle")
+    alpha_cycle_parser.add_argument("--notify", default="console")
+    alpha_cycle_parser.add_argument("--dry-run", action="store_true")
+
+    alpha_monitor_parser = subparsers.add_parser(
+        "alpha-monitor", help="Check latest AlphaOps signals against current prices"
+    )
+    alpha_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_monitor_parser.add_argument("--notify", default="console")
+    alpha_monitor_parser.add_argument("--dry-run", action="store_true")
+
+    alpha_outcomes_parser = subparsers.add_parser(
+        "alpha-outcomes", help="Label saved AlphaOps signals from manual outcomes"
+    )
+    alpha_outcomes_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    alpha_learn_parser = subparsers.add_parser(
+        "alpha-learn", help="Update AlphaOps setup memory and performance truth"
+    )
+    alpha_learn_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    alpha_status_parser = subparsers.add_parser(
+        "alpha-status", help="Print AlphaOps persistence and evidence status"
+    )
+    alpha_status_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    alpha_doctor_parser = subparsers.add_parser(
+        "alpha-doctor", help="Diagnose AlphaOps source and safety readiness"
+    )
+    alpha_doctor_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_doctor_parser.add_argument("--out-dir", default="outputs/alpha_doctor")
+
+    alpha_report_parser = subparsers.add_parser(
+        "alpha-report", help="Write AlphaOps performance and evidence report"
+    )
+    alpha_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_report_parser.add_argument("--out-dir", default="outputs/alpha_report")
+
     def add_automation_common(command: argparse.ArgumentParser) -> None:
         command.add_argument("--config", default="config/automation.example.yaml")
         command.add_argument("--db-path", default=None)
@@ -594,6 +656,22 @@ def main(argv: list[str] | None = None) -> int:
             return _run_web_source_doctor(args)
         if args.command == "web-telegram-daemon":
             return _run_web_telegram_daemon(args)
+        if args.command == "alpha-morning":
+            return _run_alpha_morning(args)
+        if args.command == "alpha-cycle":
+            return _run_alpha_cycle(args)
+        if args.command == "alpha-monitor":
+            return _run_alpha_monitor(args)
+        if args.command == "alpha-outcomes":
+            return _run_alpha_outcomes(args)
+        if args.command == "alpha-learn":
+            return _run_alpha_learn(args)
+        if args.command == "alpha-status":
+            return _run_alpha_status(args)
+        if args.command == "alpha-doctor":
+            return _run_alpha_doctor(args)
+        if args.command == "alpha-report":
+            return _run_alpha_report(args)
         if args.command == "automation-run":
             return _run_automation_run(args)
         if args.command == "automation-morning":
@@ -994,6 +1072,70 @@ def _run_web_telegram_daemon(args: argparse.Namespace) -> int:
         poll_seconds=args.poll_seconds,
         run_date=args.date,
     )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_morning(args: argparse.Namespace) -> int:
+    result = alpha_morning(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        notify=args.notify,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_cycle(args: argparse.Namespace) -> int:
+    result = alpha_cycle(
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        notify=args.notify,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_monitor(args: argparse.Namespace) -> int:
+    result = alpha_monitor(
+        db_path=args.db_path,
+        notify=args.notify,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_outcomes(args: argparse.Namespace) -> int:
+    result = alpha_outcomes(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_learn(args: argparse.Namespace) -> int:
+    result = alpha_learn(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_status(args: argparse.Namespace) -> int:
+    result = alpha_status(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_doctor(args: argparse.Namespace) -> int:
+    result = alpha_doctor(config_path=args.config, out_dir=args.out_dir)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_report(args: argparse.Namespace) -> int:
+    result = alpha_report(db_path=args.db_path, out_dir=args.out_dir)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

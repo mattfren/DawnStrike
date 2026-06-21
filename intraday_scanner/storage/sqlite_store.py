@@ -319,6 +319,73 @@ class SQLiteScanStore:
                         out_dir TEXT,
                         payload_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS alpha_feature_vectors (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scan_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        model_version TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        feature_json TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_alpha_features_scan_ticker
+                    ON alpha_feature_vectors(scan_id, ticker);
+                    CREATE TABLE IF NOT EXISTS alpha_signals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signal_key TEXT NOT NULL UNIQUE,
+                        scan_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        rank INTEGER NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        alpha_score REAL NOT NULL,
+                        edge_bucket TEXT NOT NULL,
+                        confidence_bucket TEXT NOT NULL,
+                        can_alert INTEGER NOT NULL,
+                        no_trade_reason TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_alpha_signals_scan_rank
+                    ON alpha_signals(scan_id, rank);
+                    CREATE TABLE IF NOT EXISTS alpha_outcome_labels (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        label_key TEXT NOT NULL UNIQUE,
+                        scan_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS alpha_learning_runs (
+                        id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        summary_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS alpha_source_reliability (
+                        source TEXT PRIMARY KEY,
+                        updated_at TEXT NOT NULL,
+                        runs INTEGER NOT NULL,
+                        rows_returned INTEGER NOT NULL,
+                        rows_normalized INTEGER NOT NULL,
+                        rows_rejected INTEGER NOT NULL,
+                        stale_count INTEGER NOT NULL,
+                        missing_critical_count INTEGER NOT NULL,
+                        outcome_count INTEGER NOT NULL,
+                        winner_count INTEGER NOT NULL,
+                        reliability_score REAL NOT NULL,
+                        summary_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS alpha_setup_memory (
+                        setup_key TEXT PRIMARY KEY,
+                        updated_at TEXT NOT NULL,
+                        sample_size INTEGER NOT NULL,
+                        avg_return_pct REAL NOT NULL,
+                        median_return_pct REAL NOT NULL,
+                        win_rate_pct REAL NOT NULL,
+                        max_drawdown_pct REAL NOT NULL,
+                        outlier_dependency REAL NOT NULL,
+                        summary_json TEXT NOT NULL
+                    );
                     """
                 )
         except sqlite3.Error as exc:
@@ -1781,6 +1848,313 @@ class SQLiteScanStore:
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load automation runs: {exc}") from exc
+
+    def persist_alpha_feature_vectors(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT INTO alpha_feature_vectors
+                        (scan_id, ticker, timestamp, model_version, config_hash,
+                         feature_json, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("scan_id", "")),
+                            str(row.get("ticker", "")),
+                            str(row.get("timestamp", "")),
+                            str(row.get("model_version", "")),
+                            str(row.get("config_hash", "")),
+                            json.dumps(row.get("feature_json") or {}, sort_keys=True),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps feature vectors: {exc}") from exc
+
+    def load_alpha_feature_vectors(
+        self,
+        *,
+        scan_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if scan_id:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json
+                        FROM alpha_feature_vectors
+                        WHERE scan_id = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (scan_id, limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json
+                        FROM alpha_feature_vectors
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps feature vectors: {exc}") from exc
+
+    def persist_alpha_signals(self, rows: list[dict[str, Any]], *, replace: bool = True) -> None:
+        self.initialize()
+        statement = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    signal_key = str(
+                        row.get("signal_key")
+                        or f"{row.get('scan_id')}:{row.get('rank')}:{row.get('ticker')}"
+                    )
+                    connection.execute(
+                        f"""
+                        {statement} INTO alpha_signals
+                        (signal_key, scan_id, ticker, rank, timestamp, alpha_score,
+                         edge_bucket, confidence_bucket, can_alert, no_trade_reason,
+                         payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,  # noqa: S608
+                        (
+                            signal_key,
+                            str(row.get("scan_id", "")),
+                            str(row.get("ticker", "")),
+                            int(float(row.get("rank") or 0)),
+                            str(row.get("timestamp") or row.get("as_of_timestamp") or ""),
+                            float(row.get("alpha_score") or 0.0),
+                            str(row.get("edge_bucket") or ""),
+                            str(row.get("confidence_bucket") or ""),
+                            1 if row.get("can_alert") else 0,
+                            str(row.get("no_trade_reason") or ""),
+                            json.dumps({**row, "signal_key": signal_key}, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps signals: {exc}") from exc
+
+    def load_alpha_signals(
+        self,
+        *,
+        scan_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if scan_id:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json
+                        FROM alpha_signals
+                        WHERE scan_id = ?
+                        ORDER BY rank ASC
+                        LIMIT ?
+                        """,
+                        (scan_id, limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json
+                        FROM alpha_signals
+                        ORDER BY timestamp DESC, rank ASC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps signals: {exc}") from exc
+
+    def persist_alpha_outcome_labels(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    label_key = str(
+                        row.get("label_key")
+                        or f"{row.get('scan_id')}:{row.get('ticker')}:{row.get('created_at', '')}"
+                    )
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO alpha_outcome_labels
+                        (label_key, scan_id, ticker, created_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            label_key,
+                            str(row.get("scan_id", "")),
+                            str(row.get("ticker", "")),
+                            str(row.get("created_at", "")),
+                            json.dumps({**row, "label_key": label_key}, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps outcome labels: {exc}") from exc
+
+    def load_alpha_outcome_labels(self, limit: int = 5000) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM alpha_outcome_labels
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps outcome labels: {exc}") from exc
+
+    def persist_alpha_learning_run(self, payload: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO alpha_learning_runs
+                    (id, created_at, status, summary_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload.get("run_id", "")),
+                        str(payload.get("created_at", "")),
+                        str(payload.get("status", "")),
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps learning run: {exc}") from exc
+
+    def load_alpha_learning_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT summary_json
+                    FROM alpha_learning_runs
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["summary_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps learning runs: {exc}") from exc
+
+    def persist_alpha_source_reliability(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO alpha_source_reliability
+                        (source, updated_at, runs, rows_returned, rows_normalized,
+                         rows_rejected, stale_count, missing_critical_count,
+                         outcome_count, winner_count, reliability_score, summary_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("source", "")),
+                            str(row.get("updated_at", "")),
+                            int(row.get("runs") or 0),
+                            int(row.get("rows_returned") or 0),
+                            int(row.get("rows_normalized") or 0),
+                            int(row.get("rows_rejected") or 0),
+                            int(row.get("stale_count") or 0),
+                            int(row.get("missing_critical_count") or 0),
+                            int(row.get("outcome_count") or 0),
+                            int(row.get("winner_count") or 0),
+                            float(row.get("reliability_score") or 0.0),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps source reliability: {exc}") from exc
+
+    def load_alpha_source_reliability(self) -> dict[str, dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT source, summary_json
+                    FROM alpha_source_reliability
+                    ORDER BY source ASC
+                    """
+                ).fetchall()
+                return {
+                    str(row["source"]): json.loads(str(row["summary_json"])) for row in rows
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps source reliability: {exc}") from exc
+
+    def persist_alpha_setup_memory(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO alpha_setup_memory
+                        (setup_key, updated_at, sample_size, avg_return_pct,
+                         median_return_pct, win_rate_pct, max_drawdown_pct,
+                         outlier_dependency, summary_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("setup_key", "")),
+                            str(row.get("updated_at", "")),
+                            int(row.get("sample_size") or 0),
+                            float(row.get("avg_return_pct") or 0.0),
+                            float(row.get("median_return_pct") or 0.0),
+                            float(row.get("win_rate_pct") or 0.0),
+                            float(row.get("max_drawdown_pct") or 0.0),
+                            float(row.get("outlier_dependency") or 0.0),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist AlphaOps setup memory: {exc}") from exc
+
+    def load_alpha_setup_memory(self) -> dict[str, dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT setup_key, summary_json
+                    FROM alpha_setup_memory
+                    ORDER BY setup_key ASC
+                    """
+                ).fetchall()
+                return {
+                    str(row["setup_key"]): json.loads(str(row["summary_json"])) for row in rows
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load AlphaOps setup memory: {exc}") from exc
 
     def _load_payloads(
         self, connection: sqlite3.Connection, table: str, run_id: str

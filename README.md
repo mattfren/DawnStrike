@@ -72,6 +72,21 @@ no order execution path and does not bypass protected pages. See `docs\WEB_AUTO_
 `docs\TELEGRAM_NOTIFICATIONS.md`, `docs\URL_INGESTION.md`, and
 `docs\BROWSER_SOURCE_EXTRACTION.md`.
 
+AlphaOps v4 adaptive research layer:
+
+```powershell
+py -m intraday_scanner.cli alpha-morning --config config\web_sources.example.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_morning --notify console --dry-run
+py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify console --dry-run
+py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite
+py -m intraday_scanner.cli alpha-status --db-path data\shadow_real.sqlite
+py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
+```
+
+AlphaOps persists feature vectors, source reliability, setup memory, shadow
+outcome labels, and no-trade decisions. Fewer than 20 real shadow days are shown
+as insufficient sample, not proven expectancy. See `docs\ALPHAOPS_V4.md` and
+`docs\PLAYBOOK_ENGINE.md`.
+
 ## Install
 
 ```powershell

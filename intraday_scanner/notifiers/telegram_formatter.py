@@ -178,6 +178,121 @@ def format_source_check(source_summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_alpha_watch(
+    *,
+    signals: list[dict[str, Any]],
+    edge_label: str,
+    source_summary: dict[str, Any] | None = None,
+    timezone: str = "America/Chicago",
+    max_chars: int = DEFAULT_MORNING_MAX_CHARS,
+) -> str:
+    source_summary = dict(source_summary or {})
+    picks = [row for row in signals if row.get("can_alert")][:3]
+    lines = [
+        "🚀 Dawnstrike Alpha Watch",
+        f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | {len(picks)} picks",
+        "",
+    ]
+    if not picks:
+        lines.extend([
+            "No clean edge today.",
+            f"Reason: {_text(source_summary.get('top_failure_reason'), 'risk/data filters')}",
+            "",
+            "No orders placed. Research only.",
+        ])
+        return _clip("\n".join(lines).strip(), max_chars)
+    for index, row in enumerate(picks, start=1):
+        lines.append(
+            f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
+            f"{format_score(row.get('alpha_score'))} | {_text(row.get('edge_bucket'), 'n/a')}"
+        )
+        lines.append(
+            f"   Trigger {format_price(row.get('entry_trigger') or row.get('breakout_trigger'))} | "
+            f"Invalid {format_price(row.get('invalidation') or row.get('invalidation_level'))} | "
+            f"Target {format_price(row.get('target_1') or row.get('first_target'))}"
+        )
+        lines.append(
+            f"   Confidence {_text(row.get('confidence_bucket'), 'n/a')} | "
+            f"Setup {_text(row.get('setup_key'), 'n/a')}"
+        )
+        risk = _risk_text(row)
+        if risk != "none":
+            lines.append(f"   Risk {_truncate(risk, 80)}")
+        lines.append("")
+    lines.append("No orders placed. Research only.")
+    return _clip("\n".join(lines).strip(), max_chars)
+
+
+def format_alpha_no_trade(
+    *,
+    reason: str,
+    next_action: str,
+    max_chars: int = DEFAULT_ALERT_MAX_CHARS,
+) -> str:
+    return _clip(
+        "\n".join(
+            [
+                "📡 Dawnstrike Alpha Check",
+                "No clean edge today.",
+                f"Reason: {reason}",
+                f"Next: {next_action}",
+                "",
+                "No orders placed. Research only.",
+            ]
+        ),
+        max_chars,
+    )
+
+
+def format_alpha_monitor(result: dict[str, Any], max_chars: int = DEFAULT_ALERT_MAX_CHARS) -> str:
+    if result.get("status") == "manual_monitor_required":
+        tickers = ", ".join(str(item) for item in result.get("tickers") or []) or "none"
+        return _clip(
+            "\n".join(
+                [
+                    "👀 Dawnstrike Alpha Monitor",
+                    "MANUAL REVIEW",
+                    "No live/current price source configured.",
+                    f"Watch: {tickers}",
+                    "",
+                    "No orders placed. Research only.",
+                ]
+            ),
+            max_chars,
+        )
+    events = list(result.get("events") or [])
+    lines = ["👀 Dawnstrike Alpha Monitor"]
+    for event in events[:5]:
+        lines.append(
+            f"{_text(event.get('ticker'), 'n/a')}: {_text(event.get('label'), 'MANUAL REVIEW')} "
+            f"at {format_price(event.get('current_price'))}"
+        )
+    if not events:
+        lines.append("No active events.")
+    lines.extend(["", "No orders placed. Research only."])
+    return _clip("\n".join(lines), max_chars)
+
+
+def format_alpha_summary(
+    summary: dict[str, Any],
+    max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+) -> str:
+    truth = dict(summary.get("truth_report") or summary)
+    sample = int(truth.get("real_days_collected") or 0)
+    warning = " — insufficient sample" if sample < 20 else ""
+    lines = [
+        "📊 Dawnstrike Shadow Results",
+        f"Top1 avg: {format_percent(dict(truth.get('top1') or {}).get('avg_return_pct'))}",
+        f"Top3 avg: {format_percent(dict(truth.get('top3') or {}).get('avg_return_pct'))}",
+        f"Top5 avg: {format_percent(dict(truth.get('top5') or {}).get('avg_return_pct'))}",
+        f"Win rate: {format_percent(truth.get('win_rate_pct'), signed=False)}",
+        f"Sample: {sample} days{warning}",
+        "",
+        "No orders placed. Research only.",
+    ]
+    return _clip("\n".join(lines), max_chars)
+
+
 def format_score(value: Any) -> str:
     number = _number(value)
     return "n/a" if number is None else f"{number:.1f}"

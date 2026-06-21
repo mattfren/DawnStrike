@@ -25,3 +25,10 @@ If the close-return sample size is below 20, the report says:
 ```text
 insufficient sample size.
 ```
+
+## AlphaOps Truth Layer
+
+`alpha-report` summarizes top1/top3/top5, average and median return, win rate,
+worst day, setup/source/catalyst/risk buckets, score deciles, outlier
+dependency, missing outcome rate, real days collected, and whether evidence is
+sufficient. Fewer than 20 real shadow days are reported as insufficient sample.

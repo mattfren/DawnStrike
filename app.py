@@ -53,6 +53,9 @@ DASHBOARD_COLUMNS = [
     "rank",
     "ticker",
     "decision",
+    "alpha_score",
+    "edge_bucket",
+    "no_trade_reason",
     "total_score",
     "expected_return_bucket",
     "confidence_bucket",
@@ -265,6 +268,12 @@ def _build_state(
     monitor_events = list(data.get("monitor_events", []) or [])
     recommendation_history = list(data.get("recommendation_history", []) or [])
     audit_trades_from_db = list(data.get("audit_trades", []) or [])
+    alpha_signals = list(data.get("alpha_signals", []) or [])
+    alpha_feature_vectors = list(data.get("alpha_feature_vectors", []) or [])
+    alpha_outcome_labels = list(data.get("alpha_outcome_labels", []) or [])
+    alpha_source_reliability = dict(data.get("alpha_source_reliability", {}) or {})
+    alpha_setup_memory = dict(data.get("alpha_setup_memory", {}) or {})
+    alpha_learning_runs = list(data.get("alpha_learning_runs", []) or [])
     audit_rows, audit_summary = _load_audit(settings["audit_output_dir"])
     monitor_rows = _load_monitor_rows(settings["db_path"], settings["monitor_output_dir"])
     expectancy = [
@@ -301,6 +310,12 @@ def _build_state(
         "monitor_events": monitor_events,
         "recommendation_history": recommendation_history,
         "audit_trades_from_db": audit_trades_from_db,
+        "alpha_signals": alpha_signals,
+        "alpha_feature_vectors": alpha_feature_vectors,
+        "alpha_outcome_labels": alpha_outcome_labels,
+        "alpha_source_reliability": alpha_source_reliability,
+        "alpha_setup_memory": alpha_setup_memory,
+        "alpha_learning_runs": alpha_learning_runs,
         "audit_rows": audit_rows,
         "audit_summary": audit_summary,
         "monitor_rows": monitor_rows,
@@ -1330,6 +1345,7 @@ def _today(state: dict[str, Any]) -> None:
     _free_shadow_panel(state)
     _dashboard_actions(state, config)
     _action_result()
+    _dashboard_alphaops(state)
     _dashboard_performance(state)
     _dashboard_activity(state)
     st.markdown('<div class="ds-section">Broker Flow</div>', unsafe_allow_html=True)
@@ -1387,6 +1403,63 @@ def _dashboard_actions(state: dict[str, Any], config: Any) -> None:
         key="dashboard_register_monitor",
     )
     _action_button(status_col, "Task Status", _scheduled_task_status, key="dashboard_task_status")
+
+
+def _dashboard_alphaops(state: dict[str, Any]) -> None:
+    signals = list(state.get("alpha_signals") or [])
+    if not signals:
+        return
+    top = dict(signals[0])
+    labels = list(state.get("alpha_outcome_labels") or [])
+    reliability = dict(state.get("alpha_source_reliability") or {})
+    setup_memory = dict(state.get("alpha_setup_memory") or {})
+    real_days = _distinct_dates(labels)
+    enough = "Yes" if real_days >= 20 else "Not yet"
+    source = str(top.get("preferred_source") or top.get("source") or "unknown")
+    source_score = dict(reliability.get(source) or {}).get("reliability_score")
+    memory = dict(setup_memory.get(str(top.get("setup_key") or "")) or {})
+    missing_high = sum(1 for row in labels if row.get("missing_outcome_high") is True)
+    missing_rate = (missing_high / len(labels)) * 100 if labels else 0
+    cards = [
+        (
+            "Alpha score",
+            _format_number(top.get("alpha_score")),
+            str(top.get("edge_bucket") or "n/a"),
+        ),
+        (
+            "No-trade reason",
+            str(top.get("no_trade_reason") or "Clean"),
+            "Risk gate result",
+        ),
+        ("Source reliability", _format_number(source_score), source),
+        (
+            "Setup memory",
+            _format_number(memory.get("sample_size")),
+            f"{_format_number(memory.get('win_rate_pct'))}% win rate",
+        ),
+        ("Evidence", enough, f"{real_days} real days"),
+        ("Missing outcomes", f"{_format_number(missing_rate)}%", "High-after-entry fields"),
+    ]
+    st.markdown('<div class="ds-section">AlphaOps</div>', unsafe_allow_html=True)
+    st.markdown(_step_strip(cards), unsafe_allow_html=True)
+    st.caption(
+        "Shows Alpha score, edge bucket, no-trade reason, setup memory, source reliability, "
+        "score decile, risk impact, outlier dependency, missing outcome rate, and "
+        "evidence sufficiency."
+    )
+    _table(
+        signals[:5],
+        [
+            "rank",
+            "ticker",
+            "alpha_score",
+            "edge_bucket",
+            "score_decile",
+            "confidence_bucket",
+            "expected_return_bucket",
+            "no_trade_reason",
+        ],
+    )
 
 
 def _dashboard_performance(state: dict[str, Any]) -> None:
@@ -3467,6 +3540,15 @@ def _row_by_ticker(rows: list[dict[str, Any]], ticker: str) -> dict[str, Any] | 
 
 def _first(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return rows[0] if rows else None
+
+
+def _distinct_dates(rows: list[dict[str, Any]]) -> int:
+    dates = {
+        str(row.get("created_at") or row.get("timestamp") or "")[:10]
+        for row in rows
+        if str(row.get("created_at") or row.get("timestamp") or "")[:10]
+    }
+    return len(dates)
 
 
 def _average(rows: list[dict[str, Any]], key: str) -> float:

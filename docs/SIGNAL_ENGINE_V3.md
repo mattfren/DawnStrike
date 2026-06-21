@@ -49,3 +49,10 @@ Each candidate row includes:
 When historical outcomes are sparse, Dawnstrike uses rule-based buckets only:
 `HIGH_UPSIDE`, `MEDIUM_UPSIDE`, `LOW_CONFIDENCE`, or `AVOID`. With at least 20
 similar persisted outcomes, it uses empirical priors and labels uncertainty.
+
+## AlphaOps v4 Relationship
+
+Signal Engine v3 remains the base scanner. AlphaOps v4 consumes v3 candidate
+payloads, persists feature vectors, applies risk/no-trade gates, and adds
+adaptive setup/source/catalyst memory. It does not replace the v3 output
+contract and does not add order execution.

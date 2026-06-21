@@ -46,3 +46,11 @@ recommendation has already been persisted.
 
 Fixture and manual returns are paper-validation metrics. They are not live paid
 data validation, not a forecast, and not a real-money trading claim.
+
+## AlphaOps Data Quality
+
+AlphaOps persists the source/data-quality slice of every feature vector:
+source confidence, source count, stale flag, conflict flags, coverage warning,
+data-source kind, source reliability, and normalized-row counts. Low confidence,
+stale data, and source conflicts can produce a no-trade result instead of a
+watchlist alert.

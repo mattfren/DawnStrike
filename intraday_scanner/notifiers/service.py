@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from typing import Any
 
@@ -146,7 +147,7 @@ def dispatch_events(
                 skipped += 1
                 continue
             if dry_run:
-                print(f"[dry-run:{notifier.channel}] {event.title}: {event.body}")
+                _safe_print(f"[dry-run:{notifier.channel}] {event.title}: {event.body}")
                 store.record_notification(
                     event_key=notification_key,
                     channel=notifier.channel,
@@ -185,6 +186,15 @@ def _payload_run_id(payload: dict[str, Any] | None) -> str | None:
         return None
     run_id = payload.get("run_id")
     return str(run_id) if run_id else None
+
+
+def _safe_print(message: str) -> None:
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe = message.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(safe)
 
 
 def _number(value: Any) -> float:
