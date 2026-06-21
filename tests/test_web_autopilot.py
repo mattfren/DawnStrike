@@ -2,6 +2,7 @@ import shutil
 from pathlib import Path
 
 from intraday_scanner.cli import main
+from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.public_table_provider import (
     extract_html_tables,
     normalize_public_table_rows,
@@ -20,6 +21,24 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 FIXTURE_CONFIG = Path("tests/fixtures/web_sources_fixture.yaml")
 RAW_SCREENER = Path("tests/fixtures/raw_screener_aliases.csv")
+
+
+class _FakeTelegramNotifier:
+    sent_events: list[tuple[str, str]] = []
+
+    def __init__(self, config):
+        self.config = config
+
+    def send(self, event):
+        self.sent_events.append((event.event_key, event.title))
+
+
+def _use_fake_telegram(monkeypatch):
+    _FakeTelegramNotifier.sent_events = []
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token-do-not-print")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat-do-not-print")
+    monkeypatch.setattr(web_collection_service, "TelegramNotifier", _FakeTelegramNotifier)
+    return _FakeTelegramNotifier.sent_events
 
 
 def test_web_config_loading():
@@ -217,19 +236,126 @@ def test_codex_cli_missing_executable_clear_error(monkeypatch):
         raise AssertionError("missing codex should fail")
 
 
-def test_telegram_missing_env_and_dry_run_dedupe(tmp_path, monkeypatch, capsys):
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+def test_telegram_dry_run_does_not_block_real_send(tmp_path, monkeypatch, capsys):
+    sent_events = _use_fake_telegram(monkeypatch)
+    db_path = tmp_path / "web.sqlite"
+    today = web_collection_service._today()
+
+    assert main(["telegram-test", "--dry-run", "--db-path", str(db_path)]) == 0
+    assert main(["telegram-test", "--db-path", str(db_path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "telegram_test:" in out
+    assert ":telegram:dry_run" in out
+    assert ":telegram:real" in out
+    assert sent_events == [(f"telegram_test:{today}:telegram:real", "DAWNSTRIKE TELEGRAM TEST")]
+    notifications = SQLiteScanStore(db_path).load_recent_notifications(limit=10)
+    by_key = {row["event_key"]: row for row in notifications}
+    dry_row = by_key[f"telegram_test:{today}:telegram:dry_run"]
+    real_row = by_key[f"telegram_test:{today}:telegram:real"]
+    assert dry_row["dry_run"] is True
+    assert dry_row["send_attempted"] is False
+    assert dry_row["status"] == "dry_run"
+    assert real_row["dry_run"] is False
+    assert real_row["send_attempted"] is True
+    assert real_row["status"] == "sent"
+
+
+def test_telegram_real_mode_dedupes_second_send(tmp_path, monkeypatch, capsys):
+    sent_events = _use_fake_telegram(monkeypatch)
+    db_path = tmp_path / "web.sqlite"
+
+    assert main(["telegram-test", "--db-path", str(db_path)]) == 0
+    assert main(["telegram-test", "--db-path", str(db_path)]) == 0
+
+    out = capsys.readouterr().out
+    notifications = SQLiteScanStore(db_path).load_recent_notifications(limit=10)
+    assert len(sent_events) == 1
+    assert "skipped_duplicate" in out
+    assert len([row for row in notifications if row["channel"] == "telegram"]) == 1
+
+
+def test_telegram_force_bypasses_test_dedupe(tmp_path, monkeypatch, capsys):
+    sent_events = _use_fake_telegram(monkeypatch)
+    db_path = tmp_path / "web.sqlite"
+    today = web_collection_service._today()
+
+    assert main(["telegram-test", "--db-path", str(db_path)]) == 0
+    assert main(["telegram-test", "--db-path", str(db_path), "--force"]) == 0
+
+    out = capsys.readouterr().out
+    notifications = SQLiteScanStore(db_path).load_recent_notifications(limit=10)
+    force_rows = [
+        row
+        for row in notifications
+        if row["event_key"].startswith(f"telegram_test:{today}:telegram:real:force:")
+    ]
+    assert len(sent_events) == 2
+    assert '"forced": true' in out
+    assert len(force_rows) == 1
+    assert force_rows[0]["dedupe_bypassed"] is True
+    assert force_rows[0]["send_attempted"] is True
+
+
+def test_telegram_missing_secrets_fails_clearly_for_real_mode(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        web_collection_service,
+        "load_config",
+        lambda **kwargs: ScannerConfig(
+            database_path=kwargs["database_path"],
+            notifier_channels=kwargs["notifier_channels"],
+        ),
+    )
     db_path = tmp_path / "web.sqlite"
 
     assert main(["telegram-test", "--db-path", str(db_path)]) == 1
-    assert main(["telegram-test", "--dry-run", "--db-path", str(db_path)]) == 0
+
+    captured = capsys.readouterr()
+    assert "Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID" in captured.err
+    assert "DAWNSTRIKE TELEGRAM TEST" not in captured.out
+    notifications = SQLiteScanStore(db_path).load_recent_notifications()
+    assert notifications == []
+
+
+def test_telegram_dry_run_works_without_secrets(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        web_collection_service,
+        "load_config",
+        lambda **kwargs: ScannerConfig(
+            database_path=kwargs["database_path"],
+            notifier_channels=kwargs["notifier_channels"],
+        ),
+    )
+    db_path = tmp_path / "web.sqlite"
+
     assert main(["telegram-test", "--dry-run", "--db-path", str(db_path)]) == 0
 
     out = capsys.readouterr().out
-    assert "DAWNSTRIKE TELEGRAM TEST" in out
     notifications = SQLiteScanStore(db_path).load_recent_notifications()
-    assert len([row for row in notifications if row["channel"] == "telegram"]) == 1
+    assert "DAWNSTRIKE TELEGRAM TEST" in out
+    assert len(notifications) == 1
+    assert notifications[0]["dry_run"] is True
+    assert notifications[0]["send_attempted"] is False
+
+
+def test_telegram_test_output_and_rows_do_not_expose_secrets(tmp_path, monkeypatch, capsys):
+    token = "test-token-do-not-print"
+    chat_id = "test-chat-do-not-print"
+    sent_events = _use_fake_telegram(monkeypatch)
+    db_path = tmp_path / "web.sqlite"
+
+    assert main(["telegram-test", "--db-path", str(db_path)]) == 0
+
+    captured = capsys.readouterr()
+    notifications = SQLiteScanStore(db_path).load_recent_notifications()
+    persisted_text = repr(notifications)
+    assert len(sent_events) == 1
+    assert token not in captured.out
+    assert token not in captured.err
+    assert token not in persisted_text
+    assert chat_id not in captured.out
+    assert chat_id not in captured.err
+    assert chat_id not in persisted_text
 
 
 def test_web_auto_collect_uses_local_inbox_before_public_table(tmp_path, monkeypatch):

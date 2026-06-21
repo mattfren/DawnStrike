@@ -356,17 +356,22 @@ def telegram_test(
     *,
     db_path: str | Path = "data/shadow_real.sqlite",
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     store = SQLiteScanStore(db_path)
     config = load_config(database_path=Path(db_path), notifier_channels="telegram")
+    mode = "dry_run" if dry_run else "real"
     event = _event(
-        f"telegram_test:{_today()}",
+        f"telegram_test:{_today()}:telegram:{mode}",
         "DAWNSTRIKE TELEGRAM TEST",
         "WATCH\nTelegram notification route is configured for research/watchlist alerts only.",
     )
-    notification_key = f"{event.event_key}:telegram"
-    if store.has_notification(notification_key):
-        return {"status": "skipped_duplicate", "event_key": notification_key}
+    canonical_key = event.event_key
+    notification_key = (
+        canonical_key if not force else f"{canonical_key}:force:{uuid.uuid4().hex[:12]}"
+    )
+    if not force and store.has_notification(canonical_key):
+        return {"status": "skipped_duplicate", "event_key": canonical_key}
     if dry_run:
         print(f"[dry-run:telegram] {event.title}: {event.body}")
         store.record_notification(
@@ -379,18 +384,29 @@ def telegram_test(
                 "body": event.body,
                 "channel_hint": event.channel_hint,
                 "dry_run": True,
+                "send_attempted": False,
+                "status": "dry_run",
+                "dedupe_bypassed": force,
             },
         )
-        return {"status": "dry_run", "event_key": notification_key}
+        return {"status": "dry_run", "event_key": notification_key, "forced": force}
     if not config.telegram_bot_token or not config.telegram_chat_id:
         raise NotificationError("Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
     TelegramNotifier(config).send(event)
     store.record_notification(
         event_key=notification_key,
         channel="telegram",
-        payload={"title": event.title, "body": event.body, "channel_hint": event.channel_hint},
+        payload={
+            "title": event.title,
+            "body": event.body,
+            "channel_hint": event.channel_hint,
+            "dry_run": False,
+            "send_attempted": True,
+            "status": "sent",
+            "dedupe_bypassed": force,
+        },
     )
-    return {"status": "sent", "event_key": notification_key}
+    return {"status": "sent", "event_key": notification_key, "forced": force}
 
 
 def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:

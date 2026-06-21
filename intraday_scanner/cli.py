@@ -288,6 +288,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     telegram = subparsers.add_parser("telegram-test", help="Send or dry-run a Telegram test")
     telegram.add_argument("--db-path", default="data/shadow_real.sqlite")
     telegram.add_argument("--dry-run", action="store_true")
+    telegram.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass dedupe for this test event only",
+    )
 
     web_daemon = subparsers.add_parser(
         "web-telegram-daemon", help="Run the web auto-pilot notification daemon"
@@ -919,7 +924,7 @@ def _run_web_auto_collect(args: argparse.Namespace) -> int:
 
 
 def _run_telegram_test(args: argparse.Namespace) -> int:
-    result = telegram_test(db_path=args.db_path, dry_run=args.dry_run)
+    result = telegram_test(db_path=args.db_path, dry_run=args.dry_run, force=args.force)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
