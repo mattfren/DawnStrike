@@ -199,12 +199,19 @@ def _init_defaults(config: Any) -> None:
         "scan_output_dir": str(config.output_dir),
         "audit_output_dir": "outputs/latest_audit",
         "monitor_output_dir": "outputs/latest_monitor",
-        "db_path": str(config.database_path),
+        "db_path": _default_dashboard_db_path(config),
         "rows_to_show": int(config.top_n),
         "minimum_score": 0,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+
+def _default_dashboard_db_path(config: Any) -> str:
+    alphaops_db = Path("data/shadow_real.sqlite")
+    if alphaops_db.exists():
+        return str(alphaops_db)
+    return str(config.database_path)
 
 
 def _sidebar(config: Any) -> dict[str, Any]:
