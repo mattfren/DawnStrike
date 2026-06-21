@@ -26,9 +26,12 @@ TABLE_COLUMN_SIGNALS = {
     "symbol",
     "ticker",
     "name",
+    "company name",
     "last",
     "price",
     "premarket price",
+    "premkt. price",
+    "premkt price",
     "pre-market price",
     "pre-mkt price",
     "pre mkt price",
@@ -36,7 +39,10 @@ TABLE_COLUMN_SIGNALS = {
     "pre mkt gap %",
     "pre-mkt vol",
     "pre mkt vol",
+    "pre. volume",
+    "pre volume",
     "change %",
+    "% change",
     "gap %",
     "chg %",
     "volume",
@@ -57,10 +63,12 @@ TABLE_COLUMN_SIGNALS = {
 
 ALIASES = {
     "ticker": ["ticker", "symbol"],
-    "company": ["company", "name", "security", "security name"],
+    "company": ["company", "company name", "name", "security", "security name"],
     "premarket_price": [
         "premarket_price",
         "premarket price",
+        "premkt. price",
+        "premkt price",
         "pre-market price",
         "pre-mkt price",
         "pre mkt price",
@@ -76,6 +84,8 @@ ALIASES = {
         "pre-market volume",
         "pre-mkt vol",
         "pre mkt vol",
+        "pre. volume",
+        "pre volume",
         "volume",
         "vol",
     ],
@@ -610,6 +620,9 @@ def _optional_number(value: Any) -> float | None:
     suffix = text[-1:].lower()
     if suffix in {"k", "m", "b"}:
         multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[suffix]
+        text = text[:-1]
+    elif suffix == "t":
+        multiplier = 1_000_000_000_000
         text = text[:-1]
     try:
         return float(text) * multiplier

@@ -34,7 +34,7 @@
 ## Commands run
 
 - `py -m pip install -e ".[dev]"` passed.
-- `py -m pytest -p no:cacheprovider` passed: `132 passed`.
+- `py -m pytest -p no:cacheprovider` passed: `133 passed`.
 - `py -m ruff check .` passed.
 - `py -m mypy intraday_scanner` passed: `Success: no issues found in 75 source files`.
 - `py -m compileall intraday_scanner app.py tests` passed.
@@ -59,17 +59,22 @@ py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --
 Result:
 
 - `local_inbox`: enabled, empty.
-- `stockanalysis_premarket`: enabled, `rows_extracted=20`, `rows_normalized=0`, `rows_rejected=10`, top reason `missing_price`.
-- `tradingview_premarket`: enabled, `rows_extracted=100`, `rows_normalized=99`, `rows_rejected=1`, top reason `invalid_numeric_format`.
+- `stockanalysis_premarket`: enabled, `rows_extracted=20`, `rows_normalized=10`, `rows_rejected=0`.
+- `tradingview_premarket`: enabled, `rows_extracted=100`, `rows_normalized=100`, `rows_rejected=0`.
 - `tradingview_premarket_browser`: disabled fallback.
 - `marketwatch_movers`: disabled fallback.
 - `investing_premarket`: disabled fallback.
 - `barchart_premarket` and `barchart_premarket_browser`: disabled because Barchart is commonly blocked and should not be bypassed.
-- Aggregate rejection counts: `{"invalid_numeric_format": 1, "missing_price": 10}`.
+- Aggregate rejection counts: `{}`.
 
 ## Which source normalized rows
 
-`tradingview_premarket` produced the usable candidate set. The collector persisted:
+`stockanalysis_premarket` and `tradingview_premarket` produced usable candidate rows. The collector persisted:
+
+- `outputs\source_doctor\stockanalysis_premarket\premarket_snapshot.csv`
+- `outputs\source_doctor\stockanalysis_premarket\extracted_rows.csv`
+- `outputs\source_doctor\stockanalysis_premarket\rejected_rows.csv`
+- `outputs\source_doctor\stockanalysis_premarket\normalization_debug.json`
 
 - `outputs\source_doctor\tradingview_premarket\premarket_snapshot.csv`
 - `outputs\source_doctor\tradingview_premarket\extracted_rows.csv`
@@ -86,12 +91,12 @@ Result summary:
 
 - `status`: `success`
 - `sources_attempted`: `3`
-- `sources_succeeded`: `1`
+- `sources_succeeded`: `2`
 - `rows_extracted`: `120`
-- `rows_normalized`: `99`
-- `candidate_count`: `99`
-- `top_failure_reason`: `missing_price`
-- `rejection_reason_counts`: `{"invalid_numeric_format": 1, "missing_price": 10}`
+- `rows_normalized`: `110`
+- `candidate_count`: `103`
+- `top_failure_reason`: `none`
+- `rejection_reason_counts`: `{}`
 
 ## Rejection diagnostics
 
@@ -128,12 +133,12 @@ Result:
 - `cycles`: `1`
 - collection `status`: `success`
 - `sources_attempted`: `3`
-- `sources_succeeded`: `1`
+- `sources_succeeded`: `2`
 - `rows_extracted`: `120`
-- `rows_normalized`: `99`
-- `candidate_count`: `99`
-- `top_failure_reason`: `missing_price`
-- `rejection_reason_counts`: `{"invalid_numeric_format": 1, "missing_price": 10}`
+- `rows_normalized`: `110`
+- `candidate_count`: `103`
+- `top_failure_reason`: `none`
+- `rejection_reason_counts`: `{}`
 - notifications: `sent=2`, `skipped=2`
 - no Telegram token or chat ID was printed.
 

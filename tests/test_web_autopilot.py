@@ -167,6 +167,50 @@ def test_stockanalysis_fixture_normalizes_without_previous_close(tmp_path):
     assert "previous_close_unavailable" in rows[0].coverage_warning
 
 
+def test_stockanalysis_live_header_variants_normalize_without_network():
+    html = """
+    <table>
+      <tr>
+        <th>No.</th>
+        <th>Symbol</th>
+        <th>Company Name</th>
+        <th>% Change</th>
+        <th>Premkt. Price</th>
+        <th>Pre. Volume</th>
+        <th>Market Cap</th>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td>ADTX</td>
+        <td>Aditxt, Inc.</td>
+        <td>234.09%</td>
+        <td>0.01</td>
+        <td>2,548,080,109</td>
+        <td>8.16K</td>
+      </tr>
+    </table>
+    """
+    best = select_best_table(extract_html_tables(html))
+    assert best is not None
+
+    rows, warnings = normalize_public_table_rows(
+        best,
+        source_name="stockanalysis_premarket",
+        source_url="https://stockanalysis.com/markets/premarket/",
+        raw_file_path="",
+    )
+
+    assert "ADTX: previous_close_unavailable" in warnings
+    assert "ADTX: premarket_range_unavailable_price_used" in warnings
+    assert rows[0]["ticker"] == "ADTX"
+    assert rows[0]["company"] == "Aditxt, Inc."
+    assert rows[0]["premarket_price"] == 0.01
+    assert rows[0]["premarket_volume"] == 2_548_080_109
+    assert rows[0]["gap_pct"] == 234.09
+    assert rows[0]["market_cap"] == 8_160
+    assert rows[0]["previous_close"] == ""
+
+
 def test_tradingview_fixture_normalizes_source_specific_shape(tmp_path):
     source = WebSourceConfig(
         name="tradingview_premarket",
