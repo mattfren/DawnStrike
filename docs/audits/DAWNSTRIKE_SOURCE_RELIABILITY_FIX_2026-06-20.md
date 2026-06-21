@@ -116,6 +116,27 @@ try again during premarket or drop CSV into data\inbox\screener
 
 Offline tests cover the no-source dry-run daemon path and confirm it does not also send outcome reminders or scan summaries when no candidate source produced rows.
 
+The configured one-cycle Telegram daemon verification was also run:
+
+```powershell
+py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.yaml --automation-config config\automation.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify telegram --max-cycles 1
+```
+
+Result:
+
+- `status`: `complete`
+- `cycles`: `1`
+- collection `status`: `success`
+- `sources_attempted`: `3`
+- `sources_succeeded`: `1`
+- `rows_extracted`: `120`
+- `rows_normalized`: `99`
+- `candidate_count`: `99`
+- `top_failure_reason`: `missing_price`
+- `rejection_reason_counts`: `{"invalid_numeric_format": 1, "missing_price": 10}`
+- notifications: `sent=2`, `skipped=2`
+- no Telegram token or chat ID was printed.
+
 ## Config to use next
 
 Use this hierarchy:
