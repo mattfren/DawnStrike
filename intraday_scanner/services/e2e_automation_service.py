@@ -8,7 +8,6 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date as date_type
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -21,6 +20,10 @@ from intraday_scanner.errors import DataProviderError, NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.email import EmailNotifier
+from intraday_scanner.notifiers.telegram_formatter import (
+    format_daily_summary,
+    format_outcome_needed,
+)
 from intraday_scanner.notifiers.webhooks import DiscordWebhookNotifier, TelegramNotifier
 from intraday_scanner.notifiers.windows import WindowsLocalNotifier
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider, read_snapshot_csv
@@ -39,6 +42,7 @@ from intraday_scanner.services.screener_automation import (
     normalize_screener_file,
 )
 from intraday_scanner.services.setup_monitor import run_setup_monitor
+from intraday_scanner.services.time_utils import get_market_date
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 DEFAULT_CONFIG_PATH = Path("config/automation.example.yaml")
@@ -209,8 +213,8 @@ def automation_morning(
     notify: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
     config = load_automation_config(config_path, db_path=db_path, out_root=out_root)
+    run_date = run_date or get_market_date(config.timezone)
     ensure_automation_directories(config, run_date)
     store = SQLiteScanStore(config.db_path)
     started_at = utc_now_iso()
@@ -386,8 +390,8 @@ def automation_monitor_open(
     notify: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
     config = load_automation_config(config_path, db_path=db_path, out_root=out_root)
+    run_date = run_date or get_market_date(config.timezone)
     ensure_automation_directories(config, run_date)
     store = SQLiteScanStore(config.db_path)
     started_at = utc_now_iso()
@@ -490,8 +494,8 @@ def automation_outcomes(
     notify: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
     config = load_automation_config(config_path, db_path=db_path, out_root=out_root)
+    run_date = run_date or get_market_date(config.timezone)
     ensure_automation_directories(config, run_date)
     store = SQLiteScanStore(config.db_path)
     started_at = utc_now_iso()
@@ -598,8 +602,8 @@ def automation_summary(
     dry_run: bool = False,
     dashboard_url: str = "http://127.0.0.1:8502/",
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
     config = load_automation_config(config_path, db_path=db_path, out_root=out_root)
+    run_date = run_date or get_market_date(config.timezone)
     ensure_automation_directories(config, run_date)
     store = SQLiteScanStore(config.db_path)
     started_at = utc_now_iso()
@@ -734,8 +738,8 @@ def automation_daemon(
     max_cycles: int | None = None,
     poll_seconds: int = 60,
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
     config = load_automation_config(config_path, db_path=db_path, out_root=out_root)
+    run_date = run_date or get_market_date(config.timezone)
     ensure_automation_directories(config, run_date)
     store = SQLiteScanStore(config.db_path)
     log_path = Path("logs") / f"automation_{run_date}.log"
@@ -959,15 +963,10 @@ def _send_outcome_reminder(
     notify: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
-    tickers = _missing_outcome_tickers(store)
+    ticker_limit = int(config.outcomes.get("reminder_top_n") or 3)
+    tickers = _missing_outcome_tickers(store, limit=ticker_limit)
     path = Path(config.outcomes.get("inbox") or OUTCOME_INBOX) / f"outcomes_{run_date}.csv"
-    body = (
-        f"Outcome file is missing. Save {path} with columns: {', '.join(OUTCOME_COLUMNS)}. "
-        "The automation will import, audit, report, and notify after the file appears. "
-        f"Command: py -m intraday_scanner.cli automation-outcomes --db-path {config.db_path} "
-        f"--out-root {config.out_root} --notify. "
-        f"Tickers: {', '.join(tickers) if tickers else 'none'}."
-    )
+    body = format_outcome_needed(run_date=run_date, reminder_path=str(path), tickers=tickers)
     _write_outcome_template(path, tickers)
     events = [_event(run_date, "outcome_missing", "Outcome file missing", body, severity="medium")]
     if config.notifications.get("send_lunch_reminder", True):
@@ -981,7 +980,13 @@ def _send_outcome_reminder(
         "missing",
         started_at,
         out_dir,
-        {"reminder_path": str(path), "tickers": tickers, "required_fields": OUTCOME_COLUMNS},
+        {
+            "reminder_path": str(path),
+            "tickers": tickers,
+            "missing_tickers": tickers,
+            "required_fields": OUTCOME_COLUMNS,
+            "no_saved_picks": not bool(tickers),
+        },
     )
     _write_json(out_dir / "outcome_reminder.json", payload)
     _persist_run(store, payload)
@@ -1218,15 +1223,21 @@ def _write_outcome_template(path: Path, tickers: list[str]) -> None:
             writer.writerow({"ticker": ticker, "source": "manual_outcome_upload"})
 
 
-def _missing_outcome_tickers(store: SQLiteScanStore) -> list[str]:
+def _missing_outcome_tickers(store: SQLiteScanStore, *, limit: int | None = None) -> list[str]:
     latest = store.load_latest_scan() or {}
-    ranked_rows = cast(list[dict[str, Any]], latest.get("ranked_candidates", []))
-    ranked = [str(row.get("ticker", "")).upper() for row in ranked_rows]
+    top_rows = cast(list[dict[str, Any]], latest.get("top_explosive") or [])
+    ranked_rows = cast(list[dict[str, Any]], latest.get("ranked_candidates") or [])
+    ordered: list[str] = []
+    for row in [*top_rows, *ranked_rows]:
+        ticker = str(row.get("ticker", "")).upper()
+        if ticker and ticker not in ordered:
+            ordered.append(ticker)
     outcomes = {
         str(row.get("ticker", "")).upper()
         for row in store.load_manual_outcomes(limit=5000)
     }
-    return [ticker for ticker in ranked if ticker and ticker not in outcomes]
+    missing = [ticker for ticker in ordered if ticker and ticker not in outcomes]
+    return missing[:limit] if limit else missing
 
 
 def _automation_health(
@@ -1277,14 +1288,7 @@ def _summary_body(report: dict[str, Any]) -> str:
 
 
 def _daily_body(payload: dict[str, Any]) -> str:
-    tickers = ", ".join(str(ticker) for ticker in payload.get("top_3", []) if ticker)
-    report = dict(payload.get("shadow_report") or {})
-    return (
-        f"{payload.get('date')}: top3 {tickers or 'none'}; "
-        f"outcomes_available={payload.get('outcomes_available')}; "
-        f"top3_equal_weight={report.get('top_3_close_return_pct', 'n/a')}; "
-        f"dashboard={payload.get('dashboard_url')}."
-    )
+    return format_daily_summary(payload)
 
 
 def _relabel_url_snapshot(snapshot_path: Path, url: str) -> None:
@@ -1313,7 +1317,7 @@ def _is_market_day(value: str) -> bool:
 
 
 def _today() -> str:
-    return date_type.today().isoformat()
+    return get_market_date()
 
 
 def _default_config_data() -> dict[str, Any]:

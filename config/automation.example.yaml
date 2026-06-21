@@ -41,6 +41,7 @@ outcomes:
   mode: manual_file_or_reminder
   inbox: data\inbox\outcomes
   reminder_if_missing: true
+  reminder_top_n: 3
 notifications:
   dedupe: true
   send_top_picks: true
@@ -48,3 +49,5 @@ notifications:
   send_lunch_reminder: true
   send_close_reminder: true
   send_daily_summary: true
+  telegram_send_summary_on_no_data: false
+  telegram_send_outcome_reminder_on_no_picks: false

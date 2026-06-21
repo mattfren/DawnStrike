@@ -302,15 +302,15 @@ def _default_web_config_data() -> dict[str, Any]:
         "save_raw": True,
         "allowed_domains": ["nasdaqtrader.com", "sec.gov"],
         "sources": [
-            {"name": "nasdaq_symbols", "type": "nasdaq_symbol_directory", "enabled": True},
-            {"name": "nasdaq_halts", "type": "nasdaq_trade_halts_rss", "enabled": True},
-            {"name": "sec_edgar", "type": "sec_edgar", "enabled": True},
             {
                 "name": "local_inbox",
                 "type": "local_inbox",
                 "path": "data/inbox/screener",
                 "enabled": True,
             },
+            {"name": "nasdaq_symbols", "type": "nasdaq_symbol_directory", "enabled": True},
+            {"name": "nasdaq_halts", "type": "nasdaq_trade_halts_rss", "enabled": False},
+            {"name": "sec_edgar", "type": "sec_edgar", "enabled": False},
         ],
     }
 

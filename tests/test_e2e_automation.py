@@ -1,5 +1,6 @@
 import csv
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ from intraday_scanner.services.e2e_automation_service import (
     discover_screener_source,
     load_automation_config,
 )
+from intraday_scanner.services.time_utils import get_market_date, get_operator_date
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 RAW_SCREENER = Path("tests/fixtures/raw_screener_aliases.csv")
@@ -191,10 +193,57 @@ def test_outcome_missing_reminder_includes_template_and_notification(tmp_path):
 
     assert result["status"] == "missing"
     assert Path(result["reminder_path"]).exists()
-    assert "ticker" in Path(result["reminder_path"]).read_text(encoding="utf-8")
+    template = Path(result["reminder_path"]).read_text(encoding="utf-8")
+    assert "ticker" in template
+    assert "NOVA" in template
+    assert "RIFT" in template
+    assert "WIDE" in template
+    assert result["tickers"] == ["NOVA", "RIFT", "WIDE"]
     assert any(row["channel_hint"] == "outcome_missing" for row in notifications)
     assert any(row["channel_hint"] == "lunch_reminder" for row in notifications)
     assert any(row["channel_hint"] == "close_reminder" for row in notifications)
+
+
+def test_outcome_reminder_without_saved_picks_is_clear(tmp_path):
+    db_path = tmp_path / "automation.sqlite"
+    out_root = tmp_path / "automation"
+    config_path = _write_config(tmp_path, db_path=db_path, out_root=out_root)
+
+    result = automation_outcomes(
+        config_path=config_path,
+        db_path=db_path,
+        out_root=out_root,
+        run_date="2026-06-20",
+        notify=True,
+    )
+    notifications = SQLiteScanStore(db_path).load_recent_notifications(limit=10)
+
+    assert result["status"] == "missing"
+    assert result["tickers"] == []
+    assert result["no_saved_picks"] is True
+    assert "No saved picks found." in notifications[0]["body"]
+
+
+def test_market_date_uses_configured_operator_timezone():
+    utc_now = datetime(2026, 6, 21, 2, 30, tzinfo=timezone.utc)
+
+    assert get_operator_date("America/Chicago", now=utc_now) == "2026-06-20"
+    assert get_market_date("America/Chicago", now=utc_now) == "2026-06-20"
+
+
+def test_outcome_reminder_default_path_uses_market_date(tmp_path, monkeypatch):
+    db_path, out_root, config_path = _seed_morning(tmp_path)
+    monkeypatch.setattr(e2e_automation_service, "get_market_date", lambda _timezone: "2026-06-20")
+
+    result = automation_outcomes(
+        config_path=config_path,
+        db_path=db_path,
+        out_root=out_root,
+        notify=False,
+    )
+
+    assert result["status"] == "missing"
+    assert result["reminder_path"].endswith("outcomes_2026-06-20.csv")
 
 
 def test_outcome_file_import_archive_audit_and_summary_notification(tmp_path):

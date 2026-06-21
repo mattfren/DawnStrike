@@ -1,44 +1,83 @@
 # Dawnstrike Web Auto-Pilot
 
-Dawnstrike Web Auto-Pilot is a notification-only research workflow. It can read
-allowed local/free public sources, normalize premarket candidates, enrich them
-with SEC/halt risk where available, run the scanner, and send Telegram-ready
-research messages.
+Dawnstrike Web Auto-Pilot is a notification-only research workflow. It reads
+allowed local/free public sources, normalizes premarket candidates, enriches
+them with SEC/halt risk when enabled, runs the scanner, and sends compact
+Telegram-ready messages.
 
-It does not place orders, store broker trading credentials, bypass logins,
-solve CAPTCHAs, bypass paywalls, or fabricate missing market data.
+It does not place orders, submit trades, store broker trading credentials,
+bypass logins, solve CAPTCHAs, bypass paywalls, or fabricate missing market
+data.
 
-## Configure Sources
+## Enable One Candidate Source
 
-Start from:
+Copy the example config:
 
 ```powershell
 Copy-Item config\web_sources.example.yaml config\web_sources.yaml
 ```
 
-The safest zero-dollar source is still `local_inbox`:
+At least one candidate source is required for picks:
+
+- `local_inbox`
+- `public_table_url`
+- `browser_table_url`
+
+The safest source is `local_inbox`, enabled by default:
 
 ```text
 data\inbox\screener
 ```
 
-Public table sources are disabled by default. Enable only sources you are
-allowed to access, keep `allowed_domains` tight, and expect failures when a
-page blocks automation or changes table structure.
+Drop a screener CSV into that folder before running the daemon.
+
+`nasdaq_symbols` is universe-only. It helps build a symbol universe, but it does
+not generate premarket mover picks by itself. SEC and halt sources are
+enrichment-only and also do not create picks.
+
+## Source Doctor
+
+Run this when no picks appear:
+
+```powershell
+py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --out-dir outputs\source_doctor --print
+```
+
+The doctor lists enabled sources, classifies each as candidate, universe, or
+enrichment, checks whether the local inbox has files, safely tests enabled
+public table sources, and writes:
+
+```text
+outputs\source_doctor\source_doctor.json
+```
+
+If Barchart returns `no_candidate_table`, the page likely did not expose a
+static public table. Use a local CSV, enable another allowed candidate source,
+or install the optional browser extractor.
+
+## Optional Browser Source
+
+Static extraction may fail on JavaScript-rendered pages. Browser extraction is
+disabled by default and must be explicitly enabled per source.
+
+Install:
+
+```powershell
+py -m pip install -e ".[browser]"
+py -m playwright install chromium
+```
+
+Browser extraction does not bypass logins, CAPTCHAs, paywalls, anti-bot controls,
+or protected sites. Browser rows are labeled:
+
+```text
+data_source_kind=browser_url
+coverage_warning=browser_rendered_public_table_unverified
+```
+
+Public URL data is unverified shadow data.
 
 ## Commands
-
-Build the free universe:
-
-```powershell
-py -m intraday_scanner.cli web-build-universe --config config\web_sources.yaml --db-path data\shadow_real.sqlite --persist
-```
-
-Ingest one allowed public table:
-
-```powershell
-py -m intraday_scanner.cli web-ingest-public-table --url https://allowed.example/table --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\web_ingest\manual --persist --print
-```
 
 Collect local/web candidates:
 
@@ -46,10 +85,10 @@ Collect local/web candidates:
 py -m intraday_scanner.cli web-auto-collect --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\web_auto\today --persist --print
 ```
 
-Run one notification-only auto-pilot cycle:
+Run one notification-only cycle:
 
 ```powershell
-py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.yaml --automation-config config\automation.example.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify telegram --max-cycles 1
+py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.yaml --automation-config config\automation.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify telegram --max-cycles 1
 ```
 
 Run continuously:
@@ -60,21 +99,10 @@ scripts\run_web_telegram_daemon.bat
 
 ## Outputs
 
-The collector writes:
-
 - `outputs\web_auto\...\premarket_snapshot.csv`
 - `outputs\web_auto\...\source_summary.json`
 - `outputs\web_auto\...\data_quality_report.json`
-- raw artifacts when `save_raw: true`
+- `outputs\source_doctor\source_doctor.json`
 
-SQLite persists fetch runs, source health, raw artifacts, normalized source
-rows, SEC risk events, halt events, AI summaries, scan runs, and notifications.
-
-## Zero-Key Behavior
-
-With no secrets, the local inbox, fixture-style local files, public table
-normalization, SEC/halt collection, scan, dashboard, and console notifications
-can run. Telegram requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
-
-Paid/live market data is still required for reliable automatic 5-minute current
-price monitoring. Without that source, Dawnstrike sends a manual monitor notice.
+SQLite persists fetch runs, source health, raw artifacts, normalized rows, scan
+runs, and notification attempts.

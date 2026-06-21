@@ -16,6 +16,7 @@ from intraday_scanner.dashboard.data_loader import load_output_dir, load_sample_
 from intraday_scanner.errors import IntradayScannerError
 from intraday_scanner.expectancy import estimate_expectancy
 from intraday_scanner.notifiers import scan_events_from_payload
+from intraday_scanner.notifiers.telegram_formatter import format_morning_watchlist
 from intraday_scanner.providers import CSVProvider
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.reporting import read_csv_dicts, write_scan_outputs
@@ -1645,6 +1646,45 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
         st.markdown(_step_strip(web_cards), unsafe_allow_html=True)
         if latest_web.get("snapshot_path"):
             st.caption(f"Latest web snapshot: `{_short_path(latest_web.get('snapshot_path'))}`")
+        source_operability = dict(web_status.get("source_operability") or {})
+        browser = dict(web_status.get("browser_extractor") or {})
+        enabled_candidates = list(source_operability.get("enabled_candidate_sources") or [])
+        st.markdown(
+            _callout(
+                "Enabled candidate sources",
+                ", ".join(enabled_candidates) if enabled_candidates else "None enabled",
+            ),
+            unsafe_allow_html=True,
+        )
+        if source_operability.get("only_universe_or_enrichment_enabled"):
+            st.warning("Only universe/enrichment sources are enabled. Add a candidate source.")
+        if latest_web.get("status") == "no_data":
+            attempts = list(latest_web.get("attempts") or [])
+            reason = "; ".join(
+                str(item.get("failure_reason") or item.get("reason") or item.get("status"))
+                for item in attempts[:3]
+            )
+            st.info(f"Latest no-data reason: {reason or 'No usable rows found.'}")
+        st.caption(
+            "Browser extractor: "
+            + (
+                "available"
+                if browser.get("available")
+                else str(browser.get("install_hint") or "not installed")
+            )
+        )
+        preview_ranked = list(state.get("ranked") or [])
+        preview_avoid = list(state.get("avoid") or [])
+        if preview_ranked:
+            st.markdown('<div class="ds-section">Telegram preview</div>', unsafe_allow_html=True)
+            st.code(
+                format_morning_watchlist(
+                    ranked=preview_ranked,
+                    avoid=preview_avoid,
+                    source_summary=latest_web,
+                ),
+                language="text",
+            )
         warnings = list((web_status.get("ai_data_warnings") or [])[:3])
         if warnings:
             st.warning(
@@ -1652,6 +1692,17 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
                 + "; ".join(str(item.get("warning") or item) for item in warnings)
             )
         with st.expander("Web source details", expanded=False):
+            _table(
+                list(latest_web.get("attempts") or [])[:8],
+                [
+                    "source",
+                    "source_type",
+                    "status",
+                    "rows_extracted",
+                    "rows_normalized",
+                    "failure_reason",
+                ],
+            )
             _table(
                 list(web_status.get("source_health") or [])[:8],
                 ["checked_at", "source", "status", "detail"],

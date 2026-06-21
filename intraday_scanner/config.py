@@ -51,6 +51,10 @@ def _to_int(name: str, value: str) -> int:
         raise ConfigError(f"{name} must be an integer, got {value!r}") from exc
 
 
+def _to_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
 @dataclass(frozen=True)
 class ScannerConfig:
     provider: str = "csv"
@@ -109,6 +113,13 @@ class ScannerConfig:
     discord_webhook_url: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_message_style: str = "compact"
+    telegram_max_morning_chars: int = 1200
+    telegram_max_alert_chars: int = 600
+    telegram_max_summary_chars: int = 900
+    telegram_include_debug_fields: bool = False
+    telegram_send_summary_on_no_data: bool = False
+    telegram_send_outcome_reminder_on_no_picks: bool = False
 
     def validate(self) -> None:
         if self.provider not in {"csv", "alpaca"}:
@@ -145,6 +156,14 @@ class ScannerConfig:
             raise ConfigError("monitor_rejection_range_pct must be between 0 and 100")
         if self.email_smtp_port <= 0:
             raise ConfigError("email_smtp_port must be positive")
+        if self.telegram_message_style not in {"compact", "legacy"}:
+            raise ConfigError("telegram_message_style must be one of: compact, legacy")
+        if self.telegram_max_morning_chars <= 0:
+            raise ConfigError("telegram_max_morning_chars must be positive")
+        if self.telegram_max_alert_chars <= 0:
+            raise ConfigError("telegram_max_alert_chars must be positive")
+        if self.telegram_max_summary_chars <= 0:
+            raise ConfigError("telegram_max_summary_chars must be positive")
         weights = [
             self.score_weight_gap,
             self.score_weight_liquidity,
@@ -182,6 +201,7 @@ class ScannerConfig:
             "email_password",
             "discord_webhook_url",
             "telegram_bot_token",
+            "telegram_chat_id",
         }
         data = {
             field.name: getattr(self, field.name)
@@ -326,6 +346,30 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         ),
         telegram_chat_id=_env_any(
             ["TELEGRAM_CHAT_ID", "INTRADAY_TELEGRAM_CHAT_ID"], "", env_values
+        ),
+        telegram_message_style=_env(
+            "INTRADAY_TELEGRAM_MESSAGE_STYLE", "compact", env_values
+        ).lower(),
+        telegram_max_morning_chars=_to_int(
+            "INTRADAY_TELEGRAM_MAX_MORNING_CHARS",
+            _env("INTRADAY_TELEGRAM_MAX_MORNING_CHARS", "1200", env_values),
+        ),
+        telegram_max_alert_chars=_to_int(
+            "INTRADAY_TELEGRAM_MAX_ALERT_CHARS",
+            _env("INTRADAY_TELEGRAM_MAX_ALERT_CHARS", "600", env_values),
+        ),
+        telegram_max_summary_chars=_to_int(
+            "INTRADAY_TELEGRAM_MAX_SUMMARY_CHARS",
+            _env("INTRADAY_TELEGRAM_MAX_SUMMARY_CHARS", "900", env_values),
+        ),
+        telegram_include_debug_fields=_to_bool(
+            _env("INTRADAY_TELEGRAM_INCLUDE_DEBUG_FIELDS", "false", env_values)
+        ),
+        telegram_send_summary_on_no_data=_to_bool(
+            _env("INTRADAY_TELEGRAM_SEND_SUMMARY_ON_NO_DATA", "false", env_values)
+        ),
+        telegram_send_outcome_reminder_on_no_picks=_to_bool(
+            _env("INTRADAY_TELEGRAM_SEND_OUTCOME_REMINDER_ON_NO_PICKS", "false", env_values)
         ),
     ).with_overrides(**overrides)
     config.validate()

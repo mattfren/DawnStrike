@@ -7,7 +7,6 @@ import json
 import shutil
 import time
 import uuid
-from datetime import date as date_type
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,7 +15,19 @@ from intraday_scanner.errors import NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.base import BaseNotifier
+from intraday_scanner.notifiers.telegram_formatter import (
+    format_daily_summary,
+    format_manual_monitor,
+    format_morning_watchlist,
+    format_outcome_needed,
+    format_risk_alert,
+    format_source_check,
+)
 from intraday_scanner.notifiers.webhooks import TelegramNotifier
+from intraday_scanner.providers.browser_table_provider import (
+    browser_extractor_status,
+    ingest_browser_table,
+)
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider, read_snapshot_csv
 from intraday_scanner.providers.nasdaq_halt_provider import (
     attach_halt_status,
@@ -48,6 +59,7 @@ from intraday_scanner.services.screener_automation import (
     SUPPORTED_SUFFIXES,
     normalize_screener_file,
 )
+from intraday_scanner.services.time_utils import get_market_date
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 WEB_OUT_ROOT = Path("outputs/web_auto")
@@ -156,7 +168,7 @@ def web_auto_collect(
     persist: bool = False,
     print_rows: bool = False,
 ) -> dict[str, Any]:
-    run_date = _today()
+    run_date = get_market_date()
     output_dir = Path(out_dir) if out_dir else WEB_OUT_ROOT / run_date
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = utc_now_iso()
@@ -178,6 +190,24 @@ def web_auto_collect(
         for source in enabled_sources(config, "public_table_url"):
             result = ingest_public_table(
                 url=source.url,
+                source=source,
+                config=config,
+                out_dir=output_dir / source.name,
+                store=store if persist else None,
+                persist=persist,
+                print_rows=False,
+            )
+            source_attempts.append(result)
+            if result.get("status") == "success":
+                rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
+                break
+            failures.append(result)
+            if "not in configured allowed_domains" in str(result.get("failure_reason", "")):
+                blocked_source_count += 1
+
+    if not rows:
+        for source in enabled_sources(config, "browser_table_url"):
+            result = ingest_browser_table(
                 source=source,
                 config=config,
                 out_dir=output_dir / source.name,
@@ -220,6 +250,13 @@ def web_auto_collect(
         "unknown_field_counts": _unknown_field_counts(source_attempts),
         "blocked_source_count": blocked_source_count,
         "attempts": source_attempts,
+        "enabled_candidate_sources": [
+            source.name for source in _candidate_sources(config) if source.enabled
+        ],
+        "candidate_source_count": len(
+            [source for source in _candidate_sources(config) if source.enabled]
+        ),
+        "only_universe_or_enrichment_enabled": _only_universe_or_enrichment_enabled(config),
         "halt_summary": _compact_summary(halt_summary),
         "sec_summary": _compact_summary(sec_summary),
         "snapshot_path": str(snapshot_path),
@@ -287,7 +324,13 @@ def web_telegram_daemon(
     poll_seconds: int = 60,
     run_date: str | None = None,
 ) -> dict[str, Any]:
-    run_date = run_date or _today()
+    if run_date is None:
+        auto_config = load_automation_config(
+            automation_config_path,
+            db_path=db_path,
+            out_root=Path(out_root) / get_market_date(),
+        )
+        run_date = get_market_date(auto_config.timezone)
     root = Path(out_root)
     root.mkdir(parents=True, exist_ok=True)
     log_path = Path("logs") / f"web_telegram_{run_date}.log"
@@ -419,6 +462,7 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
     rows = store.load_normalized_source_rows(limit=50)
     latest_result = fetch_results[0] if fetch_results else {}
     latest_summary = dict(latest_result.get("summary") or {})
+    web_config = load_web_sources_config(None)
     return {
         "latest_fetch_run": fetch_runs[0] if fetch_runs else {},
         "latest_fetch_result": latest_result,
@@ -434,6 +478,8 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
         "ai_research_outputs": store.load_ai_research_outputs(limit=50),
         "ai_data_warnings": store.load_ai_data_warnings(limit=50),
         "telegram_status": _telegram_status(store),
+        "source_operability": source_operability_status(web_config),
+        "browser_extractor": browser_extractor_status(),
         "counts": {
             "latest_candidate_count": latest_summary.get("candidate_count", len(rows)),
             "source_failures": latest_summary.get("source_failures", 0),
@@ -441,6 +487,46 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
             "halt_events": len(halt_events),
             "ai_runs": len(ai_runs),
         },
+    }
+
+
+def web_source_doctor(
+    *,
+    config_path: str | Path = "config/web_sources.example.yaml",
+    out_dir: str | Path = "outputs/source_doctor",
+    print_rows: bool = False,
+) -> dict[str, Any]:
+    config = load_web_sources_config(config_path)
+    output_dir = Path(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for source in config.sources:
+        rows.append(_doctor_source(source, config, output_dir))
+    result = {
+        "status": "complete",
+        "created_at": utc_now_iso(),
+        "config_path": str(config_path),
+        "browser_extractor": browser_extractor_status(),
+        "source_operability": source_operability_status(config),
+        "sources": rows,
+    }
+    write_json(output_dir / "source_doctor.json", result)
+    if print_rows:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    return result
+
+
+def source_operability_status(config: Any) -> dict[str, Any]:
+    enabled = [source for source in config.sources if source.enabled]
+    candidate = [source for source in enabled if _source_classification(source) == "candidate"]
+    universe = [source for source in enabled if _source_classification(source) == "universe"]
+    enrichment = [source for source in enabled if _source_classification(source) == "enrichment"]
+    return {
+        "enabled_candidate_sources": [source.name for source in candidate],
+        "enabled_universe_sources": [source.name for source in universe],
+        "enabled_enrichment_sources": [source.name for source in enrichment],
+        "only_universe_or_enrichment_enabled": not candidate and bool(universe or enrichment),
+        "candidate_source_required": not candidate,
     }
 
 
@@ -467,13 +553,14 @@ def _web_telegram_cycle(
     )
     events: list[NotificationEvent] = []
     if collect["status"] != "success":
+        source_body = format_source_check(collect["source_summary"])
         events.append(
             _event(
                 f"web:{run_date}:no_source",
-                "DAWNSTRIKE RISK ALERT",
-                "MANUAL REVIEW REQUIRED\nNo valid web/local source rows were available. "
-                "No market data was fabricated.",
+                "Dawnstrike Source Check",
+                source_body,
                 channel_hint="source_failed",
+                payload={"source_summary": collect["source_summary"]},
             )
         )
         _send_web_events(events, notify=notify, db_path=db_path, dry_run=dry_run)
@@ -525,14 +612,16 @@ def _web_telegram_cycle(
         "source_summary": collect["source_summary"],
         "ai": ai,
     }
+    ranked_payload = list(payload["ranked_candidates"])
     events.extend(_morning_watchlist_events(payload))
-    events.extend(_risk_events(payload))
-    events.append(_manual_monitor_event(run_date, payload))
+    if ranked_payload:
+        events.append(_manual_monitor_event(run_date, payload))
     auto_config = load_automation_config(
         automation_config_path,
         db_path=db_path,
         out_root=cycle_dir / "automation",
     )
+    scanner_config = load_config(database_path=Path(db_path), notifier_channels=notify)
     try:
         outcomes = automation_outcomes(
             config_path=automation_config_path,
@@ -552,28 +641,32 @@ def _web_telegram_cycle(
                 channel_hint="outcome_missing",
             )
         )
-    if outcomes.get("status") == "missing":
+    if outcomes.get("status") == "missing" and (
+        ranked_payload or scanner_config.telegram_send_outcome_reminder_on_no_picks
+    ):
         events.append(_outcome_needed_event(run_date, outcomes))
-    try:
-        summary = automation_summary(
-            config_path=automation_config_path,
-            db_path=db_path,
-            out_root=auto_config.out_root,
-            run_date=run_date,
-            notify=False,
-            dry_run=dry_run,
-        )
-    except Exception as exc:
-        summary = {"status": "failed", "error": str(exc), "missing_outcome_count": "n/a"}
-        events.append(
-            _event(
-                f"web:{run_date}:summary_failed",
-                "DAWNSTRIKE RISK ALERT",
-                f"MANUAL REVIEW REQUIRED\nDaily summary failed: {exc}",
-                channel_hint="daily_summary",
+    summary: dict[str, Any] = {"status": "skipped_disabled"}
+    if auto_config.notifications.get("send_daily_summary", True):
+        try:
+            summary = automation_summary(
+                config_path=automation_config_path,
+                db_path=db_path,
+                out_root=auto_config.out_root,
+                run_date=run_date,
+                notify=False,
+                dry_run=dry_run,
             )
-        )
-    events.append(_daily_summary_event(run_date, summary))
+        except Exception as exc:
+            summary = {"status": "failed", "error": str(exc), "missing_outcome_count": "n/a"}
+            events.append(
+                _event(
+                    f"web:{run_date}:summary_failed",
+                    "Dawnstrike Summary",
+                    f"MANUAL REVIEW\nDaily summary failed: {exc}",
+                    channel_hint="daily_summary",
+                )
+            )
+        events.append(_daily_summary_event(run_date, summary))
     send_stats = _send_web_events(events, notify=notify, db_path=db_path, dry_run=dry_run)
     result = {
         "run_id": run_id,
@@ -592,6 +685,89 @@ def _web_telegram_cycle(
     }
     write_json(cycle_dir / "web_telegram_cycle_summary.json", result)
     return result
+
+
+def _doctor_source(
+    source: WebSourceConfig,
+    config: Any,
+    output_dir: Path,
+) -> dict[str, Any]:
+    classification = _source_classification(source)
+    base = {
+        "source": source.name,
+        "type": source.type,
+        "classification": classification,
+        "enabled": source.enabled,
+        "attempted": False,
+        "status": "disabled" if not source.enabled else "not_attempted",
+        "rows_extracted": 0,
+        "rows_normalized": 0,
+        "failure_reason": "",
+        "next_action": _next_action_for_source(source, classification),
+    }
+    if not source.enabled:
+        return base
+    if source.type == "local_inbox":
+        inbox = Path(source.path or "data/inbox/screener")
+        files = [
+            path
+            for path in inbox.iterdir()
+            if inbox.exists() and path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
+        ] if inbox.exists() else []
+        return {
+            **base,
+            "attempted": True,
+            "status": "ready" if files else "empty",
+            "rows_extracted": len(files),
+            "rows_normalized": 0,
+            "failure_reason": "" if files else "local inbox is empty",
+            "path": str(inbox),
+        }
+    if source.type == "public_table_url":
+        result = ingest_public_table(
+            url=source.url,
+            source=source,
+            config=config,
+            out_dir=output_dir / source.name,
+            persist=False,
+            print_rows=False,
+        )
+        return _doctor_from_result(base, result)
+    if source.type == "browser_table_url":
+        result = ingest_browser_table(
+            source=source,
+            config=config,
+            out_dir=output_dir / source.name,
+            persist=False,
+            print_rows=False,
+        )
+        return _doctor_from_result(base, result)
+    if source.type == "nasdaq_symbol_directory":
+        return {
+            **base,
+            "status": "universe_only",
+            "failure_reason": "nasdaq_symbols does not generate premarket picks",
+        }
+    if source.type in {"nasdaq_trade_halts_rss", "sec_edgar"}:
+        return {
+            **base,
+            "status": "enrichment_only",
+            "failure_reason": "enrichment source; it does not generate candidate picks",
+        }
+    return {**base, "status": "unknown_type", "failure_reason": "unknown source type"}
+
+
+def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    reason = str(result.get("failure_reason") or result.get("reason") or "")
+    return {
+        **base,
+        "attempted": True,
+        "status": str(result.get("status") or "unknown"),
+        "rows_extracted": int(result.get("rows_extracted") or 0),
+        "rows_normalized": int(result.get("rows_normalized") or 0),
+        "failure_reason": reason,
+        "next_action": _next_action_for_result(base, result, reason),
+    }
 
 
 def _collect_local_inbox(
@@ -681,31 +857,24 @@ def _morning_watchlist_events(payload: dict[str, Any]) -> list[NotificationEvent
     summary = dict(payload.get("summary") or {})
     source_summary = dict(payload.get("source_summary") or {})
     ranked = list(payload.get("ranked_candidates") or [])
-    lines = [
-        f"timestamp: {summary.get('created_at')}",
-        f"source/data quality: {source_summary.get('status')} "
-        f"({source_summary.get('candidate_count')} candidates, "
-        f"{source_summary.get('source_failures')} failures)",
-        "top 3 tickers:",
-    ]
-    for row in ranked[:3]:
-        label = _action_label(row)
-        lines.append(
-            f"- {row.get('ticker')}: {label}; score {row.get('score')}; "
-            f"gap {row.get('gap_pct')}%; premarket ${row.get('premarket_price')}; "
-            f"dollar volume {row.get('dollar_volume')}; catalyst "
-            f"{row.get('catalyst_headline') or 'not supplied'}; "
-            f"BREAKOUT TRIGGER {row.get('breakout_trigger')}; "
-            f"invalidation {row.get('invalidation_level')}; "
-            f"risk flags {row.get('risk_flags') or 'none supplied'}"
-        )
-    lines.append("Research/watchlist only. Dawnstrike does not place orders.")
+    body = format_morning_watchlist(
+        ranked=ranked,
+        avoid=list(payload.get("avoid_list") or []),
+        source_summary=source_summary,
+    )
     return [
         _event(
             f"{summary.get('run_id')}:web_morning_watchlist",
-            "DAWNSTRIKE MORNING WATCHLIST",
-            "\n".join(lines),
+            "Dawnstrike Watchlist",
+            body,
             channel_hint="top_picks",
+            payload={
+                "summary": summary,
+                "ranked_candidates": ranked[:5],
+                "avoid_list": list(payload.get("avoid_list") or [])[:3],
+                "source_summary": source_summary,
+                "telegram_compact_message": body,
+            },
         )
     ]
 
@@ -733,6 +902,7 @@ def _risk_events(payload: dict[str, Any]) -> list[NotificationEvent]:
                 ),
                 ticker=str(row.get("ticker") or ""),
                 channel_hint="risk_alert",
+                payload={"telegram_compact_message": format_risk_alert(row), "row": row},
             )
         )
     return events
@@ -740,52 +910,42 @@ def _risk_events(payload: dict[str, Any]) -> list[NotificationEvent]:
 
 def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> NotificationEvent:
     ranked = list(payload.get("ranked_candidates") or [])
-    tickers = ", ".join(str(row.get("ticker") or "") for row in ranked[:5]) or "none"
+    tickers = [str(row.get("ticker") or "").upper() for row in ranked[:5] if row.get("ticker")]
+    body = format_manual_monitor(tickers)
     return _event(
-        f"web:{run_date}:manual_monitor_required:{tickers}",
-        "DAWNSTRIKE RISK ALERT",
-        "CAUTION\nNo configured current-price source is available for automated 5-minute "
-        f"checks. Manually monitor: {tickers}.",
+        f"web:{run_date}:manual_monitor_required:{','.join(tickers) or 'none'}",
+        "Manual Monitor Needed",
+        body,
         channel_hint="monitor_alert",
+        payload={"tickers": tickers, "telegram_compact_message": body},
     )
 
 
 def _outcome_needed_event(run_date: str, outcomes: dict[str, Any]) -> NotificationEvent:
+    tickers = [
+        str(ticker).upper()
+        for ticker in list(outcomes.get("missing_tickers") or outcomes.get("tickers") or [])
+        if str(ticker).strip()
+    ]
+    reminder_path = str(outcomes.get("reminder_path") or "")
+    body = format_outcome_needed(run_date=run_date, reminder_path=reminder_path, tickers=tickers)
     return _event(
         f"web:{run_date}:outcome_needed",
-        "OUTCOME DATA NEEDED",
-        "\n".join(
-            [
-                "OUTCOME NEEDED",
-                f"tickers: {', '.join(list(outcomes.get('missing_tickers') or []))}",
-                f"file path: {outcomes.get('reminder_path')}",
-                "required columns: date,ticker,entry_time,entry_price,price_1m,price_5m,"
-                "price_15m,lunch_price,close_price,high_after_entry,low_after_entry,halted,source,notes",
-                "automation note: rerun web-telegram-daemon or automation-outcomes "
-                "after saving CSV.",
-            ]
-        ),
+        "Outcome Data Needed",
+        body,
         channel_hint="outcome_missing",
+        payload={"outcomes": outcomes, "tickers": tickers, "telegram_compact_message": body},
     )
 
 
 def _daily_summary_event(run_date: str, summary: dict[str, Any]) -> NotificationEvent:
-    report = dict(summary.get("shadow_report") or {})
+    body = format_daily_summary(summary)
     return _event(
         f"web:{run_date}:daily_summary:{summary.get('source_hash', '')}",
-        "DAWNSTRIKE SHADOW SUMMARY",
-        "\n".join(
-            [
-                f"timestamp: {utc_now_iso()}",
-                f"top1 return: {report.get('top_1_close_return_pct', 'n/a')}",
-                f"top3 return: {report.get('top_3_close_return_pct', 'n/a')}",
-                f"top5 return: {report.get('top_5_close_return_pct', 'n/a')}",
-                f"missing outcome count: {summary.get('missing_outcome_count', 'n/a')}",
-                f"dashboard URL: {summary.get('dashboard_url', 'http://127.0.0.1:8502')}",
-                "Returns are manual/free shadow results only.",
-            ]
-        ),
+        "Dawnstrike Summary",
+        body,
         channel_hint="daily_summary",
+        payload={"summary": summary, "telegram_compact_message": body},
     )
 
 
@@ -833,14 +993,18 @@ def _event(
     *,
     ticker: str | None = None,
     channel_hint: str = "web_auto_pilot",
+    payload: dict[str, Any] | None = None,
 ) -> NotificationEvent:
+    base_payload = {"run_id": event_key.split(":", 1)[0], "source": "web_auto_pilot"}
+    if payload:
+        base_payload.update(payload)
     return NotificationEvent(
         event_key=event_key,
         title=title,
         body=body,
         channel_hint=channel_hint,
         ticker=ticker,
-        payload={"run_id": event_key.split(":", 1)[0], "source": "web_auto_pilot"},
+        payload=base_payload,
     )
 
 
@@ -854,6 +1018,57 @@ def _action_label(row: dict[str, Any]) -> str:
     if score >= 70:
         return "WATCH"
     return "HIGH VOLATILITY WATCH"
+
+
+def _candidate_sources(config: Any) -> list[WebSourceConfig]:
+    return [source for source in config.sources if _source_classification(source) == "candidate"]
+
+
+def _only_universe_or_enrichment_enabled(config: Any) -> bool:
+    enabled = [source for source in config.sources if source.enabled]
+    return bool(enabled) and not any(
+        _source_classification(source) == "candidate" for source in enabled
+    )
+
+
+def _source_classification(source: WebSourceConfig) -> str:
+    if source.type in {"local_inbox", "public_table_url", "browser_table_url"}:
+        return "candidate"
+    if source.type == "nasdaq_symbol_directory":
+        return "universe"
+    if source.type in {"nasdaq_trade_halts_rss", "sec_edgar"}:
+        return "enrichment"
+    return "unknown"
+
+
+def _next_action_for_source(source: WebSourceConfig, classification: str) -> str:
+    if classification == "candidate" and not source.enabled:
+        return "Enable this source or use local_inbox for picks."
+    if source.type == "local_inbox":
+        return "Drop CSV into data\\inbox\\screener."
+    if source.type == "public_table_url":
+        return "If no_candidate_table, use a local CSV or enable browser_table_url."
+    if source.type == "browser_table_url":
+        return "Install browser extra and chromium, then enable only for allowed public pages."
+    if source.type == "nasdaq_symbol_directory":
+        return "Use this for universe filtering only; enable a candidate source for picks."
+    if classification == "enrichment":
+        return "Enable after setting a real user agent; enrichment does not create picks."
+    return "Review source configuration."
+
+
+def _next_action_for_result(
+    base: dict[str, Any],
+    result: dict[str, Any],
+    reason: str,
+) -> str:
+    if result.get("status") == "success" and int(result.get("rows_normalized") or 0) > 0:
+        return "Source can produce candidate rows."
+    if str(result.get("reason")) == "no_candidate_table":
+        return "Drop CSV into data\\inbox\\screener or try browser_table_url."
+    if "BROWSER_EXTRACTOR_NOT_AVAILABLE" in reason:
+        return 'Run py -m pip install -e ".[browser]" and py -m playwright install chromium.'
+    return str(base.get("next_action") or "Review source failure.")
 
 
 def _source_for_url(sources: tuple[WebSourceConfig, ...], url: str) -> WebSourceConfig:
@@ -995,7 +1210,7 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _today() -> str:
-    return date_type.today().isoformat()
+    return get_market_date()
 
 
 def _float(value: Any) -> float:

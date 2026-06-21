@@ -96,6 +96,7 @@ from intraday_scanner.services.web_collection_service import (
     web_collect_halts,
     web_collect_sec_risk,
     web_ingest_public_table,
+    web_source_doctor,
     web_telegram_daemon,
 )
 from intraday_scanner.snapshot_builder import main as snapshot_builder_main
@@ -293,6 +294,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Bypass dedupe for this test event only",
     )
+
+    source_doctor = subparsers.add_parser(
+        "web-source-doctor", help="Diagnose configured web candidate sources"
+    )
+    source_doctor.add_argument("--config", default="config/web_sources.example.yaml")
+    source_doctor.add_argument("--out-dir", default="outputs/source_doctor")
+    source_doctor.add_argument("--print", action="store_true", dest="print_rows")
 
     web_daemon = subparsers.add_parser(
         "web-telegram-daemon", help="Run the web auto-pilot notification daemon"
@@ -566,6 +574,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_web_auto_collect(args)
         if args.command == "telegram-test":
             return _run_telegram_test(args)
+        if args.command == "web-source-doctor":
+            return _run_web_source_doctor(args)
         if args.command == "web-telegram-daemon":
             return _run_web_telegram_daemon(args)
         if args.command == "automation-run":
@@ -926,6 +936,17 @@ def _run_web_auto_collect(args: argparse.Namespace) -> int:
 def _run_telegram_test(args: argparse.Namespace) -> int:
     result = telegram_test(db_path=args.db_path, dry_run=args.dry_run, force=args.force)
     print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_web_source_doctor(args: argparse.Namespace) -> int:
+    result = web_source_doctor(
+        config_path=args.config,
+        out_dir=args.out_dir,
+        print_rows=args.print_rows,
+    )
+    if not args.print_rows:
+        print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

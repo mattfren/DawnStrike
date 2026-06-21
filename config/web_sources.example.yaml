@@ -1,3 +1,5 @@
+# Candidate source required for picks: local_inbox, public_table_url, or browser_table_url.
+# nasdaq_symbols does not generate premarket picks; it is universe-only.
 enabled: true
 respect_robots: true
 user_agent: "DawnstrikeResearchBot/0.1 contact: YOUR_EMAIL_HERE"
@@ -12,24 +14,41 @@ allowed_domains:
   - investing.com
   - tradingview.com
 sources:
-  - name: nasdaq_symbols
-    type: nasdaq_symbol_directory
-    enabled: true
-  - name: nasdaq_halts
-    type: nasdaq_trade_halts_rss
-    enabled: true
-  - name: sec_edgar
-    type: sec_edgar
-    enabled: true
-  - name: barchart_premarket
-    type: public_table_url
-    enabled: false
-    url: "https://www.barchart.com/stocks/pre-market-trading"
-  - name: tradingview_premarket
-    type: public_table_url
-    enabled: false
-    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
   - name: local_inbox
     type: local_inbox
     enabled: true
     path: data\inbox\screener
+
+  - name: barchart_premarket
+    type: public_table_url
+    enabled: false
+    url: "https://www.barchart.com/stocks/pre-market-trading"
+
+  # Optional JS-rendered fallback. Does not bypass logins, CAPTCHAs, paywalls, or anti-bot controls.
+  - name: barchart_premarket_browser
+    type: browser_table_url
+    enabled: false
+    url: "https://www.barchart.com/stocks/pre-market-trading"
+    wait_selector: "table, [role='grid'], .bc-table-scrollable-inner"
+    wait_seconds: 10
+    max_rows: 150
+
+  - name: tradingview_premarket
+    type: public_table_url
+    enabled: false
+    url: "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
+
+  - name: nasdaq_symbols
+    type: nasdaq_symbol_directory
+    enabled: true
+    role: universe_only
+
+  # Disabled until user_agent is changed to a real contact string.
+  - name: nasdaq_halts
+    type: nasdaq_trade_halts_rss
+    enabled: false
+
+  # Disabled until user_agent is changed to a real contact string.
+  - name: sec_edgar
+    type: sec_edgar
+    enabled: false

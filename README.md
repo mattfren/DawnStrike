@@ -44,13 +44,28 @@ Web Auto-Pilot with Telegram-ready notifications:
 
 ```powershell
 py -m intraday_scanner.cli web-auto-collect --config config\web_sources.example.yaml --db-path data\shadow_real.sqlite --out-dir outputs\web_auto\today --persist --print
+py -m intraday_scanner.cli web-source-doctor --config config\web_sources.example.yaml --out-dir outputs\source_doctor --print
 py -m intraday_scanner.cli telegram-test --dry-run --db-path data\shadow_real.sqlite
 py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.example.yaml --automation-config config\automation.example.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify console --dry-run --max-cycles 1
 ```
 
 Use `--notify telegram` after setting `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_CHAT_ID`. See `docs\WEB_AUTO_PILOT.md` and
-`docs\TELEGRAM_NOTIFICATIONS.md`.
+`TELEGRAM_CHAT_ID`. Telegram messages use compact emoji-based text, not raw JSON.
+At least one candidate source is required for picks: `local_inbox`,
+`public_table_url`, or `browser_table_url`. `nasdaq_symbols` is universe-only
+and does not generate premarket picks. If a public page such as Barchart returns
+`no_candidate_table`, run `web-source-doctor`, use a local CSV, enable another
+candidate source, or install the optional browser extractor:
+
+```powershell
+py -m pip install -e ".[browser]"
+py -m playwright install chromium
+```
+
+Public URL and browser-rendered data are unverified shadow data. Dawnstrike has
+no order execution path. See `docs\WEB_AUTO_PILOT.md`,
+`docs\TELEGRAM_NOTIFICATIONS.md`, `docs\URL_INGESTION.md`, and
+`docs\BROWSER_SOURCE_EXTRACTION.md`.
 
 ## Install
 

@@ -9,6 +9,7 @@ import urllib.request
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import NotificationError
 from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
+from intraday_scanner.notifiers.telegram_formatter import format_telegram_event
 
 
 class DiscordWebhookNotifier(BaseNotifier):
@@ -34,6 +35,7 @@ class TelegramNotifier(BaseNotifier):
     channel = "telegram"
 
     def __init__(self, config: ScannerConfig):
+        self.config = config
         self.bot_token = config.telegram_bot_token
         self.chat_id = config.telegram_chat_id
         self.timeout_seconds = config.request_timeout_seconds
@@ -45,9 +47,19 @@ class TelegramNotifier(BaseNotifier):
                 "INTRADAY_TELEGRAM_CHAT_ID"
             )
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        if self.config.telegram_message_style == "legacy":
+            text = f"{event.title}\n{event.body}"
+        else:
+            text = format_telegram_event(
+                event,
+                max_morning_chars=self.config.telegram_max_morning_chars,
+                max_alert_chars=self.config.telegram_max_alert_chars,
+                max_summary_chars=self.config.telegram_max_summary_chars,
+                include_debug_fields=self.config.telegram_include_debug_fields,
+            )
         _post_json(
             url,
-            {"chat_id": self.chat_id, "text": f"{event.title}\n{event.body}"},
+            {"chat_id": self.chat_id, "text": text},
             timeout_seconds=self.timeout_seconds,
         )
 

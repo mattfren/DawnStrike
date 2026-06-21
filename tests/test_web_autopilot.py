@@ -3,6 +3,9 @@ from pathlib import Path
 
 from intraday_scanner.cli import main
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.providers import browser_table_provider
+from intraday_scanner.providers.browser_table_provider import ingest_browser_table
+from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.providers.public_table_provider import (
     extract_html_tables,
     normalize_public_table_rows,
@@ -113,6 +116,84 @@ def test_table_normalization_and_lineage():
     assert rows[0]["data_source_kind"] == "web_url"
     assert rows[0]["source_url"] == "https://allowed.test/fixture"
     assert "url_table_unverified" in rows[0]["coverage_warning"]
+
+
+def test_browser_table_fixture_extracts_rows(tmp_path):
+    source = _browser_source("browser_table", "tests/fixtures/browser_table_fixture.html")
+
+    result = ingest_browser_table(
+        source=source,
+        config=_browser_config(),
+        out_dir=tmp_path / "browser",
+    )
+
+    assert result["status"] == "success"
+    assert result["rows_normalized"] == 1
+    rows = list(read_snapshot_csv(result["paths"]["premarket_snapshot"]))
+    assert rows[0].ticker == "NOVA"
+    assert rows[0].data_source_kind == "browser_url"
+    assert "browser_rendered_public_table_unverified" in rows[0].coverage_warning
+
+
+def test_browser_grid_fixture_extracts_rows(tmp_path):
+    source = _browser_source("browser_grid", "tests/fixtures/browser_grid_fixture.html")
+
+    result = ingest_browser_table(
+        source=source,
+        config=_browser_config(),
+        out_dir=tmp_path / "browser",
+    )
+
+    assert result["status"] == "success"
+    assert result["rows_normalized"] == 1
+    rows = list(read_snapshot_csv(result["paths"]["premarket_snapshot"]))
+    assert rows[0].ticker == "RIFT"
+
+
+def test_browser_blocked_fixture_reports_login_required(tmp_path):
+    source = _browser_source("browser_blocked", "tests/fixtures/browser_blocked_fixture.html")
+
+    result = ingest_browser_table(
+        source=source,
+        config=_browser_config(),
+        out_dir=tmp_path / "browser",
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "login_required"
+
+
+def test_browser_no_table_fixture_reports_no_candidate_table(tmp_path):
+    source = _browser_source("browser_no_table", "tests/fixtures/browser_no_table_fixture.html")
+
+    result = ingest_browser_table(
+        source=source,
+        config=_browser_config(),
+        out_dir=tmp_path / "browser",
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "no_candidate_table"
+
+
+def test_browser_dependency_missing_gives_install_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_table_provider, "_playwright_available", lambda: False)
+    source = WebSourceConfig(
+        name="browser_live",
+        type="browser_table_url",
+        enabled=True,
+        url="https://allowed.test/premarket",
+    )
+
+    result = ingest_browser_table(
+        source=source,
+        config=_browser_config(),
+        out_dir=tmp_path / "browser",
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "browser_extractor_not_available"
+    assert "py -m pip install -e \".[browser]\"" in result["failure_reason"]
 
 
 def test_web_ingest_public_table_outputs_and_persistence(tmp_path):
@@ -435,8 +516,11 @@ def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
     )
 
     out = capsys.readouterr().out
-    assert "DAWNSTRIKE RISK ALERT" in out
-    assert "No market data was fabricated" in out
+    assert out.count("[dry-run:console]") == 1
+    assert "📡 Dawnstrike Source Check" in out
+    assert "No usable rows found." in out
+    assert "Drop CSV into data\\inbox\\screener" in out
+    assert "📊 Dawnstrike Summary" not in out
 
 
 def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, capsys):
@@ -467,10 +551,38 @@ def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, ca
     )
 
     out = capsys.readouterr().out
-    assert "DAWNSTRIKE MORNING WATCHLIST" in out
-    assert "BREAKOUT TRIGGER" in out
-    assert "Research/watchlist only" in out
+    assert "🚀 Dawnstrike Watchlist" in out
+    assert "🎯 Trigger" in out
+    assert "👀 Manual Monitor Needed" in out
+    assert "📥 Outcome Data Needed" in out
+    assert "Research only. No orders placed." in out
     assert SQLiteScanStore(db_path).load_latest_scan()["summary"]["top_ticker"] == "NOVA"
+
+
+def test_web_source_doctor_reports_candidate_sources(tmp_path, capsys):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    config_path = _write_web_config(tmp_path, local_inbox=empty, public_enabled=True)
+
+    assert (
+        main(
+            [
+                "web-source-doctor",
+                "--config",
+                str(config_path),
+                "--out-dir",
+                str(tmp_path / "doctor"),
+                "--print",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "fixture_public_table" in out
+    assert '"classification": "candidate"' in out
+    result = (tmp_path / "doctor" / "source_doctor.json").read_text(encoding="utf-8")
+    assert "candidate" in result
 
 
 def test_no_order_execution_path_in_web_autopilot_code():
@@ -539,3 +651,26 @@ def _write_web_config(
         encoding="utf-8",
     )
     return config_path
+
+
+def _browser_config() -> WebCollectionConfig:
+    return WebCollectionConfig(
+        enabled=True,
+        respect_robots=True,
+        user_agent="test",
+        timeout_seconds=1,
+        rate_limit_seconds=0,
+        save_raw=True,
+        allowed_domains=("allowed.test",),
+        sources=(),
+    )
+
+
+def _browser_source(name: str, fixture_path: str) -> WebSourceConfig:
+    return WebSourceConfig(
+        name=name,
+        type="browser_table_url",
+        enabled=True,
+        url="https://allowed.test/premarket",
+        fixture_path=fixture_path,
+    )
