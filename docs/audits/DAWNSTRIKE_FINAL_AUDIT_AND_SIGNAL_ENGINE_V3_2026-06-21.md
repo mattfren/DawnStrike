@@ -41,6 +41,10 @@ research only. No order execution path was added.
 PASS. Live verification on `config\web_sources.yaml` normalized 110 rows from
 StockAnalysis and TradingView and deduped them into 103 candidates. Local inbox
 was empty. SEC and halt enrichment were disabled in the active config.
+StockAnalysis and TradingView did not supply previous close or premarket
+high/low range in the observed public tables, so Dawnstrike flagged
+`previous_close_unavailable` and `premarket_range_unavailable_price_used`
+instead of inferring those fields.
 
 ## 5. Source-Doctor Results
 
@@ -177,6 +181,7 @@ model version, config hash, and the research-only boundary.
 | source doctor clear results | PASS |
 | StockAnalysis normalization | PASS |
 | TradingView normalization | PASS |
+| TradingView missing-field documentation | PASS |
 | Signal Engine v3 fields | PASS |
 | compact Telegram | PASS |
 | outcome reminder tickers | PASS |
