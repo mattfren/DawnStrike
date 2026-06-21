@@ -56,6 +56,7 @@ def evaluate_no_trade(
         if _bool(row.get("can_alert"))
         and not str(row.get("no_trade_reason") or "").strip()
         and _float(row.get("alpha_score"), 0.0) >= min_alpha_score
+        and str(row.get("drawdown_risk_bucket") or "").upper() != "HIGH"
     ]
     blocked = len(candidates) - len(clean)
     if not clean:
@@ -77,6 +78,15 @@ def evaluate_no_trade(
             no_trade=True,
             reason="Every clean candidate has low source confidence.",
             next_action="Wait for source confirmation before alerting.",
+            clean_count=len(clean),
+            blocked_count=blocked,
+        )
+    top = clean[0]
+    if _float(top.get("risk_score"), 100.0) < 45.0:
+        return NoTradeDecision(
+            no_trade=True,
+            reason="Top candidate risk score is too weak for an alert.",
+            next_action="Wait for a cleaner setup instead of forcing the watchlist.",
             clean_count=len(clean),
             blocked_count=blocked,
         )

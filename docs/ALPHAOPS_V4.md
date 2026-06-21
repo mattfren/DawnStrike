@@ -41,12 +41,18 @@ With fewer than 20 real shadow-trading days, AlphaOps uses rule-based scoring
 and marks expectancy as insufficient sample. It still persists features,
 signals, and outcomes so the model can learn.
 
+Minimum evidence target is 20 real market days. Strong evidence target is 60+
+real market days. Before those thresholds, the dashboard and reports must remain
+explicit that AlphaOps is still collecting evidence.
+
 With enough outcomes, AlphaOps uses empirical priors by setup/source/catalyst,
 score decile, gap, volume, and risk buckets. Priors use shrinkage toward the
 global mean so small buckets cannot dominate the result.
 
 The implementation is rule-first. No ML model is activated unless an offline,
 date-split/walk-forward evaluation beats the rule baseline without leakage.
+The offline model uses dated historical feature/outcome rows only and targets
+close/timed returns, not high-of-day-only optimization.
 
 ## No-Trade Is Valid
 
@@ -61,3 +67,6 @@ runs, source reliability, and setup memory. The dashboard reads those records
 and shows Alpha score, edge bucket, no-trade reason, setup memory, source
 reliability, score decile, outlier dependency, missing outcome rate, real days
 collected, and whether evidence is sufficient.
+
+Without paid/live provider data, outcome quality is limited by manual/free
+shadow collection. Public web rows remain unverified shadow data.

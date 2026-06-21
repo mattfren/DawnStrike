@@ -51,6 +51,18 @@ memory, and enough real days exist. Use `alpha-report` for top1/top3/top5 and
 insufficient-sample truth. Remove `--dry-run` only after Telegram secrets are
 configured. Dawnstrike still does not place orders.
 
+Daily command:
+
+```powershell
+py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram
+```
+
+Windows scheduled-task command:
+
+```powershell
+schtasks /Create /TN "Dawnstrike AlphaOps" /SC MINUTE /MO 5 /TR "py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram" /F
+```
+
 ## Outcomes
 
 Save manual outcome CSVs under:

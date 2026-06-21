@@ -10,6 +10,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.components import filter_candidates
 from intraday_scanner.dashboard.data_loader import load_output_dir, load_sample_scan, load_sqlite
@@ -1420,6 +1421,8 @@ def _dashboard_alphaops(state: dict[str, Any]) -> None:
     memory = dict(setup_memory.get(str(top.get("setup_key") or "")) or {})
     missing_high = sum(1 for row in labels if row.get("missing_outcome_high") is True)
     missing_rate = (missing_high / len(labels)) * 100 if labels else 0
+    truth = build_truth_report(labels, real_days_collected=real_days)
+    outlier = dict(truth.get("outlier") or {})
     cards = [
         (
             "Alpha score",
@@ -1439,6 +1442,11 @@ def _dashboard_alphaops(state: dict[str, Any]) -> None:
         ),
         ("Evidence", enough, f"{real_days} real days"),
         ("Missing outcomes", f"{_format_number(missing_rate)}%", "High-after-entry fields"),
+        (
+            "Outlier dependency",
+            _format_number(outlier.get("outlier_dependency")),
+            "Too high blocks claims",
+        ),
     ]
     st.markdown('<div class="ds-section">AlphaOps</div>', unsafe_allow_html=True)
     st.markdown(_step_strip(cards), unsafe_allow_html=True)
@@ -1460,6 +1468,18 @@ def _dashboard_alphaops(state: dict[str, Any]) -> None:
             "no_trade_reason",
         ],
     )
+    if labels:
+        with st.expander("AlphaOps performance buckets", expanded=False):
+            st.markdown("Score decile performance")
+            _table(_bucket_rows(dict(truth.get("score_decile") or {})), [])
+            st.markdown("Setup bucket returns")
+            _table(_bucket_rows(dict(truth.get("setup_bucket_returns") or {})), [])
+            st.markdown("Risk flag impact")
+            _table(_bucket_rows(dict(truth.get("risk_flag_impact") or {})), [])
+            st.markdown("Catalyst bucket returns")
+            _table(_bucket_rows(dict(truth.get("catalyst_bucket_returns") or {})), [])
+    else:
+        st.caption("No AlphaOps outcome labels yet, so bucket-return tables are not populated.")
 
 
 def _dashboard_performance(state: dict[str, Any]) -> None:
@@ -3549,6 +3569,14 @@ def _distinct_dates(rows: list[dict[str, Any]]) -> int:
         if str(row.get("created_at") or row.get("timestamp") or "")[:10]
     }
     return len(dates)
+
+
+def _bucket_rows(buckets: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket, summary in sorted(buckets.items()):
+        if isinstance(summary, dict):
+            rows.append({"bucket": bucket, **summary})
+    return rows
 
 
 def _average(rows: list[dict[str, Any]], key: str) -> float:

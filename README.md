@@ -84,7 +84,9 @@ py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-
 
 AlphaOps persists feature vectors, source reliability, setup memory, shadow
 outcome labels, and no-trade decisions. Fewer than 20 real shadow days are shown
-as insufficient sample, not proven expectancy. See `docs\ALPHAOPS_V4.md` and
+as insufficient sample, not proven expectancy. Strong evidence starts at 60+
+real market days. No paid/live provider means outcome quality is limited by
+manual/free shadow collection. See `docs\ALPHAOPS_V4.md` and
 `docs\PLAYBOOK_ENGINE.md`.
 
 ## Install

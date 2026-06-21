@@ -9,6 +9,7 @@ from intraday_scanner.alpha.edge_calibrator import (
 from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.no_trade_filter import evaluate_no_trade
 from intraday_scanner.alpha.outcome_labeler import label_outcome
+from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.setup_memory import build_setup_memory
 from intraday_scanner.cli import main
@@ -89,6 +90,18 @@ def test_alpha_feature_vector_has_required_groups():
         "playbook_setup",
     }
     assert vector["feature_json"]["source_data_quality"]["source_reliability_score"] == 91
+    price = vector["feature_json"]["price_momentum"]
+    source = vector["feature_json"]["source_data_quality"]
+    catalyst = vector["feature_json"]["catalyst"]
+    structure = vector["feature_json"]["structure"]
+    playbook = vector["feature_json"]["playbook_setup"]
+    assert price["price_bucket"] == "small_cap_range"
+    assert price["mega_gap_flag"] is False
+    assert price["price_near_high"] is True
+    assert source["public_url_unverified_flag"] is False
+    assert catalyst["fda_biotech_flag"] is True
+    assert structure["squeeze_structure_score"] >= 0
+    assert playbook["primary_setup"] == "biotech_catalyst"
 
 
 def test_risk_governor_hard_avoids_block_alerts():
@@ -124,6 +137,64 @@ def test_alpha_model_uses_insufficient_sample_fallback_under_20_days():
     assert scored[0]["confidence_bucket"] == "INSUFFICIENT_SAMPLE"
     assert scored[0]["can_alert"] is True
     assert scored[0]["alpha_score"] > 0
+    assert scored[0]["source_reliability_adjustment"] == 0
+    assert scored[0]["ml_score_used"] is False
+
+
+def test_source_reliability_changes_alpha_score():
+    weak = _candidate(source_confidence=82)
+    strong = _candidate(source_confidence=82)
+    weak_vector = build_feature_vector(
+        weak,
+        scan_id="scan-1",
+        timestamp="now",
+        source_reliability={"fixture_public_table": {"reliability_score": 20}},
+    )
+    strong_vector = build_feature_vector(
+        strong,
+        scan_id="scan-1",
+        timestamp="now",
+        source_reliability={"fixture_public_table": {"reliability_score": 95}},
+    )
+
+    weak_score = AlphaModel().score_candidates([weak], [weak_vector], real_shadow_days=7)[0]
+    strong_score = AlphaModel().score_candidates([strong], [strong_vector], real_shadow_days=7)[0]
+
+    assert weak_score["source_reliability_adjustment"] < 0
+    assert strong_score["source_reliability_adjustment"] > 0
+    assert strong_score["alpha_score"] > weak_score["alpha_score"]
+
+
+def test_offline_ml_only_activates_when_it_beats_rule_baseline():
+    outcomes = []
+    for day in range(1, 31):
+        for index in range(4):
+            score = 40 + index * 10
+            outcomes.append({
+                "date": f"2026-05-{day:02d}",
+                "score": score,
+                "risk_score": 80,
+                "source_reliability_score": 90,
+                "source_confidence": 85,
+                "gap_pct": 50,
+                "dollar_volume": 1_000_000,
+                "spread_pct": 1,
+                "catalyst_confidence": 0.8,
+                "close_return_pct": score / 10,
+            })
+    candidate = _candidate(score=80)
+    vector = build_feature_vector(candidate, scan_id="scan-1", timestamp="now")
+
+    scored = AlphaModel().score_candidates(
+        [candidate],
+        [vector],
+        historical_outcomes=outcomes,
+        real_shadow_days=30,
+    )[0]
+
+    assert scored["ml_status"] == "ml_beats_baseline"
+    assert scored["ml_score_used"] is True
+    assert scored["ml_evaluation"]["split"] == "date_ordered_70_30"
 
 
 def test_empirical_prior_shrinkage_and_outlier_warning():
@@ -166,6 +237,45 @@ def test_source_reliability_and_setup_memory_update():
     assert reliability[0]["reliability_score"] > 50
     assert memory["grade:A"]["sample_size"] == 2
     assert memory["grade:A"]["win_rate_pct"] == 50
+
+
+def test_performance_truth_reports_alpha_buckets_and_warnings():
+    rows = [
+        {
+            "rank": 1,
+            "ticker": "NOVA",
+            "edge_bucket": "HIGH",
+            "score_decile": 9,
+            "setup_key": "grade:A",
+            "source": "fixture",
+            "catalyst_category": "biotech",
+            "risk_flags": "none",
+            "high_after_entry_return": 10,
+            "low_after_entry_drawdown": -2,
+            "data_source_kind": "manual",
+        },
+        {
+            "rank": 2,
+            "ticker": "RIFT",
+            "edge_bucket": "LOW",
+            "score_decile": 4,
+            "setup_key": "grade:D",
+            "source": "fixture",
+            "catalyst_category": "none",
+            "risk_flags": "wide_spread",
+            "high_after_entry_return": -3,
+            "low_after_entry_drawdown": -8,
+            "data_source_kind": "manual",
+        },
+    ]
+
+    report = build_truth_report(rows, real_days_collected=2)
+
+    assert report["max_drawdown_pct"] == -8
+    assert "HIGH" in report["alpha_bucket_performance"]
+    assert report["best_worst_setup"]["best"]["bucket"] == "grade:A"
+    assert "fewer_than_20_real_days" in report["evidence_warnings"]
+    assert report["can_claim_success"] is False
 
 
 def test_outcome_labeler_uses_entry_not_future_high_for_winners():

@@ -102,6 +102,10 @@ def evaluate_risk(
         soft.append("unknown_float")
     if _float(candidate.get("previous_close") or features.get("previous_close")) in {None, 0.0}:
         soft.append("missing_previous_close")
+    if _float(candidate.get("premarket_high") or features.get("premarket_high")) in {None, 0.0}:
+        soft.append("missing_high")
+    if _float(candidate.get("premarket_low") or features.get("premarket_low")) in {None, 0.0}:
+        soft.append("missing_low")
     if not str(candidate.get("catalyst_headline") or features.get("catalyst_headline") or ""):
         soft.append("no_catalyst")
     data_source_kind = str(
