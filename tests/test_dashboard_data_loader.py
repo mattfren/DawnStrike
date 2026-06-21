@@ -17,6 +17,9 @@ def test_dashboard_loads_sqlite_history(tmp_path):
     assert data["ranked_candidates"]
     assert data["scan_history"]
     assert data["scan_history"][0]["top_ticker"] == "NOVA"
+    assert "total_score" in data["ranked_candidates"][0]
+    assert "expected_return_bucket" in data["ranked_candidates"][0]
+    assert "model_version" in data["ranked_candidates"][0]
 
 
 def test_dashboard_loads_operating_history(tmp_path):
@@ -67,3 +70,4 @@ def test_dashboard_loads_operating_history(tmp_path):
     assert any(row["ticker"] == "NOVA" for row in data["recommendation_history"])
     assert data["audit_trades"][0]["close_return_pct"] == "12.5"
     assert data["performance_report"]["trade_count"] == 1
+    assert data["performance_report"]["sample_status"] == "insufficient sample size"

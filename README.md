@@ -120,19 +120,21 @@ Use the `Run Center` tab to run the local workflow from the web UI:
 - register/check the 5-minute local monitor tasks
 - run the full sample backtest in one click
 
-## Dawnstrike Formula
+## Dawnstrike Signal Engine v3
 
-The scanner uses a versioned research equation, currently `dawnstrike-v2.0`, that combines gap behavior, liquidity thrust, float rotation, range control, catalyst/squeeze pressure, execution quality, data quality, and risk penalties. See `docs\FORMULA.md`.
+The scanner uses `dawnstrike-signal-engine-v3`, an explainable research model
+that emits total, explosive, tradability, catalyst, risk, data-quality,
+expected-return-bucket, confidence-bucket, source-lineage, model-version, and
+config-hash fields. See `docs\SIGNAL_ENGINE_V3.md` and `docs\FORMULA.md`.
 
 ## Premarket Intelligence Layer
 
-Every output row now includes a simple action label, catalyst tier, premarket
-structure read, float-rotation label, confirmation-first opening plan, data
-confidence score, data warnings, and probability fields. Labels include
-`🟢 Opening Breakout Candidate`, `🔥 Momentum Continuation Watch`,
-`👀 Watch Only`, `🟡 Needs Confirmation`, and
-`❌ Avoid / Gap-and-Crap Risk`. Dawnstrike does not generate blind premarket
-buy-now calls. See `docs\PREMARKET_INTELLIGENCE.md`.
+Every output row includes a simple research label, catalyst category, premarket
+structure read, float-rotation label, confirmation-first review levels, data
+confidence score, data warnings, source confidence, and probability fields.
+Labels are limited to `WATCH`, `BREAKOUT WATCH`, `HIGH VOLATILITY WATCH`,
+`CAUTION`, `AVOID`, `INVALIDATED`, `THESIS BROKEN`, and `OUTCOME NEEDED`.
+See `docs\PREMARKET_INTELLIGENCE.md`.
 
 ## Expectancy Model
 

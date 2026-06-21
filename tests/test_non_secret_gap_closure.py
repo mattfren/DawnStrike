@@ -232,6 +232,9 @@ def test_performance_report_includes_compounded_equity_curve():
 
     assert curve[-1]["equity"] == 0.99
     assert report["cumulative_close_return_note"].startswith("Simple sum")
+    assert report["sample_status"] == "insufficient sample size"
+    assert report["setup_bucket_returns"][0]["sample_size"] == 2
+    assert report["outlier_dependency_warning"] == "insufficient sample size."
 
 
 def test_scheduler_calendar_holiday_early_close_and_failure_health(tmp_path):

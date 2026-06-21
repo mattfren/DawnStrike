@@ -1,60 +1,51 @@
 # Premarket Intelligence Layer
 
-Dawnstrike now classifies each scanned ticker into one operational research
-action. The label is not a broker order, trading instruction, or proof of
-future return. It is a paper-research workflow cue for what to review after the
-open.
+Dawnstrike classifies each ticker as a research/watchlist cue, not an order or
+profit claim. The allowed labels are:
 
-## Action Labels
+- `WATCH`
+- `BREAKOUT WATCH`
+- `HIGH VOLATILITY WATCH`
+- `CAUTION`
+- `AVOID`
+- `INVALIDATED`
+- `THESIS BROKEN`
+- `OUTCOME NEEDED`
 
-Every candidate row includes exactly one primary action:
+The classifier combines the Signal Engine v3 score, catalyst category, premarket
+structure, float rotation, liquidity, spread, price band, halt status, dilution
+flags, stale-source flags, and source confidence.
 
-- `🟢 Opening Breakout Candidate`
-- `🔥 Momentum Continuation Watch`
-- `👀 Watch Only`
-- `🟡 Needs Confirmation`
-- `❌ Avoid / Gap-and-Crap Risk`
+## Catalyst Categories
 
-The classifier does not rely on score alone. It combines catalyst tier, gap,
-premarket volume, dollar volume, float rotation, premarket high/low structure,
-spread/liquidity risk, price band, halt risk, and offering/dilution flags when
-available.
+Rows include `catalyst_tier`, `catalyst_category`, `catalyst_summary`,
+`catalyst_confidence`, and `catalyst_risk_flags`.
 
-## Catalyst Tiers
+- `confirmed_catalyst`: FDA/clinical, M&A, earnings, major contract, or other
+  concrete event language.
+- `soft_catalyst`: partnerships, product launches, guidance, analyst actions, or
+  vague corporate updates.
+- `sympathy_momentum`: theme or social momentum such as AI, semis, nuclear,
+  crypto, defense, quantum, robotics, or biotech.
+- `no_clear_catalyst`: no verified headline or only low-quality PR context.
+- `dilution_risk`: offering, shelf, ATM, warrant, registered direct, or private
+  placement language.
+- `legal/regulatory_risk`: investigation, lawsuit, delisting, regulatory action,
+  subpoena, or clinical-hold language.
 
-- Tier A: FDA approval or fast-track style catalyst, positive clinical data,
-  acquisition/buyout, major earnings beat, major contract, or strategic
-  investment.
-- Tier B: partnership, contract, supply agreement, product launch, guidance
-  update, analyst upgrade, expansion, or collaboration.
-- Tier C: vague update, social hype, recycled news, paid-promotion style PR, or
-  no clear catalyst.
+## Plan Fields
 
-Rows include `catalyst_tier`, `catalyst_summary`, `catalyst_confidence`, and
-`catalyst_risk_flags`.
-
-## Opening Plan
-
-Each row includes:
-
-- `entry_trigger`
-- `confirmation_needed`
-- `invalidation`
-- `target_1`
-- `target_2`
-- `risk_level`
-- `why_this_matters`
-- `do_not_buy_if`
-
-The plan is confirmation-first. Weak setups output `No trade unless structure
-improves.` Strong setups use levels above the premarket high or opening-range
-confirmation. The code does not generate casual premarket buy-now language.
+Each row includes `entry_trigger`, `confirmation_needed`, `invalidation`,
+`target_1`, `target_2`, `risk_level`, `why_this_matters`, and
+`do_not_enter_if`. These fields are operator review levels only. Weak or unsafe
+setups are labeled `AVOID` and say manual review only.
 
 ## Data Quality
 
-Rows also include `data_confidence_score`, `data_warnings`, and `field_sources`.
-Missing float, catalyst, VWAP, relative volume, or enrichment fields do not
-crash the scan. Fixture/sample/stale data is explicitly flagged.
+Rows include `data_confidence_score`, `data_warnings`, `field_sources`,
+`source_lineage`, `source_confidence`, and `stale_data_flag`. Missing float,
+short interest, catalyst, relative volume, VWAP, SEC risk, or halt enrichment
+lowers confidence instead of being fabricated.
 
 ## Outcome Evaluation
 
@@ -67,15 +58,6 @@ py -m intraday_scanner.cli evaluate-intelligence-outcomes `
   --persist
 ```
 
-The evaluator joins saved recommendations to outcome prices and records:
-
-- breakout trigger result
-- max gain after trigger
-- max drawdown after trigger
-- stop hit
-- target 1/2 hit
-- actual outcome
-
-If enough similar historical samples exist, future scans show historical win
-rate, average max gain, average drawdown, and similar setup count. If not, the
-fields say `Not enough history yet`.
+If fewer than 20 similar historical samples exist, probability fields show
+`insufficient sample size`. With enough persisted outcomes, Dawnstrike reports
+historical priors only and still labels uncertainty.

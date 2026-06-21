@@ -57,7 +57,8 @@ py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --
 Run source doctor during actual premarket hours when possible. The doctor lists
 enabled sources, classifies each as candidate, universe, or enrichment, checks
 whether the local inbox has files, safely tests enabled public table sources,
-and writes:
+prints candidate count, source confidence, stale-data status, rejection reasons,
+and the next action, then writes:
 
 ```text
 outputs\source_doctor\source_doctor.json
@@ -125,3 +126,8 @@ scripts\run_web_telegram_daemon.bat
 
 SQLite persists fetch runs, source health, raw artifacts, normalized rows, scan
 runs, and notification attempts.
+
+Every normalized web row carries source, source URL when available, extraction
+mode, source timestamp, extraction timestamp, stale flag, and source confidence.
+Duplicate ticker rows are reconciled by quality/source priority and annotated
+with source count, preferred source, merge reason, and conflict flags.

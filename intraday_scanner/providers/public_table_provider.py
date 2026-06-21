@@ -213,6 +213,8 @@ def ingest_public_table(
         "shadow_mode": True,
         "paid_data": False,
         "coverage_warning": "url_table_unverified",
+        "started_at": fetch.started_at,
+        "completed_at": fetch.completed_at,
     }
     write_json(output_dir / "extraction_summary.json", summary)
     if persist and store is not None:
@@ -440,6 +442,7 @@ def _normalize_row(
     optional_missing = sum(
         value is None for value in (float_shares, market_cap, short_float)
     ) + 3
+    source_confidence = max(20, 100 - optional_missing * 10)
     normalized = {
         "ticker": ticker,
         "company": company_hint or ticker,
@@ -464,18 +467,28 @@ def _normalize_row(
         "recent_offering": False,
         "reverse_split_90d": False,
         "source": source_name,
+        "source_url": source_url,
+        "extraction_mode": "public_table_url",
+        "source_timestamp": imported_at,
+        "extracted_at": imported_at,
+        "stale_data_flag": False,
+        "source_confidence": source_confidence,
+        "source_count": 1,
+        "score_consensus": "single_source",
+        "conflict_flags": "",
+        "preferred_source": source_name,
+        "row_merge_reason": "single_source",
         "as_of_timestamp": imported_at,
         "data_source_kind": "web_url",
         "shadow_mode": True,
         "paid_data": False,
         "fixture_only": False,
         "manual_uploaded_data": False,
-        "data_quality_score": max(20, 100 - optional_missing * 10),
+        "data_quality_score": source_confidence,
         "coverage_warning": ";".join(coverage),
         "missing_enrichment_count": optional_missing,
         "raw_file_path": raw_file_path,
         "imported_at": imported_at,
-        "source_url": source_url,
     }
     if relative_volume is not None:
         normalized["relative_volume"] = relative_volume

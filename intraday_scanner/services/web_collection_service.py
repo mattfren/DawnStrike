@@ -7,6 +7,7 @@ import json
 import shutil
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -190,7 +191,7 @@ def web_auto_collect(
     blocked_source_count = 0
 
     local_result = _collect_local_inbox(config, output_dir, store if persist else None, persist)
-    source_attempts.append(local_result["summary"])
+    source_attempts.append(_annotate_source_attempt(local_result["summary"]))
     rows.extend(local_result["rows"])
     if local_result["summary"]["status"] not in {"success", "empty"}:
         failures.append(local_result["summary"])
@@ -219,7 +220,7 @@ def web_auto_collect(
             )
         else:
             continue
-        source_attempts.append(result)
+        source_attempts.append(_annotate_source_attempt(result))
         if result.get("status") == "success":
             rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
         else:
@@ -249,6 +250,7 @@ def web_auto_collect(
         "sources_succeeded": sum(1 for item in source_attempts if item.get("status") == "success"),
         "rows_extracted": sum(int(item.get("rows_extracted") or 0) for item in source_attempts),
         "rows_normalized": sum(int(item.get("rows_normalized") or 0) for item in source_attempts),
+        "rows_rejected": sum(int(item.get("rows_rejected") or 0) for item in source_attempts),
         "candidate_count": len(deduped),
         "source_failures": len(failures),
         "top_failure_reason": _top_failure_reason(failures, source_attempts),
@@ -267,6 +269,7 @@ def web_auto_collect(
         "sec_summary": _compact_summary(sec_summary),
         "snapshot_path": str(snapshot_path),
     }
+    source_summary.update(_aggregate_source_health(source_summary))
     quality = _data_quality_report(deduped, failures, source_summary)
     write_json(output_dir / "source_summary.json", source_summary)
     write_json(output_dir / "data_quality_report.json", quality)
@@ -509,12 +512,25 @@ def web_source_doctor(
     for source in config.sources:
         rows.append(_doctor_source(source, config, output_dir))
     normalization_debug = _write_source_doctor_debug(output_dir, rows)
+    source_operability = source_operability_status(config)
+    aggregate = _aggregate_doctor_health(rows)
     result = {
         "status": "complete",
         "created_at": utc_now_iso(),
         "config_path": str(config_path),
         "browser_extractor": browser_extractor_status(),
-        "source_operability": source_operability_status(config),
+        "source_operability": source_operability,
+        "enabled_candidate_sources": source_operability["enabled_candidate_sources"],
+        "enabled_enrichment_sources": source_operability["enabled_enrichment_sources"],
+        "enabled_universe_sources": source_operability["enabled_universe_sources"],
+        "rows_extracted": aggregate["rows_extracted"],
+        "rows_normalized": aggregate["rows_normalized"],
+        "rows_rejected": aggregate["rows_rejected"],
+        "candidate_count": aggregate["candidate_count"],
+        "source_confidence": aggregate["source_confidence"],
+        "stale_data_status": aggregate["stale_data_status"],
+        "top_rejection_reasons": aggregate["top_rejection_reasons"],
+        "next_action": aggregate["next_action"],
         "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "sources": rows,
     }
@@ -710,6 +726,9 @@ def _doctor_source(
         "status": "disabled" if not source.enabled else "not_attempted",
         "rows_extracted": 0,
         "rows_normalized": 0,
+        "rows_rejected": 0,
+        "source_confidence": 0.0,
+        "stale_data_status": "not_checked",
         "failure_reason": "",
         "next_action": _next_action_for_source(source, classification),
     }
@@ -728,6 +747,9 @@ def _doctor_source(
             "status": "ready" if files else "empty",
             "rows_extracted": len(files),
             "rows_normalized": 0,
+            "rows_rejected": 0,
+            "source_confidence": 65.0 if files else 0.0,
+            "stale_data_status": "ready" if files else "no_data",
             "failure_reason": "" if files else "local inbox is empty",
             "path": str(inbox),
         }
@@ -767,7 +789,7 @@ def _doctor_source(
 
 def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     reason = str(result.get("failure_reason") or result.get("reason") or "")
-    return {
+    return _annotate_source_attempt({
         **base,
         "attempted": True,
         "status": str(result.get("status") or "unknown"),
@@ -776,9 +798,11 @@ def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[st
         "rows_rejected": int(result.get("rows_rejected") or 0),
         "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
         "paths": dict(result.get("paths") or {}),
+        "started_at": str(result.get("started_at") or ""),
+        "completed_at": str(result.get("completed_at") or ""),
         "failure_reason": reason,
         "next_action": _next_action_for_result(base, result, reason),
-    }
+    })
 
 
 def _write_source_doctor_debug(
@@ -1059,7 +1083,7 @@ def _action_label(row: dict[str, Any]) -> str:
     if "halt" in risk or "offering" in risk or score < 50:
         return "CAUTION"
     if score >= 82:
-        return "BREAKOUT TRIGGER / WATCH"
+        return "BREAKOUT WATCH"
     if score >= 70:
         return "WATCH"
     return "HIGH VOLATILITY WATCH"
@@ -1217,20 +1241,67 @@ def _write_dynamic_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_ticker: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
         if not ticker:
             continue
-        current = by_ticker.get(ticker)
-        candidate = dict(row, ticker=ticker)
-        if current is None or _dedupe_rank(candidate) > _dedupe_rank(current):
-            by_ticker[ticker] = dict(row, ticker=ticker)
+        grouped.setdefault(ticker, []).append(dict(row, ticker=ticker))
+    selected_rows: list[dict[str, Any]] = []
+    for ticker, ticker_rows in grouped.items():
+        selected = max(ticker_rows, key=_dedupe_rank)
+        sources = sorted({str(row.get("source") or "unknown") for row in ticker_rows})
+        conflicts = _conflict_flags(ticker_rows)
+        selected_rows.append(
+            dict(
+                selected,
+                ticker=ticker,
+                source_count=len(sources),
+                score_consensus=(
+                    "multi_source_clean"
+                    if len(sources) > 1 and not conflicts
+                    else "multi_source_conflict"
+                    if len(sources) > 1
+                    else "single_source"
+                ),
+                conflict_flags=";".join(conflicts),
+                preferred_source=str(selected.get("source") or ""),
+                row_merge_reason=(
+                    "highest_quality_source" if len(sources) > 1 else "single_source"
+                ),
+            )
+        )
     return sorted(
-        by_ticker.values(),
+        selected_rows,
         key=lambda row: _float(row.get("dollar_volume")),
         reverse=True,
     )
+
+
+def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:
+    if len(rows) <= 1:
+        return []
+    flags: list[str] = []
+    prices = [
+        _float(row.get("premarket_price"))
+        for row in rows
+        if _float(row.get("premarket_price"))
+    ]
+    gaps = [_float(row.get("gap_pct")) for row in rows if row.get("gap_pct") not in {None, ""}]
+    volumes = [
+        _float(row.get("premarket_volume")) for row in rows if _float(row.get("premarket_volume"))
+    ]
+    if len(prices) > 1 and min(prices) > 0 and ((max(prices) - min(prices)) / min(prices)) > 0.03:
+        flags.append("price_conflict")
+    if len(gaps) > 1 and abs(max(gaps) - min(gaps)) > 10:
+        flags.append("gap_conflict")
+    if (
+        len(volumes) > 1
+        and min(volumes) > 0
+        and ((max(volumes) - min(volumes)) / min(volumes)) > 0.5
+    ):
+        flags.append("volume_conflict")
+    return flags
 
 
 def _dedupe_rank(row: dict[str, Any]) -> tuple[int, int, str]:
@@ -1262,9 +1333,146 @@ def _data_quality_report(
         "warnings": warnings[:50],
         "source_failures": failures,
         "top_failure_reason": source_summary.get("top_failure_reason", ""),
+        "source_confidence": source_summary.get("source_confidence", 0),
+        "stale_data_status": source_summary.get("stale_data_status", "unknown"),
         "rejection_reason_counts": source_summary.get("rejection_reason_counts", {}),
         "summary": source_summary,
     }
+
+
+def _annotate_source_attempt(summary: dict[str, Any]) -> dict[str, Any]:
+    annotated = dict(summary)
+    annotated.setdefault("rows_extracted", 0)
+    annotated.setdefault("rows_normalized", 0)
+    annotated.setdefault("rows_rejected", 0)
+    annotated["source_confidence"] = _source_confidence_for_attempt(annotated)
+    annotated["stale_data_status"] = _stale_status_for_attempt(annotated)
+    return annotated
+
+
+def _source_confidence_for_attempt(summary: dict[str, Any]) -> float:
+    status = str(summary.get("status") or "")
+    normalized = int(summary.get("rows_normalized") or 0)
+    extracted = int(summary.get("rows_extracted") or 0)
+    rejected = int(summary.get("rows_rejected") or 0)
+    if status in {"disabled", "empty", "failed", "no_valid_rows", "no_data"}:
+        return 0.0
+    if normalized <= 0:
+        return 20.0 if extracted else 0.0
+    rejection_penalty = min(rejected * 4, 30)
+    extraction_bonus = min(normalized * 3, 20)
+    base = 65 + extraction_bonus - rejection_penalty
+    if str(summary.get("data_source_kind")) in {"web_url", "browser_url"}:
+        base -= 5
+    return round(max(0.0, min(100.0, base)), 2)
+
+
+def _stale_status_for_attempt(summary: dict[str, Any]) -> str:
+    if str(summary.get("status") or "") in {"disabled", "empty"}:
+        return "no_data"
+    timestamp = str(
+        summary.get("completed_at")
+        or summary.get("created_at")
+        or summary.get("started_at")
+        or ""
+    )
+    if not timestamp:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(tz=timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return "stale" if age_seconds > 18 * 60 * 60 else "fresh"
+
+
+def _aggregate_source_health(source_summary: dict[str, Any]) -> dict[str, Any]:
+    attempts = [_annotate_source_attempt(dict(item)) for item in source_summary.get("attempts", [])]
+    successful = [
+        float(item.get("source_confidence") or 0)
+        for item in attempts
+        if str(item.get("status") or "") == "success"
+    ]
+    confidence = round(sum(successful) / len(successful), 2) if successful else 0.0
+    stale_statuses = {str(item.get("stale_data_status") or "unknown") for item in attempts}
+    if "fresh" in stale_statuses:
+        stale_data_status = "fresh"
+    elif "stale" in stale_statuses:
+        stale_data_status = "stale"
+    elif attempts:
+        stale_data_status = "no_data"
+    else:
+        stale_data_status = "unknown"
+    return {
+        "attempts": attempts,
+        "source_confidence": confidence,
+        "stale_data_status": stale_data_status,
+        "next_action": _next_action_for_summary(source_summary, confidence),
+    }
+
+
+def _aggregate_doctor_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rejection_counts: dict[str, int] = {}
+    for row in rows:
+        for reason, count in dict(row.get("rejection_reason_counts") or {}).items():
+            rejection_counts[str(reason)] = rejection_counts.get(str(reason), 0) + int(count or 0)
+    candidate_rows = [row for row in rows if row.get("classification") == "candidate"]
+    successful = [
+        float(row.get("source_confidence") or 0)
+        for row in candidate_rows
+        if str(row.get("status") or "") == "success"
+    ]
+    confidence = round(sum(successful) / len(successful), 2) if successful else 0.0
+    normalized = sum(int(row.get("rows_normalized") or 0) for row in candidate_rows)
+    top_reasons = dict(
+        sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    )
+    return {
+        "rows_extracted": sum(int(row.get("rows_extracted") or 0) for row in candidate_rows),
+        "rows_normalized": normalized,
+        "rows_rejected": sum(int(row.get("rows_rejected") or 0) for row in candidate_rows),
+        "candidate_count": normalized,
+        "source_confidence": confidence,
+        "stale_data_status": _doctor_stale_status(candidate_rows),
+        "top_rejection_reasons": top_reasons,
+        "next_action": _next_action_for_doctor(candidate_rows, normalized, top_reasons),
+    }
+
+
+def _doctor_stale_status(rows: list[dict[str, Any]]) -> str:
+    statuses = {str(row.get("stale_data_status") or "unknown") for row in rows}
+    if "fresh" in statuses:
+        return "fresh"
+    if "stale" in statuses:
+        return "stale"
+    if rows:
+        return "no_data"
+    return "unknown"
+
+
+def _next_action_for_summary(source_summary: dict[str, Any], confidence: float) -> str:
+    if int(source_summary.get("candidate_count") or 0) > 0 and confidence >= 50:
+        return "Run scan, review top picks, then monitor manually every 5 minutes."
+    if source_summary.get("only_universe_or_enrichment_enabled"):
+        return "Enable a candidate source or drop a CSV into data\\inbox\\screener."
+    return "Try again during premarket or drop CSV into data\\inbox\\screener."
+
+
+def _next_action_for_doctor(
+    rows: list[dict[str, Any]],
+    normalized: int,
+    top_reasons: dict[str, int],
+) -> str:
+    if normalized > 0:
+        return "At least one candidate source normalizes. Run web-auto-collect next."
+    if top_reasons:
+        reason = next(iter(top_reasons))
+        return f"Fix source normalization or input coverage for {reason}."
+    if not rows:
+        return "Enable a candidate source or local inbox."
+    return "Try again during premarket or drop CSV into data\\inbox\\screener."
 
 
 def _unknown_field_counts(source_attempts: list[dict[str, Any]]) -> dict[str, int]:

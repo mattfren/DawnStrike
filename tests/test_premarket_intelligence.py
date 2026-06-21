@@ -9,7 +9,9 @@ from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot, score_universe
 from intraday_scanner.services.premarket_intelligence import (
     ACTION_AVOID,
+    ACTION_NEEDS_CONFIRMATION,
     ACTION_OPENING_BREAKOUT,
+    ACTION_WATCH_ONLY,
     classify_catalyst,
     evaluate_intelligence_outcomes,
     probability_summary,
@@ -32,8 +34,10 @@ def test_catalyst_tiering_keywords_and_risk_flags():
     promoted = classify_catalyst("Sponsored paid promotion social media rumor")
 
     assert promoted.catalyst_tier == "C"
+    assert promoted.catalyst_category == "sympathy_momentum"
     assert "paid_promotion_style" in promoted.catalyst_risk_flags
     assert classify_catalyst("", has_news=False).catalyst_summary == "No clear catalyst"
+    assert classify_catalyst("ATM offering with warrants").catalyst_category == "dilution_risk"
 
 
 def test_trade_classification_assigns_action_to_every_ticker():
@@ -46,7 +50,7 @@ def test_trade_classification_assigns_action_to_every_ticker():
     assert rows["NOVA"]["action"] == ACTION_OPENING_BREAKOUT
     assert rows["HALT"]["action"] == ACTION_AVOID
     assert rows["OFFER"]["action"] == ACTION_AVOID
-    assert rows["MOON"]["action"] == "👀 Watch Only"
+    assert rows["MOON"]["action"] == ACTION_WATCH_ONLY
 
 
 def test_float_rotation_structure_and_liquidity_risk_fields():
@@ -59,7 +63,7 @@ def test_float_rotation_structure_and_liquidity_risk_fields():
     assert nova["premarket_structure"] == "strong"
     assert "wide_spread" in wide["risk_flags"]
     assert wide["premarket_structure"] == "mixed"
-    assert wide["action"] == "🟡 Needs Confirmation"
+    assert wide["action"] == ACTION_NEEDS_CONFIRMATION
 
 
 def test_opening_plan_never_blind_buys_and_weak_setups_are_downgraded():
@@ -68,13 +72,13 @@ def test_opening_plan_never_blind_buys_and_weak_setups_are_downgraded():
     thin = score_snapshot(rows["THIN"], ScannerConfig()).to_dict()
 
     combined = " ".join(
-        str(nova.get(key, "")) for key in ("entry_trigger", "why_this_matters", "do_not_buy_if")
+        str(nova.get(key, "")) for key in ("entry_trigger", "why_this_matters", "do_not_enter_if")
     ).lower()
     assert "buy now" not in combined
     assert "premarket buy" not in combined
     assert "confirmation" in str(nova["entry_trigger"]).lower()
     assert thin["action"] == ACTION_AVOID
-    assert thin["entry_trigger"] == "No trade unless structure improves"
+    assert thin["entry_trigger"] == "Manual review only; setup is not eligible"
 
 
 def test_missing_enrichment_fallback_and_data_quality_warnings():
@@ -108,14 +112,14 @@ def test_telegram_watchlist_uses_simple_emoji_operational_format():
         source_summary={"attempts": []},
     )
 
-    assert "🚀 DAWNSTRIKE WATCHLIST" in body
-    assert "Data: ✅ 4 candidates" in body
-    assert "1. 🟢 NOVA — Opening Breakout Candidate" in body
-    assert "Catalyst: Tier A" in body
-    assert "Structure: Strong" in body
-    assert "Plan: Trade only over" in body
-    assert "Targets:" in body
-    assert "Avoid if:" in body
+    assert "🚀 Dawnstrike Watchlist" in body
+    assert "1) NOVA" in body
+    assert "🎯" in body
+    assert "🛑" in body
+    assert "🚫 Avoid:" in body
+    assert "Plan:" not in body
+    assert "Targets:" not in body
+    assert "Avoid if:" not in body
     assert "buy now" not in body.lower()
 
 
@@ -137,7 +141,7 @@ def test_probability_summary_does_not_fake_sparse_history():
         min_samples=2,
     )
 
-    assert sparse["historical_win_rate"] == "Not enough history yet"
+    assert sparse["historical_win_rate"] == "insufficient sample size"
     assert enough["historical_win_rate"] == 50.0
     assert enough["similar_setup_count"] == 2
 

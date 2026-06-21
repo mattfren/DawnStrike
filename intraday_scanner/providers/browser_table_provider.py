@@ -130,6 +130,10 @@ def ingest_browser_table(
     )
     for row in rows:
         row["data_source_kind"] = "browser_url"
+        row["extraction_mode"] = "browser_url"
+        row["source_url"] = source.url or source.fixture_path
+        row["preferred_source"] = source.name
+        row["source_confidence"] = max(20.0, float(row.get("source_confidence") or 60) - 5)
         warning = str(row.get("coverage_warning") or "")
         row["coverage_warning"] = ";".join(
             part

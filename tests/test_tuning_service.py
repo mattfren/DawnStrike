@@ -14,8 +14,14 @@ def test_strategy_tuning_runs_on_fixtures_and_writes_outputs(tmp_path):
     paths = write_tuning_outputs(report, tmp_path)
 
     assert report["fixture_only"] is True
+    assert report["mode"] == "fixture_only"
+    assert report["walk_forward_mode"] == "blocked_insufficient_real_outcomes"
+    assert report["overfit_risk"] == "high"
+    assert "20+ real shadow days" in report["recommendation"]
     assert report["scenario_count"] >= 3
     assert report["best"]["scenario"]
     assert "top_3_close_return_pct" in report["best"]
+    assert "objective_score" in report["best"]
+    assert report["best"]["overfit_risk"] == "high"
     assert paths["csv"].exists()
     assert paths["summary"].exists()

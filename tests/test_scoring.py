@@ -8,13 +8,21 @@ def test_scoring_ranks_expected_ticker_first():
     result = score_universe(rows, ScannerConfig())
     assert result.ranked_candidates[0].ticker == "NOVA"
     assert result.ranked_candidates[0].score_breakdown["liquidity_thrust"] > 0
-    assert result.ranked_candidates[0].equation_version == "dawnstrike-v2.0"
+    assert result.ranked_candidates[0].equation_version == "dawnstrike-signal-engine-v3"
     assert result.ranked_candidates[0].setup_grade in {"A+", "A", "B", "C"}
     assert result.ranked_candidates[0].float_rotation_pct > 0
     assert (
         result.ranked_candidates[0].breakout_trigger
         > result.ranked_candidates[0].snapshot.premarket_high
     )
+    row = result.ranked_candidates[0].to_dict()
+    assert row["total_score"] == row["score"]
+    assert row["explosive_score"] != ""
+    assert row["tradability_score"] != ""
+    assert row["expected_return_bucket"] in {"HIGH_UPSIDE", "MEDIUM_UPSIDE", "LOW_CONFIDENCE"}
+    assert row["confidence_bucket"] in {"LOW", "MEDIUM", "HIGH"}
+    assert row["model_version"] == "dawnstrike-signal-engine-v3"
+    assert len(row["config_hash"]) == 12
 
 
 def test_scoring_edge_cases_are_flagged():
@@ -56,7 +64,7 @@ def test_no_previous_close_and_zero_volume_are_safe():
     assert scored.gap_pct == 0
     assert "no_previous_close" in scored.avoid_reasons
     assert "zero_volume" in scored.risk_flags
-    assert scored.data_quality_score < 8
+    assert scored.data_quality_score < 65
 
 
 def test_supplied_gap_pct_is_used_when_previous_close_missing():
@@ -88,3 +96,15 @@ def test_supplied_gap_pct_is_used_when_previous_close_missing():
     assert scored.gap_pct == 42.0
     assert "no_previous_close" in scored.risk_flags
     assert "no_previous_close" not in scored.avoid_reasons
+
+
+def test_signal_engine_v3_penalizes_unknown_float_without_fabricating_rotation():
+    row = read_snapshot_csv("sample_data/premarket_snapshot_sample.csv")[0]
+    known = score_snapshot(row, ScannerConfig())
+    unknown = score_snapshot(type(row)(**{**row.to_dict(), "float_shares": None}), ScannerConfig())
+
+    assert known.score_breakdown["float_rotation"] > 0
+    assert unknown.float_rotation_pct == 0
+    assert unknown.score_breakdown["float_rotation"] == 0
+    assert "unknown_float" in unknown.risk_flags
+    assert unknown.score < known.score

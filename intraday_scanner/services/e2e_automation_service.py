@@ -1182,7 +1182,7 @@ def _latest_outcome_file(path: Path) -> Path | None:
     files = [
         item
         for item in _pending_files(path)
-        if _csv_has_data_rows(item)
+        if _csv_has_completed_outcome_rows(item)
     ]
     return _latest_file(files)
 
@@ -1194,6 +1194,37 @@ def _csv_has_data_rows(path: Path) -> bool:
     except OSError:
         return False
     return any(any(str(value or "").strip() for value in row.values()) for row in rows)
+
+
+def _csv_has_completed_outcome_rows(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return False
+    for row in rows:
+        if not any(str(value or "").strip() for value in row.values()):
+            continue
+        has_required = bool(
+            str(row.get("ticker") or "").strip()
+            and str(row.get("entry_time") or "").strip()
+            and str(row.get("entry_price") or "").strip()
+        )
+        has_outcome_price = any(
+            str(row.get(key) or "").strip()
+            for key in (
+                "price_1m",
+                "price_5m",
+                "price_15m",
+                "lunch_price",
+                "close_price",
+                "high_after_entry",
+                "low_after_entry",
+            )
+        )
+        if has_required and has_outcome_price:
+            return True
+    return False
 
 
 def _ai_normalizer(config: AutomationConfig) -> str:

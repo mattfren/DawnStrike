@@ -16,6 +16,11 @@ from intraday_scanner.services.audit_service import calculate_audit
 TUNING_COLUMNS = [
     "scenario",
     "fixture_only",
+    "mode",
+    "sample_size",
+    "data_quality_score",
+    "outlier_dependence_score",
+    "overfit_risk",
     "top_1_close_return_pct",
     "top_3_close_return_pct",
     "top_5_close_return_pct",
@@ -30,6 +35,7 @@ TUNING_COLUMNS = [
     "avg_close_return_pct",
     "median_close_return_pct",
     "max_drawdown_pct",
+    "objective_score",
     "best_pick",
     "worst_pick",
     "params_json",
@@ -77,15 +83,25 @@ def run_strategy_tuning(
     sorted_rows = sorted(
         rows,
         key=lambda row: (
-            _number(row["top_3_close_return_pct"]),
-            _number(row["top_3_high_return_pct"]),
-            _number(row["hit_rate_close_pct"]),
+            _number(row["objective_score"]),
+            _number(row["median_close_return_pct"]),
+            -abs(_number(row["max_drawdown_pct"])),
         ),
         reverse=True,
     )
     return {
         "created_at": utc_now_iso(),
         "fixture_only": fixture_only,
+        "mode": "fixture_only" if fixture_only else "historical_date_split",
+        "walk_forward_mode": (
+            "blocked_insufficient_real_outcomes" if fixture_only else "date_split_available"
+        ),
+        "overfit_risk": "high" if fixture_only else "medium",
+        "recommendation": (
+            "fixture-only result; collect 20+ real shadow days before changing production weights"
+            if fixture_only
+            else "review train/test stability before changing production weights"
+        ),
         "scenario_count": len(sorted_rows),
         "ranked_results": sorted_rows,
         "best": sorted_rows[0] if sorted_rows else {},
@@ -112,6 +128,11 @@ def _scenario_row(
     return {
         "scenario": scenario.name,
         "fixture_only": fixture_only,
+        "mode": "fixture_only" if fixture_only else "historical_date_split",
+        "sample_size": len(trades),
+        "data_quality_score": _data_quality_score(trades),
+        "outlier_dependence_score": _outlier_dependence_score(trades),
+        "overfit_risk": "high" if fixture_only or len(trades) < 20 else "medium",
         "top_1_close_return_pct": _portfolio(trades, "close_return_pct", 1),
         "top_3_close_return_pct": _portfolio(trades, "close_return_pct", 3),
         "top_5_close_return_pct": _portfolio(trades, "close_return_pct", 5),
@@ -126,6 +147,7 @@ def _scenario_row(
         "avg_close_return_pct": _average(trades, "close_return_pct"),
         "median_close_return_pct": _median(trades, "close_return_pct"),
         "max_drawdown_pct": _minimum(trades, "low_drawdown_pct"),
+        "objective_score": _objective_score(trades),
         "best_pick": _pick(trades, "close_return_pct", best=True),
         "worst_pick": _pick(trades, "close_return_pct", best=False),
         "params_json": json.dumps(scenario.overrides, sort_keys=True),
@@ -171,6 +193,39 @@ def _pick(rows: list[dict[str, Any]], key: str, *, best: bool) -> str:
         rows, key=lambda item: _number(item.get(key))
     )
     return f"{row.get('ticker')}:{row.get(key)}"
+
+
+def _objective_score(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    median_close = _median(rows, "close_return_pct")
+    drawdown = abs(_minimum(rows, "low_drawdown_pct"))
+    hit_rate = _hit_rate(rows, "close_return_pct")
+    outlier = _outlier_dependence_score(rows)
+    sample_bonus = min(len(rows), 20) / 20
+    quality = _data_quality_score(rows) / 100
+    score = (median_close * 2.0) + (hit_rate * 0.15) - (drawdown * 0.5) - (outlier * 0.25)
+    score += sample_bonus * 5 + quality * 5
+    return round(score, 2)
+
+
+def _data_quality_score(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    audited = sum(1 for row in rows if row.get("audit_status", "audited") == "audited")
+    with_close = sum(1 for row in rows if row.get("close_return_pct") not in {None, ""})
+    with_drawdown = sum(1 for row in rows if row.get("low_drawdown_pct") not in {None, ""})
+    return round(((audited + with_close + with_drawdown) / (len(rows) * 3)) * 100, 2)
+
+
+def _outlier_dependence_score(rows: list[dict[str, Any]]) -> float:
+    values = [_number(row.get("close_return_pct")) for row in rows]
+    if len(values) < 3:
+        return 100.0
+    total = abs(sum(values))
+    if total <= 0.01:
+        return 0.0
+    return round((max(abs(value) for value in values) / total) * 100, 2)
 
 
 def _number(value: Any) -> float:

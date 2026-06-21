@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.models import SnapshotRow
 
-FORMULA_VERSION = "dawnstrike-v2.0"
+FORMULA_VERSION = "dawnstrike-signal-engine-v3"
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def evaluate_formula(row: SnapshotRow, config: ScannerConfig) -> FormulaResult:
         "squeeze_catalyst": _squeeze_catalyst_score(row) * config.score_weight_catalyst,
         "execution_quality": _execution_quality_score(row, config)
         * config.score_weight_execution,
-        "data_quality": data_quality_score * config.score_weight_data_quality,
+        "data_quality": (data_quality_score / 100) * 8 * config.score_weight_data_quality,
     }
     risk_penalty = (
         _risk_penalty(row, gap_pct, dollar_volume, data_quality_score, config)
@@ -129,7 +129,7 @@ def _float_rotation_pct(row: SnapshotRow) -> float:
 
 def _float_rotation_score(float_rotation_pct: float, float_shares: float | None) -> float:
     if float_shares is None or float_shares <= 0:
-        return 3.0
+        return 0.0
     return _clamp((float_rotation_pct / 8.0) * 14, 0, 14)
 
 
@@ -152,7 +152,7 @@ def _squeeze_catalyst_score(row: SnapshotRow) -> float:
     short_score = _clamp(((row.short_float_pct or 0) / 30) * 5, 0, 5)
     scarcity_score = 0.0
     if row.float_shares is None or row.float_shares <= 0:
-        scarcity_score = 0.75
+        scarcity_score = 0.0
     elif row.float_shares <= 20_000_000:
         scarcity_score = 3.0
     elif row.float_shares <= 50_000_000:
@@ -179,7 +179,7 @@ def _data_quality_score(row: SnapshotRow) -> float:
         row.short_float_pct is not None,
         bool(row.as_of_timestamp),
     ]
-    return (sum(1 for passed in checks if passed) / len(checks)) * 8
+    return (sum(1 for passed in checks if passed) / len(checks)) * 100
 
 
 def _risk_flags(
@@ -203,6 +203,8 @@ def _risk_flags(
         avoid_reasons.append("recent_offering")
     if row.reverse_split_90d:
         risk_flags.append("reverse_split_90d")
+    if row.float_shares is None or row.float_shares <= 0:
+        risk_flags.append("unknown_float")
     if row.spread_pct >= config.wide_spread_pct:
         risk_flags.append("wide_spread")
     if row.premarket_price < config.min_price:
@@ -236,6 +238,8 @@ def _risk_penalty(
         penalty += 28
     if row.reverse_split_90d:
         penalty += 8
+    if row.float_shares is None or row.float_shares <= 0:
+        penalty += 5
     if row.previous_close <= 0 and row.gap_pct <= 0:
         penalty += 35
     if row.premarket_volume <= 0:
@@ -254,8 +258,12 @@ def _risk_penalty(
         penalty += 12
     if gap_pct > config.max_credible_gap_pct * 2:
         penalty += 12
-    if data_quality_score < 5:
+    if data_quality_score < 65:
         penalty += 8
+    if row.stale_data_flag:
+        penalty += 10
+    if row.source_confidence and row.source_confidence < 50:
+        penalty += 6
     return penalty
 
 

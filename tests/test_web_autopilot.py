@@ -649,6 +649,8 @@ def test_web_auto_collect_preserves_local_inbox_priority(tmp_path):
 
     assert result["status"] == "success"
     assert result["source_summary"]["candidate_count"] == 4
+    assert result["source_summary"]["source_confidence"] >= 0
+    assert result["source_summary"]["stale_data_status"] in {"fresh", "stale", "no_data", "unknown"}
     assert result["rows"][0]["ticker"]
     nova = next(row for row in result["rows"] if row["ticker"] == "NOVA")
     assert nova["source"] == "screener_import"
@@ -699,6 +701,9 @@ def test_web_auto_collect_dedupe_prefers_higher_quality_row():
     )
 
     assert rows[0]["source"] == "stockanalysis_premarket"
+    assert rows[0]["source_count"] == 2
+    assert rows[0]["preferred_source"] == "stockanalysis_premarket"
+    assert rows[0]["row_merge_reason"] == "highest_quality_source"
 
 
 def test_web_source_doctor_writes_rejection_debug_artifacts(tmp_path):
@@ -712,6 +717,10 @@ def test_web_source_doctor_writes_rejection_debug_artifacts(tmp_path):
 
     assert result["status"] == "complete"
     assert result["rejection_reason_counts"]["missing_volume"] == 1
+    assert result["source_confidence"] > 0
+    assert result["candidate_count"] >= 1
+    assert result["stale_data_status"] in {"fresh", "stale", "no_data", "unknown"}
+    assert result["next_action"]
     assert (tmp_path / "doctor" / "rejected_rows.csv").exists()
     assert (tmp_path / "doctor" / "extracted_rows.csv").exists()
     assert (tmp_path / "doctor" / "normalization_debug.json").exists()
@@ -755,7 +764,7 @@ def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
     assert out.count("[dry-run:console]") == 1
     assert "📡 Dawnstrike Source Check" in out
     assert "No usable rows found." in out
-    assert "try again during premarket or drop CSV into data\\inbox\\screener" in out
+    assert "Try again during premarket or drop CSV into data\\inbox\\screener." in out
     assert "📥 Outcome Data Needed" not in out
     assert "📊 Dawnstrike Summary" not in out
 
@@ -788,10 +797,13 @@ def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, ca
     )
 
     out = capsys.readouterr().out
-    assert "🚀 DAWNSTRIKE WATCHLIST" in out
-    assert "Plan:" in out
-    assert "Targets:" in out
-    assert "Avoid if:" in out
+    assert "🚀 Dawnstrike Watchlist" in out
+    assert "1) NOVA" in out
+    assert "🎯" in out
+    assert "🛑" in out
+    assert "Plan:" not in out
+    assert "Targets:" not in out
+    assert "Avoid if:" not in out
     assert "👀 Manual Monitor Needed" in out
     assert "📥 Outcome Data Needed" in out
     assert "Research only. No orders placed." in out
@@ -820,6 +832,9 @@ def test_web_source_doctor_reports_candidate_sources(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "fixture_public_table" in out
     assert '"classification": "candidate"' in out
+    assert '"source_confidence"' in out
+    assert '"stale_data_status"' in out
+    assert '"next_action"' in out
     result = (tmp_path / "doctor" / "source_doctor.json").read_text(encoding="utf-8")
     assert "candidate" in result
 

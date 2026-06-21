@@ -53,11 +53,15 @@ DASHBOARD_COLUMNS = [
     "rank",
     "ticker",
     "decision",
+    "total_score",
+    "expected_return_bucket",
+    "confidence_bucket",
     "breakout_trigger",
     "invalidation_level",
     "first_target",
-    "expected_return_pct",
-    "confidence_pct",
+    "source_confidence",
+    "model_version",
+    "config_hash",
 ]
 
 AUDIT_COLUMNS = [
@@ -1268,6 +1272,8 @@ def _mission_control(state: dict[str, Any]) -> None:
     avoid = state["avoid"]
     monitor_rows = state["monitor_rows"]
     audit_summary = _audit_summary(state)
+    web_status = dict(state.get("web_automation_status") or {})
+    latest_web = dict(web_status.get("latest_source_summary") or {})
     top = _first(ranked)
     monitor_top = _first(monitor_rows)
     cards = [
@@ -1290,6 +1296,11 @@ def _mission_control(state: dict[str, Any]) -> None:
             "Backtest",
             _signed_pct(audit_summary.get("avg_close_return_pct")),
             f"{int(_number(audit_summary.get('trade_count')))} test rows",
+        ),
+        (
+            "Source confidence",
+            f"{_format_number(latest_web.get('source_confidence'))}%",
+            str(latest_web.get("stale_data_status") or "No source run"),
         ),
     ]
     st.markdown(_step_strip(cards), unsafe_allow_html=True)
@@ -1625,6 +1636,11 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
                 f"{_format_number(candidate_count)} candidates",
             ),
             (
+                "Confidence",
+                f"{_format_number(latest_web.get('source_confidence'))}%",
+                str(latest_web.get("stale_data_status") or "unknown"),
+            ),
+            (
                 "Failures",
                 _format_number(counts.get("source_failures", 0)),
                 "Blocked or unavailable sources are logged",
@@ -1723,18 +1739,22 @@ def _free_shadow_panel(state: dict[str, Any]) -> None:
         st.markdown('<div class="ds-section">Current picks</div>', unsafe_allow_html=True)
         _table(
             ranked[:3],
-            [
-                "rank",
-                "ticker",
-                "score",
-                "setup_grade",
-                "premarket_price",
-                "breakout_trigger",
-                "invalidation_level",
-                "first_target",
-                "coverage_warning",
-            ],
-        )
+                [
+                    "rank",
+                    "ticker",
+                    "total_score",
+                    "expected_return_bucket",
+                    "confidence_bucket",
+                    "setup_grade",
+                    "premarket_price",
+                    "breakout_trigger",
+                    "invalidation_level",
+                    "first_target",
+                    "source_confidence",
+                    "model_version",
+                    "coverage_warning",
+                ],
+            )
     if avoid:
         with st.expander("Avoid list", expanded=False):
             _table(
@@ -3292,6 +3312,16 @@ def _column_label(column: str) -> str:
         "rank": "Rank",
         "ticker": "Ticker",
         "score": "Score",
+        "total_score": "Score",
+        "explosive_score": "Explosive",
+        "tradability_score": "Tradability",
+        "catalyst_score": "Catalyst",
+        "risk_score": "Risk",
+        "expected_return_bucket": "Expected",
+        "confidence_bucket": "Confidence",
+        "source_confidence": "Source",
+        "model_version": "Model",
+        "config_hash": "Config",
         "setup_grade": "Grade",
         "gap_pct": "Gap",
         "dollar_volume": "Dollar volume",
@@ -3370,7 +3400,15 @@ def _format_cell(column: str, value: Any) -> str:
         "low_drawdown_pct",
     }:
         return f"{_format_number(value)}%"
-    if column == "score":
+    if column in {
+        "score",
+        "total_score",
+        "explosive_score",
+        "tradability_score",
+        "catalyst_score",
+        "risk_score",
+        "source_confidence",
+    }:
         return _format_number(value)
     if column == "status":
         return _friendly(str(value))

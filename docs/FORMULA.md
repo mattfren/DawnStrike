@@ -14,7 +14,8 @@ score =
   - risk_penalty
 ```
 
-The current equation version is `dawnstrike-v2.0`. Scores are clamped to `0-100`.
+The current equation version is `dawnstrike-signal-engine-v3`. Scores are
+clamped to `0-100`.
 
 This is not a return forecast, trading recommendation, or order engine. It is a prioritization model for aggressive intraday research and paper-audit review.
 
@@ -27,12 +28,15 @@ trade classification.
 
 - `gap_curve`: rewards meaningful premarket gaps while reducing credit for extreme, less credible gaps.
 - `liquidity_thrust`: combines premarket dollar volume and share volume.
-- `float_rotation`: estimates how much of the reported float has already traded premarket.
+- `float_rotation`: estimates how much of the reported float has already traded
+  premarket when float is known. Unknown float is penalized, not fabricated.
 - `range_control`: rewards names holding near premarket highs while penalizing disorderly wide ranges.
 - `squeeze_catalyst`: combines news, short float, and float scarcity.
 - `execution_quality`: rewards tighter spreads and prices inside the configured price band.
-- `data_quality`: scores whether required market and metadata inputs are present.
-- `risk_penalty`: hard brake for halt, offering, no previous close, zero volume, wide spread, extreme gap, bad price band, and low liquidity conditions.
+- `data_quality`: 0-100 score for required market and metadata inputs.
+- `risk_penalty`: hard brake for halt, offering, no previous close, zero
+  volume, wide spread, extreme gap, bad price band, stale source, low source
+  confidence, and low liquidity conditions.
 
 ## Added Output Fields
 
@@ -52,6 +56,11 @@ trade classification.
 - `target_2`
 - `data_confidence_score`
 - `data_warnings`
+- `source_lineage`
+- `expected_return_bucket`
+- `confidence_bucket`
+- `model_version`
+- `config_hash`
 - `historical_win_rate`
 - `similar_setup_count`
 

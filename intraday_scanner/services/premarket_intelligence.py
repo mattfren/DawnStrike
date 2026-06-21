@@ -13,11 +13,25 @@ from intraday_scanner.config import ScannerConfig
 from intraday_scanner.formula import FormulaResult
 from intraday_scanner.models import SnapshotRow, utc_now_iso
 
-ACTION_OPENING_BREAKOUT = "🟢 Opening Breakout Candidate"
-ACTION_MOMENTUM_CONTINUATION = "🔥 Momentum Continuation Watch"
-ACTION_WATCH_ONLY = "👀 Watch Only"
-ACTION_NEEDS_CONFIRMATION = "🟡 Needs Confirmation"
-ACTION_AVOID = "❌ Avoid / Gap-and-Crap Risk"
+ACTION_OPENING_BREAKOUT = "BREAKOUT WATCH"
+ACTION_MOMENTUM_CONTINUATION = "HIGH VOLATILITY WATCH"
+ACTION_WATCH_ONLY = "WATCH"
+ACTION_NEEDS_CONFIRMATION = "CAUTION"
+ACTION_AVOID = "AVOID"
+ACTION_INVALIDATED = "INVALIDATED"
+ACTION_THESIS_BROKEN = "THESIS BROKEN"
+ACTION_OUTCOME_NEEDED = "OUTCOME NEEDED"
+
+ALLOWED_SIGNAL_LABELS = {
+    ACTION_WATCH_ONLY,
+    ACTION_OPENING_BREAKOUT,
+    ACTION_MOMENTUM_CONTINUATION,
+    ACTION_NEEDS_CONFIRMATION,
+    ACTION_AVOID,
+    ACTION_INVALIDATED,
+    ACTION_THESIS_BROKEN,
+    ACTION_OUTCOME_NEEDED,
+}
 
 INTELLIGENCE_OUTCOME_COLUMNS = [
     "evaluated_at",
@@ -51,6 +65,7 @@ INTELLIGENCE_OUTCOME_COLUMNS = [
 @dataclass(frozen=True)
 class CatalystAssessment:
     catalyst_tier: str
+    catalyst_category: str
     catalyst_summary: str
     catalyst_confidence: float
     catalyst_risk_flags: list[str] = field(default_factory=list)
@@ -78,7 +93,7 @@ class OpeningPlan:
     target_2: str
     risk_level: str
     why_this_matters: str
-    do_not_buy_if: str
+    do_not_enter_if: str
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,7 @@ class IntelligenceResult:
             "classification": self.classification,
             "predicted_action": self.predicted_action,
             "catalyst_tier": self.catalyst.catalyst_tier,
+            "catalyst_category": self.catalyst.catalyst_category,
             "catalyst_summary": self.catalyst.catalyst_summary,
             "catalyst_confidence": self.catalyst.catalyst_confidence,
             "catalyst_risk_flags": ";".join(self.catalyst.catalyst_risk_flags),
@@ -122,7 +138,7 @@ class IntelligenceResult:
             "target_2": self.opening_plan.target_2,
             "risk_level": self.risk_level,
             "why_this_matters": self.opening_plan.why_this_matters,
-            "do_not_buy_if": self.opening_plan.do_not_buy_if,
+            "do_not_enter_if": self.opening_plan.do_not_enter_if,
             "data_confidence_score": self.data_confidence_score,
             "data_warnings": ";".join(self.data_warnings),
             "field_sources": json.dumps(self.field_sources, sort_keys=True),
@@ -198,13 +214,41 @@ def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssess
     lowered = text.lower()
     flags: list[str] = []
     if not text or not has_news:
-        return CatalystAssessment("C", "No clear catalyst", 0.2, ["missing_catalyst"])
+        return CatalystAssessment(
+            "C", "no_clear_catalyst", "No clear catalyst", 0.2, ["missing_catalyst"]
+        )
     if any(term in lowered for term in ("paid promotion", "sponsored", "stock promotion")):
         flags.append("paid_promotion_style")
     if any(term in lowered for term in ("rumor", "social media", "viral", "reddit", "x post")):
         flags.append("social_media_hype")
     if any(term in lowered for term in ("reiterates", "reminds", "update on prior", "previously")):
         flags.append("recycled_news")
+    if any(
+        term in lowered
+        for term in (
+            "offering",
+            "shelf",
+            "atm",
+            "warrant",
+            "registered direct",
+            "private placement",
+        )
+    ):
+        flags.append("dilution_language")
+        return CatalystAssessment("C", "dilution_risk", _summary(text), 0.25, flags)
+    if any(
+        term in lowered
+        for term in (
+            "sec investigation",
+            "lawsuit",
+            "subpoena",
+            "delisting",
+            "regulatory action",
+            "clinical hold",
+        )
+    ):
+        flags.append("legal_or_regulatory_language")
+        return CatalystAssessment("C", "legal/regulatory_risk", _summary(text), 0.25, flags)
 
     tier_a = [
         "fda approval",
@@ -237,15 +281,35 @@ def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssess
         "expansion",
         "collaboration",
     ]
+    theme_terms = (
+        "ai",
+        "artificial intelligence",
+        "semiconductor",
+        "semis",
+        "nuclear",
+        "crypto",
+        "bitcoin",
+        "defense",
+        "quantum",
+        "robotics",
+        "biotech",
+    )
     if flags:
-        return CatalystAssessment("C", _summary(text), 0.35, flags)
+        category = "sympathy_momentum" if "social_media_hype" in flags else "soft_catalyst"
+        return CatalystAssessment("C", category, _summary(text), 0.35, flags)
     if any(term in lowered for term in tier_a):
-        return CatalystAssessment("A", _summary(text), 0.9, [])
+        return CatalystAssessment("A", "confirmed_catalyst", _summary(text), 0.9, [])
     if any(term in lowered for term in tier_b):
-        return CatalystAssessment("B", _summary(text), 0.7, [])
+        return CatalystAssessment("B", "soft_catalyst", _summary(text), 0.7, [])
+    if any(term in lowered for term in theme_terms):
+        return CatalystAssessment("B", "sympathy_momentum", _summary(text), 0.6, [])
     if any(term in lowered for term in ("corporate update", "shareholder update", "letter")):
-        return CatalystAssessment("C", _summary(text), 0.45, ["vague_corporate_update"])
-    return CatalystAssessment("C", _summary(text), 0.5, ["unverified_catalyst_quality"])
+        return CatalystAssessment(
+            "C", "soft_catalyst", _summary(text), 0.45, ["vague_corporate_update"]
+        )
+    return CatalystAssessment(
+        "C", "no_clear_catalyst", _summary(text), 0.5, ["unverified_catalyst_quality"]
+    )
 
 
 def classify_premarket_structure(row: SnapshotRow, formula: FormulaResult) -> StructureAssessment:
@@ -296,6 +360,10 @@ def liquidity_and_spread_risks(
         risks.append("weak_or_missing_catalyst")
     if row.float_shares is None or row.float_shares <= 0:
         risks.append("no_float_data")
+    if row.stale_data_flag:
+        risks.append("stale_source")
+    if row.source_confidence and row.source_confidence < 50:
+        risks.append("bad_source_quality_score")
     if row.recent_offering:
         risks.append("prior_offering_or_dilution")
     if row.current_halt:
@@ -363,13 +431,13 @@ def generate_opening_plan(
     stretch_target: float,
 ) -> OpeningPlan:
     if action == ACTION_AVOID:
-        entry = "No trade unless structure improves"
+        entry = "Manual review only; setup is not eligible"
         avoid_if = "Catalyst stays weak, liquidity fades, or price rejects VWAP"
     elif action == ACTION_OPENING_BREAKOUT:
-        entry = f"Trade only over {_money(breakout_trigger)} confirmation"
+        entry = f"Watch confirmation over {_money(breakout_trigger)}"
         avoid_if = "Fails VWAP or rejects opening range"
     else:
-        entry = f"Wait for opening range breakout over {_money(breakout_trigger)}"
+        entry = f"Wait for opening range confirmation over {_money(breakout_trigger)}"
         avoid_if = f"Drops below {_money(max(invalidation_level, row.premarket_low))}"
     why = f"Tier {catalyst.catalyst_tier} catalyst; {structure.structure_notes.lower()}"
     return OpeningPlan(
@@ -381,7 +449,7 @@ def generate_opening_plan(
         target_2=_money(stretch_target),
         risk_level=risk_level,
         why_this_matters=why,
-        do_not_buy_if=avoid_if,
+        do_not_enter_if=avoid_if,
     )
 
 
@@ -399,6 +467,8 @@ def data_quality_warnings(
         warnings.extend(_split_flags(row.coverage_warning))
     if row.fixture_only or "fixture" in row.source.lower() or "sample" in row.source.lower():
         warnings.append("synthetic_or_test_data")
+    if row.stale_data_flag:
+        warnings.append("stale_data")
     if not row.as_of_timestamp:
         warnings.append("missing_timestamp")
     elif _is_stale_timestamp(row.as_of_timestamp):
@@ -595,11 +665,11 @@ def probability_summary(outcomes: list[dict[str, Any]], *, min_samples: int = 20
     count = len(outcomes)
     if count < min_samples:
         return {
-            "historical_win_rate": "Not enough history yet",
-            "average_max_gain": "Not enough history yet",
-            "average_drawdown": "Not enough history yet",
+            "historical_win_rate": "insufficient sample size",
+            "average_max_gain": "insufficient sample size",
+            "average_drawdown": "insufficient sample size",
             "similar_setup_count": count,
-            "probability_note": "Not enough history yet",
+            "probability_note": "insufficient sample size",
         }
     wins = sum(1 for row in outcomes if row.get("target_1_hit") or row.get("target_2_hit"))
     avg_gain = sum(_num(row.get("max_gain_after_trigger_pct")) for row in outcomes) / count
