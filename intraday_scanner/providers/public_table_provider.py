@@ -111,6 +111,27 @@ ALIASES = {
     "relative_volume": ["relative volume", "rel volume", "rel vol", "relative_volume"],
 }
 
+TRADINGVIEW_COMPANY_SUFFIXES = {
+    "CORP",
+    "CORPORATION",
+    "CO",
+    "COMPANY",
+    "INC",
+    "INC.",
+    "LTD",
+    "LIMITED",
+    "PLC",
+    "HOLDING",
+    "HOLDINGS",
+    "THERAPEUTICS",
+    "TECHNOLOGIES",
+    "INDUSTRIES",
+    "MEDICAL",
+    "LABS",
+    "GLOBAL",
+    "EQUITY",
+}
+
 
 @dataclass(frozen=True)
 class ExtractedTable:
@@ -673,14 +694,105 @@ def _split_tradingview_symbol(value: str) -> tuple[str, str]:
     if not text:
         return "", ""
     first_token = text.split(" ", 1)[0]
-    match = re.match(r"^([A-Z][A-Z0-9.]{0,5})(?=[A-Z][a-z])(.+)$", first_token)
-    if match:
-        ticker = match.group(1)
-        company = match.group(2)
-        if " " in text:
-            company = f"{company} {text.split(' ', 1)[1]}"
-        return ticker, company.strip()
+    rest = text.split(" ", 1)[1] if " " in text else ""
+    attempts = (
+        _split_tradingview_mixed_case(first_token, rest),
+        _split_tradingview_uppercase_suffix(first_token, rest),
+        _split_tradingview_overlap(first_token, rest),
+        _split_tradingview_repeated_symbol(first_token, rest),
+    )
+    for ticker, company in attempts:
+        if _valid_ticker(ticker):
+            return ticker, company.strip()
     return first_token, text.split(" ", 1)[1] if " " in text else ""
+
+
+def _split_tradingview_mixed_case(first_token: str, rest: str) -> tuple[str, str]:
+    match = re.match(r"^([A-Z][A-Z0-9.]{0,5})(?=[A-Z][a-z])(.+)$", first_token)
+    if not match:
+        return "", ""
+    company = match.group(2)
+    if rest:
+        company = f"{company} {rest}"
+    return match.group(1), company
+
+
+def _split_tradingview_uppercase_suffix(first_token: str, rest: str) -> tuple[str, str]:
+    if len(first_token) <= 5 or not _has_company_suffix(rest):
+        return "", ""
+    return _best_compound_split(first_token, rest)
+
+
+def _split_tradingview_overlap(first_token: str, rest: str) -> tuple[str, str]:
+    if len(first_token) <= 5:
+        return "", ""
+    return _best_compound_split(first_token, rest)
+
+
+def _split_tradingview_repeated_symbol(first_token: str, rest: str) -> tuple[str, str]:
+    if len(first_token) <= 5:
+        return "", ""
+    for size in range(5, 1, -1):
+        prefix = first_token[:size]
+        suffix = first_token[size:]
+        if suffix and (prefix.startswith(suffix) or suffix.startswith(prefix[: len(suffix)])):
+            company = f"{suffix} {rest}".strip()
+            return prefix, company
+    return "", ""
+
+
+def _best_compound_split(first_token: str, rest: str) -> tuple[str, str]:
+    candidates = []
+    for size in range(min(5, len(first_token) - 1), 0, -1):
+        ticker = first_token[:size]
+        company = f"{first_token[size:]} {rest}".strip()
+        if not company:
+            continue
+        candidates.append((_compound_split_score(ticker, company), ticker, company))
+    if not candidates:
+        return "", ""
+    _score, ticker, company = max(candidates, key=lambda item: item[0])
+    return ticker, company
+
+
+def _compound_split_score(ticker: str, company: str) -> int:
+    company_first = company.split(" ", 1)[0]
+    score = 0
+    if _valid_ticker(ticker):
+        score += 20
+    if _has_company_suffix(company):
+        score += 10
+    if company_first.startswith(ticker):
+        score += 8
+    overlap = _suffix_prefix_overlap(ticker, company_first)
+    if overlap >= 3:
+        score += overlap * 2
+    if len(ticker) in {3, 4, 5}:
+        score += 3
+    if len(company_first) <= 1:
+        score -= 10
+    return score
+
+
+def _suffix_prefix_overlap(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    for size in range(limit, 0, -1):
+        if left[-size:] == right[:size]:
+            return size
+    return 0
+
+
+def _has_company_suffix(value: str) -> bool:
+    tokens = {
+        re.sub(r"[^A-Za-z]", "", token).upper()
+        for token in value.replace(",", " ").split()
+        if token.strip()
+    }
+    return bool(tokens & {suffix.replace(".", "") for suffix in TRADINGVIEW_COMPANY_SUFFIXES})
+
+
+def _valid_ticker(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,4}", value or ""))
 
 
 def _classify_rejection(detail: str) -> str:

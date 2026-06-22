@@ -29,6 +29,12 @@ from intraday_scanner.notifiers.telegram_formatter import (
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
 from intraday_scanner.reporting import write_scan_outputs
 from intraday_scanner.services.learning_service import run_alpha_learning
+from intraday_scanner.services.return_attribution_service import (
+    link_historical_notification,
+    record_alpha_historical_signals,
+    record_monitor_signal_events,
+    record_no_trade_historical_signal,
+)
 from intraday_scanner.services.scan_service import ScanService
 from intraday_scanner.services.signal_review_service import (
     monitor_alpha_signals,
@@ -91,17 +97,40 @@ def alpha_cycle(
 
     if collection.get("status") != "success":
         review = review_alpha_signals([], source_summary=source_summary)
+        no_data_scan_id = f"{cycle_name}:source_failure:{utc_now_iso()[:10]}"
+        record_no_trade_historical_signal(
+            store,
+            scan_id=no_data_scan_id,
+            generated_at=utc_now_iso(),
+            reason=str(review["decision"]["reason"]),
+            source_summary=source_summary,
+            candidate_count=int(source_summary.get("candidate_count") or 0),
+        )
         message = format_alpha_no_trade(
             reason=str(review["decision"]["reason"]),
             next_action=str(review["decision"]["next_action"]),
         )
         events = [
-            _notification_event(cycle_name, "alpha_no_trade", "Dawnstrike Alpha Check", message)
+            _notification_event(
+                no_data_scan_id,
+                "alpha_no_trade",
+                "Dawnstrike Alpha Check",
+                message,
+            )
         ]
         notification_stats = _dispatch(events, notify=notify, db_path=db_path, dry_run=dry_run)
+        _link_notification_events(
+            store,
+            scan_id=no_data_scan_id,
+            events=events,
+            notification_stats=notification_stats,
+            notify=notify,
+            dry_run=dry_run,
+        )
         no_data_result: dict[str, Any] = {
             "status": "no_trade",
             "run_type": cycle_name,
+            "scan_id": no_data_scan_id,
             "source_summary": source_summary,
             "review": review,
             "notification_stats": notification_stats,
@@ -150,6 +179,21 @@ def alpha_cycle(
     store.persist_alpha_signals(signals)
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
+    historical_rows = record_alpha_historical_signals(
+        store,
+        signals,
+        source_summary=source_summary,
+        no_trade_reason=str(decision.get("reason") or "") if decision.get("no_trade") else "",
+    )
+    if decision.get("no_trade"):
+        record_no_trade_historical_signal(
+            store,
+            scan_id=scan_result.run_id,
+            generated_at=timestamp,
+            reason=str(decision.get("reason") or ""),
+            source_summary=source_summary,
+            candidate_count=len(ranked),
+        )
     if decision.get("no_trade"):
         message = format_alpha_no_trade(
             reason=str(decision.get("reason") or ""),
@@ -158,7 +202,11 @@ def alpha_cycle(
         hint = "alpha_no_trade"
         title = "Dawnstrike Alpha Check"
     else:
-        edge_label = _edge_label(signals)
+        edge_label = (
+            "PROBABILITY WATCH"
+            if str(decision.get("decision_tier") or "") == "probability_fallback"
+            else _edge_label(signals)
+        )
         message = format_alpha_watch(
             signals=list(review["watchlist"]),
             edge_label=edge_label,
@@ -176,6 +224,14 @@ def alpha_cycle(
         )
     ]
     notification_stats = _dispatch(events, notify=notify, db_path=db_path, dry_run=dry_run)
+    notification_link = _link_notification_events(
+        store,
+        scan_id=scan_result.run_id,
+        events=events,
+        notification_stats=notification_stats,
+        notify=notify,
+        dry_run=dry_run,
+    )
     regime = detect_regime(signals, source_summary)
     result: dict[str, Any] = {
         "status": "complete" if not decision.get("no_trade") else "no_trade",
@@ -187,6 +243,8 @@ def alpha_cycle(
         "regime": regime,
         "feature_vector_count": len(feature_vectors),
         "signal_count": len(signals),
+        "historical_signal_count": len(historical_rows),
+        "historical_notification_link": notification_link,
         "top_signal": signals[0] if signals else None,
         "review": review,
         "notification_stats": notification_stats,
@@ -209,6 +267,11 @@ def alpha_monitor(
     store = SQLiteScanStore(db_path)
     signals = store.load_alpha_signals(limit=25)
     result = monitor_alpha_signals(signals, current_prices=current_prices)
+    result["historical_event_stats"] = record_monitor_signal_events(
+        store,
+        signals=signals,
+        monitor_events=list(result.get("events") or []),
+    )
     message = format_alpha_monitor(result)
     event_key = (
         "manual"
@@ -263,7 +326,7 @@ def alpha_status(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
         "enough_evidence": real_days >= 20,
         "last_learning_run": learning[0] if learning else None,
         "research_only": True,
-        "orders_enabled": False,
+        "order_execution_enabled": False,
     }
 
 
@@ -359,6 +422,38 @@ def _dispatch(
     else:
         notifiers = build_notifiers(config)
     return dispatch_events(events, notifiers, SQLiteScanStore(db_path), dry_run=dry_run)
+
+
+def _link_notification_events(
+    store: SQLiteScanStore,
+    *,
+    scan_id: str,
+    events: list[NotificationEvent],
+    notification_stats: dict[str, int],
+    notify: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    channels = [channel.strip().lower() for channel in notify.split(",") if channel.strip()]
+    channel = "telegram" if "telegram" in channels else (channels[0] if channels else "console")
+    was_alerted = (not dry_run) and (
+        int(notification_stats.get("sent") or 0) > 0
+        or int(notification_stats.get("skipped") or 0) > 0
+    )
+    links = [
+        link_historical_notification(
+            store,
+            scan_id=scan_id,
+            event_key=f"{event.event_key}:{channel}",
+            was_alerted=was_alerted,
+            channel=channel,
+        )
+        for event in events
+    ]
+    return {
+        "channel": channel,
+        "was_alerted": was_alerted,
+        "links": links,
+    }
 
 
 def _edge_label(signals: list[dict[str, Any]]) -> str:

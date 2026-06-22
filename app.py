@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import calendar as calendar_lib
 import csv
 import json
 import subprocess
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,8 +14,31 @@ import streamlit as st
 
 from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.config import load_config
-from intraday_scanner.dashboard.components import filter_candidates
-from intraday_scanner.dashboard.data_loader import load_output_dir, load_sample_scan, load_sqlite
+from intraday_scanner.dashboard.components import (
+    display_pick_from_raw,
+    evidence_status_card,
+    filter_candidates,
+    main_pick_card,
+    next_steps_panel,
+    outcome_needed_panel,
+    risk_summary_panel,
+    simple_avoid_table,
+    simple_picks_table,
+    source_status_card,
+    status_banner,
+    top_three_cards,
+)
+from intraday_scanner.dashboard.data_loader import (
+    CALENDAR_RETURN_POLICIES,
+    load_calendar_daily_returns,
+    load_calendar_day_detail,
+    load_calendar_days,
+    load_calendar_equity_curve,
+    load_calendar_missing_outcomes,
+    load_output_dir,
+    load_sample_scan,
+    load_sqlite,
+)
 from intraday_scanner.errors import IntradayScannerError
 from intraday_scanner.expectancy import estimate_expectancy
 from intraday_scanner.notifiers import scan_events_from_payload
@@ -162,30 +187,24 @@ def main() -> None:
     state = _build_state(data, settings, config)
     _header(state)
 
-    overview, run_flow, watchlist, monitor, audit, history, settings_tab = st.tabs(
-        ["Dashboard", "Run", "Picks", "5-Min Check", "Backtest", "History", "Settings"]
+    today_tab, picks_tab, calendar_tab, performance_tab, system_tab = st.tabs(
+        ["Today", "Picks", "Calendar", "Performance", "System"]
     )
 
-    with overview:
+    with today_tab:
         _today(state)
 
-    with run_flow:
-        _run_flow(state, config)
+    with picks_tab:
+        _picks(state)
 
-    with watchlist:
-        _watchlist(state)
+    with calendar_tab:
+        _historical_calendar(state)
 
-    with monitor:
-        _monitor(state)
+    with performance_tab:
+        _performance(state)
 
-    with audit:
-        _audit(state)
-
-    with history:
-        _history(state)
-
-    with settings_tab:
-        _settings(state, config)
+    with system_tab:
+        _system(state, config)
 
     if settings["refresh"]:
         st.rerun()
@@ -282,6 +301,11 @@ def _build_state(
     alpha_source_reliability = dict(data.get("alpha_source_reliability", {}) or {})
     alpha_setup_memory = dict(data.get("alpha_setup_memory", {}) or {})
     alpha_learning_runs = list(data.get("alpha_learning_runs", []) or [])
+    calendar_days = list(data.get("calendar_days", []) or [])
+    calendar_days_simple = list(data.get("calendar_days_simple", []) or [])
+    calendar_daily_returns = list(data.get("calendar_daily_returns", []) or [])
+    calendar_equity_curve = list(data.get("calendar_equity_curve", []) or [])
+    calendar_missing_outcomes = list(data.get("calendar_missing_outcomes", []) or [])
     audit_rows, audit_summary = _load_audit(settings["audit_output_dir"])
     monitor_rows = _load_monitor_rows(settings["db_path"], settings["monitor_output_dir"])
     expectancy = [
@@ -324,6 +348,21 @@ def _build_state(
         "alpha_source_reliability": alpha_source_reliability,
         "alpha_setup_memory": alpha_setup_memory,
         "alpha_learning_runs": alpha_learning_runs,
+        "latest_status": dict(data.get("latest_status", {}) or {}),
+        "main_pick": dict(data.get("main_pick", {}) or {}),
+        "top_three": list(data.get("top_three", []) or []),
+        "risk_summary": dict(data.get("risk_summary", {}) or {}),
+        "next_steps": list(data.get("next_steps", []) or []),
+        "missing_outcomes": list(data.get("missing_outcomes", []) or []),
+        "performance_summary": dict(data.get("performance_summary", {}) or {}),
+        "system_health": dict(data.get("system_health", {}) or {}),
+        "calendar_start_date": data.get("calendar_start_date", ""),
+        "calendar_end_date": data.get("calendar_end_date", ""),
+        "calendar_days": calendar_days,
+        "calendar_days_simple": calendar_days_simple,
+        "calendar_daily_returns": calendar_daily_returns,
+        "calendar_equity_curve": calendar_equity_curve,
+        "calendar_missing_outcomes": calendar_missing_outcomes,
         "audit_rows": audit_rows,
         "audit_summary": audit_summary,
         "monitor_rows": monitor_rows,
@@ -368,18 +407,18 @@ def _theme() -> None:
         """
         <style>
         :root {
-            --bg: #070b12;
-            --surface: #0f1724;
-            --surface-soft: #141d2c;
-            --line: #263246;
-            --line-strong: #3a4a63;
-            --text: #eef4ff;
-            --muted: #94a3b8;
-            --blue: #6ea8fe;
-            --green: #2dd4bf;
+            --bg: #f4f7fb;
+            --surface: #ffffff;
+            --surface-soft: #f8fafc;
+            --line: #d9e2ec;
+            --line-strong: #b8c5d6;
+            --text: #0b1220;
+            --muted: #5f6f86;
+            --blue: #2563eb;
+            --green: #059669;
             --amber: #fbbf24;
-            --red: #fb7185;
-            --copy: #cbd5e1;
+            --red: #dc2626;
+            --copy: #334155;
         }
         .stApp {
             background: var(--bg);
@@ -546,6 +585,266 @@ def _theme() -> None:
             font-weight: 750;
             margin: 0.2rem 0 0.55rem;
             text-transform: uppercase;
+        }
+        .ds-simple-section {
+            color: var(--text);
+            font-size: 0.98rem;
+            font-weight: 780;
+            margin: 1.05rem 0 0.55rem;
+        }
+        .ds-simple-banner {
+            border: 1px solid var(--line);
+            border-left: 6px solid var(--blue);
+            border-radius: 14px;
+            background: var(--surface);
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
+            margin: 0.4rem 0 1rem;
+            padding: 1rem 1.15rem;
+        }
+        .ds-simple-banner--green { border-left-color: var(--green); }
+        .ds-simple-banner--yellow,
+        .ds-simple-banner--amber { border-left-color: #f59e0b; }
+        .ds-simple-banner--red { border-left-color: var(--red); }
+        .ds-simple-banner--gray { border-left-color: #94a3b8; }
+        .ds-simple-banner-title {
+            color: var(--text);
+            font-size: 1.32rem;
+            font-weight: 850;
+            line-height: 1.2;
+        }
+        .ds-simple-banner-copy {
+            color: var(--copy);
+            font-size: 0.98rem;
+            line-height: 1.45;
+            margin-top: 0.25rem;
+        }
+        .ds-main-pick {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            box-shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
+            margin: 0.4rem 0 1rem;
+            padding: 1.25rem;
+        }
+        .ds-main-pick-kicker {
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 850;
+            text-transform: uppercase;
+        }
+        .ds-main-pick-title {
+            color: var(--text);
+            font-size: 2.4rem;
+            font-weight: 900;
+            letter-spacing: 0;
+            line-height: 1.05;
+            margin-top: 0.2rem;
+        }
+        .ds-main-pick-copy,
+        .ds-main-pick-note {
+            color: var(--copy);
+            line-height: 1.4;
+        }
+        .ds-pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            margin: 0.85rem 0;
+        }
+        .ds-pill {
+            background: #eef2ff;
+            border: 1px solid #c7d2fe;
+            border-radius: 999px;
+            color: #3730a3;
+            font-size: 0.78rem;
+            font-weight: 760;
+            padding: 0.22rem 0.55rem;
+        }
+        .ds-pill--blue {
+            background: #dbeafe;
+            border-color: #bfdbfe;
+            color: #1d4ed8;
+        }
+        .ds-level-list,
+        .ds-watch-grid,
+        .ds-mini-grid {
+            display: grid;
+            gap: 0.75rem;
+        }
+        .ds-level-list {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            margin: 0.85rem 0;
+        }
+        .ds-level-item,
+        .ds-mini-card,
+        .ds-watch-card {
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 0.78rem;
+        }
+        .ds-level-item span,
+        .ds-mini-card span,
+        .ds-watch-line span {
+            color: var(--muted);
+            display: block;
+            font-size: 0.72rem;
+            font-weight: 780;
+            text-transform: uppercase;
+        }
+        .ds-level-item strong,
+        .ds-mini-card strong,
+        .ds-watch-line strong {
+            color: var(--text);
+            display: block;
+            font-size: 1rem;
+            margin-top: 0.18rem;
+        }
+        .ds-watch-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            margin-bottom: 0.85rem;
+        }
+        .ds-watch-rank {
+            color: var(--muted);
+            font-size: 0.75rem;
+            font-weight: 760;
+        }
+        .ds-watch-ticker {
+            color: var(--text);
+            font-size: 1.45rem;
+            font-weight: 900;
+        }
+        .ds-watch-label {
+            color: var(--blue);
+            font-size: 0.85rem;
+            font-weight: 780;
+            margin-bottom: 0.45rem;
+        }
+        .ds-watch-line {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.6rem;
+            padding: 0.22rem 0;
+        }
+        .ds-watch-risk {
+            border-top: 1px solid var(--line);
+            color: var(--copy);
+            font-size: 0.86rem;
+            line-height: 1.35;
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+        }
+        .ds-watch-card--empty { opacity: 0.62; }
+        .ds-next-panel {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 0.75rem;
+        }
+        .ds-next-step {
+            align-items: center;
+            border-bottom: 1px solid var(--line);
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: 1.8rem 1fr;
+            padding: 0.55rem 0.35rem;
+        }
+        .ds-next-step:last-child { border-bottom: 0; }
+        .ds-next-step strong {
+            color: var(--text);
+            font-size: 0.95rem;
+        }
+        .ds-next-step small {
+            color: var(--muted);
+            display: block;
+            font-size: 0.82rem;
+        }
+        .ds-mini-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .ds-outcome-needed {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            border-radius: 12px;
+            color: #9a3412;
+            margin-top: 0.75rem;
+            padding: 0.85rem;
+        }
+        .ds-research-footer {
+            background: #f8fafc;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            color: var(--copy);
+            font-size: 0.92rem;
+            margin: 1rem 0;
+            padding: 0.85rem;
+        }
+        .ds-calendar-grid {
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            margin: 0.45rem 0 1.1rem;
+        }
+        .ds-calendar-head {
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .ds-calendar-card {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            min-height: 7.2rem;
+            padding: 0.72rem;
+        }
+        .ds-calendar-card--audited-positive {
+            border-color: #16a34a;
+            background: #052e22;
+        }
+        .ds-calendar-card--audited-negative {
+            border-color: #ef4444;
+            background: #3f0f16;
+        }
+        .ds-calendar-card--pending {
+            border-color: #f59e0b;
+            background: #332506;
+        }
+        .ds-calendar-card--partial {
+            border-color: #f97316;
+            background: #3b1f09;
+        }
+        .ds-calendar-card--empty {
+            opacity: 0.58;
+        }
+        .ds-calendar-date {
+            color: var(--text);
+            font-size: 1rem;
+            font-weight: 850;
+        }
+        .ds-calendar-status {
+            color: var(--muted);
+            font-size: 0.68rem;
+            font-weight: 850;
+            margin-top: 0.28rem;
+            text-transform: uppercase;
+        }
+        .ds-calendar-metric {
+            color: var(--copy);
+            font-size: 0.75rem;
+            line-height: 1.32;
+            margin-top: 0.32rem;
+        }
+        .ds-calendar-badge {
+            background: rgba(110, 168, 254, 0.14);
+            border-radius: 999px;
+            color: var(--blue);
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 800;
+            margin-top: 0.35rem;
+            padding: 0.15rem 0.38rem;
         }
         .ds-read {
             background: #ffffff;
@@ -1332,40 +1631,148 @@ def _mission_control(state: dict[str, Any]) -> None:
 
 
 def _today(state: dict[str, Any]) -> None:
-    config = state["config"]
-    top = _first(state["ranked"])
-    if not top:
+    st.markdown(status_banner(state["latest_status"]), unsafe_allow_html=True)
+    st.markdown(main_pick_card(state.get("main_pick") or None), unsafe_allow_html=True)
+    st.markdown('<div class="ds-simple-section">Top 3 Watchlist</div>', unsafe_allow_html=True)
+    st.markdown(top_three_cards(list(state.get("top_three") or [])), unsafe_allow_html=True)
+    left, right = st.columns([1.15, 0.85])
+    with left:
+        st.markdown('<div class="ds-simple-section">What To Do Next</div>', unsafe_allow_html=True)
+        st.markdown(next_steps_panel(list(state.get("next_steps") or [])), unsafe_allow_html=True)
+        missing_html = outcome_needed_panel(list(state.get("missing_outcomes") or []))
+        if missing_html:
+            st.markdown(missing_html, unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="ds-simple-section">Risk Summary</div>', unsafe_allow_html=True)
+        risk_html = risk_summary_panel(dict(state.get("risk_summary") or {}))
+        st.markdown(risk_html, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="ds-research-footer">Dawnstrike does not place trades. '
+        "You decide manually. No orders placed.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _picks(state: dict[str, Any]) -> None:
+    rows = _display_pick_rows(state["ranked"] or state.get("alpha_signals", []))
+    if not rows:
+        st.info("No current watchlist is loaded.")
+        return
+    st.markdown('<div class="ds-simple-section">Readable Picks</div>', unsafe_allow_html=True)
+    _simple_dataframe(simple_picks_table(rows), height=320)
+    avoid_rows = [_display_avoid_row(row) for row in state["avoid"]]
+    if avoid_rows:
+        st.markdown('<div class="ds-simple-section">Avoid List</div>', unsafe_allow_html=True)
+        show_all = st.checkbox("Show full avoid list", value=False)
+        _simple_dataframe(simple_avoid_table(avoid_rows, limit=len(avoid_rows) if show_all else 5))
+    notifications = _notification_rows(state)
+    if notifications:
         st.markdown(
-            """
-            <div class="ds-empty-state">
-                <div class="ds-empty-title">No scan loaded</div>
-                <div class="ds-empty-copy">Open Run and press Full Test.</div>
-            </div>
-            """,
+            '<div class="ds-simple-section">Latest Notifications</div>',
             unsafe_allow_html=True,
         )
-        return
+        _simple_dataframe(notifications[:5])
+    with st.expander("Advanced details", expanded=False):
+        _table(state["ranked"], WATCHLIST_COLUMNS)
+        if state["avoid"]:
+            _table(state["avoid"], AVOID_COLUMNS)
 
-    ticker = str(top.get("ticker", "n/a"))
-    estimate = _expectancy_for(state, ticker)
-    monitor = _row_by_ticker(state["monitor_rows"], ticker)
-    st.markdown(_dashboard_hero(top, estimate, monitor), unsafe_allow_html=True)
-    _free_shadow_panel(state)
-    _dashboard_actions(state, config)
-    _action_result()
-    _dashboard_alphaops(state)
-    _dashboard_performance(state)
-    _dashboard_activity(state)
-    st.markdown('<div class="ds-section">Broker Flow</div>', unsafe_allow_html=True)
-    st.markdown(_broker_flow(), unsafe_allow_html=True)
-    st.markdown('<div class="ds-section">Today\'s Picks</div>', unsafe_allow_html=True)
-    _table(_dashboard_rows(state["ranked"][:6], state), DASHBOARD_COLUMNS)
-    if state["avoid"]:
-        with st.expander("Risk list", expanded=False):
-            _table(state["avoid"][:8], AVOID_COLUMNS)
-    st.caption(
-        "Research only. The app does not place orders, hold broker credentials, or execute trades."
-    )
+
+def _performance(state: dict[str, Any]) -> None:
+    summary = dict(state.get("performance_summary") or {})
+    st.markdown('<div class="ds-simple-section">Is This Working Yet?</div>', unsafe_allow_html=True)
+    st.markdown(evidence_status_card(summary), unsafe_allow_html=True)
+    if _number(summary.get("audited_days")) < 20:
+        st.warning("Not enough evidence yet. Collect at least 20 real market days.")
+    cards = [
+        ("Top1 return", _pct_or_pending(summary.get("top1_return")), "Compounded audited days"),
+        ("Top3 return", _pct_or_pending(summary.get("top3_return")), "Compounded audited days"),
+        ("Win rate", _coverage_text(summary.get("win_rate")), "Audited outcomes"),
+        ("Worst drawdown", _pct_or_pending(summary.get("worst_drawdown")), "Recorded outcomes"),
+    ]
+    st.markdown(_step_strip(cards), unsafe_allow_html=True)
+    details = [
+        load_calendar_day_detail(state["settings"]["db_path"], row["date"])
+        for row in state.get("calendar_days", [])
+        if row.get("status") == "AUDITED"
+    ]
+    policy_field = CALENDAR_RETURN_POLICIES.get("close", "close_return")
+    for title, rows in (
+        ("Setup performance", _calendar_bucket_rows(details, policy_field, "primary_setup")),
+        ("Source performance", _calendar_bucket_rows(details, policy_field, "source")),
+        (
+            "Risk flag impact",
+            _calendar_bucket_rows(details, policy_field, "risk_flags", split=True),
+        ),
+    ):
+        with st.expander(title, expanded=False):
+            _simple_dataframe(rows)
+
+
+def _system(state: dict[str, Any], config: Any) -> None:
+    st.markdown('<div class="ds-simple-section">System</div>', unsafe_allow_html=True)
+    st.markdown(source_status_card(dict(state.get("system_health") or {})), unsafe_allow_html=True)
+    st.caption(f"Database: `{state['settings']['db_path']}`")
+    st.caption("Research/watchlist only. No order execution exists.")
+    st.markdown('<div class="ds-simple-section">Run Controls</div>', unsafe_allow_html=True)
+    _run_flow(state, config)
+    st.markdown('<div class="ds-simple-section">5-Min Check</div>', unsafe_allow_html=True)
+    _monitor(state)
+    st.markdown('<div class="ds-simple-section">Backtest / Audit</div>', unsafe_allow_html=True)
+    _audit(state)
+    st.markdown('<div class="ds-simple-section">History</div>', unsafe_allow_html=True)
+    _history(state)
+    st.markdown('<div class="ds-simple-section">Advanced Settings</div>', unsafe_allow_html=True)
+    _settings(state, config)
+
+
+def _display_pick_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [display_pick_from_raw(row) for row in rows]
+
+
+def _display_avoid_row(row: dict[str, Any]) -> dict[str, Any]:
+    risk = _friendly_list(row.get("risk_flags") or row.get("avoid_reasons"))
+    return {
+        "ticker": str(row.get("ticker") or "").upper(),
+        "why_avoid": risk or "Risky setup",
+        "gap_pct": row.get("gap_pct"),
+        "volume": row.get("dollar_volume") or row.get("premarket_volume"),
+        "risk": risk or "Avoid",
+    }
+
+
+def _notification_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
+    output = []
+    for row in list(state.get("recent_notifications") or [])[:5]:
+        payload_message = str(
+            row.get("title")
+            or row.get("message")
+            or row.get("telegram_compact_message")
+            or row.get("event_key")
+            or "Notification"
+        )
+        output.append(
+            {
+                "Time": _short_timestamp(row.get("sent_at")),
+                "Message type": _friendly(str(row.get("channel") or "notice")),
+                "Ticker": str(row.get("ticker") or ""),
+                "Result": payload_message[:90],
+            }
+        )
+    return output
+
+
+def _simple_dataframe(rows: list[dict[str, Any]], height: int | None = None) -> None:
+    if not rows:
+        st.caption("No rows yet.")
+        return
+    kwargs: dict[str, Any] = {
+        "hide_index": True,
+        "use_container_width": True,
+    }
+    if height is not None:
+        kwargs["height"] = height
+    st.dataframe(rows, **kwargs)
 
 
 def _dashboard_actions(state: dict[str, Any], config: Any) -> None:
@@ -2624,6 +3031,640 @@ def _audit(state: dict[str, Any]) -> None:
     _table(audit_rows, SHADOW_AUDIT_COLUMNS if state["manual_audit_trades"] else AUDIT_COLUMNS)
 
 
+def _historical_calendar(state: dict[str, Any]) -> None:
+    settings = state["settings"]
+    db_path = settings["db_path"]
+    controls = _calendar_controls(state)
+    try:
+        days = load_calendar_days(db_path, controls["start"], controls["end"])
+        daily_returns = load_calendar_daily_returns(db_path, controls["start"], controls["end"])
+        equity_curve = load_calendar_equity_curve(db_path, controls["start"], controls["end"])
+        missing = load_calendar_missing_outcomes(db_path, controls["start"], controls["end"])
+    except (IntradayScannerError, OSError, ValueError, json.JSONDecodeError) as exc:
+        st.error(str(exc))
+        return
+    filtered_days = _filter_calendar_days(
+        days,
+        source_filter=controls["source_filter"],
+        setup_filter=controls["setup_filter"],
+        audited_only=controls["audited_only"],
+        show_pending=controls["show_pending"],
+    )
+    st.caption(
+        "Historical Calendar reads the real operating database. Free web rows are "
+        "Unverified free web data. Missing outcomes are pending, not zero."
+    )
+    st.markdown(_calendar_summary_cards(filtered_days, missing), unsafe_allow_html=True)
+    st.markdown('<div class="ds-section">Month View</div>', unsafe_allow_html=True)
+    st.markdown(
+        _calendar_grid_html(filtered_days, controls["year"], controls["month"]),
+        unsafe_allow_html=True,
+    )
+    if not filtered_days:
+        st.info("No calendar days match the selected filters.")
+        return
+    selected = _calendar_selected_day(filtered_days)
+    detail = load_calendar_day_detail(db_path, selected)
+    _calendar_day_drilldown(detail)
+    st.markdown('<div class="ds-section">Historical Performance</div>', unsafe_allow_html=True)
+    details = [load_calendar_day_detail(db_path, row["date"]) for row in filtered_days]
+    _calendar_performance_panels(
+        filtered_days,
+        daily_returns,
+        equity_curve,
+        details,
+        entry_policy=controls["entry_policy"],
+        portfolio=controls["portfolio"],
+    )
+
+
+def _calendar_controls(state: dict[str, Any]) -> dict[str, Any]:
+    default_start = _parse_day(str(state.get("calendar_start_date") or "")) or date.today().replace(
+        day=1
+    )
+    default_end = _parse_day(str(state.get("calendar_end_date") or "")) or date.today()
+    top_cols = st.columns([0.75, 0.8, 1.35, 1.2])
+    with top_cols[0]:
+        month = int(
+            st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=max(0, min(11, default_start.month - 1)),
+                format_func=lambda value: calendar_lib.month_name[int(value)],
+                key="calendar_month",
+            )
+        )
+    with top_cols[1]:
+        year = int(
+            st.number_input(
+                "Year",
+                min_value=2020,
+                max_value=2100,
+                value=default_start.year,
+                step=1,
+                key="calendar_year",
+            )
+        )
+    month_start = date(year, month, 1)
+    month_end = _month_end(month_start)
+    with top_cols[2]:
+        raw_range = st.date_input(
+            "Date range",
+            value=(max(default_start, month_start), min(default_end, month_end)),
+            key="calendar_date_range",
+        )
+    start, end = _coerce_date_range(raw_range, month_start, month_end)
+    with top_cols[3]:
+        entry_policy = st.selectbox(
+            "Entry policy",
+            [
+                "scenario_1m",
+                "scenario_5m",
+                "scenario_15m",
+                "lunch",
+                "close",
+                "monitor_exit_if_available",
+                "recommended_exit_if_recorded",
+            ],
+            index=4,
+            key="calendar_entry_policy",
+        )
+    lower_cols = st.columns([0.8, 0.95, 1.0, 0.9, 0.9])
+    with lower_cols[0]:
+        portfolio = st.selectbox("Portfolio", ["top1", "top3", "top5"], index=1)
+    with lower_cols[1]:
+        source_filter = st.selectbox(
+            "Data source",
+            ["all", "manual", "web_url", "local_inbox", "paid/api"],
+        )
+    with lower_cols[2]:
+        setup_filter = st.text_input("Setup filter", value="")
+    with lower_cols[3]:
+        audited_only = st.checkbox("Only audited days", value=False)
+    with lower_cols[4]:
+        show_pending = st.checkbox("Show pending days", value=True)
+    return {
+        "month": month,
+        "year": year,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "entry_policy": entry_policy,
+        "portfolio": portfolio,
+        "source_filter": source_filter,
+        "setup_filter": setup_filter,
+        "audited_only": audited_only,
+        "show_pending": show_pending,
+    }
+
+
+def _calendar_summary_cards(
+    days: list[dict[str, Any]],
+    missing: list[dict[str, Any]],
+) -> str:
+    audited = [row for row in days if row.get("status") == "AUDITED"]
+    outcome_days = [
+        row for row in days if row.get("status") in {"AUDITED", "OUTCOMES PARTIAL"}
+    ]
+    evidence = _calendar_evidence_label(len(audited))
+    top3_values: list[float] = []
+    for row in audited:
+        value = _calendar_number(row.get("top3_return"))
+        if value is not None:
+            top3_values.append(value)
+    top3_total = round(sum(top3_values), 2) if top3_values else None
+    best = max(top3_values) if top3_values else None
+    worst = min(top3_values) if top3_values else None
+    tracked_days = len([row for row in days if row.get("status") != "NO DATA"])
+    cards = [
+        ("Days tracked", _format_number(tracked_days), "Saved rows"),
+        ("Days with outcomes", _format_number(len(outcome_days)), evidence),
+        (
+            "Top3 total return",
+            _signed_pct(top3_total) if top3_total is not None else "Pending",
+            "Audited close",
+        ),
+        ("Best day", _signed_pct(best) if best is not None else "Pending", "Top3 close"),
+        ("Worst day", _signed_pct(worst) if worst is not None else "Pending", "Top3 close"),
+        ("Outcome needed", _format_number(len(missing)), "Needs import/audit rows"),
+    ]
+    return _step_strip(cards)
+
+
+def _calendar_grid_html(days: list[dict[str, Any]], year: int, month: int) -> str:
+    by_date = {str(row.get("date")): row for row in days}
+    calendar = calendar_lib.Calendar(firstweekday=0)
+    cells = [f'<div class="ds-calendar-head">{_html(day)}</div>' for day in calendar_lib.day_abbr]
+    for week in calendar.monthdatescalendar(year, month):
+        for day_value in week:
+            day_key = day_value.isoformat()
+            row = dict(by_date.get(day_key) or {"date": day_key, "status": "NO DATA"})
+            outside = day_value.month != month
+            cells.append(_calendar_card(row, outside=outside))
+    return f'<div class="ds-calendar-grid">{"".join(cells)}</div>'
+
+
+def _calendar_card(row: dict[str, Any], *, outside: bool) -> str:
+    status = str(row.get("status") or "NO DATA")
+    labels = {
+        "NO DATA": "No data",
+        "NO TRADE": "No trade",
+        "PICKS PENDING OUTCOMES": "Picks pending",
+        "OUTCOMES PARTIAL": "Partial outcomes",
+        "AUDITED": "Audited",
+        "SOURCE FAILURE": "Data problem",
+    }
+    top3 = _calendar_number(row.get("top3_return"))
+    css = _calendar_status_class(status, top3)
+    if outside:
+        css += " ds-calendar-card--empty"
+    badges = []
+    if _number(row.get("missing_outcome_count")) > 0:
+        badges.append("Outcome needed")
+    if status == "NO TRADE":
+        badges.append("No trade")
+    badge_html = "".join(f'<span class="ds-calendar-badge">{_html(item)}</span>' for item in badges)
+    top3_text = _signed_pct(top3) if top3 is not None else "Pending"
+    date_text = str(row.get("date") or "")[-2:]
+    top_pick = str(row.get("top_pick") or "None")
+    return (
+        f'<div class="ds-calendar-card {css}">'
+        f'<div class="ds-calendar-date">{_html(date_text)}</div>'
+        f'<div class="ds-calendar-status">{_html(labels.get(status, status.title()))}</div>'
+        '<div class="ds-calendar-metric">'
+        f'Top3: {_html(top3_text)}<br>'
+        f'Top pick: {_html(top_pick)}<br>'
+        f'Missing: {_html(_format_number(row.get("missing_outcome_count")))}'
+        "</div>"
+        f"{badge_html}</div>"
+    )
+
+
+def _calendar_status_class(status: str, top3: float | None) -> str:
+    if status == "AUDITED" and top3 is not None and top3 >= 0:
+        return "ds-calendar-card--audited-positive"
+    if status == "AUDITED" and top3 is not None and top3 < 0:
+        return "ds-calendar-card--audited-negative"
+    if status == "OUTCOMES PARTIAL":
+        return "ds-calendar-card--partial"
+    if status == "PICKS PENDING OUTCOMES":
+        return "ds-calendar-card--pending"
+    if status in {"NO DATA", "NO TRADE", "SOURCE FAILURE"}:
+        return "ds-calendar-card--empty"
+    return ""
+
+
+def _calendar_selected_day(days: list[dict[str, Any]]) -> str:
+    options = [str(row["date"]) for row in days]
+    default = str(st.session_state.get("calendar_selected_day") or options[-1])
+    index = options.index(default) if default in options else len(options) - 1
+    selected = st.selectbox("Day detail", options, index=index, key="calendar_selected_day")
+    return str(selected)
+
+
+def _calendar_day_drilldown(detail: dict[str, Any]) -> None:
+    overview = dict(detail.get("overview") or {})
+    cards = [
+        ("Date", str(detail.get("date")), str(detail.get("status"))),
+        ("Decision", str(overview.get("alphaops_decision") or ""), "AlphaOps"),
+        (
+            "Source",
+            str(overview.get("source_status") or ""),
+            str(overview.get("source_label") or ""),
+        ),
+        ("Coverage", _coverage_text(detail.get("outcome_coverage_pct")), "Outcome rows"),
+    ]
+    st.markdown(_step_strip(cards), unsafe_allow_html=True)
+    picks = list(detail.get("picks") or [])
+    missing = list(detail.get("missing_outcomes") or [])
+    top3 = _calendar_number(dict(detail.get("basket_returns") or {}).get("top3_close_return"))
+    return_read = (
+        _signed_pct(top3)
+        if top3 is not None
+        else "Return not available yet because outcome data has not been imported."
+    )
+    plain_cards = [
+        (
+            "What did Dawnstrike pick?",
+            ", ".join(str(row.get("ticker") or "") for row in picks[:3]) or "No picks",
+            "Research watchlist",
+        ),
+        (
+            "What happened?",
+            str(detail.get("status") or "No data").replace("_", " ").title(),
+            "Saved day status",
+        ),
+        ("Recorded return", return_read, "Top3 close scenario"),
+        ("What is missing?", _format_number(len(missing)), "Outcome rows needed"),
+    ]
+    st.markdown(_step_strip(plain_cards), unsafe_allow_html=True)
+    st.markdown(
+        _callout(
+            "Evidence note",
+            "Evidence is insufficient until at least 20 real market days are audited. "
+            "Scenario returns are not recommended returns.",
+        ),
+        unsafe_allow_html=True,
+    )
+    if overview.get("no_trade_reason"):
+        st.info(f"No-trade reason: {overview['no_trade_reason']}")
+    telegram = list(detail.get("telegram") or [])
+    with st.expander("Telegram message", expanded=bool(telegram)):
+        if telegram:
+            st.code(str(telegram[0].get("message") or ""), language="text")
+            _table(telegram, ["event_key", "channel", "sent_at"])
+        else:
+            st.caption("No Telegram message was persisted for this day.")
+    st.markdown('<div class="ds-section">Picks</div>', unsafe_allow_html=True)
+    _table(
+        list(detail.get("picks") or []),
+        [
+            "rank",
+            "ticker",
+            "company",
+            "primary_setup",
+            "alpha_score",
+            "total_score",
+            "edge_bucket",
+            "confidence_bucket",
+            "risk_score",
+            "source_confidence",
+            "gap_pct",
+            "premarket_price",
+            "trigger",
+            "invalidation",
+            "target",
+            "catalyst",
+            "risk_flags",
+            "avoid_reasons",
+            "label/action",
+            "source",
+        ],
+    )
+    st.markdown('<div class="ds-section">Return Table</div>', unsafe_allow_html=True)
+    _table(
+        list(detail.get("return_rows") or []),
+        [
+            "rank",
+            "ticker",
+            "entry_price",
+            "entry_time",
+            "recommended_exit_policy",
+            "recommended_exit_price",
+            "recommended_exit_return",
+            "price_1m_return",
+            "price_5m_return",
+            "price_15m_return",
+            "lunch_return",
+            "close_return",
+            "high_after_entry_return",
+            "low_after_entry_drawdown",
+            "audit_status",
+            "outcome_source",
+            "notes",
+        ],
+    )
+    _calendar_basket_panel(dict(detail.get("basket_returns") or {}))
+    _calendar_missing_panel(detail)
+
+
+def _calendar_basket_panel(basket: dict[str, Any]) -> None:
+    cards = [
+        ("Top1 close", _pct_or_pending(basket.get("top1_close_return")), "Equal-weight"),
+        ("Top3 close", _pct_or_pending(basket.get("top3_close_return")), "Equal-weight"),
+        ("Top5 close", _pct_or_pending(basket.get("top5_close_return")), "Equal-weight"),
+        (
+            "Monitor exit",
+            _pct_or_pending(basket.get("top3_monitor_exit_if_available_return")),
+            "Only if saved",
+        ),
+    ]
+    st.markdown('<div class="ds-section">Top Basket Returns</div>', unsafe_allow_html=True)
+    st.markdown(_step_strip(cards), unsafe_allow_html=True)
+
+
+def _calendar_missing_panel(detail: dict[str, Any]) -> None:
+    missing = list(detail.get("missing_outcomes") or [])
+    if not missing:
+        return
+    with st.expander("Missing outcome panel", expanded=True):
+        st.warning("These tickers need outcome rows before returns can be counted.")
+        st.caption(f"Outcome file: `{detail.get('required_outcome_path')}`")
+        st.caption("Required columns:")
+        st.code(",".join(str(item) for item in detail.get("required_outcome_columns") or []))
+        _table(missing, ["date", "rank", "ticker", "audit_status", "expected_path"])
+        st.caption("Import/audit commands:")
+        st.code("\n".join(str(item) for item in detail.get("import_commands") or []))
+
+
+def _calendar_performance_panels(
+    days: list[dict[str, Any]],
+    daily_returns: list[dict[str, Any]],
+    equity_curve: list[dict[str, Any]],
+    details: list[dict[str, Any]],
+    *,
+    entry_policy: str,
+    portfolio: str,
+) -> None:
+    real_days = sum(1 for row in days if row.get("status") == "AUDITED")
+    st.caption(f"Evidence sufficiency: {_calendar_evidence_label(real_days)}.")
+    if real_days < 20:
+        st.warning("Evidence is insufficient until at least 20 real market days are audited.")
+    left, right = st.columns(2)
+    with left:
+        _render_chart(_calendar_equity_chart(equity_curve))
+    with right:
+        _render_chart(_calendar_daily_return_chart(daily_returns, entry_policy, portfolio))
+    lower_left, lower_right = st.columns(2)
+    with lower_left:
+        _render_chart(_calendar_weekly_hit_chart(daily_returns, entry_policy, portfolio))
+    with lower_right:
+        missing_rate = _calendar_missing_rate(days)
+        st.markdown(
+            _step_strip(
+                [
+                    ("Missing rate", _format_number(missing_rate) + "%", "Selected days"),
+                    ("Real days", _format_number(real_days), _calendar_evidence_label(real_days)),
+                ]
+            ),
+            unsafe_allow_html=True,
+        )
+    policy_field = CALENDAR_RETURN_POLICIES.get(entry_policy, "close_return")
+    st.markdown('<div class="ds-section">Setup Performance</div>', unsafe_allow_html=True)
+    _table(_calendar_bucket_rows(details, policy_field, "primary_setup"), [])
+    st.markdown('<div class="ds-section">Source Performance</div>', unsafe_allow_html=True)
+    _table(_calendar_bucket_rows(details, policy_field, "source"), [])
+    st.markdown('<div class="ds-section">Catalyst Bucket Performance</div>', unsafe_allow_html=True)
+    _table(_calendar_bucket_rows(details, policy_field, "catalyst_category"), [])
+    st.markdown('<div class="ds-section">Risk Flag Impact</div>', unsafe_allow_html=True)
+    _table(_calendar_bucket_rows(details, policy_field, "risk_flags", split=True), [])
+
+
+def _calendar_equity_chart(rows: list[dict[str, Any]]) -> alt.Chart:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return _empty_chart("No audited equity curve yet")
+    melted = frame.melt(
+        "date",
+        value_vars=[
+            "top1_compounded_return",
+            "top3_compounded_return",
+            "top5_compounded_return",
+        ],
+        var_name="portfolio",
+        value_name="return_pct",
+    ).dropna()
+    if melted.empty:
+        return _empty_chart("No compounded returns yet")
+    return (
+        alt.Chart(melted)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("return_pct:Q", title="Compounded return %"),
+            color=alt.Color("portfolio:N", title="Portfolio"),
+            tooltip=["date:T", "portfolio:N", "return_pct:Q"],
+        )
+        .properties(height=280)
+    )
+
+
+def _calendar_daily_return_chart(
+    rows: list[dict[str, Any]],
+    entry_policy: str,
+    portfolio: str,
+) -> alt.Chart:
+    field = f"{portfolio}_{entry_policy}_return"
+    frame = pd.DataFrame(rows)
+    if frame.empty or field not in frame:
+        return _empty_chart("No daily returns yet")
+    frame = frame[["date", field]].rename(columns={field: "return_pct"}).dropna()
+    if frame.empty:
+        return _empty_chart("No audited daily returns for this policy")
+    return (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("return_pct:Q", title=f"{portfolio} return %"),
+            color=alt.condition(
+                "datum.return_pct >= 0",
+                alt.value("#2dd4bf"),
+                alt.value("#fb7185"),
+            ),
+            tooltip=["date:T", "return_pct:Q"],
+        )
+        .properties(height=280)
+    )
+
+
+def _calendar_weekly_hit_chart(
+    rows: list[dict[str, Any]],
+    entry_policy: str,
+    portfolio: str,
+) -> alt.Chart:
+    field = f"{portfolio}_{entry_policy}_return"
+    buckets: dict[str, list[float]] = {}
+    for row in rows:
+        value = _calendar_number(row.get(field))
+        if value is None:
+            continue
+        day = _parse_day(str(row.get("date") or ""))
+        if day is None:
+            continue
+        week = f"{day.isocalendar().year}-W{day.isocalendar().week:02d}"
+        buckets.setdefault(week, []).append(value)
+    frame = pd.DataFrame(
+        [
+            {
+                "week": week,
+                "hit_rate_pct": round(
+                    (sum(1 for value in values if value > 0) / len(values)) * 100, 2
+                ),
+            }
+            for week, values in sorted(buckets.items())
+        ]
+    )
+    if frame.empty:
+        return _empty_chart("No weekly hit rate yet")
+    return (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            x=alt.X("week:N", title="Week"),
+            y=alt.Y("hit_rate_pct:Q", title="Hit rate %"),
+            tooltip=["week:N", "hit_rate_pct:Q"],
+        )
+        .properties(height=220)
+    )
+
+
+def _calendar_bucket_rows(
+    details: list[dict[str, Any]],
+    policy_field: str,
+    bucket_field: str,
+    *,
+    split: bool = False,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, list[float]] = {}
+    for detail in details:
+        picks = {str(row.get("ticker") or ""): row for row in detail.get("picks") or []}
+        for row in detail.get("return_rows") or []:
+            value = _calendar_number(row.get(policy_field))
+            if value is None:
+                continue
+            pick = dict(picks.get(str(row.get("ticker") or "")) or {})
+            raw_bucket = str(pick.get(bucket_field) or "unknown")
+            names = [raw_bucket]
+            if split:
+                names = [
+                    item.strip()
+                    for item in raw_bucket.replace(";", ",").split(",")
+                    if item.strip()
+                ]
+            for name in names or ["unknown"]:
+                buckets.setdefault(name, []).append(value)
+    output = []
+    for bucket, values in sorted(buckets.items()):
+        output.append(
+            {
+                "bucket": bucket,
+                "sample_size": len(values),
+                "avg_return_pct": round(sum(values) / len(values), 2),
+                "hit_rate_pct": round(
+                    (sum(1 for value in values if value > 0) / len(values)) * 100,
+                    2,
+                ),
+            }
+        )
+    return output
+
+
+def _filter_calendar_days(
+    days: list[dict[str, Any]],
+    *,
+    source_filter: str,
+    setup_filter: str,
+    audited_only: bool,
+    show_pending: bool,
+) -> list[dict[str, Any]]:
+    output = []
+    setup_query = setup_filter.strip().lower()
+    for row in days:
+        if audited_only and row.get("status") != "AUDITED":
+            continue
+        if not show_pending and row.get("status") in {"PICKS PENDING OUTCOMES", "OUTCOMES PARTIAL"}:
+            continue
+        source_text = (
+            str(row.get("data_source_kind") or "")
+            + " "
+            + str(row.get("source_label") or "")
+        ).lower()
+        if source_filter != "all" and source_filter.lower() not in source_text:
+            continue
+        if setup_query and setup_query not in str(row.get("setups") or "").lower():
+            continue
+        output.append(row)
+    return output
+
+
+def _calendar_missing_rate(days: list[dict[str, Any]]) -> float:
+    picks = sum(int(_number(row.get("top_pick_count"))) for row in days)
+    missing = sum(int(_number(row.get("missing_outcome_count"))) for row in days)
+    return round((missing / picks) * 100, 2) if picks else 0.0
+
+
+def _calendar_evidence_label(real_days: int) -> str:
+    if real_days < 20:
+        return "Not enough real days yet"
+    if real_days < 60:
+        return "Early evidence"
+    return "Stronger evidence"
+
+
+def _coverage_text(value: Any) -> str:
+    number = _calendar_number(value)
+    return "Pending" if number is None else f"{_format_number(number)}%"
+
+
+def _pct_or_pending(value: Any) -> str:
+    number = _calendar_number(value)
+    return "Pending" if number is None else _signed_pct(number)
+
+
+def _calendar_number(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_day(value: str) -> date | None:
+    text = str(value or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _month_end(value: date) -> date:
+    next_month = (value.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return next_month - timedelta(days=1)
+
+
+def _coerce_date_range(raw: Any, fallback_start: date, fallback_end: date) -> tuple[date, date]:
+    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+        start, end = raw[0], raw[1]
+        if isinstance(start, date) and isinstance(end, date):
+            return (start, end) if start <= end else (end, start)
+    if isinstance(raw, date):
+        return raw, raw
+    return fallback_start, fallback_end
+
+
 def _history(state: dict[str, Any]) -> None:
     history = state["history"]
     shadow_report = dict(state.get("shadow_report") or {})
@@ -3412,6 +4453,7 @@ def _column_label(column: str) -> str:
         "rank": "Rank",
         "ticker": "Ticker",
         "score": "Score",
+        "alpha_score": "Alpha score",
         "total_score": "Score",
         "explosive_score": "Explosive",
         "tradability_score": "Tradability",
@@ -3429,7 +4471,20 @@ def _column_label(column: str) -> str:
         "breakout_trigger": "Watch price",
         "invalidation_level": "Risk line",
         "first_target": "Target",
+        "trigger": "Watch price",
+        "invalidation": "Risk line",
+        "target": "Target",
         "best_exit_bias": "Exit",
+        "recommended_exit_policy": "Exit policy",
+        "recommended_exit_price": "Exit price",
+        "recommended_exit_return": "Exit return",
+        "price_1m_return": "1 min",
+        "price_5m_return": "5 min",
+        "price_15m_return": "15 min",
+        "lunch_return": "Lunch",
+        "close_return": "Close",
+        "high_after_entry_return": "High",
+        "low_after_entry_drawdown": "Drawdown",
         "risk_flags": "Risk flags",
         "avoid_reasons": "Reason",
         "status": "Status",
@@ -3460,19 +4515,29 @@ def _column_label(column: str) -> str:
         "return_1m_pct": "1 min",
         "return_5m_pct": "5 min",
         "return_15m_pct": "15 min",
+        "outcome_coverage_pct": "Outcome coverage",
+        "avg_return_pct": "Average return",
+        "hit_rate_pct": "Hit rate",
     }
     return labels.get(column, column.replace("_", " ").title())
 
 
 def _format_cell(column: str, value: Any) -> str:
     if value in {None, ""}:
+        if _is_return_column(column):
+            return "Pending"
         return ""
     if column in {
         "breakout_trigger",
         "invalidation_level",
         "first_target",
+        "trigger",
+        "invalidation",
+        "target",
         "current_price",
+        "premarket_price",
         "entry_price",
+        "recommended_exit_price",
         "price_1m",
         "price_5m",
         "price_15m",
@@ -3484,6 +4549,8 @@ def _format_cell(column: str, value: Any) -> str:
         return _format_price(value)
     if column == "dollar_volume":
         return _format_money(value)
+    if _is_return_column(column):
+        return _signed_pct(value)
     if column.endswith("_pct") or column in {
         "gap_pct",
         "range_position_pct",
@@ -3502,6 +4569,7 @@ def _format_cell(column: str, value: Any) -> str:
         return f"{_format_number(value)}%"
     if column in {
         "score",
+        "alpha_score",
         "total_score",
         "explosive_score",
         "tradability_score",
@@ -3522,17 +4590,22 @@ def _format_cell(column: str, value: Any) -> str:
 
 
 def _is_numeric_column(column: str) -> bool:
-    return column in {
+    return _is_return_column(column) or column in {
         "rank",
         "score",
+        "alpha_score",
         "gap_pct",
         "dollar_volume",
         "range_position_pct",
         "breakout_trigger",
         "invalidation_level",
         "first_target",
+        "trigger",
+        "invalidation",
+        "target",
         "monitor_confidence_pct",
         "current_price",
+        "premarket_price",
         "path_progress_pct",
         "expected_return_pct",
         "confidence_pct",
@@ -3540,6 +4613,7 @@ def _is_numeric_column(column: str) -> bool:
         "upper_return_pct",
         "risk_adjusted_return_pct",
         "entry_price",
+        "recommended_exit_price",
         "price_1m",
         "price_5m",
         "price_15m",
@@ -3547,11 +4621,25 @@ def _is_numeric_column(column: str) -> bool:
         "close_price",
         "high_after_entry",
         "low_after_entry",
-        "lunch_return_pct",
-        "close_return_pct",
-        "high_return_pct",
-        "low_drawdown_pct",
     }
+
+
+def _is_return_column(column: str) -> bool:
+    return (
+        column.endswith("_return")
+        or column.endswith("_return_pct")
+        or column.endswith("_drawdown")
+        or column.endswith("_drawdown_pct")
+        or column in {
+            "top1_return",
+            "top3_return",
+            "top5_return",
+            "top1_close_return",
+            "top3_close_return",
+            "top5_close_return",
+            "avg_return_pct",
+        }
+    )
 
 
 def _expectancy_for(state: dict[str, Any], ticker: str) -> dict[str, Any] | None:

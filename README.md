@@ -11,6 +11,60 @@ py -m intraday_scanner.cli --help
 
 Sample returns are fixture-only. Live scans need read-only market-data secrets and a universe source such as `--symbols`, `--symbols-file`, or `--universe-file`. Alpaca market data does not supply every enrichment field by itself, so use enrichment files/providers for float, market cap, short float, catalyst URL, halt, and offering context when available. Dawnstrike has no auto-trading or broker order-execution path.
 
+## How This Works
+
+Dawnstrike is a research/watchlist app. It collects premarket mover data,
+scores tickers, blocks risky names, sends Telegram watchlist or no-clean-edge
+messages, stores everything in SQLite, and shows the result in a Streamlit
+dashboard. It does not place orders, execute trades, or store broker trading
+credentials.
+
+Daily AlphaOps schedule:
+
+- 8:10 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
+- 8:35 AM CT: `Dawnstrike AlphaOps Monitor 5m` starts checking saved names
+  every 5 minutes.
+- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` writes the evidence report.
+  The EOD flow can run `alpha-report`, `attribute-returns`, and
+  `historical-report`.
+
+Manual one-off run:
+
+```powershell
+py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram
+```
+
+Put outcome CSV files here after close:
+
+```text
+data\inbox\outcomes\outcomes_YYYY-MM-DD.csv
+```
+
+Then attribute paper returns from the saved historical signal ledger:
+
+```powershell
+py -m intraday_scanner.cli import-manual-outcomes --input data\inbox\outcomes\outcomes_YYYY-MM-DD.csv --db-path data\shadow_real.sqlite --persist
+py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
+py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+```
+
+Open the dashboard:
+
+```powershell
+py -m streamlit run app.py --server.port 8502
+```
+
+Telegram messages are watchlist/status alerts only:
+
+- `Dawnstrike Alpha Watch`: review these names manually.
+- `Dawnstrike Alpha Check`: no clean edge today.
+- `Dawnstrike Alpha Monitor`: manual review/status for earlier names.
+- `Outcome Data Needed`: import the outcome CSV.
+- `Dawnstrike Shadow Results`: paper/shadow evidence summary, not a guarantee.
+
+Start with `docs\DAWNSTRIKE_EXPLAINED.md` and `docs\OPERATOR_MANUAL.md` for
+the full operator guide.
+
 ## Free Shadow Mode
 
 Free Shadow Mode is the zero-dollar paper-validation loop. It lets you manually
@@ -88,6 +142,21 @@ as insufficient sample, not proven expectancy. Strong evidence starts at 60+
 real market days. No paid/live provider means outcome quality is limited by
 manual/free shadow collection. See `docs\ALPHAOPS_V4.md` and
 `docs\PLAYBOOK_ENGINE.md`.
+
+Historical Alpha Calendar:
+
+```powershell
+py -m intraday_scanner.cli calendar-report --db-path data\shadow_real.sqlite --out-dir outputs\calendar_report
+py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+```
+
+The dashboard includes a `Historical Calendar` tab for daily pick review,
+missing outcomes, Telegram evidence, equal-weight top1/top3/top5 shadow returns,
+and monitor-exit checks. Missing outcomes remain pending and are never counted
+as zero. Scenario returns are paper returns from imported outcomes; recommended
+returns require an explicit saved exit signal. See
+`docs\HISTORICAL_SIGNAL_LEDGER.md`, `docs\RETURN_ATTRIBUTION.md`, and
+`docs\HISTORICAL_CALENDAR.md`.
 
 ## Install
 

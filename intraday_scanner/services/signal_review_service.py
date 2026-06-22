@@ -13,13 +13,22 @@ def review_alpha_signals(
     source_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     decision = evaluate_no_trade(signals, source_summary=source_summary)
-    clean = [row for row in signals if row.get("can_alert") and not row.get("no_trade_reason")]
-    blocked = [row for row in signals if not row.get("can_alert") or row.get("no_trade_reason")]
+    clean = _clean_signals(signals)
+    fallback = _fallback_signals(signals)
+    watchlist = clean if decision.decision_tier == "clean_edge" else fallback
+    blocked = [
+        row
+        for row in signals
+        if row not in watchlist
+        and (not row.get("can_alert") or row.get("no_trade_reason") or row not in clean)
+    ]
     return {
         "decision": decision.to_dict(),
-        "watchlist": clean[:5],
+        "watchlist": [
+            _with_review_tier(row, decision.decision_tier) for row in watchlist[:5]
+        ],
         "blocked": blocked,
-        "plain_read": _plain_read(clean, blocked, decision),
+        "plain_read": _plain_read(watchlist, blocked, decision),
     }
 
 
@@ -69,19 +78,68 @@ def monitor_alpha_signals(
 
 
 def _plain_read(
-    clean: list[dict[str, Any]],
+    watchlist: list[dict[str, Any]],
     blocked: list[dict[str, Any]],
     decision: NoTradeDecision,
 ) -> str:
     if decision.no_trade:
         return f"No clean edge today. Reason: {decision.reason}"
-    top = clean[0]
+    top = watchlist[0]
+    if decision.decision_tier == "probability_fallback":
+        return (
+            f"{top.get('ticker')} is the best probability watch, not a clean edge. "
+            f"Alpha {top.get('alpha_score')} with source confidence "
+            f"{top.get('source_confidence')}. Confirm ticker, catalyst, volume, "
+            f"and price action manually. {len(blocked)} names are blocked or weaker."
+        )
     return (
         f"{top.get('ticker')} is the lead research setup with Alpha "
         f"{top.get('alpha_score')}. Watch {top.get('entry_trigger')} as the trigger, "
         f"{top.get('invalidation')} as invalidation, and {top.get('target_1')} as target. "
         f"{len(blocked)} names are blocked by risk filters."
     )
+
+
+def _clean_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in signals
+        if row.get("can_alert")
+        and not row.get("no_trade_reason")
+        and _float(row.get("alpha_score")) is not None
+        and (_float(row.get("alpha_score")) or 0.0) >= 45.0
+    ]
+
+
+def _fallback_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = [
+        row
+        for row in signals
+        if row.get("can_alert")
+        and not row.get("no_trade_reason")
+        and (_float(row.get("alpha_score")) or 0.0) >= 32.0
+        and (_float(row.get("source_confidence")) or 0.0) >= 20.0
+        and (_float(row.get("risk_score")) or 0.0) >= 55.0
+        and str(row.get("drawdown_risk_bucket") or "").upper() != "HIGH"
+        and (
+            (_float(row.get("score") or row.get("total_score")) or 0.0) >= 40.0
+            or (_float(row.get("dollar_volume")) or 0.0) >= 1_000_000.0
+        )
+    ]
+    return sorted(rows, key=_rank_key, reverse=True)
+
+
+def _with_review_tier(row: dict[str, Any], decision_tier: str) -> dict[str, Any]:
+    output = dict(row)
+    output["decision_tier"] = decision_tier
+    if decision_tier == "probability_fallback":
+        output["classification"] = "WATCH ONLY"
+        output["review_label"] = "PROBABILITY WATCH"
+    return output
+
+
+def _rank_key(row: dict[str, Any]) -> tuple[float, float]:
+    return _float(row.get("alpha_score")) or 0.0, _float(row.get("dollar_volume")) or 0.0
 
 
 def _float(value: Any) -> float | None:

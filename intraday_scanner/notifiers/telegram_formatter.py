@@ -193,6 +193,14 @@ def format_alpha_watch(
         f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | {len(picks)} picks",
         "",
     ]
+    if edge_label.upper() == "PROBABILITY WATCH":
+        lines.extend(
+            [
+                "Watch-only fallback: not a clean edge.",
+                "Confirm ticker, catalyst, volume, and levels manually.",
+                "",
+            ]
+        )
     if not picks:
         lines.extend([
             "No clean edge today.",
@@ -204,7 +212,8 @@ def format_alpha_watch(
     for index, row in enumerate(picks, start=1):
         lines.append(
             f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
-            f"{format_score(row.get('alpha_score'))} | {_text(row.get('edge_bucket'), 'n/a')}"
+            f"{format_score(row.get('alpha_score'))} | "
+            f"{_text(row.get('review_label') or row.get('edge_bucket'), 'n/a')}"
         )
         lines.append(
             f"   Trigger {format_price(row.get('entry_trigger') or row.get('breakout_trigger'))} | "

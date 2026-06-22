@@ -8,11 +8,9 @@ def test_streamlit_dashboard_renders_without_exceptions():
 
     assert not app.exception
     assert [tab.label for tab in app.tabs] == [
-        "Dashboard",
-        "Run",
+        "Today",
         "Picks",
-        "5-Min Check",
-        "Backtest",
-        "History",
-        "Settings",
+        "Calendar",
+        "Performance",
+        "System",
     ]

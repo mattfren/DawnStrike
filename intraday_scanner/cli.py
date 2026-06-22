@@ -54,6 +54,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     alpha_status,
 )
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
+from intraday_scanner.services.calendar_report_service import calendar_report
 from intraday_scanner.services.e2e_automation_service import (
     automation_daemon,
     automation_monitor_open,
@@ -92,6 +93,10 @@ from intraday_scanner.services.premarket_intelligence import (
 from intraday_scanner.services.provider_health_service import (
     record_health_check,
     record_health_status,
+)
+from intraday_scanner.services.return_attribution_service import (
+    attribute_returns,
+    historical_report,
 )
 from intraday_scanner.services.scan_service import ScanService
 from intraday_scanner.services.screener_automation import (
@@ -396,6 +401,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_report_parser.add_argument("--out-dir", default="outputs/alpha_report")
 
+    attribute_parser = subparsers.add_parser(
+        "attribute-returns",
+        help="Calculate historical paper/scenario return attribution",
+    )
+    attribute_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    attribute_parser.add_argument("--out-dir", default="outputs/return_attribution")
+    attribute_parser.add_argument("--persist", action="store_true")
+    attribute_parser.add_argument("--notify", default="")
+
+    historical_report_parser = subparsers.add_parser(
+        "historical-report",
+        help="Write historical signal ledger and accuracy report files",
+    )
+    historical_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    historical_report_parser.add_argument("--out-dir", default="outputs/historical_report")
+    historical_report_parser.add_argument("--start", default=None)
+    historical_report_parser.add_argument("--end", default=None)
+
+    calendar_report_parser = subparsers.add_parser(
+        "calendar-report", help="Write Historical Alpha Calendar review files"
+    )
+    calendar_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    calendar_report_parser.add_argument("--out-dir", default="outputs/calendar_report")
+    calendar_report_parser.add_argument("--start", default=None)
+    calendar_report_parser.add_argument("--end", default=None)
+    calendar_report_parser.add_argument("--month", default=None)
+
     def add_automation_common(command: argparse.ArgumentParser) -> None:
         command.add_argument("--config", default="config/automation.example.yaml")
         command.add_argument("--db-path", default=None)
@@ -672,6 +704,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_doctor(args)
         if args.command == "alpha-report":
             return _run_alpha_report(args)
+        if args.command == "attribute-returns":
+            return _run_attribute_returns(args)
+        if args.command == "historical-report":
+            return _run_historical_report(args)
+        if args.command == "calendar-report":
+            return _run_calendar_report(args)
         if args.command == "automation-run":
             return _run_automation_run(args)
         if args.command == "automation-morning":
@@ -1136,6 +1174,40 @@ def _run_alpha_doctor(args: argparse.Namespace) -> int:
 
 def _run_alpha_report(args: argparse.Namespace) -> int:
     result = alpha_report(db_path=args.db_path, out_dir=args.out_dir)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_attribute_returns(args: argparse.Namespace) -> int:
+    result = attribute_returns(
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        notify=args.notify,
+    )
+    print(json.dumps({key: value for key, value in result.items() if key != "summary"}, indent=2))
+    return 0
+
+
+def _run_historical_report(args: argparse.Namespace) -> int:
+    result = historical_report(
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        start=args.start,
+        end=args.end,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_calendar_report(args: argparse.Namespace) -> int:
+    result = calendar_report(
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        start=args.start,
+        end=args.end,
+        month=args.month,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

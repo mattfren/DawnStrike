@@ -57,10 +57,10 @@ Daily command:
 py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram
 ```
 
-Windows scheduled-task command:
+Windows scheduled-task registration:
 
 ```powershell
-schtasks /Create /TN "Dawnstrike AlphaOps" /SC MINUTE /MO 5 /TR "py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram" /F
+powershell -ExecutionPolicy Bypass -File scripts\register_alphaops_tasks.ps1
 ```
 
 ## Outcomes
@@ -71,12 +71,51 @@ Save manual outcome CSVs under:
 data\inbox\outcomes\outcomes_YYYY-MM-DD.csv
 ```
 
-Then run outcome import/audit from the UI or CLI. Missing values stay
-unavailable and are not counted as zero.
+Then import and audit the outcomes. Missing values stay unavailable and are not
+counted as zero.
 
-For AlphaOps learning, run:
+```powershell
+py -m intraday_scanner.cli import-manual-outcomes --input data\inbox\outcomes\outcomes_YYYY-MM-DD.csv --db-path data\shadow_real.sqlite --persist
+py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
+py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+```
+
+For AlphaOps learning and reporting, run:
 
 ```powershell
 py -m intraday_scanner.cli alpha-outcomes --db-path data\shadow_real.sqlite
 py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite
+py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 ```
+
+## Historical Calendar
+
+Use the dashboard `Historical Calendar` tab to review saved daily picks, missing
+outcomes, Telegram messages, equal-weight top1/top3/top5 shadow returns, and
+monitor-exit evidence. The tab reads `data\shadow_real.sqlite` by default.
+Missing outcome rows show `Outcome needed` and are not counted as zero.
+
+Generate the offline report:
+
+```powershell
+py -m intraday_scanner.cli calendar-report --db-path data\shadow_real.sqlite --out-dir outputs\calendar_report
+py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+```
+
+For a specific month:
+
+```powershell
+py -m intraday_scanner.cli calendar-report --db-path data\shadow_real.sqlite --out-dir outputs\calendar_report --month 2026-06
+```
+
+End-of-day scheduled flow can run:
+
+```powershell
+py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
+py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
+py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+```
+
+It does not fabricate outcomes when no CSV has been imported. See
+`docs\HISTORICAL_SIGNAL_LEDGER.md`, `docs\RETURN_ATTRIBUTION.md`, and
+`docs\HISTORICAL_CALENDAR.md`.

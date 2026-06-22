@@ -13,6 +13,7 @@ from typing import Any
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso, validate_required_columns
 from intraday_scanner.reporting import read_csv_dicts
+from intraday_scanner.services.return_attribution_service import import_historical_outcomes
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 OUTCOME_COLUMNS = [
@@ -140,6 +141,25 @@ def import_manual_outcomes(
     if not rows:
         raise SnapshotValidationError(f"{input_path} has no outcome rows")
     validate_required_columns(set(rows[0]), OUTCOME_COLUMNS, str(input_path))
+    historical_signals = store.load_historical_signals(limit=50000)
+    if _use_historical_outcome_import(rows, historical_signals):
+        result = import_historical_outcomes(
+            input_path=input_path,
+            store=store,
+            persist=persist,
+            replace=replace,
+        )
+        legacy_rows = [_legacy_outcome_from_historical(row) for row in result["rows"]]
+        legacy_stats = {"inserted": 0, "skipped": 0}
+        if persist and legacy_rows:
+            legacy_stats = store.persist_manual_outcomes(legacy_rows, replace=replace)
+        return {
+            **result,
+            "manual_uploaded_data": True,
+            "paid_data": False,
+            "legacy_manual_outcomes": legacy_stats,
+            "rows": legacy_rows,
+        }
     recommendations = store.load_recommendation_theses(limit=5000)
     normalized = [
         _normalize_outcome(row, _match_recommendation(row, recommendations)) for row in rows
@@ -155,6 +175,52 @@ def import_manual_outcomes(
         "row_count": len(normalized),
         **stats,
         "rows": normalized,
+    }
+
+
+def _use_historical_outcome_import(
+    rows: list[dict[str, Any]],
+    historical_signals: list[dict[str, Any]],
+) -> bool:
+    if not historical_signals:
+        return False
+    input_dates = {str(row.get("date") or "")[:10] for row in rows if row.get("date")}
+    return any(
+        str(signal.get("market_date") or "") in input_dates
+        and str(signal.get("ticker") or "").upper() != "NO_TRADE"
+        for signal in historical_signals
+    )
+
+
+def _legacy_outcome_from_historical(row: dict[str, Any]) -> dict[str, Any]:
+    date_value = str(row.get("market_date") or row.get("date") or "")
+    ticker = str(row.get("ticker") or "").upper()
+    entry_time = str(row.get("entry_time") or "")
+    scan_id = str(row.get("scan_id") or "")
+    return {
+        "outcome_key": f"{scan_id}:{ticker}:{date_value}:{entry_time}",
+        "date": date_value,
+        "ticker": ticker,
+        "scan_id": scan_id,
+        "rank": row.get("rank"),
+        "recommendation_timestamp": row.get("recommendation_timestamp") or "",
+        "uploaded_at": row.get("imported_at") or utc_now_iso(),
+        "entry_time": entry_time,
+        "entry_price": _format_optional(_optional_float(row.get("entry_price"))),
+        "price_1m": _format_optional(_optional_float(row.get("price_1m"))),
+        "price_5m": _format_optional(_optional_float(row.get("price_5m"))),
+        "price_15m": _format_optional(_optional_float(row.get("price_15m"))),
+        "lunch_price": _format_optional(_optional_float(row.get("lunch_price"))),
+        "close_price": _format_optional(_optional_float(row.get("close_price"))),
+        "high_after_entry": _format_optional(_optional_float(row.get("high_after_entry"))),
+        "low_after_entry": _format_optional(_optional_float(row.get("low_after_entry"))),
+        "halted": _bool_text(row.get("halted")),
+        "source": row.get("outcome_source") or row.get("source") or "manual_outcome_upload",
+        "notes": row.get("notes") or "",
+        "manual_uploaded_data": True,
+        "paid_data": False,
+        "signal_id": row.get("signal_id") or "",
+        "outcome_status": row.get("outcome_status") or "",
     }
 
 

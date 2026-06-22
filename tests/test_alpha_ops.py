@@ -20,7 +20,10 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_watch,
 )
 from intraday_scanner.services.alpha_cycle_service import alpha_monitor
-from intraday_scanner.services.signal_review_service import monitor_alpha_signals
+from intraday_scanner.services.signal_review_service import (
+    monitor_alpha_signals,
+    review_alpha_signals,
+)
 from intraday_scanner.services.source_reliability_service import build_source_reliability
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -120,6 +123,29 @@ def test_no_trade_filter_allows_no_clean_edge():
     assert decision.no_trade is True
     assert "current halt" in decision.reason
     assert "Do not force" in decision.next_action
+
+
+def test_no_trade_filter_surfaces_probability_fallback_watchlist():
+    signal = _candidate(
+        alpha_score=40.4,
+        edge_bucket="LOW",
+        confidence_bucket="INSUFFICIENT_SAMPLE",
+        source_confidence=27.5,
+        risk_score=70,
+        risk_flags="missing_previous_close;unknown_float;public_url_unverified",
+        can_alert=True,
+        no_trade_reason="",
+    )
+
+    decision = evaluate_no_trade([signal], source_summary={"status": "success"})
+    review = review_alpha_signals([signal], source_summary={"status": "success"})
+
+    assert decision.no_trade is False
+    assert decision.decision_tier == "probability_fallback"
+    assert decision.fallback_count == 1
+    assert review["watchlist"][0]["ticker"] == "NOVA"
+    assert review["watchlist"][0]["review_label"] == "PROBABILITY WATCH"
+    assert "best probability watch" in review["plain_read"]
 
 
 def test_alpha_model_uses_insufficient_sample_fallback_under_20_days():

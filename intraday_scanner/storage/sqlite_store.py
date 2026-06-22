@@ -386,6 +386,130 @@ class SQLiteScanStore:
                         outlier_dependency REAL NOT NULL,
                         summary_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS historical_signals (
+                        signal_id TEXT PRIMARY KEY,
+                        scan_id TEXT,
+                        alpha_signal_id TEXT,
+                        generated_at TEXT NOT NULL,
+                        market_date TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        company TEXT,
+                        rank INTEGER,
+                        source TEXT,
+                        source_url TEXT,
+                        source_confidence REAL,
+                        data_source_kind TEXT,
+                        model_version TEXT,
+                        config_hash TEXT,
+                        primary_setup TEXT,
+                        setup_grade TEXT,
+                        signal_label TEXT NOT NULL,
+                        entry_watch_level REAL,
+                        entry_trigger_type TEXT,
+                        entry_condition TEXT,
+                        confirmation_condition TEXT,
+                        exit_line REAL,
+                        invalidation_level REAL,
+                        target_1 REAL,
+                        target_2 REAL,
+                        risk_flags_json TEXT NOT NULL,
+                        avoid_reasons_json TEXT NOT NULL,
+                        catalyst_summary TEXT,
+                        telegram_event_key TEXT,
+                        was_alerted INTEGER NOT NULL DEFAULT 0,
+                        no_trade_reason TEXT,
+                        raw_payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_historical_signals_day_rank
+                    ON historical_signals(market_date, rank);
+                    CREATE INDEX IF NOT EXISTS idx_historical_signals_scan_ticker
+                    ON historical_signals(scan_id, ticker);
+                    CREATE TABLE IF NOT EXISTS signal_events (
+                        event_id TEXT PRIMARY KEY,
+                        signal_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        event_timestamp TEXT NOT NULL,
+                        event_price REAL,
+                        source TEXT,
+                        notes TEXT,
+                        payload_json TEXT NOT NULL,
+                        FOREIGN KEY(signal_id) REFERENCES historical_signals(signal_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_signal_events_signal_time
+                    ON signal_events(signal_id, event_timestamp);
+                    CREATE TABLE IF NOT EXISTS signal_outcomes (
+                        signal_id TEXT PRIMARY KEY,
+                        market_date TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        outcome_source TEXT NOT NULL,
+                        entry_time TEXT,
+                        entry_price REAL,
+                        price_1m REAL,
+                        price_5m REAL,
+                        price_15m REAL,
+                        lunch_price REAL,
+                        close_price REAL,
+                        high_after_entry REAL,
+                        low_after_entry REAL,
+                        halted INTEGER,
+                        notes TEXT,
+                        imported_at TEXT NOT NULL,
+                        validated_against_signal_timestamp INTEGER NOT NULL,
+                        outcome_status TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        FOREIGN KEY(signal_id) REFERENCES historical_signals(signal_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_signal_outcomes_day_ticker
+                    ON signal_outcomes(market_date, ticker);
+                    CREATE TABLE IF NOT EXISTS signal_return_attribution (
+                        attribution_id TEXT PRIMARY KEY,
+                        signal_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        market_date TEXT NOT NULL,
+                        entry_policy TEXT NOT NULL,
+                        exit_policy TEXT NOT NULL,
+                        entry_price REAL,
+                        exit_price REAL,
+                        return_pct REAL,
+                        max_favorable_excursion REAL,
+                        max_adverse_excursion REAL,
+                        drawdown_pct REAL,
+                        hit_target_1 INTEGER,
+                        hit_target_2 INTEGER,
+                        hit_invalidation INTEGER,
+                        trigger_activated INTEGER,
+                        audit_status TEXT NOT NULL,
+                        scenario_or_recommended TEXT NOT NULL,
+                        calculated_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        FOREIGN KEY(signal_id) REFERENCES historical_signals(signal_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_signal_return_attr_day_rank
+                    ON signal_return_attribution(market_date, ticker);
+                    CREATE TABLE IF NOT EXISTS daily_signal_performance (
+                        market_date TEXT PRIMARY KEY,
+                        signal_count INTEGER NOT NULL,
+                        alerted_count INTEGER NOT NULL,
+                        no_trade_count INTEGER NOT NULL,
+                        audited_count INTEGER NOT NULL,
+                        missing_outcome_count INTEGER NOT NULL,
+                        top1_return REAL,
+                        top3_return REAL,
+                        top5_return REAL,
+                        top1_close_return REAL,
+                        top3_close_return REAL,
+                        top5_close_return REAL,
+                        top1_lunch_return REAL,
+                        top3_lunch_return REAL,
+                        top5_lunch_return REAL,
+                        best_pick_return REAL,
+                        worst_pick_return REAL,
+                        max_drawdown REAL,
+                        hit_rate REAL,
+                        outcome_coverage_pct REAL,
+                        evidence_status TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
                     """
                 )
         except sqlite3.Error as exc:
@@ -2156,6 +2280,473 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load AlphaOps setup memory: {exc}") from exc
 
+    def persist_historical_signals(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        replace: bool = True,
+    ) -> dict[str, int]:
+        self.initialize()
+        statement = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    signal_id = str(row.get("signal_id") or "")
+                    if not signal_id:
+                        continue
+                    cursor = connection.execute(
+                        f"""
+                        {statement} INTO historical_signals
+                        (signal_id, scan_id, alpha_signal_id, generated_at, market_date,
+                         ticker, company, rank, source, source_url, source_confidence,
+                         data_source_kind, model_version, config_hash, primary_setup,
+                         setup_grade, signal_label, entry_watch_level, entry_trigger_type,
+                         entry_condition, confirmation_condition, exit_line,
+                         invalidation_level, target_1, target_2, risk_flags_json,
+                         avoid_reasons_json, catalyst_summary, telegram_event_key,
+                         was_alerted, no_trade_reason, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,  # noqa: S608
+                        (
+                            signal_id,
+                            str(row.get("scan_id") or ""),
+                            str(row.get("alpha_signal_id") or ""),
+                            str(row.get("generated_at") or ""),
+                            str(row.get("market_date") or ""),
+                            str(row.get("ticker") or ""),
+                            str(row.get("company") or ""),
+                            _int_or_none(row.get("rank")),
+                            str(row.get("source") or ""),
+                            str(row.get("source_url") or ""),
+                            _float_or_none(row.get("source_confidence")),
+                            str(row.get("data_source_kind") or ""),
+                            str(row.get("model_version") or ""),
+                            str(row.get("config_hash") or ""),
+                            str(row.get("primary_setup") or ""),
+                            str(row.get("setup_grade") or ""),
+                            str(row.get("signal_label") or ""),
+                            _float_or_none(row.get("entry_watch_level")),
+                            str(row.get("entry_trigger_type") or ""),
+                            str(row.get("entry_condition") or ""),
+                            str(row.get("confirmation_condition") or ""),
+                            _float_or_none(row.get("exit_line")),
+                            _float_or_none(row.get("invalidation_level")),
+                            _float_or_none(row.get("target_1")),
+                            _float_or_none(row.get("target_2")),
+                            json.dumps(row.get("risk_flags_json") or [], sort_keys=True),
+                            json.dumps(row.get("avoid_reasons_json") or [], sort_keys=True),
+                            str(row.get("catalyst_summary") or ""),
+                            str(row.get("telegram_event_key") or ""),
+                            1 if row.get("was_alerted") else 0,
+                            str(row.get("no_trade_reason") or ""),
+                            json.dumps(row.get("raw_payload_json") or row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist historical signals: {exc}") from exc
+
+    def load_historical_signals(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        market_date: str | None = None,
+        scan_id: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if market_date:
+            clauses.append("market_date = ?")
+            params.append(market_date)
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end)
+        if scan_id:
+            clauses.append("scan_id = ?")
+            params.append(scan_id)
+        query = """
+            SELECT *
+            FROM historical_signals
+        """
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date DESC, COALESCE(rank, 999999) ASC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_historical_signal_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load historical signals: {exc}") from exc
+
+    def link_historical_signal_notification(
+        self,
+        *,
+        scan_id: str,
+        telegram_event_key: str,
+        was_alerted: bool,
+    ) -> int:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE historical_signals
+                    SET telegram_event_key = ?, was_alerted = ?
+                    WHERE scan_id = ?
+                    """,
+                    (telegram_event_key, 1 if was_alerted else 0, scan_id),
+                )
+                return int(cursor.rowcount or 0)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not link historical signal notification: {exc}") from exc
+
+    def persist_signal_events(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    event_id = str(row.get("event_id") or "")
+                    signal_id = str(row.get("signal_id") or "")
+                    if not event_id or not signal_id:
+                        continue
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO signal_events
+                        (event_id, signal_id, event_type, event_timestamp, event_price,
+                         source, notes, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            signal_id,
+                            str(row.get("event_type") or ""),
+                            str(row.get("event_timestamp") or ""),
+                            _float_or_none(row.get("event_price")),
+                            str(row.get("source") or ""),
+                            str(row.get("notes") or ""),
+                            json.dumps(row.get("payload_json") or row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist signal events: {exc}") from exc
+
+    def load_signal_events(
+        self,
+        *,
+        signal_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if signal_id:
+            clauses.append("signal_id = ?")
+            params.append(signal_id)
+        if start:
+            clauses.append("event_timestamp >= ?")
+            params.append(start)
+        if end:
+            clauses.append("event_timestamp <= ?")
+            params.append(end)
+        query = "SELECT * FROM signal_events"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY event_timestamp ASC, event_id ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load signal events: {exc}") from exc
+
+    def persist_signal_outcomes(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        replace: bool = False,
+    ) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    signal_id = str(row.get("signal_id") or "")
+                    if not signal_id:
+                        continue
+                    if replace:
+                        connection.execute(
+                            "DELETE FROM signal_outcomes WHERE signal_id = ?", (signal_id,)
+                        )
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO signal_outcomes
+                        (signal_id, market_date, ticker, outcome_source, entry_time,
+                         entry_price, price_1m, price_5m, price_15m, lunch_price,
+                         close_price, high_after_entry, low_after_entry, halted, notes,
+                         imported_at, validated_against_signal_timestamp, outcome_status,
+                         payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            signal_id,
+                            str(row.get("market_date") or row.get("date") or ""),
+                            str(row.get("ticker") or ""),
+                            str(row.get("outcome_source") or row.get("source") or ""),
+                            str(row.get("entry_time") or ""),
+                            _float_or_none(row.get("entry_price")),
+                            _float_or_none(row.get("price_1m")),
+                            _float_or_none(row.get("price_5m")),
+                            _float_or_none(row.get("price_15m")),
+                            _float_or_none(row.get("lunch_price")),
+                            _float_or_none(row.get("close_price")),
+                            _float_or_none(row.get("high_after_entry")),
+                            _float_or_none(row.get("low_after_entry")),
+                            _bool_or_none(row.get("halted")),
+                            str(row.get("notes") or ""),
+                            str(row.get("imported_at") or ""),
+                            1 if row.get("validated_against_signal_timestamp") else 0,
+                            str(row.get("outcome_status") or ""),
+                            json.dumps(row.get("payload_json") or row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist signal outcomes: {exc}") from exc
+
+    def load_signal_outcomes(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        signal_id: str | None = None,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end)
+        if signal_id:
+            clauses.append("signal_id = ?")
+            params.append(signal_id)
+        query = "SELECT * FROM signal_outcomes"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date DESC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load signal outcomes: {exc}") from exc
+
+    def persist_signal_return_attribution(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        replace: bool = True,
+    ) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        signal_ids = sorted(
+            {str(row.get("signal_id") or "") for row in rows if row.get("signal_id")}
+        )
+        try:
+            with self._connect() as connection:
+                if replace:
+                    for signal_id in signal_ids:
+                        connection.execute(
+                            "DELETE FROM signal_return_attribution WHERE signal_id = ?",
+                            (signal_id,),
+                        )
+                for row in rows:
+                    attribution_id = str(row.get("attribution_id") or "")
+                    signal_id = str(row.get("signal_id") or "")
+                    if not attribution_id or not signal_id:
+                        continue
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO signal_return_attribution
+                        (attribution_id, signal_id, ticker, market_date, entry_policy,
+                         exit_policy, entry_price, exit_price, return_pct,
+                         max_favorable_excursion, max_adverse_excursion, drawdown_pct,
+                         hit_target_1, hit_target_2, hit_invalidation,
+                         trigger_activated, audit_status, scenario_or_recommended,
+                         calculated_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            attribution_id,
+                            signal_id,
+                            str(row.get("ticker") or ""),
+                            str(row.get("market_date") or ""),
+                            str(row.get("entry_policy") or ""),
+                            str(row.get("exit_policy") or ""),
+                            _float_or_none(row.get("entry_price")),
+                            _float_or_none(row.get("exit_price")),
+                            _float_or_none(row.get("return_pct")),
+                            _float_or_none(row.get("max_favorable_excursion")),
+                            _float_or_none(row.get("max_adverse_excursion")),
+                            _float_or_none(row.get("drawdown_pct")),
+                            _bool_or_none(row.get("hit_target_1")),
+                            _bool_or_none(row.get("hit_target_2")),
+                            _bool_or_none(row.get("hit_invalidation")),
+                            _bool_or_none(row.get("trigger_activated")),
+                            str(row.get("audit_status") or ""),
+                            str(row.get("scenario_or_recommended") or ""),
+                            str(row.get("calculated_at") or ""),
+                            json.dumps(row.get("payload_json") or row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist signal return attribution: {exc}") from exc
+
+    def load_signal_return_attribution(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 50000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end)
+        query = "SELECT * FROM signal_return_attribution"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date DESC, ticker ASC, entry_policy ASC, exit_policy ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load signal return attribution: {exc}") from exc
+
+    def persist_daily_signal_performance(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO daily_signal_performance
+                        (market_date, signal_count, alerted_count, no_trade_count,
+                         audited_count, missing_outcome_count, top1_return, top3_return,
+                         top5_return, top1_close_return, top3_close_return,
+                         top5_close_return, top1_lunch_return, top3_lunch_return,
+                         top5_lunch_return, best_pick_return, worst_pick_return,
+                         max_drawdown, hit_rate, outcome_coverage_pct, evidence_status,
+                         payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("market_date") or ""),
+                            int(row.get("signal_count") or 0),
+                            int(row.get("alerted_count") or 0),
+                            int(row.get("no_trade_count") or 0),
+                            int(row.get("audited_count") or 0),
+                            int(row.get("missing_outcome_count") or 0),
+                            _float_or_none(row.get("top1_return")),
+                            _float_or_none(row.get("top3_return")),
+                            _float_or_none(row.get("top5_return")),
+                            _float_or_none(row.get("top1_close_return")),
+                            _float_or_none(row.get("top3_close_return")),
+                            _float_or_none(row.get("top5_close_return")),
+                            _float_or_none(row.get("top1_lunch_return")),
+                            _float_or_none(row.get("top3_lunch_return")),
+                            _float_or_none(row.get("top5_lunch_return")),
+                            _float_or_none(row.get("best_pick_return")),
+                            _float_or_none(row.get("worst_pick_return")),
+                            _float_or_none(row.get("max_drawdown")),
+                            _float_or_none(row.get("hit_rate")),
+                            _float_or_none(row.get("outcome_coverage_pct")),
+                            str(row.get("evidence_status") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist daily signal performance: {exc}") from exc
+
+    def load_daily_signal_performance(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end)
+        query = "SELECT * FROM daily_signal_performance"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date DESC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load daily signal performance: {exc}") from exc
+
     def _load_payloads(
         self, connection: sqlite3.Connection, table: str, run_id: str
     ) -> list[dict[str, Any]]:
@@ -2167,6 +2758,95 @@ class SQLiteScanStore:
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+
+def _historical_signal_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_value(row["raw_payload_json"])
+    return {
+        "signal_id": str(row["signal_id"]),
+        "scan_id": str(row["scan_id"] or ""),
+        "alpha_signal_id": str(row["alpha_signal_id"] or ""),
+        "generated_at": str(row["generated_at"] or ""),
+        "market_date": str(row["market_date"] or ""),
+        "ticker": str(row["ticker"] or ""),
+        "company": str(row["company"] or ""),
+        "rank": row["rank"],
+        "source": str(row["source"] or ""),
+        "source_url": str(row["source_url"] or ""),
+        "source_confidence": row["source_confidence"],
+        "data_source_kind": str(row["data_source_kind"] or ""),
+        "model_version": str(row["model_version"] or ""),
+        "config_hash": str(row["config_hash"] or ""),
+        "primary_setup": str(row["primary_setup"] or ""),
+        "setup_grade": str(row["setup_grade"] or ""),
+        "signal_label": str(row["signal_label"] or ""),
+        "entry_watch_level": row["entry_watch_level"],
+        "entry_trigger_type": str(row["entry_trigger_type"] or ""),
+        "entry_condition": str(row["entry_condition"] or ""),
+        "confirmation_condition": str(row["confirmation_condition"] or ""),
+        "exit_line": row["exit_line"],
+        "invalidation_level": row["invalidation_level"],
+        "target_1": row["target_1"],
+        "target_2": row["target_2"],
+        "risk_flags_json": _json_value(row["risk_flags_json"], default=[]),
+        "avoid_reasons_json": _json_value(row["avoid_reasons_json"], default=[]),
+        "catalyst_summary": str(row["catalyst_summary"] or ""),
+        "telegram_event_key": str(row["telegram_event_key"] or ""),
+        "was_alerted": bool(row["was_alerted"]),
+        "no_trade_reason": str(row["no_trade_reason"] or ""),
+        "raw_payload_json": payload,
+    }
+
+
+def _json_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_value(row["payload_json"])
+    merged = {key: row[key] for key in row.keys() if key != "payload_json"}
+    if isinstance(payload, dict):
+        merged.update(payload)
+    return merged
+
+
+def _json_value(value: Any, *, default: Any | None = None) -> Any:
+    if default is None:
+        default = {}
+    if value in {None, ""}:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    text = str(value).replace("$", "").replace(",", "").replace("%", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    parsed = _float_or_none(value)
+    return int(parsed) if parsed is not None else None
+
+
+def _bool_or_none(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    text = str(value).strip().lower()
+    if text in {"true", "t", "1", "yes", "y"}:
+        return 1
+    if text in {"false", "f", "0", "no", "n"}:
+        return 0
+    return None
 
 
 def _recommendation_payload(row: dict[str, Any], result: ScanResult) -> dict[str, Any]:

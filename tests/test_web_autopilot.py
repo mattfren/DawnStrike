@@ -247,6 +247,51 @@ def test_tradingview_fixture_normalizes_source_specific_shape(tmp_path):
     assert rows[0].market_cap == 333_630_000
 
 
+def test_tradingview_malformed_uppercase_symbols_are_repaired_before_accepting():
+    html = """
+    <table>
+      <tr>
+        <th>Symbol</th>
+        <th>Pre-Mkt Price</th>
+        <th>Pre-Mkt Vol</th>
+        <th>Pre-Mkt Gap %</th>
+        <th>Price</th>
+        <th>Mkt Cap</th>
+      </tr>
+      <tr>
+        <td>SAGTSAGTEC GLOBAL LIMITED</td>
+        <td>1.55 USD</td>
+        <td>24.19 M</td>
+        <td>+80.81%</td>
+        <td>0.99 USD</td>
+        <td>19.65 M USD</td>
+      </tr>
+      <tr>
+        <td>CCDTCDT Equity Inc.</td>
+        <td>1.40 USD</td>
+        <td>36.64 M</td>
+        <td>+19.61%</td>
+        <td>1.17 USD</td>
+        <td>51.29 M USD</td>
+      </tr>
+    </table>
+    """
+    best = select_best_table(extract_html_tables(html))
+    assert best is not None
+
+    rows, warnings = normalize_public_table_rows(
+        best,
+        source_name="tradingview_premarket",
+        source_url="https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/",
+        raw_file_path="",
+    )
+
+    assert [row["ticker"] for row in rows] == ["SAGT", "CCDT"]
+    assert rows[0]["company"] == "SAGTEC GLOBAL LIMITED"
+    assert rows[1]["company"] == "CDT Equity Inc."
+    assert "SAGTSAGTEC" not in ";".join(warnings)
+
+
 def test_marketwatch_fixture_reports_clear_missing_fields(tmp_path):
     source = WebSourceConfig(
         name="marketwatch_movers",

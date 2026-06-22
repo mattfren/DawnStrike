@@ -147,8 +147,8 @@ Register-AlphaOpsTask `
 
 Register-AlphaOpsTask `
     -TaskName "Dawnstrike AlphaOps EOD Report" `
-    -Description "Dawnstrike AlphaOps weekday end-of-day research report. No orders placed." `
+    -Description "Dawnstrike AlphaOps weekday end-of-day research, attribution, and historical reports. No orders placed." `
     -StartTime "15:15:00" `
-    -CommandLine "py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report >> logs\alpha_report.log 2>&1"
+    -CommandLine "py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report && py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist && py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report >> logs\alpha_report.log 2>&1"
 
 Write-Host "AlphaOps scheduled tasks registered for root: $Root"
