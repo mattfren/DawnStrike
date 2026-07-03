@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dawnstrike Dashboard</title>
+    <meta
+      name="description"
+      content="Dawnstrike research dashboard: premarket watchlist, risk gates, outcome status, and operator workflow."
+    />
+    <link rel="stylesheet" href="/assets/dashboard.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#dashboard">Skip to dashboard</a>
+    <main id="dashboard" class="shell">
+      <header class="topbar" aria-label="Dawnstrike status">
+        <div>
+          <p class="eyebrow">Dawnstrike</p>
+          <h1>Research Command Dashboard</h1>
+        </div>
+        <div class="status-stack" aria-label="System boundaries">
+          <span class="status-pill ok">Deployment online</span>
+          <span class="status-pill warn">Research only</span>
+          <span class="status-pill quiet">No broker execution</span>
+        </div>
+      </header>
+
+      <section class="hero-grid" aria-label="Daily operating view">
+        <article class="primary-panel">
+          <div class="section-label">Today</div>
+          <h2>One operator screen for the morning scan.</h2>
+          <p>
+            Dawnstrike ranks high-volatility premarket names, separates watchlist
+            candidates from avoid names, and keeps missing outcome truth visible
+            until it is imported.
+          </p>
+          <div class="action-row">
+            <a class="button primary" href="/api/health">Health check</a>
+            <a class="button" href="https://github.com/mattfren/DawnStrike">Repository</a>
+          </div>
+        </article>
+
+        <aside class="ticket" aria-label="Current deployment contract">
+          <div class="section-label">Production Contract</div>
+          <dl>
+            <div>
+              <dt>Execution</dt>
+              <dd>Disabled</dd>
+            </div>
+            <div>
+              <dt>Advice</dt>
+              <dd>None</dd>
+            </div>
+            <div>
+              <dt>Missing outcomes</dt>
+              <dd>Pending, never zero</dd>
+            </div>
+            <div>
+              <dt>Data quality</dt>
+              <dd>Show gaps plainly</dd>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section class="metric-grid" aria-label="Dashboard sections">
+        <article>
+          <span class="metric-title">Watchlist</span>
+          <strong>Manual review</strong>
+          <p>Top candidates are review prompts, not buy commands.</p>
+        </article>
+        <article>
+          <span class="metric-title">Risk gates</span>
+          <strong>Avoid first</strong>
+          <p>Halt, offering, source, float, and quality warnings stay visible.</p>
+        </article>
+        <article>
+          <span class="metric-title">Outcomes</span>
+          <strong>Evidence pending</strong>
+          <p>Paper returns require imported outcome rows after the session.</p>
+        </article>
+        <article>
+          <span class="metric-title">Operations</span>
+          <strong>Telegram optional</strong>
+          <p>Notifications are status/watchlist alerts only.</p>
+        </article>
+      </section>
+
+      <section class="workflow" aria-label="Operator workflow">
+        <div class="section-label">Daily Flow</div>
+        <ol>
+          <li>
+            <span>1</span>
+            <div>
+              <strong>Collect candidates</strong>
+              <p>Use local or public premarket sources. Block unusable source rows.</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <strong>Score and filter</strong>
+              <p>Rank candidates, surface avoid reasons, and mark no-clean-edge days.</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <strong>Review manually</strong>
+              <p>Watch levels and exit lines are operator context, not orders.</p>
+            </div>
+          </li>
+          <li>
+            <span>4</span>
+            <div>
+              <strong>Import outcomes</strong>
+              <p>After close, import outcome rows before judging performance.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <footer class="footer">
+        <span>Dawnstrike does not place trades or store broker execution credentials.</span>
+        <span>Vercel shell: one-dashboard production surface.</span>
+      </footer>
+    </main>
+  </body>
+</html>

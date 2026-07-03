@@ -1,0 +1,22 @@
+.git/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.codex/
+.agents/
+.vercel/
+.env
+.env.*
+API keys.txt
+*.sqlite
+*.db
+logs/
+outputs/
+tmp/
+tests/
+sample_data/
+templates/
+data/
+docs/audits/
