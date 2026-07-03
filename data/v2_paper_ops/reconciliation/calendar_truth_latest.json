@@ -1,0 +1,9 @@
+{
+  "duplicate_rows": [],
+  "ledger_mismatches": [],
+  "math_mismatches": [],
+  "missing_rows": [],
+  "schema_version": "v2.paper_ops_calendar_truth.v1",
+  "status": "passed",
+  "warnings": []
+}

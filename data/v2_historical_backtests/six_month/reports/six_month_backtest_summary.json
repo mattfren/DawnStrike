@@ -1,0 +1,30 @@
+{
+  "accepted_end": "2026-07-01",
+  "accepted_start": "2026-01-02",
+  "asof": "2026-07-02T02:38:01.564055+00:00",
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "build_id": "historical_backtest_report_20260702T023801Z",
+  "created_at": "2026-07-02T02:38:01.564047+00:00",
+  "data_quality_status": "passed",
+  "learning_foundry_sync_status": "passed",
+  "live_trading_enabled": false,
+  "market_masters_sync_status": "passed",
+  "months": 6,
+  "paperops_mutation": false,
+  "research_only": true,
+  "schema_version": "v2.historical_backtest.summary.v1",
+  "shadow_challenger_count": 15,
+  "snapshot_id": "six_month_2026-01-02_2026-07-01_ffed22f925a8",
+  "status": "passed",
+  "strategy_rows": 24,
+  "symbol_count": 6,
+  "top_strategy": "volatility_contraction_breakout",
+  "total_bars": 744,
+  "validation_triggered": false,
+  "walk_forward_status": "passed",
+  "warnings": [
+    "public_yahoo_chart: free public chart data; not an institutional feed",
+    "public_yahoo_chart: no independent corporate-action reconciliation",
+    "shadow challenger rows are metadata-only, not mechanically replayed"
+  ]
+}

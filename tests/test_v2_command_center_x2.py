@@ -140,16 +140,18 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
     assert (REPO_ROOT / "data/v2_command_center_x/command_center_x2.html").exists()
 
 
-def test_production_launcher_promotes_x2_without_live_controls() -> None:
+def test_production_launcher_promotes_canonical_operator_dashboard_without_live_controls() -> None:
     script = Path("scripts/open_command_center_production.ps1").read_text(encoding="utf-8")
 
-    assert "intraday_scanner.v2.command_center_x2 demo" in script
-    assert "intraday_scanner.v2.command_center build" in script
-    assert "data/v2_command_center_x2" in script
-    assert "http.server" in script
+    assert "streamlit" in script
+    assert "run" in script
+    assert "app.py" in script
+    assert "Dawnstrike operator dashboard" in script
+    assert "Canonical tabs: Today, Review, History, Calendar, Performance, System" in script
     assert "8502" in script
-    assert "Dawnstrike X2" in script
-    assert "py -m streamlit" not in script
+    assert "http.server" not in script
+    assert "intraday_scanner.v2.command_center_x2 demo" not in script
+    assert "data/v2_command_center_x2" not in script
     forbidden = (
         "submit" + "_order",
         "place" + "_order",

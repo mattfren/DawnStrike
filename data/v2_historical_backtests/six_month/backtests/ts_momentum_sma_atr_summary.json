@@ -1,0 +1,69 @@
+{
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "metrics": {
+    "annualized_return_pct": 0.12562007,
+    "average_holding_period_bars": 10.64,
+    "average_loss": -812.30232265,
+    "average_r": 0.32062293,
+    "average_win": 1057.36380295,
+    "best_trade": 1920.74136829,
+    "calmar": 1.69363748,
+    "drawdown_duration_bars": 23,
+    "expectancy": 234.71070769,
+    "exposure_time_market": 0.32655827,
+    "fees_paid": 90.57047465,
+    "final_equity": 105867.76769213,
+    "initial_capital": 100000.0,
+    "max_drawdown_pct": -0.07417176,
+    "median_r": 0.72081784,
+    "payoff_ratio": 1.30168753,
+    "profit_factor": 1.65669322,
+    "sharpe": 1.2621966,
+    "slippage_estimate": 452.85397607,
+    "sortino": 1.23026721,
+    "total_return_pct": 0.05867768,
+    "trade_count": 25,
+    "volatility_annualized": 0.09624703,
+    "win_rate": 0.56,
+    "worst_trade": -1008.34869494
+  },
+  "schema_version": "v2.historical_backtest.strategy_result.v1",
+  "strategy": {
+    "compatible_timeframe": "1d",
+    "description": "Time-series momentum: long when close is above SMA and trailing return is positive.",
+    "entry_logic": "Enter long when close[t] > SMA50[t] and close[t] / close[t-20] - 1 > 0.",
+    "exit_logic": "Exit on stop, target, or end-of-test liquidation.",
+    "indicators": [
+      "SMA(50)",
+      "ROC(20)",
+      "ATR(14)"
+    ],
+    "known_failure_modes": [
+      "whipsaws in range-bound regimes",
+      "late entries after exhausted trends",
+      "synthetic fixture results are not market evidence"
+    ],
+    "parameters": {
+      "atr_period": 14,
+      "atr_stop": 2.0,
+      "momentum_period": 20,
+      "sma_period": 50
+    },
+    "position_sizing_assumption": "Fixed fractional equity risk from entry reference to stop.",
+    "required_data_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ],
+    "status": "experimental",
+    "stop_logic": "Stop = close[t] - 2.0 * ATR14[t].",
+    "strategy_id": "ts_momentum_sma_atr",
+    "target_logic": "Target = close[t] + 3.0 * ATR14[t].",
+    "validation_status": "fixture_backtested_only",
+    "version": "v1.0"
+  },
+  "validation_status": "not_validated_historical_backtest_only",
+  "warnings": []
+}

@@ -1,0 +1,13 @@
+{
+  "allow_experimental": true,
+  "allow_single_provider_forward": true,
+  "fee_bps": 1.0,
+  "max_concurrent_positions": 3,
+  "max_daily_loss_pct": 0.015,
+  "max_open_risk_pct": 0.02,
+  "min_reward_risk": 1.0,
+  "risk_per_trade_pct": 0.005,
+  "schema_version": "v2.paper_ops_config.v1",
+  "slippage_bps": 5.0,
+  "starting_equity": 100000.0
+}

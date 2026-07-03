@@ -1,0 +1,24 @@
+{
+  "data_snapshot_id": "datatruth_public_yahoo_chart_1d_20260626",
+  "date": "2026-06-26",
+  "mode": "replay",
+  "provider_status": "passed_with_warnings",
+  "reconciliation_status": "single_provider_unreconciled",
+  "run_id": "paper_ops:replay:2026-06-26:datatruth_public_yahoo_chart_1d_20260626",
+  "stats": {
+    "closes": 0,
+    "marked_positions": 2,
+    "phase": "close"
+  },
+  "warnings": [
+    "AAPL: skipped incomplete daily bar 2026-06-29",
+    "AMZN: skipped incomplete daily bar 2026-06-29",
+    "MSFT: skipped incomplete daily bar 2026-06-29",
+    "NVDA: skipped incomplete daily bar 2026-06-29",
+    "QQQ: skipped incomplete daily bar 2026-06-29",
+    "SPY: skipped incomplete daily bar 2026-06-29",
+    "run date 2026-06-27 is a weekend; latest completed trading date is resolved by accepted provider bars, not an exchange holiday calendar",
+    "minor provider differences were within configured tolerance",
+    "daily replay/demo closeout is labeled research-only"
+  ]
+}

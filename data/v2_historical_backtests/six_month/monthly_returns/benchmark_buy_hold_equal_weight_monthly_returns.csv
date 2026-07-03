@@ -1,0 +1,8 @@
+strategy_id,month,start_equity,end_equity,return_pct
+benchmark_buy_hold_equal_weight,2026-01,100000,100000,0
+benchmark_buy_hold_equal_weight,2026-02,100000,100000,0
+benchmark_buy_hold_equal_weight,2026-03,100000,100000,0
+benchmark_buy_hold_equal_weight,2026-04,99993.3933,102088.2533,0.02094998
+benchmark_buy_hold_equal_weight,2026-05,102289.9633,103512.9333,0.01195591
+benchmark_buy_hold_equal_weight,2026-06,103623.9633,102090.5633,-0.01479774
+benchmark_buy_hold_equal_weight,2026-07,102181.6733,102170.9236,-0.0001052

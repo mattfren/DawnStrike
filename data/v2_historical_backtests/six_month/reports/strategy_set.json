@@ -1,0 +1,329 @@
+{
+  "asof": "today",
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "created_at": "2026-07-02T02:38:01.318329+00:00",
+  "months": 6,
+  "promotion_triggered": false,
+  "schema_version": "v2.historical_backtest.strategy_set.v1",
+  "shadow_challenger_count": 15,
+  "shadow_challengers": [
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_ts_momentum_sma_atr_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "ts_momentum_sma_atr"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps ts_momentum_sma_atr with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_donchian_breakout_20_10_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "donchian_breakout_20_10"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps donchian_breakout_20_10 with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_cross_sectional_relative_strength_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "cross_sectional_relative_strength"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps cross_sectional_relative_strength with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_pullback_reclaim_uptrend_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "pullback_reclaim_uptrend"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps pullback_reclaim_uptrend with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_volatility_contraction_breakout_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "volatility_contraction_breakout"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps volatility_contraction_breakout with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_failed_breakout_reversal_short_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "failed_breakout_reversal_short"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps failed_breakout_reversal_short with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "lf_bullish_fvg_continuation_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "bullish_fvg_continuation"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Shadow-only challenger that wraps bullish_fvg_continuation with deterministic regime and evidence filters.",
+      "source": "learning_foundry",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_ts_momentum_regime_filter_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "ts_momentum_sma_atr"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Champion plus regime and volatility state filter.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_donchian_turtle_vol_target_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "donchian_breakout_20_10"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Donchian breakout with explicit volatility budget and stop discipline.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_relative_strength_factor_guard_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "cross_sectional_relative_strength"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Relative-strength champion gated by factor rank stability.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_vol_contraction_risk_overlay_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "volatility_contraction_breakout"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Volatility contraction champion with drawdown and risk overlay.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_public_quant_ensemble_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "ts_momentum_sma_atr",
+        "donchian_breakout_20_10",
+        "cross_sectional_relative_strength",
+        "pullback_reclaim_uptrend"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Multi-signal ensemble across existing champion features.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_reflexive_macro_warning_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "ts_momentum_sma_atr",
+        "donchian_breakout_20_10",
+        "cross_sectional_relative_strength",
+        "pullback_reclaim_uptrend"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Macro/reflexivity warning layer that can only block or watch.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_quality_value_parked_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "cross_sectional_relative_strength"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Parked fundamentals-aware factor gate awaiting point-in-time fundamentals.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    },
+    {
+      "backtest_status": "metadata_only_not_mechanically_replayed",
+      "cannot_replace_parent": true,
+      "challenger_id": "mm_trend_diversification_allocator_v1",
+      "evidence_mode": "historical_backtest_metadata",
+      "no_live_trading": true,
+      "parent_strategy_ids": [
+        "ts_momentum_sma_atr",
+        "donchian_breakout_20_10",
+        "cross_sectional_relative_strength",
+        "pullback_reclaim_uptrend",
+        "volatility_contraction_breakout"
+      ],
+      "promotion_eligible": false,
+      "rule_description": "Allocator that favors diversified trend signals and blocks crowded one-factor exposure.",
+      "source": "market_masters",
+      "status": "shadow",
+      "validation_eligible": false,
+      "validation_status": "not_validated"
+    }
+  ],
+  "status": "passed",
+  "strategies": [
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "ts_momentum_sma_atr",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "donchian_breakout_20_10",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "cross_sectional_relative_strength",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "pullback_reclaim_uptrend",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "volatility_contraction_breakout",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "failed_breakout_reversal_short",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "champion_strategy",
+      "status": "experimental",
+      "strategy_id": "bullish_fvg_continuation",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "benchmark",
+      "status": "benchmark",
+      "strategy_id": "benchmark_buy_hold_equal_weight",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    },
+    {
+      "group": "baseline",
+      "status": "baseline",
+      "strategy_id": "cash_no_trade_baseline",
+      "validation_status": "not_validated_historical_backtest_only",
+      "version": "v1.0"
+    }
+  ],
+  "strategy_count": 9,
+  "validation_triggered": false
+}

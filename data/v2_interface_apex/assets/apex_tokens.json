@@ -1,0 +1,16 @@
+{
+  "amber": "#f6c453",
+  "base": "#05070b",
+  "blue": "#2f81ff",
+  "border": "#203044",
+  "cyan": "#39d7ff",
+  "font": "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+  "green": "#35e6a1",
+  "muted": "#8ea4b8",
+  "panel": "#0b1118",
+  "panel_matte": "#111a24",
+  "radius": "8px",
+  "red": "#ff5d74",
+  "schema_version": "v2.interface_apex.tokens.v1",
+  "text": "#f5fbff"
+}

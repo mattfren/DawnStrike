@@ -1,0 +1,13 @@
+{
+  "absolute_local_paths_clear": true,
+  "broken_links": [],
+  "links_checked": 5045,
+  "page_count": 71,
+  "required_page_count": 71,
+  "required_pages_present": true,
+  "research_only_banner_all_pages": true,
+  "schema_version": "v2.command_center_qa.v1",
+  "script_tags_clear": true,
+  "status": "passed",
+  "warnings": []
+}

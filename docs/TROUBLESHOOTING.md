@@ -74,8 +74,11 @@ py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --
 py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram
 ```
 
-### Run Dashboard
+### Run Operator Dashboard
 
 ```powershell
-py -m streamlit run app.py --server.port 8502
+powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
 ```
+
+Then open `http://127.0.0.1:8502/`. This is the canonical local operator
+dashboard.

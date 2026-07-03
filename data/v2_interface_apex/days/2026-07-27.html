@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike Apex Pro Archive - Daily Session 2026-07-27</title>
+  <link rel="stylesheet" href="../assets/apex.css?v=interface_apex_9f25f95e13797949">
+  <link rel="stylesheet" href="../assets/apex_components.css?v=interface_apex_9f25f95e13797949">
+<style id="dawnstrike-apex-pro-route-tokens">
+:root {
+  --apex-bg: #071013;
+  --apex-panel: #0d171b;
+  --apex-panel-2: #111f24;
+  --apex-line: #24414a;
+  --apex-text: #edf7f7;
+  --apex-muted: #94abb0;
+  --apex-accent: #47d7b2;
+  --apex-warn: #f0bf5b;
+  --apex-danger: #ff6f73;
+  --apex-info: #70a7ff;
+  --apex-radius: 8px;
+  --apex-sidebar: 238px;
+  --apex-rail: 292px;
+}
+body.apex-pro-route {
+  background: var(--apex-bg);
+  color: var(--apex-text);
+  min-height: 100vh;
+}
+body.apex-pro-route > aside.apex-shell,
+body.apex-pro-route > aside.side-shell {
+  display: none !important;
+}
+body.apex-pro-route > main {
+  margin-left: var(--apex-sidebar) !important;
+  margin-right: var(--apex-rail) !important;
+  max-width: none !important;
+  padding-top: 150px !important;
+  height: calc(100vh - 20px) !important;
+  overflow: auto !important;
+}
+body.apex-pro-route a:focus-visible,
+body.apex-pro-route button:focus-visible,
+body.apex-pro-route summary:focus-visible,
+body.apex-pro-route [tabindex]:focus-visible {
+  outline: 3px solid var(--apex-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 6px rgba(71, 215, 178, .18) !important;
+}
+.apex-pro-skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 10000;
+  transform: translateY(-160%);
+  background: var(--apex-accent);
+  color: #03100d;
+  padding: 10px 12px;
+  border-radius: var(--apex-radius);
+  font-weight: 800;
+}
+.apex-pro-skip:focus-visible { transform: translateY(0); }
+.apex-pro-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 9990;
+  width: var(--apex-sidebar);
+  box-sizing: border-box;
+  padding: 18px;
+  border-right: 1px solid var(--apex-line);
+  background: linear-gradient(180deg, #071013, #0b171a);
+}
+.apex-pro-brand {
+  display: block;
+  color: var(--apex-text);
+  text-decoration: none;
+  margin-bottom: 18px;
+}
+.apex-pro-brand span {
+  display: block;
+  color: var(--apex-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.apex-pro-brand strong { display: block; font-size: 24px; }
+.apex-pro-nav nav {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.apex-pro-nav nav a {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  padding: 10px 11px;
+  color: var(--apex-text);
+  background: var(--apex-panel);
+  text-decoration: none;
+}
+.apex-pro-nav p {
+  color: var(--apex-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.apex-pro-statusbar {
+  position: fixed;
+  z-index: 9985;
+  left: var(--apex-sidebar);
+  right: 0;
+  top: 0;
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(7, 16, 19, .96);
+}
+.apex-pro-statusbar span,
+.apex-pro-badge-row span {
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--apex-text);
+  background: var(--apex-panel-2);
+  font-size: 12px;
+}
+.apex-pro-content-header {
+  position: fixed;
+  z-index: 9980;
+  left: var(--apex-sidebar);
+  right: var(--apex-rail);
+  top: 43px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(9, 19, 22, .97);
+}
+.apex-pro-kicker {
+  color: var(--apex-muted);
+  font-size: 11px;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+.apex-pro-content-header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+.apex-pro-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.apex-pro-next-action {
+  color: var(--apex-muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+.apex-pro-evidence-rail {
+  position: fixed;
+  z-index: 9975;
+  top: 43px;
+  right: 0;
+  bottom: 0;
+  width: var(--apex-rail);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--apex-line);
+  background: #091417;
+}
+.apex-pro-evidence-rail h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.apex-pro-evidence-rail dl,
+.apex-pro-evidence-rail div {
+  display: grid;
+  gap: 7px;
+}
+.apex-pro-evidence-rail div {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  background: var(--apex-panel);
+  padding: 10px;
+}
+.apex-pro-evidence-rail dt {
+  color: var(--apex-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-pro-evidence-rail dd {
+  margin: 0;
+  color: var(--apex-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.apex-pro-dev-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--apex-warn);
+  border-radius: var(--apex-radius);
+  background: rgba(240, 191, 91, .12);
+  color: var(--apex-warn);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.apex-pro-audit-footer {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  border-top: 1px solid var(--apex-line);
+  background: #091417;
+  color: var(--apex-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+}
+.apex-pro-generated-h1 {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  padding-top: 150px;
+}
+@media (max-width: 1100px) {
+  :root { --apex-sidebar: 0px; --apex-rail: 0px; }
+  .apex-pro-nav,
+  .apex-pro-evidence-rail {
+    position: static;
+    width: auto;
+    border: 0;
+  }
+  .apex-pro-statusbar,
+  .apex-pro-content-header {
+    position: static;
+    left: auto;
+    right: auto;
+  }
+  body.apex-pro-route > main {
+    margin: 0 !important;
+    padding-top: 16px !important;
+    height: 72vh !important;
+    overflow: auto !important;
+  }
+  .apex-pro-audit-footer {
+    margin: 0;
+  }
+}
+</style>
+</head>
+<body class="apex-pro-route" data-apex-pro-hardened="true" data-apex-pro-boundary="apex-static-archive" data-apex-pro-family="daily_session_detail">
+<!-- dawnstrike-apex-pro-audit-shell:start -->
+<a class="apex-pro-skip" href="#apex-pro-route-content">Skip to content</a>
+<aside class="apex-pro-nav" aria-label="Apex Pro route boundary">
+  <a class="apex-pro-brand" href="/"><span>Dawnstrike</span><strong>Apex Pro</strong></a>
+  <nav>
+    <a href="/" aria-label="Open canonical Streamlit dashboard">Dashboard</a>
+    <a href="#apex-pro-route-evidence">Evidence</a>
+    <a href="#apex-pro-route-audit">Audit</a>
+  </nav>
+  <p>Static route archive. Production trading stays in the single operator dashboard.</p>
+</aside>
+<section class="apex-pro-statusbar" role="status" aria-live="polite">
+  <span>Archived static route</span>
+  <span>Freshness: route audit snapshot 2026-07-03</span>
+  <span>Provider: local artifact manifest</span>
+  <span>Focus: visible keyboard states enabled</span>
+</section>
+<header class="apex-pro-content-header" id="apex-pro-route-content">
+
+  <p class="apex-pro-kicker">daily_session_detail / apex-static-archive</p>
+  <h1>Daily session 2026-07-27</h1>
+  <div class="apex-pro-badge-row" aria-label="Route provenance">
+    <span>Freshness: audit snapshot 2026-07-03</span>
+    <span>Source/provider: local generated HTML artifact</span>
+    <span>Model/strategy version: Daily session detail template</span>
+    <span>Risk state: research-only; requires fresh evidence</span>
+  </div>
+  <p class="apex-pro-next-action">Next safe action: Use as archived context, then verify current state in the dashboard.</p>
+</header>
+<aside class="apex-pro-evidence-rail" id="apex-pro-route-evidence" aria-label="Evidence rail">
+  <h2>Evidence</h2>
+  <dl>
+    <div><dt>Path</dt><dd>data/v2_interface_apex/days/2026-07-27.html</dd></div>
+    <div><dt>Template</dt><dd>Daily session detail template</dd></div>
+    <div><dt>Visual proof</dt><dd>ok; desktop_fullpage; 1440x1304</dd></div>
+    <div><dt>Screenshot</dt><dd>screenshots/desktop_fullpage/data/v2_interface_apex/days/2026-07-27.png</dd></div>
+  </dl>
+</aside>
+<!-- dawnstrike-apex-pro-audit-shell:end -->
+<aside class="apex-shell">
+  <a class="brand" href="../index.html"><span>Dawnstrike</span><b>Apex</b></a>
+  <p class="brand-subtitle">Premium day-trading cockpit</p>
+  <nav class="primary-nav" data-primary-nav><a href="../pages/mission.html">Mission</a>
+<a href="../pages/calendar.html">Calendar</a>
+<a href="../pages/strategies.html">Strategies</a>
+<a href="../pages/trades.html">Trades</a>
+<a href="../pages/intelligence.html">Intelligence</a>
+<a href="../pages/system.html">System</a></nav>
+  <section class="trust-boundary trust-boundary-banner">
+    <strong>Research-only</strong>
+    <span>Live trading disabled. No strategy is validated for live execution.</span>
+  </section>
+</aside>
+<main>
+  <header class="topbar">
+    <div><span>Latest artifact</span><strong>2026-07-02T00:00:00Z</strong></div>
+    <div><span>Mode</span><strong>Paper and research evidence</strong></div>
+    <a class="toplink" href="../pages/no_picks.html">No-picks story</a>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only</span>
+    <span>Live trading disabled</span>
+    <span>Historical backtests are not validation</span>
+    <span>Warnings stay visible</span>
+  </section>
+
+<section class="page-hero compact day-story-panel">
+  <p class="eyebrow">Day story</p>
+  <h1>Daily session 2026-07-27</h1>
+  <p>Apex generated this day story so every calendar tile remains clickable. The source calendar has return and trade-count data, but no deeper day artifact.</p>
+</section>
+<section class="metric-row">
+  <article class="metric-card"><span>Daily return</span><strong>n/a</strong><small>Artifact value</small></article>
+<article class="metric-card"><span>Cumulative return</span><strong>n/a</strong><small>Through this day</small></article>
+<article class="metric-card"><span>Trade cards</span><strong>0</strong><small>Official or clearly labeled</small></article>
+<article class="metric-card"><span>Evidence quality</span><strong>calendar tile evidence only</strong><small>Fill and official gate</small></article>
+</section>
+<section class="section-stack">
+  <header class="section-heading"><div><span>Trade journey</span><h2>What fired, or why nothing did</h2></div></header>
+  <div class="trade-grid"><article class="empty-card">No official paper trades fired in this day story.</article></div>
+</section>
+<section class="story-grid two-up">
+  <article class="story-card no-picks-story-card">
+    <span>Why no picks, if applicable</span>
+    <h2>Standing aside can be correct.</h2>
+    <ul><li>No official paper trade was recorded on this calendar tile.</li></ul>
+  </article>
+  <article class="story-card warning-stack">
+    <span>Warnings</span>
+    <h2>Warnings stay visible.</h2>
+    <ul><li>Detailed day artifact missing; values are limited to calendar tile evidence.</li></ul>
+  </article>
+</section>
+<section class="section-stack">
+  <header class="section-heading"><div><span>Strategy context</span><h2>Strategies evaluated</h2></div></header>
+  <div class="mini-grid"></div>
+</section>
+<section class="story-grid two-up">
+  <article class="story-card learning-lesson-card"><span>What Dawnstrike learned</span><h2>No Learning Foundry lesson artifact was linked to this day.</h2></article>
+  <article class="story-card market-masters-card"><span>What to watch next</span><h2>Watch the next generated day artifact before upgrading confidence.</h2><p>No Market Masters note artifact was linked to this day.</p></article>
+</section>
+
+<details class="advanced-drawer raw-data">
+  <summary>Advanced: source data and artifacts</summary>
+  <p>Source data is secondary. The story above is the primary operator view.</p>
+  <ul><li><a href="../data/days.json">Day stories JSON</a></li>
+<li><a href="../data/trades.json">Trades JSON</a></li></ul>
+</details>
+
+
+</main>
+<!-- dawnstrike-apex-pro-audit-footer:start -->
+<footer class="apex-pro-audit-footer" id="apex-pro-route-audit">
+  <strong>Audit trail</strong>
+  <span>Ledger row 521; family daily_session_detail; boundary apex-static-archive.</span>
+  <span>Research-only. Live execution disabled. Missing truth must remain n/a or pending.</span>
+</footer>
+<!-- dawnstrike-apex-pro-audit-footer:end -->
+</body>
+</html>

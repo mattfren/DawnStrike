@@ -1,0 +1,10 @@
+strategy_id,in_sample_months,out_of_sample_months,in_sample_compound_return_pct,out_of_sample_compound_return_pct,status
+benchmark_buy_hold_equal_weight,5,2,0.03315637,-0.01490138,historical_split_only_not_validation
+bullish_fvg_continuation,5,2,0.06662786,-0.07188361,historical_split_only_not_validation
+cash_no_trade_baseline,5,2,0,0,historical_split_only_not_validation
+cross_sectional_relative_strength,5,2,0.08800478,-0.03592469,historical_split_only_not_validation
+donchian_breakout_20_10,5,2,0.1040192,-0.04908774,historical_split_only_not_validation
+failed_breakout_reversal_short,5,2,-0.0292925,0.00740969,historical_split_only_not_validation
+pullback_reclaim_uptrend,5,2,0.01437474,-0.02495765,historical_split_only_not_validation
+ts_momentum_sma_atr,5,2,0.12711611,-0.07415903,historical_split_only_not_validation
+volatility_contraction_breakout,5,2,0.07779231,-0.01345572,historical_split_only_not_validation

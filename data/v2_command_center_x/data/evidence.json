@@ -1,0 +1,54 @@
+{
+  "autodata_status": "COMPLETE",
+  "canonical_provider": "alpaca_market_data",
+  "commitbridge_quality_score": 100,
+  "commitbridge_status": "passed",
+  "data_truth_status": "missing",
+  "duplicate_timestamp_count": 0,
+  "fill_truth_status": "passed",
+  "provider_status": "passed",
+  "reconciliation_status": "missing",
+  "source_artifacts": [
+    {
+      "exists": false,
+      "kind": "file",
+      "path": "data/v2_data_truth/reports/data_truth_summary.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_autodata/reports/autodata_summary.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_autodata/reports/provider_readiness.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_fill_truth/reports/filltruth_summary.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_evidence_commit/reports/evidence_commit_summary.json"
+    },
+    {
+      "exists": false,
+      "kind": "file",
+      "path": "data/v2_real_intraday/reports/intraday_daily_reconciliation_latest.json"
+    }
+  ],
+  "status": "warning",
+  "title": "Evidence Quality",
+  "warnings": [
+    "missing env vars: ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY",
+    "missing env vars: ALPHA_VANTAGE_API_KEY",
+    "missing env vars: TWELVE_DATA_API_KEY",
+    "public fallback is single-provider, free/unofficial, and not broker-grade",
+    "mock provider is tests/demo only and cannot commit official evidence",
+    "only public fallback is available; public single-provider intraday is not official forward evidence by default",
+    "public fallback was used only as comparison evidence; canonical bars are not a provider merge"
+  ]
+}

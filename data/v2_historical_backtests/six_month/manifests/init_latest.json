@@ -1,0 +1,29 @@
+{
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "build_id": "historical_backtest_init_20260702T023758Z",
+  "created_at": "2026-07-02T02:37:58.814818+00:00",
+  "directories": {
+    "backtests": "data/v2_historical_backtests/six_month/backtests",
+    "equity_curves": "data/v2_historical_backtests/six_month/equity_curves",
+    "logs": "data/v2_historical_backtests/six_month/logs",
+    "manifests": "data/v2_historical_backtests/six_month/manifests",
+    "monthly_returns": "data/v2_historical_backtests/six_month/monthly_returns",
+    "normalized": "data/v2_historical_backtests/six_month/normalized",
+    "raw": "data/v2_historical_backtests/six_month/raw",
+    "reports": "data/v2_historical_backtests/six_month/reports",
+    "root": "data/v2_historical_backtests/six_month",
+    "shadow": "data/v2_historical_backtests/six_month/shadow",
+    "snapshots": "data/v2_historical_backtests/six_month/snapshots",
+    "strategy_reports": "data/v2_historical_backtests/six_month/reports/strategies",
+    "trades": "data/v2_historical_backtests/six_month/trades",
+    "ui": "data/v2_historical_backtests/six_month/ui",
+    "walk_forward": "data/v2_historical_backtests/six_month/reports/walk_forward"
+  },
+  "live_trading_enabled": false,
+  "output_root": "data/v2_historical_backtests/six_month",
+  "paperops_mutation": false,
+  "repo_root": ".",
+  "research_only": true,
+  "schema_version": "v2.historical_backtest.init.v1",
+  "status": "passed"
+}

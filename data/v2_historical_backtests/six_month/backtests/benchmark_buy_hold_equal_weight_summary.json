@@ -1,0 +1,65 @@
+{
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "metrics": {
+    "annualized_return_pct": 0.04557896,
+    "average_holding_period_bars": 63,
+    "average_loss": 0.0,
+    "average_r": 0.39385255,
+    "average_win": 361.82059726,
+    "best_trade": 571.62406874,
+    "calmar": 2.17298643,
+    "drawdown_duration_bars": 22,
+    "expectancy": 361.82059726,
+    "exposure_time_market": 0.51219512,
+    "fees_paid": 3.36431144,
+    "final_equity": 102170.92358356,
+    "initial_capital": 100000.0,
+    "max_drawdown_pct": -0.02097526,
+    "median_r": 0.40270787,
+    "payoff_ratio": null,
+    "profit_factor": null,
+    "sharpe": 1.82339238,
+    "slippage_estimate": 16.822105,
+    "sortino": 1.86982119,
+    "total_return_pct": 0.02170924,
+    "trade_count": 6,
+    "volatility_annualized": 0.02429571,
+    "win_rate": 1.0,
+    "worst_trade": 72.34736978
+  },
+  "schema_version": "v2.historical_backtest.strategy_result.v1",
+  "strategy": {
+    "compatible_timeframe": "1d",
+    "description": "Equal-weight buy-and-hold comparator with a wide catastrophe stop.",
+    "entry_logic": "Enter long once per symbol after warm-up at the next bar open.",
+    "exit_logic": "Hold to end of test unless catastrophe stop is touched.",
+    "indicators": [
+      "none"
+    ],
+    "known_failure_modes": [
+      "not a tradeable alpha strategy",
+      "does not rebalance after entry",
+      "catastrophe stop is a fixture risk control"
+    ],
+    "parameters": {
+      "catastrophe_stop_pct": 0.35,
+      "start_index": 60
+    },
+    "position_sizing_assumption": "Small fixed fractional equity allocation per symbol.",
+    "required_data_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ],
+    "status": "benchmark",
+    "stop_logic": "Stop = entry_reference * 0.65.",
+    "strategy_id": "benchmark_buy_hold_equal_weight",
+    "target_logic": "No profit target; benchmark comparator only.",
+    "validation_status": "benchmark_only",
+    "version": "v1.0"
+  },
+  "validation_status": "not_validated_historical_backtest_only",
+  "warnings": []
+}

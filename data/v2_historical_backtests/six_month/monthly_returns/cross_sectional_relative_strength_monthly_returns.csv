@@ -1,0 +1,8 @@
+strategy_id,month,start_equity,end_equity,return_pct
+cross_sectional_relative_strength,2026-01,100000,100000,0
+cross_sectional_relative_strength,2026-02,100000,100000,0
+cross_sectional_relative_strength,2026-03,100000,100000,0
+cross_sectional_relative_strength,2026-04,100000,102902.2972,0.02902297
+cross_sectional_relative_strength,2026-05,103727.4172,109672.8917,0.05731826
+cross_sectional_relative_strength,2026-06,109317.7107,105429.5763,-0.03556729
+cross_sectional_relative_strength,2026-07,105530.3763,105491.2689,-0.00037058

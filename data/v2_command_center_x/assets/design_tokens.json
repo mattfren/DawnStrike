@@ -1,0 +1,31 @@
+{
+  "color": {
+    "bg": "#101214",
+    "critical": "#fb7185",
+    "info": "#38bdf8",
+    "line": "#2d3542",
+    "missing": "#a78bfa",
+    "muted": "#9aa7b8",
+    "ok": "#4ade80",
+    "panel": "#171a1f",
+    "panel_2": "#20242b",
+    "text": "#eef2f7",
+    "warning": "#facc15"
+  },
+  "radius": {
+    "badge": "999px",
+    "panel": "8px"
+  },
+  "schema_version": "v2.command_center_x.design_tokens.v1",
+  "space": {
+    "lg": "24px",
+    "md": "16px",
+    "sm": "10px",
+    "xl": "36px",
+    "xs": "6px"
+  },
+  "typography": {
+    "family": "Arial, Helvetica, sans-serif",
+    "mono": "Consolas, monospace"
+  }
+}

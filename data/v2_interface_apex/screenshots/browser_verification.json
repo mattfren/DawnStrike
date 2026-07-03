@@ -1,0 +1,339 @@
+{
+  "schema_version": "v2.interface_apex.browser_verification.v1",
+  "status": "passed",
+  "checked_url": "http://127.0.0.1:8765",
+  "required": {
+    "mission": true,
+    "calendar": true,
+    "dayClicked": true,
+    "strategies": true,
+    "strategyDetail": true,
+    "trades": true,
+    "tradesFiltered": true,
+    "intelligence": true,
+    "system": true,
+    "noPicks": true,
+    "navCount": true,
+    "trustBoundary": true,
+    "consoleClean": true,
+    "responsesClean": true
+  },
+  "console_errors": [],
+  "responses": [
+    {
+      "path": "/",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/assets/apex.css",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/assets/apex_components.css",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/assets/apex.js",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/calendar.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/strategies.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/trades.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/intelligence.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/system.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/pages/no_picks.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/days/2026-05-01.html",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "path": "/strategies/day-failed-breakout-1min.html",
+      "status": 200,
+      "ok": true
+    }
+  ],
+  "failed_responses": [],
+  "screenshots": [
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_01_mission.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_02_calendar.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_03_day_clicked.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_04_strategies.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_05_strategy_detail.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_06_trades.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_07_trades_filtered.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_08_intelligence.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_09_system.png",
+    "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_10_no_picks.png"
+  ],
+  "pages": [
+    {
+      "name": "apex_01_mission",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 0
+      },
+      "h1": "Dawnstrike is running and stayed disciplined today.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Mission",
+      "url": "http://127.0.0.1:8765/",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_01_mission.png"
+    },
+    {
+      "name": "apex_02_calendar",
+      "cardCounts": {
+        "dayTiles": 92,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 0
+      },
+      "h1": "Performance starts with clickable day stories.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Calendar",
+      "url": "http://127.0.0.1:8765/pages/calendar.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_02_calendar.png"
+    },
+    {
+      "name": "apex_03_day_clicked",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 5
+      },
+      "h1": "2026-05-01: paper activity recorded with daily return -0.0667%.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Day 2026-05-01",
+      "url": "http://127.0.0.1:8765/days/2026-05-01.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_03_day_clicked.png"
+    },
+    {
+      "name": "apex_04_strategies",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 46,
+        "tradeCards": 0
+      },
+      "h1": "Day-trade research first. Swing research and shadow ideas stay separated.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Strategies",
+      "url": "http://127.0.0.1:8765/pages/strategies.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_04_strategies.png"
+    },
+    {
+      "name": "apex_05_strategy_detail",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 5
+      },
+      "h1": "Day Failed Breakout (1min)",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Day Failed Breakout (1min)",
+      "url": "http://127.0.0.1:8765/strategies/day-failed-breakout-1min.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_05_strategy_detail.png"
+    },
+    {
+      "name": "apex_06_trades",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 204
+      },
+      "h1": "Trade cards show the journey, not a spreadsheet.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Trades",
+      "url": "http://127.0.0.1:8765/pages/trades.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_06_trades.png"
+    },
+    {
+      "name": "apex_07_trades_filtered",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 203,
+        "strategyCards": 0,
+        "tradeCards": 204
+      },
+      "h1": "Trade cards show the journey, not a spreadsheet.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Trades",
+      "url": "http://127.0.0.1:8765/pages/trades.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_07_trades_filtered.png"
+    },
+    {
+      "name": "apex_08_intelligence",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 0
+      },
+      "h1": "What Dawnstrike learned, and why ideas remain shadow-only.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - Intelligence",
+      "url": "http://127.0.0.1:8765/pages/intelligence.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_08_intelligence.png"
+    },
+    {
+      "name": "apex_09_system",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 0
+      },
+      "h1": "Advanced diagnostics live here, not in the primary story.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - System",
+      "url": "http://127.0.0.1:8765/pages/system.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_09_system.png"
+    },
+    {
+      "name": "apex_10_no_picks",
+      "cardCounts": {
+        "dayTiles": 0,
+        "hiddenTrades": 0,
+        "strategyCards": 0,
+        "tradeCards": 0
+      },
+      "h1": "No official paper trades today.",
+      "hasLiveDisabled": true,
+      "hasResearch": true,
+      "hasWarningVisible": true,
+      "nav": [
+        "Mission",
+        "Calendar",
+        "Strategies",
+        "Trades",
+        "Intelligence",
+        "System"
+      ],
+      "title": "Dawnstrike Apex - No Picks",
+      "url": "http://127.0.0.1:8765/pages/no_picks.html",
+      "screenshot": "C:/Users/MattFields/Dawnstrike/data/v2_interface_apex/screenshots/apex_10_no_picks.png"
+    }
+  ]
+}

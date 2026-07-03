@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dawnstrike Command Center X - Artifact Map</title>
+<link rel="stylesheet" href="../assets/command_center_x.css">
+<style id="dawnstrike-apex-pro-route-tokens">
+:root {
+  --apex-bg: #071013;
+  --apex-panel: #0d171b;
+  --apex-panel-2: #111f24;
+  --apex-line: #24414a;
+  --apex-text: #edf7f7;
+  --apex-muted: #94abb0;
+  --apex-accent: #47d7b2;
+  --apex-warn: #f0bf5b;
+  --apex-danger: #ff6f73;
+  --apex-info: #70a7ff;
+  --apex-radius: 8px;
+  --apex-sidebar: 238px;
+  --apex-rail: 292px;
+}
+body.apex-pro-route {
+  background: var(--apex-bg);
+  color: var(--apex-text);
+  min-height: 100vh;
+}
+body.apex-pro-route > aside.apex-shell,
+body.apex-pro-route > aside.side-shell {
+  display: none !important;
+}
+body.apex-pro-route > main {
+  margin-left: var(--apex-sidebar) !important;
+  margin-right: var(--apex-rail) !important;
+  max-width: none !important;
+  padding-top: 150px !important;
+  height: calc(100vh - 20px) !important;
+  overflow: auto !important;
+}
+body.apex-pro-route a:focus-visible,
+body.apex-pro-route button:focus-visible,
+body.apex-pro-route summary:focus-visible,
+body.apex-pro-route [tabindex]:focus-visible {
+  outline: 3px solid var(--apex-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 6px rgba(71, 215, 178, .18) !important;
+}
+.apex-pro-skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 10000;
+  transform: translateY(-160%);
+  background: var(--apex-accent);
+  color: #03100d;
+  padding: 10px 12px;
+  border-radius: var(--apex-radius);
+  font-weight: 800;
+}
+.apex-pro-skip:focus-visible { transform: translateY(0); }
+.apex-pro-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 9990;
+  width: var(--apex-sidebar);
+  box-sizing: border-box;
+  padding: 18px;
+  border-right: 1px solid var(--apex-line);
+  background: linear-gradient(180deg, #071013, #0b171a);
+}
+.apex-pro-brand {
+  display: block;
+  color: var(--apex-text);
+  text-decoration: none;
+  margin-bottom: 18px;
+}
+.apex-pro-brand span {
+  display: block;
+  color: var(--apex-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.apex-pro-brand strong { display: block; font-size: 24px; }
+.apex-pro-nav nav {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.apex-pro-nav nav a {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  padding: 10px 11px;
+  color: var(--apex-text);
+  background: var(--apex-panel);
+  text-decoration: none;
+}
+.apex-pro-nav p {
+  color: var(--apex-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.apex-pro-statusbar {
+  position: fixed;
+  z-index: 9985;
+  left: var(--apex-sidebar);
+  right: 0;
+  top: 0;
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(7, 16, 19, .96);
+}
+.apex-pro-statusbar span,
+.apex-pro-badge-row span {
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--apex-text);
+  background: var(--apex-panel-2);
+  font-size: 12px;
+}
+.apex-pro-content-header {
+  position: fixed;
+  z-index: 9980;
+  left: var(--apex-sidebar);
+  right: var(--apex-rail);
+  top: 43px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(9, 19, 22, .97);
+}
+.apex-pro-kicker {
+  color: var(--apex-muted);
+  font-size: 11px;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+.apex-pro-content-header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+.apex-pro-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.apex-pro-next-action {
+  color: var(--apex-muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+.apex-pro-evidence-rail {
+  position: fixed;
+  z-index: 9975;
+  top: 43px;
+  right: 0;
+  bottom: 0;
+  width: var(--apex-rail);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--apex-line);
+  background: #091417;
+}
+.apex-pro-evidence-rail h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.apex-pro-evidence-rail dl,
+.apex-pro-evidence-rail div {
+  display: grid;
+  gap: 7px;
+}
+.apex-pro-evidence-rail div {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  background: var(--apex-panel);
+  padding: 10px;
+}
+.apex-pro-evidence-rail dt {
+  color: var(--apex-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-pro-evidence-rail dd {
+  margin: 0;
+  color: var(--apex-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.apex-pro-dev-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--apex-warn);
+  border-radius: var(--apex-radius);
+  background: rgba(240, 191, 91, .12);
+  color: var(--apex-warn);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.apex-pro-audit-footer {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  border-top: 1px solid var(--apex-line);
+  background: #091417;
+  color: var(--apex-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+}
+.apex-pro-generated-h1 {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  padding-top: 150px;
+}
+@media (max-width: 1100px) {
+  :root { --apex-sidebar: 0px; --apex-rail: 0px; }
+  .apex-pro-nav,
+  .apex-pro-evidence-rail {
+    position: static;
+    width: auto;
+    border: 0;
+  }
+  .apex-pro-statusbar,
+  .apex-pro-content-header {
+    position: static;
+    left: auto;
+    right: auto;
+  }
+  body.apex-pro-route > main {
+    margin: 0 !important;
+    padding-top: 16px !important;
+    height: 72vh !important;
+    overflow: auto !important;
+  }
+  .apex-pro-audit-footer {
+    margin: 0;
+  }
+}
+</style>
+</head>
+<body class="apex-pro-route" data-apex-pro-hardened="true" data-apex-pro-boundary="legacy-command-center-archive" data-apex-pro-family="application_subpage">
+<!-- dawnstrike-apex-pro-audit-shell:start -->
+<a class="apex-pro-skip" href="#apex-pro-route-content">Skip to content</a>
+<aside class="apex-pro-nav" aria-label="Apex Pro route boundary">
+  <a class="apex-pro-brand" href="/"><span>Dawnstrike</span><strong>Apex Pro</strong></a>
+  <nav>
+    <a href="/" aria-label="Open canonical Streamlit dashboard">Dashboard</a>
+    <a href="#apex-pro-route-evidence">Evidence</a>
+    <a href="#apex-pro-route-audit">Audit</a>
+  </nav>
+  <p>Static route archive. Production trading stays in the single operator dashboard.</p>
+</aside>
+<section class="apex-pro-statusbar" role="status" aria-live="polite">
+  <span>Archived static route</span>
+  <span>Freshness: route audit snapshot 2026-07-03</span>
+  <span>Provider: local artifact manifest</span>
+  <span>Focus: visible keyboard states enabled</span>
+</section>
+<header class="apex-pro-content-header" id="apex-pro-route-content">
+
+  <p class="apex-pro-kicker">application_subpage / legacy-command-center-archive</p>
+  <h1>Current repo truth rendered from inventory artifacts.</h1>
+  <div class="apex-pro-badge-row" aria-label="Route provenance">
+    <span>Freshness: audit snapshot 2026-07-03</span>
+    <span>Source/provider: local generated HTML artifact</span>
+    <span>Model/strategy version: Legacy command module archive template</span>
+    <span>Risk state: archive review required</span>
+  </div>
+  <p class="apex-pro-next-action">Next safe action: Open the canonical dashboard for current operator state.</p>
+</header>
+<aside class="apex-pro-evidence-rail" id="apex-pro-route-evidence" aria-label="Evidence rail">
+  <h2>Evidence</h2>
+  <dl>
+    <div><dt>Path</dt><dd>data/v2_command_center_x/pages/artifact_map.html</dd></div>
+    <div><dt>Template</dt><dd>Legacy command module archive template</dd></div>
+    <div><dt>Visual proof</dt><dd>ok; desktop_fullpage; 1440x1931</dd></div>
+    <div><dt>Screenshot</dt><dd>screenshots/desktop_fullpage/data/v2_command_center_x/pages/artifact_map.png</dd></div>
+  </dl>
+</aside>
+<!-- dawnstrike-apex-pro-audit-shell:end -->
+<aside class="sidebar">
+  <div class="brand">Dawnstrike <span>X</span></div>
+  <div class="boundary">Research-only / paper-only<br>Live trading disabled</div>
+  <nav><a href="../index.html">Home</a><a href="today.html">Today</a><a href="evidence.html">Evidence</a><a href="paper_trading.html">Paper Trading</a><a href="strategies.html">Strategies</a><a href="learning.html">Learning</a><a href="market_masters.html">Market Masters</a><a href="risk.html">Risk</a><a href="automation.html">Automation</a><a href="reports.html">Reports</a><a href="system_map.html">System Map</a></nav>
+</aside>
+<main>
+  <header class="topbar">
+    <div><strong>Artifact Map</strong><span>Generated 2026-07-02T02:38:21.672183+00:00</span></div>
+    <div class="build">Build command_center_x_20260702T023821Z</div>
+  </header>
+  <section class='intro'><div><p class='eyebrow'>Artifact Map</p><h1>Current repo truth rendered from inventory artifacts.</h1></div><div class='status-card status-ok'><span>Current state</span><strong>ok</strong></div></section><div class='table-wrap'><table><thead><tr><th>dir_count</th><th>exists</th><th>file_count</th><th>latest_files</th><th>latest_manifests</th><th>latest_reports</th><th>latest_status_files</th><th>path</th></tr></thead><tbody><tr><td>38</td><td>True</td><td>309</td><td>[&quot;data/v2_alpha_lab/manifests/alpha_lab_demo_20260701T020139Z.json&quot;, &quot;data/v2_alpha_lab/paper/paper_audit_log.jsonl&quot;, &quot;data/v2_alpha_lab/paper/paper_lifecycle_summary.json&quot;, &quot;data/v2_alpha_lab/reports/alpha_lab_summary.md&quot;, &quot;data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/paper/paper_audit_log.jsonl&quot;, &quot;data/v2_a</td><td>[&quot;data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T030820Z.json&quot;, &quot;data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T030945Z.json&quot;, &quot;data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T031509Z.json&quot;, &quot;data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T031821Z.json&quot;, &quot;data/v2_alpha_lab/manifests/alpha_lab_demo_202</td><td>[&quot;data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/cash_no_trade_baseline_summary.json&quot;, &quot;data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/cross_sectional_relative_strength_summary.json&quot;, &quot;data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/donchian_breakout_20_10_summary.js</td><td>[]</td><td>data/v2_alpha_lab</td></tr><tr><td>8</td><td>True</td><td>68</td><td>[&quot;data/v2_data_truth/reports/data_truth_summary.md&quot;, &quot;data/v2_data_truth/reconciliation/provider_diff_datatruth_public_yahoo_chart_1d_20260629.csv&quot;, &quot;data/v2_data_truth/reconciliation/latest_reconciliation.md&quot;, &quot;data/v2_data_truth/reconciliation/latest_reconciliation.json&quot;, &quot;data/v2_data_truth/manifests/latest.json&quot;, &quot;</td><td>[&quot;data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260514.json&quot;, &quot;data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260515.json&quot;, &quot;data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260518.json&quot;, &quot;data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260519.json&quot;, &quot;data/v</td><td>[&quot;data/v2_data_truth/reports/data_truth_summary.md&quot;]</td><td>[]</td><td>data/v2_data_truth</td></tr><tr><td>35</td><td>True</td><td>46</td><td>[&quot;data/v2_autodata/reports/provider_readiness.md&quot;, &quot;data/v2_autodata/reports/provider_readiness.json&quot;, &quot;data/v2_autodata/readiness/provider_readiness.json&quot;, &quot;data/v2_autodata/provider_registry/providers.json&quot;, &quot;data/v2_autodata/reports/autodata_trial_day_latest.md&quot;, &quot;data/v2_autodata/reports/autodata_trial_day_latest.j</td><td>[&quot;data/v2_autodata/manifests/autodata_2fd263c4cd18.json&quot;, &quot;data/v2_autodata/manifests/autodata_a528e2109b67.json&quot;, &quot;data/v2_autodata/manifests/autodata_ebc3efa2d68c.json&quot;, &quot;data/v2_autodata/manifests/autodata_manifest.json&quot;, &quot;data/v2_autodata/manifests/latest_request.json&quot;]</td><td>[&quot;data/v2_autodata/reports/autodata_quality_scorecard.md&quot;, &quot;data/v2_autodata/reports/autodata_red_team.md&quot;, &quot;data/v2_autodata/reports/autodata_summary.json&quot;, &quot;data/v2_autodata/reports/autodata_summary.md&quot;, &quot;data/v2_autodata/reports/autodata_trial_day_latest.json&quot;, &quot;data/v2_autodata/reports/autodata_trial_day_latest.md&quot;</td><td>[&quot;data/v2_autodata/readiness/provider_readiness.json&quot;, &quot;data/v2_autodata/reports/provider_readiness.json&quot;, &quot;data/v2_autodata/reports/provider_readiness.md&quot;, &quot;data/v2_autodata/reports/verify_latest.json&quot;, &quot;data/v2_autodata/reports/verify_latest.md&quot;]</td><td>data/v2_autodata</td></tr><tr><td>12</td><td>True</td><td>129</td><td>[&quot;data/v2_real_intraday/reports/import_readiness.md&quot;, &quot;data/v2_real_intraday/reports/import_readiness.json&quot;, &quot;data/v2_real_intraday/manifests/latest_manifest.json&quot;, &quot;data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T220903Z.json&quot;, &quot;data/v2_real_intraday/reports/evidence_package_latest.json&quot;, &quot;data</td><td>[&quot;data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122407Z.json&quot;, &quot;data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122507Z.json&quot;, &quot;data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122537Z.json&quot;, &quot;data/v2_real_intraday/manifests/real_intraday_build_20</td><td>[&quot;data/v2_real_intraday/reports/real_intraday_quality_scorecard.md&quot;, &quot;data/v2_real_intraday/reports/real_intraday_red_team.md&quot;, &quot;data/v2_real_intraday/reports/real_intraday_summary.json&quot;, &quot;data/v2_real_intraday/reports/real_intraday_summary.md&quot;, &quot;data/v2_real_intraday/reports/trial_day_latest.json&quot;, &quot;data/v2_real_intra</td><td>[&quot;data/v2_real_intraday/reports/import_readiness.json&quot;, &quot;data/v2_real_intraday/reports/import_readiness.md&quot;, &quot;data/v2_real_intraday/reports/verify_latest.json&quot;, &quot;data/v2_real_intraday/reports/verify_latest.md&quot;]</td><td>data/v2_real_intraday</td></tr><tr><td>9</td><td>True</td><td>236</td><td>[&quot;data/v2_fill_truth/reports/filltruth_quality_scorecard.md&quot;, &quot;data/v2_fill_truth/reports/filltruth_quality_scorecard.json&quot;, &quot;data/v2_fill_truth/reports/filltruth_summary.md&quot;, &quot;data/v2_fill_truth/reports/filltruth_summary.json&quot;, &quot;data/v2_fill_truth/manifests/fill_truth_manifest.json&quot;, &quot;data/v2_fill_truth/reconciliation</td><td>[&quot;data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150443Z.json&quot;, &quot;data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150445Z.json&quot;, &quot;data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150450Z.json&quot;, &quot;data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T15</td><td>[&quot;data/v2_fill_truth/reports/dataset_latest.json&quot;, &quot;data/v2_fill_truth/reports/dataset_latest.md&quot;, &quot;data/v2_fill_truth/reports/execution_model_comparison.md&quot;, &quot;data/v2_fill_truth/reports/filltruth_quality_scorecard.json&quot;, &quot;data/v2_fill_truth/reports/filltruth_quality_scorecard.md&quot;, &quot;data/v2_fill_truth/reports/filltruth</td><td>[&quot;data/v2_fill_truth/reconciliation/verify_latest.json&quot;, &quot;data/v2_fill_truth/reconciliation/verify_latest.md&quot;]</td><td>data/v2_fill_truth</td></tr><tr><td>7</td><td>True</td><td>330</td><td>[&quot;data/v2_evidence_commit/reports/evidence_commit_summary.md&quot;, &quot;data/v2_evidence_commit/reports/evidence_commit_summary.json&quot;, &quot;data/v2_evidence_commit/reports/evidence_commit_quality_scorecard.json&quot;, &quot;data/v2_evidence_commit/reports/real_intraday_readiness.md&quot;, &quot;data/v2_evidence_commit/reports/real_intraday_readiness.</td><td>[&quot;data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T122539Z.json&quot;, &quot;data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150443Z.json&quot;, &quot;data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150446Z.json&quot;, &quot;data/v2_evidence_commit/manifests/evide</td><td>[&quot;data/v2_evidence_commit/reports/calendar_convergence_latest.json&quot;, &quot;data/v2_evidence_commit/reports/evidence_commit_quality_scorecard.json&quot;, &quot;data/v2_evidence_commit/reports/evidence_commit_summary.json&quot;, &quot;data/v2_evidence_commit/reports/evidence_commit_summary.md&quot;, &quot;data/v2_evidence_commit/reports/latest_commit_even</td><td>[&quot;data/v2_evidence_commit/reconciliation/verify_latest.json&quot;, &quot;data/v2_evidence_commit/reconciliation/verify_latest.md&quot;, &quot;data/v2_evidence_commit/reports/real_intraday_readiness.json&quot;, &quot;data/v2_evidence_commit/reports/real_intraday_readiness.md&quot;]</td><td>data/v2_evidence_commit</td></tr><tr><td>9</td><td>True</td><td>54</td><td>[&quot;data/v2_paper_ops/reports/fill_truth_overlay.md&quot;, &quot;data/v2_paper_ops/reports/fill_truth_overlay.json&quot;, &quot;data/v2_paper_ops/reports/paper_ops_summary.md&quot;, &quot;data/v2_paper_ops/calendar/calendar_summary.md&quot;, &quot;data/v2_paper_ops/calendar/strategy_drawdowns.csv&quot;, &quot;data/v2_paper_ops/calendar/strategy_equity_curves.csv&quot;, &quot;data</td><td>[&quot;data/v2_paper_ops/manifests/paper_ops_forward_2026-06-29_datatruth_public_yahoo_chart_1d_20260626.json&quot;, &quot;data/v2_paper_ops/manifests/paper_ops_replay_2026-06-25_datatruth_public_yahoo_chart_1d_20260625.json&quot;, &quot;data/v2_paper_ops/manifests/paper_ops_replay_2026-06-26_datatruth_public_yahoo_chart_1d_20260625.json&quot;, &quot;da</td><td>[&quot;data/v2_paper_ops/calendar/calendar_summary.md&quot;, &quot;data/v2_paper_ops/reports/fill_truth_overlay.json&quot;, &quot;data/v2_paper_ops/reports/fill_truth_overlay.md&quot;, &quot;data/v2_paper_ops/reports/forward_readiness.json&quot;, &quot;data/v2_paper_ops/reports/forward_readiness.md&quot;, &quot;data/v2_paper_ops/reports/paper_ops_summary.md&quot;, &quot;data/v2_pape</td><td>[&quot;data/v2_paper_ops/reports/forward_readiness.json&quot;, &quot;data/v2_paper_ops/reports/forward_readiness.md&quot;]</td><td>data/v2_paper_ops</td></tr><tr><td>28</td><td>True</td><td>452</td><td>[&quot;data/v2_forward_evidence/strategy_evidence/evidence_commit_strategy_overlay.csv&quot;, &quot;data/v2_forward_evidence/strategy_evidence/evidence_commit_strategy_overlay.json&quot;, &quot;data/v2_forward_evidence/strategy_evidence/filltruth_strategy_evidence_overlay.json&quot;, &quot;data/v2_forward_evidence/calendar/fill_truth_calendar_summary.md</td><td>[&quot;data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-20_datatruth_public_yahoo_chart_1d_20260520.json&quot;, &quot;data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-21_datatruth_public_yahoo_chart_1d_20260521.json&quot;, &quot;data/v2_forward_evidence/shadow_replay/paper_o</td><td>[&quot;data/v2_forward_evidence/reports/forward_autopilot_result.json&quot;, &quot;data/v2_forward_evidence/reports/latest_freeze_result.json&quot;, &quot;data/v2_forward_evidence/reports/preflight_2026-06-29.json&quot;, &quot;data/v2_forward_evidence/reports/preflight_2026-06-29.md&quot;, &quot;data/v2_forward_evidence/reports/rebuild_evidence.json&quot;, &quot;data/v2_fo</td><td>[]</td><td>data/v2_forward_evidence</td></tr><tr><td>1</td><td>True</td><td>12</td><td>[&quot;data/v2_omega/reports/evidence_integrity.md&quot;, &quot;data/v2_omega/reports/risk_report.md&quot;, &quot;data/v2_omega/reports/data_quality.md&quot;, &quot;data/v2_omega/reports/strategy_health.md&quot;, &quot;data/v2_omega/reports/blocked_candidates.md&quot;, &quot;data/v2_omega/reports/top_opportunities.md&quot;, &quot;data/v2_omega/reports/what_remains_untrusted.md&quot;, &quot;da</td><td>[&quot;data/v2_omega/reports/omega_run_manifest.json&quot;]</td><td>[&quot;data/v2_omega/reports/blocked_candidates.md&quot;, &quot;data/v2_omega/reports/data_quality.md&quot;, &quot;data/v2_omega/reports/evidence_integrity.md&quot;, &quot;data/v2_omega/reports/omega_run_manifest.json&quot;, &quot;data/v2_omega/reports/omega_summary.json&quot;, &quot;data/v2_omega/reports/omega_summary.md&quot;, &quot;data/v2_omega/reports/risk_report.md&quot;, &quot;data/v2_</td><td>[]</td><td>data/v2_omega</td></tr><tr><td>9</td><td>True</td><td>27</td><td>[&quot;data/v2_omega_sentinel/reconciliation/latest_verification.md&quot;, &quot;data/v2_omega_sentinel/reconciliation/latest_verification.json&quot;, &quot;data/v2_omega_sentinel/manifests/omega_sentinel_manifest.json&quot;, &quot;data/v2_omega_sentinel/reports/doctor_latest.md&quot;, &quot;data/v2_omega_sentinel/reports/doctor_latest.json&quot;, &quot;data/v2_omega_senti</td><td>[&quot;data/v2_omega_sentinel/manifests/omega_sentinel_manifest.json&quot;]</td><td>[&quot;data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.json&quot;, &quot;data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.md&quot;, &quot;data/v2_omega_sentinel/reports/doctor_latest.json&quot;, &quot;data/v2_omega_sentinel/reports/doctor_latest.md&quot;, &quot;data/v2_omega_sentinel/reports/latest_omega_sentinel_report.json&quot;, &quot;data</td><td>[&quot;data/v2_omega_sentinel/status/2026-06-29_status.json&quot;, &quot;data/v2_omega_sentinel/status/2026-06-29_status.md&quot;, &quot;data/v2_omega_sentinel/status/latest_status.json&quot;, &quot;data/v2_omega_sentinel/status/latest_status.md&quot;, &quot;data/v2_omega_sentinel/trial/forward_trial_status.json&quot;, &quot;data/v2_omega_sentinel/trial/forward_trial_statu</td><td>data/v2_omega_sentinel</td></tr><tr><td>12</td><td>True</td><td>47</td><td>[&quot;data/v2_learning_foundry/reports/verify_latest.json&quot;, &quot;data/v2_learning_foundry/reports/verify_latest.md&quot;, &quot;data/v2_learning_foundry/lessons/2026-06-29.json&quot;, &quot;data/v2_learning_foundry/lessons/market_masters_2026-06-29.json&quot;, &quot;data/v2_learning_foundry/lessons/2026-06-29.md&quot;, &quot;data/v2_learning_foundry/reports/market_m</td><td>[&quot;data/v2_learning_foundry/manifests/learning_foundry_manifest.json&quot;]</td><td>[&quot;data/v2_learning_foundry/reports/champion_registry.json&quot;, &quot;data/v2_learning_foundry/reports/champion_registry.md&quot;, &quot;data/v2_learning_foundry/reports/feature_store_summary.md&quot;, &quot;data/v2_learning_foundry/reports/learning_foundry_summary.md&quot;, &quot;data/v2_learning_foundry/reports/market_masters_sync.md&quot;, &quot;data/v2_learning_f</td><td>[&quot;data/v2_learning_foundry/news/news_readiness.md&quot;, &quot;data/v2_learning_foundry/reports/verify_latest.json&quot;, &quot;data/v2_learning_foundry/reports/verify_latest.md&quot;]</td><td>data/v2_learning_foundry</td></tr><tr><td>11</td><td>True</td><td>24</td><td>[&quot;data/v2_market_masters/reports/verify_latest.md&quot;, &quot;data/v2_market_masters/reports/verify_latest.json&quot;, &quot;data/v2_market_masters/manifests/market_masters_manifest.json&quot;, &quot;data/v2_market_masters/reports/report_latest.md&quot;, &quot;data/v2_market_masters/reports/report_latest.json&quot;, &quot;data/v2_market_masters/reports/promotion_reco</td><td>[&quot;data/v2_market_masters/manifests/market_masters_manifest.json&quot;]</td><td>[&quot;data/v2_market_masters/backtests/2026-06-29_backtest_summary.csv&quot;, &quot;data/v2_market_masters/backtests/2026-06-29_backtest_summary.json&quot;, &quot;data/v2_market_masters/reports/backtest_report.md&quot;, &quot;data/v2_market_masters/reports/promotion_recommendations.md&quot;, &quot;data/v2_market_masters/reports/report_latest.json&quot;, &quot;data/v2_mark</td><td>[&quot;data/v2_market_masters/reports/verify_latest.json&quot;, &quot;data/v2_market_masters/reports/verify_latest.md&quot;]</td><td>data/v2_market_masters</td></tr><tr><td>9</td><td>True</td><td>42</td><td>[&quot;data/v2_telegram_intel/reports/verify_latest.md&quot;, &quot;data/v2_telegram_intel/reports/verify_latest.json&quot;, &quot;data/v2_telegram_intel/status/latest_readiness.md&quot;, &quot;data/v2_telegram_intel/status/latest_readiness.json&quot;, &quot;data/v2_telegram_intel/manifests/telegram_intel_manifest.json&quot;, &quot;data/v2_telegram_intel/templates/no_picks</td><td>[&quot;data/v2_telegram_intel/manifests/telegram_intel_manifest.json&quot;]</td><td>[&quot;data/v2_telegram_intel/reports/message_quality_latest.json&quot;, &quot;data/v2_telegram_intel/reports/message_quality_latest.md&quot;, &quot;data/v2_telegram_intel/reports/report_latest.json&quot;, &quot;data/v2_telegram_intel/reports/report_latest.md&quot;, &quot;data/v2_telegram_intel/reports/send_latest.json&quot;, &quot;data/v2_telegram_intel/reports/send_lates</td><td>[&quot;data/v2_telegram_intel/reports/verify_latest.json&quot;, &quot;data/v2_telegram_intel/reports/verify_latest.md&quot;, &quot;data/v2_telegram_intel/status/latest_readiness.json&quot;, &quot;data/v2_telegram_intel/status/latest_readiness.md&quot;]</td><td>data/v2_telegram_intel</td></tr><tr><td>6</td><td>True</td><td>45</td><td>[&quot;data/v2_autonomous_runner/reports/market_masters_autonomy_status.json&quot;, &quot;data/v2_autonomous_runner/reports/market_masters_autonomy_status.md&quot;, &quot;data/v2_autonomous_runner/reports/autonomous_runner_status.md&quot;, &quot;data/v2_autonomous_runner/reports/autonomous_runner_status.json&quot;, &quot;data/v2_autonomous_runner/reports/task_ins</td><td>[&quot;data/v2_autonomous_runner/manifests/autonomous_runner_manifest.json&quot;]</td><td>[&quot;data/v2_autonomous_runner/logs/install_report.log&quot;, &quot;data/v2_autonomous_runner/reports/autonomous_runner_status.json&quot;, &quot;data/v2_autonomous_runner/reports/autonomous_runner_status.md&quot;, &quot;data/v2_autonomous_runner/reports/doctor_latest.json&quot;, &quot;data/v2_autonomous_runner/reports/doctor_latest.md&quot;, &quot;data/v2_autonomous_runn</td><td>[&quot;data/v2_autonomous_runner/logs/final_watchdog_after_verify.out&quot;, &quot;data/v2_autonomous_runner/logs/install_scheduler_verify.log&quot;, &quot;data/v2_autonomous_runner/logs/install_status.log&quot;, &quot;data/v2_autonomous_runner/logs/test_verify_20260701T145026Z.log&quot;, &quot;data/v2_autonomous_runner/logs/test_verify_20260701T145919Z.log&quot;, &quot;da</td><td>data/v2_autonomous_runner</td></tr><tr><td>2</td><td>True</td><td>24</td><td>[&quot;data/v2_scheduler/status/latest_status.md&quot;, &quot;data/v2_scheduler/status/latest_status.json&quot;, &quot;data/v2_scheduler/logs/verify_20260701T171001.log&quot;, &quot;data/v2_scheduler/logs/morning_check_20260701T170902.log&quot;, &quot;data/v2_scheduler/logs/final_morning_market_masters_refresh.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T170737.</td><td>[]</td><td>[]</td><td>[&quot;data/v2_scheduler/logs/verify_20260701T072205.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T072445.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T095027.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T095051.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T095919.log&quot;, &quot;data/v2_scheduler/logs/verify_20260701T100459.log&quot;, &quot;</td><td>data/v2_scheduler</td></tr><tr><td>0</td><td>True</td><td>74</td><td>[&quot;data/v2_command_center/command_center_x.html&quot;, &quot;data/v2_command_center/autonomous_runner.html&quot;, &quot;data/v2_command_center/missed_runs.html&quot;, &quot;data/v2_command_center/scheduler_status.html&quot;, &quot;data/v2_command_center/task_scheduler.html&quot;, &quot;data/v2_command_center/watchdog.html&quot;, &quot;data/v2_command_center/command_center_manife</td><td>[&quot;data/v2_command_center/command_center_manifest.json&quot;]</td><td>[]</td><td>[&quot;data/v2_command_center/daily_run_status.html&quot;, &quot;data/v2_command_center/daily_status.html&quot;, &quot;data/v2_command_center/import_readiness.html&quot;, &quot;data/v2_command_center/provider_readiness.html&quot;, &quot;data/v2_command_center/real_intraday_readiness.html&quot;, &quot;data/v2_command_center/scheduler_status.html&quot;, &quot;data/v2_command_center/te</td><td>data/v2_command_center</td></tr></tbody></table></div>
+</main>
+<!-- dawnstrike-apex-pro-audit-footer:start -->
+<footer class="apex-pro-audit-footer" id="apex-pro-route-audit">
+  <strong>Audit trail</strong>
+  <span>Ledger row 149; family application_subpage; boundary legacy-command-center-archive.</span>
+  <span>Research-only. Live execution disabled. Missing truth must remain n/a or pending.</span>
+</footer>
+<!-- dawnstrike-apex-pro-audit-footer:end -->
+</body>
+</html>

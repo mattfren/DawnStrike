@@ -1,0 +1,11 @@
+{
+  "calendar_mismatches": [],
+  "duplicate_event_ids": [],
+  "orphan_closes": [],
+  "orphan_fills": [],
+  "report_id": "paper_ops_reconciliation_latest",
+  "run_id": "latest",
+  "schema_version": "v2.paper_ops_reconciliation.v1",
+  "status": "passed",
+  "warnings": []
+}

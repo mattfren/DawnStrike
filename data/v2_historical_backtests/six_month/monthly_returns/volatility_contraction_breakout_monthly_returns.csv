@@ -1,0 +1,8 @@
+strategy_id,month,start_equity,end_equity,return_pct
+volatility_contraction_breakout,2026-01,100000,100000,0
+volatility_contraction_breakout,2026-02,100000,100000,0
+volatility_contraction_breakout,2026-03,100000,100000,0
+volatility_contraction_breakout,2026-04,100000,102558.435,0.02558435
+volatility_contraction_breakout,2026-05,103356.855,108618.2942,0.05090557
+volatility_contraction_breakout,2026-06,108001.2942,106574.9543,-0.01320669
+volatility_contraction_breakout,2026-07,106520.0543,106493.1731,-0.00025236

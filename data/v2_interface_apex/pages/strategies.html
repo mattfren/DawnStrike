@@ -1,0 +1,1264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike Apex - Strategies</title>
+  <link rel="stylesheet" href="../assets/apex.css?v=interface_apex_9f25f95e13797949">
+  <link rel="stylesheet" href="../assets/apex_components.css?v=interface_apex_9f25f95e13797949">
+<style id="dawnstrike-apex-pro-route-tokens">
+:root {
+  --apex-bg: #071013;
+  --apex-panel: #0d171b;
+  --apex-panel-2: #111f24;
+  --apex-line: #24414a;
+  --apex-text: #edf7f7;
+  --apex-muted: #94abb0;
+  --apex-accent: #47d7b2;
+  --apex-warn: #f0bf5b;
+  --apex-danger: #ff6f73;
+  --apex-info: #70a7ff;
+  --apex-radius: 8px;
+  --apex-sidebar: 238px;
+  --apex-rail: 292px;
+}
+body.apex-pro-route {
+  background: var(--apex-bg);
+  color: var(--apex-text);
+  min-height: 100vh;
+}
+body.apex-pro-route > aside.apex-shell,
+body.apex-pro-route > aside.side-shell {
+  display: none !important;
+}
+body.apex-pro-route > main {
+  margin-left: var(--apex-sidebar) !important;
+  margin-right: var(--apex-rail) !important;
+  max-width: none !important;
+  padding-top: 150px !important;
+  height: calc(100vh - 20px) !important;
+  overflow: auto !important;
+}
+body.apex-pro-route a:focus-visible,
+body.apex-pro-route button:focus-visible,
+body.apex-pro-route summary:focus-visible,
+body.apex-pro-route [tabindex]:focus-visible {
+  outline: 3px solid var(--apex-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 6px rgba(71, 215, 178, .18) !important;
+}
+.apex-pro-skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 10000;
+  transform: translateY(-160%);
+  background: var(--apex-accent);
+  color: #03100d;
+  padding: 10px 12px;
+  border-radius: var(--apex-radius);
+  font-weight: 800;
+}
+.apex-pro-skip:focus-visible { transform: translateY(0); }
+.apex-pro-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 9990;
+  width: var(--apex-sidebar);
+  box-sizing: border-box;
+  padding: 18px;
+  border-right: 1px solid var(--apex-line);
+  background: linear-gradient(180deg, #071013, #0b171a);
+}
+.apex-pro-brand {
+  display: block;
+  color: var(--apex-text);
+  text-decoration: none;
+  margin-bottom: 18px;
+}
+.apex-pro-brand span {
+  display: block;
+  color: var(--apex-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.apex-pro-brand strong { display: block; font-size: 24px; }
+.apex-pro-nav nav {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.apex-pro-nav nav a {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  padding: 10px 11px;
+  color: var(--apex-text);
+  background: var(--apex-panel);
+  text-decoration: none;
+}
+.apex-pro-nav p {
+  color: var(--apex-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.apex-pro-statusbar {
+  position: fixed;
+  z-index: 9985;
+  left: var(--apex-sidebar);
+  right: 0;
+  top: 0;
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(7, 16, 19, .96);
+}
+.apex-pro-statusbar span,
+.apex-pro-badge-row span {
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--apex-text);
+  background: var(--apex-panel-2);
+  font-size: 12px;
+}
+.apex-pro-content-header {
+  position: fixed;
+  z-index: 9980;
+  left: var(--apex-sidebar);
+  right: var(--apex-rail);
+  top: 43px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(9, 19, 22, .97);
+}
+.apex-pro-kicker {
+  color: var(--apex-muted);
+  font-size: 11px;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+.apex-pro-content-header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+.apex-pro-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.apex-pro-next-action {
+  color: var(--apex-muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+.apex-pro-evidence-rail {
+  position: fixed;
+  z-index: 9975;
+  top: 43px;
+  right: 0;
+  bottom: 0;
+  width: var(--apex-rail);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--apex-line);
+  background: #091417;
+}
+.apex-pro-evidence-rail h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.apex-pro-evidence-rail dl,
+.apex-pro-evidence-rail div {
+  display: grid;
+  gap: 7px;
+}
+.apex-pro-evidence-rail div {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  background: var(--apex-panel);
+  padding: 10px;
+}
+.apex-pro-evidence-rail dt {
+  color: var(--apex-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-pro-evidence-rail dd {
+  margin: 0;
+  color: var(--apex-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.apex-pro-dev-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--apex-warn);
+  border-radius: var(--apex-radius);
+  background: rgba(240, 191, 91, .12);
+  color: var(--apex-warn);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.apex-pro-audit-footer {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  border-top: 1px solid var(--apex-line);
+  background: #091417;
+  color: var(--apex-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+}
+.apex-pro-generated-h1 {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  padding-top: 150px;
+}
+@media (max-width: 1100px) {
+  :root { --apex-sidebar: 0px; --apex-rail: 0px; }
+  .apex-pro-nav,
+  .apex-pro-evidence-rail {
+    position: static;
+    width: auto;
+    border: 0;
+  }
+  .apex-pro-statusbar,
+  .apex-pro-content-header {
+    position: static;
+    left: auto;
+    right: auto;
+  }
+  body.apex-pro-route > main {
+    margin: 0 !important;
+    padding-top: 16px !important;
+    height: 72vh !important;
+    overflow: auto !important;
+  }
+  .apex-pro-audit-footer {
+    margin: 0;
+  }
+}
+</style>
+</head>
+<body class="apex-pro-route" data-apex-pro-hardened="true" data-apex-pro-boundary="apex-static-archive" data-apex-pro-family="application_subpage">
+<!-- dawnstrike-apex-pro-audit-shell:start -->
+<a class="apex-pro-skip" href="#apex-pro-route-content">Skip to content</a>
+<aside class="apex-pro-nav" aria-label="Apex Pro route boundary">
+  <a class="apex-pro-brand" href="/"><span>Dawnstrike</span><strong>Apex Pro</strong></a>
+  <nav>
+    <a href="/" aria-label="Open canonical Streamlit dashboard">Dashboard</a>
+    <a href="#apex-pro-route-evidence">Evidence</a>
+    <a href="#apex-pro-route-audit">Audit</a>
+  </nav>
+  <p>Static route archive. Production trading stays in the single operator dashboard.</p>
+</aside>
+<section class="apex-pro-statusbar" role="status" aria-live="polite">
+  <span>Archived static route</span>
+  <span>Freshness: route audit snapshot 2026-07-03</span>
+  <span>Provider: local artifact manifest</span>
+  <span>Focus: visible keyboard states enabled</span>
+</section>
+<header class="apex-pro-content-header" id="apex-pro-route-content">
+
+  <p class="apex-pro-kicker">application_subpage / apex-static-archive</p>
+  <h1>Day-trade research first. Swing research and shadow ideas stay separated.</h1>
+  <div class="apex-pro-badge-row" aria-label="Route provenance">
+    <span>Freshness: audit snapshot 2026-07-03</span>
+    <span>Source/provider: local generated HTML artifact</span>
+    <span>Model/strategy version: Apex static archive shell template</span>
+    <span>Risk state: archive review required</span>
+  </div>
+  <p class="apex-pro-next-action">Next safe action: Open the canonical dashboard for current operator state.</p>
+</header>
+<aside class="apex-pro-evidence-rail" id="apex-pro-route-evidence" aria-label="Evidence rail">
+  <h2>Evidence</h2>
+  <dl>
+    <div><dt>Path</dt><dd>data/v2_interface_apex/pages/strategies.html</dd></div>
+    <div><dt>Template</dt><dd>Apex static archive shell template</dd></div>
+    <div><dt>Visual proof</dt><dd>ok; desktop_fullpage; 1440x8390</dd></div>
+    <div><dt>Screenshot</dt><dd>screenshots/desktop_fullpage/data/v2_interface_apex/pages/strategies.png</dd></div>
+  </dl>
+</aside>
+<!-- dawnstrike-apex-pro-audit-shell:end -->
+<aside class="apex-shell">
+  <a class="brand" href="../index.html"><span>Dawnstrike</span><b>Apex</b></a>
+  <p class="brand-subtitle">Premium day-trading cockpit</p>
+  <nav class="primary-nav" data-primary-nav><a href="mission.html">Mission</a>
+<a href="calendar.html">Calendar</a>
+<a class="active" href="strategies.html">Strategies</a>
+<a href="trades.html">Trades</a>
+<a href="intelligence.html">Intelligence</a>
+<a href="system.html">System</a></nav>
+  <section class="trust-boundary trust-boundary-banner">
+    <strong>Research-only</strong>
+    <span>Live trading disabled. No strategy is validated for live execution.</span>
+  </section>
+</aside>
+<main>
+  <header class="topbar">
+    <div><span>Latest artifact</span><strong>2026-07-02T00:00:00Z</strong></div>
+    <div><span>Mode</span><strong>Paper and research evidence</strong></div>
+    <a class="toplink" href="no_picks.html">No-picks story</a>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only</span>
+    <span>Live trading disabled</span>
+    <span>Historical backtests are not validation</span>
+    <span>Warnings stay visible</span>
+  </section>
+
+<section class="page-hero compact">
+  <p class="eyebrow">Strategies</p>
+  <h1>Day-trade research first. Swing research and shadow ideas stay separated.</h1>
+  <p>Every card shows status, trade count, R, expectancy, drawdown, robustness, slippage, OOS state, and validation progress without claiming live readiness.</p>
+</section>
+<section class="strategy-lane lane-day_trade"><header class="section-heading"><div><span>Intraday day-trade research</span><h2>16 report card(s)</h2></div></header><div class="strategy-grid">
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-failed-breakout-1min.html">Open report</a></div>
+  <h3>Day Failed Breakout (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>660</b><small>trades</small></span>
+    <span><b>43.94%</b><small>win rate</small></span>
+    <span><b>0.115011</b><small>avg R</small></span>
+    <span><b>0.115011</b><small>expectancy</small></span>
+    <span><b>1.097877</b><small>profit factor</small></span>
+    <span><b>-1.45%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>expectancy or return turns negative under stress</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-failed-breakout-5min.html">Open report</a></div>
+  <h3>Day Failed Breakout (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>550</b><small>trades</small></span>
+    <span><b>42.36%</b><small>win rate</small></span>
+    <span><b>0.01231</b><small>avg R</small></span>
+    <span><b>0.01231</b><small>expectancy</small></span>
+    <span><b>0.937275</b><small>profit factor</small></span>
+    <span><b>-2.81%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.937275</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-first-pullback-1min.html">Open report</a></div>
+  <h3>Day First Pullback (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>760</b><small>trades</small></span>
+    <span><b>35.66%</b><small>win rate</small></span>
+    <span><b>0.046123</b><small>avg R</small></span>
+    <span><b>0.046123</b><small>expectancy</small></span>
+    <span><b>0.847809</b><small>profit factor</small></span>
+    <span><b>-3.16%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.847809</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-first-pullback-5min.html">Open report</a></div>
+  <h3>Day First Pullback (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>762</b><small>trades</small></span>
+    <span><b>37.93%</b><small>win rate</small></span>
+    <span><b>-0.010239</b><small>avg R</small></span>
+    <span><b>-0.010239</b><small>expectancy</small></span>
+    <span><b>0.94193</b><small>profit factor</small></span>
+    <span><b>-3.62%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.94193</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-gap-go-fade-1min.html">Open report</a></div>
+  <h3>Day Gap Go Fade (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>577</b><small>trades</small></span>
+    <span><b>47.31%</b><small>win rate</small></span>
+    <span><b>0.046519</b><small>avg R</small></span>
+    <span><b>0.046519</b><small>expectancy</small></span>
+    <span><b>1.047023</b><small>profit factor</small></span>
+    <span><b>-6.29%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>drawdown -0.062543 return 0.020381</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-gap-go-fade-5min.html">Open report</a></div>
+  <h3>Day Gap Go Fade (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>577</b><small>trades</small></span>
+    <span><b>49.57%</b><small>win rate</small></span>
+    <span><b>0.075386</b><small>avg R</small></span>
+    <span><b>0.075386</b><small>expectancy</small></span>
+    <span><b>1.187641</b><small>profit factor</small></span>
+    <span><b>-4.78%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>expectancy or return turns negative under stress</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-intraday-relative-strength-1min.html">Open report</a></div>
+  <h3>Day Intraday Relative Strength (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>643</b><small>trades</small></span>
+    <span><b>37.01%</b><small>win rate</small></span>
+    <span><b>-0.091041</b><small>avg R</small></span>
+    <span><b>-0.091041</b><small>expectancy</small></span>
+    <span><b>0.818741</b><small>profit factor</small></span>
+    <span><b>-5.79%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.818741</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-intraday-relative-strength-5min.html">Open report</a></div>
+  <h3>Day Intraday Relative Strength (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>675</b><small>trades</small></span>
+    <span><b>41.93%</b><small>win rate</small></span>
+    <span><b>0.016218</b><small>avg R</small></span>
+    <span><b>0.016218</b><small>expectancy</small></span>
+    <span><b>1.009521</b><small>profit factor</small></span>
+    <span><b>-5.61%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>drawdown -0.055989 return 0.002673</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-orb-15m-1min.html">Open report</a></div>
+  <h3>Day ORB 15m (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>747</b><small>trades</small></span>
+    <span><b>51.14%</b><small>win rate</small></span>
+    <span><b>0.034178</b><small>avg R</small></span>
+    <span><b>0.034178</b><small>expectancy</small></span>
+    <span><b>1.046779</b><small>profit factor</small></span>
+    <span><b>-7.73%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>drawdown -0.077292 return 0.03255</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-orb-15m-5min.html">Open report</a></div>
+  <h3>Day ORB 15m (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>740</b><small>trades</small></span>
+    <span><b>50.00%</b><small>win rate</small></span>
+    <span><b>0.041943</b><small>avg R</small></span>
+    <span><b>0.041943</b><small>expectancy</small></span>
+    <span><b>1.05927</b><small>profit factor</small></span>
+    <span><b>-6.23%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>expectancy or return turns negative under stress</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-orb-5m-1min.html">Open report</a></div>
+  <h3>Day ORB 5m (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>762</b><small>trades</small></span>
+    <span><b>47.77%</b><small>win rate</small></span>
+    <span><b>0.00635</b><small>avg R</small></span>
+    <span><b>0.00635</b><small>expectancy</small></span>
+    <span><b>1.006912</b><small>profit factor</small></span>
+    <span><b>-7.68%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>drawdown -0.077067 return 0.005161</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-orb-5m-5min.html">Open report</a></div>
+  <h3>Day ORB 5m (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>0.00%</b><small>win rate</small></span>
+    <span><b>0.0</b><small>avg R</small></span>
+    <span><b>0.0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>0.00%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">robustness artifact present</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-premarket-break-1min.html">Open report</a></div>
+  <h3>Day Premarket Break (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>477</b><small>trades</small></span>
+    <span><b>58.49%</b><small>win rate</small></span>
+    <span><b>-0.035693</b><small>avg R</small></span>
+    <span><b>-0.035693</b><small>expectancy</small></span>
+    <span><b>0.814717</b><small>profit factor</small></span>
+    <span><b>-10.50%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.814717</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-premarket-break-5min.html">Open report</a></div>
+  <h3>Day Premarket Break (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>461</b><small>trades</small></span>
+    <span><b>59.87%</b><small>win rate</small></span>
+    <span><b>-0.025951</b><small>avg R</small></span>
+    <span><b>-0.025951</b><small>expectancy</small></span>
+    <span><b>0.914135</b><small>profit factor</small></span>
+    <span><b>-6.20%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.914135</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-vwap-pullback-1min.html">Open report</a></div>
+  <h3>Day VWAP Pullback (1min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>606</b><small>trades</small></span>
+    <span><b>44.88%</b><small>win rate</small></span>
+    <span><b>-0.025908</b><small>avg R</small></span>
+    <span><b>-0.025908</b><small>expectancy</small></span>
+    <span><b>0.961278</b><small>profit factor</small></span>
+    <span><b>-2.97%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.961278</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="day_trade">
+  <div class="card-topline"><span>day trade</span><a href="../strategies/day-vwap-pullback-5min.html">Open report</a></div>
+  <h3>Day VWAP Pullback (5min)</h3>
+  <p>historical intraday research - not validated</p>
+  <div class="stat-grid">
+    <span><b>332</b><small>trades</small></span>
+    <span><b>42.77%</b><small>win rate</small></span>
+    <span><b>-0.102383</b><small>avg R</small></span>
+    <span><b>-0.102383</b><small>expectancy</small></span>
+    <span><b>0.762406</b><small>profit factor</small></span>
+    <span><b>-5.35%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">fragile in some slices</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Historical intraday backtest only; not forward validation.</li><li>No strategy is promoted to live trading by Apex.</li><li>profit factor 0.762406</li></ul>
+</article>
+</div></section><section class="strategy-lane lane-swing_research"><header class="section-heading"><div><span>Daily-bar swing research</span><h2>22 report card(s)</h2></div></header><div class="strategy-grid">
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/bullish-fvg-continuation-swing_research.html">Open report</a></div>
+  <h3>Bullish Fvg Continuation</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>114</b><small>trades</small></span>
+    <span><b>47.2%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>-0.0208%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/cross-sectional-relative-strength-swing_research.html">Open report</a></div>
+  <h3>Cross Sectional Relative Strength</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>178</b><small>trades</small></span>
+    <span><b>42.7%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>-0.3333%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/donchian-breakout-20-10-swing_research.html">Open report</a></div>
+  <h3>Donchian Breakout 20 10</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>137</b><small>trades</small></span>
+    <span><b>49.4%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>0.0000%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/failed-breakout-reversal-short-swing_research.html">Open report</a></div>
+  <h3>Failed Breakout Reversal Short</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>51</b><small>trades</small></span>
+    <span><b>42.3%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>-0.0191%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/learning-shadow-swing_research.html">Open report</a></div>
+  <h3>Learning Shadow</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Learning Foundry challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-donchian-turtle-vol-target-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Donchian Turtle Vol Target V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-public-quant-ensemble-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Public Quant Ensemble V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-quality-value-parked-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Quality Value Parked V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-reflexive-macro-warning-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Reflexive Macro Warning V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-relative-strength-factor-guard-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Relative Strength Factor Guard V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-trend-diversification-allocator-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Trend Diversification Allocator V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-ts-momentum-regime-filter-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Ts Momentum Regime Filter V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/mm-vol-contraction-risk-overlay-v1-swing_research.html">Open report</a></div>
+  <h3>Mm Vol Contraction Risk Overlay V1</h3>
+  <p>daily-bar shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>n/a</b><small>win rate</small></span>
+    <span><b>n/a</b><small>avg R</small></span>
+    <span><b>n/a</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>n/a</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>Market Masters challenger remains shadow-only and not validated.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/pullback-reclaim-uptrend-swing_research.html">Open report</a></div>
+  <h3>Pullback Reclaim Uptrend</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>11</b><small>trades</small></span>
+    <span><b>42.9%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>-0.0714%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/ts-momentum-sma-atr-swing_research.html">Open report</a></div>
+  <h3>Ts Momentum Sma Atr</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>451</b><small>trades</small></span>
+    <span><b>34.7%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>-0.7968%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="swing_research">
+  <div class="card-topline"><span>swing research</span><a href="../strategies/volatility-contraction-breakout-swing_research.html">Open report</a></div>
+  <h3>Volatility Contraction Breakout</h3>
+  <p>daily-bar experimental</p>
+  <div class="stat-grid">
+    <span><b>99</b><small>trades</small></span>
+    <span><b>60.0%</b><small>win rate</small></span>
+    <span><b>0</b><small>avg R</small></span>
+    <span><b>0</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>0.0000%</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">not an intraday robustness lane</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Daily-bar swing research; not shown as day trading.</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li></ul>
+</article>
+</div></section><section class="strategy-lane lane-shadow_challenger"><header class="section-heading"><div><span>Shadow challengers</span><h2>8 report card(s)</h2></div></header><div class="strategy-grid">
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-donchian-turtle-vol-target-v1.html">Open report</a></div>
+  <h3>Mm Donchian Turtle Vol Target V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-public-quant-ensemble-v1.html">Open report</a></div>
+  <h3>Mm Public Quant Ensemble V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-quality-value-parked-v1.html">Open report</a></div>
+  <h3>Mm Quality Value Parked V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-reflexive-macro-warning-v1.html">Open report</a></div>
+  <h3>Mm Reflexive Macro Warning V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-relative-strength-factor-guard-v1.html">Open report</a></div>
+  <h3>Mm Relative Strength Factor Guard V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-trend-diversification-allocator-v1.html">Open report</a></div>
+  <h3>Mm Trend Diversification Allocator V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-ts-momentum-regime-filter-v1.html">Open report</a></div>
+  <h3>Mm Ts Momentum Regime Filter V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+
+
+<article class="strategy-card strategy-score-card" data-lane="shadow_challenger">
+  <div class="card-topline"><span>shadow challenger</span><a href="../strategies/mm-vol-contraction-risk-overlay-v1.html">Open report</a></div>
+  <h3>Mm Vol Contraction Risk Overlay V1</h3>
+  <p>shadow</p>
+  <div class="stat-grid">
+    <span><b>0</b><small>trades</small></span>
+    <span><b>unknown</b><small>win rate</small></span>
+    <span><b>unknown</b><small>avg R</small></span>
+    <span><b>unknown</b><small>expectancy</small></span>
+    <span><b>unknown</b><small>profit factor</small></span>
+    <span><b>unknown</b><small>drawdown</small></span>
+  </div>
+  <div class="badge-row">
+    <span class="badge robustness-badge">idea only</span>
+    <span class="badge evidence-quality-badge">Not validated</span>
+  </div>
+  <ul class="warnings-list"><li>Shadow challenger; cannot replace an official paper strategy.</li></ul>
+</article>
+</div></section>
+
+<details class="advanced-drawer raw-data">
+  <summary>Advanced: source data and artifacts</summary>
+  <p>Source data is secondary. The story above is the primary operator view.</p>
+  <ul><li><a href="../data/strategies.json">Strategies JSON</a></li>
+<li><a href="../data/source_refs.json">Day Trade Lab comparison</a></li></ul>
+</details>
+
+
+</main>
+<!-- dawnstrike-apex-pro-audit-footer:start -->
+<footer class="apex-pro-audit-footer" id="apex-pro-route-audit">
+  <strong>Audit trail</strong>
+  <span>Ledger row 534; family application_subpage; boundary apex-static-archive.</span>
+  <span>Research-only. Live execution disabled. Missing truth must remain n/a or pending.</span>
+</footer>
+<!-- dawnstrike-apex-pro-audit-footer:end -->
+</body>
+</html>

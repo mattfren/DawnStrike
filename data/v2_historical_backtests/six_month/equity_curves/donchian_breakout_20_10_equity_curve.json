@@ -1,0 +1,870 @@
+[
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-05T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-06T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-07T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-08T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-09T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-12T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-13T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-14T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-15T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-16T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-20T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-21T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-22T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-23T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-26T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-27T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-28T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-29T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-01-30T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-02-02T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-02-03T14:30:00+00:00"
+  },
+  {
+    "cash": 100000.0,
+    "drawdown_pct": 0.0,
+    "equity": 100000.0,
+    "open_positions": 0,
+    "timestamp": "2026-02-04T14:30:00+00:00"
+  },
+  {
+    "cash": 81910.702026,
+    "drawdown_pct": -0.00155148,
+    "equity": 99844.852026,
+    "open_positions": 1,
+    "timestamp": "2026-02-05T14:30:00+00:00"
+  },
+  {
+    "cash": 81910.702026,
+    "drawdown_pct": -0.00011498,
+    "equity": 99988.502026,
+    "open_positions": 1,
+    "timestamp": "2026-02-06T14:30:00+00:00"
+  },
+  {
+    "cash": 81910.702026,
+    "drawdown_pct": -0.00238998,
+    "equity": 99761.002026,
+    "open_positions": 1,
+    "timestamp": "2026-02-09T14:30:00+00:00"
+  },
+  {
+    "cash": 81910.702026,
+    "drawdown_pct": -0.00300098,
+    "equity": 99699.902026,
+    "open_positions": 1,
+    "timestamp": "2026-02-10T14:30:00+00:00"
+  },
+  {
+    "cash": 81910.702026,
+    "drawdown_pct": -0.00181798,
+    "equity": 99818.202026,
+    "open_positions": 1,
+    "timestamp": "2026-02-11T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-12T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-13T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-17T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-18T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-19T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-20T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-23T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-24T14:30:00+00:00"
+  },
+  {
+    "cash": 99000.178754,
+    "drawdown_pct": -0.00999821,
+    "equity": 99000.178754,
+    "open_positions": 0,
+    "timestamp": "2026-02-25T14:30:00+00:00"
+  },
+  {
+    "cash": 82088.547015,
+    "drawdown_pct": -0.01826023,
+    "equity": 98173.977015,
+    "open_positions": 1,
+    "timestamp": "2026-02-26T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-02-27T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-02T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-03T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-04T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-05T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-06T14:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-09T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-10T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-11T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-12T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-13T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-16T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-17T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-18T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-19T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-20T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-23T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-24T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-25T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-26T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-27T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-30T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-03-31T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-04-01T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-04-02T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-04-06T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-04-07T13:30:00+00:00"
+  },
+  {
+    "cash": 97989.561474,
+    "drawdown_pct": -0.02010439,
+    "equity": 97989.561474,
+    "open_positions": 0,
+    "timestamp": "2026-04-08T13:30:00+00:00"
+  },
+  {
+    "cash": 84467.652519,
+    "drawdown_pct": -0.01513347,
+    "equity": 98486.652519,
+    "open_positions": 1,
+    "timestamp": "2026-04-09T13:30:00+00:00"
+  },
+  {
+    "cash": 84467.652519,
+    "drawdown_pct": -0.01229547,
+    "equity": 98770.452519,
+    "open_positions": 1,
+    "timestamp": "2026-04-10T13:30:00+00:00"
+  },
+  {
+    "cash": 64952.589528,
+    "drawdown_pct": -0.0089753,
+    "equity": 99102.469528,
+    "open_positions": 2,
+    "timestamp": "2026-04-13T13:30:00+00:00"
+  },
+  {
+    "cash": 44997.612724,
+    "drawdown_pct": 0.0,
+    "equity": 100193.352724,
+    "open_positions": 3,
+    "timestamp": "2026-04-14T13:30:00+00:00"
+  },
+  {
+    "cash": 27101.740746,
+    "drawdown_pct": 0.0,
+    "equity": 100803.970746,
+    "open_positions": 4,
+    "timestamp": "2026-04-15T13:30:00+00:00"
+  },
+  {
+    "cash": -6937.112019,
+    "drawdown_pct": -0.0008493,
+    "equity": 100718.357981,
+    "open_positions": 6,
+    "timestamp": "2026-04-16T13:30:00+00:00"
+  },
+  {
+    "cash": -6937.112019,
+    "drawdown_pct": 0.0,
+    "equity": 102178.507981,
+    "open_positions": 6,
+    "timestamp": "2026-04-17T13:30:00+00:00"
+  },
+  {
+    "cash": -6937.112019,
+    "drawdown_pct": -0.00157685,
+    "equity": 102017.387981,
+    "open_positions": 6,
+    "timestamp": "2026-04-20T13:30:00+00:00"
+  },
+  {
+    "cash": -6937.112019,
+    "drawdown_pct": -0.00760473,
+    "equity": 101401.467981,
+    "open_positions": 6,
+    "timestamp": "2026-04-21T13:30:00+00:00"
+  },
+  {
+    "cash": -6937.112019,
+    "drawdown_pct": 0.0,
+    "equity": 103334.457981,
+    "open_positions": 6,
+    "timestamp": "2026-04-22T13:30:00+00:00"
+  },
+  {
+    "cash": 8546.707173,
+    "drawdown_pct": -0.00832927,
+    "equity": 102473.757173,
+    "open_positions": 5,
+    "timestamp": "2026-04-23T13:30:00+00:00"
+  },
+  {
+    "cash": 8546.707173,
+    "drawdown_pct": 0.0,
+    "equity": 103943.217173,
+    "open_positions": 5,
+    "timestamp": "2026-04-24T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": 0.0,
+    "equity": 104325.660931,
+    "open_positions": 6,
+    "timestamp": "2026-04-27T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": -0.00332708,
+    "equity": 103978.560931,
+    "open_positions": 6,
+    "timestamp": "2026-04-28T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": -0.00524694,
+    "equity": 103778.270931,
+    "open_positions": 6,
+    "timestamp": "2026-04-29T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": -0.01307358,
+    "equity": 102961.750931,
+    "open_positions": 6,
+    "timestamp": "2026-04-30T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": -0.00097867,
+    "equity": 104223.560931,
+    "open_positions": 6,
+    "timestamp": "2026-05-01T13:30:00+00:00"
+  },
+  {
+    "cash": -9906.559069,
+    "drawdown_pct": -0.00214799,
+    "equity": 104101.570931,
+    "open_positions": 6,
+    "timestamp": "2026-05-04T13:30:00+00:00"
+  },
+  {
+    "cash": 11828.370375,
+    "drawdown_pct": 0.0,
+    "equity": 104863.940375,
+    "open_positions": 5,
+    "timestamp": "2026-05-05T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": 0.0,
+    "equity": 106841.392006,
+    "open_positions": 6,
+    "timestamp": "2026-05-06T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": 0.0,
+    "equity": 107045.002006,
+    "open_positions": 6,
+    "timestamp": "2026-05-07T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": 0.0,
+    "equity": 108377.992006,
+    "open_positions": 6,
+    "timestamp": "2026-05-08T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": 0.0,
+    "equity": 108482.992006,
+    "open_positions": 6,
+    "timestamp": "2026-05-11T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": -0.00292461,
+    "equity": 108165.722006,
+    "open_positions": 6,
+    "timestamp": "2026-05-12T13:30:00+00:00"
+  },
+  {
+    "cash": -8129.217994,
+    "drawdown_pct": 0.0,
+    "equity": 109477.512006,
+    "open_positions": 6,
+    "timestamp": "2026-05-13T13:30:00+00:00"
+  },
+  {
+    "cash": 34351.977255,
+    "drawdown_pct": 0.0,
+    "equity": 109919.447255,
+    "open_positions": 4,
+    "timestamp": "2026-05-14T13:30:00+00:00"
+  },
+  {
+    "cash": -4947.250104,
+    "drawdown_pct": -0.00395169,
+    "equity": 109485.079896,
+    "open_positions": 6,
+    "timestamp": "2026-05-15T13:30:00+00:00"
+  },
+  {
+    "cash": 33239.321823,
+    "drawdown_pct": -0.01117987,
+    "equity": 108690.561823,
+    "open_positions": 4,
+    "timestamp": "2026-05-18T13:30:00+00:00"
+  },
+  {
+    "cash": 33239.321823,
+    "drawdown_pct": -0.01697512,
+    "equity": 108053.551823,
+    "open_positions": 4,
+    "timestamp": "2026-05-19T13:30:00+00:00"
+  },
+  {
+    "cash": 33239.321823,
+    "drawdown_pct": -0.00696451,
+    "equity": 109153.911823,
+    "open_positions": 4,
+    "timestamp": "2026-05-20T13:30:00+00:00"
+  },
+  {
+    "cash": 55712.528072,
+    "drawdown_pct": -0.00404723,
+    "equity": 109474.578072,
+    "open_positions": 3,
+    "timestamp": "2026-05-21T13:30:00+00:00"
+  },
+  {
+    "cash": 35802.788397,
+    "drawdown_pct": -0.00328349,
+    "equity": 109558.528397,
+    "open_positions": 4,
+    "timestamp": "2026-05-22T13:30:00+00:00"
+  },
+  {
+    "cash": 35802.788397,
+    "drawdown_pct": -0.00165366,
+    "equity": 109737.678397,
+    "open_positions": 4,
+    "timestamp": "2026-05-26T13:30:00+00:00"
+  },
+  {
+    "cash": 16268.193693,
+    "drawdown_pct": 0.0,
+    "equity": 110199.733693,
+    "open_positions": 5,
+    "timestamp": "2026-05-27T13:30:00+00:00"
+  },
+  {
+    "cash": 37548.834422,
+    "drawdown_pct": 0.0,
+    "equity": 111179.244422,
+    "open_positions": 4,
+    "timestamp": "2026-05-28T13:30:00+00:00"
+  },
+  {
+    "cash": 17615.200418,
+    "drawdown_pct": 0.0,
+    "equity": 111754.910418,
+    "open_positions": 5,
+    "timestamp": "2026-05-29T13:30:00+00:00"
+  },
+  {
+    "cash": 17615.200418,
+    "drawdown_pct": -0.00454262,
+    "equity": 111247.250418,
+    "open_positions": 5,
+    "timestamp": "2026-06-01T13:30:00+00:00"
+  },
+  {
+    "cash": 17615.200418,
+    "drawdown_pct": -0.00711942,
+    "equity": 110959.280418,
+    "open_positions": 5,
+    "timestamp": "2026-06-02T13:30:00+00:00"
+  },
+  {
+    "cash": 35066.224391,
+    "drawdown_pct": -0.0204762,
+    "equity": 109466.594391,
+    "open_positions": 4,
+    "timestamp": "2026-06-03T13:30:00+00:00"
+  },
+  {
+    "cash": 35066.224391,
+    "drawdown_pct": -0.01990271,
+    "equity": 109530.684391,
+    "open_positions": 4,
+    "timestamp": "2026-06-04T13:30:00+00:00"
+  },
+  {
+    "cash": 73418.608209,
+    "drawdown_pct": -0.03751443,
+    "equity": 107562.488209,
+    "open_positions": 2,
+    "timestamp": "2026-06-05T13:30:00+00:00"
+  },
+  {
+    "cash": 73418.608209,
+    "drawdown_pct": -0.04238778,
+    "equity": 107017.868209,
+    "open_positions": 2,
+    "timestamp": "2026-06-08T13:30:00+00:00"
+  },
+  {
+    "cash": 92490.787557,
+    "drawdown_pct": -0.04964599,
+    "equity": 106206.727557,
+    "open_positions": 1,
+    "timestamp": "2026-06-09T13:30:00+00:00"
+  },
+  {
+    "cash": 92490.787557,
+    "drawdown_pct": -0.05148662,
+    "equity": 106001.027557,
+    "open_positions": 1,
+    "timestamp": "2026-06-10T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-11T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-12T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-15T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-16T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-17T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-18T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-22T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-23T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-24T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-25T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-26T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-29T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-06-30T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-07-01T13:30:00+00:00"
+  },
+  {
+    "cash": 105786.374653,
+    "drawdown_pct": -0.05340737,
+    "equity": 105786.374653,
+    "open_positions": 0,
+    "timestamp": "2026-07-01T13:30:00+00:00"
+  }
+]

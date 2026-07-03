@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike X2 - Six-Month Historical Backtest</title>
+  <style>
+    body{margin:0;background:#070a0f;color:#eef6ff;font-family:Segoe UI,Arial,sans-serif;letter-spacing:0}
+    main{max-width:1160px;margin:0 auto;padding:28px}.banner,.panel{border:1px solid #2b3646;background:#10151d;border-radius:8px;padding:18px;margin:16px 0}
+    .banner{border-color:#2a7b91;background:#0d2230}h1{font-size:36px;margin:0 0 10px}p,li{color:#c4d3e4;line-height:1.5}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.metric{border:1px solid #2b3646;border-radius:8px;padding:14px;background:#121a24}
+    .metric span{display:block;color:#9fb0c3;font-size:12px;text-transform:uppercase}.metric strong{display:block;font-size:24px;margin-top:6px}
+    table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #2b3646;text-align:left;padding:10px}th{color:#9fb0c3;font-size:12px;text-transform:uppercase}
+  </style>
+<style id="dawnstrike-apex-pro-route-tokens">
+:root {
+  --apex-bg: #071013;
+  --apex-panel: #0d171b;
+  --apex-panel-2: #111f24;
+  --apex-line: #24414a;
+  --apex-text: #edf7f7;
+  --apex-muted: #94abb0;
+  --apex-accent: #47d7b2;
+  --apex-warn: #f0bf5b;
+  --apex-danger: #ff6f73;
+  --apex-info: #70a7ff;
+  --apex-radius: 8px;
+  --apex-sidebar: 238px;
+  --apex-rail: 292px;
+}
+body.apex-pro-route {
+  background: var(--apex-bg);
+  color: var(--apex-text);
+  min-height: 100vh;
+}
+body.apex-pro-route > aside.apex-shell,
+body.apex-pro-route > aside.side-shell {
+  display: none !important;
+}
+body.apex-pro-route > main {
+  margin-left: var(--apex-sidebar) !important;
+  margin-right: var(--apex-rail) !important;
+  max-width: none !important;
+  padding-top: 150px !important;
+  height: calc(100vh - 20px) !important;
+  overflow: auto !important;
+}
+body.apex-pro-route a:focus-visible,
+body.apex-pro-route button:focus-visible,
+body.apex-pro-route summary:focus-visible,
+body.apex-pro-route [tabindex]:focus-visible {
+  outline: 3px solid var(--apex-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 6px rgba(71, 215, 178, .18) !important;
+}
+.apex-pro-skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 10000;
+  transform: translateY(-160%);
+  background: var(--apex-accent);
+  color: #03100d;
+  padding: 10px 12px;
+  border-radius: var(--apex-radius);
+  font-weight: 800;
+}
+.apex-pro-skip:focus-visible { transform: translateY(0); }
+.apex-pro-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 9990;
+  width: var(--apex-sidebar);
+  box-sizing: border-box;
+  padding: 18px;
+  border-right: 1px solid var(--apex-line);
+  background: linear-gradient(180deg, #071013, #0b171a);
+}
+.apex-pro-brand {
+  display: block;
+  color: var(--apex-text);
+  text-decoration: none;
+  margin-bottom: 18px;
+}
+.apex-pro-brand span {
+  display: block;
+  color: var(--apex-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.apex-pro-brand strong { display: block; font-size: 24px; }
+.apex-pro-nav nav {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.apex-pro-nav nav a {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  padding: 10px 11px;
+  color: var(--apex-text);
+  background: var(--apex-panel);
+  text-decoration: none;
+}
+.apex-pro-nav p {
+  color: var(--apex-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.apex-pro-statusbar {
+  position: fixed;
+  z-index: 9985;
+  left: var(--apex-sidebar);
+  right: 0;
+  top: 0;
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(7, 16, 19, .96);
+}
+.apex-pro-statusbar span,
+.apex-pro-badge-row span {
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--apex-text);
+  background: var(--apex-panel-2);
+  font-size: 12px;
+}
+.apex-pro-content-header {
+  position: fixed;
+  z-index: 9980;
+  left: var(--apex-sidebar);
+  right: var(--apex-rail);
+  top: 43px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(9, 19, 22, .97);
+}
+.apex-pro-kicker {
+  color: var(--apex-muted);
+  font-size: 11px;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+.apex-pro-content-header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+.apex-pro-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.apex-pro-next-action {
+  color: var(--apex-muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+.apex-pro-evidence-rail {
+  position: fixed;
+  z-index: 9975;
+  top: 43px;
+  right: 0;
+  bottom: 0;
+  width: var(--apex-rail);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--apex-line);
+  background: #091417;
+}
+.apex-pro-evidence-rail h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.apex-pro-evidence-rail dl,
+.apex-pro-evidence-rail div {
+  display: grid;
+  gap: 7px;
+}
+.apex-pro-evidence-rail div {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  background: var(--apex-panel);
+  padding: 10px;
+}
+.apex-pro-evidence-rail dt {
+  color: var(--apex-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-pro-evidence-rail dd {
+  margin: 0;
+  color: var(--apex-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.apex-pro-dev-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--apex-warn);
+  border-radius: var(--apex-radius);
+  background: rgba(240, 191, 91, .12);
+  color: var(--apex-warn);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.apex-pro-audit-footer {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  border-top: 1px solid var(--apex-line);
+  background: #091417;
+  color: var(--apex-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+}
+.apex-pro-generated-h1 {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  padding-top: 150px;
+}
+@media (max-width: 1100px) {
+  :root { --apex-sidebar: 0px; --apex-rail: 0px; }
+  .apex-pro-nav,
+  .apex-pro-evidence-rail {
+    position: static;
+    width: auto;
+    border: 0;
+  }
+  .apex-pro-statusbar,
+  .apex-pro-content-header {
+    position: static;
+    left: auto;
+    right: auto;
+  }
+  body.apex-pro-route > main {
+    margin: 0 !important;
+    padding-top: 16px !important;
+    height: 72vh !important;
+    overflow: auto !important;
+  }
+  .apex-pro-audit-footer {
+    margin: 0;
+  }
+}
+</style>
+</head>
+<body class="apex-pro-route" data-apex-pro-hardened="true" data-apex-pro-boundary="legacy-command-center-archive" data-apex-pro-family="application_subpage">
+<!-- dawnstrike-apex-pro-audit-shell:start -->
+<a class="apex-pro-skip" href="#apex-pro-route-content">Skip to content</a>
+<aside class="apex-pro-nav" aria-label="Apex Pro route boundary">
+  <a class="apex-pro-brand" href="/"><span>Dawnstrike</span><strong>Apex Pro</strong></a>
+  <nav>
+    <a href="/" aria-label="Open canonical Streamlit dashboard">Dashboard</a>
+    <a href="#apex-pro-route-evidence">Evidence</a>
+    <a href="#apex-pro-route-audit">Audit</a>
+  </nav>
+  <p>Static route archive. Production trading stays in the single operator dashboard.</p>
+</aside>
+<section class="apex-pro-statusbar" role="status" aria-live="polite">
+  <span>Archived static route</span>
+  <span>Freshness: route audit snapshot 2026-07-03</span>
+  <span>Provider: local artifact manifest</span>
+  <span>Focus: visible keyboard states enabled</span>
+</section>
+<header class="apex-pro-content-header" id="apex-pro-route-content">
+
+  <p class="apex-pro-kicker">application_subpage / legacy-command-center-archive</p>
+  <h1>Six-Month Historical Backtest</h1>
+  <div class="apex-pro-badge-row" aria-label="Route provenance">
+    <span>Freshness: audit snapshot 2026-07-03</span>
+    <span>Source/provider: local generated HTML artifact</span>
+    <span>Model/strategy version: Legacy command module archive template</span>
+    <span>Risk state: archive review required</span>
+  </div>
+  <p class="apex-pro-next-action">Next safe action: Open the canonical dashboard for current operator state.</p>
+</header>
+<aside class="apex-pro-evidence-rail" id="apex-pro-route-evidence" aria-label="Evidence rail">
+  <h2>Evidence</h2>
+  <dl>
+    <div><dt>Path</dt><dd>data/v2_command_center/six_month_backtest.html</dd></div>
+    <div><dt>Template</dt><dd>Legacy command module archive template</dd></div>
+    <div><dt>Visual proof</dt><dd>ok; desktop_fullpage; 1440x1810</dd></div>
+    <div><dt>Screenshot</dt><dd>screenshots/desktop_fullpage/data/v2_command_center/six_month_backtest.png</dd></div>
+  </dl>
+</aside>
+<!-- dawnstrike-apex-pro-audit-shell:end -->
+<main>
+  <section class="banner">
+    <strong>Historical backtest only — not validated forward performance.</strong>
+    <p>Research-only / paper-only. Live trading disabled. Shadow challengers are not official. No strategy is validated.</p>
+  </section>
+  <h1>Six-Month Historical Backtest</h1>
+  <section class="grid">
+    <div class="metric"><span>Snapshot</span><strong>six_month_2026-01-02_2026-07-01_ffed22f925a8</strong></div>
+    <div class="metric"><span>Date range</span><strong>2026-01-02 to 2026-07-01</strong></div>
+    <div class="metric"><span>Symbols</span><strong>6</strong></div>
+    <div class="metric"><span>Strategy rows</span><strong>24</strong></div>
+  </section>
+  <section class="panel"><h2>Comparison</h2><table><thead><tr><th>Rank</th><th>Strategy</th><th>Group</th><th>Return</th><th>Drawdown</th><th>Status</th></tr></thead><tbody><tr><td>1</td><td>volatility_contraction_breakout</td><td>champion_strategy</td><td>0.06493173</td><td>-0.03180564</td><td>backtested</td></tr><tr><td>2</td><td>ts_momentum_sma_atr</td><td>champion_strategy</td><td>0.05867768</td><td>-0.07417176</td><td>backtested</td></tr><tr><td>3</td><td>donchian_breakout_20_10</td><td>champion_strategy</td><td>0.05786375</td><td>-0.05340737</td><td>backtested</td></tr><tr><td>4</td><td>cross_sectional_relative_strength</td><td>champion_strategy</td><td>0.05491269</td><td>-0.05314565</td><td>backtested</td></tr><tr><td>5</td><td>benchmark_buy_hold_equal_weight</td><td>benchmark</td><td>0.02170924</td><td>-0.02097526</td><td>backtested</td></tr><tr><td>6</td><td>bullish_fvg_continuation</td><td>champion_strategy</td><td>0.00646534</td><td>-0.07661264</td><td>backtested</td></tr><tr><td>7</td><td>cash_no_trade_baseline</td><td>baseline</td><td>0.0</td><td>0.0</td><td>backtested</td></tr><tr><td>8</td><td>pullback_reclaim_uptrend</td><td>champion_strategy</td><td>-0.01431678</td><td>-0.03771275</td><td>backtested</td></tr><tr><td>9</td><td>failed_breakout_reversal_short</td><td>champion_strategy</td><td>-0.02144455</td><td>-0.04208033</td><td>backtested</td></tr><tr><td>10</td><td>lf_ts_momentum_sma_atr_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>11</td><td>lf_donchian_breakout_20_10_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>12</td><td>lf_cross_sectional_relative_strength_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>13</td><td>lf_pullback_reclaim_uptrend_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>14</td><td>lf_volatility_contraction_breakout_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>15</td><td>lf_failed_breakout_reversal_short_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>16</td><td>lf_bullish_fvg_continuation_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>17</td><td>mm_ts_momentum_regime_filter_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>18</td><td>mm_donchian_turtle_vol_target_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>19</td><td>mm_relative_strength_factor_guard_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>20</td><td>mm_vol_contraction_risk_overlay_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>21</td><td>mm_public_quant_ensemble_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>22</td><td>mm_reflexive_macro_warning_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>23</td><td>mm_quality_value_parked_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr><tr><td>24</td><td>mm_trend_diversification_allocator_v1</td><td>shadow_challenger</td><td>n/a</td><td>n/a</td><td>metadata_only_not_mechanically_replayed</td></tr></tbody></table></section>
+  <section class="panel warnings-panel"><h2>Warnings</h2><ul><li>public_yahoo_chart: free public chart data; not an institutional feed</li><li>public_yahoo_chart: no independent corporate-action reconciliation</li><li>shadow challenger rows are metadata-only, not mechanically replayed</li></ul></section>
+</main>
+<!-- dawnstrike-apex-pro-audit-footer:start -->
+<footer class="apex-pro-audit-footer" id="apex-pro-route-audit">
+  <strong>Audit trail</strong>
+  <span>Ledger row 135; family application_subpage; boundary legacy-command-center-archive.</span>
+  <span>Research-only. Live execution disabled. Missing truth must remain n/a or pending.</span>
+</footer>
+<!-- dawnstrike-apex-pro-audit-footer:end -->
+</body>
+</html>

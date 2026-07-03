@@ -208,12 +208,12 @@ status, and evidence label.
 py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 ```
 
-## D. Dashboard
+## D. Operator Dashboard
 
-Start the dashboard:
+Start the web UI:
 
 ```powershell
-py -m streamlit run app.py --server.port 8502
+powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
 ```
 
 Open:
@@ -222,19 +222,18 @@ Open:
 http://127.0.0.1:8502/
 ```
 
-Look at `Today` first:
+Look at the dashboard `Today` tab first:
 
-1. Status banner: clean watchlist, watch only, no clean edge, outcome needed, or
-   source problem.
-2. Main pick: the top watchlist name if one exists.
-3. Top 3 watchlist: the three highest display-ready names.
-4. What to do next: scan, data, Telegram, manual watch levels, and outcome
-   reminders.
-5. Risk summary: avoid count, top avoid reason, data warnings, missing outcomes.
+1. Today: current operating story, watchlist, source confidence, and next action.
+2. Review: pick review, outcome needs, and lessons.
+3. History: prior signal context.
+4. Calendar: daily evidence and paper return attribution.
+5. Performance: evidence status and audited performance summaries.
+6. System: provider, storage, and operational diagnostics.
 
 Then use:
 
-- `Picks` for readable tables and latest notifications.
+- `Today` for readable tables and latest operating state.
 - `Calendar` for historical daily outcomes and missing outcome status.
 - `Performance` for evidence status and audited performance summaries.
-- `System` for run controls, source health, logs, and advanced diagnostics.
+- `System` for source health, logs, and advanced diagnostics.

@@ -1,0 +1,3785 @@
+{
+  "build_id": "repo_inventory_20260702T003755Z",
+  "cli_commands": [
+    {
+      "command": "py -m intraday_scanner.cli --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.cli",
+      "mutates_state": false,
+      "purpose": "cli",
+      "safe_to_run_daily": false,
+      "subcommands": [
+        "scan",
+        "print-upload-prompt",
+        "import-manual-snapshot",
+        "free-shadow-scan",
+        "import-manual-outcomes",
+        "audit-manual-outcomes",
+        "evaluate-intelligence-outcomes",
+        "free-shadow-report",
+        "build-free-universe",
+        "normalize-screener-file",
+        "auto-shadow-from-screener",
+        "watch-screener-inbox",
+        "auto-shadow-daily",
+        "url-ingest-screener",
+        "web-build-universe",
+        "web-collect-halts",
+        "web-collect-sec-risk",
+        "web-ingest-public-table",
+        "web-auto-collect",
+        "telegram-test",
+        "collect-daily-movers",
+        "daily-review",
+        "daily-review-learn",
+        "daily-review-telegram",
+        "web-source-doctor",
+        "web-telegram-daemon",
+        "alpha-morning",
+        "alpha-cycle",
+        "alpha-monitor",
+        "alpha-outcomes",
+        "alpha-learn",
+        "alpha-status",
+        "alpha-doctor",
+        "alpha-report",
+        "predict-signals",
+        "prediction-report",
+        "calibration-report",
+        "probability-doctor",
+        "outcome-gap-report",
+        "create-outcome-templates",
+        "attribute-returns",
+        "historical-report",
+        "calendar-report",
+        "benchmark-observe",
+        "benchmark-report",
+        "scheduler-doctor",
+        "preopen-check",
+        "opening-day-rehearsal",
+        "automation-run",
+        "automation-morning",
+        "automation-monitor-open",
+        "automation-outcomes",
+        "automation-summary",
+        "automation-daemon",
+        "live-scan",
+        "morning-run",
+        "build-snapshot",
+        "paper-audit",
+        "init-db",
+        "notify",
+        "audit-latest",
+        "backfill-audit",
+        "monitor-setups",
+        "monitor-loop",
+        "monitor-open",
+        "notify-test",
+        "performance-report",
+        "ingest-minute-bars",
+        "price-observe",
+        "trade-watch",
+        "trade-watch-loop",
+        "dashboard-doctor",
+        "dashboard-render-doctor",
+        "seed-dashboard-render-fixture",
+        "backfill-snapshots",
+        "tune-strategy",
+        "scheduler} ..."
+      ],
+      "ui_page": "system.html",
+      "usage": "usage: intraday-scan [-h] [--log-level LOG_LEVEL]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.omega_sentinel --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.omega_sentinel",
+      "mutates_state": true,
+      "purpose": "daily OMEGA orchestration and status",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "init",
+        "run",
+        "run-today",
+        "status",
+        "verify",
+        "report",
+        "trial-status",
+        "scheduler-scripts",
+        "doctor",
+        "omega",
+        "morning-check",
+        "after-close",
+        "resolve-pending",
+        "commit-filltruth",
+        "lock-status",
+        "clear-stale-locks"
+      ],
+      "ui_page": "today.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--output-root OUTPUT_ROOT] [--fetch]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.autodata --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.autodata",
+      "mutates_state": true,
+      "purpose": "provider-backed and fallback data intake",
+      "safe_to_run_daily": false,
+      "subcommands": [
+        "init",
+        "providers",
+        "readiness",
+        "fetch",
+        "fetch-pending",
+        "build",
+        "reconcile",
+        "feed-filltruth",
+        "trial-day",
+        "verify",
+        "report",
+        "demo"
+      ],
+      "ui_page": "evidence.html",
+      "usage": "usage: __main__.py [-h] [--symbol SYMBOL] [--date DATE] [--interval INTERVAL]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.fill_truth --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.fill_truth",
+      "mutates_state": true,
+      "purpose": "paper fill evidence resolution",
+      "safe_to_run_daily": false,
+      "subcommands": [
+        "init",
+        "import-intraday",
+        "build",
+        "resolve-pending",
+        "evaluate",
+        "compare-models",
+        "report",
+        "verify",
+        "demo"
+      ],
+      "ui_page": "evidence.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--start START] [--end END]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.evidence_commit --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.evidence_commit",
+      "mutates_state": true,
+      "purpose": "CommitBridge evidence promotion and blocking",
+      "safe_to_run_daily": false,
+      "subcommands": [
+        "init",
+        "propose",
+        "review",
+        "commit",
+        "reject",
+        "rebuild-state",
+        "reconcile",
+        "report",
+        "verify",
+        "demo"
+      ],
+      "ui_page": "evidence.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--reason REASON]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.paper_ops --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.paper_ops",
+      "mutates_state": true,
+      "purpose": "paper positions, ledgers, and returns",
+      "safe_to_run_daily": false,
+      "subcommands": [
+        "init",
+        "preflight",
+        "scan",
+        "enter",
+        "check",
+        "close",
+        "run-day",
+        "replay",
+        "calendar",
+        "reconcile",
+        "report",
+        "demo",
+        "rebuild-ledger",
+        "verify-calendar",
+        "evidence",
+        "readiness",
+        "calendar-view"
+      ],
+      "ui_page": "paper_trading.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--start START] [--end END]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.learning_foundry --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.learning_foundry",
+      "mutates_state": true,
+      "purpose": "daily lessons and shadow challenger learning",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "init",
+        "features",
+        "labels",
+        "regimes",
+        "news",
+        "train",
+        "generate-candidates",
+        "backtest-candidates",
+        "shadow-run",
+        "evaluate",
+        "promote-review",
+        "lesson",
+        "daily-learn",
+        "verify",
+        "report",
+        "demo"
+      ],
+      "ui_page": "learning.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--asof ASOF]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.market_masters --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.market_masters",
+      "mutates_state": true,
+      "purpose": "public methodology research and shadow challengers",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "init",
+        "research",
+        "source-register",
+        "extract-methodologies",
+        "generate-primitives",
+        "generate-challengers",
+        "backtest",
+        "shadow-run",
+        "evaluate",
+        "sync-learning-foundry",
+        "report",
+        "verify",
+        "demo"
+      ],
+      "ui_page": "market_masters.html",
+      "usage": "usage: __main__.py [-h] [--date DATE] [--output-root OUTPUT_ROOT]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.telegram_intel --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.telegram_intel",
+      "mutates_state": false,
+      "purpose": "dry-run/env-gated status messaging",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "init",
+        "readiness",
+        "draft",
+        "send",
+        "test-send",
+        "verify",
+        "report",
+        "demo"
+      ],
+      "ui_page": "telegram.html",
+      "usage": "usage: __main__.py [-h] [--kind {morning,after-close,watchdog,no-picks,test}]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.autonomous_runner --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.autonomous_runner",
+      "mutates_state": true,
+      "purpose": "Windows task and zero-touch run health",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "init",
+        "install",
+        "uninstall",
+        "status",
+        "verify",
+        "test-run",
+        "doctor",
+        "report",
+        "watchdog"
+      ],
+      "ui_page": "automation.html",
+      "usage": "usage: __main__.py [-h] [--yes] [--output-root OUTPUT_ROOT]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.command_center --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.command_center",
+      "mutates_state": false,
+      "purpose": "existing static local dashboard",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "build"
+      ],
+      "ui_page": "reports.html",
+      "usage": "usage: __main__.py [-h] [--output-root OUTPUT_ROOT] [--titan-root TITAN_ROOT]",
+      "writes_artifacts": true
+    },
+    {
+      "command": "py -m intraday_scanner.v2.command_center_x --help",
+      "exists": true,
+      "exit_code": 0,
+      "live_trading_risk": false,
+      "module": "intraday_scanner.v2.command_center_x",
+      "mutates_state": false,
+      "purpose": "new task-first static local dashboard",
+      "safe_to_run_daily": true,
+      "subcommands": [
+        "inventory",
+        "design",
+        "build",
+        "qa",
+        "report",
+        "verify",
+        "demo"
+      ],
+      "ui_page": "system.html",
+      "usage": "usage: __main__.py [-h] [--output-root OUTPUT_ROOT] [--repo-root REPO_ROOT]",
+      "writes_artifacts": true
+    }
+  ],
+  "created_at": "2026-07-02T00:37:55.670344+00:00",
+  "current_risks": [
+    {
+      "risk": "Local .env exists",
+      "severity": "high",
+      "ui_requirement": "Do not read, print, copy, or link secret-bearing files."
+    },
+    {
+      "risk": "API keys.txt exists in repo root",
+      "severity": "high",
+      "ui_requirement": "Do not read, print, copy, or link secret-bearing files."
+    },
+    {
+      "examples": [
+        "AAPL: skipped incomplete daily bar 2026-06-29",
+        "AAPL: skipped incomplete daily bar 2026-06-30",
+        "AMZN: skipped incomplete daily bar 2026-06-29",
+        "AMZN: skipped incomplete daily bar 2026-06-30",
+        "CommitBridge blocked unsafe FillTruth proposal",
+        "FillTruth execution model disagreement exists",
+        "FillTruth has daily approximation evidence",
+        "MSFT: skipped incomplete daily bar 2026-06-29"
+      ],
+      "risk": "data/v2_autonomous_runner/status/latest_status.json has warnings",
+      "severity": "medium",
+      "ui_requirement": "Surface warnings clearly; do not hide them behind green cards."
+    },
+    {
+      "risk": "Strategies are research or paper-evidence only unless source artifacts prove otherwise.",
+      "severity": "high",
+      "ui_requirement": "Show 'No strategy is validated yet' when validation proof is absent."
+    },
+    {
+      "risk": "Public fallback and single-provider evidence may be present.",
+      "severity": "medium",
+      "ui_requirement": "Label provider quality and stale risk directly on Evidence and Today."
+    }
+  ],
+  "data_artifacts": [
+    {
+      "dir_count": 38,
+      "exists": true,
+      "file_count": 309,
+      "latest_files": [
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260701T020139Z.json",
+        "data/v2_alpha_lab/paper/paper_audit_log.jsonl",
+        "data/v2_alpha_lab/paper/paper_lifecycle_summary.json",
+        "data/v2_alpha_lab/reports/alpha_lab_summary.md",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/paper/paper_audit_log.jsonl",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/paper/paper_lifecycle_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/reports/alpha_lab_summary.md",
+        "data/v2_alpha_lab/paper/calendar_returns.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/paper/calendar_returns.json",
+        "data/v2_alpha_lab/paper/calendar_returns.csv",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260701T020139Z/paper/calendar_returns.csv",
+        "data/v2_alpha_lab/paper/strategy_pnl.json"
+      ],
+      "latest_manifests": [
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T030820Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T030945Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T031509Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T031821Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T032031Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T032304Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T032745Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T033107Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T104048Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T104721Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T125459Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T164650Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T165328Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260630T180617Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260701T015418Z.json",
+        "data/v2_alpha_lab/manifests/alpha_lab_demo_20260701T020139Z.json"
+      ],
+      "latest_reports": [
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/cash_no_trade_baseline_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/cross_sectional_relative_strength_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/donchian_breakout_20_10_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/failed_breakout_reversal_short_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/pullback_reclaim_uptrend_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/ts_momentum_sma_atr_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/backtests/volatility_contraction_breakout_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/fixtures/data_validation_report.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/paper/paper_lifecycle_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/alpha_lab_summary.md",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/robustness_summary.csv",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/robustness_summary.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/robustness_summary.md",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/strategy_catalog.json",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/strategy_comparison.csv",
+        "data/v2_alpha_lab/runs/alpha_lab_demo_20260630T165328Z/reports/strategy_comparison.json"
+      ],
+      "latest_status_files": [],
+      "path": "data/v2_alpha_lab",
+      "purpose": "historical research and demo artifacts",
+      "stale_risk": "low",
+      "trust_level": "research/shadow only",
+      "ui_pages": [
+        "system.html"
+      ]
+    },
+    {
+      "dir_count": 8,
+      "exists": true,
+      "file_count": 68,
+      "latest_files": [
+        "data/v2_data_truth/reports/data_truth_summary.md",
+        "data/v2_data_truth/reconciliation/provider_diff_datatruth_public_yahoo_chart_1d_20260629.csv",
+        "data/v2_data_truth/reconciliation/latest_reconciliation.md",
+        "data/v2_data_truth/reconciliation/latest_reconciliation.json",
+        "data/v2_data_truth/manifests/latest.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260629.json",
+        "data/v2_data_truth/normalized/latest_ohlcv.csv",
+        "data/v2_data_truth/reconciliation/provider_diff_datatruth_public_yahoo_chart_1d_20260626.csv",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_data_truth/reconciliation/provider_diff_datatruth_public_yahoo_chart_1d_20260625.csv",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260625.json",
+        "data/v2_data_truth/reconciliation/provider_diff_datatruth_public_yahoo_chart_1d_20260624.csv"
+      ],
+      "latest_manifests": [
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260514.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260515.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260518.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260519.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260520.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260521.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260522.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260526.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260527.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260528.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260529.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260624.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260625.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_data_truth/manifests/datatruth_public_yahoo_chart_1d_20260629.json",
+        "data/v2_data_truth/manifests/latest.json"
+      ],
+      "latest_reports": [
+        "data/v2_data_truth/reports/data_truth_summary.md"
+      ],
+      "latest_status_files": [],
+      "path": "data/v2_data_truth",
+      "purpose": "canonical data truth and reconciliation",
+      "stale_risk": "low",
+      "trust_level": "provider/canonical evidence with source quality labels",
+      "ui_pages": [
+        "evidence.html"
+      ]
+    },
+    {
+      "dir_count": 35,
+      "exists": true,
+      "file_count": 46,
+      "latest_files": [
+        "data/v2_autodata/reports/provider_readiness.md",
+        "data/v2_autodata/reports/provider_readiness.json",
+        "data/v2_autodata/readiness/provider_readiness.json",
+        "data/v2_autodata/provider_registry/providers.json",
+        "data/v2_autodata/reports/autodata_trial_day_latest.md",
+        "data/v2_autodata/reports/autodata_trial_day_latest.json",
+        "data/v2_autodata/reports/autodata_filltruth_latest.md",
+        "data/v2_autodata/reports/autodata_filltruth_latest.json",
+        "data/v2_autodata/reports/provider_reconciliation_latest.md",
+        "data/v2_autodata/reports/provider_reconciliation_latest.json",
+        "data/v2_autodata/reconciliation/provider_reconciliation_latest.json",
+        "data/v2_autodata/reconciliation/provider_diff_QQQ_2026-06-29_yahoo_chart_public_fallback.csv"
+      ],
+      "latest_manifests": [
+        "data/v2_autodata/manifests/autodata_2fd263c4cd18.json",
+        "data/v2_autodata/manifests/autodata_a528e2109b67.json",
+        "data/v2_autodata/manifests/autodata_ebc3efa2d68c.json",
+        "data/v2_autodata/manifests/autodata_manifest.json",
+        "data/v2_autodata/manifests/latest_request.json"
+      ],
+      "latest_reports": [
+        "data/v2_autodata/reports/autodata_quality_scorecard.md",
+        "data/v2_autodata/reports/autodata_red_team.md",
+        "data/v2_autodata/reports/autodata_summary.json",
+        "data/v2_autodata/reports/autodata_summary.md",
+        "data/v2_autodata/reports/autodata_trial_day_latest.json",
+        "data/v2_autodata/reports/autodata_trial_day_latest.md",
+        "data/v2_autodata/reports/canonical_selection_latest.json",
+        "data/v2_autodata/reports/canonical_selection_latest.md",
+        "data/v2_autodata/reports/fetch_pending_latest.json",
+        "data/v2_autodata/reports/fetch_pending_latest.md",
+        "data/v2_autodata/reports/provider_readiness.json",
+        "data/v2_autodata/reports/provider_readiness.md",
+        "data/v2_autodata/reports/provider_reconciliation_latest.json",
+        "data/v2_autodata/reports/provider_reconciliation_latest.md",
+        "data/v2_autodata/reports/verify_latest.json",
+        "data/v2_autodata/reports/verify_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_autodata/readiness/provider_readiness.json",
+        "data/v2_autodata/reports/provider_readiness.json",
+        "data/v2_autodata/reports/provider_readiness.md",
+        "data/v2_autodata/reports/verify_latest.json",
+        "data/v2_autodata/reports/verify_latest.md"
+      ],
+      "path": "data/v2_autodata",
+      "purpose": "provider-backed and fallback data intake",
+      "stale_risk": "low",
+      "trust_level": "provider/canonical evidence with source quality labels",
+      "ui_pages": [
+        "evidence.html"
+      ]
+    },
+    {
+      "dir_count": 12,
+      "exists": true,
+      "file_count": 129,
+      "latest_files": [
+        "data/v2_real_intraday/reports/import_readiness.md",
+        "data/v2_real_intraday/reports/import_readiness.json",
+        "data/v2_real_intraday/manifests/latest_manifest.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T220903Z.json",
+        "data/v2_real_intraday/reports/evidence_package_latest.json",
+        "data/v2_real_intraday/reports/real_intraday_summary.md",
+        "data/v2_real_intraday/reports/real_intraday_summary.json",
+        "data/v2_real_intraday/reports/intraday_daily_reconciliation_latest.md",
+        "data/v2_real_intraday/daily_reconciliation/2026-06-29_reconciliation.csv",
+        "data/v2_real_intraday/daily_reconciliation/latest_reconciliation.json",
+        "data/v2_real_intraday/daily_reconciliation/2026-06-29_reconciliation.json",
+        "data/v2_real_intraday/daily_reconciliation/latest_daily_aggregate.json"
+      ],
+      "latest_manifests": [
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122407Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122507Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T122537Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T150443Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T150449Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T191201Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T220709Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T220722Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_build_2026-06-29_20260701T220903Z.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_395dbb2c2fbe.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_3ec2cfdd5725.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_5eeb9ebce352.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_d671f116bc32.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_d9b9c8c01c70.json",
+        "data/v2_real_intraday/manifests/real_intraday_import_e6201272371f.json",
+        "data/v2_real_intraday/manifests/real_intraday_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_real_intraday/reports/real_intraday_quality_scorecard.md",
+        "data/v2_real_intraday/reports/real_intraday_red_team.md",
+        "data/v2_real_intraday/reports/real_intraday_summary.json",
+        "data/v2_real_intraday/reports/real_intraday_summary.md",
+        "data/v2_real_intraday/reports/trial_day_latest.json",
+        "data/v2_real_intraday/reports/trial_day_latest.md",
+        "data/v2_real_intraday/reports/verify_latest.json",
+        "data/v2_real_intraday/reports/verify_latest.md",
+        "data/v2_real_intraday/reports/wrapper_command_verification_latest.json",
+        "data/v2_real_intraday/session_reports/2026-06-29_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_395dbb2c2fbe_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_3ec2cfdd5725_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_5eeb9ebce352_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_d671f116bc32_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_d9b9c8c01c70_session.json",
+        "data/v2_real_intraday/session_reports/real_intraday_import_e6201272371f_session.json"
+      ],
+      "latest_status_files": [
+        "data/v2_real_intraday/reports/import_readiness.json",
+        "data/v2_real_intraday/reports/import_readiness.md",
+        "data/v2_real_intraday/reports/verify_latest.json",
+        "data/v2_real_intraday/reports/verify_latest.md"
+      ],
+      "path": "data/v2_real_intraday",
+      "purpose": "timestamped intraday intake and reconciliation",
+      "stale_risk": "low",
+      "trust_level": "provider/canonical evidence with source quality labels",
+      "ui_pages": [
+        "evidence.html"
+      ]
+    },
+    {
+      "dir_count": 9,
+      "exists": true,
+      "file_count": 236,
+      "latest_files": [
+        "data/v2_fill_truth/reports/filltruth_quality_scorecard.md",
+        "data/v2_fill_truth/reports/filltruth_quality_scorecard.json",
+        "data/v2_fill_truth/reports/filltruth_summary.md",
+        "data/v2_fill_truth/reports/filltruth_summary.json",
+        "data/v2_fill_truth/manifests/fill_truth_manifest.json",
+        "data/v2_fill_truth/reconciliation/verify_latest.md",
+        "data/v2_fill_truth/reconciliation/verify_latest.json",
+        "data/v2_fill_truth/manifests/latest_run_manifest.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220904Z.json",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.md",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.csv",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.json"
+      ],
+      "latest_manifests": [
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150443Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150445Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150450Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T150451Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T191201Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T191202Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220709Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220711Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220722Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220724Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220903Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-06-29_20260701T220904Z.json",
+        "data/v2_fill_truth/manifests/filltruth_resolve_2026-07-01_20260701T213504Z.json",
+        "data/v2_fill_truth/manifests/fill_truth_manifest.json",
+        "data/v2_fill_truth/manifests/latest_intraday_import.json",
+        "data/v2_fill_truth/manifests/latest_run_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_fill_truth/reports/dataset_latest.json",
+        "data/v2_fill_truth/reports/dataset_latest.md",
+        "data/v2_fill_truth/reports/execution_model_comparison.md",
+        "data/v2_fill_truth/reports/filltruth_quality_scorecard.json",
+        "data/v2_fill_truth/reports/filltruth_quality_scorecard.md",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.csv",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.json",
+        "data/v2_fill_truth/reports/filltruth_strategy_evidence.md",
+        "data/v2_fill_truth/reports/filltruth_summary.json",
+        "data/v2_fill_truth/reports/filltruth_summary.md",
+        "data/v2_fill_truth/reports/outcome_truth_latest.json",
+        "data/v2_fill_truth/reports/outcome_truth_latest.md",
+        "data/v2_fill_truth/reports/pending_resolution_latest.json",
+        "data/v2_fill_truth/reports/pending_resolution_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_fill_truth/reconciliation/verify_latest.json",
+        "data/v2_fill_truth/reconciliation/verify_latest.md"
+      ],
+      "path": "data/v2_fill_truth",
+      "purpose": "paper fill evidence resolution",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "evidence.html",
+        "paper_trading.html"
+      ]
+    },
+    {
+      "dir_count": 7,
+      "exists": true,
+      "file_count": 330,
+      "latest_files": [
+        "data/v2_evidence_commit/reports/evidence_commit_summary.md",
+        "data/v2_evidence_commit/reports/evidence_commit_summary.json",
+        "data/v2_evidence_commit/reports/evidence_commit_quality_scorecard.json",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.md",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.json",
+        "data/v2_evidence_commit/manifests/latest_manifest.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_reconcile_2026-06-29_20260701T220905Z.json",
+        "data/v2_evidence_commit/reports/pending_divergence_latest.md",
+        "data/v2_evidence_commit/reconciliation/pending_divergence_latest.md",
+        "data/v2_evidence_commit/reports/pending_divergence_latest.json",
+        "data/v2_evidence_commit/reconciliation/pending_divergence_latest.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220905Z.json"
+      ],
+      "latest_manifests": [
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T122539Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150443Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150446Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150450Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T150452Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T191201Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T191203Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220709Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220711Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220722Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220724Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220903Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-06-29_20260701T220905Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-07-01_20260701T213502Z.json",
+        "data/v2_evidence_commit/manifests/evidence_commit_review_2026-07-01_20260701T213505Z.json",
+        "data/v2_evidence_commit/manifests/latest_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_evidence_commit/reports/calendar_convergence_latest.json",
+        "data/v2_evidence_commit/reports/evidence_commit_quality_scorecard.json",
+        "data/v2_evidence_commit/reports/evidence_commit_summary.json",
+        "data/v2_evidence_commit/reports/evidence_commit_summary.md",
+        "data/v2_evidence_commit/reports/latest_commit_events.csv",
+        "data/v2_evidence_commit/reports/latest_commit_events.json",
+        "data/v2_evidence_commit/reports/latest_commit_proposals.csv",
+        "data/v2_evidence_commit/reports/latest_commit_proposals.json",
+        "data/v2_evidence_commit/reports/latest_review.json",
+        "data/v2_evidence_commit/reports/latest_review.md",
+        "data/v2_evidence_commit/reports/pending_divergence_latest.json",
+        "data/v2_evidence_commit/reports/pending_divergence_latest.md",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.json",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.md"
+      ],
+      "latest_status_files": [
+        "data/v2_evidence_commit/reconciliation/verify_latest.json",
+        "data/v2_evidence_commit/reconciliation/verify_latest.md",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.json",
+        "data/v2_evidence_commit/reports/real_intraday_readiness.md"
+      ],
+      "path": "data/v2_evidence_commit",
+      "purpose": "CommitBridge evidence promotion and blocking",
+      "stale_risk": "low",
+      "trust_level": "official paper evidence when CommitBridge marks it official",
+      "ui_pages": [
+        "evidence.html",
+        "paper_trading.html"
+      ]
+    },
+    {
+      "dir_count": 9,
+      "exists": true,
+      "file_count": 54,
+      "latest_files": [
+        "data/v2_paper_ops/reports/fill_truth_overlay.md",
+        "data/v2_paper_ops/reports/fill_truth_overlay.json",
+        "data/v2_paper_ops/reports/paper_ops_summary.md",
+        "data/v2_paper_ops/calendar/calendar_summary.md",
+        "data/v2_paper_ops/calendar/strategy_drawdowns.csv",
+        "data/v2_paper_ops/calendar/strategy_equity_curves.csv",
+        "data/v2_paper_ops/calendar/strategy_monthly_returns.csv",
+        "data/v2_paper_ops/calendar/strategy_calendar_matrix.csv",
+        "data/v2_paper_ops/reconciliation/reconciliation_latest.md",
+        "data/v2_paper_ops/reconciliation/reconciliation_latest.json",
+        "data/v2_paper_ops/reports/strategy_evidence_summary.md",
+        "data/v2_paper_ops/reports/strategy_evidence_scores.csv"
+      ],
+      "latest_manifests": [
+        "data/v2_paper_ops/manifests/paper_ops_forward_2026-06-29_datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_paper_ops/manifests/paper_ops_replay_2026-06-25_datatruth_public_yahoo_chart_1d_20260625.json",
+        "data/v2_paper_ops/manifests/paper_ops_replay_2026-06-26_datatruth_public_yahoo_chart_1d_20260625.json",
+        "data/v2_paper_ops/manifests/paper_ops_replay_2026-06-26_datatruth_public_yahoo_chart_1d_20260626.json"
+      ],
+      "latest_reports": [
+        "data/v2_paper_ops/calendar/calendar_summary.md",
+        "data/v2_paper_ops/reports/fill_truth_overlay.json",
+        "data/v2_paper_ops/reports/fill_truth_overlay.md",
+        "data/v2_paper_ops/reports/forward_readiness.json",
+        "data/v2_paper_ops/reports/forward_readiness.md",
+        "data/v2_paper_ops/reports/paper_ops_summary.md",
+        "data/v2_paper_ops/reports/strategy_evidence_scores.csv",
+        "data/v2_paper_ops/reports/strategy_evidence_scores.json",
+        "data/v2_paper_ops/reports/strategy_evidence_summary.md"
+      ],
+      "latest_status_files": [
+        "data/v2_paper_ops/reports/forward_readiness.json",
+        "data/v2_paper_ops/reports/forward_readiness.md"
+      ],
+      "path": "data/v2_paper_ops",
+      "purpose": "paper positions, ledgers, and returns",
+      "stale_risk": "low",
+      "trust_level": "official paper evidence when CommitBridge marks it official",
+      "ui_pages": [
+        "paper_trading.html",
+        "strategies.html"
+      ]
+    },
+    {
+      "dir_count": 28,
+      "exists": true,
+      "file_count": 452,
+      "latest_files": [
+        "data/v2_forward_evidence/strategy_evidence/evidence_commit_strategy_overlay.csv",
+        "data/v2_forward_evidence/strategy_evidence/evidence_commit_strategy_overlay.json",
+        "data/v2_forward_evidence/strategy_evidence/filltruth_strategy_evidence_overlay.json",
+        "data/v2_forward_evidence/calendar/fill_truth_calendar_summary.md",
+        "data/v2_forward_evidence/calendar/fill_truth_overlay.csv",
+        "data/v2_forward_evidence/calendar/fill_truth_overlay.json",
+        "data/v2_forward_evidence/calendar/evidence_commit_overlay.csv",
+        "data/v2_forward_evidence/calendar/evidence_commit_overlay.json",
+        "data/v2_forward_evidence/reconciliation/evidence_integrity.md",
+        "data/v2_forward_evidence/reconciliation/evidence_integrity.json",
+        "data/v2_forward_evidence/reports/rebuild_evidence.json",
+        "data/v2_forward_evidence/riskhub/2026-06-29_riskhub.md"
+      ],
+      "latest_manifests": [
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-20_datatruth_public_yahoo_chart_1d_20260520.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-21_datatruth_public_yahoo_chart_1d_20260521.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-22_datatruth_public_yahoo_chart_1d_20260522.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-23_datatruth_public_yahoo_chart_1d_20260522.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-24_datatruth_public_yahoo_chart_1d_20260522.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-25_datatruth_public_yahoo_chart_1d_20260522.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-26_datatruth_public_yahoo_chart_1d_20260526.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-27_datatruth_public_yahoo_chart_1d_20260527.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-28_datatruth_public_yahoo_chart_1d_20260528.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-29_datatruth_public_yahoo_chart_1d_20260529.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-05-30_datatruth_public_yahoo_chart_1d_20260529.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-06-25_datatruth_public_yahoo_chart_1d_20260625.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-06-26_datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-06-27_datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-06-28_datatruth_public_yahoo_chart_1d_20260626.json",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/manifests/paper_ops_replay_2026-06-29_datatruth_public_yahoo_chart_1d_20260629.json"
+      ],
+      "latest_reports": [
+        "data/v2_forward_evidence/reports/forward_autopilot_result.json",
+        "data/v2_forward_evidence/reports/latest_freeze_result.json",
+        "data/v2_forward_evidence/reports/preflight_2026-06-29.json",
+        "data/v2_forward_evidence/reports/preflight_2026-06-29.md",
+        "data/v2_forward_evidence/reports/rebuild_evidence.json",
+        "data/v2_forward_evidence/reports/riskhub_daily.json",
+        "data/v2_forward_evidence/reports/riskhub_daily.md",
+        "data/v2_forward_evidence/reports/run_day_2026-06-29.json",
+        "data/v2_forward_evidence/reports/strategy_evidence_2_0.csv",
+        "data/v2_forward_evidence/reports/strategy_evidence_2_0.json",
+        "data/v2_forward_evidence/reports/strategy_evidence_2_0.md",
+        "data/v2_forward_evidence/shadow_replay/calendar/calendar_summary.md",
+        "data/v2_forward_evidence/shadow_replay/reports/shadow_replay_summary.json",
+        "data/v2_forward_evidence/shadow_replay/reports/shadow_replay_summary.md",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/calendar/calendar_summary.md",
+        "data/v2_forward_evidence/shadow_replay/paper_ops/reports/paper_ops_summary.md"
+      ],
+      "latest_status_files": [],
+      "path": "data/v2_forward_evidence",
+      "purpose": "forward evidence",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "today.html",
+        "strategies.html",
+        "risk.html"
+      ]
+    },
+    {
+      "dir_count": 1,
+      "exists": true,
+      "file_count": 12,
+      "latest_files": [
+        "data/v2_omega/reports/evidence_integrity.md",
+        "data/v2_omega/reports/risk_report.md",
+        "data/v2_omega/reports/data_quality.md",
+        "data/v2_omega/reports/strategy_health.md",
+        "data/v2_omega/reports/blocked_candidates.md",
+        "data/v2_omega/reports/top_opportunities.md",
+        "data/v2_omega/reports/what_remains_untrusted.md",
+        "data/v2_omega/reports/what_to_run_tomorrow.md",
+        "data/v2_omega/reports/what_changed.md",
+        "data/v2_omega/reports/omega_run_manifest.json",
+        "data/v2_omega/reports/omega_summary.md",
+        "data/v2_omega/reports/omega_summary.json"
+      ],
+      "latest_manifests": [
+        "data/v2_omega/reports/omega_run_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_omega/reports/blocked_candidates.md",
+        "data/v2_omega/reports/data_quality.md",
+        "data/v2_omega/reports/evidence_integrity.md",
+        "data/v2_omega/reports/omega_run_manifest.json",
+        "data/v2_omega/reports/omega_summary.json",
+        "data/v2_omega/reports/omega_summary.md",
+        "data/v2_omega/reports/risk_report.md",
+        "data/v2_omega/reports/strategy_health.md",
+        "data/v2_omega/reports/top_opportunities.md",
+        "data/v2_omega/reports/what_changed.md",
+        "data/v2_omega/reports/what_remains_untrusted.md",
+        "data/v2_omega/reports/what_to_run_tomorrow.md"
+      ],
+      "latest_status_files": [],
+      "path": "data/v2_omega",
+      "purpose": "omega",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "system.html"
+      ]
+    },
+    {
+      "dir_count": 9,
+      "exists": true,
+      "file_count": 27,
+      "latest_files": [
+        "data/v2_omega_sentinel/reconciliation/latest_verification.md",
+        "data/v2_omega_sentinel/reconciliation/latest_verification.json",
+        "data/v2_omega_sentinel/manifests/omega_sentinel_manifest.json",
+        "data/v2_omega_sentinel/reports/doctor_latest.md",
+        "data/v2_omega_sentinel/reports/doctor_latest.json",
+        "data/v2_omega_sentinel/reports/omega_sentinel_quality_scorecard.json",
+        "data/v2_omega_sentinel/logs/run_lock_events.jsonl",
+        "data/v2_omega_sentinel/reports/latest_omega_sentinel_report.md",
+        "data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.md",
+        "data/v2_omega_sentinel/reports/latest_omega_sentinel_report.json",
+        "data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.json",
+        "data/v2_omega_sentinel/retention/artifact_index.md"
+      ],
+      "latest_manifests": [
+        "data/v2_omega_sentinel/manifests/omega_sentinel_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.json",
+        "data/v2_omega_sentinel/reports/2026-06-29_omega_sentinel_report.md",
+        "data/v2_omega_sentinel/reports/doctor_latest.json",
+        "data/v2_omega_sentinel/reports/doctor_latest.md",
+        "data/v2_omega_sentinel/reports/latest_omega_sentinel_report.json",
+        "data/v2_omega_sentinel/reports/latest_omega_sentinel_report.md",
+        "data/v2_omega_sentinel/reports/omega_sentinel_quality_scorecard.json",
+        "data/v2_omega_sentinel/trial/forward_trial_strategy_summary.csv"
+      ],
+      "latest_status_files": [
+        "data/v2_omega_sentinel/status/2026-06-29_status.json",
+        "data/v2_omega_sentinel/status/2026-06-29_status.md",
+        "data/v2_omega_sentinel/status/latest_status.json",
+        "data/v2_omega_sentinel/status/latest_status.md",
+        "data/v2_omega_sentinel/trial/forward_trial_status.json",
+        "data/v2_omega_sentinel/trial/forward_trial_status.md"
+      ],
+      "path": "data/v2_omega_sentinel",
+      "purpose": "daily OMEGA orchestration and status",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "today.html",
+        "risk.html"
+      ]
+    },
+    {
+      "dir_count": 12,
+      "exists": true,
+      "file_count": 47,
+      "latest_files": [
+        "data/v2_learning_foundry/reports/verify_latest.json",
+        "data/v2_learning_foundry/reports/verify_latest.md",
+        "data/v2_learning_foundry/lessons/2026-06-29.json",
+        "data/v2_learning_foundry/lessons/market_masters_2026-06-29.json",
+        "data/v2_learning_foundry/lessons/2026-06-29.md",
+        "data/v2_learning_foundry/reports/market_masters_sync.md",
+        "data/v2_learning_foundry/candidates/market_masters_sync_2026-06-29.json",
+        "data/v2_learning_foundry/reports/learning_foundry_summary.md",
+        "data/v2_learning_foundry/manifests/learning_foundry_manifest.json",
+        "data/v2_learning_foundry/reports/champion_registry.json",
+        "data/v2_learning_foundry/reports/champion_registry.md",
+        "data/v2_learning_foundry/reports/promotion_review.md"
+      ],
+      "latest_manifests": [
+        "data/v2_learning_foundry/manifests/learning_foundry_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_learning_foundry/reports/champion_registry.json",
+        "data/v2_learning_foundry/reports/champion_registry.md",
+        "data/v2_learning_foundry/reports/feature_store_summary.md",
+        "data/v2_learning_foundry/reports/learning_foundry_summary.md",
+        "data/v2_learning_foundry/reports/market_masters_sync.md",
+        "data/v2_learning_foundry/reports/market_regimes.md",
+        "data/v2_learning_foundry/reports/model_training_summary.md",
+        "data/v2_learning_foundry/reports/promotion_review.json",
+        "data/v2_learning_foundry/reports/promotion_review.md",
+        "data/v2_learning_foundry/reports/verify_latest.json",
+        "data/v2_learning_foundry/reports/verify_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_learning_foundry/news/news_readiness.md",
+        "data/v2_learning_foundry/reports/verify_latest.json",
+        "data/v2_learning_foundry/reports/verify_latest.md"
+      ],
+      "path": "data/v2_learning_foundry",
+      "purpose": "daily lessons and shadow challenger learning",
+      "stale_risk": "low",
+      "trust_level": "research/shadow only",
+      "ui_pages": [
+        "learning.html"
+      ]
+    },
+    {
+      "dir_count": 11,
+      "exists": true,
+      "file_count": 24,
+      "latest_files": [
+        "data/v2_market_masters/reports/verify_latest.md",
+        "data/v2_market_masters/reports/verify_latest.json",
+        "data/v2_market_masters/manifests/market_masters_manifest.json",
+        "data/v2_market_masters/reports/report_latest.md",
+        "data/v2_market_masters/reports/report_latest.json",
+        "data/v2_market_masters/reports/promotion_recommendations.md",
+        "data/v2_market_masters/evals/challenger_scoreboard.csv",
+        "data/v2_market_masters/evals/2026-06-29_eval.json",
+        "data/v2_market_masters/shadow_runs/shadow_calendar.csv",
+        "data/v2_market_masters/shadow_runs/2026-06-29_shadow_results.json",
+        "data/v2_market_masters/reports/backtest_report.md",
+        "data/v2_market_masters/backtests/2026-06-29_backtest_summary.csv"
+      ],
+      "latest_manifests": [
+        "data/v2_market_masters/manifests/market_masters_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_market_masters/backtests/2026-06-29_backtest_summary.csv",
+        "data/v2_market_masters/backtests/2026-06-29_backtest_summary.json",
+        "data/v2_market_masters/reports/backtest_report.md",
+        "data/v2_market_masters/reports/promotion_recommendations.md",
+        "data/v2_market_masters/reports/report_latest.json",
+        "data/v2_market_masters/reports/report_latest.md",
+        "data/v2_market_masters/reports/verify_latest.json",
+        "data/v2_market_masters/reports/verify_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_market_masters/reports/verify_latest.json",
+        "data/v2_market_masters/reports/verify_latest.md"
+      ],
+      "path": "data/v2_market_masters",
+      "purpose": "public methodology research and shadow challengers",
+      "stale_risk": "low",
+      "trust_level": "research/shadow only",
+      "ui_pages": [
+        "market_masters.html"
+      ]
+    },
+    {
+      "dir_count": 9,
+      "exists": true,
+      "file_count": 42,
+      "latest_files": [
+        "data/v2_telegram_intel/reports/verify_latest.md",
+        "data/v2_telegram_intel/reports/verify_latest.json",
+        "data/v2_telegram_intel/status/latest_readiness.md",
+        "data/v2_telegram_intel/status/latest_readiness.json",
+        "data/v2_telegram_intel/manifests/telegram_intel_manifest.json",
+        "data/v2_telegram_intel/templates/no_picks.md",
+        "data/v2_telegram_intel/templates/watchdog.md",
+        "data/v2_telegram_intel/templates/after_close.md",
+        "data/v2_telegram_intel/templates/morning.md",
+        "data/v2_telegram_intel/audit/telegram_intel_audit.jsonl",
+        "data/v2_telegram_intel/logs/2026-07-01_watchdog_6c6ee4f6a202_failed.json",
+        "data/v2_telegram_intel/reports/send_latest.md"
+      ],
+      "latest_manifests": [
+        "data/v2_telegram_intel/manifests/telegram_intel_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_telegram_intel/reports/message_quality_latest.json",
+        "data/v2_telegram_intel/reports/message_quality_latest.md",
+        "data/v2_telegram_intel/reports/report_latest.json",
+        "data/v2_telegram_intel/reports/report_latest.md",
+        "data/v2_telegram_intel/reports/send_latest.json",
+        "data/v2_telegram_intel/reports/send_latest.md",
+        "data/v2_telegram_intel/reports/verify_latest.json",
+        "data/v2_telegram_intel/reports/verify_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_telegram_intel/reports/verify_latest.json",
+        "data/v2_telegram_intel/reports/verify_latest.md",
+        "data/v2_telegram_intel/status/latest_readiness.json",
+        "data/v2_telegram_intel/status/latest_readiness.md"
+      ],
+      "path": "data/v2_telegram_intel",
+      "purpose": "dry-run/env-gated status messaging",
+      "stale_risk": "low",
+      "trust_level": "notification draft/send audit only",
+      "ui_pages": [
+        "automation.html",
+        "telegram.html"
+      ]
+    },
+    {
+      "dir_count": 6,
+      "exists": true,
+      "file_count": 45,
+      "latest_files": [
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.json",
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.md",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.md",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.json",
+        "data/v2_autonomous_runner/reports/task_installation_report.md",
+        "data/v2_autonomous_runner/manifests/autonomous_runner_manifest.json",
+        "data/v2_autonomous_runner/reports/task_installation_report.json",
+        "data/v2_autonomous_runner/task_definitions/omega_autonomous_tasks.json",
+        "data/v2_autonomous_runner/task_definitions/omega_watchdog.json",
+        "data/v2_autonomous_runner/task_definitions/omega_morning_check.json",
+        "data/v2_autonomous_runner/task_definitions/omega_verify.json",
+        "data/v2_autonomous_runner/task_definitions/omega_after_close.json"
+      ],
+      "latest_manifests": [
+        "data/v2_autonomous_runner/manifests/autonomous_runner_manifest.json"
+      ],
+      "latest_reports": [
+        "data/v2_autonomous_runner/logs/install_report.log",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.json",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.md",
+        "data/v2_autonomous_runner/reports/doctor_latest.json",
+        "data/v2_autonomous_runner/reports/doctor_latest.md",
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.json",
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.md",
+        "data/v2_autonomous_runner/reports/task_installation_report.json",
+        "data/v2_autonomous_runner/reports/task_installation_report.md",
+        "data/v2_autonomous_runner/reports/test_run_latest.json",
+        "data/v2_autonomous_runner/reports/test_run_latest.md",
+        "data/v2_autonomous_runner/reports/verify_latest.json",
+        "data/v2_autonomous_runner/reports/verify_latest.md"
+      ],
+      "latest_status_files": [
+        "data/v2_autonomous_runner/logs/final_watchdog_after_verify.out",
+        "data/v2_autonomous_runner/logs/install_scheduler_verify.log",
+        "data/v2_autonomous_runner/logs/install_status.log",
+        "data/v2_autonomous_runner/logs/test_verify_20260701T145026Z.log",
+        "data/v2_autonomous_runner/logs/test_verify_20260701T145919Z.log",
+        "data/v2_autonomous_runner/logs/test_verify_20260701T220736Z.log",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.json",
+        "data/v2_autonomous_runner/reports/autonomous_runner_status.md",
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.json",
+        "data/v2_autonomous_runner/reports/market_masters_autonomy_status.md",
+        "data/v2_autonomous_runner/reports/verify_latest.json",
+        "data/v2_autonomous_runner/reports/verify_latest.md",
+        "data/v2_autonomous_runner/status/latest_status.json",
+        "data/v2_autonomous_runner/status/latest_status.md",
+        "data/v2_autonomous_runner/task_definitions/omega_verify.json",
+        "data/v2_autonomous_runner/task_definitions/omega_verify.xml"
+      ],
+      "path": "data/v2_autonomous_runner",
+      "purpose": "Windows task and zero-touch run health",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "automation.html"
+      ]
+    },
+    {
+      "dir_count": 2,
+      "exists": true,
+      "file_count": 24,
+      "latest_files": [
+        "data/v2_scheduler/status/latest_status.md",
+        "data/v2_scheduler/status/latest_status.json",
+        "data/v2_scheduler/logs/verify_20260701T171001.log",
+        "data/v2_scheduler/logs/morning_check_20260701T170902.log",
+        "data/v2_scheduler/logs/final_morning_market_masters_refresh.log",
+        "data/v2_scheduler/logs/verify_20260701T170737.log",
+        "data/v2_scheduler/logs/verify_20260701T170736.log",
+        "data/v2_scheduler/logs/morning_check_20260701T170721.log",
+        "data/v2_scheduler/logs/after_close_20260701T170708.log",
+        "data/v2_scheduler/logs/after_close_20260701T163501.log",
+        "data/v2_scheduler/logs/verify_20260701T100459.log",
+        "data/v2_scheduler/logs/morning_check_20260701T100448.log"
+      ],
+      "latest_manifests": [],
+      "latest_reports": [],
+      "latest_status_files": [
+        "data/v2_scheduler/logs/verify_20260701T072205.log",
+        "data/v2_scheduler/logs/verify_20260701T072445.log",
+        "data/v2_scheduler/logs/verify_20260701T095027.log",
+        "data/v2_scheduler/logs/verify_20260701T095051.log",
+        "data/v2_scheduler/logs/verify_20260701T095919.log",
+        "data/v2_scheduler/logs/verify_20260701T100459.log",
+        "data/v2_scheduler/logs/verify_20260701T170736.log",
+        "data/v2_scheduler/logs/verify_20260701T170737.log",
+        "data/v2_scheduler/logs/verify_20260701T171001.log",
+        "data/v2_scheduler/status/latest_status.json",
+        "data/v2_scheduler/status/latest_status.md"
+      ],
+      "path": "data/v2_scheduler",
+      "purpose": "scheduler",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "automation.html",
+        "scheduler.html"
+      ]
+    },
+    {
+      "dir_count": 0,
+      "exists": true,
+      "file_count": 74,
+      "latest_files": [
+        "data/v2_command_center/command_center_x.html",
+        "data/v2_command_center/autonomous_runner.html",
+        "data/v2_command_center/missed_runs.html",
+        "data/v2_command_center/scheduler_status.html",
+        "data/v2_command_center/task_scheduler.html",
+        "data/v2_command_center/watchdog.html",
+        "data/v2_command_center/command_center_manifest.json",
+        "data/v2_command_center/command_center_qa.json",
+        "data/v2_command_center/command_center_qa.md",
+        "data/v2_command_center/market_masters.html",
+        "data/v2_command_center/market_masters_challengers.html",
+        "data/v2_command_center/market_masters_evals.html"
+      ],
+      "latest_manifests": [
+        "data/v2_command_center/command_center_manifest.json"
+      ],
+      "latest_reports": [],
+      "latest_status_files": [
+        "data/v2_command_center/daily_run_status.html",
+        "data/v2_command_center/daily_status.html",
+        "data/v2_command_center/import_readiness.html",
+        "data/v2_command_center/provider_readiness.html",
+        "data/v2_command_center/real_intraday_readiness.html",
+        "data/v2_command_center/scheduler_status.html",
+        "data/v2_command_center/telegram_readiness.html"
+      ],
+      "path": "data/v2_command_center",
+      "purpose": "existing static local dashboard",
+      "stale_risk": "low",
+      "trust_level": "artifact evidence",
+      "ui_pages": [
+        "reports.html"
+      ]
+    }
+  ],
+  "docs": [
+    {
+      "audit_docs": [
+        "DAWNSTRIKE_NASA_GRADE_REPO_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_NON_SECRET_GAP_CLOSURE_2026-06-20.md",
+        "DAWNSTRIKE_OPENING_DAY_TRUST_GATES_2026-06-22.md",
+        "DAWNSTRIKE_PRE_SECRETS_READINESS_2026-06-20.md",
+        "DAWNSTRIKE_PREDICTION_PROBABILITY_GAINS_HARDENING_2026-06-22.md",
+        "DAWNSTRIKE_PRICE_OBSERVATION_HARDENING_2026-06-23.md",
+        "DAWNSTRIKE_RENDERED_UI_SHIP_GATE_2026-06-23.md",
+        "DAWNSTRIKE_REPO_AUDIT_2026-06-20.md",
+        "DAWNSTRIKE_SCREENER_AUTOMATION_2026-06-20.md",
+        "DAWNSTRIKE_SHIPROOM_V1_INTERNAL_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_SHIPROOM_V1_RELEASE_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_SIMPLE_DASHBOARD_REDESIGN_2026-06-21.md",
+        "DAWNSTRIKE_SOURCE_RELIABILITY_FIX_2026-06-20.md",
+        "DAWNSTRIKE_TELEGRAM_DEDUPE_FIX_2026-06-20.md",
+        "DAWNSTRIKE_WEB_TELEGRAM_AUTOPILOT_2026-06-20.md",
+        "DAWNSTRIKE_WEB_TELEGRAM_OPERATIONALIZATION_2026-06-20.md",
+        "BACKTESTING_AND_AUDIT.md",
+        "FINAL_REPO_AUDIT.md",
+        "HISTORICAL_AUDIT.md",
+        "PERFORMANCE_AUDIT.md"
+      ],
+      "exists": true,
+      "latest_files": [
+        "docs/TECHNICAL_ARCHITECTURE.md",
+        "docs/TELEGRAM_NOTIFICATIONS.md",
+        "docs/TOP_MOVERS_COMPARISON.md",
+        "docs/TRADE_WATCHER.md",
+        "docs/TROUBLESHOOTING.md",
+        "docs/TRUTH_GUARD.md",
+        "docs/TUNING.md",
+        "docs/UNIVERSE_DISCOVERY.md",
+        "docs/URL_INGESTION.md",
+        "docs/WEB_AUTO_PILOT.md",
+        "docs/WINDOWS_SETUP.md",
+        "docs/WINDOWS_TASK_SCHEDULER_AUTOMATION.md"
+      ],
+      "markdown_count": 309,
+      "operator_docs": [
+        "DAWNSTRIKE_APPLE_OPERATOR_DASHBOARD_2026-06-22.md",
+        "command_center_x_operator_runbook.md",
+        "OPERATOR_MANUAL.md",
+        "OPERATOR_RUNBOOK.md"
+      ],
+      "path": "docs",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [
+        "omega_sentinel_release_summary.md",
+        "omega_sentinel_resume_goal.md",
+        "omega_stateguard_quality_scorecard.md",
+        "omega_stateguard_red_team.md",
+        "omega_stateguard_resume_goal.md",
+        "omega_stateguard_summary.md",
+        "omega_telegram_intel_quality_scorecard.md",
+        "omega_telegram_intel_red_team.md",
+        "omega_telegram_intel_release_summary.md",
+        "omega_telegram_intel_resume_goal.md",
+        "paper_ops_quality_scorecard.md",
+        "paper_ops_red_team.md",
+        "paper_ops_v1_summary.md",
+        "phase_1a_summary.md",
+        "risks_and_unknowns.md",
+        "titan_build_log.md",
+        "titan_quality_scorecard.md",
+        "titan_red_team.md",
+        "titan_release_summary.md",
+        "titan_resume_goal.md"
+      ],
+      "exists": true,
+      "latest_files": [
+        "docs/audit/omega_telegram_intel_release_summary.md",
+        "docs/audit/omega_telegram_intel_resume_goal.md",
+        "docs/audit/paper_ops_quality_scorecard.md",
+        "docs/audit/paper_ops_red_team.md",
+        "docs/audit/paper_ops_v1_summary.md",
+        "docs/audit/phase_1a_summary.md",
+        "docs/audit/risks_and_unknowns.md",
+        "docs/audit/titan_build_log.md",
+        "docs/audit/titan_quality_scorecard.md",
+        "docs/audit/titan_red_team.md",
+        "docs/audit/titan_release_summary.md",
+        "docs/audit/titan_resume_goal.md"
+      ],
+      "markdown_count": 89,
+      "operator_docs": [],
+      "path": "docs/audit",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [
+        "DAWNSTRIKE_FINAL_SHIP_READY_PRODUCT_AUDIT_2026-06-23.md",
+        "DAWNSTRIKE_FREE_SHADOW_MODE_2026-06-20.md",
+        "DAWNSTRIKE_HISTORICAL_CALENDAR_2026-06-21.md",
+        "DAWNSTRIKE_HISTORICAL_SIGNAL_LEDGER_AND_RETURN_ATTRIBUTION_2026-06-22.md",
+        "DAWNSTRIKE_NASA_GRADE_REPO_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_NON_SECRET_GAP_CLOSURE_2026-06-20.md",
+        "DAWNSTRIKE_OPENING_DAY_TRUST_GATES_2026-06-22.md",
+        "DAWNSTRIKE_PRE_SECRETS_READINESS_2026-06-20.md",
+        "DAWNSTRIKE_PREDICTION_PROBABILITY_GAINS_HARDENING_2026-06-22.md",
+        "DAWNSTRIKE_PRICE_OBSERVATION_HARDENING_2026-06-23.md",
+        "DAWNSTRIKE_RENDERED_UI_SHIP_GATE_2026-06-23.md",
+        "DAWNSTRIKE_REPO_AUDIT_2026-06-20.md",
+        "DAWNSTRIKE_SCREENER_AUTOMATION_2026-06-20.md",
+        "DAWNSTRIKE_SHIPROOM_V1_INTERNAL_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_SHIPROOM_V1_RELEASE_AUDIT_2026-06-26.md",
+        "DAWNSTRIKE_SIMPLE_DASHBOARD_REDESIGN_2026-06-21.md",
+        "DAWNSTRIKE_SOURCE_RELIABILITY_FIX_2026-06-20.md",
+        "DAWNSTRIKE_TELEGRAM_DEDUPE_FIX_2026-06-20.md",
+        "DAWNSTRIKE_WEB_TELEGRAM_AUTOPILOT_2026-06-20.md",
+        "DAWNSTRIKE_WEB_TELEGRAM_OPERATIONALIZATION_2026-06-20.md"
+      ],
+      "exists": true,
+      "latest_files": [
+        "docs/audits/DAWNSTRIKE_PREDICTION_PROBABILITY_GAINS_HARDENING_2026-06-22.md",
+        "docs/audits/DAWNSTRIKE_PRICE_OBSERVATION_HARDENING_2026-06-23.md",
+        "docs/audits/DAWNSTRIKE_RENDERED_UI_SHIP_GATE_2026-06-23.md",
+        "docs/audits/DAWNSTRIKE_REPO_AUDIT_2026-06-20.md",
+        "docs/audits/DAWNSTRIKE_SCREENER_AUTOMATION_2026-06-20.md",
+        "docs/audits/DAWNSTRIKE_SHIPROOM_V1_INTERNAL_AUDIT_2026-06-26.md",
+        "docs/audits/DAWNSTRIKE_SHIPROOM_V1_RELEASE_AUDIT_2026-06-26.md",
+        "docs/audits/DAWNSTRIKE_SIMPLE_DASHBOARD_REDESIGN_2026-06-21.md",
+        "docs/audits/DAWNSTRIKE_SOURCE_RELIABILITY_FIX_2026-06-20.md",
+        "docs/audits/DAWNSTRIKE_TELEGRAM_DEDUPE_FIX_2026-06-20.md",
+        "docs/audits/DAWNSTRIKE_WEB_TELEGRAM_AUTOPILOT_2026-06-20.md",
+        "docs/audits/DAWNSTRIKE_WEB_TELEGRAM_OPERATIONALIZATION_2026-06-20.md"
+      ],
+      "markdown_count": 31,
+      "operator_docs": [
+        "DAWNSTRIKE_APPLE_OPERATOR_DASHBOARD_2026-06-22.md"
+      ],
+      "path": "docs/audits",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [],
+      "exists": true,
+      "latest_files": [
+        "docs/architecture/v2_forward_autopilot.md",
+        "docs/architecture/v2_learning_foundry.md",
+        "docs/architecture/v2_market_masters.md",
+        "docs/architecture/v2_omega_architecture.md",
+        "docs/architecture/v2_omega_sentinel.md",
+        "docs/architecture/v2_paper_ops.md",
+        "docs/architecture/v2_real_intraday.md",
+        "docs/architecture/v2_release_candidate.md",
+        "docs/architecture/v2_riskhub.md",
+        "docs/architecture/v2_strategy_evidence.md",
+        "docs/architecture/v2_telegram_intel.md",
+        "docs/architecture/v2_titan_architecture.md"
+      ],
+      "markdown_count": 28,
+      "operator_docs": [],
+      "path": "docs/architecture",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [],
+      "exists": true,
+      "latest_files": [
+        "docs/operations/paper_ops_schedule.md",
+        "docs/operations/real_intraday_csv_format.md",
+        "docs/operations/real_intraday_data_onboarding.md",
+        "docs/operations/real_intraday_import_workflow.md",
+        "docs/operations/real_intraday_trial_day.md",
+        "docs/operations/telegram_intel_message_guide.md",
+        "docs/operations/telegram_intel_no_picks.md",
+        "docs/operations/telegram_intel_setup.md",
+        "docs/operations/titan_daily_runbook.md",
+        "docs/operations/titan_debugging_runbook.md",
+        "docs/operations/titan_scheduler_examples.md",
+        "docs/operations/windows_task_scheduler_examples.md"
+      ],
+      "markdown_count": 41,
+      "operator_docs": [
+        "command_center_x_operator_runbook.md"
+      ],
+      "path": "docs/operations",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [],
+      "exists": true,
+      "latest_files": [
+        "docs/research/alpha_source_register.md",
+        "docs/research/market_masters_methodology_taxonomy.md",
+        "docs/research/market_masters_source_register.md",
+        "docs/research/rejected_strategy_ideas.md",
+        "docs/research/selected_strategy_theses.md"
+      ],
+      "markdown_count": 5,
+      "operator_docs": [],
+      "path": "docs/research",
+      "stale_risk": "historical audit docs may not match current source"
+    },
+    {
+      "audit_docs": [],
+      "exists": true,
+      "latest_files": [
+        "docs/agents/titan_release_manager.md",
+        "docs/agents/titan_repository_cartographer.md",
+        "docs/agents/titan_riskhub_officer.md",
+        "docs/agents/titan_strategy_factory_engineer.md",
+        "docs/agents/ui_x_data_adapter_engineer.md",
+        "docs/agents/ui_x_frontend_engineer.md",
+        "docs/agents/ui_x_product_architect.md",
+        "docs/agents/ui_x_qa_evals_engineer.md",
+        "docs/agents/ui_x_red_team.md",
+        "docs/agents/ui_x_release_manager.md",
+        "docs/agents/ui_x_repository_cartographer.md",
+        "docs/agents/ui_x_ux_designer.md"
+      ],
+      "markdown_count": 45,
+      "operator_docs": [],
+      "path": "docs/agents",
+      "stale_risk": "historical audit docs may not match current source"
+    }
+  ],
+  "existing_command_center": {
+    "exists": true,
+    "limitations": [
+      "Dense technical page list rather than task-first IA.",
+      "Limited normalized view models for Today, no-picks, trust, and next actions.",
+      "Visual system is functional but not the Command Center X product surface."
+    ],
+    "manifest": {
+      "index_path": "data/v2_command_center/index.html",
+      "output_root": "data/v2_command_center",
+      "pages": [
+        "data/v2_command_center/index.html",
+        "data/v2_command_center/market_read.html",
+        "data/v2_command_center/picks.html",
+        "data/v2_command_center/watchlist.html",
+        "data/v2_command_center/decision_cards.html",
+        "data/v2_command_center/strategy_calendar.html",
+        "data/v2_command_center/strategy_calendar_forward.html",
+        "data/v2_command_center/strategy_decay.html",
+        "data/v2_command_center/strategy_evidence.html",
+        "data/v2_command_center/backtests.html",
+        "data/v2_command_center/paper_ops.html",
+        "data/v2_command_center/forward_evidence.html",
+        "data/v2_command_center/frozen_picks.html",
+        "data/v2_command_center/risk.html",
+        "data/v2_command_center/riskhub_daily.html",
+        "data/v2_command_center/daily_run_status.html",
+        "data/v2_command_center/evidence_integrity.html",
+        "data/v2_command_center/shadow_replay.html",
+        "data/v2_command_center/data_truth.html",
+        "data/v2_command_center/audit.html",
+        "data/v2_command_center/runbook.html",
+        "data/v2_command_center/omega_sentinel.html",
+        "data/v2_command_center/forward_trial.html",
+        "data/v2_command_center/daily_status.html",
+        "data/v2_command_center/alerts.html",
+        "data/v2_command_center/artifact_index.html",
+        "data/v2_command_center/fill_truth.html",
+        "data/v2_command_center/pending_orders.html",
+        "data/v2_command_center/execution_models.html",
+        "data/v2_command_center/fill_certainty.html",
+        "data/v2_command_center/evidence_commit.html",
+        "data/v2_command_center/commit_proposals.html",
+        "data/v2_command_center/pending_divergence.html",
+        "data/v2_command_center/real_intraday_readiness.html",
+        "data/v2_command_center/real_intraday.html",
+        "data/v2_command_center/intraday_reconciliation.html",
+        "data/v2_command_center/real_evidence_trial.html",
+        "data/v2_command_center/import_readiness.html",
+        "data/v2_command_center/intraday_import_templates.html",
+        "data/v2_command_center/autodata.html",
+        "data/v2_command_center/provider_readiness.html",
+        "data/v2_command_center/provider_fetches.html",
+        "data/v2_command_center/provider_reconciliation.html",
+        "data/v2_command_center/autodata_pending_orders.html",
+        "data/v2_command_center/autodata_filltruth.html",
+        "data/v2_command_center/learning_foundry.html",
+        "data/v2_command_center/market_regimes.html",
+        "data/v2_command_center/feature_store.html",
+        "data/v2_command_center/news_events.html",
+        "data/v2_command_center/challenger_strategies.html",
+        "data/v2_command_center/model_lab.html",
+        "data/v2_command_center/daily_lessons.html",
+        "data/v2_command_center/promotion_review.html",
+        "data/v2_command_center/autonomous_runner.html",
+        "data/v2_command_center/task_scheduler.html",
+        "data/v2_command_center/scheduler_status.html",
+        "data/v2_command_center/watchdog.html",
+        "data/v2_command_center/missed_runs.html",
+        "data/v2_command_center/telegram_intel.html",
+        "data/v2_command_center/telegram_messages.html",
+        "data/v2_command_center/telegram_readiness.html",
+        "data/v2_command_center/message_quality.html",
+        "data/v2_command_center/market_masters.html",
+        "data/v2_command_center/market_masters_sources.html",
+        "data/v2_command_center/methodology_taxonomy.html",
+        "data/v2_command_center/strategy_primitives.html",
+        "data/v2_command_center/market_masters_challengers.html",
+        "data/v2_command_center/market_masters_shadow.html",
+        "data/v2_command_center/market_masters_evals.html",
+        "data/v2_command_center/market_masters_lessons.html"
+      ],
+      "qa_report_path": "data/v2_command_center/command_center_qa.json",
+      "status": "passed",
+      "warnings": []
+    },
+    "page_count": 71,
+    "pages": [
+      "data/v2_command_center/alerts.html",
+      "data/v2_command_center/artifact_index.html",
+      "data/v2_command_center/audit.html",
+      "data/v2_command_center/autodata.html",
+      "data/v2_command_center/autodata_filltruth.html",
+      "data/v2_command_center/autodata_pending_orders.html",
+      "data/v2_command_center/autonomous_runner.html",
+      "data/v2_command_center/backtests.html",
+      "data/v2_command_center/challenger_strategies.html",
+      "data/v2_command_center/command_center_x.html",
+      "data/v2_command_center/commit_proposals.html",
+      "data/v2_command_center/daily_lessons.html",
+      "data/v2_command_center/daily_run_status.html",
+      "data/v2_command_center/daily_status.html",
+      "data/v2_command_center/data_truth.html",
+      "data/v2_command_center/decision_cards.html",
+      "data/v2_command_center/evidence_commit.html",
+      "data/v2_command_center/evidence_integrity.html",
+      "data/v2_command_center/execution_models.html",
+      "data/v2_command_center/feature_store.html",
+      "data/v2_command_center/fill_certainty.html",
+      "data/v2_command_center/fill_truth.html",
+      "data/v2_command_center/forward_evidence.html",
+      "data/v2_command_center/forward_trial.html",
+      "data/v2_command_center/frozen_picks.html",
+      "data/v2_command_center/import_readiness.html",
+      "data/v2_command_center/index.html",
+      "data/v2_command_center/intraday_import_templates.html",
+      "data/v2_command_center/intraday_reconciliation.html",
+      "data/v2_command_center/learning_foundry.html",
+      "data/v2_command_center/market_masters.html",
+      "data/v2_command_center/market_masters_challengers.html",
+      "data/v2_command_center/market_masters_evals.html",
+      "data/v2_command_center/market_masters_lessons.html",
+      "data/v2_command_center/market_masters_shadow.html",
+      "data/v2_command_center/market_masters_sources.html",
+      "data/v2_command_center/market_read.html",
+      "data/v2_command_center/market_regimes.html",
+      "data/v2_command_center/message_quality.html",
+      "data/v2_command_center/methodology_taxonomy.html",
+      "data/v2_command_center/missed_runs.html",
+      "data/v2_command_center/model_lab.html",
+      "data/v2_command_center/news_events.html",
+      "data/v2_command_center/omega_sentinel.html",
+      "data/v2_command_center/paper_ops.html",
+      "data/v2_command_center/pending_divergence.html",
+      "data/v2_command_center/pending_orders.html",
+      "data/v2_command_center/picks.html",
+      "data/v2_command_center/promotion_review.html",
+      "data/v2_command_center/provider_fetches.html",
+      "data/v2_command_center/provider_readiness.html",
+      "data/v2_command_center/provider_reconciliation.html",
+      "data/v2_command_center/real_evidence_trial.html",
+      "data/v2_command_center/real_intraday.html",
+      "data/v2_command_center/real_intraday_readiness.html",
+      "data/v2_command_center/risk.html",
+      "data/v2_command_center/riskhub_daily.html",
+      "data/v2_command_center/runbook.html",
+      "data/v2_command_center/scheduler_status.html",
+      "data/v2_command_center/shadow_replay.html",
+      "data/v2_command_center/strategy_calendar.html",
+      "data/v2_command_center/strategy_calendar_forward.html",
+      "data/v2_command_center/strategy_decay.html",
+      "data/v2_command_center/strategy_evidence.html",
+      "data/v2_command_center/strategy_primitives.html",
+      "data/v2_command_center/task_scheduler.html",
+      "data/v2_command_center/telegram_intel.html",
+      "data/v2_command_center/telegram_messages.html",
+      "data/v2_command_center/telegram_readiness.html",
+      "data/v2_command_center/watchdog.html",
+      "data/v2_command_center/watchlist.html"
+    ],
+    "qa": {
+      "absolute_local_paths_clear": true,
+      "broken_links": [],
+      "links_checked": 4900,
+      "page_count": 70,
+      "required_page_count": 70,
+      "required_pages_present": true,
+      "research_only_banner_all_pages": true,
+      "schema_version": "v2.command_center_qa.v1",
+      "script_tags_clear": true,
+      "status": "passed",
+      "warnings": []
+    },
+    "qa_status": "passed"
+  },
+  "git": {
+    "diff_stat": [
+      " .gitignore                                                 |  1 +",
+      " intraday_scanner/dashboard/data_loader.py                  | 11 +++++++----",
+      " intraday_scanner/services/opening_day_rehearsal_service.py |  6 ++++++",
+      " 3 files changed, 14 insertions(+), 4 deletions(-)"
+    ],
+    "diff_stat_exit_code": 0,
+    "dirty": true,
+    "status_exit_code": 0,
+    "status_lines": [
+      "## main...origin/main",
+      "MM .gitignore",
+      "M  README.md",
+      "M  app.py",
+      "A  docs/DAILY_REVIEW.md",
+      "A  docs/EXPECTED_VALUE.md",
+      "A  docs/FUTURE_API_INTEGRATIONS.md",
+      "A  docs/FUTURE_BROKER_ADAPTERS.md",
+      "M  docs/HISTORICAL_CALENDAR.md",
+      "A  docs/LEARNING_BACKFEED.md",
+      "M  docs/OPERATOR_RUNBOOK.md",
+      "M  docs/PERFORMANCE_AUDIT.md",
+      "A  docs/PREDICTION_ENGINE.md",
+      "A  docs/PROBABILITY_CALIBRATION.md",
+      "M  docs/SECRETS_REQUIRED.md",
+      "A  docs/STORAGE_SCHEMA.md",
+      "M  docs/TELEGRAM_NOTIFICATIONS.md",
+      "A  docs/TOP_MOVERS_COMPARISON.md",
+      "A  docs/TRADE_WATCHER.md",
+      "A  docs/TRUTH_GUARD.md",
+      "M  docs/audits/DAWNSTRIKE_ALPHAOPS_OPERATIONALIZATION_2026-06-21.md",
+      "M  docs/audits/DAWNSTRIKE_ALPHAOPS_V4_FINAL_2026-06-21.md",
+      "A  docs/audits/DAWNSTRIKE_APPLE_OPERATOR_DASHBOARD_2026-06-22.md",
+      "M  docs/audits/DAWNSTRIKE_APPLICATION_DEEP_DIVE_2026-06-21.md",
+      "M  docs/audits/DAWNSTRIKE_APPLICATION_DEEP_DIVE_2026-06-22.md",
+      "M  docs/audits/DAWNSTRIKE_COMPACT_TELEGRAM_AND_SOURCE_HARDENING_2026-06-20.md",
+      "A  docs/audits/DAWNSTRIKE_DAILY_REVIEW_AND_LEARNING_BACKFEED_2026-06-22.md",
+      "M  docs/audits/DAWNSTRIKE_E2E_NOTIFICATION_AUTOMATION_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_FINAL_AUDIT_AND_SIGNAL_ENGINE_V3_2026-06-21.md",
+      "A  docs/audits/DAWNSTRIKE_FINAL_SHIP_READY_PRODUCT_AUDIT_2026-06-23.md",
+      "M  docs/audits/DAWNSTRIKE_FREE_SHADOW_MODE_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_HISTORICAL_CALENDAR_2026-06-21.md",
+      "M  docs/audits/DAWNSTRIKE_HISTORICAL_SIGNAL_LEDGER_AND_RETURN_ATTRIBUTION_2026-06-22.md",
+      "A  docs/audits/DAWNSTRIKE_NASA_GRADE_REPO_AUDIT_2026-06-26.md",
+      "M  docs/audits/DAWNSTRIKE_NON_SECRET_GAP_CLOSURE_2026-06-20.md",
+      "A  docs/audits/DAWNSTRIKE_OPENING_DAY_TRUST_GATES_2026-06-22.md",
+      "A  docs/audits/DAWNSTRIKE_PREDICTION_PROBABILITY_GAINS_HARDENING_2026-06-22.md",
+      "M  docs/audits/DAWNSTRIKE_PRE_SECRETS_READINESS_2026-06-20.md",
+      "A  docs/audits/DAWNSTRIKE_PRICE_OBSERVATION_HARDENING_2026-06-23.md",
+      "A  docs/audits/DAWNSTRIKE_RENDERED_UI_SHIP_GATE_2026-06-23.md",
+      "M  docs/audits/DAWNSTRIKE_REPO_AUDIT_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_SCREENER_AUTOMATION_2026-06-20.md",
+      "A  docs/audits/DAWNSTRIKE_SHIPROOM_V1_INTERNAL_AUDIT_2026-06-26.md",
+      "A  docs/audits/DAWNSTRIKE_SHIPROOM_V1_RELEASE_AUDIT_2026-06-26.md",
+      "M  docs/audits/DAWNSTRIKE_SIMPLE_DASHBOARD_REDESIGN_2026-06-21.md",
+      "M  docs/audits/DAWNSTRIKE_SOURCE_RELIABILITY_FIX_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_TELEGRAM_DEDUPE_FIX_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_WEB_TELEGRAM_AUTOPILOT_2026-06-20.md",
+      "M  docs/audits/DAWNSTRIKE_WEB_TELEGRAM_OPERATIONALIZATION_2026-06-20.md",
+      "A  intraday_scanner/alpha/alert_gate.py",
+      "M  intraday_scanner/alpha/alpha_model.py",
+      "A  intraday_scanner/alpha/calibration.py",
+      "M  intraday_scanner/alpha/edge_calibrator.py",
+      "A  intraday_scanner/alpha/expected_value.py",
+      "M  intraday_scanner/alpha/outcome_labeler.py",
+      "M  intraday_scanner/alpha/performance_truth.py",
+      "A  intraday_scanner/alpha/prediction_engine.py",
+      "A  intraday_scanner/alpha/probability_buckets.py",
+      "M  intraday_scanner/alpha/risk_governor.py",
+      "M  intraday_scanner/alpha/setup_memory.py",
+      "A  intraday_scanner/alpha/truth_guard.py",
+      "M  intraday_scanner/cli.py",
+      "M  intraday_scanner/config.py",
+      "A  intraday_scanner/dashboard/app_shell.py",
+      "A  intraday_scanner/dashboard/charts.py",
+      "M  intraday_scanner/dashboard/components.py",
+      "A  intraday_scanner/dashboard/dashboard_doctor.py",
+      "MM intraday_scanner/dashboard/data_loader.py",
+      "M  intraday_scanner/dashboard/display_text.py",
+      "A  intraday_scanner/dashboard/operator_data_service.py",
+      "A  intraday_scanner/dashboard/operator_models.py",
+      "A  intraday_scanner/dashboard/real_data_guard.py",
+      "A  intraday_scanner/dashboard/render_qa.py",
+      "A  intraday_scanner/dashboard/ticker_guard.py",
+      "M  intraday_scanner/formula.py",
+      "A  intraday_scanner/integrations/__init__.py",
+      "A  intraday_scanner/integrations/brokers/__init__.py",
+      "A  intraday_scanner/integrations/brokers/base.py",
+      "A  intraday_scanner/integrations/brokers/disabled.py",
+      "A  intraday_scanner/integrations/brokers/registry.py",
+      "A  intraday_scanner/integrations/data_sources/__init__.py",
+      "A  intraday_scanner/integrations/data_sources/base.py",
+      "A  intraday_scanner/integrations/data_sources/registry.py",
+      "A  intraday_scanner/integrations/execution/__init__.py",
+      "A  intraday_scanner/integrations/execution/intents.py",
+      "A  intraday_scanner/integrations/execution/modes.py",
+      "A  intraday_scanner/integrations/execution/safety.py",
+      "M  intraday_scanner/notifiers/telegram_formatter.py",
+      "M  intraday_scanner/notifiers/webhooks.py",
+      "A  intraday_scanner/providers/daily_movers_base.py",
+      "A  intraday_scanner/providers/local_daily_movers_provider.py",
+      "M  intraday_scanner/providers/public_table_provider.py",
+      "M  intraday_scanner/providers/sec_edgar_provider.py",
+      "A  intraday_scanner/providers/stockanalysis_daily_movers.py",
+      "A  intraday_scanner/providers/tradingview_daily_movers.py",
+      "M  intraday_scanner/services/alpha_cycle_service.py",
+      "A  intraday_scanner/services/benchmark_service.py",
+      "M  intraday_scanner/services/calendar_report_service.py",
+      "A  intraday_scanner/services/daily_movers_service.py",
+      "A  intraday_scanner/services/daily_review_learning_service.py",
+      "A  intraday_scanner/services/daily_review_service.py",
+      "A  intraday_scanner/services/dashboard_outcome_service.py",
+      "A  intraday_scanner/services/launch_readiness_service.py",
+      "AM intraday_scanner/services/opening_day_rehearsal_service.py",
+      "A  intraday_scanner/services/prediction_service.py",
+      "A  intraday_scanner/services/price_observation_service.py",
+      "M  intraday_scanner/services/return_attribution_service.py",
+      "A  intraday_scanner/services/scheduler_doctor_service.py",
+      "M  intraday_scanner/services/signal_review_service.py",
+      "A  intraday_scanner/services/trade_watcher_service.py",
+      "A  intraday_scanner/storage/migrations.py",
+      "M  intraday_scanner/storage/sqlite_store.py",
+      "M  scripts/register_alphaops_tasks.ps1",
+      "A  scripts/render_dashboard_qa.py",
+      "A  scripts/run_alphaops_eod_full.bat",
+      "A  tests/fixtures/daily_movers_2026-06-21.csv",
+      "A  tests/fixtures/daily_review_outcomes.csv",
+      "A  tests/fixtures/daily_review_signals.json",
+      "M  tests/test_alpha_ops.py",
+      "A  tests/test_daily_review.py",
+      "M  tests/test_e2e_automation.py",
+      "M  tests/test_historical_calendar.py",
+      "M  tests/test_historical_signal_ledger.py",
+      "M  tests/test_notifications.py",
+      "A  tests/test_opening_day_trust_gates.py",
+      "A  tests/test_operator_dashboard_contract.py",
+      "A  tests/test_prediction_hardening.py",
+      "A  tests/test_price_observation_service.py",
+      "A  tests/test_render_dashboard_qa.py",
+      "M  tests/test_scoring.py",
+      "A  tests/test_shiproom_contracts.py",
+      "M  tests/test_simple_dashboard.py",
+      "M  tests/test_streamlit_app.py",
+      "A  tests/test_trade_watcher_service.py",
+      "M  tests/test_web_autopilot.py",
+      "?? data/v2_alpha_lab/",
+      "?? data/v2_autodata/",
+      "?? data/v2_autonomous_runner/",
+      "?? data/v2_command_center/",
+      "?? data/v2_command_center_x/",
+      "?? data/v2_data_truth/",
+      "?? data/v2_evidence_commit/",
+      "?? data/v2_fill_truth/",
+      "?? data/v2_forward_evidence/",
+      "?? data/v2_learning_foundry/",
+      "?? data/v2_market_masters/",
+      "?? data/v2_omega/",
+      "?? data/v2_omega_sentinel/",
+      "?? data/v2_omega_stateguard/",
+      "?? data/v2_paper_ops/",
+      "?? data/v2_real_intraday/",
+      "?? data/v2_release_candidate/",
+      "?? data/v2_scheduler/",
+      "?? data/v2_telegram_intel/",
+      "?? data/v2_titan/",
+      "?? docs/agents/",
+      "?? docs/architecture/",
+      "?? docs/audit/",
+      "?? docs/operations/",
+      "?? docs/repo_inventory/",
+      "?? docs/research/",
+      "?? docs/roadmap/",
+      "?? intraday_scanner/notifiers/telegram_bot_api.py",
+      "?? intraday_scanner/public_data/",
+      "?? intraday_scanner/v2/",
+      "?? scripts/build_command_center_x.ps1",
+      "?? scripts/check_omega_sentinel_status.ps1",
+      "?? scripts/check_omega_sentinel_status.sh",
+      "?? scripts/generate_omega_release_candidate_reports.py",
+      "?? scripts/generate_omega_stateguard_reports.py",
+      "?? scripts/install_omega_autonomous_tasks.ps1",
+      "?? scripts/omega_scheduler_common.ps1",
+      "?? scripts/open_command_center_x.ps1",
+      "?? scripts/run_forward_autopilot_daily.ps1",
+      "?? scripts/run_forward_autopilot_daily.sh",
+      "?? scripts/run_omega_daily.ps1",
+      "?? scripts/run_omega_daily.sh",
+      "?? scripts/run_omega_scheduler_after_close.ps1",
+      "?? scripts/run_omega_scheduler_morning_check.ps1",
+      "?? scripts/run_omega_scheduler_verify.ps1",
+      "?? scripts/run_omega_scheduler_watchdog.ps1",
+      "?? scripts/run_omega_sentinel_daily.ps1",
+      "?? scripts/run_omega_sentinel_daily.sh",
+      "?? scripts/status_omega_autonomous_tasks.ps1",
+      "?? scripts/test_omega_autonomous_tasks.ps1",
+      "?? scripts/uninstall_omega_autonomous_tasks.ps1",
+      "?? tests/test_v2_alpha_lab.py",
+      "?? tests/test_v2_autodata.py",
+      "?? tests/test_v2_autonomous_runner.py",
+      "?? tests/test_v2_command_center_x.py",
+      "?? tests/test_v2_contracts.py",
+      "?? tests/test_v2_data_truth_paper_ops.py",
+      "?? tests/test_v2_evidence_commit.py",
+      "?? tests/test_v2_fill_truth.py",
+      "?? tests/test_v2_forward_autopilot.py",
+      "?? tests/test_v2_learning_foundry.py",
+      "?? tests/test_v2_market_masters.py",
+      "?? tests/test_v2_omega.py",
+      "?? tests/test_v2_omega_sentinel.py",
+      "?? tests/test_v2_real_intraday.py",
+      "?? tests/test_v2_scheduler_scripts.py",
+      "?? tests/test_v2_telegram_intel.py",
+      "?? tests/test_v2_titan.py"
+    ]
+  },
+  "python_packages": [
+    {
+      "path": "intraday_scanner/ai",
+      "primary_symbols": [
+        "HeadlineClassification",
+        "HeadlineClassifier",
+        "RuleBasedHeadlineClassifier",
+        "ThesisRead",
+        "ThesisMonitor"
+      ],
+      "purpose": "ai",
+      "python_file_count": 5,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/alpha",
+      "primary_symbols": [
+        "apply_alert_gates",
+        "apply_alert_gate",
+        "evaluate_alert_gate",
+        "AlphaModel",
+        "setup_key_for_candidate",
+        "evaluate_offline_model",
+        "predict_offline_score",
+        "calibration_unavailable",
+        "brier_score",
+        "calibration_error",
+        "calibration_rows",
+        "summarize_calibration"
+      ],
+      "purpose": "alpha",
+      "python_file_count": 16,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/cli.py",
+      "primary_symbols": [
+        "build_arg_parser",
+        "main"
+      ],
+      "purpose": "cli",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/config.py",
+      "primary_symbols": [
+        "ScannerConfig",
+        "load_config"
+      ],
+      "purpose": "config",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/dashboard",
+      "primary_symbols": [
+        "OperatorPage",
+        "readable_chart",
+        "empty_chart",
+        "chart_status",
+        "filter_candidates",
+        "status_banner",
+        "main_pick_card",
+        "top_three_cards",
+        "next_steps_panel",
+        "risk_summary_panel",
+        "outcome_needed_panel",
+        "evidence_status_card"
+      ],
+      "purpose": "dashboard",
+      "python_file_count": 12,
+      "risk_level": "low",
+      "ui_relevance": "primary"
+    },
+    {
+      "path": "intraday_scanner/errors.py",
+      "primary_symbols": [
+        "IntradayScannerError",
+        "ConfigError",
+        "DataProviderError",
+        "SnapshotValidationError",
+        "StorageError",
+        "NotificationError"
+      ],
+      "purpose": "errors",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/expectancy.py",
+      "primary_symbols": [
+        "ExpectancyEstimate",
+        "estimate_expectancy"
+      ],
+      "purpose": "expectancy",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/formula.py",
+      "primary_symbols": [
+        "FormulaResult",
+        "evaluate_formula"
+      ],
+      "purpose": "formula",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/integrations",
+      "primary_symbols": [
+        "LiveExecutionDisabled",
+        "BrokerAdapter",
+        "DisabledBrokerAdapter",
+        "BrokerRegistry",
+        "DataSourceCapabilities",
+        "DataSourceProvider",
+        "DataSourceRegistry"
+      ],
+      "purpose": "integrations",
+      "python_file_count": 12,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/logging_config.py",
+      "primary_symbols": [
+        "configure_logging"
+      ],
+      "purpose": "logging config",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/models.py",
+      "primary_symbols": [
+        "utc_now_iso",
+        "parse_bool",
+        "parse_float",
+        "parse_int",
+        "validate_required_columns",
+        "SnapshotRow",
+        "ScoredCandidate",
+        "ScanResult"
+      ],
+      "purpose": "models",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/notifications",
+      "primary_symbols": [],
+      "purpose": "notifications",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/notifiers",
+      "primary_symbols": [
+        "NotificationEvent",
+        "BaseNotifier",
+        "ConsoleNotifier",
+        "EmailNotifier",
+        "build_notifiers",
+        "scan_events_from_payload",
+        "audit_summary_events",
+        "dispatch_events",
+        "send_message",
+        "format_telegram_event",
+        "format_morning_watchlist",
+        "format_risk_alert"
+      ],
+      "purpose": "notifiers",
+      "python_file_count": 9,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/paper_audit.py",
+      "primary_symbols": [
+        "build_arg_parser",
+        "main"
+      ],
+      "purpose": "paper audit",
+      "python_file_count": 1,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "path": "intraday_scanner/providers",
+      "primary_symbols": [
+        "AlpacaMoversProvider",
+        "AlpacaProvider",
+        "MarketDataProvider",
+        "ProviderHealth",
+        "NewsItem",
+        "FilingItem",
+        "NewsProvider",
+        "SECProvider",
+        "NotificationProvider",
+        "ingest_browser_table",
+        "extract_browser_tables",
+        "browser_extractor_status"
+      ],
+      "purpose": "providers",
+      "python_file_count": 23,
+      "risk_level": "medium",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/public_data",
+      "primary_symbols": [
+        "ProviderHttpError",
+        "ProviderFetchError",
+        "encode_query",
+        "fetch_json_url",
+        "NasdaqHistoricalFetchResult",
+        "fetch_nasdaq_historical_daily_dataset",
+        "fetch_yahoo_chart_daily_dataset"
+      ],
+      "purpose": "public data",
+      "python_file_count": 4,
+      "risk_level": "medium",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/reporting.py",
+      "primary_symbols": [
+        "write_scan_outputs",
+        "read_csv_dicts",
+        "read_scan_summary"
+      ],
+      "purpose": "reporting",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/scheduler.py",
+      "primary_symbols": [
+        "ScheduledJob",
+        "build_default_schedule",
+        "schedule_as_rows",
+        "schedule_as_rows_for_date",
+        "record_scheduler_failure",
+        "scheduler_failure_event"
+      ],
+      "purpose": "scheduler",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/scoring.py",
+      "primary_symbols": [
+        "score_universe",
+        "score_snapshot"
+      ],
+      "purpose": "scoring",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/services",
+      "primary_symbols": [
+        "run_ai_research",
+        "validate_ai_csv",
+        "AlertEvent",
+        "alerts_from_monitor_rows",
+        "alerts_from_news_and_filings",
+        "persist_deduped_alerts",
+        "alpha_morning",
+        "alpha_cycle",
+        "alpha_monitor",
+        "alpha_outcomes",
+        "alpha_learn",
+        "alpha_status"
+      ],
+      "purpose": "services",
+      "python_file_count": 39,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/snapshot_builder.py",
+      "primary_symbols": [
+        "build_snapshot",
+        "write_snapshot_csv",
+        "build_arg_parser",
+        "main"
+      ],
+      "purpose": "snapshot builder",
+      "python_file_count": 1,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/storage",
+      "primary_symbols": [
+        "ScanStore",
+        "get_schema_version",
+        "set_schema_version",
+        "run_migrations",
+        "SQLiteScanStore"
+      ],
+      "purpose": "storage",
+      "python_file_count": 4,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "path": "intraday_scanner/v2",
+      "primary_symbols": [
+        "write_robustness_artifacts",
+        "write_json",
+        "write_csv_rows",
+        "AlphaLabRunResult",
+        "main",
+        "run_demo",
+        "RunType",
+        "ReportType",
+        "DataLineage",
+        "CodeLineage",
+        "ExecutionAssumptions",
+        "FeeAssumptions"
+      ],
+      "purpose": "v2",
+      "python_file_count": 109,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    }
+  ],
+  "repo_root_name": "Dawnstrike",
+  "schema_version": "v2.command_center_x.inventory.v1",
+  "scripts": [
+    {
+      "extension": ".py",
+      "path": "scripts/alpaca_live_snapshot.py",
+      "purpose": "alpaca live snapshot",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/build_command_center_x.ps1",
+      "purpose": "build command center x",
+      "ui_relevance": "primary"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/check_omega_sentinel_status.ps1",
+      "purpose": "check omega sentinel status",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".sh",
+      "path": "scripts/check_omega_sentinel_status.sh",
+      "purpose": "check omega sentinel status",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".py",
+      "path": "scripts/generate_omega_release_candidate_reports.py",
+      "purpose": "generate omega release candidate reports",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".py",
+      "path": "scripts/generate_omega_stateguard_reports.py",
+      "purpose": "generate omega stateguard reports",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/install_omega_autonomous_tasks.ps1",
+      "purpose": "install omega autonomous tasks",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/omega_scheduler_common.ps1",
+      "purpose": "omega scheduler common",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/open_command_center_x.ps1",
+      "purpose": "open command center x",
+      "ui_relevance": "primary"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/register_alphaops_tasks.ps1",
+      "purpose": "register alphaops tasks",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/register_dawnstrike_automation.ps1",
+      "purpose": "register dawnstrike automation",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/register_dawnstrike_tasks.ps1",
+      "purpose": "register dawnstrike tasks",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/register_web_telegram_automation.ps1",
+      "purpose": "register web telegram automation",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".py",
+      "path": "scripts/render_dashboard_qa.py",
+      "purpose": "render dashboard qa",
+      "ui_relevance": "primary"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_alphaops_eod_full.bat",
+      "purpose": "run alphaops eod full",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_auto_shadow_once.ps1",
+      "purpose": "run auto shadow once",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_automation_daemon.bat",
+      "purpose": "run automation daemon",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_automation_once.bat",
+      "purpose": "run automation once",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_daily_shadow_scan.bat",
+      "purpose": "run daily shadow scan",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_forward_autopilot_daily.ps1",
+      "purpose": "run forward autopilot daily",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".sh",
+      "path": "scripts/run_forward_autopilot_daily.sh",
+      "purpose": "run forward autopilot daily",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_monitor_loop.ps1",
+      "purpose": "run monitor loop",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_monitor_once.ps1",
+      "purpose": "run monitor once",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_daily.ps1",
+      "purpose": "run omega daily",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".sh",
+      "path": "scripts/run_omega_daily.sh",
+      "purpose": "run omega daily",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_scheduler_after_close.ps1",
+      "purpose": "run omega scheduler after close",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_scheduler_morning_check.ps1",
+      "purpose": "run omega scheduler morning check",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_scheduler_verify.ps1",
+      "purpose": "run omega scheduler verify",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_scheduler_watchdog.ps1",
+      "purpose": "run omega scheduler watchdog",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_omega_sentinel_daily.ps1",
+      "purpose": "run omega sentinel daily",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".sh",
+      "path": "scripts/run_omega_sentinel_daily.sh",
+      "purpose": "run omega sentinel daily",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/run_sample_backtest.ps1",
+      "purpose": "run sample backtest",
+      "ui_relevance": "supporting"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_web_telegram_daemon.bat",
+      "purpose": "run web telegram daemon",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".bat",
+      "path": "scripts/run_web_telegram_once.bat",
+      "purpose": "run web telegram once",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/status_omega_autonomous_tasks.ps1",
+      "purpose": "status omega autonomous tasks",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/test_omega_autonomous_tasks.ps1",
+      "purpose": "test omega autonomous tasks",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/uninstall_omega_autonomous_tasks.ps1",
+      "purpose": "uninstall omega autonomous tasks",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "extension": ".ps1",
+      "path": "scripts/watch_screener_inbox.ps1",
+      "purpose": "watch screener inbox",
+      "ui_relevance": "supporting"
+    }
+  ],
+  "tests": [
+    {
+      "area": "ai news",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_ai_news.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "alert service",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_alert_service.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "alpha ops",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_alpha_ops.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 20
+    },
+    {
+      "area": "cli",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_cli.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 7
+    },
+    {
+      "area": "config",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_config.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "csv provider",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_csv_provider.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 2
+    },
+    {
+      "area": "daily review",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_daily_review.py",
+      "recommended_command_center_x_gap": "reuse safety patterns for X",
+      "test_count": 9
+    },
+    {
+      "area": "dashboard data loader",
+      "covers_safety": false,
+      "covers_ui": true,
+      "path": "tests/test_dashboard_data_loader.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 2
+    },
+    {
+      "area": "e2e automation",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_e2e_automation.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 16
+    },
+    {
+      "area": "expectancy",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_expectancy.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 2
+    },
+    {
+      "area": "free shadow mode",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_free_shadow_mode.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 6
+    },
+    {
+      "area": "historical calendar",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_historical_calendar.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 9
+    },
+    {
+      "area": "historical signal ledger",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_historical_signal_ledger.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 6
+    },
+    {
+      "area": "non secret gap closure",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_non_secret_gap_closure.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 12
+    },
+    {
+      "area": "notifications",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_notifications.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 2
+    },
+    {
+      "area": "opening day trust gates",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_opening_day_trust_gates.py",
+      "recommended_command_center_x_gap": "reuse safety patterns for X",
+      "test_count": 8
+    },
+    {
+      "area": "operator dashboard contract",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_operator_dashboard_contract.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 5
+    },
+    {
+      "area": "paper audit",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_paper_audit.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 4
+    },
+    {
+      "area": "prediction hardening",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_prediction_hardening.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 8
+    },
+    {
+      "area": "premarket intelligence",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_premarket_intelligence.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 10
+    },
+    {
+      "area": "price observation service",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_price_observation_service.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 9
+    },
+    {
+      "area": "provider health",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_provider_health.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 2
+    },
+    {
+      "area": "render dashboard qa",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_render_dashboard_qa.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 5
+    },
+    {
+      "area": "scan service",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_scan_service.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 2
+    },
+    {
+      "area": "scheduler",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_scheduler.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "scoring",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_scoring.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 6
+    },
+    {
+      "area": "screener automation",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_screener_automation.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 11
+    },
+    {
+      "area": "sec provider",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_sec_provider.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "setup monitor",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_setup_monitor.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 7
+    },
+    {
+      "area": "shiproom contracts",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_shiproom_contracts.py",
+      "recommended_command_center_x_gap": "reuse safety patterns for X",
+      "test_count": 8
+    },
+    {
+      "area": "simple dashboard",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_simple_dashboard.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 14
+    },
+    {
+      "area": "snapshot builder",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_snapshot_builder.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "storage",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_storage.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "streamlit app",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_streamlit_app.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 3
+    },
+    {
+      "area": "trade watcher service",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_trade_watcher_service.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 6
+    },
+    {
+      "area": "tuning service",
+      "covers_safety": false,
+      "covers_ui": false,
+      "path": "tests/test_tuning_service.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 1
+    },
+    {
+      "area": "v2 alpha lab",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_v2_alpha_lab.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 14
+    },
+    {
+      "area": "v2 autodata",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_autodata.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 11
+    },
+    {
+      "area": "v2 autonomous runner",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_autonomous_runner.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 5
+    },
+    {
+      "area": "v2 command center x",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_command_center_x.py",
+      "recommended_command_center_x_gap": "covers Command Center X",
+      "test_count": 5
+    },
+    {
+      "area": "v2 contracts",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_v2_contracts.py",
+      "recommended_command_center_x_gap": "reuse safety patterns for X",
+      "test_count": 7
+    },
+    {
+      "area": "v2 data truth paper ops",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_v2_data_truth_paper_ops.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 21
+    },
+    {
+      "area": "v2 evidence commit",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_evidence_commit.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 11
+    },
+    {
+      "area": "v2 fill truth",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_fill_truth.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 6
+    },
+    {
+      "area": "v2 forward autopilot",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_forward_autopilot.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 6
+    },
+    {
+      "area": "v2 learning foundry",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_learning_foundry.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 5
+    },
+    {
+      "area": "v2 market masters",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_market_masters.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 6
+    },
+    {
+      "area": "v2 omega",
+      "covers_safety": false,
+      "covers_ui": true,
+      "path": "tests/test_v2_omega.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 1
+    },
+    {
+      "area": "v2 omega sentinel",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_omega_sentinel.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 9
+    },
+    {
+      "area": "v2 real intraday",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_real_intraday.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 9
+    },
+    {
+      "area": "v2 scheduler scripts",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_v2_scheduler_scripts.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 4
+    },
+    {
+      "area": "v2 telegram intel",
+      "covers_safety": true,
+      "covers_ui": true,
+      "path": "tests/test_v2_telegram_intel.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 5
+    },
+    {
+      "area": "v2 titan",
+      "covers_safety": false,
+      "covers_ui": true,
+      "path": "tests/test_v2_titan.py",
+      "recommended_command_center_x_gap": "extend with X page/link/QA assertions",
+      "test_count": 6
+    },
+    {
+      "area": "web autopilot",
+      "covers_safety": true,
+      "covers_ui": false,
+      "path": "tests/test_web_autopilot.py",
+      "recommended_command_center_x_gap": "not UI-specific",
+      "test_count": 38
+    }
+  ],
+  "top_level": {
+    "directories": [
+      ".agents",
+      ".codex",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".pytest_calendar_tmp_1",
+      ".pytest_calendar_tmp_2",
+      ".pytest_calendar_tmp_3",
+      ".pytest_calendar_tmp_4",
+      ".pytest_calendar_tmp_5",
+      ".pytest_full_tmp_1",
+      ".pytest_full_tmp_2",
+      ".pytest_full_tmp_3",
+      ".pytest_full_tmp_4",
+      ".ruff_cache",
+      "__pycache__",
+      "config",
+      "data",
+      "dawnstrike_intraday_scanner.egg-info",
+      "docs",
+      "intraday_scanner",
+      "logs",
+      "outputs",
+      "sample_data",
+      "scripts",
+      "templates",
+      "tests",
+      "tmp"
+    ],
+    "files": [
+      ".env",
+      ".env.example",
+      ".gitignore",
+      "API keys.txt",
+      "app.py",
+      "pyproject.toml",
+      "README.md"
+    ],
+    "has_api_keys_text": true,
+    "has_env_file": true,
+    "major_config_files": [
+      ".gitignore",
+      "pyproject.toml",
+      "README.md"
+    ]
+  },
+  "v2_modules": [
+    {
+      "cli_command": "py -m intraday_scanner.v2.alpha_lab",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_alpha_lab"
+      ],
+      "output_artifacts": [
+        "data/v2_alpha_lab"
+      ],
+      "path": "intraday_scanner/v2/alpha_lab",
+      "primary_symbols": [
+        "write_robustness_artifacts",
+        "write_json",
+        "write_csv_rows",
+        "AlphaLabRunResult",
+        "main",
+        "run_demo"
+      ],
+      "purpose": "historical research and demo artifacts",
+      "python_file_count": 4,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_audit"
+      ],
+      "output_artifacts": [
+        "data/v2_audit"
+      ],
+      "path": "intraday_scanner/v2/audit",
+      "primary_symbols": [
+        "RunType",
+        "ReportType",
+        "DataLineage",
+        "CodeLineage",
+        "ExecutionAssumptions",
+        "FeeAssumptions",
+        "SlippageAssumptions",
+        "RunManifest",
+        "ReportManifest"
+      ],
+      "purpose": "audit",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.autodata",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_autodata"
+      ],
+      "output_artifacts": [
+        "data/v2_autodata"
+      ],
+      "path": "intraday_scanner/v2/autodata",
+      "primary_symbols": [
+        "main",
+        "init",
+        "providers",
+        "readiness",
+        "fetch",
+        "fetch_pending",
+        "build",
+        "reconcile",
+        "feed_filltruth",
+        "trial_day",
+        "verify",
+        "report"
+      ],
+      "purpose": "provider-backed and fallback data intake",
+      "python_file_count": 3,
+      "risk_level": "medium",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.autonomous_runner",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_autonomous_runner"
+      ],
+      "output_artifacts": [
+        "data/v2_autonomous_runner"
+      ],
+      "path": "intraday_scanner/v2/autonomous_runner",
+      "primary_symbols": [
+        "main",
+        "AutonomousTask",
+        "init",
+        "install",
+        "uninstall",
+        "status",
+        "verify",
+        "test_run",
+        "watchdog",
+        "report",
+        "doctor"
+      ],
+      "purpose": "Windows task and zero-touch run health",
+      "python_file_count": 3,
+      "risk_level": "high",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_backtest"
+      ],
+      "output_artifacts": [
+        "data/v2_backtest"
+      ],
+      "path": "intraday_scanner/v2/backtest",
+      "primary_symbols": [
+        "BacktestSettings",
+        "TradeRecord",
+        "EquityPoint",
+        "BacktestResult",
+        "BacktestEngine"
+      ],
+      "purpose": "backtest",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_calendar_intelligence"
+      ],
+      "output_artifacts": [
+        "data/v2_calendar_intelligence"
+      ],
+      "path": "intraday_scanner/v2/calendar_intelligence",
+      "primary_symbols": [
+        "CalendarIntelligenceResult",
+        "build_calendar_intelligence"
+      ],
+      "purpose": "calendar intelligence",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.command_center",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_command_center"
+      ],
+      "output_artifacts": [
+        "data/v2_command_center"
+      ],
+      "path": "intraday_scanner/v2/command_center",
+      "primary_symbols": [
+        "main",
+        "CommandCenterResult",
+        "build_command_center"
+      ],
+      "purpose": "existing static local dashboard",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "primary"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.command_center_x",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_command_center_x"
+      ],
+      "output_artifacts": [
+        "data/v2_command_center_x"
+      ],
+      "path": "intraday_scanner/v2/command_center_x",
+      "primary_symbols": [
+        "main",
+        "build_view_models",
+        "system_health_view",
+        "today_view",
+        "evidence_view",
+        "paper_trading_view",
+        "strategy_view",
+        "learning_view",
+        "market_masters_view",
+        "automation_view",
+        "repo_inventory_view",
+        "write_view_models"
+      ],
+      "purpose": "new task-first static local dashboard",
+      "python_file_count": 6,
+      "risk_level": "low",
+      "ui_relevance": "primary"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_contracts"
+      ],
+      "output_artifacts": [
+        "data/v2_contracts"
+      ],
+      "path": "intraday_scanner/v2/contracts",
+      "primary_symbols": [
+        "DataSourceId",
+        "StrategyId",
+        "StrategyVersion",
+        "Symbol",
+        "AssetClass",
+        "Timeframe",
+        "DataValidationSeverity",
+        "DataValidationStatus",
+        "Bar",
+        "BarBatch",
+        "DataSnapshot",
+        "DataValidationIssue"
+      ],
+      "purpose": "contracts",
+      "python_file_count": 7,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_data"
+      ],
+      "output_artifacts": [
+        "data/v2_data"
+      ],
+      "path": "intraday_scanner/v2/data",
+      "primary_symbols": [
+        "MarketBar",
+        "MarketDataset",
+        "ValidationResult",
+        "discover_ohlcv_csvs",
+        "load_ohlcv_csv",
+        "write_ohlcv_csv",
+        "validate_dataset",
+        "has_minimum_history",
+        "timestamp_alignment_issues",
+        "is_timestamp_aligned",
+        "filter_incomplete_daily_bars",
+        "dataset_to_snapshot"
+      ],
+      "purpose": "data",
+      "python_file_count": 4,
+      "risk_level": "medium",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.data_truth",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_data_truth"
+      ],
+      "output_artifacts": [
+        "data/v2_data_truth"
+      ],
+      "path": "intraday_scanner/v2/data_truth",
+      "primary_symbols": [
+        "main",
+        "CanonicalDataDecision",
+        "classify_canonical_data",
+        "DataTruthPaths",
+        "DataTruthBuildResult",
+        "build_data_truth_snapshot",
+        "load_datatruth_dataset",
+        "reconcile_provider_datasets",
+        "count_csv_rows",
+        "LocalImportResult",
+        "import_local_csv_provider",
+        "DataTruthManifest"
+      ],
+      "purpose": "canonical data truth and reconciliation",
+      "python_file_count": 8,
+      "risk_level": "medium",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.decision_engine",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_decision_engine"
+      ],
+      "output_artifacts": [
+        "data/v2_decision_engine"
+      ],
+      "path": "intraday_scanner/v2/decision_engine",
+      "primary_symbols": [
+        "main",
+        "DecisionEngineResult",
+        "build_decision_engine"
+      ],
+      "purpose": "decision engine",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.evidence_commit",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_evidence_commit"
+      ],
+      "output_artifacts": [
+        "data/v2_evidence_commit"
+      ],
+      "path": "intraday_scanner/v2/evidence_commit",
+      "primary_symbols": [
+        "main",
+        "EvidenceCommitStatus",
+        "EvidenceCommitSource",
+        "EvidenceCommitConfig",
+        "EvidenceCommitProposal",
+        "EvidenceCommitDecision",
+        "EvidenceCommitEvent",
+        "EvidenceCommitRejection",
+        "EvidenceCommitManifest",
+        "EvidenceCommitReconciliationReport",
+        "init",
+        "propose"
+      ],
+      "purpose": "CommitBridge evidence promotion and blocking",
+      "python_file_count": 3,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_evidence_vault"
+      ],
+      "output_artifacts": [
+        "data/v2_evidence_vault"
+      ],
+      "path": "intraday_scanner/v2/evidence_vault",
+      "primary_symbols": [
+        "EvidenceVaultPaths",
+        "FrozenWriteResult",
+        "create_paths",
+        "write_frozen_pick_set",
+        "verify_frozen_pick_hashes",
+        "canonical_json",
+        "canonical_hash",
+        "file_sha256"
+      ],
+      "purpose": "evidence vault",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.fill_truth",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_fill_truth"
+      ],
+      "output_artifacts": [
+        "data/v2_fill_truth"
+      ],
+      "path": "intraday_scanner/v2/fill_truth",
+      "primary_symbols": [
+        "main",
+        "FillTruthPaths",
+        "init",
+        "import_intraday",
+        "build",
+        "resolve_pending",
+        "evaluate",
+        "compare_models",
+        "report",
+        "verify",
+        "demo",
+        "morning_check"
+      ],
+      "purpose": "paper fill evidence resolution",
+      "python_file_count": 3,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.forward_autopilot",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_forward_autopilot"
+      ],
+      "output_artifacts": [
+        "data/v2_forward_autopilot"
+      ],
+      "path": "intraday_scanner/v2/forward_autopilot",
+      "primary_symbols": [
+        "main",
+        "ForwardAutopilotResult",
+        "preflight",
+        "paper_run_preflight",
+        "freeze_picks",
+        "run_day",
+        "evaluate",
+        "shadow_replay",
+        "rebuild_evidence",
+        "verify",
+        "build_calendar",
+        "dashboard"
+      ],
+      "purpose": "forward autopilot",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_indicators"
+      ],
+      "output_artifacts": [
+        "data/v2_indicators"
+      ],
+      "path": "intraday_scanner/v2/indicators",
+      "primary_symbols": [
+        "sma",
+        "rate_of_change",
+        "rolling_volatility",
+        "rsi",
+        "atr",
+        "bollinger_bands",
+        "donchian_high",
+        "donchian_low"
+      ],
+      "purpose": "indicators",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.learning_foundry",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_learning_foundry"
+      ],
+      "output_artifacts": [
+        "data/v2_learning_foundry"
+      ],
+      "path": "intraday_scanner/v2/learning_foundry",
+      "primary_symbols": [
+        "main",
+        "write_json",
+        "write_csv_rows",
+        "init",
+        "build_features",
+        "build_labels",
+        "build_regimes",
+        "ingest_news",
+        "train",
+        "generate_candidates",
+        "backtest_candidates",
+        "shadow_run"
+      ],
+      "purpose": "daily lessons and shadow challenger learning",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.market_masters",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_market_masters"
+      ],
+      "output_artifacts": [
+        "data/v2_market_masters"
+      ],
+      "path": "intraday_scanner/v2/market_masters",
+      "primary_symbols": [
+        "main",
+        "init",
+        "research",
+        "source_register",
+        "extract_methodologies",
+        "generate_primitives",
+        "generate_challengers",
+        "backtest",
+        "shadow_run",
+        "evaluate",
+        "sync_learning_foundry",
+        "report"
+      ],
+      "purpose": "public methodology research and shadow challengers",
+      "python_file_count": 3,
+      "risk_level": "medium",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.omega",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_omega"
+      ],
+      "output_artifacts": [
+        "data/v2_omega"
+      ],
+      "path": "intraday_scanner/v2/omega",
+      "primary_symbols": [
+        "main",
+        "OmegaBuildResult",
+        "build_all"
+      ],
+      "purpose": "omega",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.omega_sentinel",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_omega_sentinel"
+      ],
+      "output_artifacts": [
+        "data/v2_omega_sentinel"
+      ],
+      "path": "intraday_scanner/v2/omega_sentinel",
+      "primary_symbols": [
+        "main",
+        "SentinelResult",
+        "init",
+        "run",
+        "run_today",
+        "omega",
+        "morning_check",
+        "after_close",
+        "commit_filltruth",
+        "resolve_pending",
+        "status",
+        "report"
+      ],
+      "purpose": "daily OMEGA orchestration and status",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_paper"
+      ],
+      "output_artifacts": [
+        "data/v2_paper"
+      ],
+      "path": "intraday_scanner/v2/paper",
+      "primary_symbols": [
+        "write_paper_artifacts",
+        "write_audit_log",
+        "PaperLifecycleSettings",
+        "PaperPick",
+        "PaperEntry",
+        "PaperCheck",
+        "PaperExit",
+        "StrategyPnl",
+        "CalendarReturn",
+        "PaperAuditEvent",
+        "PaperLifecycleResult",
+        "run_paper_lifecycle"
+      ],
+      "purpose": "paper",
+      "python_file_count": 3,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.paper_ops",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_paper_ops"
+      ],
+      "output_artifacts": [
+        "data/v2_paper_ops"
+      ],
+      "path": "intraday_scanner/v2/paper_ops",
+      "primary_symbols": [
+        "main",
+        "CalendarTruthResult",
+        "verify_calendar_truth",
+        "write_calendar_view",
+        "PaperOpsPaths",
+        "init",
+        "preflight",
+        "scan",
+        "enter",
+        "check",
+        "close",
+        "run_day"
+      ],
+      "purpose": "paper positions, ledgers, and returns",
+      "python_file_count": 10,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_quality"
+      ],
+      "output_artifacts": [
+        "data/v2_quality"
+      ],
+      "path": "intraday_scanner/v2/quality",
+      "primary_symbols": [
+        "TitanQualityResult",
+        "score_titan_quality"
+      ],
+      "purpose": "quality",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.real_intraday",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_real_intraday"
+      ],
+      "output_artifacts": [
+        "data/v2_real_intraday"
+      ],
+      "path": "intraday_scanner/v2/real_intraday",
+      "primary_symbols": [
+        "main",
+        "init",
+        "template",
+        "inspect_imports",
+        "import_intraday",
+        "validate",
+        "aggregate_daily",
+        "reconcile_daily",
+        "build",
+        "readiness",
+        "trial_day",
+        "report"
+      ],
+      "purpose": "timestamped intraday intake and reconciliation",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_reports"
+      ],
+      "output_artifacts": [
+        "data/v2_reports"
+      ],
+      "path": "intraday_scanner/v2/reports",
+      "primary_symbols": [
+        "AlphaLabPaths",
+        "write_json",
+        "write_csv_rows",
+        "write_backtest_artifacts",
+        "write_strategy_comparison",
+        "build_comparison_rows",
+        "write_alpha_lab_summary"
+      ],
+      "purpose": "reports",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_risk"
+      ],
+      "output_artifacts": [
+        "data/v2_risk"
+      ],
+      "path": "intraday_scanner/v2/risk",
+      "primary_symbols": [
+        "RiskSettings",
+        "RiskDecision",
+        "evaluate_signal_risk"
+      ],
+      "purpose": "risk",
+      "python_file_count": 2,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.riskhub",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_riskhub"
+      ],
+      "output_artifacts": [
+        "data/v2_riskhub"
+      ],
+      "path": "intraday_scanner/v2/riskhub",
+      "primary_symbols": [
+        "main",
+        "RiskHubResult",
+        "build_risk_report"
+      ],
+      "purpose": "risk gating and block reasons",
+      "python_file_count": 3,
+      "risk_level": "high",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_scanner"
+      ],
+      "output_artifacts": [
+        "data/v2_scanner"
+      ],
+      "path": "intraday_scanner/v2/scanner",
+      "primary_symbols": [
+        "ScanCard",
+        "ScanOutput",
+        "run_latest_scan"
+      ],
+      "purpose": "scanner",
+      "python_file_count": 2,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": null,
+      "has_cli": false,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_strategies"
+      ],
+      "output_artifacts": [
+        "data/v2_strategies"
+      ],
+      "path": "intraday_scanner/v2/strategies",
+      "primary_symbols": [
+        "build_strategy_catalog",
+        "describe_strategy",
+        "summarize_signal_density",
+        "median_close",
+        "Direction",
+        "StrategySignal",
+        "StrategySpec"
+      ],
+      "purpose": "strategies",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.telegram_intel",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_telegram_intel"
+      ],
+      "output_artifacts": [
+        "data/v2_telegram_intel"
+      ],
+      "path": "intraday_scanner/v2/telegram_intel",
+      "primary_symbols": [
+        "main",
+        "SourceRecord",
+        "init",
+        "readiness",
+        "draft",
+        "send",
+        "test_send",
+        "verify",
+        "report",
+        "demo",
+        "build_command_center_pages"
+      ],
+      "purpose": "dry-run/env-gated status messaging",
+      "python_file_count": 3,
+      "risk_level": "medium",
+      "ui_relevance": "primary data source"
+    },
+    {
+      "cli_command": "py -m intraday_scanner.v2.titan",
+      "has_cli": true,
+      "input_artifacts": [
+        "data/v2_* artifacts",
+        "data/v2_titan"
+      ],
+      "output_artifacts": [
+        "data/v2_titan"
+      ],
+      "path": "intraday_scanner/v2/titan",
+      "primary_symbols": [
+        "main",
+        "TitanBuildResult",
+        "build_all"
+      ],
+      "purpose": "titan",
+      "python_file_count": 3,
+      "risk_level": "low",
+      "ui_relevance": "supporting"
+    }
+  ]
+}

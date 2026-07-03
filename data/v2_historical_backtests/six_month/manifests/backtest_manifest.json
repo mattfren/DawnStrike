@@ -1,0 +1,20 @@
+{
+  "asof": "2026-07-02T02:38:01.334145+00:00",
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "build_id": "historical_backtest_run_20260702T023801Z",
+  "created_at": "2026-07-02T02:38:01.334135+00:00",
+  "include_benchmarks": false,
+  "include_champions": false,
+  "include_shadow_challengers": true,
+  "live_trading_enabled": false,
+  "months": 6,
+  "normalized_path": "data/v2_historical_backtests/six_month/normalized/six_month_ohlcv.csv",
+  "paperops_mutation": false,
+  "research_only": true,
+  "schema_version": "v2.historical_backtest.run_manifest.v1",
+  "shadow_challenger_count": 15,
+  "status": "passed",
+  "strategies": [],
+  "strategy_count": 0,
+  "validation_triggered": false
+}

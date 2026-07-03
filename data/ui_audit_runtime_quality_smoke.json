@@ -1,0 +1,158 @@
+{
+  "summary": {
+    "route_count": 12,
+    "ok_count": 12,
+    "error_count": 0,
+    "console_error_count": 0,
+    "page_error_count": 0,
+    "request_failure_count": 0,
+    "bad_response_count": 0,
+    "dom_issue_count": 0
+  },
+  "rows": [
+    {
+      "source": ".pytest_full_tmp_1/test_alpha_cycle_cli_fixture_p0/alpha/web_collect/fixture_public_table/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_alpha_cycle_cli_fixture_p0/alpha/web_collect/fixture_public_table/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_alpha_cycle_cli_fixture_p0/alpha/web_collect/fixture_public_table/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_browser_grid_fixture_extr0/browser/rendered_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_browser_grid_fixture_extr0/browser/rendered_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_browser_grid_fixture_extr0/browser/rendered_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_browser_no_table_fixture_0/browser/rendered_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_browser_no_table_fixture_0/browser/rendered_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_browser_no_table_fixture_0/browser/rendered_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_browser_table_fixture_ext0/browser/rendered_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_browser_table_fixture_ext0/browser/rendered_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_browser_table_fixture_ext0/browser/rendered_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_investing_fixture_normali0/investing/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_investing_fixture_normali0/investing/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_investing_fixture_normali0/investing/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_marketwatch_fixture_repor0/marketwatch/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_marketwatch_fixture_repor0/marketwatch/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_marketwatch_fixture_repor0/marketwatch/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_stockanalysis_fixture_nor0/stockanalysis/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_stockanalysis_fixture_nor0/stockanalysis/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_stockanalysis_fixture_nor0/stockanalysis/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_tradingview_fixture_norma0/tradingview/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_tradingview_fixture_norma0/tradingview/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_tradingview_fixture_norma0/tradingview/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_web_auto_collect_preserve0/auto/fixture_public_table/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_web_auto_collect_preserve0/auto/fixture_public_table/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_web_auto_collect_preserve0/auto/fixture_public_table/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_web_auto_collect_public_t0/auto/fixture_public_table/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_web_auto_collect_public_t0/auto/fixture_public_table/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_web_auto_collect_public_t0/auto/fixture_public_table/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_web_ingest_missing_requir0/ingest/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_web_ingest_missing_requir0/ingest/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_web_ingest_missing_requir0/ingest/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    },
+    {
+      "source": ".pytest_full_tmp_1/test_web_ingest_public_table_o0/ingest/raw_source.html",
+      "group": ".pytest_full_tmp_1",
+      "audit_path": "site/.pytest_full_tmp_1/test_web_ingest_public_table_o0/ingest/raw_source.html",
+      "url": "http://127.0.0.1:18750/site/.pytest_full_tmp_1/test_web_ingest_public_table_o0/ingest/raw_source.html",
+      "status": "ok",
+      "console_errors": [],
+      "page_errors": [],
+      "request_failures": [],
+      "bad_responses": [],
+      "dom_issues": []
+    }
+  ]
+}

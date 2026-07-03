@@ -1,0 +1,69 @@
+{
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "metrics": {
+    "annualized_return_pct": 0.11732847,
+    "average_holding_period_bars": 17,
+    "average_loss": -560.36914107,
+    "average_r": 0.55525705,
+    "average_win": 1382.1857621,
+    "best_trade": 2857.41497152,
+    "calmar": 2.20767793,
+    "drawdown_duration_bars": 24,
+    "expectancy": 499.20626066,
+    "exposure_time_market": 0.24390244,
+    "fees_paid": 39.18500972,
+    "final_equity": 105491.26886725,
+    "initial_capital": 100000.0,
+    "max_drawdown_pct": -0.05314565,
+    "median_r": 0.01486507,
+    "payoff_ratio": 2.46656295,
+    "profit_factor": 2.95987554,
+    "sharpe": 1.6030982,
+    "slippage_estimate": 195.92648018,
+    "sortino": 1.81640471,
+    "total_return_pct": 0.05491269,
+    "trade_count": 11,
+    "volatility_annualized": 0.06985466,
+    "win_rate": 0.54545455,
+    "worst_trade": -1012.85922601
+  },
+  "schema_version": "v2.historical_backtest.strategy_result.v1",
+  "strategy": {
+    "compatible_timeframe": "1d",
+    "description": "Cross-sectional relative strength: rank symbols by volatility-adjusted momentum.",
+    "entry_logic": "Enter long when symbol ranks in the top 2 by ROC60 / vol20 and close[t] > SMA50[t].",
+    "exit_logic": "Exit on stop, target, or end-of-test liquidation.",
+    "indicators": [
+      "ROC(60)",
+      "RollingVolatility(20)",
+      "SMA(50)"
+    ],
+    "known_failure_modes": [
+      "universe selection bias",
+      "momentum crashes after crowded rotations",
+      "requires clean synchronized universe history"
+    ],
+    "parameters": {
+      "momentum_period": 60,
+      "sma_period": 50,
+      "top_n": 2,
+      "vol_period": 20
+    },
+    "position_sizing_assumption": "Fixed fractional equity risk from entry reference to stop.",
+    "required_data_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ],
+    "status": "experimental",
+    "stop_logic": "Stop = close[t] - 2.5 * ATR14[t].",
+    "strategy_id": "cross_sectional_relative_strength",
+    "target_logic": "Target = close[t] + 3.0 * initial risk.",
+    "validation_status": "fixture_backtested_only",
+    "version": "v1.0"
+  },
+  "validation_status": "not_validated_historical_backtest_only",
+  "warnings": []
+}

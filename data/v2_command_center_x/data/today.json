@@ -1,0 +1,112 @@
+{
+  "accepted_count": 0,
+  "blocked_count": 2,
+  "learning_summary": "passed",
+  "market_masters_summary": {
+    "build_id": "omega_market_masters_20260701T220908Z_9b978aaa",
+    "challenger_count": 8,
+    "methodology_count": 11,
+    "primitive_count": 8,
+    "promotion_result": "blocked_no_true_forward_sample",
+    "source_count": 17,
+    "status": "COMPLETE_MARKET_MASTERS_WIRED",
+    "validation_triggered": false
+  },
+  "near_setup_count": 0,
+  "next_action": "Inspect warnings, provider evidence, RiskHub blocks, and no-picks reasons.",
+  "no_pick_reasons": [
+    "1. RiskHub kill switch is active and status is blocked.",
+    "2. 2 candidate(s) were blocked by RiskHub or Decision Engine: no detailed blocked reason available",
+    "3. 5 strategy(s) are quarantined: bullish_fvg_continuation, donchian_breakout_20_10, failed_breakout_reversal_short, pullback_reclaim_uptrend, plus 1 more.",
+    "4. CommitBridge did not promote unsafe FillTruth overlay evidence into official PaperOps evidence.",
+    "5. Data/provider state is degraded or fallback-backed: ready_public_fallback_only / broker_or_vendor_intraday."
+  ],
+  "no_setup_count": 0,
+  "open_paper_count": 1,
+  "pending_paper_count": 0,
+  "run_date": "2026-07-01",
+  "scheduler_status": "passed",
+  "sentinel_status": "completed",
+  "source_artifacts": [
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_omega_sentinel/status/latest_status.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_scheduler/status/latest_status.json"
+    },
+    {
+      "exists": true,
+      "kind": "directory",
+      "path": "data/v2_forward_evidence/frozen_picks"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_paper_ops/state/pending_orders.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_paper_ops/state/open_positions.json"
+    },
+    {
+      "exists": true,
+      "kind": "directory",
+      "path": "data/v2_learning_foundry/lessons"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_market_masters/reports/report_latest.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_telegram_intel/messages/latest_message.json"
+    }
+  ],
+  "status": "warning",
+  "title": "Today",
+  "warnings": [
+    "AAPL: skipped incomplete daily bar 2026-06-29",
+    "AAPL: skipped incomplete daily bar 2026-06-30",
+    "AMZN: skipped incomplete daily bar 2026-06-29",
+    "AMZN: skipped incomplete daily bar 2026-06-30",
+    "MSFT: skipped incomplete daily bar 2026-06-29",
+    "MSFT: skipped incomplete daily bar 2026-06-30",
+    "NVDA: skipped incomplete daily bar 2026-06-29",
+    "NVDA: skipped incomplete daily bar 2026-06-30",
+    "QQQ: skipped incomplete daily bar 2026-06-29",
+    "QQQ: skipped incomplete daily bar 2026-06-30",
+    "SPY: skipped incomplete daily bar 2026-06-29",
+    "SPY: skipped incomplete daily bar 2026-06-30",
+    "commitbridge_blocks_unsafe_filltruth_commit",
+    "candidate_blocked_by_decision_engine",
+    "only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible",
+    "daily bar cannot prove intraday stop/target order",
+    "daily next-open fills do not prove intraday stop/target sequence",
+    "earliest_fill_date repaired from legacy calendar-day logic",
+    "intraday bar still approximates within-bar order",
+    "carry position marked to completed close; not realized",
+    "daily conservative model is approximate for same-bar stop/target order",
+    "execution model disagreement is non-zero",
+    "real intraday aggregate is not reconciled enough against DataTruth daily bars",
+    "blocked FillTruth proposals are not official PaperOps evidence",
+    "FillTruth has daily approximation evidence",
+    "FillTruth execution model disagreement exists",
+    "CommitBridge blocked unsafe FillTruth proposal",
+    "pending paper orders exist",
+    "no accepted candidates",
+    "candidates blocked by RiskHub or Decision Engine",
+    "no strategy validated",
+    "source missing: market_masters_eval",
+    "source missing: market_masters_shadow",
+    "source missing: market_masters_sync",
+    "source missing: frozen_picks"
+  ],
+  "watch_count": 40
+}

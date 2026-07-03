@@ -1,0 +1,68 @@
+{
+  "accounts": [
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "ts_momentum_sma_atr",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    },
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "donchian_breakout_20_10",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    },
+    {
+      "current_equity": 100145.97263,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "cross_sectional_relative_strength",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 145.97262999999873
+    },
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "pullback_reclaim_uptrend",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    },
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "volatility_contraction_breakout",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    },
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "failed_breakout_reversal_short",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    },
+    {
+      "current_equity": 100000.0,
+      "realized_pnl": 0.0,
+      "schema_version": "v2.strategy_paper_account.v1",
+      "starting_equity": 100000.0,
+      "strategy_id": "bullish_fvg_continuation",
+      "strategy_version": "v1.0",
+      "unrealized_pnl": 0
+    }
+  ],
+  "schema_version": "v2.paper_account_state.v1"
+}

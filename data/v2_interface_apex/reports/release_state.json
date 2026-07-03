@@ -1,0 +1,31 @@
+{
+  "browser_verification_status": "passed",
+  "build_id": "interface_apex_9f25f95e13797949",
+  "day_count": 92,
+  "final_status": "COMPLETE_INTERFACE_APEX",
+  "live_trading_enabled": false,
+  "month_count": 3,
+  "page_count": 347,
+  "prior_ui_roots_preserved": {
+    "command_center": true,
+    "command_center_x": true,
+    "command_center_x2": true,
+    "command_center_x3": true
+  },
+  "qa_status": "passed",
+  "quality_score": 100,
+  "research_only": true,
+  "schema_version": "v2.interface_apex.build_state.v1",
+  "status": "passed",
+  "strategy_count": 46,
+  "top_level_nav_count": 6,
+  "trade_count": 204,
+  "verify_status": "passed",
+  "what_remains_untrusted": [
+    "No strategy is validated for live execution.",
+    "Historical intraday backtests are research, not forward validation.",
+    "Daily-bar swing research is not same-session day trading.",
+    "Shadow challengers are not official paper strategies.",
+    "Local Telegram readiness is blocked_missing_telegram_env."
+  ]
+}

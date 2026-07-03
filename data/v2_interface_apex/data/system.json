@@ -1,0 +1,81 @@
+{
+  "data_quality_status": "artifact present; day-trade QA passed",
+  "evidence_chain_status": "Data quality artifact present; fill quality initialized; official gate artifact present",
+  "live_trading_disabled": true,
+  "provider_status": "ready_with_configured_provider",
+  "scheduled_tasks": [
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA After Close",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-02T16:35:01.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-03T16:35:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA After Close",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Morning Check",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-02T09:10:01.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-03T09:10:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Morning Check",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Verify",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-02T17:10:01.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-03T17:10:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Verify",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Watchdog",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-02T18:00:01.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-03T18:00:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Watchdog",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    }
+  ],
+  "secrets_safe": true,
+  "sentinel_status": "completed",
+  "telegram_status": "blocked_missing_telegram_env",
+  "warnings": [
+    "Missing artifact: data/v2_evidence_commit/manifests/evidence_commit_manifest.json",
+    "AAPL: skipped incomplete daily bar 2026-06-29",
+    "AAPL: skipped incomplete daily bar 2026-06-30",
+    "AMZN: skipped incomplete daily bar 2026-06-29",
+    "AMZN: skipped incomplete daily bar 2026-06-30",
+    "CommitBridge blocked unsafe FillTruth proposal",
+    "FillTruth execution model disagreement exists",
+    "FillTruth has daily approximation evidence",
+    "MSFT: skipped incomplete daily bar 2026-06-29",
+    "MSFT: skipped incomplete daily bar 2026-06-30",
+    "NVDA: skipped incomplete daily bar 2026-06-29",
+    "NVDA: skipped incomplete daily bar 2026-06-30",
+    "QQQ: skipped incomplete daily bar 2026-06-29",
+    "72 requested symbol/interval sessions are missing",
+    "155 sessions are partial"
+  ],
+  "watchdog_status": "passed"
+}

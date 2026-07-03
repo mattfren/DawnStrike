@@ -1,0 +1,54 @@
+{
+  "boundary": "Historical backtest only \u2014 not validated forward performance.",
+  "metrics": {
+    "annualized_return_pct": 0.0,
+    "average_holding_period_bars": 0.0,
+    "average_loss": 0.0,
+    "average_r": 0.0,
+    "average_win": 0.0,
+    "best_trade": 0.0,
+    "calmar": null,
+    "drawdown_duration_bars": 0,
+    "expectancy": 0.0,
+    "exposure_time_market": 0.0,
+    "fees_paid": 0,
+    "final_equity": 100000.0,
+    "initial_capital": 100000.0,
+    "max_drawdown_pct": 0.0,
+    "median_r": 0.0,
+    "payoff_ratio": null,
+    "profit_factor": null,
+    "sharpe": null,
+    "slippage_estimate": 0,
+    "sortino": null,
+    "total_return_pct": 0.0,
+    "trade_count": 0,
+    "volatility_annualized": 0.0,
+    "win_rate": 0.0,
+    "worst_trade": 0.0
+  },
+  "schema_version": "v2.historical_backtest.strategy_result.v1",
+  "strategy": {
+    "compatible_timeframe": "1d",
+    "description": "No-trade cash baseline.",
+    "entry_logic": "Never enters a position.",
+    "exit_logic": "Not applicable.",
+    "indicators": [
+      "none"
+    ],
+    "known_failure_modes": [
+      "does not measure opportunity cost except through comparison"
+    ],
+    "parameters": {},
+    "position_sizing_assumption": "Capital remains in cash.",
+    "required_data_fields": [],
+    "status": "baseline",
+    "stop_logic": "Not applicable.",
+    "strategy_id": "cash_no_trade_baseline",
+    "target_logic": "Not applicable.",
+    "validation_status": "baseline_only",
+    "version": "v1.0"
+  },
+  "validation_status": "not_validated_historical_backtest_only",
+  "warnings": []
+}

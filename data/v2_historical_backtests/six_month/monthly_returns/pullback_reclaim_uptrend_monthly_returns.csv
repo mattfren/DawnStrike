@@ -1,0 +1,8 @@
+strategy_id,month,start_equity,end_equity,return_pct
+pullback_reclaim_uptrend,2026-01,100000,100000,0
+pullback_reclaim_uptrend,2026-02,100000,100000,0
+pullback_reclaim_uptrend,2026-03,100000,100000,0
+pullback_reclaim_uptrend,2026-04,100000,100000,0
+pullback_reclaim_uptrend,2026-05,100000,101437.4739,0.01437474
+pullback_reclaim_uptrend,2026-06,101091.3236,98568.3218,-0.02495765
+pullback_reclaim_uptrend,2026-07,98568.3218,98568.3218,0

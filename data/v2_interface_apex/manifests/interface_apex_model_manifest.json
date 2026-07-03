@@ -1,0 +1,21 @@
+{
+  "build_id": "interface_apex_ca6b9c707ca65794",
+  "dashboard": "data/v2_interface_apex/index.html",
+  "day_count": 92,
+  "month_count": 3,
+  "nav": [
+    "Mission",
+    "Calendar",
+    "Strategies",
+    "Trades",
+    "Intelligence",
+    "System"
+  ],
+  "output_root": "data/v2_interface_apex",
+  "page_count": 0,
+  "pages": [],
+  "schema_version": "v2.interface_apex.manifest.v1",
+  "strategy_count": 46,
+  "top_level_nav_count": 6,
+  "trade_count": 204
+}

@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dawnstrike - Message Quality</title>
+<style>
+body { margin: 0; font-family: Arial, sans-serif; color: #20242a; background: #f7f8fa; }
+header { background: #111827; color: white; padding: 16px 24px; }
+nav { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+nav a { color: #d8e2ff; text-decoration: none; font-size: 14px; }
+.boundary { display: block; color: #c7d2fe; font-size: 13px; margin-top: 6px; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px; }
+section { background: white; border: 1px solid #d9dee7; border-radius: 6px; padding: 20px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }
+th { background: #f1f5f9; }
+pre { white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; padding: 12px; }
+</style>
+<style id="dawnstrike-apex-pro-route-tokens">
+:root {
+  --apex-bg: #071013;
+  --apex-panel: #0d171b;
+  --apex-panel-2: #111f24;
+  --apex-line: #24414a;
+  --apex-text: #edf7f7;
+  --apex-muted: #94abb0;
+  --apex-accent: #47d7b2;
+  --apex-warn: #f0bf5b;
+  --apex-danger: #ff6f73;
+  --apex-info: #70a7ff;
+  --apex-radius: 8px;
+  --apex-sidebar: 238px;
+  --apex-rail: 292px;
+}
+body.apex-pro-route {
+  background: var(--apex-bg);
+  color: var(--apex-text);
+  min-height: 100vh;
+}
+body.apex-pro-route > aside.apex-shell,
+body.apex-pro-route > aside.side-shell {
+  display: none !important;
+}
+body.apex-pro-route > main {
+  margin-left: var(--apex-sidebar) !important;
+  margin-right: var(--apex-rail) !important;
+  max-width: none !important;
+  padding-top: 150px !important;
+  height: calc(100vh - 20px) !important;
+  overflow: auto !important;
+}
+body.apex-pro-route a:focus-visible,
+body.apex-pro-route button:focus-visible,
+body.apex-pro-route summary:focus-visible,
+body.apex-pro-route [tabindex]:focus-visible {
+  outline: 3px solid var(--apex-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 6px rgba(71, 215, 178, .18) !important;
+}
+.apex-pro-skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 10000;
+  transform: translateY(-160%);
+  background: var(--apex-accent);
+  color: #03100d;
+  padding: 10px 12px;
+  border-radius: var(--apex-radius);
+  font-weight: 800;
+}
+.apex-pro-skip:focus-visible { transform: translateY(0); }
+.apex-pro-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 9990;
+  width: var(--apex-sidebar);
+  box-sizing: border-box;
+  padding: 18px;
+  border-right: 1px solid var(--apex-line);
+  background: linear-gradient(180deg, #071013, #0b171a);
+}
+.apex-pro-brand {
+  display: block;
+  color: var(--apex-text);
+  text-decoration: none;
+  margin-bottom: 18px;
+}
+.apex-pro-brand span {
+  display: block;
+  color: var(--apex-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.apex-pro-brand strong { display: block; font-size: 24px; }
+.apex-pro-nav nav {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.apex-pro-nav nav a {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  padding: 10px 11px;
+  color: var(--apex-text);
+  background: var(--apex-panel);
+  text-decoration: none;
+}
+.apex-pro-nav p {
+  color: var(--apex-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.apex-pro-statusbar {
+  position: fixed;
+  z-index: 9985;
+  left: var(--apex-sidebar);
+  right: 0;
+  top: 0;
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(7, 16, 19, .96);
+}
+.apex-pro-statusbar span,
+.apex-pro-badge-row span {
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--apex-text);
+  background: var(--apex-panel-2);
+  font-size: 12px;
+}
+.apex-pro-content-header {
+  position: fixed;
+  z-index: 9980;
+  left: var(--apex-sidebar);
+  right: var(--apex-rail);
+  top: 43px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--apex-line);
+  background: rgba(9, 19, 22, .97);
+}
+.apex-pro-kicker {
+  color: var(--apex-muted);
+  font-size: 11px;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+.apex-pro-content-header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+.apex-pro-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.apex-pro-next-action {
+  color: var(--apex-muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+.apex-pro-evidence-rail {
+  position: fixed;
+  z-index: 9975;
+  top: 43px;
+  right: 0;
+  bottom: 0;
+  width: var(--apex-rail);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--apex-line);
+  background: #091417;
+}
+.apex-pro-evidence-rail h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.apex-pro-evidence-rail dl,
+.apex-pro-evidence-rail div {
+  display: grid;
+  gap: 7px;
+}
+.apex-pro-evidence-rail div {
+  border: 1px solid var(--apex-line);
+  border-radius: var(--apex-radius);
+  background: var(--apex-panel);
+  padding: 10px;
+}
+.apex-pro-evidence-rail dt {
+  color: var(--apex-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-pro-evidence-rail dd {
+  margin: 0;
+  color: var(--apex-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.apex-pro-dev-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--apex-warn);
+  border-radius: var(--apex-radius);
+  background: rgba(240, 191, 91, .12);
+  color: var(--apex-warn);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.apex-pro-audit-footer {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  border-top: 1px solid var(--apex-line);
+  background: #091417;
+  color: var(--apex-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+}
+.apex-pro-generated-h1 {
+  margin-left: var(--apex-sidebar);
+  margin-right: var(--apex-rail);
+  padding-top: 150px;
+}
+@media (max-width: 1100px) {
+  :root { --apex-sidebar: 0px; --apex-rail: 0px; }
+  .apex-pro-nav,
+  .apex-pro-evidence-rail {
+    position: static;
+    width: auto;
+    border: 0;
+  }
+  .apex-pro-statusbar,
+  .apex-pro-content-header {
+    position: static;
+    left: auto;
+    right: auto;
+  }
+  body.apex-pro-route > main {
+    margin: 0 !important;
+    padding-top: 16px !important;
+    height: 72vh !important;
+    overflow: auto !important;
+  }
+  .apex-pro-audit-footer {
+    margin: 0;
+  }
+}
+</style>
+</head>
+<body class="apex-pro-route" data-apex-pro-hardened="true" data-apex-pro-boundary="legacy-command-center-archive" data-apex-pro-family="application_subpage">
+<!-- dawnstrike-apex-pro-audit-shell:start -->
+<a class="apex-pro-skip" href="#apex-pro-route-content">Skip to content</a>
+<aside class="apex-pro-nav" aria-label="Apex Pro route boundary">
+  <a class="apex-pro-brand" href="/"><span>Dawnstrike</span><strong>Apex Pro</strong></a>
+  <nav>
+    <a href="/" aria-label="Open canonical Streamlit dashboard">Dashboard</a>
+    <a href="#apex-pro-route-evidence">Evidence</a>
+    <a href="#apex-pro-route-audit">Audit</a>
+  </nav>
+  <p>Static route archive. Production trading stays in the single operator dashboard.</p>
+</aside>
+<section class="apex-pro-statusbar" role="status" aria-live="polite">
+  <span>Archived static route</span>
+  <span>Freshness: route audit snapshot 2026-07-03</span>
+  <span>Provider: local artifact manifest</span>
+  <span>Focus: visible keyboard states enabled</span>
+</section>
+<header class="apex-pro-content-header" id="apex-pro-route-content">
+
+  <p class="apex-pro-kicker">application_subpage / legacy-command-center-archive</p>
+  <h1>Message Quality</h1>
+  <div class="apex-pro-badge-row" aria-label="Route provenance">
+    <span>Freshness: audit snapshot 2026-07-03</span>
+    <span>Source/provider: local generated HTML artifact</span>
+    <span>Model/strategy version: Legacy command module archive template</span>
+    <span>Risk state: archive review required</span>
+  </div>
+  <p class="apex-pro-next-action">Next safe action: Open the canonical dashboard for current operator state.</p>
+</header>
+<aside class="apex-pro-evidence-rail" id="apex-pro-route-evidence" aria-label="Evidence rail">
+  <h2>Evidence</h2>
+  <dl>
+    <div><dt>Path</dt><dd>data/v2_command_center/message_quality.html</dd></div>
+    <div><dt>Template</dt><dd>Legacy command module archive template</dd></div>
+    <div><dt>Visual proof</dt><dd>ok; desktop_fullpage; 1440x1000</dd></div>
+    <div><dt>Screenshot</dt><dd>screenshots/desktop_fullpage/data/v2_command_center/message_quality.png</dd></div>
+  </dl>
+</aside>
+<!-- dawnstrike-apex-pro-audit-shell:end -->
+<header><strong>Dawnstrike Telegram Intelligence</strong><span class="boundary">Research-only; no live execution.</span><nav><a href='index.html'>Home</a><a href='telegram_intel.html'>Telegram</a><a href='telegram_messages.html'>Messages</a><a href='telegram_readiness.html'>Readiness</a><a href='message_quality.html'>Quality</a></nav></header>
+<main><section><h1>Message Quality</h1><h2>Telegram Message Quality</h2>
+<p>Status: `passed`</p>
+<p>Score: `100 / 100`</p>
+<p>Threshold: `90 / 100`</p>
+<p>Kind: `morning`</p>
+<p>Message hash: `ce7cbb602ba0de888b26274da7cc5935c9b175a4bb047834a51399bae6f084b7`</p>
+<h2>Checks</h2>
+<ul>
+<li>has_commitbridge_status: `True`</li>
+<li>has_dashboard_path: `True`</li>
+<li>has_filltruth_status: `True`</li>
+<li>has_learning_lesson: `True`</li>
+<li>has_next_action: `True`</li>
+<li>has_no_picks_reasons: `True`</li>
+<li>has_paperops_status: `True`</li>
+<li>has_pick_counts: `True`</li>
+<li>has_provider_status: `True`</li>
+<li>has_riskhub_status: `True`</li>
+<li>has_run_status: `True`</li>
+<li>has_strategy_evidence: `True`</li>
+<li>no_secrets: `True`</li>
+<li>parse_mode_safe: `True`</li>
+<li>under_length_limit: `True`</li>
+</ul>
+<h2>Warnings</h2>
+<ul>
+<li>None.</li>
+</ul></section></main>
+<!-- dawnstrike-apex-pro-audit-footer:start -->
+<footer class="apex-pro-audit-footer" id="apex-pro-route-audit">
+  <strong>Audit trail</strong>
+  <span>Ledger row 112; family application_subpage; boundary legacy-command-center-archive.</span>
+  <span>Research-only. Live execution disabled. Missing truth must remain n/a or pending.</span>
+</footer>
+<!-- dawnstrike-apex-pro-audit-footer:end -->
+</body>
+</html>
