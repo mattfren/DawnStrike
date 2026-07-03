@@ -345,7 +345,6 @@ def _layout(*, title: str, body: str, data: dict[str, Any], build_id: str, rel_a
   <title>Dawnstrike X3 - {_esc(title)}</title>
   <link rel="icon" href="{rel_assets}/x3_favicon.svg?v={_esc(build_id)}" type="image/svg+xml">
   <link rel="stylesheet" href="{rel_assets}/x3.css?v={_esc(build_id)}">
-  <style>{_ops_inline_css()}</style>
 </head>
 <body>
 <aside class="side-shell">
@@ -357,7 +356,6 @@ def _layout(*, title: str, body: str, data: dict[str, Any], build_id: str, rel_a
 <main>
   <header class="topbar">
     <div><span>Latest artifact day</span><strong>{latest}</strong></div>
-    <div class="backend-pill" data-x3-backend-pill><span>Vercel backend</span><strong data-x3-backend-status>checking</strong></div>
     <a class="toplink" href="{_root_link(path, "pages/system.html")}">System check</a>
   </header>
   <section class="boundary-strip">
@@ -372,10 +370,6 @@ def _layout(*, title: str, body: str, data: dict[str, Any], build_id: str, rel_a
 </body>
 </html>
 """
-
-
-def _ops_inline_css() -> str:
-    return """.backend-pill{border:1px solid #244054;border-radius:8px;background:#0b141d;padding:8px 10px;min-width:150px}.backend-pill span,.ops-grid span{display:block;color:#8da1b7;font-size:10px;text-transform:uppercase}.backend-pill strong{display:block;font-size:13px;color:#d8f7ff;margin-top:2px}.ops-panel{border:1px solid #244054;border-radius:8px;background:#0b111a;margin:16px 0;padding:16px;display:grid;grid-template-columns:minmax(0,1fr)minmax(420px,1.2fr);gap:16px;align-items:start}.ops-panel h2{font-size:22px;margin:0 0 8px}.ops-panel p{color:#c7d8e8;line-height:1.5;margin:0}.ops-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.ops-grid article{border:1px solid #213245;border-radius:8px;background:#0d131c;padding:12px;min-height:92px}.ops-grid strong{display:block;font-size:18px;margin:5px 0;overflow-wrap:anywhere}.ops-grid em{display:block;color:#8da1b7;font-size:12px;font-style:normal;line-height:1.35}.ops-grid [data-state=ok] strong,.backend-pill[data-state=ok] strong{color:#35e6a1}.ops-grid [data-state=warn] strong,.backend-pill[data-state=warn] strong{color:#f6c453}.ops-grid [data-state=bad] strong,.backend-pill[data-state=bad] strong{color:#ff5d74}@media(max-width:1000px){.ops-panel{grid-template-columns:1fr}.ops-grid{grid-template-columns:1fr}.backend-pill{width:100%}}"""
 
 
 def _nav(path: Path) -> str:
@@ -421,7 +415,6 @@ def _home_body(data: dict[str, Any], *, actions_base: str) -> str:
   <article><span>Next scheduled run</span><strong>{_esc(next_run["label"])}</strong><em>{_esc(next_run["time"])}</em></article>
   <article><span>Learning note</span><strong>{_esc(learning["title"])}</strong><em>{_esc(learning["body"])}</em></article>
 </section>
-{_backend_panel()}
 <section class="home-grid">
   <a class="big-card" href="{actions_base}calendar.html"><span>Performance calendar</span><strong>See the month story</strong><p>Daily return, trade count, warning, and no-trade states are easiest to understand by day.</p></a>
   <a class="big-card" href="{actions_base}strategies.html"><span>Strategy report cards</span><strong>What is working?</strong><p>Day-trade research is separated from swing research and shadow challengers.</p></a>
@@ -429,7 +422,7 @@ def _home_body(data: dict[str, Any], *, actions_base: str) -> str:
 </section>
 <section class="trust-panel">
   <strong>Still untrusted</strong>
-  <p>No strategy is validated. Day-trade backtests are historical research. Shadow challengers are not official strategies. The public dashboard cannot trade, send Telegram messages, or mutate paper records. Authenticated Vercel functions can run the read-only scanner, provider, and Telegram intelligence workflows.</p>
+  <p>No strategy is validated. Day-trade backtests are historical research. Shadow challengers are not official strategies. The dashboard cannot trade, send Telegram messages, fetch providers, or mutate paper records.</p>
 </section>
 """
 
@@ -610,11 +603,10 @@ def _system_body(data: dict[str, Any], *, output_root: Path) -> str:
   <article><span>X2 preserved</span><strong>{_esc(str(Path("data/v2_command_center_x2/index.html").exists()))}</strong><em><a href="{_esc(_repo_artifact_href("data/v2_command_center_x2/index.html", start_dir=page_dir))}">Open X2 advanced dashboard</a></em></article>
 </section>
 <section class="story-section"><h2>Advanced dashboard</h2><p>Command Center X2 remains available as the advanced technical dashboard: <a href="{_esc(_repo_artifact_href("data/v2_command_center_x2/index.html", start_dir=page_dir))}">Open Command Center X2</a>.</p></section>
-{_backend_panel()}
 <section class="story-section"><h2>Plain-English system map</h2><div class="card-grid system-grid">{flow or '<article class="soft-card"><strong>No system-flow cards found.</strong></article>'}</div></section>
 <section class="split-story">
   <article><h2>Translation dictionary</h2><ul>{translation_rows}</ul></article>
-  <article><h2>Diagnostics</h2><p>Warnings remain visible, live trading is disabled, public UI actions cannot send Telegram, and paper records are not mutated. Vercel API routes handle scanner, provider, and Telegram operations behind cron/admin authorization.</p></article>
+  <article><h2>Diagnostics</h2><p>Warnings remain visible, live trading is disabled, provider fetches are not run from this UI, Telegram sends are not available, and paper records are not mutated.</p></article>
 </section>
 <details class="advanced-drawer">
   <summary>Advanced artifact links</summary>
@@ -923,26 +915,6 @@ def _system_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _backend_panel() -> str:
-    return """
-<section class="ops-panel" data-x3-ops>
-  <div>
-    <p class="eyebrow">Production wiring</p>
-    <h2>Vercel is wired to the Python scanner and Telegram layer.</h2>
-    <p>The public page reads live backend health. Scanner, provider, and Telegram run paths stay behind cron/admin authorization, with live trading disabled.</p>
-  </div>
-  <div class="ops-grid">
-    <article data-x3-backend-card><span>Backend</span><strong data-x3-backend-status>checking</strong><em data-x3-backend-detail>/api/health</em></article>
-    <article data-x3-telegram-card><span>Telegram</span><strong data-x3-telegram-status>checking</strong><em data-x3-telegram-detail>/api/readiness</em></article>
-    <article data-x3-scanner-card><span>Python scanner</span><strong data-x3-scanner-status>checking</strong><em data-x3-scanner-detail>OMEGA Sentinel</em></article>
-    <article data-x3-provider-card><span>Market data</span><strong data-x3-provider-status>checking</strong><em data-x3-provider-detail>AutoData readiness</em></article>
-    <article data-x3-cron-card><span>Vercel cron</span><strong data-x3-cron-status>checking</strong><em data-x3-cron-detail>morning + after-close</em></article>
-    <article data-x3-admin-card><span>Admin gate</span><strong data-x3-admin-status>checking</strong><em data-x3-admin-detail>manual scanner/send routes</em></article>
-  </div>
-</section>
-"""
-
-
 def _untrusted_items(data: dict[str, Any]) -> list[str]:
     warnings = [str(item) for item in _list(_dict(data.get("app")).get("warnings"))]
     base = [
@@ -983,7 +955,7 @@ def _base_css() -> str:
 
 
 def _base_js() -> str:
-    return """document.addEventListener('DOMContentLoaded',()=>{const search=document.querySelector('[data-x3-search]');if(search){const scope=document.querySelector('[data-filter-scope]')||document;search.addEventListener('input',()=>{const q=search.value.toLowerCase();for(const item of scope.querySelectorAll('[data-filter-item]')){item.hidden=q&&!item.textContent.toLowerCase().includes(q)&&!(item.getAttribute('data-filter-text')||'').toLowerCase().includes(q);}})}for(const button of document.querySelectorAll('[data-filter-button]')){button.addEventListener('click',()=>{const q=button.getAttribute('data-filter-button')||'';for(const item of document.querySelectorAll('[data-filter-item]')){item.hidden=q!=='all'&&!item.textContent.toLowerCase().includes(q);}})}for(const select of document.querySelectorAll('[data-x3-select]')){select.addEventListener('change',()=>{const result=document.querySelector('[data-x3-select=\"result\"]')?.value||'';const exit=document.querySelector('[data-x3-select=\"exit\"]')?.value||'';for(const item of document.querySelectorAll('[data-filter-item]')){const okResult=!result||item.getAttribute('data-result')===result;const okExit=!exit||(item.getAttribute('data-exit')||'').includes(exit);item.hidden=!(okResult&&okExit);}})}const setText=(sel,text)=>document.querySelectorAll(sel).forEach(el=>{el.textContent=text});const setState=(sel,state)=>document.querySelectorAll(sel).forEach(el=>{el.setAttribute('data-state',state)});const normState=value=>{const v=String(value||'').toLowerCase();if(v.includes('failed')||v.includes('blocked')||v.includes('missing'))return'bad';if(v.includes('warning')||v.includes('dry')||v.includes('disabled'))return'warn';return'ok'};const setDetail=(sel,text)=>document.querySelectorAll(sel).forEach(el=>{el.textContent=text});if(location.protocol==='file:'){setText('[data-x3-backend-status]','static-only');setText('[data-x3-telegram-status]','not checked');setText('[data-x3-scanner-status]','not checked');setText('[data-x3-provider-status]','not checked');setText('[data-x3-cron-status]','not checked');setText('[data-x3-admin-status]','not checked');setState('[data-x3-backend-pill],[data-x3-backend-card]','warn');return}Promise.all([fetch('/api/health',{cache:'no-store'}).then(r=>r.json()),fetch('/api/readiness',{cache:'no-store'}).then(r=>r.json())]).then(([health,ready])=>{const backend=health.status||'unknown';const telegram=ready.telegram?.status||'unknown';const scanner=ready.sentinel?.status||ready.doctor?.status||'unknown';const provider=ready.autodata?.status||'unknown';const env=health.env||{};const present=env.present||{};setText('[data-x3-backend-status]',backend);setText('[data-x3-telegram-status]',telegram);setText('[data-x3-scanner-status]',scanner);setText('[data-x3-provider-status]',provider);setText('[data-x3-cron-status]',present.CRON_SECRET?'configured':'missing');setText('[data-x3-admin-status]',present.DAWNSTRIKE_ADMIN_TOKEN?'configured':'missing');setDetail('[data-x3-backend-detail]',`live trading: ${health.live_trading_enabled===true}`);setDetail('[data-x3-telegram-detail]',env.telegram_ready_for_external_send?'external send ready':'dry-run/disabled or env-gated');setDetail('[data-x3-scanner-detail]',`doctor: ${ready.doctor?.status||'unknown'}`);setDetail('[data-x3-provider-detail]',`configured providers: ${ready.autodata?.configured_count??'n/a'}`);setDetail('[data-x3-cron-detail]','morning 14:10 UTC / after-close 21:35 UTC');setDetail('[data-x3-admin-detail]','required for manual operations');setState('[data-x3-backend-pill],[data-x3-backend-card]',normState(backend));setState('[data-x3-telegram-card]',normState(telegram));setState('[data-x3-scanner-card]',normState(scanner));setState('[data-x3-provider-card]',normState(provider));setState('[data-x3-cron-card]',present.CRON_SECRET?'ok':'bad');setState('[data-x3-admin-card]',present.DAWNSTRIKE_ADMIN_TOKEN?'ok':'bad')}).catch(()=>{setText('[data-x3-backend-status]','offline');setText('[data-x3-telegram-status]','not reached');setText('[data-x3-scanner-status]','not reached');setText('[data-x3-provider-status]','not reached');setText('[data-x3-cron-status]','not reached');setText('[data-x3-admin-status]','not reached');setState('[data-x3-backend-pill],[data-x3-backend-card],[data-x3-telegram-card],[data-x3-scanner-card],[data-x3-provider-card],[data-x3-cron-card],[data-x3-admin-card]','bad')})});"""
+    return """document.addEventListener('DOMContentLoaded',()=>{const search=document.querySelector('[data-x3-search]');if(search){const scope=document.querySelector('[data-filter-scope]')||document;search.addEventListener('input',()=>{const q=search.value.toLowerCase();for(const item of scope.querySelectorAll('[data-filter-item]')){item.hidden=q&&!item.textContent.toLowerCase().includes(q)&&!(item.getAttribute('data-filter-text')||'').toLowerCase().includes(q);}})}for(const button of document.querySelectorAll('[data-filter-button]')){button.addEventListener('click',()=>{const q=button.getAttribute('data-filter-button')||'';for(const item of document.querySelectorAll('[data-filter-item]')){item.hidden=q!=='all'&&!item.textContent.toLowerCase().includes(q);}})}for(const select of document.querySelectorAll('[data-x3-select]')){select.addEventListener('change',()=>{const result=document.querySelector('[data-x3-select=\"result\"]')?.value||'';const exit=document.querySelector('[data-x3-select=\"exit\"]')?.value||'';for(const item of document.querySelectorAll('[data-filter-item]')){const okResult=!result||item.getAttribute('data-result')===result;const okExit=!exit||(item.getAttribute('data-exit')||'').includes(exit);item.hidden=!(okResult&&okExit);}})}});"""
 
 
 def _favicon_svg() -> str:
@@ -1137,7 +1109,7 @@ X3 is a static, local, read-only story layer over existing Dawnstrike artifacts.
 
 It keeps five primary navigation items: Home, Calendar, Strategies, Trades, and System. Technical concepts such as FillTruth, CommitBridge, PaperOps, RiskHub, Learning Foundry, Market Masters, AutoData, and raw artifacts are translated into product language on primary pages and moved into System for drill-down.
 
-X3 public pages do not trade, send Telegram messages, mutate SQLite, change PaperOps, recompute strategy signals, or enable live trading. In the Vercel deployment, authenticated API routes can run OMEGA Sentinel, AutoData, Learning Foundry, Market Masters, and Telegram Intelligence workflows behind cron/admin authorization.
+X3 does not fetch providers, send Telegram messages, mutate SQLite, change PaperOps, recompute strategy signals, or enable live trading.
 """
 
 
@@ -1151,7 +1123,7 @@ Open `data/v2_command_center_x3/index.html` directly or serve `data/v2_command_c
 - Day pages explain daily returns, no-pick reasons, evidence quality, and tomorrow watch items.
 - Strategies separates day-trade research, shadow challengers, and swing research.
 - Trades shows a clean read-only blotter.
-- System contains live Vercel backend readiness, scheduler, provider, Telegram, learning, advanced artifacts, and links back to X2.
+- System contains scheduler, provider, Telegram, learning, advanced artifacts, and links back to X2.
 
 Everything remains research-only. No strategy is validated unless future artifacts prove it.
 """
