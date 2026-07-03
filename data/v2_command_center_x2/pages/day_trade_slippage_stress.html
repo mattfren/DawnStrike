@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike X2 - Day Trade Slippage Stress</title>
+  <link rel="icon" href="../assets/favicon.svg?v=command_center_x2_20260703t035444z" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/x2.css?v=command_center_x2_20260703t035444z">
+  <link rel="stylesheet" href="../assets/x2_components.css?v=command_center_x2_20260703t035444z">
+</head>
+<body>
+<aside class="app-shell">
+  <a class="brand" href="../index.html">Dawnstrike <span>X2</span></a>
+  <div class="trust-banner"><strong>Research-only</strong><span>Paper-only evidence. Live trading disabled.</span></div>
+  <nav><a href="../index.html">Mission</a>
+<a href="today.html">Today</a>
+<a href="calendar.html">Calendar</a>
+<a href="strategies.html">Strategies</a>
+<a href="no_picks.html">No Picks</a>
+<a href="learning.html">Learning</a>
+<a href="market_masters.html">Market Masters</a>
+<a href="risk.html">Risk</a>
+<a href="evidence.html">Evidence</a>
+<a href="automation.html">Automation</a>
+<a href="telegram.html">Telegram</a>
+<a href="reports.html">Reports</a>
+<a href="day_trade_lab.html">Day Trade Lab</a>
+<a href="day_trade_strategies.html">Day Strategies</a>
+<a href="day_trade_robustness.html">Day Robustness</a>
+<a href="day_trade_refinements.html">Day Refinements</a>
+<a href="day_trade_trades.html">Day Trades</a>
+<a href="six_month_backtest.html">Backtest</a>
+<a href="system_map.html">System</a></nav>
+</aside>
+<main>
+  <header class="top-status">
+    <div><span>X2 Command Center</span><strong>Day Trade Slippage Stress</strong></div>
+    <div class="status-meta"><span>Latest artifact day</span><strong>2026-07-01</strong></div>
+    <a class="build-chip" href="../../v2_command_center_x3/index.html">Open X3</a>
+    <div class="build-chip">Build command_center_x2_20260703T035444Z</div>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only / paper-only</span>
+    <span>Live trading disabled</span>
+    <span>No strategy validated</span>
+    <span>Shadow challengers are not official</span>
+  </section>
+  <div class="content-frame">
+
+
+<section class="hero-story compact">
+  <div><div class="section-label">Day Trade Slippage Stress</div>
+  <h1>Costs can erase an intraday edge.</h1><p>Historical day-trade backtest only - not validated. These rows replay the corpus under current slippage, 2x slippage, 3x slippage, fixed spread, adverse fill, and commission-increase assumptions.</p></div>
+  <div class="pulse-card"><span>Failed rows</span><strong>73</strong><em>15 strategy/interval failures</em></div>
+</section>
+
+<section class="metric-grid backtest-metrics">
+  <div class="metric-card"><span>Stress rows</span><strong>90</strong><em>Local replay only</em></div>
+  <div class="metric-card"><span>Failed strategy intervals</span><strong>15</strong><em>Any negative stress result</em></div>
+  <div class="metric-card"><span>Report result</span><strong>38</strong><em>Failed stress rows</em></div>
+  <div class="metric-card"><span>Trust boundary</span><strong>Not validated</strong><em>Not broker fill proof</em></div>
+</section>
+<section class="toolbar"><input data-x2-search aria-label="Filter slippage stress rows" placeholder="Filter stress rows"></section>
+<section class="panel table-panel" data-filter-scope>
+  <div class="panel-heading"><div><div class="section-label">Slippage Stress</div><h2>Cost-adjusted replay by strategy</h2></div></div>
+  <div class="table-scroll"><table class="backtest-table">
+    <thead><tr><th>Strategy</th><th>Interval</th><th>Stress</th><th>Return</th><th>Expectancy</th><th>PF</th><th>Win</th><th>Drawdown</th><th>Result</th></tr></thead>
+    <tbody><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-65.16%</td>
+  <td class="return-negative">-2.747R</td>
+  <td>0.05</td>
+  <td>10.00%</td>
+  <td>-65.16%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-positive">1.50%</td>
+  <td class="return-positive">0.006R</td>
+  <td>1.07</td>
+  <td>43.94%</td>
+  <td>-1.53%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">2.16%</td>
+  <td class="return-positive">0.033R</td>
+  <td>1.10</td>
+  <td>43.94%</td>
+  <td>-1.41%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-63.84%</td>
+  <td class="return-negative">-2.692R</td>
+  <td>0.05</td>
+  <td>10.45%</td>
+  <td>-63.84%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-positive">0.84%</td>
+  <td class="return-negative">-0.021R</td>
+  <td>1.04</td>
+  <td>43.94%</td>
+  <td>-1.73%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-0.48%</td>
+  <td class="return-negative">-0.076R</td>
+  <td>0.98</td>
+  <td>43.94%</td>
+  <td>-2.11%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-57.79%</td>
+  <td class="return-negative">-1.999R</td>
+  <td>0.10</td>
+  <td>17.45%</td>
+  <td>-57.79%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-2.24%</td>
+  <td class="return-negative">-0.064R</td>
+  <td>0.92</td>
+  <td>42.36%</td>
+  <td>-3.08%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-1.69%</td>
+  <td class="return-negative">-0.045R</td>
+  <td>0.94</td>
+  <td>42.36%</td>
+  <td>-3.00%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-56.69%</td>
+  <td class="return-negative">-1.961R</td>
+  <td>0.11</td>
+  <td>18.18%</td>
+  <td>-56.69%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-2.79%</td>
+  <td class="return-negative">-0.083R</td>
+  <td>0.90</td>
+  <td>42.36%</td>
+  <td>-3.35%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-3.89%</td>
+  <td class="return-negative">-0.122R</td>
+  <td>0.86</td>
+  <td>42.36%</td>
+  <td>-4.35%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-80.65%</td>
+  <td class="return-negative">-3.874R</td>
+  <td>0.01</td>
+  <td>3.42%</td>
+  <td>-80.65%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-3.89%</td>
+  <td class="return-negative">-0.103R</td>
+  <td>0.82</td>
+  <td>35.66%</td>
+  <td>-3.92%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-3.13%</td>
+  <td class="return-negative">-0.066R</td>
+  <td>0.85</td>
+  <td>35.66%</td>
+  <td>-3.16%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-79.13%</td>
+  <td class="return-negative">-3.799R</td>
+  <td>0.01</td>
+  <td>4.47%</td>
+  <td>-79.13%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-4.65%</td>
+  <td class="return-negative">-0.141R</td>
+  <td>0.78</td>
+  <td>35.66%</td>
+  <td>-4.68%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-6.17%</td>
+  <td class="return-negative">-0.215R</td>
+  <td>0.73</td>
+  <td>35.66%</td>
+  <td>-6.19%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-79.21%</td>
+  <td class="return-negative">-2.904R</td>
+  <td>0.04</td>
+  <td>9.58%</td>
+  <td>-79.21%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-2.24%</td>
+  <td class="return-negative">-0.120R</td>
+  <td>0.91</td>
+  <td>37.93%</td>
+  <td>-4.02%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-1.48%</td>
+  <td class="return-negative">-0.093R</td>
+  <td>0.94</td>
+  <td>37.93%</td>
+  <td>-3.66%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-77.68%</td>
+  <td class="return-negative">-2.849R</td>
+  <td>0.04</td>
+  <td>11.02%</td>
+  <td>-77.68%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-3.01%</td>
+  <td class="return-negative">-0.148R</td>
+  <td>0.89</td>
+  <td>37.93%</td>
+  <td>-4.43%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-4.53%</td>
+  <td class="return-negative">-0.203R</td>
+  <td>0.83</td>
+  <td>37.93%</td>
+  <td>-5.57%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-56.82%</td>
+  <td class="return-negative">-0.909R</td>
+  <td>0.27</td>
+  <td>32.06%</td>
+  <td>-56.82%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-positive">1.46%</td>
+  <td class="return-positive">0.010R</td>
+  <td>1.03</td>
+  <td>47.31%</td>
+  <td>-6.62%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">2.04%</td>
+  <td class="return-positive">0.019R</td>
+  <td>1.05</td>
+  <td>47.31%</td>
+  <td>-6.25%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-55.66%</td>
+  <td class="return-negative">-0.891R</td>
+  <td>0.28</td>
+  <td>32.24%</td>
+  <td>-55.66%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-positive">0.88%</td>
+  <td class="return-positive">0.001R</td>
+  <td>1.02</td>
+  <td>47.31%</td>
+  <td>-6.99%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-0.27%</td>
+  <td class="return-negative">-0.017R</td>
+  <td>0.99</td>
+  <td>47.14%</td>
+  <td>-7.73%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-49.50%</td>
+  <td class="return-negative">-0.604R</td>
+  <td>0.41</td>
+  <td>36.40%</td>
+  <td>-49.50%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-positive">8.78%</td>
+  <td class="return-positive">0.050R</td>
+  <td>1.18</td>
+  <td>49.39%</td>
+  <td>-4.87%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">9.36%</td>
+  <td class="return-positive">0.056R</td>
+  <td>1.19</td>
+  <td>49.57%</td>
+  <td>-4.72%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-48.34%</td>
+  <td class="return-negative">-0.591R</td>
+  <td>0.41</td>
+  <td>36.57%</td>
+  <td>-48.34%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-positive">8.20%</td>
+  <td class="return-positive">0.043R</td>
+  <td>1.16</td>
+  <td>49.39%</td>
+  <td>-5.02%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-positive">7.05%</td>
+  <td class="return-positive">0.030R</td>
+  <td>1.14</td>
+  <td>49.05%</td>
+  <td>-5.31%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-70.85%</td>
+  <td class="return-negative">-1.962R</td>
+  <td>0.06</td>
+  <td>15.55%</td>
+  <td>-70.94%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-5.91%</td>
+  <td class="return-negative">-0.162R</td>
+  <td>0.80</td>
+  <td>37.01%</td>
+  <td>-6.33%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-5.27%</td>
+  <td class="return-negative">-0.144R</td>
+  <td>0.82</td>
+  <td>37.01%</td>
+  <td>-5.76%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-69.57%</td>
+  <td class="return-negative">-1.926R</td>
+  <td>0.07</td>
+  <td>16.17%</td>
+  <td>-69.66%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-6.55%</td>
+  <td class="return-negative">-0.180R</td>
+  <td>0.78</td>
+  <td>37.01%</td>
+  <td>-6.89%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-7.84%</td>
+  <td class="return-negative">-0.216R</td>
+  <td>0.74</td>
+  <td>37.01%</td>
+  <td>-8.04%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-68.58%</td>
+  <td class="return-negative">-1.815R</td>
+  <td>0.09</td>
+  <td>16.59%</td>
+  <td>-68.76%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-0.41%</td>
+  <td class="return-negative">-0.054R</td>
+  <td>0.99</td>
+  <td>41.93%</td>
+  <td>-5.96%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">0.27%</td>
+  <td class="return-negative">-0.036R</td>
+  <td>1.01</td>
+  <td>41.93%</td>
+  <td>-5.60%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-67.23%</td>
+  <td class="return-negative">-1.780R</td>
+  <td>0.09</td>
+  <td>17.48%</td>
+  <td>-67.41%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-1.08%</td>
+  <td class="return-negative">-0.071R</td>
+  <td>0.96</td>
+  <td>41.93%</td>
+  <td>-6.32%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-2.43%</td>
+  <td class="return-negative">-0.106R</td>
+  <td>0.92</td>
+  <td>41.93%</td>
+  <td>-7.10%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-72.94%</td>
+  <td class="return-negative">-0.346R</td>
+  <td>0.35</td>
+  <td>34.94%</td>
+  <td>-73.21%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-positive">2.51%</td>
+  <td class="return-positive">0.020R</td>
+  <td>1.04</td>
+  <td>50.87%</td>
+  <td>-7.81%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">3.26%</td>
+  <td class="return-positive">0.023R</td>
+  <td>1.05</td>
+  <td>51.14%</td>
+  <td>-7.73%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-71.45%</td>
+  <td class="return-negative">-0.339R</td>
+  <td>0.36</td>
+  <td>35.07%</td>
+  <td>-71.72%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-positive">1.76%</td>
+  <td class="return-positive">0.016R</td>
+  <td>1.03</td>
+  <td>50.47%</td>
+  <td>-7.90%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-positive">0.27%</td>
+  <td class="return-positive">0.009R</td>
+  <td>1.00</td>
+  <td>50.33%</td>
+  <td>-8.42%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-70.20%</td>
+  <td class="return-negative">-0.312R</td>
+  <td>0.46</td>
+  <td>40.27%</td>
+  <td>-70.73%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-positive">4.54%</td>
+  <td class="return-positive">0.028R</td>
+  <td>1.05</td>
+  <td>50.00%</td>
+  <td>-6.63%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">5.28%</td>
+  <td class="return-positive">0.032R</td>
+  <td>1.06</td>
+  <td>50.00%</td>
+  <td>-6.20%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-68.72%</td>
+  <td class="return-negative">-0.306R</td>
+  <td>0.47</td>
+  <td>40.54%</td>
+  <td>-69.25%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-positive">3.80%</td>
+  <td class="return-positive">0.025R</td>
+  <td>1.04</td>
+  <td>50.00%</td>
+  <td>-7.07%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-positive">2.32%</td>
+  <td class="return-positive">0.018R</td>
+  <td>1.03</td>
+  <td>49.59%</td>
+  <td>-7.95%</td>
+  <td><span class="trust-chip">Survives row</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-77.21%</td>
+  <td class="return-negative">-0.504R</td>
+  <td>0.35</td>
+  <td>36.09%</td>
+  <td>-77.43%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-0.25%</td>
+  <td class="return-negative">-0.013R</td>
+  <td>1.00</td>
+  <td>47.77%</td>
+  <td>-8.16%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-positive">0.52%</td>
+  <td class="return-negative">-0.008R</td>
+  <td>1.01</td>
+  <td>47.77%</td>
+  <td>-7.71%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-75.68%</td>
+  <td class="return-negative">-0.494R</td>
+  <td>0.36</td>
+  <td>36.35%</td>
+  <td>-75.91%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-1.01%</td>
+  <td class="return-negative">-0.018R</td>
+  <td>0.99</td>
+  <td>47.77%</td>
+  <td>-8.61%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-2.53%</td>
+  <td class="return-negative">-0.028R</td>
+  <td>0.97</td>
+  <td>47.51%</td>
+  <td>-9.53%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-56.27%</td>
+  <td class="return-negative">-0.701R</td>
+  <td>0.18</td>
+  <td>25.79%</td>
+  <td>-56.28%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-8.10%</td>
+  <td class="return-negative">-0.061R</td>
+  <td>0.80</td>
+  <td>58.28%</td>
+  <td>-10.74%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-7.62%</td>
+  <td class="return-negative">-0.055R</td>
+  <td>0.81</td>
+  <td>58.49%</td>
+  <td>-10.37%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-55.32%</td>
+  <td class="return-negative">-0.688R</td>
+  <td>0.18</td>
+  <td>26.21%</td>
+  <td>-55.32%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-8.57%</td>
+  <td class="return-negative">-0.067R</td>
+  <td>0.79</td>
+  <td>58.28%</td>
+  <td>-11.11%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-9.53%</td>
+  <td class="return-negative">-0.080R</td>
+  <td>0.77</td>
+  <td>58.07%</td>
+  <td>-11.85%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-50.60%</td>
+  <td class="return-negative">-0.633R</td>
+  <td>0.23</td>
+  <td>32.32%</td>
+  <td>-50.60%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-4.04%</td>
+  <td class="return-negative">-0.049R</td>
+  <td>0.90</td>
+  <td>59.87%</td>
+  <td>-6.52%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-3.58%</td>
+  <td class="return-negative">-0.043R</td>
+  <td>0.91</td>
+  <td>59.87%</td>
+  <td>-6.20%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-49.68%</td>
+  <td class="return-negative">-0.621R</td>
+  <td>0.24</td>
+  <td>32.54%</td>
+  <td>-49.68%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-4.50%</td>
+  <td class="return-negative">-0.055R</td>
+  <td>0.89</td>
+  <td>59.87%</td>
+  <td>-6.84%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-5.42%</td>
+  <td class="return-negative">-0.066R</td>
+  <td>0.87</td>
+  <td>59.87%</td>
+  <td>-7.49%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-62.97%</td>
+  <td class="return-negative">-1.387R</td>
+  <td>0.11</td>
+  <td>19.14%</td>
+  <td>-62.97%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-1.77%</td>
+  <td class="return-negative">-0.078R</td>
+  <td>0.94</td>
+  <td>44.88%</td>
+  <td>-3.07%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-1.16%</td>
+  <td class="return-negative">-0.065R</td>
+  <td>0.96</td>
+  <td>44.88%</td>
+  <td>-2.97%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-61.76%</td>
+  <td class="return-negative">-1.361R</td>
+  <td>0.11</td>
+  <td>19.97%</td>
+  <td>-61.76%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-2.37%</td>
+  <td class="return-negative">-0.091R</td>
+  <td>0.92</td>
+  <td>44.88%</td>
+  <td>-3.50%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-3.58%</td>
+  <td class="return-negative">-0.117R</td>
+  <td>0.89</td>
+  <td>44.39%</td>
+  <td>-4.65%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Adverse Fill Estimate</span></td>
+  <td class="return-negative">-38.10%</td>
+  <td class="return-negative">-1.380R</td>
+  <td>0.07</td>
+  <td>16.27%</td>
+  <td>-38.10%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Commission Increase</span></td>
+  <td class="return-negative">-4.57%</td>
+  <td class="return-negative">-0.151R</td>
+  <td>0.75</td>
+  <td>42.77%</td>
+  <td>-5.47%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Current Slippage</span></td>
+  <td class="return-negative">-4.24%</td>
+  <td class="return-negative">-0.139R</td>
+  <td>0.76</td>
+  <td>42.77%</td>
+  <td>-5.29%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Fixed Spread Estimate</span></td>
+  <td class="return-negative">-37.44%</td>
+  <td class="return-negative">-1.355R</td>
+  <td>0.08</td>
+  <td>16.27%</td>
+  <td>-37.44%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 2x</span></td>
+  <td class="return-negative">-4.90%</td>
+  <td class="return-negative">-0.163R</td>
+  <td>0.73</td>
+  <td>42.77%</td>
+  <td>-5.64%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td><span class="horizon-chip">Slippage 3x</span></td>
+  <td class="return-negative">-5.57%</td>
+  <td class="return-negative">-0.188R</td>
+  <td>0.70</td>
+  <td>42.47%</td>
+  <td>-6.00%</td>
+  <td><span class="trust-chip">Fails stress</span></td>
+</tr></tbody>
+  </table></div>
+</section>
+
+  <details class="panel warnings-panel app-warnings-panel" data-warning-count="33">
+    <summary><span>Warnings & trust boundaries</span><strong>33 current warning(s)</strong></summary>
+    <ul><li>AAPL: skipped incomplete daily bar 2026-06-29</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-29</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li><li>CommitBridge blocked unsafe FillTruth proposal</li><li>FillTruth execution model disagreement exists</li><li>FillTruth has daily approximation evidence</li><li>MSFT: skipped incomplete daily bar 2026-06-29</li><li>MSFT: skipped incomplete daily bar 2026-06-30</li><li>NVDA: skipped incomplete daily bar 2026-06-29</li><li>NVDA: skipped incomplete daily bar 2026-06-30</li><li>QQQ: skipped incomplete daily bar 2026-06-29</li><li>QQQ: skipped incomplete daily bar 2026-06-30</li><li>SPY: skipped incomplete daily bar 2026-06-29</li><li>SPY: skipped incomplete daily bar 2026-06-30</li><li>blocked FillTruth proposals are not official PaperOps evidence</li><li>candidate_blocked_by_decision_engine</li><li>candidates blocked by RiskHub or Decision Engine</li><li>carry position marked to completed close; not realized</li><li>commitbridge_blocks_unsafe_filltruth_commit</li><li>daily bar cannot prove intraday stop/target order</li><li>daily conservative model is approximate for same-bar stop/target order</li><li>daily next-open fills do not prove intraday stop/target sequence</li><li>earliest_fill_date repaired from legacy calendar-day logic</li><li>execution model disagreement is non-zero</li><li>intraday bar still approximates within-bar order</li><li>no accepted candidates</li><li>no strategy validated</li><li>only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible</li><li>pending paper orders exist</li><li>real intraday aggregate is not reconciled enough against DataTruth daily bars</li><li>\Dawnstrike\OMEGA Morning Check has not run today after scheduled time 09:10</li><li>No strategy is validated yet.</li></ul>
+  </details>
+  </div>
+</main>
+<script src="../assets/x2_interactions.js?v=command_center_x2_20260703t035444z" defer></script>
+</body>
+</html>

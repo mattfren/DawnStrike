@@ -1,0 +1,144 @@
+{
+  "alert_level": "warning",
+  "command_center_paths": {
+    "command_center": "data/v2_command_center/production.html",
+    "command_center_legacy": "data/v2_command_center/index.html",
+    "command_center_x": "data/v2_command_center_x/index.html",
+    "command_center_x2": "data/v2_command_center_x2/index.html"
+  },
+  "generated_at": "2026-07-02T13:21:06.613023+00:00",
+  "headline": "Dawnstrike needs attention",
+  "latest_run_date": "2026-07-01",
+  "overall_status": "needs_attention",
+  "source_refs": [
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_forward_evidence/calendar/strategy_daily_returns.csv"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_paper_ops/calendar/strategy_daily_returns.csv"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_paper_ops/state/open_positions.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_fill_truth/reports/filltruth_summary.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_evidence_commit/reports/evidence_commit_summary.json"
+    },
+    {
+      "exists": true,
+      "kind": "directory",
+      "path": "data/v2_learning_foundry/lessons"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_market_masters/reports/report_latest.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_autonomous_runner/status/latest_status.json"
+    },
+    {
+      "exists": true,
+      "kind": "file",
+      "path": "data/v2_telegram_intel/reports/verify_latest.json"
+    }
+  ],
+  "subheadline": "X2 is a local story layer over existing OMEGA artifacts. It does not send messages, change strategies, or enable live execution.",
+  "top_metrics": [
+    {
+      "context": "Most recent artifact date",
+      "label": "Latest day",
+      "tone": "info",
+      "value": "2026-07-01"
+    },
+    {
+      "context": "Story cards from PaperOps, Learning Foundry, and Market Masters",
+      "label": "Strategies",
+      "tone": "info",
+      "value": "22"
+    },
+    {
+      "context": "Simulated state from PaperOps artifacts",
+      "label": "Open paper positions",
+      "tone": "warning",
+      "value": "1"
+    },
+    {
+      "context": "Days with artifact-backed story pages",
+      "label": "Calendar days",
+      "tone": "info",
+      "value": "36"
+    }
+  ],
+  "trust_boundaries": [
+    {
+      "explanation": "X2 renders local artifacts and has no execution controls.",
+      "label": "Research-only / paper-only",
+      "status": "enforced"
+    },
+    {
+      "explanation": "Autonomous Runner reports live_trading_enabled=false.",
+      "label": "Live trading disabled",
+      "status": "enforced"
+    },
+    {
+      "explanation": "Champion and challenger cards remain unvalidated unless a source says otherwise.",
+      "label": "No strategy validated",
+      "status": "active warning"
+    },
+    {
+      "explanation": "Learning Foundry and Market Masters cards cannot promote anything from the UI.",
+      "label": "Shadow challengers stay shadow",
+      "status": "enforced"
+    }
+  ],
+  "warnings": [
+    "AAPL: skipped incomplete daily bar 2026-06-29",
+    "AAPL: skipped incomplete daily bar 2026-06-30",
+    "AMZN: skipped incomplete daily bar 2026-06-29",
+    "AMZN: skipped incomplete daily bar 2026-06-30",
+    "CommitBridge blocked unsafe FillTruth proposal",
+    "FillTruth execution model disagreement exists",
+    "FillTruth has daily approximation evidence",
+    "MSFT: skipped incomplete daily bar 2026-06-29",
+    "MSFT: skipped incomplete daily bar 2026-06-30",
+    "NVDA: skipped incomplete daily bar 2026-06-29",
+    "NVDA: skipped incomplete daily bar 2026-06-30",
+    "QQQ: skipped incomplete daily bar 2026-06-29",
+    "QQQ: skipped incomplete daily bar 2026-06-30",
+    "SPY: skipped incomplete daily bar 2026-06-29",
+    "SPY: skipped incomplete daily bar 2026-06-30",
+    "blocked FillTruth proposals are not official PaperOps evidence",
+    "candidate_blocked_by_decision_engine",
+    "candidates blocked by RiskHub or Decision Engine",
+    "carry position marked to completed close; not realized",
+    "commitbridge_blocks_unsafe_filltruth_commit",
+    "daily bar cannot prove intraday stop/target order",
+    "daily conservative model is approximate for same-bar stop/target order",
+    "daily next-open fills do not prove intraday stop/target sequence",
+    "earliest_fill_date repaired from legacy calendar-day logic",
+    "execution model disagreement is non-zero",
+    "intraday bar still approximates within-bar order",
+    "no accepted candidates",
+    "no strategy validated",
+    "only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible",
+    "pending paper orders exist",
+    "real intraday aggregate is not reconciled enough against DataTruth daily bars",
+    "\\Dawnstrike\\OMEGA Morning Check has not run today after scheduled time 09:10",
+    "No strategy is validated yet."
+  ]
+}

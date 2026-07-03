@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike X3 - Day First Pullback</title>
+  <link rel="icon" href="../assets/x3_favicon.svg?v=command_center_x3_746654438850" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/x3.css?v=command_center_x3_746654438850">
+</head>
+<body>
+<aside class="side-shell">
+  <a class="brand" href="../index.html"><span>Dawnstrike</span><b>X3</b></a>
+  <p class="brand-subtitle">Simple day-trading cockpit</p>
+  <nav class="primary-nav" data-primary-nav><a href="../pages/home.html">Home</a>
+<a href="../pages/calendar.html">Calendar</a>
+<a href="../pages/strategies.html">Strategies</a>
+<a href="../pages/trades.html">Trades</a>
+<a href="../pages/system.html">System</a></nav>
+  <div class="safety-card"><strong>Research-only</strong><span>Live trading disabled. No strategy validated.</span></div>
+</aside>
+<main>
+  <header class="topbar">
+    <div><span>Latest artifact day</span><strong>2026-07-02</strong></div>
+    <a class="toplink" href="../pages/system.html">System check</a>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only</span>
+    <span>Live trading disabled</span>
+    <span>Historical results are not validation</span>
+    <span>Warnings stay visible</span>
+  </section>
+
+<section class="hero compact-hero">
+  <div><p class="eyebrow">Strategy Report Card</p><h1>Day First Pullback</h1><p class="story-summary">This page explains performance, fragility, and why the strategy is still not validated.</p></div>
+</section>
+<section class="metric-strip">
+  <article><span>Type</span><strong>Day Trade</strong><em>Day-trade and swing lanes stay separate</em></article>
+  <article><span>Expectancy</span><strong>0.046R</strong><em>Historical only</em></article>
+  <article><span>Win rate</span><strong>35.66%</strong><em>Not validation</em></article>
+  <article><span>Drawdown</span><strong>-3.16%</strong><em>Risk context</em></article>
+</section>
+<section class="story-section"><h2>Performance story</h2><p>Status: Active research. Expectancy: 0.046R. Fragility: negative_profit_factor. This is not validated.</p></section>
+<section class="split-story">
+  <article><h2>Robustness notes</h2><ul><li>1min: expectancy 0.046R, drawdown -3.16%, warning negative_profit_factor</li><li>5min: expectancy -0.010R, drawdown -3.66%, warning negative_profit_factor</li></ul></article>
+  <article><h2>Why not trusted yet</h2><p>Historical backtests and shadow challengers are not validation. This strategy would need provider-backed forward evidence, clean fill-quality review, and official paper results before it could be trusted.</p></article>
+</section>
+<section class="story-section"><h2>Trade examples</h2><div class="card-grid trade-grid"><article class="trade-card soft-card win" data-filter-item data-result="win" data-exit="target" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;AMZN&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;long&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T12:20:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T12:30:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;242.235&#x27;, &#x27;exit_price&#x27;: &#x27;242.599&#x27;, &#x27;stop&#x27;: &#x27;241.965&#x27;, &#x27;target&#x27;: &#x27;242.599&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;36.4&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;33.4&#x27;, &#x27;return_pct&#x27;: &#x27;0.000334&#x27;, &#x27;r_multiple&#x27;: &#x27;1.348148&#x27;, &#x27;hold_minutes&#x27;: &#x27;10&#x27;, &#x27;exit_reason&#x27;: &#x27;target&#x27;, &#x27;evidence&#x27;: &#x27;first pullback reclaimed previous close in an opening uptrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / AMZN</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 12:20:00-04:00 to 2026-07-01 12:30:00-04:00. Hold 10 min. Exit: Target.</p>
+  <div class="mini-metrics"><b>1.35R</b><b>0.03%</b><b>long</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;SPY&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;long&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T12:05:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T12:35:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;748.88&#x27;, &#x27;exit_price&#x27;: &#x27;748.66&#x27;, &#x27;stop&#x27;: &#x27;748.66&#x27;, &#x27;target&#x27;: &#x27;749.928432&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-22.0&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-25.0&#x27;, &#x27;return_pct&#x27;: &#x27;-0.00025&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;30&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback reclaimed previous close in an opening uptrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / SPY</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 12:05:00-04:00 to 2026-07-01 12:35:00-04:00. Hold 30 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.03%</b><b>long</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;NVDA&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;short&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T12:00:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T12:25:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;196.89&#x27;, &#x27;exit_price&#x27;: &#x27;197.27&#x27;, &#x27;stop&#x27;: &#x27;197.27&#x27;, &#x27;target&#x27;: &#x27;196.372&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-38.0&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-41.0&#x27;, &#x27;return_pct&#x27;: &#x27;-0.00041&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;25&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback failed in an opening downtrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / NVDA</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 12:00:00-04:00 to 2026-07-01 12:25:00-04:00. Hold 25 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.04%</b><b>short</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;AAPL&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;long&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T11:55:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T12:30:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;295.245&#x27;, &#x27;exit_price&#x27;: &#x27;294.62&#x27;, &#x27;stop&#x27;: &#x27;294.62&#x27;, &#x27;target&#x27;: &#x27;296.106&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-62.5&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-65.5&#x27;, &#x27;return_pct&#x27;: &#x27;-0.000655&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;35&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback reclaimed previous close in an opening uptrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / AAPL</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 11:55:00-04:00 to 2026-07-01 12:30:00-04:00. Hold 35 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.07%</b><b>long</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card win" data-filter-item data-result="win" data-exit="target" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;QQQ&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;short&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T11:30:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T11:45:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;730.99&#x27;, &#x27;exit_price&#x27;: &#x27;729.828&#x27;, &#x27;stop&#x27;: &#x27;731.83&#x27;, &#x27;target&#x27;: &#x27;729.828&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;116.2&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;113.2&#x27;, &#x27;return_pct&#x27;: &#x27;0.001132&#x27;, &#x27;r_multiple&#x27;: &#x27;1.383333&#x27;, &#x27;hold_minutes&#x27;: &#x27;15&#x27;, &#x27;exit_reason&#x27;: &#x27;target&#x27;, &#x27;evidence&#x27;: &#x27;first pullback failed in an opening downtrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / QQQ</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 11:30:00-04:00 to 2026-07-01 11:45:00-04:00. Hold 15 min. Exit: Target.</p>
+  <div class="mini-metrics"><b>1.38R</b><b>0.11%</b><b>short</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;5min&#x27;, &#x27;symbol&#x27;: &#x27;MSFT&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;long&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T11:25:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T11:30:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;386.97&#x27;, &#x27;exit_price&#x27;: &#x27;386.14&#x27;, &#x27;stop&#x27;: &#x27;386.14&#x27;, &#x27;target&#x27;: &#x27;388.118&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-83.0&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-86.0&#x27;, &#x27;return_pct&#x27;: &#x27;-0.00086&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;5&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback reclaimed previous close in an opening uptrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / MSFT</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 11:25:00-04:00 to 2026-07-01 11:30:00-04:00. Hold 5 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.09%</b><b>long</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;1min&#x27;, &#x27;symbol&#x27;: &#x27;QQQ&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;short&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T10:04:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T10:06:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;729.74&#x27;, &#x27;exit_price&#x27;: &#x27;730.32&#x27;, &#x27;stop&#x27;: &#x27;730.32&#x27;, &#x27;target&#x27;: &#x27;728.718364&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-58.0&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-61.0&#x27;, &#x27;return_pct&#x27;: &#x27;-0.00061&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;2&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback failed in an opening downtrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / QQQ</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 10:04:00-04:00 to 2026-07-01 10:06:00-04:00. Hold 2 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.06%</b><b>short</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article><article class="trade-card soft-card loss" data-filter-item data-result="loss" data-exit="stop" data-filter-text="{&#x27;strategy_id&#x27;: &#x27;day_first_pullback&#x27;, &#x27;interval&#x27;: &#x27;1min&#x27;, &#x27;symbol&#x27;: &#x27;SPY&#x27;, &#x27;session_date&#x27;: &#x27;2026-07-01&#x27;, &#x27;direction&#x27;: &#x27;short&#x27;, &#x27;entry_time&#x27;: &#x27;2026-07-01T10:04:00-04:00&#x27;, &#x27;exit_time&#x27;: &#x27;2026-07-01T10:05:00-04:00&#x27;, &#x27;entry_price&#x27;: &#x27;745.405&#x27;, &#x27;exit_price&#x27;: &#x27;745.57&#x27;, &#x27;stop&#x27;: &#x27;745.57&#x27;, &#x27;target&#x27;: &#x27;744.361433&#x27;, &#x27;quantity&#x27;: &#x27;100&#x27;, &#x27;gross_pnl&#x27;: &#x27;-16.5&#x27;, &#x27;fees&#x27;: &#x27;1.0&#x27;, &#x27;slippage&#x27;: &#x27;2.0&#x27;, &#x27;net_pnl&#x27;: &#x27;-19.5&#x27;, &#x27;return_pct&#x27;: &#x27;-0.000195&#x27;, &#x27;r_multiple&#x27;: &#x27;-1.0&#x27;, &#x27;hold_minutes&#x27;: &#x27;1&#x27;, &#x27;exit_reason&#x27;: &#x27;stop&#x27;, &#x27;evidence&#x27;: &#x27;first pullback failed in an opening downtrend&#x27;, &#x27;source_mode&#x27;: &#x27;historical_daytrade_backtest&#x27;, &#x27;is_day_trade&#x27;: &#x27;true&#x27;, &#x27;overnight&#x27;: &#x27;false&#x27;}">
+  <span>2026-07-01 / SPY</span>
+  <strong>Day First Pullback</strong>
+  <p>2026-07-01 10:04:00-04:00 to 2026-07-01 10:05:00-04:00. Hold 1 min. Exit: Stop.</p>
+  <div class="mini-metrics"><b>-1.00R</b><b>-0.02%</b><b>short</b></div>
+  <em>Historical day-trade research / evidence badge: historical_daytrade_backtest</em>
+</article></div></section>
+
+</main>
+<script src="../assets/x3.js?v=command_center_x3_746654438850" defer></script>
+</body>
+</html>

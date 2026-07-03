@@ -1,0 +1,32 @@
+# Command Center X2 Inventory
+
+- Status: `passed`
+
+- `docs/audit/omega_command_center_x_release_summary.md`: exists=`True`, kind=`file`, files=`1`
+- `docs/audit/omega_command_center_x_quality_scorecard.md`: exists=`True`, kind=`file`, files=`1`
+- `docs/audit/omega_command_center_x_red_team.md`: exists=`True`, kind=`file`, files=`1`
+- `docs/repo_inventory`: exists=`True`, kind=`directory`, files=`7`
+- `docs/architecture/v2_command_center_x.md`: exists=`True`, kind=`file`, files=`1`
+- `data/v2_command_center_x`: exists=`True`, kind=`directory`, files=`46`
+- `data/v2_command_center`: exists=`True`, kind=`directory`, files=`77`
+- `intraday_scanner/v2/command_center_x`: exists=`True`, kind=`directory`, files=`12`
+- `intraday_scanner/v2/command_center`: exists=`True`, kind=`directory`, files=`6`
+- `intraday_scanner/v2/paper_ops`: exists=`True`, kind=`directory`, files=`20`
+- `intraday_scanner/v2/calendar_intelligence`: exists=`True`, kind=`directory`, files=`4`
+- `intraday_scanner/v2/evidence`: exists=`False`, kind=`file`, files=`0`
+- `intraday_scanner/v2/risk`: exists=`True`, kind=`directory`, files=`4`
+- `intraday_scanner/v2/learning_foundry`: exists=`True`, kind=`directory`, files=`6`
+- `intraday_scanner/v2/market_masters`: exists=`True`, kind=`directory`, files=`6`
+- `intraday_scanner/v2/autonomous_runner`: exists=`True`, kind=`directory`, files=`6`
+- `intraday_scanner/v2/telegram_intel`: exists=`True`, kind=`directory`, files=`6`
+- `data/v2_paper_ops`: exists=`True`, kind=`directory`, files=`54`
+- `data/v2_forward_evidence`: exists=`True`, kind=`directory`, files=`452`
+- `data/v2_learning_foundry`: exists=`True`, kind=`directory`, files=`50`
+- `data/v2_market_masters`: exists=`True`, kind=`directory`, files=`27`
+- `data/v2_autonomous_runner`: exists=`True`, kind=`directory`, files=`45`
+- `data/v2_scheduler`: exists=`True`, kind=`directory`, files=`24`
+- `data/v2_telegram_intel`: exists=`True`, kind=`directory`, files=`44`
+- `data/v2_autodata`: exists=`True`, kind=`directory`, files=`46`
+- `data/v2_fill_truth`: exists=`True`, kind=`directory`, files=`236`
+- `data/v2_evidence_commit`: exists=`True`, kind=`directory`, files=`330`
+- `tests`: exists=`True`, kind=`directory`, files=`190`

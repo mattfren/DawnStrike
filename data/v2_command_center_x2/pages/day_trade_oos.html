@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike X2 - Day Trade Out-of-Sample</title>
+  <link rel="icon" href="../assets/favicon.svg?v=command_center_x2_20260703t035444z" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/x2.css?v=command_center_x2_20260703t035444z">
+  <link rel="stylesheet" href="../assets/x2_components.css?v=command_center_x2_20260703t035444z">
+</head>
+<body>
+<aside class="app-shell">
+  <a class="brand" href="../index.html">Dawnstrike <span>X2</span></a>
+  <div class="trust-banner"><strong>Research-only</strong><span>Paper-only evidence. Live trading disabled.</span></div>
+  <nav><a href="../index.html">Mission</a>
+<a href="today.html">Today</a>
+<a href="calendar.html">Calendar</a>
+<a href="strategies.html">Strategies</a>
+<a href="no_picks.html">No Picks</a>
+<a href="learning.html">Learning</a>
+<a href="market_masters.html">Market Masters</a>
+<a href="risk.html">Risk</a>
+<a href="evidence.html">Evidence</a>
+<a href="automation.html">Automation</a>
+<a href="telegram.html">Telegram</a>
+<a href="reports.html">Reports</a>
+<a href="day_trade_lab.html">Day Trade Lab</a>
+<a href="day_trade_strategies.html">Day Strategies</a>
+<a href="day_trade_robustness.html">Day Robustness</a>
+<a href="day_trade_refinements.html">Day Refinements</a>
+<a href="day_trade_trades.html">Day Trades</a>
+<a href="six_month_backtest.html">Backtest</a>
+<a href="system_map.html">System</a></nav>
+</aside>
+<main>
+  <header class="top-status">
+    <div><span>X2 Command Center</span><strong>Day Trade Out-of-Sample</strong></div>
+    <div class="status-meta"><span>Latest artifact day</span><strong>2026-07-01</strong></div>
+    <a class="build-chip" href="../../v2_command_center_x3/index.html">Open X3</a>
+    <div class="build-chip">Build command_center_x2_20260703T035444Z</div>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only / paper-only</span>
+    <span>Live trading disabled</span>
+    <span>No strategy validated</span>
+    <span>Shadow challengers are not official</span>
+  </section>
+  <div class="content-frame">
+
+
+<section class="hero-story compact">
+  <div><div class="section-label">Day Trade Out-of-Sample</div>
+  <h1>Holdout behavior controls confidence.</h1><p>Historical day-trade backtest only - not validated. The Day Trade Lab splits sessions by time, halves, and odd/even sessions so full-sample curve fitting is not mistaken for an edge.</p></div>
+  <div class="pulse-card"><span>Overfit warnings</span><strong>26</strong><em>Research/holdout split</em></div>
+</section>
+
+<section class="metric-grid backtest-metrics">
+  <div class="metric-card"><span>OOS rows</span><strong>45</strong><em>Time, half, odd/even splits</em></div>
+  <div class="metric-card"><span>Positive holdout</span><strong>8</strong><em>70/30 split rows</em></div>
+  <div class="metric-card"><span>Strategy intervals</span><strong>15</strong><em>Corpus families tested</em></div>
+  <div class="metric-card"><span>Trust boundary</span><strong>Not validated</strong><em>Holdout is still historical</em></div>
+</section>
+<section class="toolbar"><input data-x2-search aria-label="Filter out-of-sample rows" placeholder="Filter OOS rows"></section>
+<section class="panel table-panel" data-filter-scope>
+  <div class="panel-heading"><div><div class="section-label">Out-of-Sample Splits</div><h2>Research vs holdout comparison</h2></div></div>
+  <div class="table-scroll"><table class="backtest-table">
+    <thead><tr><th>Strategy</th><th>Interval</th><th>Split</th><th>Trades R/H</th><th>Research Exp.</th><th>Holdout Exp.</th><th>Degradation</th><th>Warning</th></tr></thead>
+    <tbody><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>328 / 332</td>
+  <td class="return-positive">0.117R</td>
+  <td class="return-positive">0.113R</td>
+  <td class="return-negative">-0.003R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>456 / 204</td>
+  <td class="return-positive">0.066R</td>
+  <td class="return-positive">0.225R</td>
+  <td class="return-positive">0.159R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>332 / 328</td>
+  <td class="return-positive">0.215R</td>
+  <td class="return-positive">0.013R</td>
+  <td class="return-negative">-0.202R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>282 / 268</td>
+  <td class="return-negative">-0.022R</td>
+  <td class="return-positive">0.049R</td>
+  <td class="return-positive">0.071R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>385 / 165</td>
+  <td class="return-positive">0.052R</td>
+  <td class="return-negative">-0.080R</td>
+  <td class="return-negative">-0.131R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Failed Breakout</strong><em>day_failed_breakout</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>291 / 259</td>
+  <td class="return-positive">0.004R</td>
+  <td class="return-positive">0.022R</td>
+  <td class="return-positive">0.018R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>378 / 382</td>
+  <td class="return-negative">-0.003R</td>
+  <td class="return-positive">0.095R</td>
+  <td class="return-positive">0.098R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>528 / 232</td>
+  <td class="return-positive">0.085R</td>
+  <td class="return-negative">-0.042R</td>
+  <td class="return-negative">-0.127R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>384 / 376</td>
+  <td class="return-positive">0.125R</td>
+  <td class="return-negative">-0.035R</td>
+  <td class="return-negative">-0.160R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>378 / 384</td>
+  <td class="return-negative">-0.082R</td>
+  <td class="return-positive">0.060R</td>
+  <td class="return-positive">0.142R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>528 / 234</td>
+  <td class="return-negative">-0.044R</td>
+  <td class="return-positive">0.066R</td>
+  <td class="return-positive">0.110R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day First Pullback</strong><em>day_first_pullback</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>384 / 378</td>
+  <td class="return-negative">-0.041R</td>
+  <td class="return-positive">0.021R</td>
+  <td class="return-positive">0.063R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>282 / 295</td>
+  <td class="return-positive">0.072R</td>
+  <td class="return-positive">0.022R</td>
+  <td class="return-negative">-0.049R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>394 / 183</td>
+  <td class="return-positive">0.073R</td>
+  <td class="return-negative">-0.012R</td>
+  <td class="return-negative">-0.085R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>290 / 287</td>
+  <td class="return-positive">0.002R</td>
+  <td class="return-positive">0.091R</td>
+  <td class="return-positive">0.089R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>282 / 295</td>
+  <td class="return-positive">0.046R</td>
+  <td class="return-positive">0.104R</td>
+  <td class="return-positive">0.058R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>394 / 183</td>
+  <td class="return-positive">0.022R</td>
+  <td class="return-positive">0.191R</td>
+  <td class="return-positive">0.170R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Gap Go Fade</strong><em>day_gap_go_fade</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>290 / 287</td>
+  <td class="return-positive">0.073R</td>
+  <td class="return-positive">0.078R</td>
+  <td class="return-positive">0.005R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>304 / 339</td>
+  <td class="return-negative">-0.120R</td>
+  <td class="return-negative">-0.065R</td>
+  <td class="return-positive">0.056R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>436 / 207</td>
+  <td class="return-negative">-0.091R</td>
+  <td class="return-negative">-0.092R</td>
+  <td class="return-negative">-0.001R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>329 / 314</td>
+  <td class="return-negative">-0.096R</td>
+  <td class="return-negative">-0.086R</td>
+  <td class="return-positive">0.009R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>324 / 351</td>
+  <td class="return-positive">0.071R</td>
+  <td class="return-negative">-0.035R</td>
+  <td class="return-negative">-0.106R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>460 / 215</td>
+  <td class="return-positive">0.001R</td>
+  <td class="return-positive">0.049R</td>
+  <td class="return-positive">0.047R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Intraday Relative Strength</strong><em>day_intraday_relative_strength</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>341 / 334</td>
+  <td class="return-negative">-0.062R</td>
+  <td class="return-positive">0.096R</td>
+  <td class="return-positive">0.158R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>369 / 378</td>
+  <td class="return-positive">0.034R</td>
+  <td class="return-positive">0.034R</td>
+  <td class="return-negative">-0.000R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>516 / 231</td>
+  <td class="return-positive">0.056R</td>
+  <td class="return-negative">-0.015R</td>
+  <td class="return-negative">-0.071R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>374 / 373</td>
+  <td class="return-positive">0.012R</td>
+  <td class="return-positive">0.056R</td>
+  <td class="return-positive">0.044R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>368 / 372</td>
+  <td class="return-positive">0.058R</td>
+  <td class="return-positive">0.026R</td>
+  <td class="return-negative">-0.032R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>515 / 225</td>
+  <td class="return-positive">0.049R</td>
+  <td class="return-positive">0.027R</td>
+  <td class="return-negative">-0.022R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 15m</strong><em>day_orb_15m</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>368 / 372</td>
+  <td class="return-positive">0.020R</td>
+  <td class="return-positive">0.063R</td>
+  <td class="return-positive">0.043R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>378 / 384</td>
+  <td class="return-negative">-0.015R</td>
+  <td class="return-positive">0.027R</td>
+  <td class="return-positive">0.042R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>528 / 234</td>
+  <td class="return-positive">0.000R</td>
+  <td class="return-positive">0.020R</td>
+  <td class="return-positive">0.019R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Orb 5m</strong><em>day_orb_5m</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>384 / 378</td>
+  <td class="return-positive">0.055R</td>
+  <td class="return-negative">-0.044R</td>
+  <td class="return-negative">-0.099R</td>
+  <td><span class="trust-chip">positive_research_negative_holdout</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>224 / 253</td>
+  <td class="return-negative">-0.077R</td>
+  <td class="return-positive">0.001R</td>
+  <td class="return-positive">0.078R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>311 / 166</td>
+  <td class="return-negative">-0.068R</td>
+  <td class="return-positive">0.025R</td>
+  <td class="return-positive">0.093R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>249 / 228</td>
+  <td class="return-negative">-0.071R</td>
+  <td class="return-positive">0.003R</td>
+  <td class="return-positive">0.075R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>215 / 246</td>
+  <td class="return-negative">-0.042R</td>
+  <td class="return-negative">-0.012R</td>
+  <td class="return-positive">0.030R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>298 / 163</td>
+  <td class="return-negative">-0.016R</td>
+  <td class="return-negative">-0.044R</td>
+  <td class="return-negative">-0.027R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Premarket Break</strong><em>day_premarket_break</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>238 / 223</td>
+  <td class="return-negative">-0.067R</td>
+  <td class="return-positive">0.018R</td>
+  <td class="return-positive">0.084R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td>50 50 Time</td>
+  <td>303 / 303</td>
+  <td class="return-negative">-0.081R</td>
+  <td class="return-positive">0.029R</td>
+  <td class="return-positive">0.110R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td>70 30 Time</td>
+  <td>417 / 189</td>
+  <td class="return-negative">-0.015R</td>
+  <td class="return-negative">-0.049R</td>
+  <td class="return-negative">-0.033R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>1min</td>
+  <td>Odd Even Sessions</td>
+  <td>313 / 293</td>
+  <td class="return-negative">-0.014R</td>
+  <td class="return-negative">-0.038R</td>
+  <td class="return-negative">-0.024R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td>50 50 Time</td>
+  <td>173 / 159</td>
+  <td class="return-negative">-0.257R</td>
+  <td class="return-positive">0.066R</td>
+  <td class="return-positive">0.323R</td>
+  <td><span class="trust-chip">none</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td>70 30 Time</td>
+  <td>229 / 103</td>
+  <td class="return-negative">-0.149R</td>
+  <td class="return-positive">0.002R</td>
+  <td class="return-positive">0.151R</td>
+  <td><span class="trust-chip">negative_holdout_return</span></td>
+</tr><tr data-filter-item>
+  <td><strong>Day Vwap Pullback</strong><em>day_vwap_pullback</em></td>
+  <td>5min</td>
+  <td>Odd Even Sessions</td>
+  <td>185 / 147</td>
+  <td class="return-negative">-0.081R</td>
+  <td class="return-negative">-0.129R</td>
+  <td class="return-negative">-0.048R</td>
+  <td><span class="trust-chip">holdout_expectancy_degraded</span></td>
+</tr></tbody>
+  </table></div>
+</section>
+
+  <details class="panel warnings-panel app-warnings-panel" data-warning-count="33">
+    <summary><span>Warnings & trust boundaries</span><strong>33 current warning(s)</strong></summary>
+    <ul><li>AAPL: skipped incomplete daily bar 2026-06-29</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-29</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li><li>CommitBridge blocked unsafe FillTruth proposal</li><li>FillTruth execution model disagreement exists</li><li>FillTruth has daily approximation evidence</li><li>MSFT: skipped incomplete daily bar 2026-06-29</li><li>MSFT: skipped incomplete daily bar 2026-06-30</li><li>NVDA: skipped incomplete daily bar 2026-06-29</li><li>NVDA: skipped incomplete daily bar 2026-06-30</li><li>QQQ: skipped incomplete daily bar 2026-06-29</li><li>QQQ: skipped incomplete daily bar 2026-06-30</li><li>SPY: skipped incomplete daily bar 2026-06-29</li><li>SPY: skipped incomplete daily bar 2026-06-30</li><li>blocked FillTruth proposals are not official PaperOps evidence</li><li>candidate_blocked_by_decision_engine</li><li>candidates blocked by RiskHub or Decision Engine</li><li>carry position marked to completed close; not realized</li><li>commitbridge_blocks_unsafe_filltruth_commit</li><li>daily bar cannot prove intraday stop/target order</li><li>daily conservative model is approximate for same-bar stop/target order</li><li>daily next-open fills do not prove intraday stop/target sequence</li><li>earliest_fill_date repaired from legacy calendar-day logic</li><li>execution model disagreement is non-zero</li><li>intraday bar still approximates within-bar order</li><li>no accepted candidates</li><li>no strategy validated</li><li>only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible</li><li>pending paper orders exist</li><li>real intraday aggregate is not reconciled enough against DataTruth daily bars</li><li>\Dawnstrike\OMEGA Morning Check has not run today after scheduled time 09:10</li><li>No strategy is validated yet.</li></ul>
+  </details>
+  </div>
+</main>
+<script src="../assets/x2_interactions.js?v=command_center_x2_20260703t035444z" defer></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+[
+  {
+    "href": "reports/build_report.md",
+    "status": "generated local artifact",
+    "title": "Command Center X2 build",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "reports/inventory_latest.md",
+    "status": "generated local artifact",
+    "title": "Command Center X2 inventory",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "qa/qa_latest.md",
+    "status": "generated local artifact",
+    "title": "Command Center X2 QA",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "reports/verify_latest.md",
+    "status": "generated local artifact",
+    "title": "Command Center X2 verify",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "reports/calendar_audit.json",
+    "status": "generated local artifact",
+    "title": "Calendar audit",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "manifests/story_bundle.json",
+    "status": "generated local artifact",
+    "title": "Story bundle",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  },
+  {
+    "href": "reports/release_state.json",
+    "status": "generated local artifact",
+    "title": "Release state",
+    "why": "Evidence, runbook, or QA artifact used by the X2 story layer."
+  }
+]

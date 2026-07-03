@@ -1,0 +1,20 @@
+{
+  "colors": {
+    "amber": "#f7c65b",
+    "base": "#06080d",
+    "cyan": "#35d5ff",
+    "green": "#38e29b",
+    "line": "#2b3646",
+    "muted": "#9fb0c3",
+    "red": "#ff6b7a",
+    "surface": "#10151d",
+    "surface_2": "#171f2a",
+    "text": "#eef6ff"
+  },
+  "font": "Segoe UI, SF Pro Display, Arial, sans-serif",
+  "radius": {
+    "card": "8px",
+    "pill": "999px"
+  },
+  "schema_version": "v2.command_center_x2.design_tokens.v1"
+}

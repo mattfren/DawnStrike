@@ -1,0 +1,9 @@
+{
+  "day_count": 36,
+  "month_count": 3,
+  "policy": "calendar daily/cumulative values are direct aggregates of source CSV fields",
+  "schema_version": "v2.command_center_x2.calendar_audit.v1",
+  "source_hash": "4be7a0829d22192a",
+  "source_row_count": 273,
+  "status": "passed"
+}

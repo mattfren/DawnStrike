@@ -1,0 +1,1309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dawnstrike X2 - Six-Month Backtest</title>
+  <link rel="icon" href="../assets/favicon.svg?v=command_center_x2_20260703t035444z" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/x2.css?v=command_center_x2_20260703t035444z">
+  <link rel="stylesheet" href="../assets/x2_components.css?v=command_center_x2_20260703t035444z">
+</head>
+<body>
+<aside class="app-shell">
+  <a class="brand" href="../index.html">Dawnstrike <span>X2</span></a>
+  <div class="trust-banner"><strong>Research-only</strong><span>Paper-only evidence. Live trading disabled.</span></div>
+  <nav><a href="../index.html">Mission</a>
+<a href="today.html">Today</a>
+<a href="calendar.html">Calendar</a>
+<a href="strategies.html">Strategies</a>
+<a href="no_picks.html">No Picks</a>
+<a href="learning.html">Learning</a>
+<a href="market_masters.html">Market Masters</a>
+<a href="risk.html">Risk</a>
+<a href="evidence.html">Evidence</a>
+<a href="automation.html">Automation</a>
+<a href="telegram.html">Telegram</a>
+<a href="reports.html">Reports</a>
+<a href="day_trade_lab.html">Day Trade Lab</a>
+<a href="day_trade_strategies.html">Day Strategies</a>
+<a href="day_trade_robustness.html">Day Robustness</a>
+<a href="day_trade_refinements.html">Day Refinements</a>
+<a href="day_trade_trades.html">Day Trades</a>
+<a class="active" href="six_month_backtest.html">Backtest</a>
+<a href="system_map.html">System</a></nav>
+</aside>
+<main>
+  <header class="top-status">
+    <div><span>X2 Command Center</span><strong>Six-Month Backtest</strong></div>
+    <div class="status-meta"><span>Latest artifact day</span><strong>2026-07-01</strong></div>
+    <a class="build-chip" href="../../v2_command_center_x3/index.html">Open X3</a>
+    <div class="build-chip">Build command_center_x2_20260703T035444Z</div>
+  </header>
+  <section class="boundary-strip">
+    <span>Research-only / paper-only</span>
+    <span>Live trading disabled</span>
+    <span>No strategy validated</span>
+    <span>Shadow challengers are not official</span>
+  </section>
+  <div class="content-frame">
+
+<section class="hero-story compact backtest-hero">
+  <div><div class="section-label">Six-Month Historical Backtest</div>
+  <h1>Daily-bar strategy backtest, not day-trading proof.</h1>
+  <p>Historical backtest only — not validated forward performance. Entries and exits are generated from completed daily bars, so ranked rows can be swing or position holds.</p></div>
+  <div class="pulse-card snapshot-card"><span>Snapshot</span><strong>2026-01-02 to 2026-07-01</strong><em>six_month_2026-01-02_2026-07-01_ffed22f925a8</em></div>
+</section>
+<section class="metric-grid backtest-metrics">
+  <div class="metric-card"><span>Date range</span><strong>2026-01-02 to 2026-07-01</strong><em>Completed daily bars only, not intraday fills</em></div>
+  <div class="metric-card"><span>Symbols</span><strong>6</strong><em>Aligned historical universe</em></div>
+  <div class="metric-card"><span>Strategy rows</span><strong>24</strong><em>Champions, benchmarks, shadow metadata</em></div>
+  <div class="metric-card"><span>Boundary</span><strong>Not validated</strong><em>Research-only / paper-only</em></div>
+</section>
+<section class="toolbar"><input data-x2-search aria-label="Filter backtest rows" placeholder="Filter strategies"></section>
+<section class="panel backtest-table-panel">
+  <div class="panel-heading"><div><div class="section-label">Ranked Backtested Strategies</div><h2>Daily-bar strategy comparison</h2></div><span>2026-01-02 to 2026-07-01</span></div>
+  <div class="table-scroll"><table class="backtest-table">
+    <thead><tr><th>Rank</th><th>Strategy</th><th>Role</th><th>Return</th><th>Drawdown</th><th>Trades</th><th>Horizon</th><th>Trust</th></tr></thead>
+    <tbody><tr data-filter-item>
+  <td><span class="rank-chip">1</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-volatility_contraction_breakout" aria-controls="trade-menu-volatility_contraction_breakout" aria-expanded="false" aria-label="View trade ledger for Volatility Contraction Breakout" title="View trade ledger"><strong>Volatility Contraction Breakout</strong><em>volatility_contraction_breakout</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-positive">6.49%</td>
+  <td>-3.18%</td>
+  <td>6</td>
+  <td><span class="horizon-chip">Position hold</span><em>avg 30.2 daily bars / max 48</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">2</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-ts_momentum_sma_atr" aria-controls="trade-menu-ts_momentum_sma_atr" aria-expanded="false" aria-label="View trade ledger for Ts Momentum SMA ATR" title="View trade ledger"><strong>Ts Momentum SMA ATR</strong><em>ts_momentum_sma_atr</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-positive">5.87%</td>
+  <td>-7.42%</td>
+  <td>25</td>
+  <td><span class="horizon-chip">Swing hold</span><em>avg 10.6 daily bars / max 31</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">3</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-donchian_breakout_20_10" aria-controls="trade-menu-donchian_breakout_20_10" aria-expanded="false" aria-label="View trade ledger for Donchian Breakout 20 10" title="View trade ledger"><strong>Donchian Breakout 20 10</strong><em>donchian_breakout_20_10</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-positive">5.79%</td>
+  <td>-5.34%</td>
+  <td>15</td>
+  <td><span class="horizon-chip">Swing hold</span><em>avg 14.7 daily bars / max 40</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">4</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-cross_sectional_relative_strength" aria-controls="trade-menu-cross_sectional_relative_strength" aria-expanded="false" aria-label="View trade ledger for Cross Sectional Relative Strength" title="View trade ledger"><strong>Cross Sectional Relative Strength</strong><em>cross_sectional_relative_strength</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-positive">5.49%</td>
+  <td>-5.31%</td>
+  <td>11</td>
+  <td><span class="horizon-chip">Swing hold</span><em>avg 17.0 daily bars / max 55</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">5</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-benchmark_buy_hold_equal_weight" aria-controls="trade-menu-benchmark_buy_hold_equal_weight" aria-expanded="false" aria-label="View trade ledger for Benchmark Buy Hold Equal Weight" title="View trade ledger"><strong>Benchmark Buy Hold Equal Weight</strong><em>benchmark_buy_hold_equal_weight</em></button></td>
+  <td>Benchmark</td>
+  <td class="return-positive">2.17%</td>
+  <td>-2.10%</td>
+  <td>6</td>
+  <td><span class="horizon-chip">Position hold</span><em>avg 63.0 daily bars / max 63</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">6</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-bullish_fvg_continuation" aria-controls="trade-menu-bullish_fvg_continuation" aria-expanded="false" aria-label="View trade ledger for Bullish FVG Continuation" title="View trade ledger"><strong>Bullish FVG Continuation</strong><em>bullish_fvg_continuation</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-positive">0.65%</td>
+  <td>-7.66%</td>
+  <td>23</td>
+  <td><span class="horizon-chip">Swing hold</span><em>avg 14.2 daily bars / max 57</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">7</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-cash_no_trade_baseline" aria-controls="trade-menu-cash_no_trade_baseline" aria-expanded="false" aria-label="View trade ledger for Cash No Trade Baseline" title="View trade ledger"><strong>Cash No Trade Baseline</strong><em>cash_no_trade_baseline</em></button></td>
+  <td>Baseline</td>
+  <td class="return-flat">0.00%</td>
+  <td>0.00%</td>
+  <td>0</td>
+  <td><span class="horizon-chip">No trades</span><em>No ledger entries</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">8</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-pullback_reclaim_uptrend" aria-controls="trade-menu-pullback_reclaim_uptrend" aria-expanded="false" aria-label="View trade ledger for Pullback Reclaim Uptrend" title="View trade ledger"><strong>Pullback Reclaim Uptrend</strong><em>pullback_reclaim_uptrend</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-negative">-1.43%</td>
+  <td>-3.77%</td>
+  <td>10</td>
+  <td><span class="horizon-chip">Not day trade</span><em>avg 4.8 daily bars / max 12</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr><tr data-filter-item>
+  <td><span class="rank-chip">9</span></td>
+  <td><button class="strategy-disclosure" type="button" data-x2-toggle="trade-menu-failed_breakout_reversal_short" aria-controls="trade-menu-failed_breakout_reversal_short" aria-expanded="false" aria-label="View trade ledger for Failed Breakout Reversal Short" title="View trade ledger"><strong>Failed Breakout Reversal Short</strong><em>failed_breakout_reversal_short</em></button></td>
+  <td>Champion Strategy</td>
+  <td class="return-negative">-2.14%</td>
+  <td>-4.21%</td>
+  <td>33</td>
+  <td><span class="horizon-chip">Not day trade</span><em>avg 2.0 daily bars / max 10</em></td>
+  <td><span class="trust-chip">Not validated</span></td>
+</tr></tbody>
+  </table></div>
+  <div id="trade-menu-volatility_contraction_breakout" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-volatility_contraction_breakout-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-volatility_contraction_breakout"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-volatility_contraction_breakout-title">Volatility Contraction Breakout</strong><em>data/v2_historical_backtests/six_month/trades/volatility_contraction_breakout_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-volatility_contraction_breakout" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>6</b> generated trades</span>
+      <span><b>2026-04-07 13:30:00 UTC</b> first entry</span>
+      <span><b>2026-07-01 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-07 13:30:00 UTC</td>
+  <td>2026-05-08 13:30:00 UTC</td>
+  <td>$256.29</td>
+  <td>$292.09</td>
+  <td>$245.51 / $292.24</td>
+  <td class="return-positive">$2788.19 net / 13.95% / 3.32R</td>
+  <td>24 daily bars</td>
+  <td>Target</td>
+  <td><em>ATR/close 0.0205 is in trailing low-volatility quartile | close 258.86 broke compression high 257.00</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-09 13:30:00 UTC</td>
+  <td>2026-05-13 13:30:00 UTC</td>
+  <td>$181.93</td>
+  <td>$226.49</td>
+  <td>$164.27 / $226.60</td>
+  <td class="return-positive">$2493.12 net / 24.47% / 2.52R</td>
+  <td>25 daily bars</td>
+  <td>Target</td>
+  <td><em>ATR/close 0.0293 is in trailing low-volatility quartile | close 182.08 broke compression high 181.22</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-05-28 13:30:00 UTC</td>
+  <td>2026-06-02 13:30:00 UTC</td>
+  <td>$272.41</td>
+  <td>$255.06</td>
+  <td>$255.19 / $313.50</td>
+  <td class="return-negative">-$1009.00 net / -6.39% / -1.01R</td>
+  <td>4 daily bars</td>
+  <td>Stop</td>
+  <td><em>ATR/close 0.0231 is in trailing low-volatility quartile | close 271.85 broke compression high 270.78</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-23 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$653.88</td>
+  <td>$724.81</td>
+  <td>$602.12 / $787.59</td>
+  <td class="return-positive">$1345.06 net / 10.83% / 1.37R</td>
+  <td>48 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>ATR/close 0.0158 is in trailing low-volatility quartile | close 655.11 broke compression high 650.20</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-27 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$713.53</td>
+  <td>$745.39</td>
+  <td>$676.58 / $807.34</td>
+  <td class="return-positive">$856.30 net / 4.44% / 0.86R</td>
+  <td>46 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>ATR/close 0.0113 is in trailing low-volatility quartile | close 713.94 broke compression high 712.39</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-05-13 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$293.65</td>
+  <td>$294.23</td>
+  <td>$267.04 / $364.20</td>
+  <td class="return-positive">$19.51 net / 0.18% / 0.02R</td>
+  <td>34 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>ATR/close 0.0213 is in trailing low-volatility quartile | close 294.80 broke compression high 294.76</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-ts_momentum_sma_atr" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-ts_momentum_sma_atr-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-ts_momentum_sma_atr"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-ts_momentum_sma_atr-title">Ts Momentum SMA ATR</strong><em>data/v2_historical_backtests/six_month/trades/ts_momentum_sma_atr_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-ts_momentum_sma_atr" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>25</b> generated trades</span>
+      <span><b>2026-04-09 13:30:00 UTC</b> first entry</span>
+      <span><b>2026-06-25 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+    <p class="quiet-note">Showing first 12 of 25 ledger rows. Open the CSV artifact for the complete ledger.</p>
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-09 13:30:00 UTC</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>$225.34</td>
+  <td>$239.61</td>
+  <td>$208.93 / $239.73</td>
+  <td class="return-positive">$853.52 net / 6.31% / 0.87R</td>
+  <td>2 daily bars</td>
+  <td>Target</td>
+  <td><em>close 221.25 above SMA50 213.72 | 20-bar trailing return 3.23%</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-04-17 13:30:00 UTC</td>
+  <td>$612.15</td>
+  <td>$646.37</td>
+  <td>$585.85 / $646.69</td>
+  <td class="return-positive">$1091.15 net / 5.57% / 1.30R</td>
+  <td>6 daily bars</td>
+  <td>Target</td>
+  <td><em>close 610.19 above SMA50 601.08 | 20-bar trailing return 0.41%</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$681.66</td>
+  <td>$713.39</td>
+  <td>$657.35 / $713.75</td>
+  <td class="return-positive">$916.07 net / 4.63% / 1.30R</td>
+  <td>11 daily bars</td>
+  <td>Target</td>
+  <td><em>close 679.91 above SMA50 674.61 | 20-bar trailing return 0.53%</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$237.57</td>
+  <td>$259.11</td>
+  <td>$224.48 / $259.24</td>
+  <td class="return-positive">$1633.12 net / 9.05% / 1.64R</td>
+  <td>10 daily bars</td>
+  <td>Target</td>
+  <td><em>close 238.38 above SMA50 213.40 | 20-bar trailing return 13.77%</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$186.12</td>
+  <td>$204.11</td>
+  <td>$178.24 / $204.22</td>
+  <td class="return-positive">$1920.74 net / 9.64% / 2.28R</td>
+  <td>10 daily bars</td>
+  <td>Target</td>
+  <td><em>close 188.63 above SMA50 182.08 | 20-bar trailing return 3.00%</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-16 13:30:00 UTC</td>
+  <td>2026-05-01 13:30:00 UTC</td>
+  <td>$266.93</td>
+  <td>$285.01</td>
+  <td>$253.95 / $285.15</td>
+  <td class="return-positive">$1333.55 net / 6.75% / 1.39R</td>
+  <td>12 daily bars</td>
+  <td>Target</td>
+  <td><em>close 266.43 above SMA50 260.81 | 20-bar trailing return 4.80%</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-27 13:30:00 UTC</td>
+  <td>2026-05-01 13:30:00 UTC</td>
+  <td>$209.75</td>
+  <td>$197.61</td>
+  <td>$197.71 / $224.12</td>
+  <td class="return-negative">-$999.47 net / -5.81% / -1.01R</td>
+  <td>5 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 208.27 above SMA50 185.03 | 20-bar trailing return 21.62%</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-20 13:30:00 UTC</td>
+  <td>2026-05-06 13:30:00 UTC</td>
+  <td>$648.36</td>
+  <td>$683.39</td>
+  <td>$625.59 / $683.73</td>
+  <td class="return-positive">$1046.84 net / 5.38% / 1.53R</td>
+  <td>13 daily bars</td>
+  <td>Target</td>
+  <td><em>close 648.85 above SMA50 602.10 | 20-bar trailing return 9.41%</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-05-04 13:30:00 UTC</td>
+  <td>2026-05-08 13:30:00 UTC</td>
+  <td>$199.60</td>
+  <td>$217.56</td>
+  <td>$185.64 / $217.67</td>
+  <td class="return-positive">$1272.10 net / 8.98% / 1.28R</td>
+  <td>5 daily bars</td>
+  <td>Target</td>
+  <td><em>close 198.45 above SMA50 187.15 | 20-bar trailing return 11.87%</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-27 13:30:00 UTC</td>
+  <td>2026-05-11 13:30:00 UTC</td>
+  <td>$713.53</td>
+  <td>$737.73</td>
+  <td>$697.83 / $738.10</td>
+  <td class="return-positive">$673.68 net / 3.37% / 1.53R</td>
+  <td>11 daily bars</td>
+  <td>Target</td>
+  <td><em>close 713.94 above SMA50 676.99 | 20-bar trailing return 10.67%</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-05-04 13:30:00 UTC</td>
+  <td>2026-05-13 13:30:00 UTC</td>
+  <td>$279.80</td>
+  <td>$300.30</td>
+  <td>$266.60 / $300.45</td>
+  <td class="return-positive">$1451.53 net / 7.31% / 1.55R</td>
+  <td>8 daily bars</td>
+  <td>Target</td>
+  <td><em>close 280.14 above SMA50 261.22 | 20-bar trailing return 9.46%</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-05-07 13:30:00 UTC</td>
+  <td>2026-05-26 13:30:00 UTC</td>
+  <td>$696.93</td>
+  <td>$723.32</td>
+  <td>$677.16 / $723.68</td>
+  <td class="return-positive">$734.90 net / 3.77% / 1.33R</td>
+  <td>13 daily bars</td>
+  <td>Target</td>
+  <td><em>close 695.77 above SMA50 617.31 | 20-bar trailing return 14.80%</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-donchian_breakout_20_10" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-donchian_breakout_20_10-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-donchian_breakout_20_10"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-donchian_breakout_20_10-title">Donchian Breakout 20 10</strong><em>data/v2_historical_backtests/six_month/trades/donchian_breakout_20_10_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-donchian_breakout_20_10" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>15</b> generated trades</span>
+      <span><b>2026-02-05 14:30:00 UTC</b> first entry</span>
+      <span><b>2026-06-11 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+    <p class="quiet-note">Showing first 12 of 15 ledger rows. Open the CSV artifact for the complete ledger.</p>
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-02-05 14:30:00 UTC</td>
+  <td>2026-02-12 14:30:00 UTC</td>
+  <td>$278.27</td>
+  <td>$262.94</td>
+  <td>$263.07 / $316.74</td>
+  <td class="return-negative">-$999.82 net / -5.53% / -1.01R</td>
+  <td>6 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 276.49 broke prior 20-bar high 271.88</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-02-26 14:30:00 UTC</td>
+  <td>2026-02-27 14:30:00 UTC</td>
+  <td>$194.37</td>
+  <td>$182.79</td>
+  <td>$182.88 / $233.60</td>
+  <td class="return-negative">-$1010.62 net / -5.98% / -1.01R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 195.56 broke prior 20-bar high 194.49</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-09 13:30:00 UTC</td>
+  <td>2026-04-23 13:30:00 UTC</td>
+  <td>$225.34</td>
+  <td>$258.09</td>
+  <td>$208.93 / $258.22</td>
+  <td class="return-positive">$1961.91 net / 14.51% / 1.99R</td>
+  <td>11 daily bars</td>
+  <td>Target</td>
+  <td><em>close 221.25 broke prior 20-bar high 217.00</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>2026-05-05 13:30:00 UTC</td>
+  <td>$609.78</td>
+  <td>$679.28</td>
+  <td>$588.22 / $679.62</td>
+  <td class="return-positive">$2219.87 net / 11.38% / 3.22R</td>
+  <td>17 daily bars</td>
+  <td>Target</td>
+  <td><em>close 611.07 broke prior 20-bar high 610.50</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-14 13:30:00 UTC</td>
+  <td>2026-05-14 13:30:00 UTC</td>
+  <td>$688.03</td>
+  <td>$746.61</td>
+  <td>$665.80 / $746.99</td>
+  <td class="return-positive">$1694.65 net / 8.49% / 2.63R</td>
+  <td>23 daily bars</td>
+  <td>Target</td>
+  <td><em>close 686.10 broke prior 20-bar high 682.03</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-15 13:30:00 UTC</td>
+  <td>2026-05-14 13:30:00 UTC</td>
+  <td>$196.64</td>
+  <td>$228.94</td>
+  <td>$185.66 / $229.06</td>
+  <td class="return-positive">$2935.69 net / 16.41% / 2.94R</td>
+  <td>22 daily bars</td>
+  <td>Target</td>
+  <td><em>close 196.51 broke prior 20-bar high 190.00</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-05-15 13:30:00 UTC</td>
+  <td>2026-05-18 13:30:00 UTC</td>
+  <td>$229.87</td>
+  <td>$219.50</td>
+  <td>$219.61 / $284.13</td>
+  <td class="return-negative">-$906.51 net / -4.53% / -1.02R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 235.74 broke prior 20-bar high 227.84</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-05-15 13:30:00 UTC</td>
+  <td>2026-05-18 13:30:00 UTC</td>
+  <td>$742.16</td>
+  <td>$734.38</td>
+  <td>$734.75 / $788.44</td>
+  <td class="return-negative">-$206.15 net / -1.07% / -1.07R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 748.17 broke prior 20-bar high 743.91</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-16 13:30:00 UTC</td>
+  <td>2026-05-21 13:30:00 UTC</td>
+  <td>$266.93</td>
+  <td>$303.72</td>
+  <td>$253.95 / $303.87</td>
+  <td class="return-positive">$2718.16 net / 13.76% / 2.83R</td>
+  <td>26 daily bars</td>
+  <td>Target</td>
+  <td><em>close 266.43 broke prior 20-bar high 262.19</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-05-06 13:30:00 UTC</td>
+  <td>2026-05-28 13:30:00 UTC</td>
+  <td>$688.12</td>
+  <td>$733.89</td>
+  <td>$664.06 / $734.26</td>
+  <td class="return-positive">$1323.05 net / 6.63% / 1.90R</td>
+  <td>16 daily bars</td>
+  <td>Target</td>
+  <td><em>close 681.61 broke prior 20-bar high 676.73</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-27 13:30:00 UTC</td>
+  <td>2026-06-03 13:30:00 UTC</td>
+  <td>$263.59</td>
+  <td>$249.33</td>
+  <td>$249.45 / $307.61</td>
+  <td class="return-negative">-$1002.24 net / -5.43% / -1.01R</td>
+  <td>27 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 263.99 broke prior 20-bar high 258.79</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-05-27 13:30:00 UTC</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>$751.26</td>
+  <td>$735.19</td>
+  <td>$735.56 / $795.68</td>
+  <td class="return-negative">-$421.55 net / -2.16% / -1.03R</td>
+  <td>8 daily bars</td>
+  <td>Stop</td>
+  <td><em>close 750.59 broke prior 20-bar high 749.53</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-cross_sectional_relative_strength" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-cross_sectional_relative_strength-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-cross_sectional_relative_strength"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-cross_sectional_relative_strength-title">Cross Sectional Relative Strength</strong><em>data/v2_historical_backtests/six_month/trades/cross_sectional_relative_strength_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-cross_sectional_relative_strength" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>11</b> generated trades</span>
+      <span><b>2026-04-10 13:30:00 UTC</b> first entry</span>
+      <span><b>2026-07-01 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-05-12 13:30:00 UTC</td>
+  <td>$184.40</td>
+  <td>$223.16</td>
+  <td>$170.79 / $223.27</td>
+  <td class="return-positive">$2826.54 net / 21.00% / 2.84R</td>
+  <td>23 daily bars</td>
+  <td>Target</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 183.91 above SMA50 182.14</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-16 13:30:00 UTC</td>
+  <td>2026-05-27 13:30:00 UTC</td>
+  <td>$266.93</td>
+  <td>$313.08</td>
+  <td>$250.83 / $313.24</td>
+  <td class="return-positive">$2857.41 net / 17.27% / 2.86R</td>
+  <td>29 daily bars</td>
+  <td>Target</td>
+  <td><em>rank 1 by volatility-adjusted 60-bar momentum | close 266.43 above SMA50 260.81</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-28 13:30:00 UTC</td>
+  <td>2026-05-29 13:30:00 UTC</td>
+  <td>$657.74</td>
+  <td>$740.11</td>
+  <td>$638.81 / $740.48</td>
+  <td class="return-positive">$2467.05 net / 12.50% / 4.34R</td>
+  <td>23 daily bars</td>
+  <td>Target</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 664.23 above SMA50 607.69</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-06-01 13:30:00 UTC</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>$737.41</td>
+  <td>$711.47</td>
+  <td>$711.82 / $817.77</td>
+  <td class="return-negative">-$704.30 net / -3.54% / -1.02R</td>
+  <td>5 daily bars</td>
+  <td>Stop</td>
+  <td><em>rank 1 by volatility-adjusted 60-bar momentum | close 738.31 above SMA50 652.93</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-06-02 13:30:00 UTC</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>$757.41</td>
+  <td>$741.15</td>
+  <td>$741.52 / $809.61</td>
+  <td class="return-negative">-$426.72 net / -2.17% / -1.03R</td>
+  <td>4 daily bars</td>
+  <td>Stop</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 758.54 above SMA50 705.62</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-06-08 13:30:00 UTC</td>
+  <td>2026-06-09 13:30:00 UTC</td>
+  <td>$308.89</td>
+  <td>$292.88</td>
+  <td>$293.02 / $350.29</td>
+  <td class="return-negative">-$1012.86 net / -5.20% / -1.01R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>rank 1 by volatility-adjusted 60-bar momentum | close 307.34 above SMA50 281.24</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-06-08 13:30:00 UTC</td>
+  <td>2026-06-26 13:30:00 UTC</td>
+  <td>$743.73</td>
+  <td>$719.33</td>
+  <td>$719.69 / $791.14</td>
+  <td class="return-negative">-$638.35 net / -3.30% / -1.02R</td>
+  <td>14 daily bars</td>
+  <td>Stop</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 737.55 above SMA50 713.51</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-14 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$241.90</td>
+  <td>$241.58</td>
+  <td>$223.08 / $290.33</td>
+  <td class="return-negative">-$19.61 net / -0.15% / -0.02R</td>
+  <td>55 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 239.89 above SMA50 213.37</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-06-09 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$723.34</td>
+  <td>$724.81</td>
+  <td>$685.85 / $806.75</td>
+  <td class="return-positive">$34.35 net / 0.18% / 0.04R</td>
+  <td>16 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>rank 2 by volatility-adjusted 60-bar momentum | close 716.07 above SMA50 670.65</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-06-11 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$293.87</td>
+  <td>$294.23</td>
+  <td>$273.20 / $346.70</td>
+  <td class="return-positive">$14.74 net / 0.10% / 0.01R</td>
+  <td>14 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>rank 1 by volatility-adjusted 60-bar momentum | close 291.58 above SMA50 283.94</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-06-30 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$741.66</td>
+  <td>$745.39</td>
+  <td>$710.00 / $833.99</td>
+  <td class="return-positive">$93.02 net / 0.48% / 0.11R</td>
+  <td>2 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>rank 1 by volatility-adjusted 60-bar momentum | close 741.00 above SMA50 735.14</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-benchmark_buy_hold_equal_weight" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-benchmark_buy_hold_equal_weight-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-benchmark_buy_hold_equal_weight"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-benchmark_buy_hold_equal_weight-title">Benchmark Buy Hold Equal Weight</strong><em>data/v2_historical_backtests/six_month/trades/benchmark_buy_hold_equal_weight_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-benchmark_buy_hold_equal_weight" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>6</b> generated trades</span>
+      <span><b>2026-04-01 13:30:00 UTC</b> first entry</span>
+      <span><b>2026-07-01 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$254.21</td>
+  <td>$294.23</td>
+  <td>$164.96 / n/a</td>
+  <td class="return-positive">$439.68 net / 15.72% / 0.45R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$210.55</td>
+  <td>$241.58</td>
+  <td>$135.38 / n/a</td>
+  <td class="return-positive">$402.85 net / 14.72% / 0.41R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr><tr>
+  <td><strong>MSFT</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$373.68</td>
+  <td>$384.09</td>
+  <td>$240.61 / n/a</td>
+  <td class="return-positive">$72.35 net / 2.77% / 0.08R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$176.09</td>
+  <td>$197.48</td>
+  <td>$113.36 / n/a</td>
+  <td class="return-positive">$320.34 net / 12.13% / 0.34R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$581.77</td>
+  <td>$724.81</td>
+  <td>$375.17 / n/a</td>
+  <td class="return-positive">$571.62 net / 24.56% / 0.69R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-01 13:30:00 UTC</td>
+  <td>2026-07-01 13:30:00 UTC</td>
+  <td>$654.23</td>
+  <td>$745.39</td>
+  <td>$422.72 / n/a</td>
+  <td class="return-positive">$364.08 net / 13.91% / 0.39R</td>
+  <td>63 daily bars</td>
+  <td>End Of Test Liquidation</td>
+  <td><em>benchmark equal-weight buy-and-hold entry after warm-up</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-bullish_fvg_continuation" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-bullish_fvg_continuation-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-bullish_fvg_continuation"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-bullish_fvg_continuation-title">Bullish FVG Continuation</strong><em>data/v2_historical_backtests/six_month/trades/bullish_fvg_continuation_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-bullish_fvg_continuation" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>23</b> generated trades</span>
+      <span><b>2026-02-05 14:30:00 UTC</b> first entry</span>
+      <span><b>2026-07-01 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+    <p class="quiet-note">Showing first 12 of 23 ledger rows. Open the CSV artifact for the complete ledger.</p>
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-02-05 14:30:00 UTC</td>
+  <td>2026-02-13 14:30:00 UTC</td>
+  <td>$278.27</td>
+  <td>$258.42</td>
+  <td>$258.55 / $312.38</td>
+  <td class="return-negative">-$995.31 net / -7.15% / -1.01R</td>
+  <td>7 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 261.90-267.61 | close 276.49 held above gap midpoint 264.75</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-02-11 14:30:00 UTC</td>
+  <td>2026-02-13 14:30:00 UTC</td>
+  <td>$696.74</td>
+  <td>$679.45</td>
+  <td>$679.79 / $716.77</td>
+  <td class="return-negative">-$487.80 net / -2.50% / -1.03R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 683.69-688.34 | close 692.12 held above gap midpoint 686.02</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-02-26 14:30:00 UTC</td>
+  <td>2026-03-02 14:30:00 UTC</td>
+  <td>$275.09</td>
+  <td>$261.27</td>
+  <td>$261.40 / $299.89</td>
+  <td class="return-negative">-$998.80 net / -5.04% / -1.01R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 264.75-267.71 | close 274.23 held above gap midpoint 266.23</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-03-06 14:30:00 UTC</td>
+  <td>2026-03-13 13:30:00 UTC</td>
+  <td>$215.10</td>
+  <td>$206.75</td>
+  <td>$206.86 / $243.11</td>
+  <td class="return-negative">-$771.64 net / -3.90% / -1.02R</td>
+  <td>6 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 209.73-210.15 | close 218.94 held above gap midpoint 209.94</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-02-11 14:30:00 UTC</td>
+  <td>2026-03-20 13:30:00 UTC</td>
+  <td>$192.55</td>
+  <td>$173.48</td>
+  <td>$173.57 / $218.48</td>
+  <td class="return-negative">-$993.20 net / -9.92% / -1.01R</td>
+  <td>27 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 176.82-183.95 | close 188.54 held above gap midpoint 180.38</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-04-06 13:30:00 UTC</td>
+  <td>2026-04-07 13:30:00 UTC</td>
+  <td>$256.64</td>
+  <td>$248.17</td>
+  <td>$248.29 / $271.17</td>
+  <td class="return-negative">-$655.90 net / -3.32% / -1.02R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 250.87-253.33 | close 255.92 held above gap midpoint 252.10</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-04-06 13:30:00 UTC</td>
+  <td>2026-04-09 13:30:00 UTC</td>
+  <td>$209.90</td>
+  <td>$227.40</td>
+  <td>$200.90 / $227.52</td>
+  <td class="return-positive">$1658.07 net / 8.31% / 1.94R</td>
+  <td>4 daily bars</td>
+  <td>Target</td>
+  <td><em>bullish three-candle gap zone 203.80-208.19 | close 209.77 held above gap midpoint 206.00</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-04-17 13:30:00 UTC</td>
+  <td>$184.40</td>
+  <td>$201.30</td>
+  <td>$175.17 / $201.40</td>
+  <td class="return-positive">$1820.57 net / 9.14% / 1.83R</td>
+  <td>6 daily bars</td>
+  <td>Target</td>
+  <td><em>bullish three-candle gap zone 177.79-180.30 | close 183.91 held above gap midpoint 179.05</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$612.15</td>
+  <td>$661.19</td>
+  <td>$584.53 / $661.52</td>
+  <td class="return-positive">$1565.24 net / 7.99% / 1.77R</td>
+  <td>11 daily bars</td>
+  <td>Target</td>
+  <td><em>bullish three-candle gap zone 590.61-602.12 | close 610.19 held above gap midpoint 596.37</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-04-29 13:30:00 UTC</td>
+  <td>2026-04-30 13:30:00 UTC</td>
+  <td>$212.81</td>
+  <td>$200.87</td>
+  <td>$200.97 / $237.57</td>
+  <td class="return-negative">-$1006.17 net / -5.63% / -1.01R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>bullish three-candle gap zone 203.83-207.38 | close 213.17 held above gap midpoint 205.61</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-05-06 13:30:00 UTC</td>
+  <td>$681.66</td>
+  <td>$731.20</td>
+  <td>$654.08 / $731.57</td>
+  <td class="return-positive">$1432.62 net / 7.25% / 1.79R</td>
+  <td>19 daily bars</td>
+  <td>Target</td>
+  <td><em>bullish three-candle gap zone 659.72-671.46 | close 679.91 held above gap midpoint 665.59</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-04-28 13:30:00 UTC</td>
+  <td>2026-05-06 13:30:00 UTC</td>
+  <td>$657.74</td>
+  <td>$691.85</td>
+  <td>$650.25 / $692.20</td>
+  <td class="return-positive">$1019.32 net / 5.17% / 4.53R</td>
+  <td>7 daily bars</td>
+  <td>Target</td>
+  <td><em>bullish three-candle gap zone 655.33-656.53 | close 664.23 held above gap midpoint 655.93</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-cash_no_trade_baseline" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-cash_no_trade_baseline-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-cash_no_trade_baseline"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-cash_no_trade_baseline-title">Cash No Trade Baseline</strong><em>data/v2_historical_backtests/six_month/trades/cash_no_trade_baseline_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-cash_no_trade_baseline" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>0</b> generated trades</span>
+      <span><b>n/a</b> first entry</span>
+      <span><b>n/a</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr><td colspan="11"><strong>No trades generated.</strong><em>This strategy or baseline produced no executed backtest trades for this window.</em></td></tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-pullback_reclaim_uptrend" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-pullback_reclaim_uptrend-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-pullback_reclaim_uptrend"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-pullback_reclaim_uptrend-title">Pullback Reclaim Uptrend</strong><em>data/v2_historical_backtests/six_month/trades/pullback_reclaim_uptrend_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-pullback_reclaim_uptrend" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>10</b> generated trades</span>
+      <span><b>2026-05-18 13:30:00 UTC</b> first entry</span>
+      <span><b>2026-06-30 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>MSFT</strong></td>
+  <td>long</td>
+  <td>2026-05-18 13:30:00 UTC</td>
+  <td>2026-06-01 13:30:00 UTC</td>
+  <td>$416.83</td>
+  <td>$455.92</td>
+  <td>$404.81 / $456.15</td>
+  <td class="return-positive">$1833.30 net / 9.36% / 3.24R</td>
+  <td>10 daily bars</td>
+  <td>Target</td>
+  <td><em>uptrend close 421.92 above SMA50 399.06 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-05-28 13:30:00 UTC</td>
+  <td>2026-06-01 13:30:00 UTC</td>
+  <td>$272.41</td>
+  <td>$262.30</td>
+  <td>$262.43 / $290.70</td>
+  <td class="return-negative">-$741.97 net / -3.73% / -1.02R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>uptrend close 271.85 above SMA50 244.28 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>$214.64</td>
+  <td>$205.92</td>
+  <td>$206.03 / $219.42</td>
+  <td class="return-negative">-$814.17 net / -4.08% / -1.02R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>uptrend close 218.66 above SMA50 202.92 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>long</td>
+  <td>2026-06-05 13:30:00 UTC</td>
+  <td>2026-06-09 13:30:00 UTC</td>
+  <td>$254.39</td>
+  <td>$243.09</td>
+  <td>$243.21 / $265.38</td>
+  <td class="return-negative">-$885.38 net / -4.46% / -1.02R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>uptrend close 253.79 above SMA50 250.47 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-06-12 13:30:00 UTC</td>
+  <td>2026-06-12 13:30:00 UTC</td>
+  <td>$717.97</td>
+  <td>$721.06</td>
+  <td>$693.72 / $721.42</td>
+  <td class="return-positive">$79.64 net / 0.41% / 0.12R</td>
+  <td>1 daily bar</td>
+  <td>Target</td>
+  <td><em>uptrend close 717.12 above SMA50 679.07 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-06-12 13:30:00 UTC</td>
+  <td>2026-06-15 13:30:00 UTC</td>
+  <td>$741.08</td>
+  <td>$745.02</td>
+  <td>$723.87 / $745.40</td>
+  <td class="return-positive">$98.64 net / 0.51% / 0.22R</td>
+  <td>2 daily bars</td>
+  <td>Target</td>
+  <td><em>uptrend close 737.76 above SMA50 721.07 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>long</td>
+  <td>2026-06-09 13:30:00 UTC</td>
+  <td>2026-06-25 13:30:00 UTC</td>
+  <td>$210.73</td>
+  <td>$196.28</td>
+  <td>$196.38 / $218.78</td>
+  <td class="return-negative">-$999.73 net / -6.88% / -1.01R</td>
+  <td>12 daily bars</td>
+  <td>Stop</td>
+  <td><em>uptrend close 208.64 above SMA50 204.19 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>long</td>
+  <td>2026-06-11 13:30:00 UTC</td>
+  <td>2026-06-25 13:30:00 UTC</td>
+  <td>$293.87</td>
+  <td>$280.41</td>
+  <td>$280.56 / $304.40</td>
+  <td class="return-negative">-$918.65 net / -4.60% / -1.01R</td>
+  <td>10 daily bars</td>
+  <td>Stop</td>
+  <td><em>uptrend close 291.58 above SMA50 283.94 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>long</td>
+  <td>2026-06-26 13:30:00 UTC</td>
+  <td>2026-06-30 13:30:00 UTC</td>
+  <td>$707.48</td>
+  <td>$725.85</td>
+  <td>$684.73 / $726.22</td>
+  <td class="return-positive">$510.34 net / 2.58% / 0.80R</td>
+  <td>3 daily bars</td>
+  <td>Target</td>
+  <td><em>uptrend close 716.38 above SMA50 701.41 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>long</td>
+  <td>2026-06-26 13:30:00 UTC</td>
+  <td>2026-06-30 13:30:00 UTC</td>
+  <td>$729.31</td>
+  <td>$744.51</td>
+  <td>$716.04 / $744.88</td>
+  <td class="return-positive">$406.30 net / 2.06% / 1.13R</td>
+  <td>3 daily bars</td>
+  <td>Target</td>
+  <td><em>uptrend close 734.30 above SMA50 733.77 | prior bar showed RSI/Bollinger pullback and current bar reclaimed upward</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div><div id="trade-menu-failed_breakout_reversal_short" class="trade-menu" role="dialog" aria-modal="true" aria-labelledby="trade-menu-failed_breakout_reversal_short-title" aria-hidden="true" hidden>
+  <div class="trade-menu-backdrop" data-x2-close="trade-menu-failed_breakout_reversal_short"></div>
+  <div class="trade-menu-panel" tabindex="-1">
+    <div class="trade-menu-bar">
+      <div><div class="section-label">Trade Ledger</div><strong id="trade-menu-failed_breakout_reversal_short-title">Failed Breakout Reversal Short</strong><em>data/v2_historical_backtests/six_month/trades/failed_breakout_reversal_short_trades.csv</em></div>
+      <button class="menu-close" type="button" data-x2-close="trade-menu-failed_breakout_reversal_short" aria-label="Close trade ledger">Close</button>
+    </div>
+    <div class="trade-detail-stats">
+      <span><b>33</b> generated trades</span>
+      <span><b>2026-02-04 14:30:00 UTC</b> first entry</span>
+      <span><b>2026-06-09 13:30:00 UTC</b> last exit</span>
+    </div>
+    <p class="quiet-note">Historical-only replay. Timestamps are the available backtest bar timestamps, not broker fill confirmations.</p>
+    <p class="quiet-note">Showing first 12 of 33 ledger rows. Open the CSV artifact for the complete ledger.</p>
+    <div class="table-scroll trade-ledger-scroll"><table class="backtest-table trade-ledger-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Entry</th><th>Exit</th><th>Stop / Target</th><th>Result</th><th>Hold</th><th>Exit reason</th><th>Evidence</th></tr></thead>
+      <tbody><tr>
+  <td><strong>AAPL</strong></td>
+  <td>short</td>
+  <td>2026-02-04 14:30:00 UTC</td>
+  <td>2026-02-04 14:30:00 UTC</td>
+  <td>$272.15</td>
+  <td>$273.62</td>
+  <td>$273.48 / $261.48</td>
+  <td class="return-negative">-$110.72 net / -0.56% / -1.14R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>high 271.88 swept prior 20-bar high 271.51 | close 269.48 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>short</td>
+  <td>2026-02-06 14:30:00 UTC</td>
+  <td>2026-02-12 14:30:00 UTC</td>
+  <td>$276.98</td>
+  <td>$265.43</td>
+  <td>$281.22 / $265.29</td>
+  <td class="return-positive">$828.02 net / 4.15% / 2.71R</td>
+  <td>5 daily bars</td>
+  <td>Target</td>
+  <td><em>high 279.50 swept prior 20-bar high 278.95 | close 275.91 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>SPY</strong></td>
+  <td>short</td>
+  <td>2026-04-10 13:30:00 UTC</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>$680.98</td>
+  <td>$684.32</td>
+  <td>$683.98 / $671.77</td>
+  <td class="return-negative">-$100.89 net / -0.51% / -1.16R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>high 681.16 swept prior 20-bar high 680.08 | close 679.91 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>short</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>2026-04-14 13:30:00 UTC</td>
+  <td>$185.94</td>
+  <td>$191.39</td>
+  <td>$191.30 / $183.29</td>
+  <td class="return-negative">-$587.98 net / -2.96% / -1.02R</td>
+  <td>2 daily bars</td>
+  <td>Stop</td>
+  <td><em>high 190.00 swept prior 20-bar high 188.88 | close 188.63 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>short</td>
+  <td>2026-04-13 13:30:00 UTC</td>
+  <td>2026-04-15 13:30:00 UTC</td>
+  <td>$259.60</td>
+  <td>$263.85</td>
+  <td>$263.71 / $254.01</td>
+  <td class="return-negative">-$330.96 net / -1.66% / -1.04R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>high 262.19 swept prior 20-bar high 262.16 | close 260.48 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>short</td>
+  <td>2026-04-17 13:30:00 UTC</td>
+  <td>2026-04-17 13:30:00 UTC</td>
+  <td>$266.83</td>
+  <td>$268.85</td>
+  <td>$268.71 / $252.77</td>
+  <td class="return-negative">-$153.59 net / -0.78% / -1.10R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>high 267.16 swept prior 20-bar high 266.56 | close 263.40 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>short</td>
+  <td>2026-04-22 13:30:00 UTC</td>
+  <td>2026-04-22 13:30:00 UTC</td>
+  <td>$649.82</td>
+  <td>$653.10</td>
+  <td>$652.78 / $627.44</td>
+  <td class="return-negative">-$102.26 net / -0.52% / -1.15R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>high 650.20 swept prior 20-bar high 650.00 | close 644.33 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>short</td>
+  <td>2026-04-20 13:30:00 UTC</td>
+  <td>2026-04-23 13:30:00 UTC</td>
+  <td>$249.07</td>
+  <td>$258.07</td>
+  <td>$257.94 / $235.80</td>
+  <td class="return-negative">-$724.20 net / -3.63% / -1.02R</td>
+  <td>4 daily bars</td>
+  <td>Stop</td>
+  <td><em>high 256.18 swept prior 20-bar high 252.18 | close 250.56 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>NVDA</strong></td>
+  <td>short</td>
+  <td>2026-04-22 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$200.89</td>
+  <td>$203.99</td>
+  <td>$203.89 / $191.87</td>
+  <td class="return-negative">-$310.81 net / -1.56% / -1.05R</td>
+  <td>3 daily bars</td>
+  <td>Stop</td>
+  <td><em>high 202.75 swept prior 20-bar high 202.17 | close 199.88 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AMZN</strong></td>
+  <td>short</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$259.85</td>
+  <td>$260.63</td>
+  <td>$260.50 / $244.24</td>
+  <td class="return-negative">-$63.20 net / -0.32% / -1.28R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>high 258.79 swept prior 20-bar high 256.18 | close 255.08 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>QQQ</strong></td>
+  <td>short</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>$658.18</td>
+  <td>$659.79</td>
+  <td>$659.46 / $635.35</td>
+  <td class="return-negative">-$52.10 net / -0.26% / -1.36R</td>
+  <td>1 daily bar</td>
+  <td>Stop</td>
+  <td><em>high 656.92 swept prior 20-bar high 655.33 | close 651.42 failed back below prior high</em></td>
+</tr><tr>
+  <td><strong>AAPL</strong></td>
+  <td>short</td>
+  <td>2026-04-24 13:30:00 UTC</td>
+  <td>2026-04-27 13:30:00 UTC</td>
+  <td>$272.62</td>
+  <td>$265.69</td>
+  <td>$277.37 / $265.56</td>
+  <td class="return-positive">$502.13 net / 2.52% / 1.45R</td>
+  <td>2 daily bars</td>
+  <td>Target</td>
+  <td><em>high 275.77 swept prior 20-bar high 274.28 | close 273.43 failed back below prior high</em></td>
+</tr></tbody>
+    </table></div>
+  </div>
+</div>
+</section>
+<section class="panel shadow-panel">
+  <div class="panel-heading"><div><div class="section-label">Shadow Challengers</div><h2>Metadata-only candidates</h2></div><span>Not mechanically replayed</span></div>
+  <ul class="shadow-list"><li data-filter-item><strong>LF Ts Momentum SMA ATR Regime Filter v1</strong><span>lf_ts_momentum_sma_atr_regime_filter_v1</span></li><li data-filter-item><strong>LF Donchian Breakout 20 10 Regime Filter v1</strong><span>lf_donchian_breakout_20_10_regime_filter_v1</span></li><li data-filter-item><strong>LF Cross Sectional Relative Strength Regime Filter v1</strong><span>lf_cross_sectional_relative_strength_regime_filter_v1</span></li><li data-filter-item><strong>LF Pullback Reclaim Uptrend Regime Filter v1</strong><span>lf_pullback_reclaim_uptrend_regime_filter_v1</span></li><li data-filter-item><strong>LF Volatility Contraction Breakout Regime Filter v1</strong><span>lf_volatility_contraction_breakout_regime_filter_v1</span></li><li data-filter-item><strong>LF Failed Breakout Reversal Short Regime Filter v1</strong><span>lf_failed_breakout_reversal_short_regime_filter_v1</span></li><li data-filter-item><strong>LF Bullish FVG Continuation Regime Filter v1</strong><span>lf_bullish_fvg_continuation_regime_filter_v1</span></li><li data-filter-item><strong>MM Ts Momentum Regime Filter v1</strong><span>mm_ts_momentum_regime_filter_v1</span></li><li data-filter-item><strong>MM Donchian Turtle Vol Target v1</strong><span>mm_donchian_turtle_vol_target_v1</span></li><li data-filter-item><strong>MM Relative Strength Factor Guard v1</strong><span>mm_relative_strength_factor_guard_v1</span></li><li data-filter-item><strong>MM Vol Contraction Risk Overlay v1</strong><span>mm_vol_contraction_risk_overlay_v1</span></li><li data-filter-item><strong>MM Public Quant Ensemble v1</strong><span>mm_public_quant_ensemble_v1</span></li><li data-filter-item><strong>MM Reflexive Macro Warning v1</strong><span>mm_reflexive_macro_warning_v1</span></li><li data-filter-item><strong>MM Quality Value Parked v1</strong><span>mm_quality_value_parked_v1</span></li><li data-filter-item><strong>MM Trend Diversification Allocator v1</strong><span>mm_trend_diversification_allocator_v1</span></li></ul>
+</section>
+<section class="panel warnings-panel backtest-warnings"><div class="section-label">Historical Warnings</div><ul><li>Ranked strategy rows are daily-bar historical replays. Holds above 1 daily bar are not day trades.</li><li>public_yahoo_chart: free public chart data; not an institutional feed</li><li>public_yahoo_chart: no independent corporate-action reconciliation</li><li>shadow challenger rows are metadata-only, not mechanically replayed</li></ul></section>
+
+  <details class="panel warnings-panel app-warnings-panel" data-warning-count="33">
+    <summary><span>Warnings & trust boundaries</span><strong>33 current warning(s)</strong></summary>
+    <ul><li>AAPL: skipped incomplete daily bar 2026-06-29</li><li>AAPL: skipped incomplete daily bar 2026-06-30</li><li>AMZN: skipped incomplete daily bar 2026-06-29</li><li>AMZN: skipped incomplete daily bar 2026-06-30</li><li>CommitBridge blocked unsafe FillTruth proposal</li><li>FillTruth execution model disagreement exists</li><li>FillTruth has daily approximation evidence</li><li>MSFT: skipped incomplete daily bar 2026-06-29</li><li>MSFT: skipped incomplete daily bar 2026-06-30</li><li>NVDA: skipped incomplete daily bar 2026-06-29</li><li>NVDA: skipped incomplete daily bar 2026-06-30</li><li>QQQ: skipped incomplete daily bar 2026-06-29</li><li>QQQ: skipped incomplete daily bar 2026-06-30</li><li>SPY: skipped incomplete daily bar 2026-06-29</li><li>SPY: skipped incomplete daily bar 2026-06-30</li><li>blocked FillTruth proposals are not official PaperOps evidence</li><li>candidate_blocked_by_decision_engine</li><li>candidates blocked by RiskHub or Decision Engine</li><li>carry position marked to completed close; not realized</li><li>commitbridge_blocks_unsafe_filltruth_commit</li><li>daily bar cannot prove intraday stop/target order</li><li>daily conservative model is approximate for same-bar stop/target order</li><li>daily next-open fills do not prove intraday stop/target sequence</li><li>earliest_fill_date repaired from legacy calendar-day logic</li><li>execution model disagreement is non-zero</li><li>intraday bar still approximates within-bar order</li><li>no accepted candidates</li><li>no strategy validated</li><li>only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible</li><li>pending paper orders exist</li><li>real intraday aggregate is not reconciled enough against DataTruth daily bars</li><li>\Dawnstrike\OMEGA Morning Check has not run today after scheduled time 09:10</li><li>No strategy is validated yet.</li></ul>
+  </details>
+  </div>
+</main>
+<script src="../assets/x2_interactions.js?v=command_center_x2_20260703t035444z" defer></script>
+</body>
+</html>

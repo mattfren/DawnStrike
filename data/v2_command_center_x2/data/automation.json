@@ -1,0 +1,124 @@
+{
+  "autonomous_runner_status": "installed",
+  "latest_scheduler_status": "passed",
+  "latest_watchdog_status": "passed_with_warnings",
+  "missed_runs": [
+    {
+      "schedule_time": "09:10",
+      "state": "missed",
+      "task": "OMEGA Morning Check"
+    }
+  ],
+  "next_runs": [
+    {
+      "next_run_time": "2026-07-02T16:35:00.0000000-05:00",
+      "state": "Ready",
+      "task": "OMEGA After Close"
+    },
+    {
+      "next_run_time": "2026-07-02T09:10:00.0000000-05:00",
+      "state": "Ready",
+      "task": "OMEGA Morning Check"
+    },
+    {
+      "next_run_time": "2026-07-02T17:10:00.0000000-05:00",
+      "state": "Ready",
+      "task": "OMEGA Verify"
+    },
+    {
+      "next_run_time": "2026-07-02T18:00:00.0000000-05:00",
+      "state": "Ready",
+      "task": "OMEGA Watchdog"
+    }
+  ],
+  "no_overlap_status": "Do not start a new instance / MultipleInstances IgnoreNew",
+  "task_statuses": [
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA After Close",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-01T16:35:00.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-02T16:35:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA After Close",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Morning Check",
+      "installed": true,
+      "last_result": 267011,
+      "last_run_time": "1999-11-30T00:00:00.0000000-06:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-02T09:10:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Morning Check",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Verify",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-01T17:10:00.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-02T17:10:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Verify",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    },
+    {
+      "enabled": true,
+      "full_name": "\\Dawnstrike\\OMEGA Watchdog",
+      "installed": true,
+      "last_result": 0,
+      "last_run_time": "2026-07-01T18:00:00.0000000-05:00",
+      "multiple_instances": "IgnoreNew",
+      "next_run_time": "2026-07-02T18:00:00.0000000-05:00",
+      "state": "Ready",
+      "task_name": "OMEGA Watchdog",
+      "working_directory": ".",
+      "working_directory_matches_repo": true
+    }
+  ],
+  "telegram_readiness": "blocked_missing_telegram_env",
+  "warnings": [
+    "AAPL: skipped incomplete daily bar 2026-06-29",
+    "AAPL: skipped incomplete daily bar 2026-06-30",
+    "AMZN: skipped incomplete daily bar 2026-06-29",
+    "AMZN: skipped incomplete daily bar 2026-06-30",
+    "CommitBridge blocked unsafe FillTruth proposal",
+    "FillTruth execution model disagreement exists",
+    "FillTruth has daily approximation evidence",
+    "MSFT: skipped incomplete daily bar 2026-06-29",
+    "MSFT: skipped incomplete daily bar 2026-06-30",
+    "NVDA: skipped incomplete daily bar 2026-06-29",
+    "NVDA: skipped incomplete daily bar 2026-06-30",
+    "QQQ: skipped incomplete daily bar 2026-06-29",
+    "QQQ: skipped incomplete daily bar 2026-06-30",
+    "SPY: skipped incomplete daily bar 2026-06-29",
+    "SPY: skipped incomplete daily bar 2026-06-30",
+    "blocked FillTruth proposals are not official PaperOps evidence",
+    "candidate_blocked_by_decision_engine",
+    "candidates blocked by RiskHub or Decision Engine",
+    "carry position marked to completed close; not realized",
+    "commitbridge_blocks_unsafe_filltruth_commit",
+    "daily bar cannot prove intraday stop/target order",
+    "daily conservative model is approximate for same-bar stop/target order",
+    "daily next-open fills do not prove intraday stop/target sequence",
+    "earliest_fill_date repaired from legacy calendar-day logic",
+    "execution model disagreement is non-zero",
+    "intraday bar still approximates within-bar order",
+    "no accepted candidates",
+    "no strategy validated",
+    "only one comparable provider snapshot is available; no cross-provider OHLCV reconciliation was possible",
+    "pending paper orders exist",
+    "real intraday aggregate is not reconciled enough against DataTruth daily bars",
+    "\\Dawnstrike\\OMEGA Morning Check has not run today after scheduled time 09:10"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "amber": "#f6c453",
+  "cyan": "#35d5ff",
+  "green": "#35e6a1",
+  "line": "#213245",
+  "muted": "#8da1b7",
+  "panel": "#0d131c",
+  "panel_soft": "#101a25",
+  "radius": 8,
+  "red": "#ff5d74",
+  "surface": "#070a0f",
+  "text": "#f1f7ff"
+}

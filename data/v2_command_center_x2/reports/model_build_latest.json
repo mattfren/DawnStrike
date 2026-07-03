@@ -1,0 +1,10 @@
+{
+  "build_id": "command_center_x2_models_20260702T132107Z",
+  "created_at": "2026-07-02T13:21:07.088490+00:00",
+  "day_count": 36,
+  "latest_run_date": "2026-07-01",
+  "month_count": 3,
+  "schema_version": "v2.command_center_x2.models.v1",
+  "status": "passed",
+  "strategy_count": 22
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "description": "Collects provider evidence and records readiness.",
+    "name": "AutoData",
+    "status": "passed"
+  },
+  {
+    "description": "Keeps canonical data quality boundaries visible.",
+    "name": "DataTruth",
+    "status": "artifact-linked"
+  },
+  {
+    "description": "Separates exact, approximate, pending, and blocked fill evidence.",
+    "name": "FillTruth",
+    "status": "passed"
+  },
+  {
+    "description": "Prevents unsafe evidence from becoming official.",
+    "name": "CommitBridge",
+    "status": "passed"
+  },
+  {
+    "description": "Stores paper-only positions, returns, and calendar rows.",
+    "name": "PaperOps",
+    "status": "artifact-linked"
+  },
+  {
+    "description": "Turns strategy daily rows into day and month memory.",
+    "name": "Calendar Intelligence",
+    "status": "artifact-linked"
+  },
+  {
+    "description": "Shows forward evidence without validation inflation.",
+    "name": "Strategy Evidence",
+    "status": "artifact-linked"
+  },
+  {
+    "description": "Creates lessons and shadow challengers without promotion.",
+    "name": "Learning Foundry",
+    "status": "passed"
+  },
+  {
+    "description": "Translates research into shadow-only challengers.",
+    "name": "Market Masters",
+    "status": "passed"
+  },
+  {
+    "description": "Watches run health, warnings, and trust boundaries.",
+    "name": "Sentinel",
+    "status": "completed"
+  },
+  {
+    "description": "Formats/send-checks messages without exposing secrets here.",
+    "name": "Telegram",
+    "status": "passed"
+  },
+  {
+    "description": "Renders the local story interface from these artifacts.",
+    "name": "Command Center X2",
+    "status": "generated"
+  }
+]

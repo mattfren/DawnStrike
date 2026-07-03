@@ -1,0 +1,20 @@
+[
+  {
+    "path": "data/v2_learning_foundry/lessons/2026-06-29.json",
+    "status": "passed",
+    "summary": "passed",
+    "title": "2026-06-29"
+  },
+  {
+    "path": "data/v2_learning_foundry/lessons/2026-07-01.json",
+    "status": "passed",
+    "summary": "passed",
+    "title": "2026-07-01"
+  },
+  {
+    "path": "data/v2_learning_foundry/lessons/market_masters_2026-06-29.json",
+    "status": "shadow_only_not_validated",
+    "summary": "shadow_only_not_validated",
+    "title": "market_masters_2026-06-29"
+  }
+]

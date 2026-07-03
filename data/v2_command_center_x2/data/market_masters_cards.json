@@ -1,0 +1,56 @@
+[
+  {
+    "path": "data/v2_market_masters/reports/report_latest.json",
+    "status": "COMPLETE_MARKET_MASTERS_WIRED",
+    "summary": "8 shadow challengers, 11 methodologies, promotion blocked_no_true_forward_sample.",
+    "title": "Market Masters Research"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  },
+  {
+    "path": "data/v2_market_masters/candidates/challenger_registry.json",
+    "status": "shadow",
+    "summary": "Shadow-only challenger; not promoted.",
+    "title": "Shadow"
+  }
+]
