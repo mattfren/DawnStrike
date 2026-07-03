@@ -32,3 +32,5 @@ data/*.sqlite
 data/*.sqlite3
 data/universe_*.csv
 data/universe_*.json
+.vercel
+.env*

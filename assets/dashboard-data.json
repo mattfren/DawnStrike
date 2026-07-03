@@ -1,35 +1,41 @@
 {
-  "generatedAt": "2026-07-03T20:12:39Z",
-  "sourceCommit": "68bf68f",
+  "generatedAt": "2026-07-03T20:35:03Z",
+  "sourceCommit": "68bf68f + local AlphaOps output 2026-07-03",
   "deploymentMode": "single-dashboard-static",
-  "headline": "Dawnstrike needs attention",
-  "subheadline": "X2 is a local story layer over existing OMEGA artifacts. It does not send messages, change strategies, or enable live execution.",
-  "latestRunDate": "2026-07-01",
-  "overallStatus": "needs_attention",
+  "headline": "Dawnstrike operator surface restored",
+  "subheadline": "The latest AlphaOps scan is back beside the paper book, calendar, strategy health, automation status, and evidence rail. Current gates blocked the Top 5 watchlist, so the dashboard shows watch-only truth instead of fake tradability.",
+  "latestRunDate": "2026-07-03",
+  "overallStatus": "research online / alerts blocked by gates",
   "topMetrics": [
     {
-      "context": "Most recent artifact date",
-      "label": "Latest day",
-      "tone": "info",
-      "value": "2026-07-01"
+      "label": "AlphaOps Top 5",
+      "value": "5 real tickers",
+      "context": "Latest scan 2026-07-03; 0 cleared alerts",
+      "tone": "warning"
     },
     {
-      "context": "Story cards from PaperOps, Learning Foundry, and Market Masters",
-      "label": "Strategies",
-      "tone": "info",
-      "value": "22"
+      "label": "Risk Gate",
+      "value": "10 blocked",
+      "context": "Reward/risk, source, catalyst, SEC, halt, and range checks remain visible",
+      "tone": "danger"
     },
     {
-      "context": "Simulated state from PaperOps artifacts",
-      "label": "Open paper positions",
-      "tone": "warning",
-      "value": "1"
+      "label": "Paper Book",
+      "value": "1 open",
+      "context": "QQQ official paper evidence, no broker execution",
+      "tone": "info"
     },
     {
-      "context": "Days with artifact-backed story pages",
-      "label": "Calendar days",
-      "tone": "info",
-      "value": "36"
+      "label": "Calendar",
+      "value": "31 no-trade",
+      "context": "July 2026 stays n/a where no artifact-backed trade exists",
+      "tone": "neutral"
+    },
+    {
+      "label": "Automation",
+      "value": "passed",
+      "context": "Telegram env missing; scheduler/watchdog checks passed",
+      "tone": "warning"
     }
   ],
   "current": {
@@ -840,5 +846,340 @@
     "No broker execution or order placement.",
     "Missing values remain n/a or pending, never zero.",
     "Top 5 uses latest full paper basket when latest day has fewer rows."
+  ],
+  "operatorWatchlist": {
+    "title": "Top 5 Operator Watchlist",
+    "date": "2026-07-03",
+    "scanId": "075d75aa-c6d5-4707-9210-a83bdd61241c",
+    "source": "outputs/alpha_cycle/alpha_signals.json",
+    "sourceKinds": [
+      "tradingview_premarket",
+      "stockanalysis_premarket"
+    ],
+    "candidateCount": 10,
+    "clearedCount": 0,
+    "blockedCount": 10,
+    "rows": [
+      {
+        "rank": 1,
+        "ticker": "DDSY",
+        "company": "Big Tree Cloud Holdings Limited",
+        "action": "WATCH",
+        "gate": "BLOCKED",
+        "canAlert": false,
+        "score": "50.37",
+        "alphaScore": "37.24",
+        "setupGrade": "D",
+        "gapPct": "95.14%",
+        "dollarVolume": "$35,028,400",
+        "entryTrigger": "$4.2009",
+        "invalidation": "$4.1173",
+        "target1": "$4.2741",
+        "target2": "$4.62",
+        "rewardRisk": "0.88R",
+        "source": "tradingview_premarket",
+        "sourceCount": 1,
+        "sourceConfidence": "27.5%",
+        "dataQuality": "Blocked",
+        "noTradeReason": "reward/risk below 1.50R",
+        "probability": "insufficient sample size",
+        "why": "Tier C catalyst; mid-range consolidation",
+        "timestamp": "2026-07-03T13:10:12+00:00"
+      },
+      {
+        "rank": 2,
+        "ticker": "WHLR",
+        "company": "Wheeler Real Estate Investment Trust, Inc.",
+        "action": "WATCH",
+        "gate": "BLOCKED",
+        "canAlert": false,
+        "score": "49.44",
+        "alphaScore": "37.02",
+        "setupGrade": "D",
+        "gapPct": "49.56%",
+        "dollarVolume": "$24,506,500",
+        "entryTrigger": "$1.1557",
+        "invalidation": "$1.1327",
+        "target1": "$1.1759",
+        "target2": "$1.27",
+        "rewardRisk": "0.88R",
+        "source": "tradingview_premarket",
+        "sourceCount": 1,
+        "sourceConfidence": "27.5%",
+        "dataQuality": "Blocked",
+        "noTradeReason": "reward/risk below 1.50R",
+        "probability": "insufficient sample size",
+        "why": "Tier C catalyst; mid-range consolidation",
+        "timestamp": "2026-07-03T13:10:12+00:00"
+      },
+      {
+        "rank": 3,
+        "ticker": "JEM7",
+        "company": "07 Cayman Holdings Limited",
+        "action": "WATCH",
+        "gate": "BLOCKED",
+        "canAlert": false,
+        "score": "47.51",
+        "alphaScore": "36.56",
+        "setupGrade": "D",
+        "gapPct": "40.50%",
+        "dollarVolume": "$11,684,300",
+        "entryTrigger": "$3.5476",
+        "invalidation": "$3.4770",
+        "target1": "$3.6094",
+        "target2": "$3.90",
+        "rewardRisk": "0.88R",
+        "source": "tradingview_premarket",
+        "sourceCount": 1,
+        "sourceConfidence": "27.5%",
+        "dataQuality": "Blocked",
+        "noTradeReason": "reward/risk below 1.50R",
+        "probability": "insufficient sample size",
+        "why": "Tier C catalyst; mid-range consolidation",
+        "timestamp": "2026-07-03T13:10:12+00:00"
+      },
+      {
+        "rank": 4,
+        "ticker": "UUSDE",
+        "company": "StablecoinX Inc.",
+        "action": "WATCH",
+        "gate": "BLOCKED",
+        "canAlert": false,
+        "score": "47.09",
+        "alphaScore": "35.46",
+        "setupGrade": "D",
+        "gapPct": "210.58%",
+        "dollarVolume": "$59,131,200",
+        "entryTrigger": "$3.8994",
+        "invalidation": "$3.8218",
+        "target1": "$3.9673",
+        "target2": "$4.28",
+        "rewardRisk": "0.88R",
+        "source": "tradingview_premarket",
+        "sourceCount": 1,
+        "sourceConfidence": "27.5%",
+        "dataQuality": "Blocked",
+        "noTradeReason": "reward/risk below 1.50R",
+        "probability": "insufficient sample size",
+        "why": "Tier C catalyst; mid-range consolidation",
+        "timestamp": "2026-07-03T13:10:12+00:00"
+      },
+      {
+        "rank": 5,
+        "ticker": "USDE",
+        "company": "StablecoinX Inc.",
+        "action": "WATCH",
+        "gate": "BLOCKED",
+        "canAlert": false,
+        "score": "51.5",
+        "alphaScore": "34.01",
+        "setupGrade": "D",
+        "gapPct": "85.10%",
+        "dollarVolume": "$83,482,734",
+        "entryTrigger": "$3.8692",
+        "invalidation": "$3.7923",
+        "target1": "$3.9366",
+        "target2": "$4.25",
+        "rewardRisk": "0.88R",
+        "source": "stockanalysis_premarket",
+        "sourceCount": 1,
+        "sourceConfidence": "27.5%",
+        "dataQuality": "Blocked",
+        "noTradeReason": "reward/risk below 1.50R",
+        "probability": "insufficient sample size",
+        "why": "Tier C catalyst; mid-range consolidation",
+        "timestamp": "2026-07-03T13:10:12+00:00"
+      }
+    ],
+    "note": "These are the latest ranked AlphaOps names. They are watch-only because every Top 5 row is currently blocked by gate checks; Dawnstrike is not placing or recommending live orders."
+  },
+  "system": {
+    "telegramReadiness": "blocked_missing_telegram_env",
+    "schedulerStatus": "passed",
+    "watchdogStatus": "passed",
+    "noOverlapStatus": "Do not start a new instance / MultipleInstances IgnoreNew",
+    "nextRuns": [
+      {
+        "next_run_time": "2026-07-03T16:35:00-05:00",
+        "state": "Ready",
+        "task": "OMEGA After Close"
+      },
+      {
+        "next_run_time": "2026-07-03T09:10:00-05:00",
+        "state": "Ready",
+        "task": "OMEGA Morning Check"
+      },
+      {
+        "next_run_time": "2026-07-03T17:10:00-05:00",
+        "state": "Ready",
+        "task": "OMEGA Verify"
+      },
+      {
+        "next_run_time": "2026-07-03T18:00:00-05:00",
+        "state": "Ready",
+        "task": "OMEGA Watchdog"
+      }
+    ],
+    "taskStatuses": [
+      {
+        "task_name": "OMEGA After Close",
+        "state": "Ready",
+        "last_result": 0,
+        "last_run_time": "2026-07-02T16:35:01-05:00",
+        "next_run_time": "2026-07-03T16:35:00-05:00",
+        "multiple_instances": "IgnoreNew",
+        "working_directory_matches_repo": true
+      },
+      {
+        "task_name": "OMEGA Morning Check",
+        "state": "Ready",
+        "last_result": 0,
+        "last_run_time": "2026-07-02T09:10:01-05:00",
+        "next_run_time": "2026-07-03T09:10:00-05:00",
+        "multiple_instances": "IgnoreNew",
+        "working_directory_matches_repo": true
+      },
+      {
+        "task_name": "OMEGA Verify",
+        "state": "Ready",
+        "last_result": 0,
+        "last_run_time": "2026-07-02T17:10:01-05:00",
+        "next_run_time": "2026-07-03T17:10:00-05:00",
+        "multiple_instances": "IgnoreNew",
+        "working_directory_matches_repo": true
+      },
+      {
+        "task_name": "OMEGA Watchdog",
+        "state": "Ready",
+        "last_result": 0,
+        "last_run_time": "2026-07-02T18:00:01-05:00",
+        "next_run_time": "2026-07-03T18:00:00-05:00",
+        "multiple_instances": "IgnoreNew",
+        "working_directory_matches_repo": true
+      }
+    ],
+    "flow": [
+      {
+        "description": "Collects provider evidence and records readiness.",
+        "name": "AutoData",
+        "status": "passed"
+      },
+      {
+        "description": "Keeps canonical data quality boundaries visible.",
+        "name": "DataTruth",
+        "status": "artifact-linked"
+      },
+      {
+        "description": "Separates exact, approximate, pending, and blocked fill evidence.",
+        "name": "FillTruth",
+        "status": "passed"
+      },
+      {
+        "description": "Prevents unsafe evidence from becoming official.",
+        "name": "CommitBridge",
+        "status": "passed"
+      },
+      {
+        "description": "Stores paper-only positions, returns, and calendar rows.",
+        "name": "PaperOps",
+        "status": "artifact-linked"
+      },
+      {
+        "description": "Turns strategy daily rows into day and month memory.",
+        "name": "Calendar Intelligence",
+        "status": "artifact-linked"
+      },
+      {
+        "description": "Shows forward evidence without validation inflation.",
+        "name": "Strategy Evidence",
+        "status": "artifact-linked"
+      },
+      {
+        "description": "Creates lessons and shadow challengers without promotion.",
+        "name": "Learning Foundry",
+        "status": "passed"
+      },
+      {
+        "description": "Translates research into shadow-only challengers.",
+        "name": "Market Masters",
+        "status": "passed"
+      },
+      {
+        "description": "Watches run health, warnings, and trust boundaries.",
+        "name": "Sentinel",
+        "status": "completed"
+      },
+      {
+        "description": "Formats/send-checks messages without exposing secrets here.",
+        "name": "Telegram",
+        "status": "passed"
+      },
+      {
+        "description": "Renders the local story interface from these artifacts.",
+        "name": "Command Center X2",
+        "status": "generated"
+      }
+    ],
+    "warnings": [
+      "AAPL: skipped incomplete daily bar 2026-06-29",
+      "AAPL: skipped incomplete daily bar 2026-06-30",
+      "AMZN: skipped incomplete daily bar 2026-06-29",
+      "AMZN: skipped incomplete daily bar 2026-06-30",
+      "CommitBridge blocked unsafe FillTruth proposal",
+      "FillTruth execution model disagreement exists",
+      "FillTruth has daily approximation evidence",
+      "MSFT: skipped incomplete daily bar 2026-06-29",
+      "MSFT: skipped incomplete daily bar 2026-06-30",
+      "NVDA: skipped incomplete daily bar 2026-06-29"
+    ]
+  },
+  "evidenceRail": [
+    {
+      "label": "AlphaOps scan",
+      "value": "outputs/alpha_cycle/alpha_signals.json",
+      "status": "local artifact",
+      "detail": "10 candidates; Top 5 restored as real symbols"
+    },
+    {
+      "label": "PaperOps",
+      "value": "X3 compact paper evidence",
+      "status": "official paper",
+      "detail": "QQQ current paper record plus 204-row paper ledger summary"
+    },
+    {
+      "label": "Calendar",
+      "value": "2026-07 heatmap",
+      "status": "artifact backed",
+      "detail": "n/a remains n/a on no-trade days"
+    },
+    {
+      "label": "Automation",
+      "value": "OMEGA scheduler",
+      "status": "passed",
+      "detail": "Do not start a new instance / MultipleInstances IgnoreNew"
+    },
+    {
+      "label": "Boundary",
+      "value": "research only",
+      "status": "no broker execution",
+      "detail": "Static dashboard exposes no internal raw route archive"
+    }
+  ],
+  "quickActions": [
+    {
+      "label": "Review Top 5",
+      "href": "#watchlist",
+      "tone": "primary"
+    },
+    {
+      "label": "Open Paper Book",
+      "href": "#paper",
+      "tone": "secondary"
+    },
+    {
+      "label": "Check Automation",
+      "href": "#system",
+      "tone": "secondary"
+    }
   ]
 }

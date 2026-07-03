@@ -1,18 +1,44 @@
+const tableState = new Map();
+
 const formatValue = (value) => {
   if (value === null || value === undefined || value === "") return "n/a";
   return String(value);
 };
 
+const byId = (id) => document.getElementById(id);
+
 const text = (id, value) => {
-  const element = document.getElementById(id);
+  const element = byId(id);
   if (element) element.textContent = formatValue(value);
 };
 
+const clear = (element) => {
+  if (element) element.replaceChildren();
+};
+
+const numeric = (value) => {
+  const raw = formatValue(value).replace(/[$,%R,]/g, "");
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const toneClass = (value) => {
-  const raw = String(value || "").toLowerCase();
-  if (raw.includes("-") || raw.includes("loss") || raw.includes("blocked")) return "negative";
-  if (raw.includes("+") || raw.includes("win") || raw === "positive") return "positive";
+  const raw = formatValue(value).toLowerCase();
+  const parsed = numeric(raw);
+  if (raw.includes("blocked") || raw.includes("loss") || (parsed !== null && parsed < 0)) return "negative";
+  if (raw.includes("pass") || raw.includes("ready") || raw.includes("win") || (parsed !== null && parsed > 0)) {
+    return "positive";
+  }
+  if (raw.includes("warn") || raw.includes("experimental") || raw.includes("pending")) return "warning";
   return "neutral";
+};
+
+const appendText = (parent, tag, value, className = "") => {
+  const element = document.createElement(tag);
+  element.textContent = formatValue(value);
+  if (className) element.className = className;
+  parent.appendChild(element);
+  return element;
 };
 
 const cell = (value, className = "") => {
@@ -22,79 +48,182 @@ const cell = (value, className = "") => {
   return td;
 };
 
+const badge = (value, tone = "quiet") => {
+  const span = document.createElement("span");
+  span.className = `status-pill ${tone}`;
+  span.textContent = formatValue(value);
+  return span;
+};
+
+const sortRows = (rows, key, direction) => {
+  const dir = direction === "desc" ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const leftNumber = numeric(a[key]);
+    const rightNumber = numeric(b[key]);
+    if (leftNumber !== null && rightNumber !== null) return (leftNumber - rightNumber) * dir;
+    return formatValue(a[key]).localeCompare(formatValue(b[key]), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }) * dir;
+  });
+};
+
+const bindSortButtons = (tableId, rows, renderRows) => {
+  const table = byId(tableId);
+  if (!table) return;
+  table.querySelectorAll("button[data-sort]").forEach((button) => {
+    button.onclick = () => {
+      const key = button.getAttribute("data-sort");
+      const current = tableState.get(tableId) || {};
+      const direction = current.key === key && current.direction === "asc" ? "desc" : "asc";
+      tableState.set(tableId, { key, direction });
+      renderRows(sortRows(rows, key, direction));
+    };
+  });
+};
+
+const renderQuickActions = (actions = []) => {
+  const row = byId("quick-actions");
+  clear(row);
+  actions.forEach((action) => {
+    const link = document.createElement("a");
+    link.href = formatValue(action.href);
+    link.className = action.tone === "primary" ? "button primary" : "button";
+    link.textContent = formatValue(action.label);
+    row.appendChild(link);
+  });
+};
+
 const renderMetrics = (metrics = []) => {
-  const grid = document.getElementById("metric-grid");
-  grid.replaceChildren();
+  const grid = byId("metric-grid");
+  clear(grid);
   metrics.forEach((metric) => {
     const article = document.createElement("article");
-    const label = document.createElement("span");
-    label.className = "metric-title";
-    label.textContent = formatValue(metric.label);
-    const strong = document.createElement("strong");
-    strong.textContent = formatValue(metric.value);
-    const detail = document.createElement("p");
-    detail.textContent = formatValue(metric.context);
-    article.append(label, strong, detail);
+    article.className = `metric-tone-${formatValue(metric.tone)}`;
+    appendText(article, "span", metric.label, "metric-title");
+    appendText(article, "strong", metric.value);
+    appendText(article, "p", metric.context);
     grid.appendChild(article);
   });
 };
 
-const renderCurrent = (current) => {
-  const stack = document.getElementById("current-records");
-  stack.replaceChildren();
+const renderWatchlist = (watchlist = {}) => {
+  const rows = watchlist.rows || [];
+  text("watchlist-date", `${formatValue(watchlist.title)} - ${formatValue(watchlist.date)}`);
+  text("watchlist-count", `${formatValue(watchlist.candidateCount)} candidates`);
+  text("watchlist-note", watchlist.note);
+  text("hero-top-symbol", rows[0] ? `${rows[0].ticker} / ${rows[0].gate}` : "n/a");
+  text("status-gate", `${formatValue(watchlist.blockedCount)} blocked / ${formatValue(watchlist.clearedCount)} cleared`);
+
+  const renderRows = (displayRows) => {
+    const body = byId("watchlist-body");
+    clear(body);
+    displayRows.forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.append(cell(row.rank));
+
+      const ticker = document.createElement("td");
+      ticker.className = "ticker-cell";
+      appendText(ticker, "strong", row.ticker);
+      appendText(ticker, "span", row.company);
+      tr.appendChild(ticker);
+
+      tr.append(cell(row.score, toneClass(row.score)));
+      tr.append(cell(row.gate, toneClass(row.gate)));
+      tr.append(cell(row.gapPct, toneClass(row.gapPct)));
+      tr.append(cell(row.entryTrigger));
+      tr.append(cell(row.rewardRisk, toneClass(row.rewardRisk)));
+
+      const source = document.createElement("td");
+      source.className = "source-stack";
+      appendText(source, "strong", row.source);
+      appendText(source, "span", `${formatValue(row.sourceCount)} source / ${formatValue(row.sourceConfidence)}`);
+      tr.appendChild(source);
+
+      body.appendChild(tr);
+    });
+  };
+
+  renderRows(rows);
+  bindSortButtons("watchlist-table", rows, renderRows);
+};
+
+const renderEvidenceRail = (items = []) => {
+  const rail = byId("evidence-rail");
+  clear(rail);
+  items.forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "rail-item";
+    appendText(article, "span", item.label);
+    appendText(article, "strong", item.value);
+    article.appendChild(badge(item.status, toneClass(item.status) === "negative" ? "bad" : "quiet"));
+    appendText(article, "p", item.detail);
+    rail.appendChild(article);
+  });
+};
+
+const renderCurrent = (current = {}) => {
+  const grid = byId("current-records");
+  clear(grid);
   (current.records || []).forEach((row) => {
-    const item = document.createElement("article");
-    item.className = "mini-ticket";
-    item.innerHTML = `
-      <div>
-        <span>${formatValue(row.date)}</span>
-        <strong>${formatValue(row.symbol)}</strong>
-      </div>
-      <dl>
-        <div><dt>Strategy</dt><dd>${formatValue(row.strategy)}</dd></div>
-        <div><dt>Entry</dt><dd>${formatValue(row.entry)}</dd></div>
-        <div><dt>Stop</dt><dd>${formatValue(row.stop)}</dd></div>
-        <div><dt>Target</dt><dd>${formatValue(row.target)}</dd></div>
-      </dl>
-    `;
-    stack.appendChild(item);
+    const card = document.createElement("article");
+    card.className = "ticket-card";
+
+    const header = document.createElement("header");
+    appendText(header, "span", row.date);
+    appendText(header, "strong", row.symbol);
+    header.appendChild(badge(row.status || "paper", "quiet"));
+    card.appendChild(header);
+
+    const dl = document.createElement("dl");
+    [
+      ["Strategy", row.strategy],
+      ["Direction", row.direction],
+      ["Entry", row.entry],
+      ["Stop", row.stop],
+      ["Target", row.target],
+      ["R", row.r],
+    ].forEach(([label, value]) => {
+      const item = document.createElement("div");
+      appendText(item, "dt", label);
+      appendText(item, "dd", value, toneClass(value));
+      dl.appendChild(item);
+    });
+    card.appendChild(dl);
+    grid.appendChild(card);
   });
   text("current-note", current.note);
 };
 
-const renderTopFive = (topFive) => {
-  text("top-five-date", `${formatValue(topFive.label)} - ${formatValue(topFive.date)}`);
-  const body = document.getElementById("top-five-body");
-  body.replaceChildren();
-  (topFive.rows || []).forEach((row, index) => {
-    const tr = document.createElement("tr");
-    tr.append(
-      cell(index + 1),
-      cell(row.symbol),
-      cell(row.strategy),
-      cell(row.entry),
-      cell(row.stop),
-      cell(row.target),
-      cell(row.r, toneClass(row.r)),
-      cell(row.state)
-    );
-    body.appendChild(tr);
+const updateCalendarDetail = (tile, button) => {
+  document.querySelectorAll(".calendar-day.selected").forEach((day) => {
+    day.classList.remove("selected");
+    day.removeAttribute("aria-current");
   });
+  if (button) {
+    button.classList.add("selected");
+    button.setAttribute("aria-current", "date");
+  }
+  text("calendar-selected-date", tile.date);
+  text("calendar-selected-return", tile.dailyReturn);
+  text("calendar-selected-trades", tile.tradeCount);
+  text("calendar-selected-state", tile.noTrade ? "no-trade" : tile.tone || "active");
 };
 
-const renderCalendar = (calendar) => {
-  const summary = document.getElementById("calendar-summary");
+const renderCalendar = (calendar = {}) => {
+  const summary = byId("calendar-summary");
+  clear(summary);
   const s = calendar.summary || {};
-  summary.innerHTML = `
-    <span>${formatValue(calendar.currentMonth)}</span>
-    <span>${formatValue(s.monthlyReturn)} month</span>
-    <span>${formatValue(s.totalTrades)} trades</span>
-    <span>${formatValue(s.noTradeDays)} no-trade</span>
-  `;
+  [
+    calendar.currentMonth,
+    `${formatValue(s.monthlyReturn)} month`,
+    `${formatValue(s.totalTrades)} trades`,
+    `${formatValue(s.noTradeDays)} no-trade`,
+  ].forEach((item) => appendText(summary, "span", item));
 
-  const grid = document.getElementById("calendar-grid");
-  grid.replaceChildren();
-  (calendar.tiles || []).forEach((tile) => {
+  const grid = byId("calendar-grid");
+  clear(grid);
+  (calendar.tiles || []).forEach((tile, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `calendar-day ${tile.noTrade ? "no-trade" : ""} ${tile.warning ? "warning" : ""}`;
@@ -102,80 +231,134 @@ const renderCalendar = (calendar) => {
       "aria-label",
       `${formatValue(tile.date)} return ${formatValue(tile.dailyReturn)} trades ${formatValue(tile.tradeCount)}`
     );
-    button.innerHTML = `
-      <span>${formatValue(tile.day)}</span>
-      <strong>${formatValue(tile.dailyReturn)}</strong>
-      <small>${formatValue(tile.tradeCount)} trades</small>
-    `;
+    appendText(button, "span", tile.day);
+    appendText(button, "strong", tile.dailyReturn);
+    appendText(button, "small", `${formatValue(tile.tradeCount)} trades`);
+    button.addEventListener("click", () => updateCalendarDetail(tile, button));
     grid.appendChild(button);
+    if (index === 0) updateCalendarDetail(tile, button);
   });
 };
 
-const renderPaper = (paper) => {
+const renderPaper = (paper = {}) => {
+  const rows = paper.recentRows || [];
   text("paper-count", `${formatValue(paper.totalRows)} paper rows`);
-  const body = document.getElementById("paper-body");
-  body.replaceChildren();
-  (paper.recentRows || []).forEach((row) => {
-    const tr = document.createElement("tr");
-    tr.append(
-      cell(row.date),
-      cell(row.symbol),
-      cell(row.strategy),
-      cell(row.entry),
-      cell(row.stop),
-      cell(row.target),
-      cell(row.pnl, toneClass(row.pnl)),
-      cell(row.r, toneClass(row.r))
-    );
-    body.appendChild(tr);
-  });
+  text("status-paper", `${formatValue(paper.totalRows)} paper rows`);
+
+  const renderRows = (displayRows) => {
+    const body = byId("paper-body");
+    clear(body);
+    displayRows.forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(row.date),
+        cell(row.symbol),
+        cell(row.strategy),
+        cell(row.entry),
+        cell(row.stop),
+        cell(row.target),
+        cell(row.pnl, toneClass(row.pnl)),
+        cell(row.r, toneClass(row.r))
+      );
+      body.appendChild(tr);
+    });
+  };
+
+  renderRows(rows);
+  bindSortButtons("paper-table", rows, renderRows);
 };
 
-const renderRisk = (risk) => {
+const renderRisk = (risk = {}) => {
   text("no-picks-headline", risk.headline || "Risk status");
   text("risk-watch", risk.watchCount);
   text("risk-accepted", risk.acceptedCount);
   text("risk-blocked", risk.blockedCount);
-  const list = document.getElementById("risk-reasons");
-  list.replaceChildren();
+  const list = byId("risk-reasons");
+  clear(list);
   (risk.topReasons || []).forEach((reason) => {
-    const item = document.createElement("li");
-    item.textContent = formatValue(reason);
-    list.appendChild(item);
+    appendText(list, "li", reason);
   });
 };
 
 const renderStrategies = (strategies = []) => {
-  const body = document.getElementById("strategy-body");
-  body.replaceChildren();
+  const grid = byId("strategy-grid");
+  clear(grid);
   strategies.forEach((row) => {
-    const tr = document.createElement("tr");
-    tr.append(
-      cell(row.name),
-      cell(row.status),
-      cell(row.trades),
-      cell(row.winRate),
-      cell(row.return, toneClass(row.return)),
-      cell(row.drawdown, toneClass(row.drawdown)),
-      cell(row.validation)
-    );
-    body.appendChild(tr);
+    const card = document.createElement("article");
+    card.className = "strategy-card";
+    appendText(card, "h3", row.name);
+    card.appendChild(badge(row.status, "warn"));
+
+    const bar = document.createElement("div");
+    bar.className = "health-bar";
+    const fill = document.createElement("span");
+    const winRate = Math.max(5, Math.min(100, numeric(row.winRate) || 0));
+    fill.style.width = `${winRate}%`;
+    bar.appendChild(fill);
+    card.appendChild(bar);
+
+    const dl = document.createElement("dl");
+    dl.className = "strategy-stats";
+    [
+      ["Trades", row.trades],
+      ["Win rate", row.winRate],
+      ["Return", row.return],
+      ["Drawdown", row.drawdown],
+    ].forEach(([label, value]) => {
+      const item = document.createElement("div");
+      appendText(item, "dt", label);
+      appendText(item, "dd", value, toneClass(value));
+      dl.appendChild(item);
+    });
+    card.appendChild(dl);
+    appendText(card, "p", row.validation);
+    grid.appendChild(card);
+  });
+};
+
+const renderSystem = (system = {}) => {
+  text("system-status", `${formatValue(system.schedulerStatus)} / ${formatValue(system.telegramReadiness)}`);
+
+  const flow = byId("system-flow");
+  clear(flow);
+  (system.flow || []).forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "flow-card";
+    appendText(card, "strong", item.name);
+    appendText(card, "p", item.description);
+    card.appendChild(badge(item.status, toneClass(item.status) === "positive" ? "ok" : "quiet"));
+    flow.appendChild(card);
+  });
+
+  const timeline = byId("audit-timeline");
+  clear(timeline);
+  (system.taskStatuses || []).forEach((task) => {
+    const card = document.createElement("article");
+    card.className = "timeline-card";
+    appendText(card, "strong", task.task_name);
+    appendText(card, "p", `Last ${formatValue(task.last_run_time)} / next ${formatValue(task.next_run_time)}`);
+    card.appendChild(badge(`${formatValue(task.state)} result ${formatValue(task.last_result)}`, "quiet"));
+    timeline.appendChild(card);
   });
 };
 
 const renderDashboard = (data) => {
-  text("headline", data.headline);
   text("subheadline", data.subheadline);
   text("latest-run-date", data.latestRunDate);
   text("overall-status", data.overallStatus);
+  text("status-freshness", `${formatValue(data.latestRunDate)} scan`);
   text("source-line", `Source ${formatValue(data.sourceCommit)} - generated ${formatValue(data.generatedAt)}`);
+
+  renderQuickActions(data.quickActions || []);
   renderMetrics(data.topMetrics || []);
+  renderWatchlist(data.operatorWatchlist || {});
+  renderEvidenceRail(data.evidenceRail || []);
   renderCurrent(data.current || {});
-  renderTopFive(data.topFive || {});
   renderCalendar(data.calendar || {});
   renderPaper(data.paperTrading || {});
   renderRisk(data.noPicks || {});
   renderStrategies(data.strategies || []);
+  renderSystem(data.system || {});
 };
 
 fetch("/assets/dashboard-data.json", { cache: "no-store" })
@@ -185,7 +368,6 @@ fetch("/assets/dashboard-data.json", { cache: "no-store" })
   })
   .then(renderDashboard)
   .catch((error) => {
-    text("headline", "Dashboard data unavailable");
     text("subheadline", error.message);
     text("status-deployment", "Data load error");
   });
