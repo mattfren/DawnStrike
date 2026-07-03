@@ -6,9 +6,10 @@
     <title>Dawnstrike Dashboard</title>
     <meta
       name="description"
-      content="Dawnstrike research dashboard: premarket watchlist, risk gates, outcome status, and operator workflow."
+      content="Dawnstrike one-dashboard view for top picks, calendar evidence, paper trading, and strategy health."
     />
     <link rel="stylesheet" href="/assets/dashboard.css" />
+    <script defer src="/assets/dashboard.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#dashboard">Skip to dashboard</a>
@@ -16,113 +17,152 @@
       <header class="topbar" aria-label="Dawnstrike status">
         <div>
           <p class="eyebrow">Dawnstrike</p>
-          <h1>Research Command Dashboard</h1>
+          <h1><span>Trading Research</span><span>Dashboard</span></h1>
         </div>
         <div class="status-stack" aria-label="System boundaries">
-          <span class="status-pill ok">Deployment online</span>
-          <span class="status-pill warn">Research only</span>
+          <span class="status-pill ok" id="status-deployment">Deployment online</span>
+          <span class="status-pill warn">Paper evidence</span>
           <span class="status-pill quiet">No broker execution</span>
         </div>
       </header>
 
-      <section class="hero-grid" aria-label="Daily operating view">
-        <article class="primary-panel">
-          <div class="section-label">Today</div>
-          <h2>One operator screen for the morning scan.</h2>
-          <p>
-            Dawnstrike ranks high-volatility premarket names, separates watchlist
-            candidates from avoid names, and keeps missing outcome truth visible
-            until it is imported.
-          </p>
-          <div class="action-row">
-            <a class="button primary" href="/api/health">Health check</a>
-            <a class="button" href="https://github.com/mattfren/DawnStrike">Repository</a>
+      <nav class="nav-tabs" aria-label="Dashboard sections">
+        <a href="#top-five">Top 5</a>
+        <a href="#calendar">Calendar</a>
+        <a href="#paper">Paper Trading</a>
+        <a href="#strategies">Strategies</a>
+      </nav>
+
+      <section class="overview-grid" aria-label="Dashboard overview">
+        <article class="primary-panel compact">
+          <div class="section-label">Latest State</div>
+          <h2 id="headline">Loading dashboard...</h2>
+          <p id="subheadline">Loading the latest compact Dawnstrike evidence bundle.</p>
+          <div class="fact-row">
+            <span>Latest run</span>
+            <strong id="latest-run-date">n/a</strong>
+          </div>
+          <div class="fact-row">
+            <span>Status</span>
+            <strong id="overall-status">n/a</strong>
           </div>
         </article>
 
-        <aside class="ticket" aria-label="Current deployment contract">
-          <div class="section-label">Production Contract</div>
-          <dl>
-            <div>
-              <dt>Execution</dt>
-              <dd>Disabled</dd>
-            </div>
-            <div>
-              <dt>Advice</dt>
-              <dd>None</dd>
-            </div>
-            <div>
-              <dt>Missing outcomes</dt>
-              <dd>Pending, never zero</dd>
-            </div>
-            <div>
-              <dt>Data quality</dt>
-              <dd>Show gaps plainly</dd>
-            </div>
-          </dl>
+        <aside class="ticket" aria-label="Current paper record">
+          <div class="section-label">Current Record</div>
+          <div id="current-records" class="current-stack"></div>
+          <p class="note" id="current-note"></p>
         </aside>
       </section>
 
-      <section class="metric-grid" aria-label="Dashboard sections">
-        <article>
-          <span class="metric-title">Watchlist</span>
-          <strong>Manual review</strong>
-          <p>Top candidates are review prompts, not buy commands.</p>
-        </article>
-        <article>
-          <span class="metric-title">Risk gates</span>
-          <strong>Avoid first</strong>
-          <p>Halt, offering, source, float, and quality warnings stay visible.</p>
-        </article>
-        <article>
-          <span class="metric-title">Outcomes</span>
-          <strong>Evidence pending</strong>
-          <p>Paper returns require imported outcome rows after the session.</p>
-        </article>
-        <article>
-          <span class="metric-title">Operations</span>
-          <strong>Telegram optional</strong>
-          <p>Notifications are status/watchlist alerts only.</p>
-        </article>
+      <section class="metric-grid" id="metric-grid" aria-label="Key metrics"></section>
+
+      <section class="dashboard-section" id="top-five" aria-labelledby="top-five-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-label">Watchlist</p>
+            <h2 id="top-five-title">Top 5 Picks</h2>
+          </div>
+          <span class="status-pill quiet" id="top-five-date">n/a</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Symbol</th>
+                <th>Strategy</th>
+                <th>Entry</th>
+                <th>Stop</th>
+                <th>Target</th>
+                <th>R</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody id="top-five-body"></tbody>
+          </table>
+        </div>
       </section>
 
-      <section class="workflow" aria-label="Operator workflow">
-        <div class="section-label">Daily Flow</div>
-        <ol>
-          <li>
-            <span>1</span>
-            <div>
-              <strong>Collect candidates</strong>
-              <p>Use local or public premarket sources. Block unusable source rows.</p>
-            </div>
-          </li>
-          <li>
-            <span>2</span>
-            <div>
-              <strong>Score and filter</strong>
-              <p>Rank candidates, surface avoid reasons, and mark no-clean-edge days.</p>
-            </div>
-          </li>
-          <li>
-            <span>3</span>
-            <div>
-              <strong>Review manually</strong>
-              <p>Watch levels and exit lines are operator context, not orders.</p>
-            </div>
-          </li>
-          <li>
-            <span>4</span>
-            <div>
-              <strong>Import outcomes</strong>
-              <p>After close, import outcome rows before judging performance.</p>
-            </div>
-          </li>
-        </ol>
+      <section class="dashboard-section" id="calendar" aria-labelledby="calendar-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-label">Calendar</p>
+            <h2 id="calendar-title">Paper Calendar</h2>
+          </div>
+          <div class="calendar-summary" id="calendar-summary"></div>
+        </div>
+        <div class="calendar-grid" id="calendar-grid" aria-label="Calendar day tiles"></div>
+      </section>
+
+      <section class="dashboard-section" id="paper" aria-labelledby="paper-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-label">Paper Trading</p>
+            <h2 id="paper-title">Recent Paper Evidence</h2>
+          </div>
+          <span class="status-pill quiet" id="paper-count">n/a</span>
+        </div>
+        <div class="paper-layout">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Symbol</th>
+                  <th>Strategy</th>
+                  <th>Entry</th>
+                  <th>Stop</th>
+                  <th>Target</th>
+                  <th>PnL</th>
+                  <th>R</th>
+                </tr>
+              </thead>
+              <tbody id="paper-body"></tbody>
+            </table>
+          </div>
+          <aside class="risk-panel">
+            <p class="section-label">No-Trade / Risk</p>
+            <h3 id="no-picks-headline">n/a</h3>
+            <dl class="risk-stats">
+              <div><dt>Watch</dt><dd id="risk-watch">n/a</dd></div>
+              <div><dt>Accepted</dt><dd id="risk-accepted">n/a</dd></div>
+              <div><dt>Blocked</dt><dd id="risk-blocked">n/a</dd></div>
+            </dl>
+            <ul id="risk-reasons" class="reason-list"></ul>
+          </aside>
+        </div>
+      </section>
+
+      <section class="dashboard-section" id="strategies" aria-labelledby="strategies-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-label">Strategies</p>
+            <h2 id="strategies-title">Strategy Health</h2>
+          </div>
+          <span class="status-pill warn">Experimental</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Strategy</th>
+                <th>Status</th>
+                <th>Trades</th>
+                <th>Win Rate</th>
+                <th>Return</th>
+                <th>Drawdown</th>
+                <th>Validation</th>
+              </tr>
+            </thead>
+            <tbody id="strategy-body"></tbody>
+          </table>
+        </div>
       </section>
 
       <footer class="footer">
+        <span id="source-line">Source evidence loading...</span>
         <span>Dawnstrike does not place trades or store broker execution credentials.</span>
-        <span>Vercel shell: one-dashboard production surface.</span>
       </footer>
     </main>
   </body>

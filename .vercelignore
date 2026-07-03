@@ -10,13 +10,19 @@ __pycache__/
 .env
 .env.*
 API keys.txt
+README.md
+pyproject.toml
+app.py
 *.sqlite
 *.db
+config/
+data/
+docs/
+intraday_scanner/
 logs/
 outputs/
-tmp/
-tests/
 sample_data/
+scripts/
 templates/
-data/
-docs/audits/
+tests/
+tmp/

@@ -1,0 +1,844 @@
+{
+  "generatedAt": "2026-07-03T20:12:39Z",
+  "sourceCommit": "68bf68f",
+  "deploymentMode": "single-dashboard-static",
+  "headline": "Dawnstrike needs attention",
+  "subheadline": "X2 is a local story layer over existing OMEGA artifacts. It does not send messages, change strategies, or enable live execution.",
+  "latestRunDate": "2026-07-01",
+  "overallStatus": "needs_attention",
+  "topMetrics": [
+    {
+      "context": "Most recent artifact date",
+      "label": "Latest day",
+      "tone": "info",
+      "value": "2026-07-01"
+    },
+    {
+      "context": "Story cards from PaperOps, Learning Foundry, and Market Masters",
+      "label": "Strategies",
+      "tone": "info",
+      "value": "22"
+    },
+    {
+      "context": "Simulated state from PaperOps artifacts",
+      "label": "Open paper positions",
+      "tone": "warning",
+      "value": "1"
+    },
+    {
+      "context": "Days with artifact-backed story pages",
+      "label": "Calendar days",
+      "tone": "info",
+      "value": "36"
+    }
+  ],
+  "current": {
+    "date": "2026-06-29",
+    "records": [
+      {
+        "date": "2026-06-29",
+        "symbol": "QQQ",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "715.5376",
+        "stop": "657.8343",
+        "target": "852.5771",
+        "pnl": "0",
+        "r": "n/a",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "Paper evidence row."
+      }
+    ],
+    "note": "Latest paper record has fewer than five symbols; the dashboard keeps that truth visible instead of inventing a full list."
+  },
+  "topFive": {
+    "date": "2026-06-25",
+    "label": "Latest full Top 5 paper basket",
+    "summary": {
+      "accepted": 0,
+      "blocked": 2,
+      "strategy_rows": 14,
+      "watch": 40
+    },
+    "rows": [
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "r": "0",
+        "pnl": "0",
+        "state": "paper-calendar",
+        "evidence": "daily_and_intraday"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Bullish Fvg Continuation",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "r": "-1.1215",
+        "pnl": "-15009.8476",
+        "state": "paper-calendar",
+        "evidence": "daily_and_intraday"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "r": "-1.1709",
+        "pnl": "-29801.7436",
+        "state": "paper-calendar",
+        "evidence": "daily_and_intraday"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Donchian Breakout 20 10",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "r": "-0.5382",
+        "pnl": "-12195.8869",
+        "state": "paper-calendar",
+        "evidence": "daily_and_intraday"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Failed Breakout Reversal Short",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "r": "8.9128",
+        "pnl": "12591.3066",
+        "state": "paper-calendar",
+        "evidence": "daily_and_intraday"
+      }
+    ]
+  },
+  "calendar": {
+    "currentMonth": "2026-07",
+    "summary": {
+      "monthlyReturn": "n/a",
+      "cumulativeReturn": "n/a",
+      "totalTrades": 0,
+      "winDays": 0,
+      "lossDays": 0,
+      "noTradeDays": 31,
+      "bestDay": "n/a",
+      "worstDay": "n/a"
+    },
+    "tiles": [
+      {
+        "date": "2026-07-01",
+        "day": "01",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-02",
+        "day": "02",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": true,
+        "learning": true
+      },
+      {
+        "date": "2026-07-03",
+        "day": "03",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-04",
+        "day": "04",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-05",
+        "day": "05",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-06",
+        "day": "06",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-07",
+        "day": "07",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-08",
+        "day": "08",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-09",
+        "day": "09",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-10",
+        "day": "10",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-11",
+        "day": "11",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-12",
+        "day": "12",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-13",
+        "day": "13",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-14",
+        "day": "14",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-15",
+        "day": "15",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-16",
+        "day": "16",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-17",
+        "day": "17",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-18",
+        "day": "18",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-19",
+        "day": "19",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-20",
+        "day": "20",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-21",
+        "day": "21",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-22",
+        "day": "22",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-23",
+        "day": "23",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-24",
+        "day": "24",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-25",
+        "day": "25",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-26",
+        "day": "26",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-27",
+        "day": "27",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-28",
+        "day": "28",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-29",
+        "day": "29",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-30",
+        "day": "30",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      },
+      {
+        "date": "2026-07-31",
+        "day": "31",
+        "dailyReturn": "n/a",
+        "cumulativeReturn": "n/a",
+        "tradeCount": 0,
+        "tone": "none",
+        "noTrade": true,
+        "warning": false,
+        "learning": false
+      }
+    ]
+  },
+  "paperTrading": {
+    "latestDate": "2026-06-29",
+    "totalRows": 204,
+    "latestRecords": [
+      {
+        "date": "2026-06-29",
+        "symbol": "QQQ",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "715.5376",
+        "stop": "657.8343",
+        "target": "852.5771",
+        "pnl": "0",
+        "r": "n/a",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "Paper evidence row."
+      }
+    ],
+    "recentRows": [
+      {
+        "date": "2026-06-29",
+        "symbol": "QQQ",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "715.5376",
+        "stop": "657.8343",
+        "target": "852.5771",
+        "pnl": "0",
+        "r": "n/a",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "Paper evidence row."
+      },
+      {
+        "date": "2026-06-28",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-29 | AMZN: skipped incomplete daily bar 2026-06-30 | MSFT: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-27",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-29 | AMZN: skipped incomplete daily bar 2026-06-30 | MSFT: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-26",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-29 | AMZN: skipped incomplete daily bar 2026-06-29 | MSFT: skipped incomplete daily bar 2026-06-29 | NVDA: skipped incomplete daily bar 2026-06-29 | QQQ: skipped incomplete dail"
+      },
+      {
+        "date": "2026-06-26",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-29 | AMZN: skipped incomplete daily bar 2026-06-30 | MSFT: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete daily bar 2026-06-29 | MSFT: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Bullish Fvg Continuation",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-15009.8476",
+        "r": "-1.1215",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-29801.7436",
+        "r": "-1.1709",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Donchian Breakout 20 10",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-12195.8869",
+        "r": "-0.5382",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Failed Breakout Reversal Short",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "12591.3066",
+        "r": "8.9128",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Pullback Reclaim Uptrend",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-7999.4826",
+        "r": "-5.146",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Ts Momentum Sma Atr",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-104205.9311",
+        "r": "-1.7341",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-06-25",
+        "symbol": "paper basket",
+        "strategy": "Volatility Contraction Breakout",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "-3633.8809",
+        "r": "-0.2424",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-26 | AAPL: skipped incomplete daily bar 2026-06-29 | AAPL: skipped incomplete daily bar 2026-06-30 | AMZN: skipped incomplete daily bar 2026-06-26 | AMZN: skipped incomplete dai"
+      },
+      {
+        "date": "2026-05-30",
+        "symbol": "paper basket",
+        "strategy": "Bullish Fvg Continuation",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-01 | AAPL: skipped incomplete daily bar 2026-06-02 | AAPL: skipped incomplete daily bar 2026-06-03 | AAPL: skipped incomplete daily bar 2026-06-04 | AAPL: skipped incomplete dai"
+      },
+      {
+        "date": "2026-05-30",
+        "symbol": "paper basket",
+        "strategy": "Cross Sectional Relative Strength",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-01 | AAPL: skipped incomplete daily bar 2026-06-02 | AAPL: skipped incomplete daily bar 2026-06-03 | AAPL: skipped incomplete daily bar 2026-06-04 | AAPL: skipped incomplete dai"
+      },
+      {
+        "date": "2026-05-30",
+        "symbol": "paper basket",
+        "strategy": "Donchian Breakout 20 10",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-01 | AAPL: skipped incomplete daily bar 2026-06-02 | AAPL: skipped incomplete daily bar 2026-06-03 | AAPL: skipped incomplete daily bar 2026-06-04 | AAPL: skipped incomplete dai"
+      },
+      {
+        "date": "2026-05-30",
+        "symbol": "paper basket",
+        "strategy": "Failed Breakout Reversal Short",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-01 | AAPL: skipped incomplete daily bar 2026-06-02 | AAPL: skipped incomplete daily bar 2026-06-03 | AAPL: skipped incomplete daily bar 2026-06-04 | AAPL: skipped incomplete dai"
+      },
+      {
+        "date": "2026-05-30",
+        "symbol": "paper basket",
+        "strategy": "Pullback Reclaim Uptrend",
+        "direction": "long",
+        "entry": "n/a",
+        "stop": "n/a",
+        "target": "n/a",
+        "pnl": "0",
+        "r": "0",
+        "status": "official paper evidence",
+        "evidence": "paper artifact; fill quality daily_and_intraday",
+        "warning": "AAPL: skipped incomplete daily bar 2026-06-01 | AAPL: skipped incomplete daily bar 2026-06-02 | AAPL: skipped incomplete daily bar 2026-06-03 | AAPL: skipped incomplete daily bar 2026-06-04 | AAPL: skipped incomplete dai"
+      }
+    ],
+    "note": "Paper evidence only. No live broker execution path is enabled."
+  },
+  "strategies": [
+    {
+      "name": "Ts Momentum Sma Atr",
+      "status": "experimental",
+      "trades": 451,
+      "winRate": "34.7%",
+      "return": "-0.7968%",
+      "drawdown": "-0.7968%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Cross Sectional Relative Strength",
+      "status": "experimental",
+      "trades": 178,
+      "winRate": "42.7%",
+      "return": "-0.3333%",
+      "drawdown": "-0.3333%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Donchian Breakout 20 10",
+      "status": "experimental",
+      "trades": 137,
+      "winRate": "49.4%",
+      "return": "0.0251%",
+      "drawdown": "0.0000%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Bullish Fvg Continuation",
+      "status": "experimental",
+      "trades": 114,
+      "winRate": "47.2%",
+      "return": "-0.0208%",
+      "drawdown": "-0.0208%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Volatility Contraction Breakout",
+      "status": "experimental",
+      "trades": 99,
+      "winRate": "60.0%",
+      "return": "0.0314%",
+      "drawdown": "0.0000%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Failed Breakout Reversal Short",
+      "status": "experimental",
+      "trades": 51,
+      "winRate": "42.3%",
+      "return": "-0.0191%",
+      "drawdown": "-0.0191%",
+      "validation": "0% - not validated"
+    },
+    {
+      "name": "Pullback Reclaim Uptrend",
+      "status": "experimental",
+      "trades": 11,
+      "winRate": "42.9%",
+      "return": "-0.0714%",
+      "drawdown": "-0.0714%",
+      "validation": "0% - not validated"
+    }
+  ],
+  "noPicks": {
+    "date": "2026-07-02",
+    "headline": "Dawnstrike waited because no official paper edge cleared the evidence gates.",
+    "watchCount": 40,
+    "acceptedCount": 0,
+    "blockedCount": 2,
+    "topReasons": [
+      "1. RiskHub kill switch is active and status is blocked.",
+      "2. 2 candidate(s) were blocked by RiskHub or Decision Engine: no detailed blocked reason available",
+      "3. 5 strategy(s) are quarantined: bullish_fvg_continuation, donchian_breakout_20_10, failed_breakout_reversal_short, pullback_reclaim_uptrend, plus 1 more.",
+      "4. CommitBridge did not promote unsafe FillTruth overlay evidence into official PaperOps evidence.",
+      "5. Data/provider state is degraded or fallback-backed: ready_public_fallback_only / broker_or_vendor_intraday."
+    ],
+    "whyNoTradeIsValid": "No-picks days protect the research process. Missing or blocked evidence stays visible instead of becoming a false zero or a fake opportunity."
+  },
+  "boundaries": [
+    "Research and paper-trading evidence only.",
+    "No broker execution or order placement.",
+    "Missing values remain n/a or pending, never zero.",
+    "Top 5 uses latest full paper basket when latest day has fewer rows."
+  ]
+}
