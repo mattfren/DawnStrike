@@ -23,14 +23,14 @@ py -m intraday_scanner.cli web-auto-collect --config config\web_sources.yaml --d
 py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.yaml --automation-config config\automation.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify telegram --max-cycles 1
 ```
 
-4. Start the operator dashboard:
+4. Start dashboard:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py --server.port 8502
 ```
 
-5. Open `http://127.0.0.1:8502/` and review Today, Review, History, Calendar,
-Performance, and System. Any broker action remains outside Dawnstrike.
+5. Review picks, source confidence, risk flags, and Telegram preview. Any broker
+action remains outside Dawnstrike.
 
 ## AlphaOps Flow
 
@@ -88,49 +88,6 @@ py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite
 py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 ```
 
-## Prediction And Probability
-
-After the morning watchlist exists, create the prediction read:
-
-```powershell
-py -m intraday_scanner.cli predict-signals --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report --persist
-py -m intraday_scanner.cli prediction-report --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report
-```
-
-Check whether probability is ready to trust:
-
-```powershell
-py -m intraday_scanner.cli probability-doctor --db-path data\shadow_real.sqlite --print
-py -m intraday_scanner.cli calibration-report --db-path data\shadow_real.sqlite --out-dir outputs\calibration_report
-```
-
-If it says `Not enough history yet.`, collect more real outcomes before
-treating probability or expected return as calibrated.
-
-Create missing outcome templates:
-
-```powershell
-py -m intraday_scanner.cli outcome-gap-report --db-path data\shadow_real.sqlite --out-dir outputs\outcome_gap --print
-py -m intraday_scanner.cli create-outcome-templates --db-path data\shadow_real.sqlite --out-dir data\inbox\outcomes --days-missing-only
-```
-
-## Day Review
-
-After the session, collect the day mover list, compare it against the saved
-Dawnstrike picks, and create gated learning proposals:
-
-```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist --print
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-telegram --date YYYY-MM-DD --db-path data\shadow_real.sqlite --notify console
-```
-
-Use the dashboard `Day Review` tab for the plain-English summary: top movers,
-which names were picked, which were missed, which were avoided, what outcomes
-are still needed, and what learning events were proposed. A missed winner can be
-a source coverage issue rather than a scoring issue.
-
 ## Historical Calendar
 
 Use the dashboard `Historical Calendar` tab to review saved daily picks, missing
@@ -154,12 +111,9 @@ py -m intraday_scanner.cli calendar-report --db-path data\shadow_real.sqlite --o
 End-of-day scheduled flow can run:
 
 ```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist
+py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
 py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
-py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 ```
 
 It does not fabricate outcomes when no CSV has been imported. See

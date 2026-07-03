@@ -1,8 +1,0 @@
-month,strategy_id,monthly_return_pct,cumulative_return_pct,win_days,loss_days,flat_days,max_drawdown_pct
-2026-06,bullish_fvg_continuation,0,0,0,0,4,0
-2026-06,cross_sectional_relative_strength,-0.00013864,0,0,1,3,-0.00013864
-2026-06,donchian_breakout_20_10,0,0,0,0,4,0
-2026-06,failed_breakout_reversal_short,0,0,0,0,4,0
-2026-06,pullback_reclaim_uptrend,0,0,0,0,4,0
-2026-06,ts_momentum_sma_atr,0,0,0,0,4,0
-2026-06,volatility_contraction_breakout,0,0,0,0,4,0

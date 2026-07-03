@@ -20,7 +20,7 @@ are not live performance claims.
 5. Monitor saved recommendations during the session.
 6. Run paper audit after market data is available.
 7. Build the performance report.
-8. Open the operator dashboard.
+8. Open the dashboard.
 
 ## Windows Commands
 
@@ -75,7 +75,7 @@ intraday-scan tune-strategy ^
 
 intraday-scan scheduler
 
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py
 ```
 
 ## Provider Credentials

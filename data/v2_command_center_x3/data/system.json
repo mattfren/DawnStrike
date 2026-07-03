@@ -22,7 +22,7 @@
       },
       {
         "next_run_time": "2026-07-03T18:00:00.0000000-05:00",
-        "state": "Ready",
+        "state": "Running",
         "task": "OMEGA Watchdog"
       }
     ],
@@ -71,11 +71,11 @@
         "enabled": true,
         "full_name": "\\Dawnstrike\\OMEGA Watchdog",
         "installed": true,
-        "last_result": 0,
+        "last_result": 267009,
         "last_run_time": "2026-07-02T18:00:01.0000000-05:00",
         "multiple_instances": "IgnoreNew",
         "next_run_time": "2026-07-03T18:00:00.0000000-05:00",
-        "state": "Ready",
+        "state": "Running",
         "task_name": "OMEGA Watchdog",
         "working_directory": ".",
         "working_directory_matches_repo": true

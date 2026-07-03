@@ -24,9 +24,9 @@ Daily AlphaOps schedule:
 - 8:10 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
 - 8:35 AM CT: `Dawnstrike AlphaOps Monitor 5m` starts checking saved names
   every 5 minutes.
-- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` collects daily movers, runs
-  Day Review, creates learning backfeed proposals, attributes returns, and
-  writes the evidence reports.
+- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` writes the evidence report.
+  The EOD flow can run `alpha-report`, `attribute-returns`, and
+  `historical-report`.
 
 Manual one-off run:
 
@@ -48,26 +48,11 @@ py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite -
 py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
 ```
 
-Post-market Day Review:
+Open the dashboard:
 
 ```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist --print
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
+py -m streamlit run app.py --server.port 8502
 ```
-
-See `docs\DAILY_REVIEW.md`, `docs\TOP_MOVERS_COMPARISON.md`, and
-`docs\LEARNING_BACKFEED.md`.
-
-Open the canonical operator dashboard:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
-```
-
-Then open `http://127.0.0.1:8502/`. The only dashboard to refine is the
-Streamlit operator dashboard in `app.py`, with tabs for Today, Review, History,
-Calendar, Performance, and System.
 
 Telegram messages are watchlist/status alerts only:
 
@@ -203,15 +188,23 @@ Outputs:
 - `outputs\sample_scan\avoid_list.csv`
 - `outputs\sample_scan\scan_summary.json`
 
-## Run the Operator Dashboard
+## Run the Dashboard
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py
 ```
 
-Open `http://127.0.0.1:8502/`. This launches the canonical Streamlit operator
-dashboard in `app.py`. It is research-only/paper-only, does not require Alpaca
-credentials, and does not place orders.
+The dashboard can read sample CSV data, latest output files, or SQLite. It does not require Alpaca credentials for sample mode.
+
+Use the `Run Center` tab to run the local workflow from the web UI:
+
+- initialize SQLite
+- run the scan
+- run the paper audit
+- preview notification events
+- monitor the saved setup list against a fresh snapshot
+- register/check the 5-minute local monitor tasks
+- run the full sample backtest in one click
 
 ## Dawnstrike Signal Engine v3
 
@@ -419,26 +412,6 @@ Build historical performance:
 ```powershell
 intraday-scan performance-report --db-path data\scanner.sqlite --persist
 ```
-
-Build prediction and probability reports:
-
-```powershell
-py -m intraday_scanner.cli predict-signals --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report --persist
-py -m intraday_scanner.cli prediction-report --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report
-py -m intraday_scanner.cli calibration-report --db-path data\shadow_real.sqlite --out-dir outputs\calibration_report
-py -m intraday_scanner.cli probability-doctor --db-path data\shadow_real.sqlite --print
-```
-
-Fewer than 20 real audited market days means probability is uncalibrated and
-expected returns stay unavailable. Use outcome-gap tools to find missing CSVs:
-
-```powershell
-py -m intraday_scanner.cli outcome-gap-report --db-path data\shadow_real.sqlite --out-dir outputs\outcome_gap --print
-py -m intraday_scanner.cli create-outcome-templates --db-path data\shadow_real.sqlite --out-dir data\inbox\outcomes --days-missing-only
-```
-
-See `docs\PREDICTION_ENGINE.md`, `docs\PROBABILITY_CALIBRATION.md`,
-`docs\EXPECTED_VALUE.md`, and `docs\TRUTH_GUARD.md`.
 
 Tune strategy parameters on fixtures:
 

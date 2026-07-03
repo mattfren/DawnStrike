@@ -1,8 +1,0 @@
-strategy_id,month,start_equity,end_equity,return_pct
-failed_breakout_reversal_short,2026-01,100000,100000,0
-failed_breakout_reversal_short,2026-02,100000,100717.2966,0.00717297
-failed_breakout_reversal_short,2026-03,100717.2966,100717.2966,0
-failed_breakout_reversal_short,2026-04,100717.2966,99184.3465,-0.01522033
-failed_breakout_reversal_short,2026-05,99045.8539,96935.2083,-0.02130978
-failed_breakout_reversal_short,2026-06,97135.7995,97855.5453,0.00740969
-failed_breakout_reversal_short,2026-07,97855.5453,97855.5453,0

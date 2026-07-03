@@ -1,1 +1,0 @@
-trade_id,strategy_id,strategy_version,symbol,direction,entry_time,exit_time,entry_price,exit_price,stop,target,quantity,gross_pnl,net_pnl,return_pct,r_multiple,exit_reason,holding_bars,fees_paid,slippage_paid,evidence
