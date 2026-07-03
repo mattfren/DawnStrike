@@ -1,0 +1,22 @@
+.env
+.env*
+API keys.txt
+.git
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite
+*.sqlite3
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+tmp/
+outputs/
+logs/
+data/v2_alpha_lab/
+data/v2_command_center_x2/
+data/v2_day_trade_lab/
+data/v2_forward_evidence/
+data/v2_historical_backtests/
+data/processed/
