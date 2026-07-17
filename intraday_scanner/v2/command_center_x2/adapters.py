@@ -15,6 +15,7 @@ from typing import Any
 
 from intraday_scanner.dashboard.paper_ops_calendar_service import (
     PaperOpsCalendarError,
+    build_paper_ops_calendar_view,
     load_paper_ops_calendar,
 )
 from intraday_scanner.paper_ops_root import production_paper_ops_root
@@ -58,6 +59,7 @@ def build_story_bundle(
             *_payload_warnings(ctx.scheduler),
             *_payload_warnings(ctx.sentinel),
             *_payload_warnings(ctx.riskhub),
+            *_payload_warnings(ctx.paper_calendar_view),
             "No strategy is validated yet.",
         ]
     )
@@ -79,8 +81,13 @@ def build_story_bundle(
             TopMetric("Latest day", latest_day, "Most recent artifact date", "info"),
             TopMetric(
                 "Strategies",
-                str(len(strategy_models)),
-                "Story cards from PaperOps, Learning Foundry, and Market Masters",
+                str(
+                    sum(
+                        model.role == "official_champion"
+                        for model in strategy_models
+                    )
+                ),
+                "Registered official PaperOps series, including future inceptions",
                 "info",
             ),
             TopMetric(
@@ -183,6 +190,13 @@ class _ArtifactContext:
             self.paper_calendar = load_paper_ops_calendar(self.paper_ops_root)
         except (OSError, ValueError, PaperOpsCalendarError):
             self.paper_calendar = {}
+        try:
+            self.paper_calendar_view = build_paper_ops_calendar_view(
+                self.paper_calendar,
+                "forward",
+            )
+        except (OSError, ValueError, PaperOpsCalendarError):
+            self.paper_calendar_view = {}
         self.sentinel = _read_json(repo_root / "data/v2_omega_sentinel/status/latest_status.json", {})
         self.scheduler = _read_json(repo_root / "data/v2_scheduler/status/latest_status.json", {})
         self.autonomous = _read_json(
@@ -261,11 +275,22 @@ class _ArtifactContext:
 
 
 def _calendar_rows(ctx: _ArtifactContext) -> list[dict[str, str]]:
-    rows = _read_csv(ctx.paper_ops_root / "calendar/strategy_daily_returns.csv")
-    # Operator performance surfaces are forward-only. Replay/demo evidence
-    # remains in the canonical ledger and reports, but is never blended into a
-    # live return tile or silently relabeled as forward evidence.
-    return [row for row in rows if str(row.get("mode") or "").lower() == "forward"]
+    if ctx.paper_calendar_view.get("status") != "verified":
+        return []
+    # The calendar service binds every row to the exact active registry identity
+    # and its immutable inception.  Never reconstruct that classification from
+    # strategy_id or strategy_status here: a same-id shadow, benchmark, or cash
+    # row is valid audit evidence but is not an official fleet sleeve.
+    return [
+        dict(row)
+        for row in _rows_from_payload(
+            ctx.paper_calendar_view.get("official_rows", [])
+        )
+        if str(row.get("mode") or "").lower() == "forward"
+        and row.get("registration_status") == "registered"
+        and str(row.get("date") or "")
+        >= str(row.get("registry_inception_date") or "9999-12-31")
+    ]
 
 
 def _latest_day(ctx: _ArtifactContext, calendar_rows: list[dict[str, str]]) -> str:
@@ -296,7 +321,7 @@ def _strategy_models(
             StrategyStoryModel(
                 strategy_id=strategy_id,
                 strategy_name=_title(strategy_id),
-                role="champion" if "legacy" in strategy_id else "challenger",
+                role="official_champion",
                 status=_strategy_status(latest),
                 daily_return_pct=_fmt_pct(latest.get("daily_return_pct")),
                 cumulative_return_pct=_fmt_pct(latest.get("cumulative_return_pct")),
@@ -333,7 +358,7 @@ def _strategy_models(
             StrategyStoryModel(
                 strategy_id=strategy_id,
                 strategy_name=_text(row.get("strategy_label"), _title(strategy_id)),
-                role="registered_forward_candidate",
+                role="official_champion",
                 status="registered / not yet eligible",
                 daily_return_pct=MISSING,
                 cumulative_return_pct=MISSING,
@@ -355,6 +380,7 @@ def _strategy_models(
             )
         )
         existing_strategy_ids.add(strategy_id)
+    models.extend(_paper_ops_shadow_strategies(ctx))
     for row in _rows_from_payload(ctx.learning_challengers)[:20]:
         strategy_id = _text(
             row.get("strategy_id") or row.get("challenger_id") or row.get("id") or row.get("name"),
@@ -372,6 +398,90 @@ def _strategy_models(
             continue
         models.append(_shadow_strategy(strategy_id, "Market Masters", row))
     return models[:120]
+
+
+def _paper_ops_shadow_strategies(ctx: _ArtifactContext) -> list[StrategyStoryModel]:
+    """Expose exact challenger evidence without admitting it to official math."""
+
+    rows = [
+        dict(row)
+        for row in _rows_from_payload(
+            ctx.paper_calendar_view.get("challenger_rows", [])
+        )
+        if ctx.paper_calendar_view.get("status") == "verified"
+        and str(row.get("mode") or "").lower() == "forward"
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[_text(row.get("series_key"), "unknown-shadow-series")].append(row)
+
+    models: list[StrategyStoryModel] = []
+    for _series_key, series_rows in sorted(grouped.items()):
+        series_rows.sort(key=lambda item: str(item.get("date") or ""))
+        latest = series_rows[-1]
+        challenger_id = _text(latest.get("challenger_id"), "unregistered-shadow")
+        base_strategy_id = _text(latest.get("strategy_id"), "unknown")
+        version = _text(latest.get("strategy_version"), MISSING)
+        policy = _text(latest.get("execution_policy_version"), MISSING)
+        fingerprint = _text(
+            latest.get("strategy_semantics_fingerprint"), MISSING
+        )
+        model_id = _slug(f"experimental_{challenger_id}_{version}")
+        models.append(
+            StrategyStoryModel(
+                strategy_id=model_id,
+                strategy_name=(
+                    f"{_title(base_strategy_id)} - {version} shadow audit"
+                ),
+                role="paperops_shadow",
+                status="shadow / excluded from official fleet",
+                daily_return_pct=_fmt_pct(latest.get("daily_return_pct")),
+                cumulative_return_pct=_fmt_pct(
+                    latest.get("cumulative_return_pct")
+                ),
+                win_rate=_win_rate(series_rows),
+                average_r=_fmt_value(latest.get("average_r")),
+                expectancy=_fmt_value(latest.get("expectancy_r")),
+                drawdown=_fmt_pct(latest.get("drawdown_pct")),
+                trade_count=sum(
+                    _int(row.get("trades_opened"))
+                    + _int(row.get("trades_closed"))
+                    for row in series_rows
+                ),
+                forward_days=len(
+                    {str(row.get("date") or "") for row in series_rows}
+                ),
+                validation_progress="0% - shadow only",
+                latest_signal_state=(
+                    f"Experimental audit evidence for {challenger_id}; never an official signal."
+                ),
+                latest_paper_state=_paper_state(latest),
+                latest_learning_notes=(
+                    f"Exact shadow lineage: {base_strategy_id}@{version}; "
+                    f"policy={policy}; fingerprint={fingerprint}."
+                ),
+                evidence_quality=(
+                    "artifact-backed shadow evidence; excluded from official counts and returns"
+                ),
+                warnings=[
+                    "Experimental challenger only; excluded from every official fleet and calendar return."
+                ],
+                daily_series=[
+                    {
+                        "date": str(row.get("date") or MISSING),
+                        "mode": "forward_shadow_audit",
+                        "daily_return_pct": _fmt_pct(
+                            row.get("daily_return_pct")
+                        ),
+                        "cumulative_return_pct": _fmt_pct(
+                            row.get("cumulative_return_pct")
+                        ),
+                    }
+                    for row in series_rows[-40:]
+                ],
+            )
+        )
+    return models
 
 
 def _shadow_strategy(source_id: str, source: str, row: dict[str, Any]) -> StrategyStoryModel:
@@ -534,7 +644,16 @@ def _month_models(
         best = max(daily_values, key=lambda item: item[1])[0] if daily_values else MISSING
         worst = min(daily_values, key=lambda item: item[1])[0] if daily_values else MISSING
         month_rows = [row for row in calendar_rows if str(row.get("date") or "").startswith(month)]
-        _, month_cumulative = _day_return_values(month_rows[-10:])
+        latest_month_rows = [
+            row
+            for row in month_rows
+            if str(row.get("date") or "")
+            == max(
+                (str(item.get("date") or "") for item in month_rows),
+                default="",
+            )
+        ]
+        _, month_cumulative = _day_return_values(latest_month_rows)
         month_return = _aggregate_return(month_rows, "daily_return_pct")
         models.append(
             MonthCalendarModel(
@@ -551,7 +670,9 @@ def _month_models(
                 warning_days=warning_days,
                 previous_month=months[index - 1] if index else month,
                 next_month=months[index + 1] if index + 1 < len(months) else month,
-                source_policy="mean of source strategy_daily_returns rows by calendar day",
+                source_policy=(
+                    "exact registered official fleet return by day; monthly return compounds days"
+                ),
             )
         )
     audit = {
@@ -560,7 +681,10 @@ def _month_models(
         "source_hash": _hash_rows(calendar_rows),
         "day_count": len(day_models),
         "month_count": len(models),
-        "policy": "calendar daily/cumulative values are direct aggregates of source CSV fields",
+        "policy": (
+            "verified exact official rows only; daily fleet returns use PnL/session-open equity; "
+            "monthly returns compound by date"
+        ),
         "status": "passed",
     }
     return models, audit
@@ -798,14 +922,52 @@ def _day_return_values(rows: list[dict[str, str]]) -> tuple[str, str]:
 
 def _aggregate_return(rows: list[dict[str, str]], field: str) -> str:
     values = [_float_or_none(row.get(field)) for row in rows]
-    numbers = [value for value in values if value is not None]
-    if not numbers:
+    if not values or any(value is None for value in values):
         return MISSING
-    return f"{sum(numbers) / len(numbers):.4f}%"
+    if field == "daily_return_pct":
+        rows_by_day: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for row in rows:
+            rows_by_day[str(row.get("date") or MISSING)].append(row)
+        compounded = 1.0
+        for day_rows in rows_by_day.values():
+            daily_return = _official_daily_return_fraction(day_rows)
+            if daily_return is None:
+                return MISSING
+            compounded *= 1.0 + daily_return
+        return f"{(compounded - 1.0) * 100:.6f}%"
+    if field == "cumulative_return_pct":
+        starting = [_float_or_none(row.get("starting_equity")) for row in rows]
+        ending = [_float_or_none(row.get("ending_equity")) for row in rows]
+        if all(value is not None for value in [*starting, *ending]):
+            start = sum(value for value in starting if value is not None)
+            end = sum(value for value in ending if value is not None)
+            if start:
+                return f"{(end - start) / start * 100:.6f}%"
+    numbers = [value for value in values if value is not None]
+    return f"{sum(numbers) / len(numbers) * 100:.6f}%"
+
+
+def _official_daily_return_fraction(rows: list[dict[str, str]]) -> float | None:
+    values = [_float_or_none(row.get("daily_return_pct")) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    pnl = [_float_or_none(row.get("total_pnl")) for row in rows]
+    ending = [_float_or_none(row.get("ending_equity")) for row in rows]
+    if all(value is not None for value in [*pnl, *ending]):
+        daily_pnl = sum(value for value in pnl if value is not None)
+        session_open = sum(
+            end - row_pnl
+            for end, row_pnl in zip(ending, pnl, strict=True)
+            if end is not None and row_pnl is not None
+        )
+        if session_open:
+            return daily_pnl / session_open
+    numbers = [value for value in values if value is not None]
+    return sum(numbers) / len(numbers)
 
 
 def _hash_rows(rows: list[dict[str, str]]) -> str:
-    encoded = json.dumps(rows, sort_keys=True).encode("utf-8")
+    encoded = json.dumps(rows, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
@@ -1189,7 +1351,7 @@ def _fmt_pct(value: Any) -> str:
     number = _float_or_none(value)
     if number is None:
         return text
-    return f"{number:.4f}%"
+    return f"{number * 100:.6f}%"
 
 
 def _float_or_none(value: Any) -> float | None:

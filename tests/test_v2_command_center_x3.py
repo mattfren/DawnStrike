@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from intraday_scanner.v2.command_center_x3.core import (
+    _strategies_body,
     build_command_center_x3,
     demo_command_center_x3,
     qa_command_center_x3,
@@ -117,3 +118,35 @@ def test_x3_demo_runs_full_cli_path(tmp_path: Path) -> None:
     assert result["quality_score"] == 100
     assert result["qa_status"] == "passed"
     assert result["verify_status"] == "passed"
+
+
+def test_x3_separates_official_swing_cards_from_experimental_audit_evidence() -> None:
+    html = _strategies_body(
+        {
+            "day_trade": {},
+            "strategies": [
+                {
+                    "strategy_id": "ts_momentum_sma_atr",
+                    "strategy_name": "Trend Momentum",
+                    "role": "official_champion",
+                    "daily_return_pct": "0.020000%",
+                    "trade_count": 2,
+                },
+                {
+                    "strategy_id": "experimental_ts_momentum_shadow_v2",
+                    "strategy_name": "Trend Momentum - v2 shadow audit",
+                    "role": "paperops_shadow",
+                    "daily_return_pct": "5.000000%",
+                    "trade_count": 1,
+                },
+            ],
+        }
+    )
+
+    official_section, experimental_section = html.split(
+        "<h2>Experimental / audit evidence</h2>"
+    )
+    assert "Trend Momentum" in official_section
+    assert "v2 shadow audit" not in official_section
+    assert "v2 shadow audit" in experimental_section
+    assert "excluded from official strategy counts" in experimental_section

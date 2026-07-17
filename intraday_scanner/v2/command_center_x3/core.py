@@ -786,9 +786,21 @@ def _strategies_body(data: dict[str, Any]) -> str:
     day_rows = _day_trade_strategy_rows(data)
     challengers = _refinement_rows(data)
     swing = [_dict(row) for row in _list(data.get("strategies"))]
+    official_swing = [
+        row for row in swing if row.get("role") == "official_champion"
+    ]
+    experimental_swing = [
+        row for row in swing if row.get("role") != "official_champion"
+    ]
     day_cards = "".join(_strategy_card(row, kind="day") for row in day_rows)
     challenger_cards = "".join(_challenger_card(row) for row in challengers[:12])
-    swing_cards = "".join(_strategy_card(row, kind="swing") for row in swing[:12])
+    swing_cards = "".join(
+        _strategy_card(row, kind="swing") for row in official_swing[:20]
+    )
+    experimental_cards = "".join(
+        _strategy_card(row, kind="experimental")
+        for row in experimental_swing[:20]
+    )
     return f"""
 <section class="hero compact-hero">
   <div><p class="eyebrow">Strategies</p><h1>Strategy report cards, not a ranking wall.</h1><p class="story-summary">Day-trade strategies come first. Swing research and shadow challengers are separated so historical swing results cannot masquerade as day-trading proof.</p></div>
@@ -797,6 +809,7 @@ def _strategies_body(data: dict[str, Any]) -> str:
 <section class="story-section"><h2>Active day-trade research</h2><div class="card-grid strategy-grid">{day_cards or '<article class="soft-card"><strong>No Day Trade Lab strategy rows found.</strong><p>Run the Day Trade Lab robustness report first.</p></article>'}</div></section>
 <section class="story-section"><h2>Shadow challengers</h2><div class="card-grid strategy-grid">{challenger_cards or '<article class="soft-card"><strong>No shadow challengers found.</strong><p>No refinement candidates were generated.</p></article>'}</div></section>
 <section class="story-section secondary"><h2>Swing research, separated</h2><div class="card-grid strategy-grid">{swing_cards or '<article class="soft-card"><strong>No swing research cards found.</strong></article>'}</div></section>
+<section class="story-section secondary"><h2>Experimental / audit evidence</h2><p>These cards are excluded from official strategy counts, calendar returns, and fleet performance.</p><div class="card-grid strategy-grid">{experimental_cards or '<article class="soft-card"><strong>No experimental PaperOps evidence found.</strong></article>'}</div></section>
 """
 
 
@@ -1014,9 +1027,14 @@ def _strategy_card(row: dict[str, Any], *, kind: str) -> str:
         trade_count = row.get("trade_count")
         latest = row.get("latest_result")
     else:
-        badge = "Swing Research"
+        is_experimental = kind == "experimental"
+        badge = (
+            "Experimental / excluded"
+            if is_experimental
+            else "Official PaperOps champion"
+        )
         href = f"../strategies/{_slug(strategy_id)}.html"
-        type_label = "Swing Research"
+        type_label = "Audit evidence" if is_experimental else "Swing Research"
         drawdown = row.get("drawdown")
         trade_count = row.get("trade_count")
         latest = row.get("daily_return_pct", "n/a")
