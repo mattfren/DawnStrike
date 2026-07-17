@@ -26,11 +26,36 @@ const toneClass = (value) => {
   const raw = formatValue(value).toLowerCase();
   const parsed = numeric(raw);
   if (raw.includes("blocked") || raw.includes("loss") || (parsed !== null && parsed < 0)) return "negative";
-  if (raw.includes("pass") || raw.includes("ready") || raw.includes("win") || (parsed !== null && parsed > 0)) {
+  if (
+    raw.includes("pass") ||
+    raw.includes("ready") ||
+    raw.includes("verified") ||
+    raw.includes("official") ||
+    raw.includes("delivery recorded") ||
+    raw.includes("win") ||
+    (parsed !== null && parsed > 0)
+  ) {
     return "positive";
   }
-  if (raw.includes("warn") || raw.includes("experimental") || raw.includes("pending")) return "warning";
+  if (
+    raw.includes("warn") ||
+    raw.includes("experimental") ||
+    raw.includes("pending") ||
+    raw.includes("confirm") ||
+    raw.includes("not yet") ||
+    raw.includes("starts")
+  ) {
+    return "warning";
+  }
   return "neutral";
+};
+
+const badgeTone = (value) => {
+  const tone = toneClass(value);
+  if (tone === "negative") return "bad";
+  if (tone === "positive") return "ok";
+  if (tone === "warning") return "warn";
+  return "quiet";
 };
 
 const appendText = (parent, tag, value, className = "") => {
@@ -112,8 +137,15 @@ const renderWatchlist = (watchlist = {}) => {
   text("watchlist-date", `${formatValue(watchlist.title)} - ${formatValue(watchlist.date)}`);
   text("watchlist-count", `${formatValue(watchlist.candidateCount)} candidates`);
   text("watchlist-note", watchlist.note);
-  text("hero-top-symbol", rows[0] ? `${rows[0].ticker} / ${rows[0].gate}` : "n/a");
-  text("status-gate", `${formatValue(watchlist.blockedCount)} blocked / ${formatValue(watchlist.clearedCount)} cleared`);
+  text(
+    "hero-top-symbol",
+    rows[0] ? `${formatValue(rows[0].ticker)} / ${formatValue(rows[0].gate)}` : "n/a"
+  );
+  text(
+    "status-gate",
+    watchlist.gateSummary ||
+      `${formatValue(watchlist.blockedCount)} blocked / ${formatValue(watchlist.clearedCount)} cleared`
+  );
 
   const renderRows = (displayRows) => {
     const body = byId("watchlist-body");
@@ -182,6 +214,7 @@ const renderCurrent = (current = {}) => {
       ["Entry", row.entry],
       ["Stop", row.stop],
       ["Target", row.target],
+      ["P&L", row.pnl],
       ["R", row.r],
     ].forEach(([label, value]) => {
       const item = document.createElement("div");
@@ -206,8 +239,42 @@ const updateCalendarDetail = (tile, button) => {
   }
   text("calendar-selected-date", tile.date);
   text("calendar-selected-return", tile.dailyReturn);
-  text("calendar-selected-trades", tile.tradeCount);
-  text("calendar-selected-state", tile.noTrade ? "no-trade" : tile.tone || "active");
+  text("calendar-selected-trades", tile.activity || tile.tradeCount);
+  text(
+    "calendar-selected-state",
+    tile.observed === false ? "not observed" : tile.state || (tile.noTrade ? "no-trade" : "active")
+  );
+  text("calendar-selected-note", tile.detailNote);
+
+  const strategyList = byId("calendar-selected-strategies");
+  clear(strategyList);
+  const strategyRows = Array.isArray(tile.strategyReturns) ? tile.strategyReturns : [];
+  if (strategyRows.length === 0) {
+    appendText(
+      strategyList,
+      "p",
+      tile.detailNote || "No official per-strategy evidence is retained for this date.",
+      "calendar-empty-state"
+    );
+  }
+  strategyRows.forEach((row) => {
+    const article = document.createElement("article");
+    article.className = "calendar-strategy-row";
+    article.setAttribute("role", "listitem");
+
+    const identity = document.createElement("div");
+    appendText(identity, "strong", row.name);
+    appendText(identity, "span", row.status);
+    article.appendChild(identity);
+
+    const result = document.createElement("div");
+    appendText(result, "strong", row.return, toneClass(row.return));
+    appendText(result, "span", row.pnl);
+    article.appendChild(result);
+
+    appendText(article, "small", row.activity);
+    strategyList.appendChild(article);
+  });
 };
 
 const renderCalendar = (calendar = {}) => {
@@ -219,31 +286,47 @@ const renderCalendar = (calendar = {}) => {
     `${formatValue(s.monthlyReturn)} month`,
     `${formatValue(s.totalTrades)} trades`,
     `${formatValue(s.noTradeDays)} no-trade`,
+    `${formatValue(s.observedDays)} observed`,
   ].forEach((item) => appendText(summary, "span", item));
 
   const grid = byId("calendar-grid");
   clear(grid);
-  (calendar.tiles || []).forEach((tile, index) => {
+  const renderedTiles = [];
+  (calendar.tiles || []).forEach((tile) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `calendar-day ${tile.noTrade ? "no-trade" : ""} ${tile.warning ? "warning" : ""}`;
+    const tone = ["positive", "negative", "flat"].includes(tile.tone)
+      ? `tone-${tile.tone}`
+      : "";
+    button.className = [
+      "calendar-day",
+      tile.observed === false ? "not-observed" : "",
+      tile.noTrade ? "no-trade" : "",
+      tile.warning ? "warning" : "",
+      tone,
+    ]
+      .filter(Boolean)
+      .join(" ");
     button.setAttribute(
       "aria-label",
-      `${formatValue(tile.date)} return ${formatValue(tile.dailyReturn)} trades ${formatValue(tile.tradeCount)}`
+      `${formatValue(tile.date)} return ${formatValue(tile.dailyReturn)} ${formatValue(tile.activity)}`
     );
     appendText(button, "span", tile.day);
     appendText(button, "strong", tile.dailyReturn);
-    appendText(button, "small", `${formatValue(tile.tradeCount)} trades`);
+    appendText(button, "small", tile.activity || `${formatValue(tile.tradeCount)} trades`);
     button.addEventListener("click", () => updateCalendarDetail(tile, button));
     grid.appendChild(button);
-    if (index === 0) updateCalendarDetail(tile, button);
+    renderedTiles.push({ tile, button });
   });
+  const initial = [...renderedTiles].reverse().find((item) => item.tile.observed !== false);
+  if (initial) updateCalendarDetail(initial.tile, initial.button);
 };
 
 const renderPaper = (paper = {}) => {
   const rows = paper.recentRows || [];
-  text("paper-count", `${formatValue(paper.totalRows)} paper rows`);
-  text("status-paper", `${formatValue(paper.totalRows)} paper rows`);
+  const rowLabel = paper.rowLabel || `${formatValue(paper.totalRows)} paper rows`;
+  text("paper-count", rowLabel);
+  text("status-paper", rowLabel);
 
   const renderRows = (displayRows) => {
     const body = byId("paper-body");
@@ -258,7 +341,8 @@ const renderPaper = (paper = {}) => {
         cell(row.stop),
         cell(row.target),
         cell(row.pnl, toneClass(row.pnl)),
-        cell(row.r, toneClass(row.r))
+        cell(row.r, toneClass(row.r)),
+        cell(row.status, toneClass(row.status))
       );
       body.appendChild(tr);
     });
@@ -287,12 +371,18 @@ const renderStrategies = (strategies = []) => {
     const card = document.createElement("article");
     card.className = "strategy-card";
     appendText(card, "h3", row.name);
-    card.appendChild(badge(row.status, "warn"));
+    card.appendChild(badge(row.status, badgeTone(row.status)));
 
     const bar = document.createElement("div");
     bar.className = "health-bar";
     const fill = document.createElement("span");
-    const winRate = Math.max(5, Math.min(100, numeric(row.winRate) || 0));
+    const observedWinRate = numeric(row.winRate);
+    const winRate = observedWinRate === null ? 0 : Math.max(0, Math.min(100, observedWinRate));
+    if (observedWinRate === null) bar.classList.add("unavailable");
+    bar.setAttribute(
+      "aria-label",
+      observedWinRate === null ? "Win rate unavailable" : `Win rate ${winRate}%`
+    );
     fill.style.width = `${winRate}%`;
     bar.appendChild(fill);
     card.appendChild(bar);
@@ -326,7 +416,7 @@ const renderSystem = (system = {}) => {
     card.className = "flow-card";
     appendText(card, "strong", item.name);
     appendText(card, "p", item.description);
-    card.appendChild(badge(item.status, toneClass(item.status) === "positive" ? "ok" : "quiet"));
+    card.appendChild(badge(item.status, badgeTone(item.status)));
     flow.appendChild(card);
   });
 
@@ -343,10 +433,13 @@ const renderSystem = (system = {}) => {
 };
 
 const renderDashboard = (data) => {
+  text("status-deployment", data.deploymentStatus || "Data verified");
+  const deployment = byId("status-deployment");
+  if (deployment) deployment.className = "status-pill ok";
   text("subheadline", data.subheadline);
   text("latest-run-date", data.latestRunDate);
   text("overall-status", data.overallStatus);
-  text("status-freshness", `${formatValue(data.latestRunDate)} scan`);
+  text("status-freshness", data.freshnessLabel || `${formatValue(data.latestRunDate)} scan`);
   text("source-line", `Source ${formatValue(data.sourceCommit)} - generated ${formatValue(data.generatedAt)}`);
 
   renderQuickActions(data.quickActions || []);
@@ -370,4 +463,6 @@ fetch("/assets/dashboard-data.json", { cache: "no-store" })
   .catch((error) => {
     text("subheadline", error.message);
     text("status-deployment", "Data load error");
+    const deployment = byId("status-deployment");
+    if (deployment) deployment.className = "status-pill bad";
   });

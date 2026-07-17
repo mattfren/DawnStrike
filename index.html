@@ -20,7 +20,7 @@
           <strong>Operator</strong>
         </a>
         <nav>
-          <a href="#watchlist">Top 5</a>
+          <a href="#watchlist">Watchlist</a>
           <a href="#calendar">Calendar</a>
           <a href="#paper">Paper Book</a>
           <a href="#strategies">Strategies</a>
@@ -34,7 +34,7 @@
       </aside>
 
       <header class="statusbar" aria-label="Dawnstrike status">
-        <span class="status-pill ok" id="status-deployment">Deployment online</span>
+        <span class="status-pill quiet" id="status-deployment">Dashboard loading</span>
         <span class="status-pill warn" id="status-gate">Gate loading</span>
         <span class="status-pill quiet" id="status-paper">Paper evidence</span>
         <span class="status-pill quiet" id="status-freshness">Freshness loading</span>
@@ -74,7 +74,7 @@
             <div class="section-heading">
               <div>
                 <p class="section-label">AlphaOps</p>
-                <h2 id="watchlist-title">Top 5 Operator Watchlist</h2>
+                <h2 id="watchlist-title">Current Operator Watchlist</h2>
               </div>
               <div class="badge-row">
                 <span class="status-pill warn" id="watchlist-date">n/a</span>
@@ -116,9 +116,9 @@
           <div class="section-heading">
             <div>
               <p class="section-label">PaperOps</p>
-              <h2 id="ticket-title">Current Paper Ticket</h2>
+              <h2 id="ticket-title">Open Paper Positions</h2>
             </div>
-            <span class="status-pill quiet" id="current-ticket-label">Official paper evidence</span>
+            <span class="status-pill quiet" id="current-ticket-label">Verified forward paper</span>
           </div>
           <div class="ticket-grid" id="current-records"></div>
           <p class="note" id="current-note"></p>
@@ -128,13 +128,13 @@
           <div class="section-heading">
             <div>
               <p class="section-label">Calendar</p>
-              <h2 id="calendar-title">Paper Calendar</h2>
+              <h2 id="calendar-title">Strategy Performance Calendar</h2>
             </div>
             <div class="calendar-summary" id="calendar-summary"></div>
           </div>
           <div class="calendar-layout">
             <div class="calendar-grid" id="calendar-grid" aria-label="Calendar day tiles"></div>
-            <aside class="calendar-detail" aria-label="Selected calendar day">
+            <aside class="calendar-detail" aria-label="Selected calendar day" aria-live="polite">
               <span>Selected day</span>
               <strong id="calendar-selected-date">n/a</strong>
               <dl>
@@ -142,6 +142,11 @@
                 <div><dt>Trades</dt><dd id="calendar-selected-trades">n/a</dd></div>
                 <div><dt>State</dt><dd id="calendar-selected-state">n/a</dd></div>
               </dl>
+              <p class="calendar-detail-note" id="calendar-selected-note"></p>
+              <section class="calendar-strategy-detail" aria-labelledby="calendar-strategy-title">
+                <h3 id="calendar-strategy-title">Return by strategy</h3>
+                <div id="calendar-selected-strategies" role="list"></div>
+              </section>
             </aside>
           </div>
         </section>
@@ -167,6 +172,7 @@
                     <th>Target</th>
                     <th><button type="button" data-sort="pnl">PnL</button></th>
                     <th><button type="button" data-sort="r">R</button></th>
+                    <th>Status</th>
                   </tr>
                 </thead>
                 <tbody id="paper-body"></tbody>
@@ -191,7 +197,7 @@
               <p class="section-label">Strategy evidence</p>
               <h2 id="strategies-title">Strategy Health</h2>
             </div>
-            <span class="status-pill warn">Experimental</span>
+            <span class="status-pill warn">Forward paper</span>
           </div>
           <div class="strategy-grid" id="strategy-grid"></div>
         </section>
