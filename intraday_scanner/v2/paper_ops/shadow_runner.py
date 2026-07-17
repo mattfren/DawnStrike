@@ -48,7 +48,10 @@ REGISTERED_CHALLENGER_SCHEMA = "v2.paper_ops_registered_challenger.v1"
 REGISTRATION_EVENT_SCHEMA = "v2.paper_ops_shadow_registration_event.v1"
 SHADOW_RUN_SCHEMA = "v2.paper_ops_shadow_run.v1"
 IMPLEMENTATION_KIND = "parent_signal_filter_v1"
+LEGACY_CANDIDATE_SEMANTICS_CONTRACT = "legacy_module_bound_v1"
+SCOPED_CANDIDATE_SEMANTICS_CONTRACT = "scoped_candidate_semantics_v2"
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,80}$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 def initialize_shadow_registry(
@@ -104,10 +107,23 @@ def register_shadow_challenger(
             None,
         )
         if existing_id is not None:
+            integrity_reasons = verify_registration_integrity(
+                existing_id,
+                output_root=output_root,
+            )
+            if integrity_reasons:
+                raise ValueError(
+                    "existing frozen challenger failed integrity: "
+                    + " | ".join(integrity_reasons)
+                )
             registration = _freeze_registration(
                 dict(raw),
                 output_root,
                 registered_at=str(existing_id.get("registered_at") or ""),
+                candidate_semantics_contract=_candidate_semantics_contract(existing_id),
+                frozen_candidate_semantics_fingerprint=str(
+                    existing_id.get("candidate_strategy_semantics_fingerprint") or ""
+                ),
             )
             if existing_id != registration:
                 raise ValueError(
@@ -202,6 +218,23 @@ def verify_registration_integrity(
         reasons.append("registered challenger schema is unsupported")
     if registration.get("status") != "shadow":
         reasons.append("registered challenger status is not shadow")
+    champion = _champion_registry(output_root).get(
+        str(registration.get("strategy_id") or "")
+    )
+    if champion is None:
+        reasons.append("registered challenger parent is absent from the active registry")
+    else:
+        if registration.get("champion_strategy_version") != champion[0]:
+            reasons.append("champion strategy version changed after challenger freeze")
+        if registration.get("execution_policy_version") != champion[1]:
+            reasons.append("execution policy changed after challenger freeze")
+        if registration.get("champion_strategy_semantics_fingerprint") != champion[2]:
+            reasons.append("active champion lineage changed after challenger freeze")
+    candidate_version = str(registration.get("candidate_strategy_version") or "")
+    if not candidate_version:
+        reasons.append("candidate strategy version is missing")
+    elif candidate_version == str(registration.get("champion_strategy_version") or ""):
+        reasons.append("candidate strategy version matches the champion version")
     if registration.get("implementation_source_sha256") != _implementation_source_sha256():
         reasons.append("shadow implementation source changed after freeze")
     if registration.get("parent_logic_sha256") != _strategy_logic_sha256(parent):
@@ -214,9 +247,28 @@ def verify_registration_integrity(
     except ValueError as exc:
         reasons.append(str(exc))
     else:
-        expected_semantics = paper_engine._strategy_semantics_fingerprint(candidate)
-        if registration.get("candidate_strategy_semantics_fingerprint") != expected_semantics:
-            reasons.append("candidate strategy semantics changed after challenger freeze")
+        contract = _candidate_semantics_contract(registration)
+        frozen_semantics = str(
+            registration.get("candidate_strategy_semantics_fingerprint") or ""
+        )
+        if contract == LEGACY_CANDIDATE_SEMANTICS_CONTRACT:
+            # Legacy v1 registrations used the generic strategy identity helper, which
+            # hashes the entire module containing the nested candidate signal.  That
+            # made unrelated runner edits look like strategy drift.  The frozen digest
+            # remains an opaque lineage ID only after every explicit implementation,
+            # parent, policy, registration, and append-only event check in this
+            # function passes.
+            if not _SHA256_HEX.fullmatch(frozen_semantics):
+                reasons.append("legacy candidate semantics fingerprint is invalid")
+        elif contract == SCOPED_CANDIDATE_SEMANTICS_CONTRACT:
+            expected_semantics = _scoped_candidate_semantics_fingerprint(
+                candidate,
+                registration,
+            )
+            if frozen_semantics != expected_semantics:
+                reasons.append("candidate strategy semantics changed after challenger freeze")
+        else:
+            reasons.append(f"unsupported candidate semantics contract: {contract}")
     registered_at = str(registration.get("registered_at") or "")
     if not registered_at:
         reasons.append("challenger registration is missing registered_at")
@@ -970,12 +1022,18 @@ def _run_one_challenger(
         data_snapshot_id=run.data_snapshot_id,
         run_manifest_id=run.run_id,
     )
-    picks = paper_engine._picks_from_scan(
-        scan_output,
-        (strategy,),
-        run,
-        config,
-        warnings,
+    picks = tuple(
+        replace(
+            pick,
+            strategy_semantics_fingerprint=candidate_semantics,
+        )
+        for pick in paper_engine._picks_from_scan(
+            scan_output,
+            (strategy,),
+            run,
+            config,
+            warnings,
+        )
     )
     no_setup = [
         paper_engine._no_setup_decision(
@@ -1455,6 +1513,8 @@ def _freeze_registration(
     output_root: Path,
     *,
     registered_at: str,
+    candidate_semantics_contract: str = SCOPED_CANDIDATE_SEMANTICS_CONTRACT,
+    frozen_candidate_semantics_fingerprint: str | None = None,
 ) -> JsonDict:
     if raw.get("schema_version") != SHADOW_MANIFEST_SCHEMA:
         raise ValueError("unsupported shadow registration manifest schema")
@@ -1519,11 +1579,28 @@ def _freeze_registration(
         "automatic_promotion_enabled": False,
         "broker_execution_allowed": False,
     }
+    if candidate_semantics_contract == SCOPED_CANDIDATE_SEMANTICS_CONTRACT:
+        registration["candidate_semantics_contract"] = candidate_semantics_contract
+    elif candidate_semantics_contract != LEGACY_CANDIDATE_SEMANTICS_CONTRACT:
+        raise ValueError(
+            f"unsupported candidate semantics contract: {candidate_semantics_contract}"
+        )
     registration["logic_artifact_sha256"] = _logic_artifact_sha256(registration)
     candidate = _build_candidate_strategy(registration, output_root)
-    registration["candidate_strategy_semantics_fingerprint"] = (
-        paper_engine._strategy_semantics_fingerprint(candidate)
-    )
+    if candidate_semantics_contract == SCOPED_CANDIDATE_SEMANTICS_CONTRACT:
+        registration["candidate_strategy_semantics_fingerprint"] = (
+            _scoped_candidate_semantics_fingerprint(candidate, registration)
+        )
+    elif frozen_candidate_semantics_fingerprint is None:
+        registration["candidate_strategy_semantics_fingerprint"] = (
+            paper_engine._strategy_semantics_fingerprint(candidate)
+        )
+    elif _SHA256_HEX.fullmatch(frozen_candidate_semantics_fingerprint):
+        registration["candidate_strategy_semantics_fingerprint"] = (
+            frozen_candidate_semantics_fingerprint
+        )
+    else:
+        raise ValueError("legacy candidate semantics fingerprint is invalid")
     registration["registration_id"] = _registration_id(registration)
     return registration
 
@@ -1700,8 +1777,45 @@ def _implementation_source_sha256() -> str:
     )
 
 
+def _candidate_semantics_contract(registration: JsonDict) -> str:
+    contract = str(registration.get("candidate_semantics_contract") or "")
+    return contract or LEGACY_CANDIDATE_SEMANTICS_CONTRACT
+
+
+def _scoped_candidate_semantics_fingerprint(
+    candidate: StrategySpec,
+    registration: JsonDict,
+) -> str:
+    payload = paper_engine._strategy_semantics_payload(candidate)
+    # The candidate signal is a closure in this runner.  Hashing its entire module
+    # makes scheduler/recovery changes alter strategy identity even when the exact
+    # builder and filter remain byte-identical.  Replace that broad digest with the
+    # already-frozen implementation sources and the exact indicator dependencies.
+    payload.pop("implementation_module_sha256", None)
+    payload.update(
+        {
+            "candidate_semantics_contract": SCOPED_CANDIDATE_SEMANTICS_CONTRACT,
+            "implementation_source_sha256": registration.get(
+                "implementation_source_sha256"
+            ),
+            "implementation_dependency_sha256": _sha256(
+                {
+                    "atr": inspect.getsource(atr),
+                    "sma": inspect.getsource(sma),
+                }
+            ),
+            "parent_logic_sha256": registration.get("parent_logic_sha256"),
+            "champion_strategy_semantics_fingerprint": registration.get(
+                "champion_strategy_semantics_fingerprint"
+            ),
+            "logic_artifact_sha256": registration.get("logic_artifact_sha256"),
+        }
+    )
+    return _sha256(payload)
+
+
 def _logic_artifact_sha256(registration: JsonDict) -> str:
-    fields = (
+    fields: tuple[str, ...] = (
         "challenger_id",
         "strategy_id",
         "champion_strategy_version",
@@ -1718,6 +1832,8 @@ def _logic_artifact_sha256(registration: JsonDict) -> str:
         "automatic_promotion_enabled",
         "broker_execution_allowed",
     )
+    if "candidate_semantics_contract" in registration:
+        fields = (*fields, "candidate_semantics_contract")
     return _sha256({field: registration.get(field) for field in fields})
 
 
@@ -1798,6 +1914,12 @@ def _matching_registration_event(
         raw,
         output_root,
         registered_at=str(stored_registration.get("registered_at") or ""),
+        candidate_semantics_contract=_candidate_semantics_contract(
+            stored_registration
+        ),
+        frozen_candidate_semantics_fingerprint=str(
+            stored_registration.get("candidate_strategy_semantics_fingerprint") or ""
+        ),
     )
     if candidate != stored_registration:
         raise ValueError(

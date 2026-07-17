@@ -126,3 +126,26 @@ def test_shadow_run_cli_distinguishes_expected_eligibility_skips_from_failure(
     )
 
     assert status == expected_exit
+
+
+def test_shadow_run_cli_propagates_frozen_integrity_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fail_closed(**_kwargs) -> dict[str, object]:
+        raise ValueError(
+            "invalid frozen challenger fixture: shadow implementation source changed"
+        )
+
+    monkeypatch.setattr(paper_ops_cli, "run_shadow_day", fail_closed)
+
+    with pytest.raises(ValueError, match="invalid frozen challenger"):
+        paper_ops_cli.main(
+            [
+                "shadow-run",
+                "--date",
+                "2026-07-16",
+                "--output-root",
+                str(tmp_path / "paper_ops"),
+            ]
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -77,6 +79,205 @@ def test_shadow_activation_uses_new_york_market_date_at_utc_midnight() -> None:
         "2026-07-17T00:30:00+00:00",
         field="registered_at",
     ) == date(2026, 7, 16)
+
+
+def test_new_candidate_semantics_ignore_unrelated_runner_module_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    _seed_root(root, parent)
+    shadow_runner.initialize_shadow_registry(output_root=root)
+    registration = _seed_registered_challenger(
+        root,
+        _registration_manifest(),
+        registered_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+    assert registration["candidate_semantics_contract"] == (
+        shadow_runner.SCOPED_CANDIDATE_SEMANTICS_CONTRACT
+    )
+    candidate = shadow_runner._build_candidate_strategy(registration, root)
+    generic_before = paper_engine._strategy_semantics_fingerprint(candidate)
+    frozen = registration["candidate_strategy_semantics_fingerprint"]
+
+    _simulate_unrelated_runner_module_drift(monkeypatch)
+
+    assert paper_engine._strategy_semantics_fingerprint(candidate) != generic_before
+    assert shadow_runner._scoped_candidate_semantics_fingerprint(
+        candidate,
+        registration,
+    ) == frozen
+    assert shadow_runner.verify_registration_integrity(
+        registration,
+        output_root=root,
+    ) == ()
+
+
+def test_legacy_candidate_accepts_only_scoped_drift_and_preserves_frozen_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    run_date = date.today() + timedelta(days=1)
+    _seed_root(root, parent)
+    shadow_runner.initialize_shadow_registry(output_root=root)
+    registration = _seed_registered_challenger(
+        root,
+        {
+            **_registration_manifest(),
+            "frozen_at": f"{(run_date - timedelta(days=1)).isoformat()}T12:00:00+00:00",
+        },
+        registered_at=(
+            f"{(run_date - timedelta(days=1)).isoformat()}T13:00:00+00:00"
+        ),
+        candidate_semantics_contract=(
+            shadow_runner.LEGACY_CANDIDATE_SEMANTICS_CONTRACT
+        ),
+    )
+    assert "candidate_semantics_contract" not in registration
+    frozen = str(registration["candidate_strategy_semantics_fingerprint"])
+    registry_path = root / "state" / "strategy_challenger_registry.json"
+    event_path = root / "state" / "shadow_registration_ledger.jsonl"
+    registry_before = registry_path.read_bytes()
+    event_before = event_path.read_bytes()
+    candidate = shadow_runner._build_candidate_strategy(registration, root)
+    generic_before = paper_engine._strategy_semantics_fingerprint(candidate)
+
+    _simulate_unrelated_runner_module_drift(monkeypatch)
+
+    assert paper_engine._strategy_semantics_fingerprint(candidate) != generic_before
+    assert shadow_runner.verify_registration_integrity(
+        registration,
+        output_root=root,
+    ) == ()
+    _seed_champion_day(root, run_date)
+    _write_truth_audits(root)
+
+    def fake_loader(
+        **_kwargs: object,
+    ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+        snapshot = f"sourced-shadow-{run_date.isoformat()}"
+        return _dataset(run_date), _manifest(run_date, snapshot), ()
+
+    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fake_loader)
+    result = shadow_runner.run_shadow_day(
+        run_date=run_date,
+        mode=PaperRunMode.FORWARD,
+        output_root=root,
+        allow_fetch=False,
+    )
+
+    assert result["status"] == "passed"
+    assert registry_path.read_bytes() == registry_before
+    assert event_path.read_bytes() == event_before
+    manifest = read_json(
+        root / "manifests" / f"shadow_forward_{run_date}_{CHALLENGER_ID}.json",
+        {},
+    )
+    assert manifest["strategy_semantics_fingerprint"] == frozen
+    account = read_json(
+        root / "state" / "shadow" / CHALLENGER_ID / "forward_account.json",
+        {},
+    )
+    assert account["account"]["strategy_semantics_fingerprint"] == frozen
+    pending = read_json(
+        root / "state" / "shadow" / CHALLENGER_ID / "forward_pending_orders.json",
+        [],
+    )
+    assert pending
+    assert all(row["strategy_semantics_fingerprint"] == frozen for row in pending)
+    decisions = read_json(
+        root
+        / "exports"
+        / f"shadow_strategy_decisions_forward_{run_date}_{CHALLENGER_ID}.json",
+        [],
+    )
+    assert decisions
+    assert all(row["strategy_semantics_fingerprint"] == frozen for row in decisions)
+    candidate_event_payloads = [
+        event["payload"]
+        for event in read_jsonl(root / "ledger" / "paper_ledger.jsonl")
+        if isinstance(event.get("payload"), dict)
+        and event["payload"].get("strategy_version")
+        == registration["candidate_strategy_version"]
+    ]
+    assert candidate_event_payloads
+    assert all(
+        row["strategy_semantics_fingerprint"] == frozen
+        for row in candidate_event_payloads
+    )
+    candidate_calendar = next(
+        row
+        for row in paper_engine._read_calendar_rows(
+            paper_engine.PaperOpsPaths.create(root)
+        )
+        if row.get("strategy_version") == registration["candidate_strategy_version"]
+    )
+    assert candidate_calendar["strategy_semantics_fingerprint"] == frozen
+
+
+def test_candidate_integrity_still_rejects_builder_parent_and_registration_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    _seed_root(root, parent)
+    shadow_runner.initialize_shadow_registry(output_root=root)
+    registration = _seed_registered_challenger(
+        root,
+        _registration_manifest(),
+        registered_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+    original_getsource = shadow_runner.inspect.getsource
+
+    def changed_filter_source(target: object) -> str:
+        source = original_getsource(target)
+        if target is shadow_runner._filter_allows:
+            return source + "\n# material filter drift"
+        return source
+
+    monkeypatch.setattr(shadow_runner.inspect, "getsource", changed_filter_source)
+    implementation_reasons = shadow_runner.verify_registration_integrity(
+        registration,
+        output_root=root,
+    )
+    assert "shadow implementation source changed after freeze" in implementation_reasons
+
+    monkeypatch.setattr(shadow_runner.inspect, "getsource", original_getsource)
+    changed_parent = replace(parent, parameters={"material_parent_drift": 1})
+    monkeypatch.setattr(
+        shadow_runner,
+        "build_strategy_catalog",
+        lambda: (changed_parent,),
+    )
+    parent_reasons = shadow_runner.verify_registration_integrity(
+        registration,
+        output_root=root,
+    )
+    assert "parent strategy logic changed after challenger freeze" in parent_reasons
+    assert "champion strategy semantics changed after challenger freeze" in parent_reasons
+
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    tampered = deepcopy(registration)
+    tampered["implementation"]["parameters"]["max_atr_pct"] = 0.5
+    tamper_reasons = shadow_runner.verify_registration_integrity(
+        tampered,
+        output_root=root,
+    )
+    assert "candidate strategy semantics changed after challenger freeze" in tamper_reasons
+    assert "challenger logic artifact hash does not match frozen registration" in (
+        tamper_reasons
+    )
+    assert "challenger registration_id does not match immutable registration" in (
+        tamper_reasons
+    )
+    assert "registry row differs from append-only registration event" in tamper_reasons
 
 
 def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
@@ -317,6 +518,9 @@ def test_shadow_day_preserves_not_yet_eligible_challenger_as_na_without_evidence
         root,
         raw,
         registered_at=f"{run_date.isoformat()}T13:00:00+00:00",
+        candidate_semantics_contract=(
+            shadow_runner.LEGACY_CANDIDATE_SEMANTICS_CONTRACT
+        ),
     )
     _seed_champion_day(root, run_date)
     _write_truth_audits(root)
@@ -533,11 +737,15 @@ def _seed_registered_challenger(
     raw: dict[str, object],
     *,
     registered_at: str,
+    candidate_semantics_contract: str = (
+        shadow_runner.SCOPED_CANDIDATE_SEMANTICS_CONTRACT
+    ),
 ) -> dict[str, object]:
     registration = shadow_runner._freeze_registration(
         raw,
         root,
         registered_at=registered_at,
+        candidate_semantics_contract=candidate_semantics_contract,
     )
     append_jsonl_unique(
         root / "state" / "shadow_registration_ledger.jsonl",
@@ -559,6 +767,20 @@ def _seed_registered_challenger(
     challengers.append(registration)
     write_json(root / "state" / "strategy_challenger_registry.json", registry)
     return registration
+
+
+def _simulate_unrelated_runner_module_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_getsource = shadow_runner.inspect.getsource
+
+    def drifted_getsource(target: object) -> str:
+        source = original_getsource(target)
+        if target is shadow_runner:
+            return source + "\n# unrelated scheduler-only runner change"
+        return source
+
+    monkeypatch.setattr(shadow_runner.inspect, "getsource", drifted_getsource)
 
 
 def _dataset(day_one: date, day_two: date | None = None) -> MarketDataset:
