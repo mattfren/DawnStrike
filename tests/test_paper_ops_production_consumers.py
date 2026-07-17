@@ -106,12 +106,101 @@ def test_operator_adapters_keep_explicit_custom_root_injectable(tmp_path: Path) 
 
 
 def _write_calendar(root: Path, rows: list[dict[str, str]]) -> None:
+    normalized: list[dict[str, str]] = []
+    officials: list[dict[str, str]] = []
+    semantics: dict[str, object] = {}
+    policy_version = "fixture-paper-policy-v1"
+    for source in rows:
+        row = dict(source)
+        strategy_id = row["strategy_id"]
+        strategy_version = row.setdefault("strategy_version", "v1.0")
+        fingerprint = row.setdefault(
+            "strategy_semantics_fingerprint",
+            f"fixture-{strategy_id}-semantics-v1",
+        )
+        row.setdefault("execution_policy_version", policy_version)
+        row.setdefault("strategy_status", "experimental")
+        row.setdefault("data_snapshot_id", f"fixture:{row['date']}")
+        row.setdefault("starting_equity", "100000")
+        row.setdefault("ending_equity", "100000")
+        row.setdefault("total_pnl", "0")
+        row.setdefault("drawdown_pct", "0")
+        row.setdefault("run_id", f"fixture:{row['mode']}:{row['date']}")
+        normalized.append(row)
+        if row["mode"] != "forward":
+            continue
+        identity = {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "execution_policy_version": policy_version,
+            "strategy_semantics_fingerprint": fingerprint,
+        }
+        if identity not in officials:
+            officials.append(identity)
+        semantics[f"{strategy_id}@{strategy_version}"] = {
+            "configuration": {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+            },
+            "fingerprint": fingerprint,
+            "registered_at": "2026-06-30T12:00:00+00:00",
+        }
+
     path = root / "calendar/strategy_daily_returns.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=list(normalized[0]))
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(normalized)
+
+    _write_json(root / "state/strategy_registry.json", officials)
+    _write_json(
+        root / "state/strategy_semantics_manifest.json",
+        {
+            "schema_version": "v2.strategy_semantics_manifest.v1",
+            "strategies": semantics,
+        },
+    )
+    _write_json(
+        root / "state/execution_policy_manifest.json",
+        {
+            "schema_version": "v2.paper_execution_policy_manifest.v1",
+            "active_execution_policy_version": policy_version,
+            "policies": {
+                policy_version: {
+                    "configuration": {"fixture": True},
+                    "fingerprint": "fixture-paper-policy-fingerprint-v1",
+                    "registered_at": "2026-06-30T12:00:00+00:00",
+                }
+            },
+        },
+    )
+    _write_json(
+        root / "state/strategy_challenger_registry.json",
+        {
+            "schema_version": "v2.paper_ops_challenger_registry.v1",
+            "challengers": [],
+        },
+    )
+    reconciliation = root / "reconciliation"
+    for name, schema in (
+        ("reconciliation_latest.json", "v2.paper_ops_reconciliation.v1"),
+        ("calendar_truth_latest.json", "v2.paper_ops_calendar_truth.v2"),
+        ("ledger_rebuild_latest.json", "v2.paper_ops_ledger_rebuild.v1"),
+    ):
+        _write_json(
+            reconciliation / name,
+            {"schema_version": schema, "status": "passed"},
+        )
+    for mode in {row["mode"] for row in normalized}:
+        _write_json(
+            reconciliation / f"source_bar_truth_{mode}_latest.json",
+            {
+                "schema_version": "v2.paper_ops_source_bar_truth.v1",
+                "status": "passed",
+                "mode": mode,
+            },
+        )
 
 
 def _write_json(path: Path, payload: object) -> None:

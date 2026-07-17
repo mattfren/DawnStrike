@@ -1,0 +1,25 @@
+{
+  "schema_version": "dawnstrike.mover_daily_workflow.v1",
+  "input_adapter": "retained_csv",
+  "bars_csv_template": "../data/mover_inputs/{market_date}/bars_{cutoff_token}.csv",
+  "context_csv_template": "../data/mover_inputs/{market_date}/context_{cutoff_token}.csv",
+  "reconciliation_bars_csv_template": "../data/mover_inputs/{market_date}/bars_after_close.csv",
+  "cutoffs_et": [
+    "09:45",
+    "10:00",
+    "12:00",
+    "15:00"
+  ],
+  "reconcile_not_before_et": "16:10",
+  "output_root": "../data/v2_mover_pattern_lab",
+  "notification_db_path": "../data/mover_pattern_notifications.sqlite",
+  "env_file": "../.env",
+  "notification_channel": "telegram",
+  "min_baseline_sessions": 10,
+  "bar_interval_minutes": 5,
+  "notional_per_trade": 1000.0,
+  "slippage_bps": 10.0,
+  "fee_bps": 1.0,
+  "research_only": true,
+  "broker_execution_enabled": false
+}

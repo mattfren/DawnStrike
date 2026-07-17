@@ -54,8 +54,10 @@ from intraday_scanner.services.alpha_cycle_service import (
     alpha_report,
     alpha_status,
 )
+from intraday_scanner.services.alpha_paper_service import alpha_paper_reconcile
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.calendar_report_service import calendar_report
+from intraday_scanner.services.daily_movers_service import collect_daily_movers
 from intraday_scanner.services.e2e_automation_service import (
     automation_daemon,
     automation_monitor_open,
@@ -322,6 +324,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_auto.add_argument("--persist", action="store_true")
     web_auto.add_argument("--print", action="store_true", dest="print_rows")
 
+    daily_movers = subparsers.add_parser(
+        "collect-daily-movers",
+        help="Collect realized post-market gainers for descriptive research only",
+    )
+    daily_movers.add_argument("--date", required=True)
+    daily_movers.add_argument("--config", default="config/web_sources.example.yaml")
+    daily_movers.add_argument("--db-path", default="data/shadow_real.sqlite")
+    daily_movers.add_argument("--out-dir", default="outputs/daily_movers")
+    daily_movers.add_argument("--persist", action="store_true")
+    daily_movers.add_argument("--print", action="store_true", dest="print_rows")
+
     telegram = subparsers.add_parser("telegram-test", help="Send or dry-run a Telegram test")
     telegram.add_argument("--db-path", default="data/shadow_real.sqlite")
     telegram.add_argument("--dry-run", action="store_true")
@@ -386,6 +399,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_outcomes_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
 
+    alpha_reconcile_parser = subparsers.add_parser(
+        "alpha-paper-reconcile",
+        help="Reconcile the exact delivered AlphaOps Telegram cohort from sourced RTH bars",
+    )
+    alpha_reconcile_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_reconcile_parser.add_argument("--market-date", required=True)
+    alpha_reconcile_parser.add_argument(
+        "--bars-csv",
+        default=None,
+        help=(
+            "Timezone-aware one-minute RTH OHLCV aggregate CSV or canonical "
+            "per-symbol directory containing every delivered symbol; may be omitted "
+            "only for an explicit delivered NO_TRADE day"
+        ),
+    )
+    alpha_reconcile_parser.add_argument(
+        "--out-dir", default="outputs/strategy_reconciliation"
+    )
+    alpha_reconcile_parser.add_argument("--persist", action="store_true")
+    alpha_reconcile_parser.add_argument("--slippage-bps", type=float, default=5.0)
+    alpha_reconcile_parser.add_argument("--fee-bps", type=float, default=0.0)
+    alpha_reconcile_parser.add_argument(
+        "--notional-per-trade", type=float, default=1000.0
+    )
+    alpha_reconcile_parser.add_argument(
+        "--bar-timestamp-semantics",
+        choices=["bar_close"],
+        default="bar_close",
+    )
+
     strategy_fleet_parser = subparsers.add_parser(
         "strategy-fleet-report",
         help=(
@@ -437,6 +480,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-learn", help="Update AlphaOps setup memory and performance truth"
     )
     alpha_learn_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_learn_parser.add_argument(
+        "--market-date",
+        default=None,
+        help="Require a complete exact AlphaOps reconciliation for this market date",
+    )
 
     alpha_status_parser = subparsers.add_parser(
         "alpha-status", help="Print AlphaOps persistence and evidence status"
@@ -736,6 +784,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_web_ingest_public_table(args)
         if args.command == "web-auto-collect":
             return _run_web_auto_collect(args)
+        if args.command == "collect-daily-movers":
+            return _run_collect_daily_movers(args)
         if args.command == "telegram-test":
             return _run_telegram_test(args)
         if args.command == "web-source-doctor":
@@ -750,6 +800,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_monitor(args)
         if args.command == "alpha-outcomes":
             return _run_alpha_outcomes(args)
+        if args.command == "alpha-paper-reconcile":
+            return _run_alpha_paper_reconcile(args)
         if args.command == "strategy-fleet-report":
             return _run_strategy_fleet_report(args)
         if args.command == "strategy-fleet-telegram":
@@ -1138,6 +1190,30 @@ def _run_web_auto_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_collect_daily_movers(args: argparse.Namespace) -> int:
+    result = collect_daily_movers(
+        market_date=args.date,
+        config_path=args.config,
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        print_rows=args.print_rows,
+    )
+    if not args.print_rows:
+        print(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"rows", "rejected_rows"}
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    return 0 if result.get("status") == "success" else 2
+
+
 def _run_telegram_test(args: argparse.Namespace) -> int:
     result = telegram_test(db_path=args.db_path, dry_run=args.dry_run, force=args.force)
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -1209,7 +1285,23 @@ def _run_alpha_monitor(args: argparse.Namespace) -> int:
 def _run_alpha_outcomes(args: argparse.Namespace) -> int:
     result = alpha_outcomes(db_path=args.db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return 0 if result.get("status") == "complete" else 2
+
+
+def _run_alpha_paper_reconcile(args: argparse.Namespace) -> int:
+    result = alpha_paper_reconcile(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        bars_csv=args.bars_csv,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        slippage_bps=args.slippage_bps,
+        fee_bps=args.fee_bps,
+        notional_per_trade=args.notional_per_trade,
+        bar_timestamp_semantics=args.bar_timestamp_semantics,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return int(result.get("exit_code") or 0)
 
 
 def _run_strategy_fleet_report(args: argparse.Namespace) -> int:
@@ -1240,9 +1332,9 @@ def _run_strategy_fleet_telegram(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_learn(args: argparse.Namespace) -> int:
-    result = alpha_learn(db_path=args.db_path)
+    result = alpha_learn(db_path=args.db_path, market_date=args.market_date)
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return 0 if result.get("status") == "complete" else 2
 
 
 def _run_alpha_status(args: argparse.Namespace) -> int:

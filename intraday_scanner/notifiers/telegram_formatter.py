@@ -178,6 +178,20 @@ def format_source_check(source_summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+ALPHA_WATCH_LIMIT = 3
+
+
+def select_alpha_watch_rows(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the exact rows eligible for the compact morning message.
+
+    Cohort persistence and rendering must share this function.  A separate
+    slice in either path would make the paper ledger capable of evaluating a
+    signal the operator never received.
+    """
+
+    return [row for row in signals if row.get("can_alert")][:ALPHA_WATCH_LIMIT]
+
+
 def format_alpha_watch(
     *,
     signals: list[dict[str, Any]],
@@ -187,7 +201,7 @@ def format_alpha_watch(
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
 ) -> str:
     source_summary = dict(source_summary or {})
-    picks = [row for row in signals if row.get("can_alert")][:3]
+    picks = select_alpha_watch_rows(signals)
     lines = [
         "🚀 Dawnstrike Alpha Watch",
         f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | {len(picks)} picks",

@@ -65,71 +65,31 @@ powershell -ExecutionPolicy Bypass -File scripts\register_alphaops_tasks.ps1
 
 ## Outcomes
 
-Save manual outcome CSVs under:
-
-```text
-data\inbox\outcomes\outcomes_YYYY-MM-DD.csv
-```
-
-Then import and audit the outcomes. Missing values stay unavailable and are not
-counted as zero.
+AlphaOps production learning uses only the exact delivered Telegram cohort and
+complete sourced one-minute RTH bars. Set the bar artifact and run:
 
 ```powershell
-py -m intraday_scanner.cli import-manual-outcomes --input data\inbox\outcomes\outcomes_YYYY-MM-DD.csv --db-path data\shadow_real.sqlite --persist
-py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
-py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+$env:DAWNSTRIKE_ALPHAOPS_EOD_BARS_CSV = "C:\path\to\YYYY-MM-DD_complete_rth.csv"
+scripts\run_alphaops_eod_full.bat YYYY-MM-DD
 ```
 
-For AlphaOps learning and reporting, run:
-
-```powershell
-py -m intraday_scanner.cli alpha-outcomes --db-path data\shadow_real.sqlite
-py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite
-py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
-```
-
-## Prediction And Probability
-
-After the morning watchlist exists, create the prediction read:
-
-```powershell
-py -m intraday_scanner.cli predict-signals --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report --persist
-py -m intraday_scanner.cli prediction-report --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report
-```
-
-Check whether probability is ready to trust:
-
-```powershell
-py -m intraday_scanner.cli probability-doctor --db-path data\shadow_real.sqlite --print
-py -m intraday_scanner.cli calibration-report --db-path data\shadow_real.sqlite --out-dir outputs\calibration_report
-```
-
-If it says `Not enough history yet.`, collect more real outcomes before
-treating probability or expected return as calibrated.
-
-Create missing outcome templates:
-
-```powershell
-py -m intraday_scanner.cli outcome-gap-report --db-path data\shadow_real.sqlite --out-dir outputs\outcome_gap --print
-py -m intraday_scanner.cli create-outcome-templates --db-path data\shadow_real.sqlite --out-dir data\inbox\outcomes --days-missing-only
-```
+Exit `0` is complete, `2` is blocked/incomplete evidence, and `1` is an
+operational failure. A missing bar, unproven delivery, no trigger, or incomplete
+grid is never converted into a zero return. Manual outcome imports remain a
+separate historical audit surface and are not consumed by production learning.
 
 ## Day Review
 
-After the session, collect the day mover list, compare it against the saved
-Dawnstrike picks, and create gated learning proposals:
+The former day-review command names were never implemented and are disabled.
+Use the source-complete mover-pattern workflow instead:
 
 ```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist --print
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-telegram --date YYYY-MM-DD --db-path data\shadow_real.sqlite --notify console
+Copy-Item config\mover_daily_workflow.example.json config\mover_daily_workflow.json
+powershell -ExecutionPolicy Bypass -File scripts\mover-pattern-lab\run_operator.ps1 -Stage reconcile
 ```
 
-Use the dashboard `Day Review` tab for the plain-English summary: top movers,
-which names were picked, which were missed, which were avoided, what outcomes
-are still needed, and what learning events were proposed. A missed winner can be
-a source coverage issue rather than a scoring issue.
+See `docs\operations\mover_pattern_daily_workflow.md`. A missed winner can be
+called a model miss only when the retained comparison universe is complete.
 
 ## Historical Calendar
 
@@ -154,14 +114,9 @@ py -m intraday_scanner.cli calendar-report --db-path data\shadow_real.sqlite --o
 End-of-day scheduled flow can run:
 
 ```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist
-py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
-py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
-py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
+scripts\run_alphaops_eod_full.bat YYYY-MM-DD
 ```
 
-It does not fabricate outcomes when no CSV has been imported. See
+It does not fabricate outcomes when sourced bars are unavailable. See
 `docs\HISTORICAL_SIGNAL_LEDGER.md`, `docs\RETURN_ATTRIBUTION.md`, and
 `docs\HISTORICAL_CALENDAR.md`.

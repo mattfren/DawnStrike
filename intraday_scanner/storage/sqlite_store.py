@@ -1299,6 +1299,29 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load notification: {exc}") from exc
 
+    def discard_dry_run_notification(self, event_key: str) -> bool:
+        """Delete only a simulated notification so a later real send can proceed."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM notifications_sent WHERE event_key = ?",
+                    (event_key,),
+                ).fetchone()
+                if row is None:
+                    return False
+                payload = _json_value(row[0])
+                if not isinstance(payload, dict) or payload.get("dry_run") is not True:
+                    return False
+                cursor = connection.execute(
+                    "DELETE FROM notifications_sent WHERE event_key = ?",
+                    (event_key,),
+                )
+                return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not discard dry-run notification: {exc}") from exc
+
     def persist_strategy_versions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Persist immutable strategy definitions used to make selections."""
 
@@ -1431,6 +1454,171 @@ class SQLiteScanStore:
             return {"inserted": inserted, "skipped": skipped}
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist signal selections: {exc}") from exc
+
+    def persist_official_signal_cohort(
+        self,
+        cohort_row: dict[str, Any],
+        selections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically claim one date-level official cohort and its exact members.
+
+        The unique date/strategy/cohort key is the morning-run concurrency lock.
+        A retry may restate the exact same cohort, but it cannot replace the
+        membership, message identity, or source-failure ``NO_TRADE`` sentinel.
+        """
+
+        self.initialize()
+        required = (
+            "official_cohort_id",
+            "market_date",
+            "strategy_id",
+            "strategy_version",
+            "cohort",
+            "scan_id",
+            "event_key",
+            "body_sha256",
+            "membership_sha256",
+            "claimed_at",
+        )
+        if any(not str(cohort_row.get(field) or "").strip() for field in required):
+            raise StorageError("Official strategy cohort lock is missing required truth")
+        if not selections:
+            raise StorageError("Official strategy cohort requires at least one member")
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO official_strategy_cohorts
+                    (official_cohort_id, market_date, strategy_id, strategy_version,
+                     cohort, scan_id, event_key, body_sha256, membership_sha256,
+                     claimed_at, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(cohort_row["official_cohort_id"]),
+                        str(cohort_row["market_date"])[:10],
+                        str(cohort_row["strategy_id"]),
+                        str(cohort_row["strategy_version"]),
+                        str(cohort_row["cohort"]),
+                        str(cohort_row["scan_id"]),
+                        str(cohort_row["event_key"]),
+                        str(cohort_row["body_sha256"]),
+                        str(cohort_row["membership_sha256"]),
+                        str(cohort_row["claimed_at"]),
+                        json.dumps(cohort_row.get("payload_json") or cohort_row, sort_keys=True),
+                    ),
+                )
+                official = connection.execute(
+                    """
+                    SELECT * FROM official_strategy_cohorts
+                    WHERE market_date = ? AND strategy_id = ?
+                      AND strategy_version = ? AND cohort = ?
+                    LIMIT 1
+                    """,
+                    (
+                        str(cohort_row["market_date"])[:10],
+                        str(cohort_row["strategy_id"]),
+                        str(cohort_row["strategy_version"]),
+                        str(cohort_row["cohort"]),
+                    ),
+                ).fetchone()
+                if official is None:
+                    raise StorageError("Official strategy cohort lock was not persisted")
+                immutable_fields = (
+                    "official_cohort_id",
+                    "market_date",
+                    "strategy_id",
+                    "strategy_version",
+                    "cohort",
+                    "scan_id",
+                    "event_key",
+                    "body_sha256",
+                    "membership_sha256",
+                )
+                if any(
+                    str(official[field]) != str(cohort_row[field])
+                    for field in immutable_fields
+                ):
+                    raise StorageError(
+                        "Official strategy cohort is already frozen for this market date "
+                        "with a different Telegram cohort"
+                    )
+                inserted_members = 0
+                for row in selections:
+                    member = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO signal_selections
+                        (selection_id, scan_id, signal_id, ticker, rank, strategy_id,
+                         strategy_version, cohort, decision, selected_at, event_key,
+                         body_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row["selection_id"]),
+                            str(row["scan_id"]),
+                            str(row["signal_id"]),
+                            str(row.get("ticker") or "").upper(),
+                            _int_or_none(row.get("rank")),
+                            str(row["strategy_id"]),
+                            str(row["strategy_version"]),
+                            str(row["cohort"]),
+                            str(row["decision"]),
+                            str(row["selected_at"]),
+                            str(row["event_key"]),
+                            str(row["body_sha256"]),
+                            json.dumps(row.get("payload_json") or row, sort_keys=True),
+                        ),
+                    )
+                    inserted_members += int(member.rowcount or 0)
+                actual_members = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM signal_selections
+                    WHERE scan_id = ? AND strategy_id = ? AND strategy_version = ?
+                      AND cohort = ? AND event_key = ?
+                    """,
+                    (
+                        str(cohort_row["scan_id"]),
+                        str(cohort_row["strategy_id"]),
+                        str(cohort_row["strategy_version"]),
+                        str(cohort_row["cohort"]),
+                        str(cohort_row["event_key"]),
+                    ),
+                ).fetchone()
+                if actual_members is None or int(actual_members[0]) != len(selections):
+                    raise StorageError("Official strategy cohort membership is incomplete")
+                return {
+                    "claimed": bool(cursor.rowcount),
+                    "inserted_members": inserted_members,
+                    "official_cohort": _official_strategy_cohort_row(official),
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist official strategy cohort: {exc}") from exc
+
+    def load_official_strategy_cohort(
+        self,
+        *,
+        market_date: str,
+        strategy_id: str,
+        strategy_version: str,
+        cohort: str,
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    """
+                    SELECT * FROM official_strategy_cohorts
+                    WHERE market_date = ? AND strategy_id = ?
+                      AND strategy_version = ? AND cohort = ?
+                    LIMIT 1
+                    """,
+                    (market_date[:10], strategy_id, strategy_version, cohort),
+                ).fetchone()
+                return _official_strategy_cohort_row(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load official strategy cohort: {exc}") from exc
 
     def load_signal_selections(
         self,
@@ -1631,8 +1819,15 @@ class SQLiteScanStore:
         paper_trades: list[dict[str, Any]],
         learning_labels: list[dict[str, Any]],
         scorecards: list[dict[str, Any]],
+        immutable: bool = False,
     ) -> dict[str, dict[str, int]]:
-        """Atomically upsert one sourced strategy-reconciliation batch."""
+        """Atomically persist one sourced strategy-reconciliation batch.
+
+        ``immutable=True`` is the production AlphaOps truth path. Existing
+        identities are only accepted when their non-volatile semantics are
+        identical; changed bars or economics raise instead of overwriting
+        historical evaluations, trades, labels, or scorecards.
+        """
 
         self.initialize()
         stats = {
@@ -1643,6 +1838,31 @@ class SQLiteScanStore:
         }
         try:
             with self._connect() as connection:
+                if immutable:
+                    evaluations = _immutable_new_rows(
+                        connection,
+                        table="strategy_evaluations",
+                        identity_column="evaluation_id",
+                        rows=evaluations,
+                    )
+                    paper_trades = _immutable_new_rows(
+                        connection,
+                        table="strategy_paper_trades",
+                        identity_column="trade_id",
+                        rows=paper_trades,
+                    )
+                    learning_labels = _immutable_new_rows(
+                        connection,
+                        table="strategy_learning_labels",
+                        identity_column="label_id",
+                        rows=learning_labels,
+                    )
+                    scorecards = _immutable_new_rows(
+                        connection,
+                        table="daily_strategy_scorecards",
+                        identity_column="scorecard_id",
+                        rows=scorecards,
+                    )
                 # The batch is a complete snapshot for every included evaluation.
                 # Purge prior derived rows that are no longer present before the
                 # upserts.  This shares the transaction with all writes, so a failed
@@ -1664,7 +1884,7 @@ class SQLiteScanStore:
                         expected_label_ids_by_evaluation.setdefault(
                             evaluation_id, set()
                         ).add(label_id)
-                for evaluation in evaluations:
+                for evaluation in evaluations if not immutable else []:
                     evaluation_id = str(evaluation.get("evaluation_id") or "")
                     selection_id = str(evaluation.get("selection_id") or "")
                     if selection_id:
@@ -3453,6 +3673,42 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist AlphaOps setup memory: {exc}") from exc
 
+    def replace_alpha_setup_memory(self, rows: list[dict[str, Any]]) -> None:
+        """Atomically replace derived AlphaOps setup memory.
+
+        Setup memory is a materialized view of canonical strategy-learning
+        labels.  Deleting stale buckets in the same transaction prevents a
+        corrected reconciliation from leaving obsolete evidence active.
+        """
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute("DELETE FROM alpha_setup_memory")
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT INTO alpha_setup_memory
+                        (setup_key, updated_at, sample_size, avg_return_pct,
+                         median_return_pct, win_rate_pct, max_drawdown_pct,
+                         outlier_dependency, summary_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("setup_key") or ""),
+                            str(row.get("updated_at") or ""),
+                            int(row.get("sample_size") or 0),
+                            float(row.get("avg_return_pct") or 0.0),
+                            float(row.get("median_return_pct") or 0.0),
+                            float(row.get("win_rate_pct") or 0.0),
+                            float(row.get("max_drawdown_pct") or 0.0),
+                            float(row.get("outlier_dependency") or 0.0),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not replace AlphaOps setup memory: {exc}") from exc
+
     def load_alpha_setup_memory(self) -> dict[str, dict[str, Any]]:
         self.initialize()
         try:
@@ -3765,6 +4021,7 @@ class SQLiteScanStore:
         event_rows: list[dict[str, Any]],
         *,
         replace: bool = False,
+        immutable: bool = False,
     ) -> dict[str, dict[str, int]]:
         """Persist outcome evidence and its audit events in one transaction."""
 
@@ -3773,6 +4030,24 @@ class SQLiteScanStore:
         event_stats = {"inserted": 0, "skipped": 0}
         try:
             with self._connect() as connection:
+                if immutable:
+                    outcome_count = len(outcome_rows)
+                    event_count = len(event_rows)
+                    outcome_rows = _immutable_new_rows(
+                        connection,
+                        table="signal_outcomes",
+                        identity_column="signal_id",
+                        rows=outcome_rows,
+                    )
+                    event_rows = _immutable_new_rows(
+                        connection,
+                        table="signal_events",
+                        identity_column="event_id",
+                        rows=event_rows,
+                    )
+                    outcome_stats["skipped"] += outcome_count - len(outcome_rows)
+                    event_stats["skipped"] += event_count - len(event_rows)
+                    replace = False
                 for row in outcome_rows:
                     signal_id = str(row.get("signal_id") or "")
                     if not signal_id:
@@ -5013,6 +5288,7 @@ class SQLiteScanStore:
         events: list[dict[str, Any]],
         *,
         replace: bool = True,
+        quarantine_manifest_path: str | Path | None = None,
     ) -> dict[str, int]:
         self.initialize()
         review_id = str(run.get("review_id") or "")
@@ -5021,6 +5297,13 @@ class SQLiteScanStore:
             raise StorageError("Daily review run requires review_id and market_date.")
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                _assert_applied_backfeed_allowed(
+                    events,
+                    review_id=review_id,
+                    quarantine_manifest_path=quarantine_manifest_path,
+                    db_path=self.db_path,
+                )
                 if replace:
                     existing = connection.execute(
                         "SELECT review_id FROM daily_review_runs WHERE market_date = ?",
@@ -5242,10 +5525,18 @@ class SQLiteScanStore:
         *,
         review_id: str,
         events: list[dict[str, Any]],
+        quarantine_manifest_path: str | Path | None = None,
     ) -> dict[str, int]:
         self.initialize()
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                _assert_applied_backfeed_allowed(
+                    events,
+                    review_id=review_id,
+                    quarantine_manifest_path=quarantine_manifest_path,
+                    db_path=self.db_path,
+                )
                 connection.execute(
                     "DELETE FROM learning_backfeed_events WHERE review_id = ?",
                     (review_id,),
@@ -5293,6 +5584,30 @@ class SQLiteScanStore:
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+
+def _assert_applied_backfeed_allowed(
+    events: list[dict[str, Any]],
+    *,
+    review_id: str,
+    quarantine_manifest_path: str | Path | None,
+    db_path: Path,
+) -> None:
+    if not any(event.get("applied") is True for event in events):
+        return
+    if quarantine_manifest_path is None:
+        raise StorageError(
+            "Applied learning backfeed requires a current quarantine audit receipt."
+        )
+    from intraday_scanner.mover_pattern_audit import (  # local to avoid cycles
+        assert_backfeed_not_quarantined,
+    )
+
+    assert_backfeed_not_quarantined(
+        review_id,
+        quarantine_manifest_path,
+        db_path=db_path,
+    )
 
 
 def _historical_signal_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -5371,6 +5686,83 @@ def _notification_delivery_row(row: sqlite3.Row) -> dict[str, Any]:
         "body_sha256": str(row["body_sha256"]),
         "payload_json": _json_value(row["payload_json"]),
     }
+
+
+def _official_strategy_cohort_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_value(row["payload_json"])
+    return {
+        "official_cohort_id": str(row["official_cohort_id"]),
+        "market_date": str(row["market_date"]),
+        "strategy_id": str(row["strategy_id"]),
+        "strategy_version": str(row["strategy_version"]),
+        "cohort": str(row["cohort"]),
+        "scan_id": str(row["scan_id"]),
+        "event_key": str(row["event_key"]),
+        "body_sha256": str(row["body_sha256"]),
+        "membership_sha256": str(row["membership_sha256"]),
+        "claimed_at": str(row["claimed_at"]),
+        "payload_json": payload if isinstance(payload, dict) else {},
+    }
+
+
+def _immutable_new_rows(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    identity_column: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed = {
+        ("strategy_evaluations", "evaluation_id"),
+        ("strategy_paper_trades", "trade_id"),
+        ("strategy_learning_labels", "label_id"),
+        ("daily_strategy_scorecards", "scorecard_id"),
+        ("signal_outcomes", "signal_id"),
+        ("signal_events", "event_id"),
+    }
+    if (table, identity_column) not in allowed:
+        raise StorageError(f"Unsupported immutable strategy table: {table}")
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        identity = str(row.get(identity_column) or "").strip()
+        if not identity:
+            continue
+        existing = connection.execute(
+            f"SELECT payload_json FROM {table} WHERE {identity_column} = ? LIMIT 1",  # noqa: S608
+            (identity,),
+        ).fetchone()
+        if existing is None:
+            pending.append(row)
+            continue
+        payload = _json_value(existing[0])
+        if not isinstance(payload, dict) or _immutable_semantics(payload) != _immutable_semantics(
+            row
+        ):
+            raise StorageError(
+                f"Immutable {table} identity conflicts with prior truth: {identity}"
+            )
+    return pending
+
+
+def _immutable_semantics(value: Any) -> Any:
+    volatile = {
+        "reconciled_at",
+        "created_at",
+        "imported_at",
+        "artifact_path",
+        "retained_source_path",
+        "source_bar_artifact_path",
+        "event_timestamp",
+    }
+    if isinstance(value, dict):
+        return {
+            key: _immutable_semantics(item)
+            for key, item in sorted(value.items())
+            if key not in volatile
+        }
+    if isinstance(value, list):
+        return [_immutable_semantics(item) for item in value]
+    return value
 
 
 def _json_row(row: sqlite3.Row) -> dict[str, Any]:

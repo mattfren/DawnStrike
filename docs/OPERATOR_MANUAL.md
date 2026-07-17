@@ -17,10 +17,10 @@ It creates three weekday tasks:
 | --- | --- | --- | --- |
 | `Dawnstrike AlphaOps Morning` | 8:10 AM CT | `py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram` | `logs\alpha_morning.log` |
 | `Dawnstrike AlphaOps Monitor 5m` | 8:35 AM CT, every 5 minutes for 6 hours | `py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram` | `logs\alpha_monitor.log` |
-| `Dawnstrike AlphaOps EOD Report` | 3:15 PM CT | `py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report && py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist && py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report` | `logs\alpha_report.log` |
+| `Dawnstrike AlphaOps EOD Report` | 3:15 PM CT | `call scripts\run_alphaops_eod_full.bat` | `logs\alpha_report.log` |
 
-If `schtasks /Query /TN "Dawnstrike AlphaOps EOD Report" /V /FO LIST` still
-shows only `alpha-report`, re-register tasks with:
+If `schtasks /Query /TN "Dawnstrike AlphaOps EOD Report" /V /FO LIST` does not
+show `run_alphaops_eod_full.bat`, re-register tasks with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\register_alphaops_tasks.ps1
@@ -40,8 +40,12 @@ During the day:
 
 End of day:
 
-- The scheduled report writes files. Telegram summary behavior depends on the
-  command path and notification settings.
+- The wrapper reconciles only the exact rows proven delivered in the morning
+  Telegram body. It writes paper evaluations, closed trades, activation and
+  return labels, and a daily scorecard before allowing learning.
+- Exit `0` means complete, exit `2` means source/membership/reconciliation truth
+  is blocked or incomplete, and exit `1` means an operational failure.
+- A resolved no-trigger has return `N/A`; it is not a 0% trade.
 
 ### Where Logs Live
 
@@ -55,6 +59,7 @@ End of day:
 
 - `outputs\alpha_cycle`
 - `outputs\alpha_report`
+- `outputs\strategy_reconciliation`
 - `outputs\source_doctor`
 - `outputs\manual_audit`
 - `outputs\calendar_report`
@@ -62,6 +67,21 @@ End of day:
 - `outputs\automation`
 
 These output folders are local artifacts and are ignored by Git.
+
+### Required EOD Bar Artifact
+
+Set `DAWNSTRIKE_ALPHAOPS_EOD_BARS_CSV` before the task runs, or place the
+canonical file at
+`data\v2_autodata\normalized\canonical\YYYY-MM-DD_canonical_intraday.csv`.
+It must contain exactly the delivered tickers with columns
+`symbol,timestamp,open,high,low,close,volume`. Timestamps must carry an offset
+and represent one-minute bar closes for every RTH minute (09:31 through 16:00
+ET, or through the published early close). The only run that may omit this file
+is a proven delivered `NO_TRADE` day.
+
+The EOD service retains the source file and persists both raw-byte and
+normalized-content SHA-256 hashes. It does not fetch fallback prices, fill a
+partial grid, or invent an outcome.
 
 ### If No Telegram Message Arrives
 

@@ -26,6 +26,7 @@ browser = [
 intraday-scan = "intraday_scanner.cli:main"
 build-snapshot = "intraday_scanner.snapshot_builder:main"
 paper-audit = "intraday_scanner.paper_audit:main"
+mover-pattern-lab = "intraday_scanner.v2.mover_pattern_lab.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["intraday_scanner*"]

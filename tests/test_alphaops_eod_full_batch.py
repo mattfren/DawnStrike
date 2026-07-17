@@ -27,100 +27,46 @@ def test_full_eod_batch_contains_no_embedded_telegram_secret() -> None:
 def test_full_eod_batch_pins_one_market_date_across_the_fleet() -> None:
     batch = _batch_text()
 
-    assert batch.count("set RUN_DATE=%%I") == 1
-    assert (
-        'if not "!PAPEROPS_CURRENT_DATE!"=="%RUN_DATE%" (' in batch
-    )
-    assert (
-        "paper_ops run-day --date %RUN_DATE% --mode forward "
-        '--output-root "%DAWNSTRIKE_PAPER_OPS_ROOT%"'
-    ) in batch
-    assert (
-        "strategy-fleet-report --db-path data\\shadow_real.sqlite "
-        '--paper-ops-root "%DAWNSTRIKE_PAPER_OPS_ROOT%" '
-        "--out-dir outputs\\strategy_fleet --start %RUN_DATE% --end %RUN_DATE%"
-    ) in batch
-    assert (
-        "strategy-fleet-telegram --date %RUN_DATE% "
-        "--db-path data\\shadow_real.sqlite "
-        '--paper-ops-root "%DAWNSTRIKE_PAPER_OPS_ROOT%" '
-        "--fleet-report outputs\\strategy_fleet\\strategy_fleet_report.json "
-        "--notify telegram --max-attempts 3"
-    ) in batch
+    assert batch.count('set "RUN_DATE=%%I"') == 1
+    assert "alpha-paper-reconcile" in batch
+    assert "--market-date %RUN_DATE%" in batch
+    assert "alpha-learn" in batch
+    assert "call scripts\\run_paperops_fleet_eod.bat %RUN_DATE%" in batch
 
 
-def test_full_eod_batch_preserves_fail_closed_fleet_digest_gates() -> None:
+def test_full_eod_batch_preserves_fail_closed_alpha_truth_gates() -> None:
     batch = _batch_text()
     phase_markers = (
-        "call :RUN_PAPEROPS_FORWARD_WITH_RETRY",
-        "Establishing pre-shadow PaperOps truth gates.",
-        "paper_ops shadow-init",
-        "paper_ops shadow-run",
-        "Rebuilding truth after shadow evidence writes.",
-        "paper_ops blotter",
-        "paper_ops verify-blotter",
-        "paper_ops challenger-evaluate",
-        "paper_ops evidence",
-        "strategy-fleet-report",
-        "set PAPEROPS_DIGEST_READY=1",
-        'if "%PAPEROPS_DIGEST_READY%"=="1" (',
-        "strategy-fleet-telegram",
+        "intraday_scanner.services.market_calendar",
+        "alpha-paper-reconcile",
+        "alpha-learn",
+        "alpha-report",
+        "run_paperops_fleet_eod.bat",
     )
     offsets = [batch.index(marker) for marker in phase_markers]
     assert offsets == sorted(offsets)
 
-    gates = (
-        "PAPEROPS_FORWARD_OK",
-        "PAPEROPS_VERIFY_OK",
-        "PAPEROPS_SOURCE_TRUTH_OK",
-        "PAPEROPS_SHADOW_OK",
-        "POST_SHADOW_TRUTH_OK",
-        "PAPEROPS_BLOTTER_OK",
-        "CHALLENGER_EVAL_OK",
-        "PAPEROPS_EVIDENCE_OK",
-        "FLEET_REPORT_OK",
-    )
-    for gate in gates:
-        assert (
-            f'if not "%{gate}%"=="1" set PAPEROPS_DIGEST_READY=0' in batch
-        )
-
-    assert batch.count("strategy-fleet-report") == 1
-    assert batch.count("strategy-fleet-telegram") == 1
-    assert (
-        "PaperOps fleet Telegram blocked because forward, shadow, challenger, "
-        "truth, evidence, or fleet-report gates did not complete."
-    ) in batch
-    assert "exit /b %EXITCODE%" in batch
+    assert 'if "%RECONCILE_EXIT%"=="2" (' in batch
+    assert 'if not "%RECONCILE_EXIT%"=="0" (' in batch
+    assert 'if "%LEARN_EXIT%"=="2" (' in batch
+    assert "exit /b 2" in batch
+    assert "exit /b 1" in batch
+    assert "alpha-capture-outcomes" not in batch
+    assert "daily-review" not in batch
+    assert "trade-watch" not in batch
 
 
-def test_full_eod_batch_uses_one_configured_root_for_every_paperops_phase() -> None:
+def test_full_eod_batch_requires_real_bars_or_explicit_no_trade() -> None:
     batch = _batch_text()
 
+    assert "DAWNSTRIKE_ALPHAOPS_EOD_BARS_CSV" in batch
     assert (
-        'if not defined DAWNSTRIKE_PAPER_OPS_ROOT set '
-        '"DAWNSTRIKE_PAPER_OPS_ROOT=data\\v2_paper_ops_live"'
-    ) in batch
-    paperops_lines = [
-        line.strip()
-        for line in batch.splitlines()
-        if line.strip().startswith("py -m intraday_scanner.v2.paper_ops ")
-    ]
-    assert paperops_lines
-    assert all(
-        '--output-root "%DAWNSTRIKE_PAPER_OPS_ROOT%"' in line
-        for line in paperops_lines
+        "data\\v2_autodata\\normalized\\canonical\\%RUN_DATE%_canonical_intraday.csv"
+        in batch
     )
-
-    commands = [line.split()[3] for line in paperops_lines]
-    assert commands.count("run-day") == 1
-    assert commands.count("reconcile") == 2
-    assert commands.count("verify-calendar") == 2
-    assert commands.count("rebuild-ledger") == 2
-    assert commands.count("verify-source-bars") == 2
-    assert commands.count("shadow-init") == 1
-    assert commands.count("shadow-run") == 1
-    assert commands.count("blotter") == 1
-    assert commands.count("verify-blotter") == 1
-    assert commands.count("challenger-evaluate") == 1
-    assert commands.count("evidence") == 1
+    assert (
+        'if not defined BARS_ARG if exist "data\\v2_autodata\\normalized\\canonical"'
+        in batch
+    )
+    assert "--bars-csv" in batch
+    assert "no broker/order command" in batch.lower()

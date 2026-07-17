@@ -1,6 +1,11 @@
-# Dawnstrike Intraday Scanner
+# Dawnstrike
 
-Dawnstrike is an aggressive intraday research scanner. It ranks high-volatility premarket momentum names, separates candidates from avoid/do-not-touch names, and supports offline paper audits. It does not place trades and does not provide financial advice.
+Dawnstrike is a research and paper-audit platform. Its existing AlphaOps scanner
+builds intraday watchlists; Dawnstrike Holdings covers long-horizon ownership
+research; and the Mover Pattern Lab tests frozen, point-in-time mover hypotheses
+with simulated paper outcomes. Dawnstrike does not place orders, connect a
+strategy to broker execution, promise returns, or provide personalized
+investment advice.
 
 Windows note: prefer module-entry commands until your Python Scripts directory is on PATH:
 
@@ -10,6 +15,65 @@ py -m intraday_scanner.cli --help
 ```
 
 Sample returns are fixture-only. Live scans need read-only market-data secrets and a universe source such as `--symbols`, `--symbols-file`, or `--universe-file`. Alpaca market data does not supply every enrichment field by itself, so use enrichment files/providers for float, market cap, short float, catalyst URL, halt, and offering context when available. Dawnstrike has no auto-trading or broker order-execution path.
+
+## Mover Pattern Lab
+
+The Mover Pattern Lab is the strict daily paper ledger for two frozen research
+hypotheses:
+
+- `mover_opening_drive_rvol_v1@v1.0` — Opening Drive + Same-Clock RVOL
+- `mover_verified_catalyst_gap_hold_v1@v1.0` — Verified Catalyst Gap Hold
+
+It retains every evaluated decision, allows at most one paper signal per
+strategy/version/symbol/session, simulates the next eligible bar open after
+available truth with explicit costs, reconciles same-session outcomes, and
+produces a day-by-day strategy calendar with a clickable immutable HTML report.
+Missing facts and outcomes
+remain `null`; they are never converted to zero or a flat trade.
+
+Evidence modes are deliberately separate:
+
+- `forward_observation` is captured at the live cutoff and is the only mode that
+  can count toward manual strategy-review gates.
+- `historical_replay` is for deterministic debugging and exploratory replay. It
+  is reported separately and can never promote a strategy.
+
+Start with [the scheduled Mover Pattern Lab runbook](docs/operations/mover_pattern_daily_workflow.md),
+[the Mover Pattern Lab operator guide](docs/research/mover_pattern_lab.md),
+and [data dictionary](docs/research/mover_pattern_data_dictionary.md). Header-only
+input templates live in `examples/mover_pattern_lab`. The two-stage daily
+operator workflow is:
+
+```powershell
+# Copy the example, then replace its path templates with genuine retained feeds.
+Copy-Item config\mover_daily_workflow.example.json config\mover_daily_workflow.json
+
+# Preview host-local task times; this does not mutate Task Scheduler.
+powershell -ExecutionPolicy Bypass -File `
+  scripts\mover-pattern-lab\register_daily_workflow.ps1 `
+  -Config config\mover_daily_workflow.json
+
+# Explicit opt-in registration: one weekday task per ET cutoff plus after-close.
+powershell -ExecutionPolicy Bypass -File `
+  scripts\mover-pattern-lab\register_daily_workflow.ps1 `
+  -Config config\mover_daily_workflow.json `
+  -Apply
+```
+
+The operator invokes each forward cutoff only inside its five-minute receipt
+window. Core records an authoritative system receipt, rejects input bars after
+the cutoff, scans frozen strategy versions, reconciles after close, rebuilds the
+cumulative calendar, verifies evidence, and sends Telegram either a validated
+paper signal/result or the exact no-data blocker. Without genuine point-in-time
+bars and verified spread, halt, split, offering, universe, and catalyst lineage,
+the workflow fails closed. That is a data-readiness result—not a 0% return and
+not permission to fabricate context. The registration script is preview-only
+unless `-Apply` is supplied.
+
+After close, the optional `StudyCandidates` stage labels every retained
+prospective candidate and evaluates highest-mover/control relationships only
+when both universes prove complete. See the operator guide for the exact
+denominator, split-assignment, and descriptive EOD contracts.
 
 ## How This Works
 
@@ -24,9 +88,10 @@ Daily AlphaOps schedule:
 - 8:10 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
 - 8:35 AM CT: `Dawnstrike AlphaOps Monitor 5m` starts checking saved names
   every 5 minutes.
-- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` collects daily movers, runs
-  Day Review, creates learning backfeed proposals, attributes returns, and
-  writes the evidence reports.
+- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` runs
+  `scripts\run_alphaops_eod_full.bat`. It reconciles the exact proven delivered
+  Telegram cohort from complete sourced one-minute RTH bars, gates learning,
+  writes the AlphaOps report, and then runs the separate PaperOps fleet.
 
 Manual one-off run:
 
@@ -34,30 +99,23 @@ Manual one-off run:
 py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram
 ```
 
-Put outcome CSV files here after close:
-
-```text
-data\inbox\outcomes\outcomes_YYYY-MM-DD.csv
-```
-
-Then attribute paper returns from the saved historical signal ledger:
+Provide a complete timezone-aware one-minute RTH CSV for exactly the delivered
+symbols, then reconcile and learn:
 
 ```powershell
-py -m intraday_scanner.cli import-manual-outcomes --input data\inbox\outcomes\outcomes_YYYY-MM-DD.csv --db-path data\shadow_real.sqlite --persist
-py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist
-py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report
+$env:DAWNSTRIKE_ALPHAOPS_EOD_BARS_CSV = "C:\path\to\YYYY-MM-DD_complete_rth.csv"
+scripts\run_alphaops_eod_full.bat YYYY-MM-DD
 ```
 
-Post-market Day Review:
+The mover research workflow is separate:
 
 ```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist --print
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
+Copy-Item config\mover_daily_workflow.example.json config\mover_daily_workflow.json
+powershell -ExecutionPolicy Bypass -File scripts\mover-pattern-lab\run_operator.ps1 -Stage reconcile
 ```
 
-See `docs\DAILY_REVIEW.md`, `docs\TOP_MOVERS_COMPARISON.md`, and
-`docs\LEARNING_BACKFEED.md`.
+See `docs\operations\strategy_paper_learning_loop.md` and
+`docs\operations\mover_pattern_daily_workflow.md`.
 
 Open the canonical operator dashboard:
 
@@ -420,22 +478,18 @@ Build historical performance:
 intraday-scan performance-report --db-path data\scanner.sqlite --persist
 ```
 
-Build prediction and probability reports:
+The former prediction/probability and outcome-gap command names are not active
+CLI surfaces. Canonical AlphaOps evidence is produced only after exact EOD
+reconciliation:
 
 ```powershell
-py -m intraday_scanner.cli predict-signals --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report --persist
-py -m intraday_scanner.cli prediction-report --db-path data\shadow_real.sqlite --out-dir outputs\prediction_report
-py -m intraday_scanner.cli calibration-report --db-path data\shadow_real.sqlite --out-dir outputs\calibration_report
-py -m intraday_scanner.cli probability-doctor --db-path data\shadow_real.sqlite --print
+py -m intraday_scanner.cli alpha-paper-reconcile --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD --bars-csv PATH_TO_COMPLETE_RTH.csv --persist
+py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD
+py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report
 ```
 
-Fewer than 20 real audited market days means probability is uncalibrated and
-expected returns stay unavailable. Use outcome-gap tools to find missing CSVs:
-
-```powershell
-py -m intraday_scanner.cli outcome-gap-report --db-path data\shadow_real.sqlite --out-dir outputs\outcome_gap --print
-py -m intraday_scanner.cli create-outcome-templates --db-path data\shadow_real.sqlite --out-dir data\inbox\outcomes --days-missing-only
-```
+Fewer than 20 real reconciled market days means probability is uncalibrated and
+expected returns stay unavailable. Missing source or outcome truth stays null.
 
 See `docs\PREDICTION_ENGINE.md`, `docs\PROBABILITY_CALIBRATION.md`,
 `docs\EXPECTED_VALUE.md`, and `docs\TRUTH_GUARD.md`.

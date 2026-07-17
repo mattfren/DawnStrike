@@ -17,6 +17,7 @@ SNAPSHOT_COLUMNS = [
     "premarket_high",
     "premarket_low",
     "premarket_volume",
+    "relative_volume",
     "dollar_volume",
     "gap_pct",
     "float_shares",
@@ -106,6 +107,7 @@ CANDIDATE_COLUMNS = [
     "premarket_high",
     "premarket_low",
     "premarket_volume",
+    "relative_volume",
     "catalyst_headline",
     "catalyst_url",
     "breakout_trigger",
@@ -261,6 +263,7 @@ class SnapshotRow:
     row_merge_reason: str = "single_source"
     dollar_volume: float = 0.0
     gap_pct: float = 0.0
+    relative_volume: float | None = None
     catalyst_headline: str = ""
     catalyst_url: str = ""
     data_source_kind: str = ""
@@ -341,6 +344,11 @@ class SnapshotRow:
             row_merge_reason=str(row.get("row_merge_reason") or "single_source").strip(),
             dollar_volume=dollar_volume,
             gap_pct=gap_pct,
+            relative_volume=(
+                None
+                if row.get("relative_volume") in {None, ""}
+                else parse_float(row.get("relative_volume"), "relative_volume")
+            ),
             catalyst_headline=str(row.get("catalyst_headline") or "").strip(),
             catalyst_url=str(row.get("catalyst_url") or "").strip(),
             data_source_kind=str(row.get("data_source_kind") or "").strip(),
@@ -373,6 +381,8 @@ class SnapshotRow:
             raise SnapshotValidationError(f"{self.ticker}: premarket_volume must be non-negative")
         if self.spread_pct < 0:
             raise SnapshotValidationError(f"{self.ticker}: spread_pct must be non-negative")
+        if self.relative_volume is not None and self.relative_volume < 0:
+            raise SnapshotValidationError(f"{self.ticker}: relative_volume must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -383,6 +393,7 @@ class SnapshotRow:
             "premarket_high": self.premarket_high,
             "premarket_low": self.premarket_low,
             "premarket_volume": self.premarket_volume,
+            "relative_volume": self.relative_volume,
             "dollar_volume": self.dollar_volume,
             "gap_pct": self.gap_pct,
             "float_shares": self.float_shares,

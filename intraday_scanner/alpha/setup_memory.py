@@ -27,7 +27,16 @@ def summarize_setup(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "median_return_pct": round(float(median(returns)), 4) if returns else 0.0,
         "win_rate_pct": round((len(wins) / len(returns)) * 100.0, 2) if returns else 0.0,
         "max_drawdown_pct": min(
-            [_float(row.get("low_after_entry_drawdown"), 0.0) or 0.0 for row in rows],
+            [
+                _float(
+                    row.get("low_after_entry_drawdown")
+                    if row.get("low_after_entry_drawdown") is not None
+                    else row.get("realized_drawdown_pct"),
+                    0.0,
+                )
+                or 0.0
+                for row in rows
+            ],
             default=0.0,
         ),
         "outlier_dependency": _outlier_dependency(returns),

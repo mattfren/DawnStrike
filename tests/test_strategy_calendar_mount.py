@@ -32,13 +32,18 @@ def test_strategy_calendar_is_default_and_truthless_state_falls_back(
     )
     monkeypatch.setattr(
         dashboard_app,
+        "render_mover_strategy_calendar",
+        lambda: calls.append(("movers", None)) or False,
+    )
+    monkeypatch.setattr(
+        dashboard_app,
         "_alphaops_historical_calendar",
         lambda received: calls.append(("archive", received)),
     )
 
     dashboard_app._historical_calendar(state)
 
-    assert calls == [("fleet", None), ("archive", state)]
+    assert calls == [("fleet", None), ("movers", None), ("archive", state)]
     assert expanders == [("Intraday signal archive", True)]
     assert len(warnings) == 1
     assert "No return data was fabricated" in warnings[0]
@@ -57,6 +62,11 @@ def test_intraday_archive_selection_skips_strategy_renderer(monkeypatch: Any) ->
         dashboard_app,
         "render_strategy_calendar",
         lambda: calls.append(("fleet", None)) or True,
+    )
+    monkeypatch.setattr(
+        dashboard_app,
+        "render_mover_strategy_calendar",
+        lambda: calls.append(("movers", None)) or True,
     )
     monkeypatch.setattr(
         dashboard_app,

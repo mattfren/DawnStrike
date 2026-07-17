@@ -1,73 +1,25 @@
 # Dawnstrike Daily Review
 
-Dawnstrike Daily Review is the post-market truth check. It compares the names
-Dawnstrike saved during the day with the day mover list and the imported outcome
-rows. It is research/watchlist and paper-validation only. No orders are placed.
+## Current Status
 
-## What It Answers
+The former `daily-review`, `daily-review-learn`, and
+`daily-review-telegram` CLI stages are not implemented and are not part of the
+scheduled EOD path. Do not use old runbooks that reference them. They were thin
+aspirational names without an authoritative exact-cohort outcome contract.
 
-- What Dawnstrike picked.
-- Why each name was picked.
-- What happened after the pick.
-- Which daily top movers were caught, missed, avoided, or not available in data.
-- Which picks still need outcomes before returns can be calculated.
-- What lessons should become learning backfeed proposals.
+The supported workflows are now separated by purpose:
 
-## Commands
+- AlphaOps intraday picks: run `scripts\run_alphaops_eod_full.bat YYYY-MM-DD`.
+  It reconciles only the exact proven delivered Telegram cohort against a
+  complete sourced one-minute RTH artifact. Missing truth returns exit `2` and
+  remains `N/A`.
+- Daily mover/pattern research: configure
+  `config\mover_daily_workflow.json` from the checked-in example and use
+  `scripts\mover-pattern-lab\run_operator.ps1`. See
+  `docs\operations\mover_pattern_daily_workflow.md`.
+- Manual outcome imports remain available for historical audit, but production
+  AlphaOps learning does not consume them.
 
-Collect or import top movers:
-
-```powershell
-py -m intraday_scanner.cli collect-daily-movers --date YYYY-MM-DD --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\daily_movers --persist --print
-```
-
-Run the review:
-
-```powershell
-py -m intraday_scanner.cli daily-review --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-```
-
-Create learning proposals:
-
-```powershell
-py -m intraday_scanner.cli daily-review-learn --date YYYY-MM-DD --db-path data\shadow_real.sqlite --out-dir outputs\daily_review --persist --print
-```
-
-Print or send the compact day-review message:
-
-```powershell
-py -m intraday_scanner.cli daily-review-telegram --date YYYY-MM-DD --db-path data\shadow_real.sqlite --notify console
-```
-
-## Review Categories
-
-- `CAUGHT_WINNER`: a daily top mover was in Dawnstrike Top1/Top3/Top5.
-- `MISSED_WINNER`: a daily top mover was not picked.
-- `AVOIDED_WINNER`: a daily top mover was blocked by the avoid list.
-- `FALSE_POSITIVE`: a Dawnstrike pick had a negative or failed outcome.
-- `CORRECT_AVOID`: an avoided name was weak or failed.
-- `OUTCOME_NEEDED`: a pick has no outcome row yet.
-- `NO_DATA`: the day has no usable mover or outcome data.
-
-## Outcome Rules
-
-Missing prices stay missing. They are not treated as zero. Return precision is
-only calculated where outcome rows exist. If outcomes are missing, Dawnstrike
-creates an outcome template under:
-
-```text
-outputs\daily_review\outcomes\outcomes_YYYY-MM-DD.csv
-```
-
-## Operator Dashboard
-
-Open the operator dashboard and review `Today`, `Review`, `Calendar`, and
-`Performance`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
-```
-
-The dashboard shows review status, top movers, pick review, missed winners,
-outcome needs, and historical review trends in plain English from saved
-operating data.
+Neither workflow places orders or calls a broker. A mover that was not present
+in a source-complete retained universe cannot be labeled as a model miss, and
+an absent outcome can never be converted to a zero return.

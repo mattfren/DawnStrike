@@ -27,11 +27,12 @@ matches the repo.
 | --- | --- | --- | --- |
 | 8:10 AM CT | `Dawnstrike AlphaOps Morning` | `alpha-cycle` | Collects sources, scores candidates, sends Telegram watchlist or no-clean-edge message. |
 | 8:35 AM CT | `Dawnstrike AlphaOps Monitor 5m` | `alpha-monitor` every 5 minutes for 6 hours | Re-checks saved AlphaOps names and sends manual review/status messages. |
-| 3:15 PM CT | `Dawnstrike AlphaOps EOD Report` | `alpha-report`, `attribute-returns`, `historical-report` | Writes end-of-day evidence, return-attribution, and historical-report files from saved outcomes. |
+| 3:15 PM CT | `Dawnstrike AlphaOps EOD Report` | `scripts/run_alphaops_eod_full.bat` | Reconciles the exact delivered Telegram cohort from complete sourced RTH bars, then permits learning and reporting only if truth is complete. |
 
-Outcome data is still manual unless a future reliable price feed is added. The
-app can remind you that outcomes are missing, but it cannot invent the actual
-prices.
+The EOD input is an operator-supplied or canonical retained one-minute RTH CSV.
+If it is absent or incomplete, the run blocks and the return remains unknown.
+The app does not invent prices. Manual outcome files can still be audited, but
+they are not production learning evidence.
 
 ## What Data It Uses
 
@@ -89,16 +90,15 @@ Common reasons:
 
 ## What "Outcome Data Needed" Means
 
-The system saved picks, but no outcome CSV has been imported for those tickers
-yet. Until outcomes are imported, returns stay pending. Missing outcomes are not
-counted as zero and are not treated as wins or losses.
+The system saved picks, but a complete exact-symbol one-minute RTH artifact has
+not passed reconciliation. Until it does, returns stay pending. Missing outcomes
+are not counted as zero and are not treated as wins or losses.
 
 Use:
 
 ```powershell
-py -m intraday_scanner.cli import-manual-outcomes --input data\inbox\outcomes\outcomes_YYYY-MM-DD.csv --db-path data\shadow_real.sqlite --persist
-py -m intraday_scanner.cli audit-manual-outcomes --db-path data\shadow_real.sqlite --out-dir outputs\manual_audit --persist
-py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite
+py -m intraday_scanner.cli alpha-paper-reconcile --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD --bars-csv PATH_TO_COMPLETE_RTH.csv --out-dir outputs\strategy_reconciliation --persist
+py -m intraday_scanner.cli alpha-learn --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD
 ```
 
 ## What "Not Enough Evidence Yet" Means

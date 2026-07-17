@@ -60,7 +60,16 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def append_jsonl_unique(path: Path, rows: list[dict[str, object]], id_field: str) -> int:
+def append_jsonl_unique(
+    path: Path,
+    rows: list[dict[str, object]],
+    id_field: str,
+    *,
+    idempotency_ignored_fields: tuple[str, ...] = (),
+) -> int:
+    ignored_fields = frozenset(idempotency_ignored_fields)
+    if id_field in ignored_fields:
+        raise ValueError(f"idempotency comparison cannot ignore {id_field}")
     path.parent.mkdir(parents=True, exist_ok=True)
     with exclusive_file_lock(jsonl_lock_path(path)):
         _repair_incomplete_jsonl_tail(path)
@@ -71,7 +80,7 @@ def append_jsonl_unique(path: Path, rows: list[dict[str, object]], id_field: str
                 id_field,
                 location=f"existing JSONL record {index}",
             )
-            canonical = _canonical_jsonl_row(row)
+            canonical = _canonical_jsonl_row(row, ignored_fields=ignored_fields)
             existing_prior = existing.get(row_id)
             if existing_prior is not None:
                 raise ValueError(
@@ -87,7 +96,7 @@ def append_jsonl_unique(path: Path, rows: list[dict[str, object]], id_field: str
                 id_field,
                 location=f"incoming JSONL record {index}",
             )
-            canonical = _canonical_jsonl_row(row)
+            canonical = _canonical_jsonl_row(row, ignored_fields=ignored_fields)
             incoming_prior = incoming.get(row_id)
             if incoming_prior is not None:
                 if incoming_prior[0] != canonical:
@@ -135,10 +144,14 @@ def _required_jsonl_id(
     return value
 
 
-def _canonical_jsonl_row(row: dict[str, object]) -> str:
+def _canonical_jsonl_row(
+    row: dict[str, object],
+    *,
+    ignored_fields: frozenset[str] = frozenset(),
+) -> str:
     try:
         return json.dumps(
-            row,
+            {key: value for key, value in row.items() if key not in ignored_fields},
             allow_nan=False,
             separators=(",", ":"),
             sort_keys=True,

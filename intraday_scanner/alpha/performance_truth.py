@@ -116,7 +116,12 @@ def _return(row: dict[str, Any]) -> float | None:
 
 
 def _drawdown(row: dict[str, Any]) -> float | None:
-    for key in ("low_after_entry_drawdown", "max_adverse_excursion", "drawdown_pct"):
+    for key in (
+        "low_after_entry_drawdown",
+        "max_adverse_excursion",
+        "drawdown_pct",
+        "realized_drawdown_pct",
+    ):
         value = row.get(key)
         if value is None or value == "":
             continue

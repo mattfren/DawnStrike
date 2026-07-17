@@ -41,6 +41,7 @@ HARD_AVOID_FLAGS = {
     "stale_data",
     "source_conflict",
     "no_source_confidence",
+    "reverse_split_90d",
 }
 
 
@@ -89,6 +90,8 @@ def evaluate_risk(
         hard.append("current_halt")
     if _truthy(candidate.get("recent_offering")) or "recent_offering" in risk_flags:
         hard.append("active_offering")
+    if _truthy(candidate.get("reverse_split_90d")) or "reverse_split_90d" in risk_flags:
+        hard.append("reverse_split_90d")
     if _truthy(candidate.get("stale_data_flag")) or _truthy(features.get("stale_data_flag")):
         hard.append("stale_source")
     if str(candidate.get("conflict_flags") or features.get("conflict_flags") or "").strip():

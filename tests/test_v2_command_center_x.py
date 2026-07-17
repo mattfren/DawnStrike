@@ -13,6 +13,7 @@ from intraday_scanner.v2.command_center_x.core import (
     build_command_center_x,
     inventory_command_center_x,
     qa_command_center_x,
+    report_command_center_x,
     verify_command_center_x,
 )
 from intraday_scanner.v2.command_center_x.qa import REQUIRED_PAGE_NAMES, run_command_center_x_qa
@@ -79,10 +80,12 @@ def test_build_generates_required_pages_assets_view_models_and_bridge(tmp_path: 
     inventory_command_center_x(repo_root=REPO_ROOT, output_root=output_root)
     build = build_command_center_x(repo_root=REPO_ROOT, output_root=output_root)
     qa = qa_command_center_x(repo_root=REPO_ROOT, output_root=output_root)
+    report = report_command_center_x(repo_root=REPO_ROOT, output_root=output_root)
     verify = verify_command_center_x(repo_root=REPO_ROOT, output_root=output_root)
 
     assert build["status"] == "passed"
     assert qa["status"] == "passed"
+    assert report["final_status"] == "COMPLETE_COMMAND_CENTER_X"
     assert verify["status"] == "passed"
     assert (output_root / "index.html").exists()
     assert (output_root / "assets/command_center_x.css").exists()

@@ -143,6 +143,11 @@ def _broken_links(*, output_root: Path, html_files: list[Path]) -> list[str]:
         for href in _hrefs(text):
             if href.startswith("#"):
                 continue
+            # Hardened archive pages link explicitly to the canonical runtime
+            # dashboard at the application root.  That route is resolved by
+            # the serving app, not by the static artifact directory.
+            if href == "/":
+                continue
             if "://" in href or href.startswith("mailto:"):
                 broken.append(f"{path.as_posix()}->{href}")
                 continue

@@ -90,9 +90,11 @@ def _liquidity_execution(row: dict[str, Any]) -> dict[str, Any]:
     dollar_volume = _float(row.get("dollar_volume"))
     spread = _float(row.get("spread_pct"))
     volume = _float(row.get("premarket_volume"))
+    relative_volume = _float(row.get("relative_volume"))
     tradability = _float(row.get("tradability_score"), 0.0)
     return {
         "premarket_volume": volume,
+        "provider_relative_volume": relative_volume,
         "dollar_volume": dollar_volume,
         "dollar_volume_bucket": _bucket(
             dollar_volume,

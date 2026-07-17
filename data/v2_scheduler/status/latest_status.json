@@ -1,0 +1,16 @@
+{
+  "browser_opened": false,
+  "command_name": "not_run_in_release_checkout",
+  "completed_at": null,
+  "exit_code": null,
+  "live_trading_enabled": false,
+  "log_path": null,
+  "market_masters_enabled": false,
+  "repo_root": ".",
+  "run_date": null,
+  "scheduled_task_installed": false,
+  "schema_version": "v2.scheduler_status.v1",
+  "started_at": null,
+  "status": "not_run",
+  "steps": []
+}

@@ -165,14 +165,19 @@ def link_historical_notification(
     event_key: str,
     was_alerted: bool,
     channel: str,
+    signal_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Link a sent notification event back to all historical signals for a scan."""
     updated = store.link_historical_signal_notification(
         scan_id=scan_id,
         telegram_event_key=event_key,
         was_alerted=was_alerted,
+        signal_ids=signal_ids,
     )
     signals = store.load_historical_signals(scan_id=scan_id, limit=500)
+    if signal_ids is not None:
+        exact_ids = set(signal_ids)
+        signals = [row for row in signals if str(row.get("signal_id") or "") in exact_ids]
     if signals:
         store.persist_signal_events([
             _signal_event(

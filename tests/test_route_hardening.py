@@ -14,10 +14,29 @@ def _write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"rows": rows}, indent=2), encoding="utf-8")
 
 
-def test_harden_html_replaces_generic_title_and_inserts_apex_shell() -> None:
+def test_harden_html_replaces_generic_title_and_inserts_apex_shell(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest_path,
+        [
+            {
+                "group": ".pytest_full_tmp_1",
+                "source": ".pytest_full_tmp_1/provider/raw_source.html",
+                "title": "",
+                "h1": "",
+                "status": "ok",
+                "mode": "desktop_fullpage",
+                "width": 1440,
+                "height": 1000,
+                "screenshot": "screenshots/provider/raw_source.png",
+            }
+        ],
+    )
     row = build_ledger_rows(
-        repo_root=Path("."),
-        manifest_path=Path("data/ui_ux_audit_visuals_20260703T095541/manifest.json"),
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
         include_discovered_extras=False,
     )[0]
     html = "<!doctype html><html><head><title>Untitled</title></head><body><p>Raw</p></body></html>"

@@ -137,15 +137,29 @@ def dispatch_events(
     store: SQLiteScanStore,
     *,
     dry_run: bool = False,
-) -> dict[str, int]:
+    capture_transport_receipts: bool = False,
+) -> dict[str, Any]:
     sent = 0
     skipped = 0
+    deliveries: list[dict[str, Any]] = []
     for event in events:
         for notifier in notifiers:
             notification_key = f"{event.event_key}:{notifier.channel}"
             if store.has_notification(notification_key):
-                skipped += 1
-                continue
+                if dry_run or not store.discard_dry_run_notification(notification_key):
+                    skipped += 1
+                    if capture_transport_receipts:
+                        persisted = store.load_notification(notification_key) or {}
+                        deliveries.append(
+                            {
+                                "event_key": event.event_key,
+                                "notification_key": notification_key,
+                                "channel": notifier.channel,
+                                "status": "duplicate_suppressed",
+                                "transport_receipt": persisted.get("transport_receipt"),
+                            }
+                        )
+                    continue
             if dry_run:
                 _safe_print(f"[dry-run:{notifier.channel}] {event.title}: {event.body}")
                 store.record_notification(
@@ -164,7 +178,7 @@ def dispatch_events(
                 sent += 1
                 continue
             else:
-                notifier.send(event)
+                transport_receipt = notifier.send(event)
             store.record_notification(
                 event_key=notification_key,
                 channel=notifier.channel,
@@ -175,10 +189,32 @@ def dispatch_events(
                     "body": event.body,
                     "channel_hint": event.channel_hint,
                     "payload": event.payload or {},
+                    "transport_receipt": (
+                        dict(transport_receipt)
+                        if not dry_run and transport_receipt is not None
+                        else None
+                    ),
                 },
             )
+            if capture_transport_receipts:
+                deliveries.append(
+                    {
+                        "event_key": event.event_key,
+                        "notification_key": notification_key,
+                        "channel": notifier.channel,
+                        "status": "dry_run" if dry_run else "delivered",
+                        "transport_receipt": (
+                            dict(transport_receipt)
+                            if not dry_run and transport_receipt is not None
+                            else None
+                        ),
+                    }
+                )
             sent += 1
-    return {"sent": sent, "skipped": skipped}
+    result: dict[str, Any] = {"sent": sent, "skipped": skipped}
+    if capture_transport_receipts:
+        result["deliveries"] = deliveries
+    return result
 
 
 def _payload_run_id(payload: dict[str, Any] | None) -> str | None:

@@ -330,7 +330,7 @@ def test_alpha_telegram_messages_are_secret_free():
     assert secret_token not in text + no_trade + summary
 
 
-def test_manual_monitor_no_price_source_dedupes_without_spam(tmp_path):
+def test_monitor_without_current_proven_cohort_fails_closed(tmp_path):
     store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     store.persist_alpha_signals([
         {
@@ -344,9 +344,9 @@ def test_manual_monitor_no_price_source_dedupes_without_spam(tmp_path):
     first = alpha_monitor(db_path=tmp_path / "alpha.sqlite", dry_run=True)
     second = alpha_monitor(db_path=tmp_path / "alpha.sqlite", dry_run=True)
 
-    assert first["status"] == "manual_monitor_required"
-    assert first["notification_stats"]["sent"] == 1
-    assert second["notification_stats"]["skipped"] == 1
+    assert first["status"] == "blocked_incomplete"
+    assert first["notification_stats"]["sent"] == 0
+    assert second["notification_stats"]["sent"] == 0
     assert "MANUAL REVIEW" in format_alpha_monitor(monitor_alpha_signals([], current_prices={}))
 
 

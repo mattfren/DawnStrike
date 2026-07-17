@@ -221,6 +221,11 @@ def _expected_edge_score(calibration: dict[str, Any], memory: dict[str, Any] | N
         avg_return = _float(memory.get("avg_return_pct"), 0.0)
         bounded_return = min(25.0, max(-25.0, avg_return)) + 25
         base = (base * 0.5) + (min(100.0, win_rate) * 0.3) + bounded_return
+        if int(memory.get("activation_sample_size") or 0) >= 20:
+            base += max(
+                -5.0,
+                min(5.0, _float(memory.get("activation_score_adjustment"), 0.0)),
+            )
     return max(0.0, min(100.0, base))
 
 

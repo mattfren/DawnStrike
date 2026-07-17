@@ -20,11 +20,12 @@ Returns from these lanes must never be blended:
 1. **AlphaOps v4, intraday**
    - The immutable `official_telegram` cohort is the exact set rendered in the
      morning message.
-   - The five-minute watcher creates paper-only intents, fills, positions, and
-     exit events for that cohort.
-   - End-of-day reconciliation uses complete sourced one-minute bars to rebuild
-     the authoritative first-touch entry and target, invalidation, or close
-     exit under `alphaops_intraday_first_touch_v1`.
+   - The five-minute watcher is informational; it does not create a trade or an
+     outcome when current-price truth is unavailable.
+   - End-of-day reconciliation is the authoritative paper lifecycle. It uses a
+     complete sourced one-minute RTH artifact to rebuild first-touch entry and
+     target, invalidation, or close exit under
+     `alphaops_intraday_first_touch_v1`.
 2. **PaperOps, daily swing**
    - Registered deterministic strategies run independently with separate
      strategy accounts.
@@ -50,7 +51,10 @@ The current nine daily strategies are:
 
 `Dawnstrike AlphaOps Morning` collects public premarket evidence, scores the
 AlphaOps model, freezes exact `signal_selections`, sends the Telegram message,
-and records per-signal delivery membership and the rendered-body SHA-256.
+and records per-signal delivery membership. One official cohort is locked per
+market date, including source-failure `NO_TRADE`. Delivery proof is the final
+Telegram UTF-8 text/byte count/SHA-256 plus HTTP acknowledgement and provider
+`message_id`, not the pre-format body.
 
 ### 08:35-15:35 Central, every five minutes
 
@@ -58,8 +62,14 @@ and records per-signal delivery membership and the rendered-body SHA-256.
 `scripts/run_alphaops_monitor_full.bat`:
 
 1. `alpha-monitor` observes only the exact official cohort.
-2. `trade-watch --mode paper_execute` creates or updates the auditable paper
-   lifecycle. `live_execute` remains locked and no broker adapter is called.
+2. No execution stage runs. The monitor may emit a sourced status message, but
+   a monitor message is not a paper fill and no broker adapter is called.
+
+The monitor is market-date bound. It excludes prior-day cohorts and requires a
+usable current-day quote observation with source identity, timezone-aware
+`observed_at`, and a positive price for every delivered symbol. Absent quote
+truth returns `blocked_incomplete`; it never substitutes a cached signal price.
+Its event key is deterministic from the day, cohort, and quote/event evidence.
 
 If exact Telegram membership cannot be proven, both stages fail closed rather
 than consuming every ranked candidate.
@@ -69,8 +79,8 @@ than consuming every ranked candidate.
 `Dawnstrike AlphaOps EOD Full Report` runs
 `scripts/run_alphaops_eod_full.bat` after the US regular close:
 
-1. Capture complete sourced one-minute AlphaOps outcomes.
-2. Atomically reconcile exact selections to evaluations, paper trades,
+1. Load the operator-configured complete sourced one-minute AlphaOps RTH CSV.
+2. Atomically reconcile exact delivered selections to evaluations, paper trades,
    activation labels, return labels, and daily scorecards.
 3. Run every currently eligible PaperOps strategy in `forward` mode.
 4. Verify the PaperOps calendar and ledger.
@@ -84,8 +94,19 @@ than consuming every ranked candidate.
 8. Run daily mover review, return attribution, historical/calendar reports,
    and AlphaOps learning only after the source and reconciliation gates pass.
 
-Any failed source, membership, reconciliation, or calendar gate returns a
-nonzero scheduler result. Learning does not run through an unresolved gate.
+Any failed source, membership, reconciliation, or calendar gate returns `2`
+for blocked/incomplete evidence. Operational failures return `1`. Learning does
+not run through an unresolved gate.
+
+Set `DAWNSTRIKE_ALPHAOPS_EOD_BARS_CSV` to a timezone-aware aggregate CSV or the
+canonical directory. Every delivered symbol must have the complete one-minute
+bar-close grid from 09:31 through the scheduled New York close. Unrelated
+aggregate symbols are ignored. If the variable is absent, the wrapper checks
+`data/v2_autodata/normalized/canonical/YYYY-MM-DD_canonical_intraday.csv`, then
+resolves `SYMBOL/YYYY-MM-DD_canonical_intraday.csv` under the canonical
+directory. The exact delivered subset is retained as a content-addressed CSV;
+its selected raw-byte and normalized-content SHA-256 identities are persisted.
+The command may omit `--bars-csv` only for a proven delivered `NO_TRADE` cohort.
 
 ## Truth and Return Semantics
 
@@ -179,7 +200,7 @@ Combined, horizon-separated operator artifacts:
 
 ```powershell
 py -m intraday_scanner.cli scheduler-doctor --root C:\Users\MattFields\Dawnstrike
-py -m intraday_scanner.cli alpha-paper-reconcile --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD --persist
+py -m intraday_scanner.cli alpha-paper-reconcile --db-path data\shadow_real.sqlite --market-date YYYY-MM-DD --bars-csv PATH_TO_COMPLETE_RTH.csv --persist
 py -m intraday_scanner.v2.paper_ops verify-calendar --output-root data\v2_paper_ops_live
 py -m intraday_scanner.v2.paper_ops rebuild-ledger --output-root data\v2_paper_ops_live
 py -m intraday_scanner.v2.paper_ops verify-blotter --output-root data\v2_paper_ops_live

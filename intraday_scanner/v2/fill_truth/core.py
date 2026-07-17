@@ -1807,7 +1807,16 @@ def _append_filltruth_events(
                 "source": "FillTruth",
             }
         )
-    append_jsonl_unique(paths.logs / "fill_truth_ledger.jsonl", events, "event_id")
+    # Re-running a deterministic reconciliation must preserve the original
+    # event instead of conflicting solely because this invocation has a newer
+    # wall-clock creation timestamp.  All evidence-bearing fields remain part
+    # of the atomic idempotency comparison.
+    append_jsonl_unique(
+        paths.logs / "fill_truth_ledger.jsonl",
+        events,
+        "event_id",
+        idempotency_ignored_fields=("created_at",),
+    )
 
 
 def _write_manifest(

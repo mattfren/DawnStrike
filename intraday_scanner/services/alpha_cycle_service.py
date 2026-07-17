@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import uuid
+from collections.abc import Mapping
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,12 @@ from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.config import load_config
+from intraday_scanner.errors import StorageError
+from intraday_scanner.market_calendar import (
+    MARKET_TIMEZONE,
+    core_session_phase,
+    session_for_timestamp,
+)
 from intraday_scanner.models import utc_now_iso
 from intraday_scanner.notifiers import (
     BaseNotifier,
@@ -25,9 +33,21 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_no_trade,
     format_alpha_summary,
     format_alpha_watch,
+    format_telegram_event,
+    select_alpha_watch_rows,
 )
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
 from intraday_scanner.reporting import write_scan_outputs
+from intraday_scanner.services.alpha_paper_service import (
+    ALPHAOPS_COHORT,
+    ALPHAOPS_STRATEGY_ID,
+    ALPHAOPS_STRATEGY_VERSION,
+    alpha_reconciliation_gate,
+    alpha_telegram_delivery_proof,
+    freeze_alpha_telegram_cohort,
+    load_alpha_official_delivered_cohort,
+    persist_alpha_telegram_delivery,
+)
 from intraday_scanner.services.learning_service import run_alpha_learning
 from intraday_scanner.services.return_attribution_service import (
     link_historical_notification,
@@ -55,6 +75,7 @@ def alpha_morning(
     out_dir: str | Path = "outputs/alpha_morning",
     notify: str = "console",
     dry_run: bool = False,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     return alpha_cycle(
         config_path=config_path,
@@ -63,6 +84,7 @@ def alpha_morning(
         notify=notify,
         dry_run=dry_run,
         cycle_name="alpha_morning",
+        as_of=as_of,
     )
 
 
@@ -74,11 +96,47 @@ def alpha_cycle(
     notify: str = "console",
     dry_run: bool = False,
     cycle_name: str = "alpha_cycle",
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
-    store.initialize()
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if _uses_external_notifications(notify):
+        session = session_for_timestamp(as_of)
+        phase = core_session_phase(as_of)
+        if not session.is_trading_day:
+            return _write_alpha_session_skip(
+                output_dir=output_dir,
+                cycle_name=cycle_name,
+                status="skipped_market_closed",
+                phase=phase,
+                session=session.to_dict(),
+                as_of=as_of,
+            )
+        if phase != "before_core_session":
+            return _write_alpha_session_skip(
+                output_dir=output_dir,
+                cycle_name=cycle_name,
+                status="skipped_outside_premarket_session",
+                phase=phase,
+                session=session.to_dict(),
+                as_of=as_of,
+            )
+    store = SQLiteScanStore(db_path)
+    store.initialize()
+    run_market_date = _alpha_market_date(as_of)
+    if _has_channel(notify, "telegram"):
+        official = store.load_official_strategy_cohort(
+            market_date=run_market_date.isoformat(),
+            strategy_id=ALPHAOPS_STRATEGY_ID,
+            strategy_version=ALPHAOPS_STRATEGY_VERSION,
+            cohort=ALPHAOPS_COHORT,
+        )
+        if official is not None:
+            return _official_cohort_already_frozen_result(
+                official=official,
+                cycle_name=cycle_name,
+                output_dir=output_dir,
+            )
     collection = web_auto_collect(
         config_path=config_path,
         db_path=db_path,
@@ -89,7 +147,7 @@ def alpha_cycle(
     source_summary = dict(collection.get("source_summary") or {})
     source_reliability = build_source_reliability(
         source_summary,
-        outcomes=store.load_alpha_outcome_labels(limit=5000),
+        outcomes=_canonical_alpha_labels(store),
         previous=store.load_alpha_source_reliability(),
     )
     if source_reliability:
@@ -97,11 +155,12 @@ def alpha_cycle(
 
     if collection.get("status") != "success":
         review = review_alpha_signals([], source_summary=source_summary)
-        no_data_scan_id = f"{cycle_name}:source_failure:{utc_now_iso()[:10]}"
-        record_no_trade_historical_signal(
+        generated_at = (as_of.isoformat() if as_of is not None else utc_now_iso())
+        no_data_scan_id = f"{cycle_name}:source_failure:{run_market_date.isoformat()}"
+        source_failure_no_trade_row = record_no_trade_historical_signal(
             store,
             scan_id=no_data_scan_id,
-            generated_at=utc_now_iso(),
+            generated_at=generated_at,
             reason=str(review["decision"]["reason"]),
             source_summary=source_summary,
             candidate_count=int(source_summary.get("candidate_count") or 0),
@@ -118,14 +177,71 @@ def alpha_cycle(
                 message,
             )
         ]
-        notification_stats = _dispatch(events, notify=notify, db_path=db_path, dry_run=dry_run)
-        _link_notification_events(
+        source_failure_selections: list[dict[str, Any]] = []
+        exact_telegram_body = ""
+        if _has_channel(notify, "telegram"):
+            exact_telegram_body = _expected_telegram_transmission(events[0], db_path=db_path)
+            try:
+                source_failure_selections = freeze_alpha_telegram_cohort(
+                    store,
+                    scan_id=no_data_scan_id,
+                    selected_at=generated_at,
+                    event_key=events[0].event_key,
+                    body=exact_telegram_body,
+                    rendered_rows=[],
+                    no_trade_row=source_failure_no_trade_row,
+                )
+            except StorageError as exc:
+                if "already frozen for this market date" in str(exc):
+                    official = store.load_official_strategy_cohort(
+                        market_date=run_market_date.isoformat(),
+                        strategy_id=ALPHAOPS_STRATEGY_ID,
+                        strategy_version=ALPHAOPS_STRATEGY_VERSION,
+                        cohort=ALPHAOPS_COHORT,
+                    )
+                    if official is not None:
+                        return _official_cohort_already_frozen_result(
+                            official=official,
+                            cycle_name=cycle_name,
+                            output_dir=output_dir,
+                        )
+                raise
+        notification_stats = _dispatch(
+            events,
+            notify=notify,
+            db_path=db_path,
+            dry_run=dry_run,
+        )
+        delivery_status = "not_telegram"
+        source_failure_receipt: Mapping[str, Any] | None = None
+        if source_failure_selections:
+            proof = alpha_telegram_delivery_proof(
+                store,
+                event_key=events[0].event_key,
+                body=exact_telegram_body,
+                dry_run=dry_run,
+                notification_stats=notification_stats,
+            )
+            delivery_status = str(proof["status"])
+            raw_receipt = proof.get("transport_receipt")
+            source_failure_receipt = (
+                raw_receipt if isinstance(raw_receipt, Mapping) else None
+            )
+            persist_alpha_telegram_delivery(
+                store,
+                selections=source_failure_selections,
+                delivery_status=delivery_status,
+                transport_receipt=source_failure_receipt,
+            )
+        notification_link = _link_notification_events(
             store,
             scan_id=no_data_scan_id,
             events=events,
             notification_stats=notification_stats,
             notify=notify,
             dry_run=dry_run,
+            signal_ids=[str(row["signal_id"]) for row in source_failure_selections],
+            proven_delivery=delivery_status == "delivered",
         )
         no_data_result: dict[str, Any] = {
             "status": "no_trade",
@@ -134,6 +250,10 @@ def alpha_cycle(
             "source_summary": source_summary,
             "review": review,
             "notification_stats": notification_stats,
+            "historical_notification_link": notification_link,
+            "official_telegram_delivery_status": delivery_status,
+            "official_telegram_selection_count": len(source_failure_selections),
+            "official_telegram_transport_receipt": source_failure_receipt,
             "out_dir": str(output_dir),
         }
         _write_json(output_dir / "alpha_cycle.json", no_data_result)
@@ -163,7 +283,7 @@ def alpha_cycle(
         for row in ranked
     ]
     store.persist_alpha_feature_vectors(feature_vectors)
-    historical_labels = store.load_alpha_outcome_labels(limit=5000)
+    historical_labels = _canonical_alpha_labels(store)
     model = AlphaModel()
     signals = model.score_candidates(
         ranked,
@@ -185,8 +305,9 @@ def alpha_cycle(
         source_summary=source_summary,
         no_trade_reason=str(decision.get("reason") or "") if decision.get("no_trade") else "",
     )
+    no_trade_row: dict[str, Any] | None = None
     if decision.get("no_trade"):
-        record_no_trade_historical_signal(
+        no_trade_row = record_no_trade_historical_signal(
             store,
             scan_id=scan_result.run_id,
             generated_at=timestamp,
@@ -214,16 +335,88 @@ def alpha_cycle(
         )
         hint = "alpha_morning_watch"
         title = "Dawnstrike Alpha Watch"
+    rendered_rows = (
+        []
+        if decision.get("no_trade")
+        else select_alpha_watch_rows(list(review["watchlist"]))
+    )
     events = [
         _notification_event(
             scan_result.run_id,
             hint,
             title,
             message,
-            payload={"signals": signals[:5]},
+            payload={
+                "signals": rendered_rows,
+                "rendered_signal_count": len(rendered_rows),
+                "official_cohort": "official_telegram",
+            },
         )
     ]
-    notification_stats = _dispatch(events, notify=notify, db_path=db_path, dry_run=dry_run)
+    delivery_selections: list[dict[str, Any]] = []
+    exact_telegram_body = ""
+    if _has_channel(notify, "telegram"):
+        exact_telegram_body = _expected_telegram_transmission(events[0], db_path=db_path)
+        try:
+            delivery_selections = freeze_alpha_telegram_cohort(
+                store,
+                scan_id=scan_result.run_id,
+                selected_at=timestamp,
+                event_key=events[0].event_key,
+                body=exact_telegram_body,
+                rendered_rows=rendered_rows,
+                no_trade_row=no_trade_row,
+            )
+        except StorageError as exc:
+            if "already frozen for this market date" in str(exc):
+                official = store.load_official_strategy_cohort(
+                    market_date=run_market_date.isoformat(),
+                    strategy_id=ALPHAOPS_STRATEGY_ID,
+                    strategy_version=ALPHAOPS_STRATEGY_VERSION,
+                    cohort=ALPHAOPS_COHORT,
+                )
+                if official is not None:
+                    return _official_cohort_already_frozen_result(
+                        official=official,
+                        cycle_name=cycle_name,
+                        output_dir=output_dir,
+                    )
+            raise
+    try:
+        notification_stats = _dispatch(
+            events,
+            notify=notify,
+            db_path=db_path,
+            dry_run=dry_run,
+        )
+    except Exception:
+        if delivery_selections:
+            persist_alpha_telegram_delivery(
+                store,
+                selections=delivery_selections,
+                delivery_status="failed",
+            )
+        raise
+    delivery_status = "not_telegram"
+    delivery_receipt: Mapping[str, Any] | None = None
+    delivery_stats: dict[str, int] = {"inserted": 0, "updated": 0, "skipped": 0}
+    if delivery_selections:
+        proof = alpha_telegram_delivery_proof(
+            store,
+            event_key=events[0].event_key,
+            body=exact_telegram_body,
+            dry_run=dry_run,
+            notification_stats=notification_stats,
+        )
+        delivery_status = str(proof["status"])
+        raw_receipt = proof.get("transport_receipt")
+        delivery_receipt = raw_receipt if isinstance(raw_receipt, Mapping) else None
+        delivery_stats = persist_alpha_telegram_delivery(
+            store,
+            selections=delivery_selections,
+            delivery_status=delivery_status,
+            transport_receipt=delivery_receipt,
+        )
     notification_link = _link_notification_events(
         store,
         scan_id=scan_result.run_id,
@@ -231,6 +424,8 @@ def alpha_cycle(
         notification_stats=notification_stats,
         notify=notify,
         dry_run=dry_run,
+        signal_ids=[str(row["signal_id"]) for row in delivery_selections],
+        proven_delivery=delivery_status == "delivered",
     )
     regime = detect_regime(signals, source_summary)
     result: dict[str, Any] = {
@@ -245,6 +440,10 @@ def alpha_cycle(
         "signal_count": len(signals),
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,
+        "official_telegram_delivery_status": delivery_status,
+        "official_telegram_selection_count": len(delivery_selections),
+        "official_telegram_delivery_stats": delivery_stats,
+        "official_telegram_transport_receipt": delivery_receipt,
         "top_signal": signals[0] if signals else None,
         "review": review,
         "notification_stats": notification_stats,
@@ -262,23 +461,136 @@ def alpha_monitor(
     db_path: str | Path = DEFAULT_DB_PATH,
     notify: str = "console",
     dry_run: bool = False,
-    current_prices: dict[str, float] | None = None,
+    current_prices: dict[str, float | Mapping[str, Any]] | None = None,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
+    if _uses_external_notifications(notify):
+        session = session_for_timestamp(as_of)
+        phase = core_session_phase(as_of)
+        if phase != "core_session_open":
+            return {
+                "status": "skipped_outside_core_session",
+                "phase": phase,
+                "session_gate": session.to_dict(),
+                "as_of": as_of.isoformat() if as_of is not None else utc_now_iso(),
+                "notification_stats": {"sent": 0, "skipped": 0, "failed": 0},
+                "research_only": True,
+                "order_execution_enabled": False,
+            }
+    run_date = _alpha_market_date(as_of)
     store = SQLiteScanStore(db_path)
-    signals = store.load_alpha_signals(limit=25)
-    result = monitor_alpha_signals(signals, current_prices=current_prices)
+    store.initialize()
+    selections, cohort_blockers = load_alpha_official_delivered_cohort(
+        store,
+        market_date=run_date,
+    )
+    official = store.load_official_strategy_cohort(
+        market_date=run_date.isoformat(),
+        strategy_id=ALPHAOPS_STRATEGY_ID,
+        strategy_version=ALPHAOPS_STRATEGY_VERSION,
+        cohort=ALPHAOPS_COHORT,
+    )
+    if cohort_blockers or official is None:
+        return {
+            "status": "blocked_incomplete",
+            "market_date": run_date.isoformat(),
+            "blocked_reasons": cohort_blockers or ["official cohort lock is absent"],
+            "notification_stats": {"sent": 0, "skipped": 0, "deliveries": []},
+            "research_only": True,
+            "order_execution_enabled": False,
+        }
+    if len(selections) == 1 and selections[0].get("decision") == "no_trade":
+        return {
+            "status": "no_trade",
+            "market_date": run_date.isoformat(),
+            "official_cohort_id": official["official_cohort_id"],
+            "message": "The proven official cohort is an explicit NO_TRADE day.",
+            "notification_stats": {"sent": 0, "skipped": 0, "deliveries": []},
+            "research_only": True,
+            "order_execution_enabled": False,
+        }
+    signals = [_selection_signal_snapshot(row) for row in selections]
+    prices, quote_refs, quote_blockers = _proven_monitor_prices(
+        store,
+        selections=selections,
+        market_date=run_date,
+        supplied=current_prices,
+    )
+    cohort_key = str(official["official_cohort_id"])
+    if quote_blockers:
+        blocked_digest = hashlib.sha256(
+            "\x1f".join(sorted(quote_blockers)).encode("utf-8")
+        ).hexdigest()[:16]
+        message = "AlphaOps monitor blocked: " + "; ".join(quote_blockers)
+        event = NotificationEvent(
+            event_key=(
+                f"alphaops-monitor:{run_date.isoformat()}:{cohort_key.split(':')[-1][:12]}:"
+                f"blocked:{blocked_digest}"
+            ),
+            title="Dawnstrike Alpha Monitor Blocked",
+            body=message,
+            channel_hint="alpha_monitor_blocked",
+            payload={
+                "run_id": cohort_key,
+                "market_date": run_date.isoformat(),
+                "official_cohort_id": cohort_key,
+                "research_only": True,
+            },
+        )
+        return {
+            "status": "blocked_incomplete",
+            "market_date": run_date.isoformat(),
+            "official_cohort_id": cohort_key,
+            "blocked_reasons": quote_blockers,
+            "blocked_symbols": sorted(
+                str(row.get("ticker") or "")
+                for row in selections
+                if str(row.get("ticker") or "") not in prices
+            ),
+            "notification_stats": _dispatch(
+                [event], notify=notify, db_path=db_path, dry_run=dry_run
+            ),
+            "research_only": True,
+            "order_execution_enabled": False,
+        }
+    result = monitor_alpha_signals(signals, current_prices=prices)
+    result["market_date"] = run_date.isoformat()
+    result["official_cohort_id"] = cohort_key
+    result["quote_source_refs"] = quote_refs
     result["historical_event_stats"] = record_monitor_signal_events(
         store,
         signals=signals,
         monitor_events=list(result.get("events") or []),
     )
     message = format_alpha_monitor(result)
-    event_key = (
-        "manual"
-        if result.get("status") == "manual_monitor_required"
-        else uuid.uuid4().hex[:12]
-    )
-    events = [_notification_event("alpha_monitor", event_key, "Dawnstrike Alpha Monitor", message)]
+    event_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "events": result.get("events") or [],
+                "quote_source_refs": quote_refs,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    events = [
+        NotificationEvent(
+            event_key=(
+                f"alphaops-monitor:{run_date.isoformat()}:{cohort_key.split(':')[-1][:12]}:"
+                f"{event_digest}"
+            ),
+            title="Dawnstrike Alpha Monitor",
+            body=message,
+            channel_hint="alpha_monitor",
+            payload={
+                "run_id": cohort_key,
+                "market_date": run_date.isoformat(),
+                "official_cohort_id": cohort_key,
+                "quote_source_refs": quote_refs,
+                "research_only": True,
+            },
+        )
+    ]
     result["notification_stats"] = _dispatch(
         events,
         notify=notify,
@@ -288,17 +600,139 @@ def alpha_monitor(
     return result
 
 
+def _uses_external_notifications(notify: str) -> bool:
+    channels = {channel.strip().lower() for channel in notify.split(",") if channel.strip()}
+    return bool(channels - {"console"})
+
+
+def _has_channel(notify: str, channel: str) -> bool:
+    return channel.lower() in {
+        value.strip().lower() for value in notify.split(",") if value.strip()
+    }
+
+
+def _alpha_market_date(as_of: datetime | None) -> date:
+    timestamp = as_of or datetime.now(MARKET_TIMEZONE)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("AlphaOps as_of must include a timezone offset")
+    return timestamp.astimezone(MARKET_TIMEZONE).date()
+
+
+def _official_cohort_already_frozen_result(
+    *,
+    official: Mapping[str, Any],
+    cycle_name: str,
+    output_dir: Path,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "official_cohort_already_frozen",
+        "run_type": cycle_name,
+        "market_date": str(official.get("market_date") or ""),
+        "scan_id": str(official.get("scan_id") or ""),
+        "official_cohort_id": str(official.get("official_cohort_id") or ""),
+        "event_key": str(official.get("event_key") or ""),
+        "membership_sha256": str(official.get("membership_sha256") or ""),
+        "notification_stats": {"sent": 0, "skipped": 1, "deliveries": []},
+        "message": (
+            "One official AlphaOps cohort is already frozen for this market date; "
+            "the retry did not rescan, replace membership, or send another message."
+        ),
+        "out_dir": str(output_dir),
+        "research_only": True,
+        "order_execution_enabled": False,
+    }
+    _write_json(output_dir / "alpha_cycle.json", result)
+    return result
+
+
+def _write_alpha_session_skip(
+    *,
+    output_dir: Path,
+    cycle_name: str,
+    status: str,
+    phase: str,
+    session: dict[str, object],
+    as_of: datetime | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": status,
+        "run_type": cycle_name,
+        "phase": phase,
+        "session_gate": session,
+        "as_of": as_of.isoformat() if as_of is not None else utc_now_iso(),
+        "notification_stats": {"sent": 0, "skipped": 0, "failed": 0},
+        "out_dir": str(output_dir),
+        "research_only": True,
+        "order_execution_enabled": False,
+    }
+    _write_json(output_dir / "alpha_session_gate.json", payload)
+    return payload
+
+
 def alpha_outcomes(
     *,
     db_path: str | Path = DEFAULT_DB_PATH,
 ) -> dict[str, Any]:
+    return {
+        "status": "blocked_incomplete",
+        "reason": (
+            "alpha-outcomes is a disabled legacy alias; use alpha-paper-reconcile "
+            "with complete sourced RTH bars, then alpha-learn"
+        ),
+        "db_path": str(db_path),
+        "research_only": True,
+        "order_execution_enabled": False,
+    }
+
+
+def alpha_learn(
+    *,
+    db_path: str | Path = DEFAULT_DB_PATH,
+    market_date: str | None = None,
+) -> dict[str, Any]:
     store = SQLiteScanStore(db_path)
+    store.initialize()
+    target_date = market_date or _latest_real_alpha_delivery_date(store)
+    if not target_date:
+        return {
+            "status": "blocked_incomplete",
+            "reason": "no proven real official Telegram delivery is available to learn from",
+            "market_date": None,
+            "research_only": True,
+            "order_execution_enabled": False,
+        }
+    allowed, reason = alpha_reconciliation_gate(store, market_date=target_date)
+    if not allowed:
+        return {
+            "status": "blocked_incomplete",
+            "reason": reason,
+            "market_date": target_date,
+            "research_only": True,
+            "order_execution_enabled": False,
+        }
     return run_alpha_learning(store)
 
 
-def alpha_learn(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
-    return run_alpha_learning(store)
+def _latest_real_alpha_delivery_date(store: SQLiteScanStore) -> str | None:
+    rows = store.load_notification_deliveries(
+        channel="telegram",
+        cohort=ALPHAOPS_COHORT,
+        limit=50_000,
+    )
+    dates: list[str] = []
+    for row in rows:
+        if row.get("delivery_status") != "delivered":
+            continue
+        try:
+            parsed = datetime.fromisoformat(
+                str(row.get("selected_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            continue
+        dates.append(parsed.astimezone(MARKET_TIMEZONE).date().isoformat())
+    return max(dates) if dates else None
 
 
 def alpha_status(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
@@ -306,7 +740,7 @@ def alpha_status(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
     store.initialize()
     latest_scan = store.load_latest_scan()
     signals = store.load_alpha_signals(limit=20)
-    labels = store.load_alpha_outcome_labels(limit=5000)
+    labels = _canonical_alpha_labels(store)
     learning = store.load_alpha_learning_runs(limit=1)
     reliability = store.load_alpha_source_reliability()
     setup_memory = store.load_alpha_setup_memory()
@@ -352,7 +786,7 @@ def alpha_report(
     store = SQLiteScanStore(db_path)
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    labels = store.load_alpha_outcome_labels(limit=5000)
+    labels = _canonical_alpha_labels(store)
     real_days = _real_days(labels)
     truth = build_truth_report(labels, real_days_collected=real_days)
     status = alpha_status(db_path=db_path)
@@ -409,7 +843,7 @@ def _dispatch(
     notify: str,
     db_path: str | Path,
     dry_run: bool,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     channels = [channel.strip().lower() for channel in notify.split(",") if channel.strip()]
     if not channels:
         channels = ["console"]
@@ -421,7 +855,129 @@ def _dispatch(
         notifiers = [ConsoleNotifier()]
     else:
         notifiers = build_notifiers(config)
-    return dispatch_events(events, notifiers, SQLiteScanStore(db_path), dry_run=dry_run)
+    return dispatch_events(
+        events,
+        notifiers,
+        SQLiteScanStore(db_path),
+        dry_run=dry_run,
+        capture_transport_receipts=True,
+    )
+
+
+def _expected_telegram_transmission(
+    event: NotificationEvent,
+    *,
+    db_path: str | Path,
+) -> str:
+    config = load_config(database_path=Path(db_path), notifier_channels="telegram")
+    if config.telegram_message_style == "legacy":
+        return f"{event.title}\n{event.body}"
+    return format_telegram_event(
+        event,
+        max_morning_chars=config.telegram_max_morning_chars,
+        max_alert_chars=config.telegram_max_alert_chars,
+        max_summary_chars=config.telegram_max_summary_chars,
+        include_debug_fields=config.telegram_include_debug_fields,
+    )
+
+
+def _selection_signal_snapshot(selection: Mapping[str, Any]) -> dict[str, Any]:
+    payload = selection.get("payload_json")
+    snapshot = payload.get("signal_snapshot") if isinstance(payload, Mapping) else None
+    if not isinstance(snapshot, Mapping):
+        raise StorageError(
+            f"{selection.get('ticker')}: official cohort has no frozen signal snapshot"
+        )
+    return {
+        **dict(snapshot),
+        "signal_id": str(selection.get("signal_id") or ""),
+        "signal_key": str(selection.get("signal_id") or ""),
+        "ticker": str(selection.get("ticker") or ""),
+        "rank": selection.get("rank"),
+    }
+
+
+def _proven_monitor_prices(
+    store: SQLiteScanStore,
+    *,
+    selections: list[dict[str, Any]],
+    market_date: date,
+    supplied: dict[str, float | Mapping[str, Any]] | None,
+) -> tuple[dict[str, float], list[dict[str, Any]], list[str]]:
+    prices: dict[str, float] = {}
+    source_refs: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    supplied_rows = {str(key).upper(): value for key, value in (supplied or {}).items()}
+    for selection in selections:
+        ticker = str(selection.get("ticker") or "").upper()
+        signal_id = str(selection.get("signal_id") or "")
+        quote: Mapping[str, Any] | None = None
+        raw_supplied = supplied_rows.get(ticker)
+        if raw_supplied is not None:
+            if not isinstance(raw_supplied, Mapping):
+                blockers.append(f"{ticker}: supplied current price has no source lineage")
+                continue
+            quote = raw_supplied
+        else:
+            observations = store.load_price_observations(
+                market_date=market_date.isoformat(),
+                signal_id=signal_id,
+                usable_only=True,
+                limit=10,
+            )
+            if not observations:
+                observations = store.load_price_observations(
+                    market_date=market_date.isoformat(),
+                    ticker=ticker,
+                    usable_only=True,
+                    limit=10,
+                )
+            quote = observations[0] if observations else None
+        if quote is None:
+            blockers.append(f"{ticker}: no usable real sourced current-day quote")
+            continue
+        observed_at = str(quote.get("observed_at") or "")
+        try:
+            observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            blockers.append(f"{ticker}: sourced quote observed_at is invalid")
+            continue
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            blockers.append(f"{ticker}: sourced quote observed_at has no timezone")
+            continue
+        if observed.astimezone(MARKET_TIMEZONE).date() != market_date:
+            blockers.append(f"{ticker}: sourced quote is not from the current market date")
+            continue
+        source = str(quote.get("source") or quote.get("provider") or "").strip()
+        if not source or quote.get("is_usable") is not True:
+            blockers.append(f"{ticker}: quote source/usable proof is incomplete")
+            continue
+        raw_price = quote.get("price")
+        if raw_price is None:
+            blockers.append(f"{ticker}: sourced quote price is invalid")
+            continue
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            blockers.append(f"{ticker}: sourced quote price is invalid")
+            continue
+        if price <= 0:
+            blockers.append(f"{ticker}: sourced quote price is non-positive")
+            continue
+        prices[ticker] = price
+        source_refs.append(
+            {
+                "ticker": ticker,
+                "signal_id": signal_id,
+                "observation_id": str(quote.get("observation_id") or ""),
+                "source": source,
+                "provider": str(quote.get("provider") or ""),
+                "observed_at": observed.isoformat(),
+                "price_type": str(quote.get("price_type") or ""),
+                "price": price,
+            }
+        )
+    return prices, source_refs, blockers
 
 
 def _link_notification_events(
@@ -429,15 +985,30 @@ def _link_notification_events(
     *,
     scan_id: str,
     events: list[NotificationEvent],
-    notification_stats: dict[str, int],
+    notification_stats: Mapping[str, Any],
     notify: str,
     dry_run: bool,
+    signal_ids: list[str] | None = None,
+    proven_delivery: bool | None = None,
 ) -> dict[str, Any]:
     channels = [channel.strip().lower() for channel in notify.split(",") if channel.strip()]
     channel = "telegram" if "telegram" in channels else (channels[0] if channels else "console")
-    was_alerted = (not dry_run) and (
-        int(notification_stats.get("sent") or 0) > 0
-        or int(notification_stats.get("skipped") or 0) > 0
+    if channel != "telegram":
+        # The official learning cohort is Telegram-only, but other transports
+        # still need their legacy audit linkage.  Let the scan id select those
+        # historical rows instead of passing the intentionally empty official
+        # Telegram selection set.
+        if not signal_ids:
+            signal_ids = None
+        proven_delivery = None
+    was_alerted = (
+        proven_delivery
+        if proven_delivery is not None
+        else (not dry_run)
+        and (
+            int(notification_stats.get("sent") or 0) > 0
+            or int(notification_stats.get("skipped") or 0) > 0
+        )
     )
     links = [
         link_historical_notification(
@@ -446,6 +1017,7 @@ def _link_notification_events(
             event_key=f"{event.event_key}:{channel}",
             was_alerted=was_alerted,
             channel=channel,
+            signal_ids=signal_ids,
         )
         for event in events
     ]
@@ -475,6 +1047,16 @@ def _real_days(rows: list[dict[str, Any]]) -> int:
         if str(row.get("created_at") or row.get("timestamp") or "")[:10]
     }
     return len(dates)
+
+
+def _canonical_alpha_labels(store: SQLiteScanStore) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in store.load_alpha_outcome_labels(limit=50_000)
+        if row.get("label_source") == "strategy_learning"
+        and row.get("forward_observation") is True
+        and row.get("after_cost") is True
+    ]
 
 
 def _write_json(path: Path, payload: Any) -> None:

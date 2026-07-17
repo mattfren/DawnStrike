@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -295,9 +295,37 @@ def _migration_004_scorecard_session_truth(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_005_official_strategy_cohort_lock(
+    connection: sqlite3.Connection,
+) -> None:
+    """Freeze one immutable official cohort for each strategy market date."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS official_strategy_cohorts (
+            official_cohort_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            cohort TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            event_key TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL,
+            membership_sha256 TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (market_date, strategy_id, strategy_version, cohort)
+        );
+        CREATE INDEX IF NOT EXISTS idx_official_strategy_cohorts_event
+        ON official_strategy_cohorts(event_key, cohort);
+        """
+    )
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, _migration_001_benchmark_tables),
     (2, _migration_002_signal_selection_delivery_identity),
     (3, _migration_003_strategy_paper_reconciliation),
     (4, _migration_004_scorecard_session_truth),
+    (5, _migration_005_official_strategy_cohort_lock),
 )

@@ -2120,21 +2120,22 @@ def _parse_datetime(value: str) -> datetime | None:
 
 
 def _default_calendar_range(db_path: str | Path) -> tuple[str, str]:
-    dates: list[str] = []
+    market_dates: list[str] = []
+    operational_dates: list[str] = []
     path = Path(db_path)
     if path.exists():
         try:
             with sqlite3.connect(path) as connection:
                 connection.row_factory = sqlite3.Row
                 tables = _table_names(connection)
-                for table, column in (
-                    ("scan_runs", "created_at"),
-                    ("alpha_signals", "timestamp"),
-                    ("historical_signals", "market_date"),
-                    ("signal_outcomes", "market_date"),
-                    ("daily_signal_performance", "market_date"),
-                    ("notifications_sent", "sent_at"),
-                    ("manual_audit_trades", ""),
+                for table, column, destination in (
+                    ("alpha_signals", "timestamp", market_dates),
+                    ("historical_signals", "market_date", market_dates),
+                    ("signal_outcomes", "market_date", market_dates),
+                    ("daily_signal_performance", "market_date", market_dates),
+                    ("manual_audit_trades", "", market_dates),
+                    ("scan_runs", "created_at", operational_dates),
+                    ("notifications_sent", "sent_at", operational_dates),
                 ):
                     if table not in tables:
                         continue
@@ -2146,14 +2147,19 @@ def _default_calendar_range(db_path: str | Path) -> tuple[str, str]:
                                 row.get("date"),
                             )
                             if row_date:
-                                dates.append(row_date)
+                                destination.append(row_date)
                         continue
                     for row in _select_rows(connection, table, [column]):
                         row_date = _date_from_values(row.get(column))
                         if row_date:
-                            dates.append(row_date)
+                            destination.append(row_date)
         except sqlite3.Error:
-            dates = []
+            market_dates = []
+            operational_dates = []
+    # Calendar navigation follows market evidence when it exists.  Notification
+    # insertion times and delayed scan persistence are operational metadata and
+    # must not move a historical market-day calendar into the current month.
+    dates = market_dates or operational_dates
     if dates:
         anchor = datetime.strptime(max(dates), "%Y-%m-%d").date()
     else:

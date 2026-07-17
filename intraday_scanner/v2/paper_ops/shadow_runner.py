@@ -1822,9 +1822,87 @@ def _strategy_logic_sha256(strategy: StrategySpec) -> str:
         "exit_logic": strategy.exit_logic,
         "stop_logic": strategy.stop_logic,
         "target_logic": strategy.target_logic,
-        "generate_signal_source": inspect.getsource(strategy.generate_signal),
+        "generate_signal_source": _callable_logic_material(strategy.generate_signal),
     }
     return _sha256(payload)
+
+
+def _callable_logic_material(target: Any) -> object:
+    """Return deterministic strategy logic material even without source text.
+
+    ``inspect.getsource`` can legitimately be unavailable for functions loaded
+    through assertion rewriting, zip imports, or Python 3.13's code-object
+    source cache.  Registration must still fingerprint the executable logic;
+    silently omitting it would weaken challenger lineage.  The fallback hashes
+    a location-independent description of the function's code object, defaults,
+    and closure values instead.
+    """
+
+    try:
+        return {"kind": "source", "text": inspect.getsource(target)}
+    except (OSError, TypeError) as exc:
+        code = getattr(target, "__code__", None)
+        if code is None:
+            raise ValueError(
+                "strategy callable source and code object are unavailable"
+            ) from exc
+        closure = getattr(target, "__closure__", None) or ()
+        return {
+            "kind": "python_code_v1",
+            "module": str(getattr(target, "__module__", "")),
+            "qualname": str(getattr(target, "__qualname__", "")),
+            "code": _code_logic_material(code),
+            "defaults": _stable_logic_value(getattr(target, "__defaults__", None)),
+            "kwdefaults": _stable_logic_value(
+                getattr(target, "__kwdefaults__", None)
+            ),
+            "closure": [
+                _stable_logic_value(cell.cell_contents)
+                for cell in closure
+            ],
+        }
+
+
+def _code_logic_material(code: Any) -> JsonDict:
+    return {
+        "argcount": int(code.co_argcount),
+        "posonlyargcount": int(code.co_posonlyargcount),
+        "kwonlyargcount": int(code.co_kwonlyargcount),
+        "flags": int(code.co_flags),
+        "bytecode_hex": bytes(code.co_code).hex(),
+        "constants": [_stable_logic_value(value) for value in code.co_consts],
+        "names": list(code.co_names),
+        "varnames": list(code.co_varnames),
+        "freevars": list(code.co_freevars),
+        "cellvars": list(code.co_cellvars),
+    }
+
+
+def _stable_logic_value(value: Any) -> object:
+    if inspect.iscode(value):
+        return {"kind": "python_code_v1", "code": _code_logic_material(value)}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        return {"kind": "bytes", "hex": value.hex()}
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [_stable_logic_value(item) for item in value]}
+    if isinstance(value, list):
+        return {"kind": "list", "items": [_stable_logic_value(item) for item in value]}
+    if isinstance(value, dict):
+        return {
+            "kind": "dict",
+            "items": [
+                [str(key), _stable_logic_value(item)]
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            ],
+        }
+    if inspect.isfunction(value):
+        return _callable_logic_material(value)
+    raise ValueError(
+        "strategy callable contains an unsupported non-deterministic value: "
+        f"{type(value).__module__}.{type(value).__qualname__}"
+    )
 
 
 def _implementation_source_sha256() -> str:

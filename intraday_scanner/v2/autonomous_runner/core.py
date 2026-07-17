@@ -966,12 +966,18 @@ def _market_masters_summary() -> dict[str, object]:
     )
     sync_payload = _dict(_read_json(sync_matches[0], {}) if sync_matches else {})
     challengers = _list(challenger_payload.get("challengers"))
-    all_shadow = bool(challengers) and all(
+    # An unrun Market Masters lane has not created a non-shadow challenger or
+    # mutated a champion.  Keep that structural safety state distinct from a
+    # passed evidence verification: the watchdog still fails closed while the
+    # verification status is ``not_run``.
+    all_shadow = all(
         _dict(row).get("status") == "shadow"
         and _dict(row).get("evidence_mode") == "shadow"
         and _dict(row).get("cannot_replace_parent") is True
         for row in challengers
     )
+    report_present = bool(report_payload)
+    sync_present = bool(sync_payload)
     market_enabled = all(
         "--market-masters" in _read_text(Path(script))
         for script in (
@@ -983,13 +989,23 @@ def _market_masters_summary() -> dict[str, object]:
         "all_challengers_shadow_only": all_shadow,
         "latest_market_masters_build_id": report_payload.get("build_id", "n/a"),
         "latest_market_masters_challenger_count": report_payload.get("challenger_count", "n/a"),
-        "latest_market_masters_promotion_status": report_payload.get("promotion_result", "n/a"),
-        "latest_market_masters_status": report_payload.get("final_status", "missing"),
-        "learning_foundry_champion_registry_changed": sync_payload.get("champion_registry_changed", "missing"),
+        "latest_market_masters_promotion_status": report_payload.get(
+            "promotion_result", "blocked_true_forward_evidence_required"
+        ),
+        "latest_market_masters_status": report_payload.get(
+            "final_status", "not_run"
+        ),
+        "learning_foundry_champion_registry_changed": sync_payload.get(
+            "champion_registry_changed", False
+        ),
         "market_masters_enabled": market_enabled,
-        "market_masters_verify_status": verify_payload.get("status", "missing"),
-        "strategy_validation_triggered": report_payload.get("validation_triggered", "missing"),
-        "sync_status": sync_payload.get("status", "missing"),
+        "market_masters_verify_status": verify_payload.get("status", "not_run"),
+        "report_present": report_present,
+        "strategy_validation_triggered": report_payload.get(
+            "validation_triggered", False
+        ),
+        "sync_present": sync_present,
+        "sync_status": sync_payload.get("status", "not_run"),
     }
 
 

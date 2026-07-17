@@ -39,6 +39,12 @@ from intraday_scanner.dashboard.data_loader import (
     load_sample_scan,
     load_sqlite,
 )
+from intraday_scanner.dashboard.mover_strategy_calendar_page import (
+    render_mover_strategy_calendar,
+)
+from intraday_scanner.dashboard.strategy_calendar_page import (
+    render_strategy_calendar,
+)
 from intraday_scanner.errors import IntradayScannerError
 from intraday_scanner.expectancy import estimate_expectancy
 from intraday_scanner.notifiers import scan_events_from_payload
@@ -3032,6 +3038,27 @@ def _audit(state: dict[str, Any]) -> None:
 
 
 def _historical_calendar(state: dict[str, Any]) -> None:
+    selected_view = st.segmented_control(
+        "Calendar view",
+        options=["Strategy fleet", "Intraday signal archive"],
+        default="Strategy fleet",
+    )
+    if selected_view == "Intraday signal archive":
+        _alphaops_historical_calendar(state)
+        return
+    fleet_rendered = render_strategy_calendar()
+    mover_rendered = render_mover_strategy_calendar()
+    if fleet_rendered or mover_rendered:
+        return
+    st.warning(
+        "No verified strategy-return calendar is retained yet. No return data was "
+        "fabricated; the intraday signal archive is shown below."
+    )
+    with st.expander("Intraday signal archive", expanded=True):
+        _alphaops_historical_calendar(state)
+
+
+def _alphaops_historical_calendar(state: dict[str, Any]) -> None:
     settings = state["settings"]
     db_path = settings["db_path"]
     controls = _calendar_controls(state)
