@@ -26,6 +26,11 @@ from intraday_scanner.market_calendar import (
 from intraday_scanner.paper_ops_root import production_paper_ops_root
 from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths, _recover_pending_transaction
+from intraday_scanner.v2.paper_ops.shadow_runner import (
+    REGISTERED_CHALLENGER_SCHEMA,
+    SHADOW_REGISTRY_SCHEMA,
+    verify_registration_integrity,
+)
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.strategies import build_strategy_catalog
 
@@ -566,6 +571,8 @@ def _read_paperops_rows(
         "expected_strategy_ids": sorted(expected),
         "present_strategy_ids": [],
         "excluded_non_forward_rows": 0,
+        "excluded_shadow_rows": 0,
+        "excluded_shadow_exact_rows": [],
         "excluded_unregistered_rows": 0,
         "status": "missing",
         "row_count": 0,
@@ -631,6 +638,15 @@ def _read_paperops_rows(
     source["active_registry_status"] = (
         "complete" if set(active_series) == set(expected) else "partial"
     )
+    challenger_registry_path = registry_path.parent / "strategy_challenger_registry.json"
+    registered_shadow_series, challenger_registry_status = (
+        _registered_shadow_series(
+            challenger_registry_path,
+            output_root=csv_path.parent.parent,
+        )
+    )
+    source["challenger_registry_path"] = str(challenger_registry_path)
+    source["challenger_registry_status"] = challenger_registry_status
     inception_dates, inception_issues, manifest_paths = (
         _paperops_strategy_inception_dates(
             expected_strategy_ids=set(expected),
@@ -728,11 +744,19 @@ def _read_paperops_rows(
         strategy_semantics_fingerprint = str(
             raw.get("strategy_semantics_fingerprint") or ""
         ).strip()
-        if active_series.get(strategy_id) != (
+        exact_identity = (
+            strategy_id,
             strategy_version,
             execution_policy_version,
             strategy_semantics_fingerprint,
-        ):
+        )
+        if active_series.get(strategy_id) != exact_identity[1:]:
+            if exact_identity in registered_shadow_series:
+                source["excluded_shadow_rows"] += 1
+                source["excluded_shadow_exact_rows"].append(
+                    f"{row_date}|{_paper_series_key(exact_identity)}"
+                )
+                continue
             source["excluded_unregistered_rows"] += 1
             warnings.append(
                 "Ignored non-champion PaperOps series: "
@@ -930,6 +954,9 @@ def _read_paperops_rows(
             ]
     missing = sorted(required_any - set(present))
     source["present_strategy_ids"] = present
+    source["excluded_shadow_exact_rows"] = sorted(
+        set(source["excluded_shadow_exact_rows"])
+    )
     source["missing_strategy_ids"] = missing
     source["missing_strategy_ids_by_date"] = missing_by_date
     source["missing_exact_strategy_series_by_date"] = missing_exact_by_date
@@ -1077,6 +1104,80 @@ def _paperops_strategy_inception_dates(
             continue
         inception_dates[identity] = max(strategy_inception, policy_inception)
     return inception_dates, issues, (semantics_path, policy_path)
+
+
+def _registered_shadow_series(
+    path: Path,
+    *,
+    output_root: Path,
+) -> tuple[set[PaperSeriesIdentity], str]:
+    """Return unique, integrity-verified paper-only challenger identities.
+
+    Shadow rows are expected research evidence, but they are never members of
+    the official fleet. Only an exact frozen identity whose immutable fields
+    and append-only registration event pass the shadow runner's canonical
+    verifier earns the quiet exclusion path. Malformed, duplicate, drifted, or
+    unknown calendar series continue through the fail-closed warning path.
+    """
+
+    if not path.is_file():
+        return set(), "missing"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set(), "invalid"
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != SHADOW_REGISTRY_SCHEMA
+    ):
+        return set(), "invalid"
+    rows = payload.get("challengers")
+    if not isinstance(rows, list):
+        return set(), "invalid"
+
+    identities: list[PaperSeriesIdentity] = []
+    malformed = False
+    for raw in rows:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema_version") != REGISTERED_CHALLENGER_SCHEMA
+            or raw.get("status") != "shadow"
+            or raw.get("research_only") is not True
+            or raw.get("automatic_promotion_enabled") is not False
+            or raw.get("broker_execution_allowed") is not False
+        ):
+            malformed = True
+            continue
+        try:
+            integrity_reasons = verify_registration_integrity(
+                raw,
+                output_root=output_root,
+            )
+        except (KeyError, OSError, TypeError, ValueError):
+            malformed = True
+            continue
+        if integrity_reasons:
+            malformed = True
+            continue
+        identity = (
+            str(raw.get("strategy_id") or "").strip(),
+            str(raw.get("candidate_strategy_version") or "").strip(),
+            str(raw.get("execution_policy_version") or "").strip(),
+            str(raw.get("candidate_strategy_semantics_fingerprint") or "").strip(),
+        )
+        if not all(identity) or identity[3] == "unknown":
+            malformed = True
+            continue
+        identities.append(identity)
+
+    counts: dict[PaperSeriesIdentity, int] = defaultdict(int)
+    for identity in identities:
+        counts[identity] += 1
+    duplicates = {identity for identity, count in counts.items() if count > 1}
+    return (
+        {identity for identity in identities if identity not in duplicates},
+        "partial" if malformed or duplicates else "complete",
+    )
 
 
 def _manifest_mapping(

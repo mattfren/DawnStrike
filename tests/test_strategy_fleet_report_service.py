@@ -189,6 +189,95 @@ def test_fleet_report_excludes_same_id_shadow_version_from_official_rows(
     assert len(momentum) == 1
     assert momentum[0]["strategy_version"] == "v1.0"
     assert result["sources"]["v2_paper_ops"]["excluded_unregistered_rows"] == 1
+    assert result["sources"]["v2_paper_ops"]["excluded_shadow_rows"] == 0
+    assert any(
+        "Ignored non-champion PaperOps series" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_fleet_report_quietly_excludes_exact_registered_shadow_series(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper_root = tmp_path / "paper_ops"
+    _write_paper_calendar(
+        paper_root,
+        include_shadow=True,
+        register_shadow=True,
+        missing_return=False,
+    )
+    verified_roots: list[Path] = []
+
+    def verify_integrity(
+        _registration: dict[str, object],
+        *,
+        output_root: Path,
+    ) -> tuple[str, ...]:
+        verified_roots.append(output_root)
+        return ()
+
+    monkeypatch.setattr(
+        "intraday_scanner.services.strategy_fleet_report_service."
+        "verify_registration_integrity",
+        verify_integrity,
+    )
+
+    result = build_strategy_fleet_report(
+        db_path=tmp_path / "absent.sqlite",
+        paper_ops_root=paper_root,
+        out_dir=tmp_path / "report",
+    )
+
+    source = result["sources"]["v2_paper_ops"]
+    paper_rows = [
+        row for row in result["daily_rows"] if row["horizon"] == PAPEROPS_HORIZON
+    ]
+    momentum = [
+        row for row in paper_rows if row["strategy_id"] == "ts_momentum_sma_atr"
+    ]
+    assert source["status"] == "complete"
+    assert source["excluded_shadow_rows"] == 1
+    assert source["excluded_unregistered_rows"] == 0
+    assert source["challenger_registry_status"] == "complete"
+    assert verified_roots == [paper_root]
+    assert source["excluded_shadow_exact_rows"] == [
+        "2026-07-15|ts_momentum_sma_atr|v2.0-shadow|"
+        f"{PAPER_EXECUTION_POLICY_VERSION}|{'e' * 64}"
+    ]
+    assert len(momentum) == 1
+    assert momentum[0]["strategy_version"] == "v1.0"
+    assert not any(
+        "Ignored non-champion PaperOps series" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_integrity_invalid_challenger_does_not_suppress_non_champion_warning(
+    tmp_path: Path,
+) -> None:
+    paper_root = tmp_path / "paper_ops"
+    _write_paper_calendar(
+        paper_root,
+        include_shadow=True,
+        register_shadow=True,
+        missing_return=False,
+    )
+
+    result = build_strategy_fleet_report(
+        db_path=tmp_path / "absent.sqlite",
+        paper_ops_root=paper_root,
+        out_dir=tmp_path / "report",
+    )
+
+    source = result["sources"]["v2_paper_ops"]
+    assert source["excluded_shadow_rows"] == 0
+    assert source["excluded_unregistered_rows"] == 1
+    assert source["challenger_registry_status"] == "partial"
+    assert any(
+        "Ignored non-champion PaperOps series" in warning
+        for warning in result["warnings"]
+    )
 
 
 def test_paperops_coverage_marks_pre_inception_strategies_not_yet_registered(
@@ -879,6 +968,7 @@ def _write_paper_calendar(
     *,
     include_comparators: bool = True,
     include_shadow: bool = False,
+    register_shadow: bool = False,
     calendar_date: str = "2026-07-15",
     additive_registered_at: str | None = "2026-07-16T12:00:00+00:00",
     additive_activation_policy: str | None = None,
@@ -1000,9 +1090,54 @@ def _write_paper_calendar(
                 **momentum,
                 "strategy_version": "v2.0-shadow",
                 "strategy_status": "shadow",
+                "strategy_semantics_fingerprint": "e" * 64,
                 "daily_return_pct": 0.99,
                 "run_id": "shadow-candidate",
             }
+        )
+    if register_shadow:
+        (state / "strategy_challenger_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "v2.paper_ops_challenger_registry.v1",
+                    "challengers": [
+                        {
+                            "schema_version": "v2.paper_ops_registered_challenger.v1",
+                            "status": "shadow",
+                            "research_only": True,
+                            "automatic_promotion_enabled": False,
+                            "broker_execution_allowed": False,
+                            "challenger_id": "ts_momentum_sma_atr_shadow_v2",
+                            "strategy_id": "ts_momentum_sma_atr",
+                            "champion_strategy_version": "v1.0",
+                            "champion_strategy_semantics_fingerprint": "f" * 64,
+                            "candidate_strategy_version": "v2.0-shadow",
+                            "execution_policy_version": PAPER_EXECUTION_POLICY_VERSION,
+                            "candidate_strategy_semantics_fingerprint": "e" * 64,
+                            "candidate_semantics_contract": (
+                                "scoped_candidate_semantics_v2"
+                            ),
+                            "frozen_at": "2026-07-14T12:00:00+00:00",
+                            "registered_at": "2026-07-14T13:00:00+00:00",
+                            "hypothesis": "A frozen filter improves outcomes.",
+                            "implementation": {
+                                "kind": "parent_signal_filter_v1",
+                                "parameters": {
+                                    "trend_sma_period": 50,
+                                    "atr_period": 14,
+                                    "max_atr_pct": 0.06,
+                                    "min_parent_score": 0.0,
+                                },
+                            },
+                            "implementation_source_sha256": "a" * 64,
+                            "parent_logic_sha256": "b" * 64,
+                            "logic_artifact_sha256": "c" * 64,
+                            "registration_id": "d" * 64,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
         )
     if include_comparators:
         rows.extend(
