@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from intraday_scanner.v2.data import MarketBar, MarketDataset
+from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
+from intraday_scanner.v2.data_truth import build_data_truth_snapshot
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
 from intraday_scanner.v2.paper_ops import engine as paper_engine
 from intraday_scanner.v2.paper_ops import shadow_runner
@@ -226,7 +227,7 @@ def test_legacy_candidate_accepts_only_scoped_drift_and_preserves_frozen_lineage
         snapshot = f"sourced-shadow-{run_date.isoformat()}"
         return _dataset(run_date), _manifest(run_date, snapshot), ()
 
-    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fake_loader)
+    monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
     result = shadow_runner.run_shadow_day(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
@@ -281,6 +282,230 @@ def test_legacy_candidate_accepts_only_scoped_drift_and_preserves_frozen_lineage
         if row.get("strategy_version") == registration["candidate_strategy_version"]
     )
     assert candidate_calendar["strategy_semantics_fingerprint"] == frozen
+
+
+def test_retained_snapshot_forward_gate_runs_before_immutable_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_date = date(2026, 7, 15)
+    immutable_loads: list[str] = []
+    monkeypatch.setattr(
+        paper_engine,
+        "_current_utc_time",
+        lambda: datetime(2026, 7, 15, 19, 0, tzinfo=timezone.utc),
+    )
+
+    def unexpected_load(snapshot_id: str, _data_truth_root: Path) -> object:
+        immutable_loads.append(snapshot_id)
+        raise AssertionError("immutable load must not run before the session close")
+
+    monkeypatch.setattr(shadow_runner, "load_datatruth_snapshot", unexpected_load)
+
+    with pytest.raises(ValueError, match="before the US equities regular session"):
+        shadow_runner._load_retained_champion_snapshot(
+            output_root=tmp_path / "paper",
+            run_date=run_date,
+            mode=PaperRunMode.FORWARD,
+            snapshot_id="retained-champion-snapshot",
+            universe_symbols=("TST",),
+        )
+
+    assert immutable_loads == []
+    assert not (tmp_path / "paper").exists()
+
+
+def test_shadow_day_loads_exact_retained_champion_snapshot_when_latest_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    run_date = date(2026, 7, 15)
+    monkeypatch.setattr(
+        paper_engine,
+        "_current_utc_time",
+        lambda: datetime(2026, 7, 15, 21, 30, tzinfo=timezone.utc),
+    )
+    data_truth_root = Path("data/v2_data_truth")
+    champion_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=data_truth_root,
+        fixture_root=tmp_path / "champion_source",
+        run_date=run_date,
+        revision="champion",
+        close=100.0,
+    )
+    latest_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=data_truth_root,
+        fixture_root=tmp_path / "revised_source",
+        run_date=run_date,
+        revision="revised-latest",
+        close=101.0,
+    )
+    assert latest_manifest.snapshot_id != champion_manifest.snapshot_id
+    latest_alias = read_json(data_truth_root / "manifests" / "latest.json", {})
+    assert latest_alias["snapshot_id"] == latest_manifest.snapshot_id
+
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    _seed_root(root, parent)
+    shadow_runner.initialize_shadow_registry(output_root=root)
+    _seed_registered_challenger(
+        root,
+        {
+            **_registration_manifest(),
+            "frozen_at": (
+                f"{(run_date - timedelta(days=1)).isoformat()}T12:00:00+00:00"
+            ),
+        },
+        registered_at=(
+            f"{(run_date - timedelta(days=1)).isoformat()}T13:00:00+00:00"
+        ),
+    )
+    _seed_champion_day(
+        root,
+        run_date,
+        snapshot_id=champion_manifest.snapshot_id,
+    )
+    _write_truth_audits(root)
+
+    def fail_if_refetched(**_kwargs: object) -> object:
+        raise AssertionError("shadow recovery must never refetch the latest snapshot")
+
+    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fail_if_refetched)
+
+    result = shadow_runner.run_shadow_day(
+        run_date=run_date,
+        mode=PaperRunMode.FORWARD,
+        output_root=root,
+        allow_fetch=True,
+    )
+
+    assert result["status"] == "passed"
+    assert result["data_snapshot_id"] == champion_manifest.snapshot_id
+    assert read_json(data_truth_root / "manifests" / "latest.json", {})[
+        "snapshot_id"
+    ] == latest_manifest.snapshot_id
+    decisions = read_json(
+        root
+        / "exports"
+        / f"shadow_strategy_decisions_forward_{run_date}_{CHALLENGER_ID}.json",
+        [],
+    )
+    assert decisions[0]["entry_reference"] == 100.0
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("missing", "tampered"),
+    ids=("missing", "tampered"),
+)
+def test_shadow_day_fails_closed_when_retained_champion_snapshot_is_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    run_date = date(2026, 7, 15)
+    monkeypatch.setattr(
+        paper_engine,
+        "_current_utc_time",
+        lambda: datetime(2026, 7, 15, 21, 30, tzinfo=timezone.utc),
+    )
+    data_truth_root = Path("data/v2_data_truth")
+    champion_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=data_truth_root,
+        fixture_root=tmp_path / "champion_source",
+        run_date=run_date,
+        revision="champion",
+        close=100.0,
+    )
+    latest_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=data_truth_root,
+        fixture_root=tmp_path / "revised_source",
+        run_date=run_date,
+        revision="revised-latest",
+        close=101.0,
+    )
+    assert latest_manifest.snapshot_id != champion_manifest.snapshot_id
+    if failure_mode == "missing":
+        assert champion_manifest.snapshot_relative_path
+        retained_manifest_path = (
+            data_truth_root
+            / champion_manifest.snapshot_relative_path
+            / "manifest.json"
+        )
+        retained_manifest_path.unlink()
+    else:
+        assert champion_manifest.normalized_artifact_path
+        normalized_path = data_truth_root / champion_manifest.normalized_artifact_path
+        normalized_path.write_bytes(normalized_path.read_bytes() + b"tampered\n")
+
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    _seed_root(root, parent)
+    shadow_runner.initialize_shadow_registry(output_root=root)
+    _seed_registered_challenger(
+        root,
+        {
+            **_registration_manifest(),
+            "frozen_at": (
+                f"{(run_date - timedelta(days=1)).isoformat()}T12:00:00+00:00"
+            ),
+        },
+        registered_at=(
+            f"{(run_date - timedelta(days=1)).isoformat()}T13:00:00+00:00"
+        ),
+    )
+    _seed_champion_day(
+        root,
+        run_date,
+        snapshot_id=champion_manifest.snapshot_id,
+    )
+    _write_truth_audits(root)
+    registry_path = root / "state" / "strategy_challenger_registry.json"
+    event_path = root / "state" / "shadow_registration_ledger.jsonl"
+    calendar_path = root / "calendar" / "strategy_daily_returns.csv"
+    registry_before = registry_path.read_bytes()
+    event_before = event_path.read_bytes()
+    calendar_before = calendar_path.read_bytes()
+
+    def fail_if_refetched(**_kwargs: object) -> object:
+        raise AssertionError("shadow recovery must never refetch the latest snapshot")
+
+    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fail_if_refetched)
+
+    with pytest.raises(
+        ValueError,
+        match="retained champion DataTruth snapshot is missing or invalid",
+    ) as exc_info:
+        shadow_runner.run_shadow_day(
+            run_date=run_date,
+            mode=PaperRunMode.FORWARD,
+            output_root=root,
+            allow_fetch=True,
+        )
+
+    if failure_mode == "missing":
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+        assert "snapshot manifest is missing" in str(exc_info.value.__cause__)
+    else:
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert "normalized artifact hash mismatch" in str(exc_info.value.__cause__)
+    assert read_json(data_truth_root / "manifests" / "latest.json", {})[
+        "snapshot_id"
+    ] == latest_manifest.snapshot_id
+    assert registry_path.read_bytes() == registry_before
+    assert event_path.read_bytes() == event_before
+    assert calendar_path.read_bytes() == calendar_before
+    assert not (root / "state" / "shadow" / CHALLENGER_ID).exists()
+    assert not (
+        root / "manifests" / f"shadow_forward_{run_date}_{CHALLENGER_ID}.json"
+    ).exists()
+    assert not (
+        root / "reports" / "daily" / f"shadow_forward_{run_date}.json"
+    ).exists()
 
 
 def test_candidate_integrity_still_rejects_builder_parent_and_registration_drift(
@@ -372,7 +597,7 @@ def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
         snapshot = f"sourced-shadow-{run_date.isoformat()}"
         return datasets[run_date], _manifest(run_date, snapshot), ()
 
-    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fake_loader)
+    monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
     _seed_champion_day(root, day_one)
     _write_truth_audits(root)
 
@@ -592,7 +817,11 @@ def test_shadow_day_preserves_not_yet_eligible_challenger_as_na_without_evidence
     def fail_if_loaded(**_kwargs: object) -> object:
         raise AssertionError("an ineligible challenger must not load execution data")
 
-    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fail_if_loaded)
+    monkeypatch.setattr(
+        shadow_runner,
+        "_load_retained_champion_snapshot",
+        fail_if_loaded,
+    )
     result = shadow_runner.run_shadow_day(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
@@ -678,7 +907,7 @@ def test_shadow_day_runs_eligible_challengers_while_preserving_ineligible_as_na(
         snapshot = f"sourced-shadow-{run_date.isoformat()}"
         return _dataset(run_date), _manifest(run_date, snapshot), ()
 
-    monkeypatch.setattr(paper_engine, "_load_dataset_for_mode", fake_loader)
+    monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
     result = shadow_runner.run_shadow_day(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
@@ -933,8 +1162,13 @@ def _manifest(run_date: date, snapshot: str) -> DataTruthManifest:
     )
 
 
-def _seed_champion_day(root: Path, run_date: date) -> None:
-    snapshot = f"sourced-shadow-{run_date.isoformat()}"
+def _seed_champion_day(
+    root: Path,
+    run_date: date,
+    *,
+    snapshot_id: str | None = None,
+) -> None:
+    snapshot = snapshot_id or f"sourced-shadow-{run_date.isoformat()}"
     run = paper_engine._paper_run(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
@@ -1013,6 +1247,58 @@ def _seed_champion_day(root: Path, run_date: date) -> None:
         ),
         paper_engine.CALENDAR_FIELDNAMES,
     )
+
+
+def _build_retained_data_truth_snapshot(
+    *,
+    data_truth_root: Path,
+    fixture_root: Path,
+    run_date: date,
+    revision: str,
+    close: float,
+) -> DataTruthManifest:
+    fixture_root.mkdir(parents=True)
+    raw_dir = fixture_root / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "tst_chart.json").write_text(
+        f'{{"revision":"{revision}"}}',
+        encoding="utf-8",
+    )
+    source_csv = fixture_root / "ohlcv.csv"
+    write_ohlcv_csv(
+        MarketDataset(
+            dataset_id=f"fixture-{revision}",
+            source_kind="sourced_fixture",
+            timeframe="1d",
+            bars_by_symbol={
+                "TST": (
+                    _bar(
+                        run_date,
+                        open_price=100.0,
+                        high=max(101.0, close + 1.0),
+                        low=99.0,
+                        close=close,
+                    ),
+                )
+            },
+        ),
+        source_csv,
+    )
+    result = build_data_truth_snapshot(
+        as_of_date=run_date + timedelta(days=1),
+        output_root=data_truth_root,
+        created_at=datetime.combine(
+            run_date + timedelta(days=1),
+            time(22, 0),
+            tzinfo=timezone.utc,
+        ),
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+        allow_fetch=False,
+        symbols=("TST",),
+    )
+    assert result.manifest.accepted_end == run_date.isoformat()
+    return result.manifest
 
 
 def _write_truth_audits(root: Path) -> None:

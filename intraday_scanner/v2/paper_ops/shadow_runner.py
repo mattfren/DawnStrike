@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.market_calendar import MARKET_TIMEZONE
+from intraday_scanner.v2.data import MarketDataset
+from intraday_scanner.v2.data_truth import DataTruthManifest, load_datatruth_snapshot
 from intraday_scanner.v2.indicators import atr, sma
 from intraday_scanner.v2.paper_ops import engine as paper_engine
 from intraday_scanner.v2.paper_ops.models import (
@@ -399,17 +401,12 @@ def run_shadow_day(
         return result
 
     _assert_pre_shadow_truth_gates(output_root)
-    dataset, manifest, warnings = paper_engine._load_dataset_for_mode(
+    dataset, manifest, warnings = _load_retained_champion_snapshot(
+        output_root=output_root,
         run_date=run_date,
         mode=mode,
-        allow_fetch=allow_fetch,
+        snapshot_id=str(source["data_snapshot_id"]),
         universe_symbols=config.universe_symbols,
-        allow_single_provider_forward=config.allow_single_provider_forward,
-        data_truth_root=(
-            output_root / "data_truth_replay"
-            if mode is PaperRunMode.REPLAY
-            else Path("data/v2_data_truth")
-        ),
     )
     if manifest.snapshot_id != source["data_snapshot_id"]:
         raise ValueError(
@@ -452,6 +449,69 @@ def run_shadow_day(
         result,
     )
     return result
+
+
+def _load_retained_champion_snapshot(
+    *,
+    output_root: Path,
+    run_date: date,
+    mode: PaperRunMode,
+    snapshot_id: str,
+    universe_symbols: tuple[str, ...],
+) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+    """Load and validate the champion's exact immutable DataTruth snapshot."""
+
+    if mode is PaperRunMode.FORWARD:
+        paper_engine._assert_forward_session_complete(run_date)
+    paths = paper_engine.PaperOpsPaths.create(output_root)
+    data_truth_root = paper_engine._data_truth_root_for_mode(paths, mode)
+    try:
+        dataset, manifest = load_datatruth_snapshot(snapshot_id, data_truth_root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "retained champion DataTruth snapshot is missing or invalid; "
+            f"shadow execution is blocked: {snapshot_id}"
+        ) from exc
+
+    if manifest.snapshot_id != snapshot_id:
+        raise ValueError(
+            "retained champion DataTruth snapshot identity differs from the "
+            "completed champion run; shadow execution is blocked"
+        )
+    if manifest.validation_status not in {"passed", "passed_with_warnings"}:
+        raise ValueError(
+            "retained champion DataTruth snapshot has blocked validation status "
+            f"{manifest.validation_status}; shadow execution is blocked"
+        )
+    if mode is PaperRunMode.FORWARD and (
+        dataset.source_kind == "synthetic" or manifest.provider_id == "synthetic"
+    ):
+        raise ValueError(
+            "retained champion DataTruth snapshot is synthetic; "
+            "forward shadow execution is blocked"
+        )
+    if manifest.accepted_end != run_date.isoformat():
+        raise ValueError("shadow dataset does not end on the exact completed run date")
+
+    normalized_universe = tuple(
+        dict.fromkeys(symbol.upper() for symbol in universe_symbols)
+    )
+    if tuple(sorted(dataset.symbols)) != tuple(sorted(normalized_universe)):
+        raise ValueError(
+            "shadow dataset universe differs from the configured champion universe"
+        )
+    stale_symbols = sorted(
+        symbol
+        for symbol in normalized_universe
+        if not dataset.bars_by_symbol.get(symbol)
+        or dataset.bars_by_symbol[symbol][-1].timestamp.date() != run_date
+    )
+    if stale_symbols:
+        raise ValueError(
+            "shadow dataset requires an exact completed run-date bar for every "
+            "configured symbol; stale or missing: " + ", ".join(stale_symbols)
+        )
+    return dataset, manifest, tuple(manifest.warnings)
 
 
 def _shadow_day_result(
