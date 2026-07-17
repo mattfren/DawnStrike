@@ -209,7 +209,7 @@ def test_same_day_registration_passes_operationally_without_candidate_evidence(
     result = evaluate_paperops_challengers(output_root=root)
     proposal = result["proposals"][0]
 
-    assert result["status"] == "passed"
+    assert result["status"] == "passed", result["operational_blockers"]
     assert result["operational_blockers"] == []
     assert result["completed_forward_session_count"] == 1
     assert result["registered_challenger_count"] == 1
@@ -323,6 +323,200 @@ def test_wrong_policy_decisions_cannot_satisfy_exact_candidate_coverage(
     )
 
 
+def test_shared_daily_champion_decisions_allow_other_exact_active_series(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(6)
+    _seed_candidate_evidence(root, dates)
+    second_id = STRATEGY_IDS[1]
+    _write_registry(root, (STRATEGY_IDS[0], second_id))
+    second_semantics = _registered_semantics(root, second_id)
+    for session_date in dates:
+        path = root / "exports" / f"strategy_decisions_forward_{session_date}.json"
+        decisions = read_json(path, [])
+        assert isinstance(decisions, list)
+        run_id = str(decisions[0]["run_id"])
+        decisions.append(
+            _decision(
+                second_id,
+                "v1.0",
+                session_date,
+                run_id,
+                no_trades=True,
+                semantics=second_semantics,
+            )
+        )
+        write_json(path, decisions)
+    _refresh_evaluation_truth(root)
+
+    result = evaluate_paperops_challengers(output_root=root, config=_test_config())
+    proposal = next(
+        row for row in result["proposals"] if row["challenger_id"] is not None
+    )
+
+    assert result["status"] == "passed", result["operational_blockers"]
+    assert proposal["champion_metrics"]["eligible_session_count"] == 6
+    assert proposal["candidate_metrics"]["eligible_session_count"] == 6
+    assert not any(
+        "cross-series contamination" in reason
+        for reason in result["operational_blockers"]
+    )
+
+
+def test_shared_champion_decisions_reject_conflicting_registered_series_identity(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(6)
+    _seed_candidate_evidence(root, dates)
+    second_id = STRATEGY_IDS[1]
+    _write_registry(root, (STRATEGY_IDS[0], second_id))
+    decisions_path = (
+        root / "exports" / f"strategy_decisions_forward_{dates[0]}.json"
+    )
+    decisions = read_json(decisions_path, [])
+    assert isinstance(decisions, list)
+    decisions.append(
+        _decision(
+            second_id,
+            "v9.0",
+            dates[0],
+            str(decisions[0]["run_id"]),
+            no_trades=True,
+            semantics=_registered_semantics(root, second_id),
+        )
+    )
+    write_json(decisions_path, decisions)
+    _refresh_evaluation_truth(root)
+
+    result = evaluate_paperops_challengers(output_root=root, config=_test_config())
+
+    assert result["status"] == "failed"
+    assert any(
+        "unmatched or cross-series contamination" in reason
+        for reason in result["operational_blockers"]
+    )
+
+
+def test_shared_champion_decisions_reject_shadow_lineage_on_champion_identity(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(6)
+    _seed_candidate_evidence(root, dates)
+    decisions_path = (
+        root / "exports" / f"strategy_decisions_forward_{dates[0]}.json"
+    )
+    decisions = read_json(decisions_path, [])
+    assert isinstance(decisions, list)
+    assert isinstance(decisions[0], dict)
+    decisions[0]["challenger_id"] = "injected_shadow"
+    decisions[0]["logic_artifact_sha256"] = "f" * 64
+    write_json(decisions_path, decisions)
+    _refresh_evaluation_truth(root)
+
+    result = evaluate_paperops_challengers(output_root=root, config=_test_config())
+
+    assert result["status"] == "failed"
+    assert any(
+        "unmatched or cross-series contamination" in reason
+        for reason in result["operational_blockers"]
+    )
+
+
+def test_champion_evidence_dates_begin_at_exact_registry_inception(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(2)
+    _seed_candidate_evidence(root, dates)
+    future_id = STRATEGY_IDS[1]
+    _write_registry(root, (STRATEGY_IDS[0], future_id))
+    semantics_manifest = read_json(
+        root / "state" / "strategy_semantics_manifest.json",
+        {},
+    )
+    assert isinstance(semantics_manifest, dict)
+    strategies = semantics_manifest["strategies"]
+    assert isinstance(strategies, dict)
+    future_entry = strategies[f"{future_id}@v1.0"]
+    assert isinstance(future_entry, dict)
+    future_entry["activation_policy"] = "next_market_session_after_registration"
+    future_entry["registered_at"] = "2026-01-02T21:00:00+00:00"
+    future_entry["coverage_inception_date"] = "2026-01-05"
+    write_json(
+        root / "state" / "strategy_semantics_manifest.json",
+        semantics_manifest,
+    )
+    _refresh_evaluation_truth(root)
+
+    result = evaluate_paperops_challengers(output_root=root)
+    future = next(
+        row for row in result["proposals"] if row["strategy_id"] == future_id
+    )
+
+    assert result["status"] == "passed", result["operational_blockers"]
+    assert future["champion_metrics"]["expected_completed_session_count"] == 0
+    assert future["champion_metrics"]["eligible_session_count"] == 0
+    assert future["excluded_dates"]["champion"] == {}
+    assert not any(
+        "cross-series contamination" in reason
+        for reason in result["operational_blockers"]
+    )
+
+
+def test_shared_champion_decisions_reject_pre_inception_series(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(2)
+    _seed_candidate_evidence(root, dates)
+    future_id = STRATEGY_IDS[1]
+    _write_registry(root, (STRATEGY_IDS[0], future_id))
+    semantics_manifest = read_json(
+        root / "state" / "strategy_semantics_manifest.json",
+        {},
+    )
+    assert isinstance(semantics_manifest, dict)
+    strategies = semantics_manifest["strategies"]
+    assert isinstance(strategies, dict)
+    future_entry = strategies[f"{future_id}@v1.0"]
+    assert isinstance(future_entry, dict)
+    future_entry["activation_policy"] = "next_market_session_after_registration"
+    future_entry["registered_at"] = "2026-01-02T21:00:00+00:00"
+    future_entry["coverage_inception_date"] = "2026-01-05"
+    write_json(
+        root / "state" / "strategy_semantics_manifest.json",
+        semantics_manifest,
+    )
+    decisions_path = (
+        root / "exports" / f"strategy_decisions_forward_{dates[0]}.json"
+    )
+    decisions = read_json(decisions_path, [])
+    assert isinstance(decisions, list)
+    decisions.append(
+        _decision(
+            future_id,
+            "v1.0",
+            dates[0],
+            str(decisions[0]["run_id"]),
+            no_trades=True,
+            semantics=str(future_entry["fingerprint"]),
+        )
+    )
+    write_json(decisions_path, decisions)
+    _refresh_evaluation_truth(root)
+
+    result = evaluate_paperops_challengers(output_root=root)
+
+    assert result["status"] == "failed"
+    assert any(
+        "unmatched or cross-series contamination" in reason
+        for reason in result["operational_blockers"]
+    )
+
+
 def _test_config() -> ChallengerEvaluationConfig:
     return ChallengerEvaluationConfig(
         min_forward_sessions=6,
@@ -346,6 +540,10 @@ def _dates(count: int) -> list[str]:
 
 def _write_registry(root: Path, strategy_ids: tuple[str, ...]) -> None:
     catalog = {strategy.strategy_id: strategy for strategy in build_strategy_catalog()}
+    fingerprints = {
+        strategy_id: paper_engine._strategy_semantics_fingerprint(catalog[strategy_id])
+        for strategy_id in strategy_ids
+    }
     write_json(
         root / "state" / "strategy_registry.json",
         [
@@ -354,13 +552,63 @@ def _write_registry(root: Path, strategy_ids: tuple[str, ...]) -> None:
                 "strategy_version": "v1.0",
                 "strategy_status": "experimental",
                 "execution_policy_version": POLICY,
-                "strategy_semantics_fingerprint": (
-                    paper_engine._strategy_semantics_fingerprint(catalog[strategy_id])
-                ),
+                "strategy_semantics_fingerprint": fingerprints[strategy_id],
             }
             for strategy_id in strategy_ids
         ],
     )
+    write_json(
+        root / "state" / "strategy_semantics_manifest.json",
+        {
+            "schema_version": "v2.strategy_semantics_manifest.v1",
+            "strategies": {
+                f"{strategy_id}@v1.0": {
+                    "activation_policy": "first_eligible_session",
+                    "coverage_inception_date": "2026-01-02",
+                    "fingerprint": fingerprints[strategy_id],
+                    "registered_at": "2026-01-01T12:00:00+00:00",
+                }
+                for strategy_id in strategy_ids
+            },
+        },
+    )
+    write_json(
+        root / "state" / "execution_policy_manifest.json",
+        {
+            "active_execution_policy_version": POLICY,
+            "policies": {
+                POLICY: {
+                    "activation_policy": "first_eligible_session",
+                    "coverage_inception_date": "2026-01-02",
+                    "fingerprint": "fixture-policy-fingerprint",
+                    "registered_at": "2026-01-01T12:00:00+00:00",
+                }
+            },
+            "schema_version": "v2.paper_execution_policy_manifest.v1",
+        },
+    )
+
+
+def _registered_semantics(root: Path, strategy_id: str) -> str:
+    payload = read_json(root / "state" / "strategy_semantics_manifest.json", {})
+    assert isinstance(payload, dict)
+    strategies = payload["strategies"]
+    assert isinstance(strategies, dict)
+    entry = strategies[f"{strategy_id}@v1.0"]
+    assert isinstance(entry, dict)
+    return str(entry["fingerprint"])
+
+
+def _refresh_evaluation_truth(root: Path) -> None:
+    build_trade_blotter(output_root=root)
+    verify_trade_blotter(output_root=root)
+    for name in (
+        "reconciliation_latest.json",
+        "calendar_truth_latest.json",
+        "ledger_rebuild_latest.json",
+        "source_bar_truth_forward_latest.json",
+    ):
+        write_json(root / "reconciliation" / name, {"status": "passed"})
 
 
 def _seed_candidate_evidence(

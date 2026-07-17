@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.v2.paper_ops import engine as paper_engine
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import (
     append_jsonl_unique,
@@ -154,6 +155,10 @@ def evaluate_paperops_challengers(
     effective_config.validate()
 
     champions, registry_warnings = _champions(state)
+    champion_inceptions, inception_reasons = _champion_coverage_inceptions(
+        output_root,
+        champions,
+    )
     challengers, challenger_warnings = _challenger_registry(state)
     calendar_rows = _read_csv(output_root / "calendar" / "strategy_daily_returns.csv")
     ledger_events = read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
@@ -225,14 +230,23 @@ def evaluate_paperops_challengers(
         )
         cache_key = (key, frozen_after, challenger_id)
         if cache_key not in evidence_cache:
+            series_expected_dates = expected_dates
+            if candidate_registration is None:
+                inception = champion_inceptions.get(key)
+                series_expected_dates = tuple(
+                    session_date
+                    for session_date in expected_dates
+                    if inception is not None and session_date >= inception
+                )
             evidence_cache[cache_key] = _series_evidence(
                 output_root=output_root,
                 key=key,
-                expected_dates=expected_dates,
+                expected_dates=series_expected_dates,
                 completed_reports=completed_reports,
                 calendar_index=calendar_index,
                 ledger_events=ledger_events,
                 universe=universe,
+                champion_inceptions=champion_inceptions,
                 global_truth_reasons=truth_reasons,
                 blotter_rows=blotter_rows,
                 blotter_reasons=blotter_reasons,
@@ -283,6 +297,7 @@ def evaluate_paperops_challengers(
         *truth_reasons,
         *blotter_reasons,
         *registry_warnings,
+        *inception_reasons,
         *challenger_warnings,
         *unknown_registration_reasons,
         *proposal_integrity_reasons,
@@ -394,6 +409,34 @@ def _champions(state: Path) -> tuple[list[_SeriesKey], list[str]]:
         seen.add(strategy_id)
     champions.sort(key=lambda item: item.strategy_id)
     return champions, warnings
+
+
+def _champion_coverage_inceptions(
+    output_root: Path,
+    champions: list[_SeriesKey],
+) -> tuple[dict[_SeriesKey, str], tuple[str, ...]]:
+    """Resolve fail-closed forward inception for every exact champion series."""
+
+    paths = paper_engine.PaperOpsPaths.create(output_root)
+    inceptions: dict[_SeriesKey, str] = {}
+    reasons: list[str] = []
+    for champion in champions:
+        try:
+            inceptions[champion] = paper_engine._strategy_coverage_inception(
+                paths,
+                strategy_id=champion.strategy_id,
+                strategy_version=champion.strategy_version,
+                execution_policy_version=champion.execution_policy_version,
+                strategy_semantics_fingerprint=(
+                    champion.strategy_semantics_fingerprint
+                ),
+            ).isoformat()
+        except (OSError, TypeError, ValueError) as exc:
+            reasons.append(
+                "champion coverage inception is unavailable for "
+                f"{champion.strategy_id}@{champion.strategy_version}: {exc}"
+            )
+    return inceptions, tuple(sorted(dict.fromkeys(reasons)))
 
 
 def _challenger_registry(state: Path) -> tuple[list[JsonDict], list[str]]:
@@ -679,6 +722,7 @@ def _series_evidence(
     calendar_index: dict[tuple[str, _SeriesKey], list[JsonDict]],
     ledger_events: list[JsonDict],
     universe: tuple[str, ...],
+    champion_inceptions: dict[_SeriesKey, str],
     global_truth_reasons: tuple[str, ...],
     blotter_rows: list[JsonDict],
     blotter_reasons: tuple[str, ...],
@@ -730,6 +774,7 @@ def _series_evidence(
                 report,
                 key,
                 universe,
+                champion_inceptions=champion_inceptions,
                 candidate_registration=candidate_registration,
             )
         )
@@ -838,6 +883,7 @@ def _decision_coverage_reasons(
     key: _SeriesKey,
     universe: tuple[str, ...],
     *,
+    champion_inceptions: dict[_SeriesKey, str],
     candidate_registration: JsonDict | None,
 ) -> tuple[str, ...]:
     challenger_id = (
@@ -856,17 +902,53 @@ def _decision_coverage_reasons(
     reasons: list[str] = []
     if any(not isinstance(row, dict) for row in payload):
         reasons.append("strategy decision coverage contains a non-object row")
+    object_rows = [row for row in payload if isinstance(row, dict)]
     matches = [
         row
-        for row in payload
-        if isinstance(row, dict)
-        and row.get("strategy_id") == key.strategy_id
+        for row in object_rows
+        if row.get("strategy_id") == key.strategy_id
         and row.get("strategy_version") == key.strategy_version
         and row.get("execution_policy_version") == key.execution_policy_version
         and row.get("strategy_semantics_fingerprint")
         == key.strategy_semantics_fingerprint
     ]
-    if len(matches) != len(payload):
+    contaminated = len(object_rows) != len(payload)
+    if candidate_registration is not None:
+        # Shadow decision artifacts are dedicated to exactly one frozen candidate.
+        contaminated = contaminated or len(matches) != len(object_rows)
+    else:
+        # Champion decisions are intentionally one shared daily artifact.  Other
+        # rows are valid only when they belong to another exact champion series
+        # whose immutable forward coverage has already begun.
+        active_champions = {
+            champion
+            for champion, inception in champion_inceptions.items()
+            if session_date >= inception
+        }
+        observed_series = {
+            _SeriesKey(
+                strategy_id=str(row.get("strategy_id") or "").strip(),
+                strategy_version=str(row.get("strategy_version") or "").strip(),
+                execution_policy_version=str(
+                    row.get("execution_policy_version") or ""
+                ).strip(),
+                strategy_semantics_fingerprint=str(
+                    row.get("strategy_semantics_fingerprint") or ""
+                ).strip(),
+            )
+            for row in object_rows
+        }
+        has_shadow_lineage = any(
+            str(row.get("challenger_id") or "").strip()
+            or str(row.get("logic_artifact_sha256") or "").strip()
+            for row in object_rows
+        )
+        contaminated = (
+            contaminated
+            or not observed_series.issubset(active_champions)
+            or has_shadow_lineage
+        )
+    if contaminated:
         reasons.append(
             "strategy decision artifact contains unmatched or cross-series contamination"
         )
@@ -1208,7 +1290,10 @@ def _evaluate_registration(
     candidate_by_date = {row.session_date: row for row in candidate_evidence.eligible}
     aligned_dates = tuple(sorted(set(champion_by_date) & set(candidate_by_date)))
     expected_dates = tuple(
-        item for item in sorted(completed_reports) if frozen_after is None or item > frozen_after
+        sorted(
+            set(champion_evidence.expected_dates)
+            & set(candidate_evidence.expected_dates)
+        )
     )
     champion_aligned = tuple(champion_by_date[item] for item in aligned_dates)
     candidate_aligned = tuple(candidate_by_date[item] for item in aligned_dates)
