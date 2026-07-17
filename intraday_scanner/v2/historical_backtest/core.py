@@ -32,7 +32,11 @@ from intraday_scanner.v2.data import (
     validate_dataset,
     write_ohlcv_csv,
 )
-from intraday_scanner.v2.strategies.catalog import build_strategy_catalog, describe_strategy
+from intraday_scanner.v2.paper_ops.lifecycle_backtest import (
+    PaperOpsLifecycleBacktestEngine,
+)
+from intraday_scanner.v2.paper_ops.models import PaperOpsConfig
+from intraday_scanner.v2.strategies import build_strategy_catalog, describe_strategy
 from intraday_scanner.v2.strategies.models import StrategySpec
 
 BOUNDARY_TEXT = "Historical backtest only — not validated forward performance."
@@ -324,11 +328,24 @@ def run(
         include_champions=include_champions,
         include_benchmarks=include_benchmarks,
     )
-    engine = BacktestEngine()
     results: dict[str, BacktestResult] = {}
+    paper_strategies = tuple(
+        strategy
+        for strategy in selected
+        if strategy.status not in {"benchmark", "baseline"}
+    )
+    if paper_strategies:
+        results.update(
+            PaperOpsLifecycleBacktestEngine(
+                PaperOpsConfig(universe_symbols=dataset.symbols)
+            ).run(paper_strategies, dataset)
+        )
+    benchmark_engine = BacktestEngine()
     for strategy in selected:
-        result = engine.run(strategy, dataset)
-        results[strategy.strategy_id] = result
+        if strategy.strategy_id in results:
+            continue
+        results[strategy.strategy_id] = benchmark_engine.run(strategy, dataset)
+    for result in results.values():
         _write_backtest_result(paths, result)
     shadow = _load_shadow_challengers(repo_root=repo_root) if include_shadow_challengers else []
     if shadow:
@@ -354,6 +371,10 @@ def run(
         "asof": _resolve_asof(asof).isoformat(),
         "strategy_count": len(results),
         "strategies": sorted(results),
+        "execution_models": {
+            strategy_id: str(result.metrics.get("execution_model") or "legacy_backtest")
+            for strategy_id, result in sorted(results.items())
+        },
         "shadow_challenger_count": len(shadow),
         "include_champions": include_champions,
         "include_benchmarks": include_benchmarks,

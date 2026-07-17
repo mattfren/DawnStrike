@@ -13,6 +13,7 @@ from calendar import monthrange
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.paper_ops_root import production_paper_ops_root
 from intraday_scanner.v2.command_center_x2.adapters import build_story_bundle
 from intraday_scanner.v2.command_center_x2.story_models import to_plain
 from intraday_scanner.v2.command_center_x3.qa import REQUIRED_PAGE_NAMES, run_command_center_x3_qa
@@ -30,10 +31,10 @@ OUTPUT_DIRS = (
 )
 
 PRIMARY_NAV = (
-    ("Home", "pages/home.html"),
+    ("Top 5", "pages/home.html"),
     ("Calendar", "pages/calendar.html"),
+    ("Paper Book", "pages/trades.html"),
     ("Strategies", "pages/strategies.html"),
-    ("Trades", "pages/trades.html"),
     ("System", "pages/system.html"),
 )
 
@@ -67,9 +68,14 @@ def build_command_center_x3(
     *,
     repo_root: Path = Path("."),
     output_root: Path = Path("data/v2_command_center_x3"),
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
     _ensure_dirs(output_root)
-    data = _story_payload(repo_root=repo_root)
+    configured_paper_root = production_paper_ops_root(
+        repo_root=repo_root,
+        override=paper_ops_root,
+    )
+    data = _story_payload(repo_root=repo_root, paper_ops_root=configured_paper_root)
     _write_data(output_root=output_root, data=data)
     _write_assets(output_root)
     build_id = _stable_build_id(data)
@@ -91,6 +97,7 @@ def build_command_center_x3(
         "strategy_count": len(_strategy_groups(data)),
         "research_only": True,
         "live_trading_enabled": False,
+        "paper_ops_root": _relative_or_absolute(repo_root, configured_paper_root),
         "x2_preserved": (repo_root / "data/v2_command_center_x2/index.html").exists(),
         "pages": [path.as_posix() for path in sorted(set(pages), key=lambda item: item.as_posix())],
     }
@@ -161,11 +168,16 @@ def report_command_center_x3(
     *,
     repo_root: Path = Path("."),
     output_root: Path = Path("data/v2_command_center_x3"),
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
     _ensure_dirs(output_root)
     manifest = _read_json(output_root / "manifests/command_center_x3_manifest.json", {})
     if not manifest:
-        manifest = build_command_center_x3(repo_root=repo_root, output_root=output_root)
+        manifest = build_command_center_x3(
+            repo_root=repo_root,
+            output_root=output_root,
+            paper_ops_root=paper_ops_root,
+        )
     qa = qa_command_center_x3(repo_root=repo_root, output_root=output_root)
     data = _read_json(output_root / "manifests/story_bundle_x3.json", {})
     score = _quality_score(qa=qa, manifest=manifest, data=data)
@@ -209,10 +221,19 @@ def demo_command_center_x3(
     *,
     repo_root: Path = Path("."),
     output_root: Path = Path("data/v2_command_center_x3"),
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    manifest = build_command_center_x3(repo_root=repo_root, output_root=output_root)
+    manifest = build_command_center_x3(
+        repo_root=repo_root,
+        output_root=output_root,
+        paper_ops_root=paper_ops_root,
+    )
     qa = qa_command_center_x3(repo_root=repo_root, output_root=output_root)
-    report = report_command_center_x3(repo_root=repo_root, output_root=output_root)
+    report = report_command_center_x3(
+        repo_root=repo_root,
+        output_root=output_root,
+        paper_ops_root=paper_ops_root,
+    )
     verify = verify_command_center_x3(repo_root=repo_root, output_root=output_root)
     return {
         "schema_version": "v2.command_center_x3.demo.v1",
@@ -232,8 +253,14 @@ def _ensure_dirs(output_root: Path) -> None:
         (output_root / dirname).mkdir(parents=True, exist_ok=True)
 
 
-def _story_payload(*, repo_root: Path) -> dict[str, Any]:
-    data = to_plain(build_story_bundle(repo_root=repo_root))
+def _story_payload(
+    *,
+    repo_root: Path,
+    paper_ops_root: str | Path | None = None,
+) -> dict[str, Any]:
+    data = to_plain(
+        build_story_bundle(repo_root=repo_root, paper_ops_root=paper_ops_root)
+    )
     app = _dict(data.get("app"))
     latest = str(app.get("latest_run_date") or "unknown")
     app["generated_at"] = f"{latest}T00:00:00Z"
@@ -241,6 +268,7 @@ def _story_payload(*, repo_root: Path) -> dict[str, Any]:
     app["plain_language"] = True
     data["app"] = app
     data["day_trade"] = _day_trade_payload(repo_root)
+    data["watchlist"] = _alphaops_watchlist_payload(repo_root)
     data["copy_translations"] = COPY_TRANSLATIONS
     return data
 
@@ -253,6 +281,7 @@ def _write_data(*, output_root: Path, data: dict[str, Any]) -> None:
     _write_json(data_dir / "strategies.json", data.get("strategies", []))
     _write_json(data_dir / "no_picks.json", data.get("no_picks", {}))
     _write_json(data_dir / "day_trade.json", data.get("day_trade", {}))
+    _write_json(data_dir / "watchlist.json", data.get("watchlist", {}))
     _write_json(data_dir / "system.json", _system_payload(data))
     _write_json(output_root / "manifests/story_bundle_x3.json", data)
 
@@ -272,6 +301,53 @@ def _day_trade_payload(repo_root: Path) -> dict[str, Any]:
         "refinement_eval": eval_payload if isinstance(eval_payload, dict) else {},
         "trades": trades,
     }
+
+
+def _alphaops_watchlist_payload(repo_root: Path) -> dict[str, Any]:
+    signal_path = repo_root / "outputs/alpha_cycle/alpha_signals.json"
+    rows = _alphaops_signal_rows(signal_path)
+    source = "outputs/alpha_cycle/alpha_signals.json"
+    if not rows:
+        source = "outputs/alpha_cycle/scan/ranked_candidates.csv"
+        rows = _read_csv_rows(repo_root / source)
+    top = rows[:5]
+    latest = "n/a"
+    if top:
+        latest = top[0].get("as_of_timestamp") or top[0].get("imported_at") or "n/a"
+    return {
+        "source": source,
+        "latest_as_of": latest,
+        "count": len(rows),
+        "top_five": [
+            {
+                "rank": row.get("rank", ""),
+                "ticker": row.get("ticker", ""),
+                "company": row.get("company", ""),
+                "score": row.get("total_score") or row.get("score", ""),
+                "gap_pct": row.get("gap_pct", ""),
+                "gate": row.get("alert_gate_status") or row.get("data_quality_label") or row.get("classification") or "n/a",
+                "watch": row.get("entry_trigger") or row.get("breakout_trigger", ""),
+                "target": row.get("target_1") or row.get("first_target", ""),
+                "failed_below": row.get("invalidation") or row.get("invalidation_level", ""),
+                "reward_risk": row.get("reward_risk_ratio") or row.get("planned_r_multiple", ""),
+                "source_kind": row.get("data_source_kind") or row.get("source", ""),
+                "next": row.get("confirmation_needed") or row.get("action") or "Wait for trigger",
+            }
+            for row in top
+        ],
+    }
+
+
+def _alphaops_signal_rows(path: Path) -> list[dict[str, Any]]:
+    payload = _read_json(path, [])
+    if isinstance(payload, dict):
+        for key in ("signals", "top_signals", "candidates", "items"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    rows = [dict(_dict(row)) for row in _list(payload)]
+    rows.sort(key=lambda row: _int(row.get("rank")) or 9999)
+    return rows
 
 
 def _render_primary_pages(*, output_root: Path, data: dict[str, Any], build_id: str) -> list[Path]:
@@ -334,31 +410,29 @@ def _write_page(path: Path, title: str, body: str, data: dict[str, Any], build_i
 
 
 def _layout(*, title: str, body: str, data: dict[str, Any], build_id: str, rel_assets: str, path: Path) -> str:
-    app = _dict(data.get("app"))
     nav = _nav(path)
-    latest = _esc(str(app.get("latest_run_date", "unknown")))
+    status_chips = _layout_status_chips(data)
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dawnstrike X3 - {_esc(title)}</title>
+  <title>Dawnstrike Operator Dashboard - {_esc(title)}</title>
   <link rel="icon" href="{rel_assets}/x3_favicon.svg?v={_esc(build_id)}" type="image/svg+xml">
   <link rel="stylesheet" href="{rel_assets}/x3.css?v={_esc(build_id)}">
   <style>{_ops_inline_css()}</style>
 </head>
 <body>
 <aside class="side-shell">
-  <a class="brand" href="{_root_link(path, "index.html")}"><span>Dawnstrike</span><b>X3</b></a>
-  <p class="brand-subtitle">Simple day-trading cockpit</p>
+  <a class="brand" href="{_root_link(path, "index.html")}"><span>Dawnstrike</span><b>Operator</b></a>
+  <p class="brand-subtitle">Research terminal</p>
   <nav class="primary-nav" data-primary-nav>{nav}</nav>
-  <div class="safety-card"><strong>Research-only</strong><span>Live trading disabled. No strategy validated.</span></div>
+  <div class="safety-card"><strong>Boundary</strong><span>Research only. No broker execution. Missing values stay n/a.</span></div>
 </aside>
 <main>
   <header class="topbar">
-    <div><span>Latest artifact day</span><strong>{latest}</strong></div>
-    <div class="backend-pill" data-x3-backend-pill><span>Vercel backend</span><strong data-x3-backend-status>checking</strong></div>
-    <a class="toplink" href="{_root_link(path, "pages/system.html")}">System check</a>
+    <div class="page-title"><span>Operator Dashboard</span><strong>{_esc(title)}</strong></div>
+    <div class="status-chips">{status_chips}</div>
   </header>
   <section class="boundary-strip">
     <span>Research-only</span>
@@ -374,8 +448,28 @@ def _layout(*, title: str, body: str, data: dict[str, Any], build_id: str, rel_a
 """
 
 
+def _layout_status_chips(data: dict[str, Any]) -> str:
+    app = _dict(data.get("app"))
+    no_picks = _dict(data.get("no_picks"))
+    watchlist = _dict(data.get("watchlist"))
+    trades = _trade_rows(data)
+    latest = str(app.get("latest_run_date", "unknown"))
+    blocked = _int(no_picks.get("blocked_count"))
+    accepted = _int(no_picks.get("accepted_count"))
+    top_count = _int(watchlist.get("count"))
+    return "\n".join(
+        [
+            '<span class="chip chip-info">Deployment online</span>',
+            f'<span class="chip chip-warn">{blocked} blocked / {accepted} cleared</span>',
+            f'<span class="chip chip-plain">{len(trades)} paper rows</span>',
+            f'<span class="chip chip-plain">{_esc(latest)} scan</span>',
+            f'<span class="chip chip-plain">{top_count} candidates</span>',
+        ]
+    )
+
+
 def _ops_inline_css() -> str:
-    return """.backend-pill{border:1px solid #244054;border-radius:8px;background:#0b141d;padding:8px 10px;min-width:150px}.backend-pill span,.ops-grid span{display:block;color:#8da1b7;font-size:10px;text-transform:uppercase}.backend-pill strong{display:block;font-size:13px;color:#d8f7ff;margin-top:2px}.ops-panel{border:1px solid #244054;border-radius:8px;background:#0b111a;margin:16px 0;padding:16px;display:grid;grid-template-columns:minmax(0,1fr)minmax(420px,1.2fr);gap:16px;align-items:start}.ops-panel h2{font-size:22px;margin:0 0 8px}.ops-panel p{color:#c7d8e8;line-height:1.5;margin:0}.ops-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.ops-grid article{border:1px solid #213245;border-radius:8px;background:#0d131c;padding:12px;min-height:92px}.ops-grid strong{display:block;font-size:18px;margin:5px 0;overflow-wrap:anywhere}.ops-grid em{display:block;color:#8da1b7;font-size:12px;font-style:normal;line-height:1.35}.ops-grid [data-state=ok] strong,.backend-pill[data-state=ok] strong{color:#35e6a1}.ops-grid [data-state=warn] strong,.backend-pill[data-state=warn] strong{color:#f6c453}.ops-grid [data-state=bad] strong,.backend-pill[data-state=bad] strong{color:#ff5d74}@media(max-width:1000px){.ops-panel{grid-template-columns:1fr}.ops-grid{grid-template-columns:1fr}.backend-pill{width:100%}}"""
+    return """.ops-panel{border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:16px 0;padding:16px;display:grid;grid-template-columns:minmax(0,1fr)minmax(420px,1.2fr);gap:16px;align-items:start}.ops-panel h2{font-size:22px;margin:0 0 8px}.ops-panel p{color:var(--muted);line-height:1.5;margin:0}.ops-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.ops-grid article{border:1px solid var(--line);border-radius:8px;background:#fffdf7;padding:12px;min-height:92px}.ops-grid span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;font-weight:800}.ops-grid strong{display:block;font-size:18px;margin:5px 0;overflow-wrap:anywhere}.ops-grid em{display:block;color:var(--muted);font-size:12px;font-style:normal;line-height:1.35}.ops-grid [data-state=ok] strong{color:var(--accent)}.ops-grid [data-state=warn] strong{color:var(--amber)}.ops-grid [data-state=bad] strong{color:var(--red)}@media(max-width:1000px){.ops-panel{grid-template-columns:1fr}.ops-grid{grid-template-columns:1fr}}"""
 
 
 def _nav(path: Path) -> str:
@@ -391,47 +485,236 @@ def _nav(path: Path) -> str:
 def _home_body(data: dict[str, Any], *, actions_base: str) -> str:
     day = _latest_day(data)
     no_picks = _dict(data.get("no_picks"))
-    app = _dict(data.get("app"))
-    warnings = _list(app.get("warnings"))
     open_trades = len(_list(day.get("open_positions")))
     paper_trades = len(_list(day.get("paper_trades")))
     best = _best_day_trade(data)
-    hero = "Dawnstrike needs attention." if warnings else "Dawnstrike is watching the market."
-    if open_trades:
-        hero = "Dawnstrike has open paper trades."
-    elif no_picks.get("accepted_count") == 0:
-        hero = "Dawnstrike found no official day trades."
     risk = _risk_state(data)
     next_run = _next_run(data)
     learning = _learning_sentence(data)
     summary = _plain_home_summary(day=day, best=best, risk=risk, learning=learning)
+    current_state = _current_state_panel(data, day=day, risk=risk)
+    months = _list(data.get("months"))
+    latest_month = _dict(months[-1]) if months else {}
     return f"""
-<section class="hero story-hero">
+<section class="hero story-hero operator-hero">
   <div>
-    <p class="eyebrow">Home</p>
-    <h1>{_esc(hero)}</h1>
+    <p class="eyebrow">Trading Research Terminal</p>
+    <h1>Dawnstrike Operator Dashboard</h1>
     <p class="story-summary">{_esc(summary)}</p>
+    <div class="hero-actions"><a class="button-primary" href="{actions_base}home.html#top-five">Review Top 5</a><a class="button-secondary" href="{actions_base}trades.html">Open Paper Book</a><a class="button-secondary" href="{actions_base}system.html">Check Automation</a></div>
   </div>
-  <div class="hero-metric"><span>Today</span><strong>{_esc(str(day.get("date", "n/a")))}</strong><em>{_esc(str(day.get("headline", "No artifact headline found.")))}</em></div>
+  {current_state}
 </section>
-<section class="metric-strip">
-  <article><span>Today's result</span><strong class="{_tone_class(day.get("cumulative_returns", {}).get("daily_return_pct"))}">{_esc(str(_dict(day.get("cumulative_returns")).get("daily_return_pct", "n/a")))}</strong><em>{paper_trades} paper/shadow trade rows, {open_trades} open</em></article>
-  <article><span>Best day-trade strategy</span><strong>{_esc(str(best.get("strategy_name", "n/a")))}</strong><em>{_esc(str(best.get("interval", "n/a")))} / {_esc(_decimal_text(best.get("expectancy"), 3))}R expectancy</em></article>
-  <article><span>Risk state</span><strong>{_esc(risk["label"])}</strong><em>{_esc(risk["reason"])}</em></article>
-  <article><span>Next scheduled run</span><strong>{_esc(next_run["label"])}</strong><em>{_esc(next_run["time"])}</em></article>
-  <article><span>Learning note</span><strong>{_esc(learning["title"])}</strong><em>{_esc(learning["body"])}</em></article>
+<section class="metric-strip operator-kpis">
+  <article><span>AlphaOps Top 5</span><strong>{_esc(str(len(_list(_dict(data.get("watchlist")).get("top_five")))))} real tickers</strong><em>Latest scan { _esc(str(_dict(data.get("watchlist")).get("latest_as_of", "n/a"))) }</em></article>
+  <article><span>Risk Gate</span><strong>{_esc(str(no_picks.get("blocked_count", "n/a")))} blocked</strong><em>{_esc(risk["reason"])}</em></article>
+  <article><span>Paper Book</span><strong>{open_trades} open</strong><em>{len(_trade_rows(data))} paper rows available</em></article>
+  <article><span>Calendar</span><strong>{_esc(str(latest_month.get("no_trade_days", "n/a")))} no-trade</strong><em>{paper_trades} latest-day paper/shadow rows</em></article>
+  <article><span>Automation</span><strong>{_esc(next_run["label"])}</strong><em>{_esc(next_run["time"])}</em></article>
 </section>
-{_backend_panel()}
-<section class="home-grid">
-  <a class="big-card" href="{actions_base}calendar.html"><span>Performance calendar</span><strong>See the month story</strong><p>Daily return, trade count, warning, and no-trade states are easiest to understand by day.</p></a>
-  <a class="big-card" href="{actions_base}strategies.html"><span>Strategy report cards</span><strong>What is working?</strong><p>Day-trade research is separated from swing research and shadow challengers.</p></a>
-  <a class="big-card warning" href="{actions_base}no_picks.html"><span>No-picks explanation</span><strong>Why wait?</strong><p>Dawnstrike should explain why it did not force an official paper trade.</p></a>
+<section class="operator-grid">
+  <div class="operator-main">
+    {_watchlist_section(data)}
+    {_paper_ticket_section(data)}
+    {_calendar_preview_section(data, actions_base=actions_base)}
+    {_strategy_health_section(data)}
+    {_system_readiness_section(data)}
+  </div>
+  {_evidence_rail(data)}
 </section>
 <section class="trust-panel">
   <strong>Still untrusted</strong>
-  <p>No strategy is validated. Day-trade backtests are historical research. Shadow challengers are not official strategies. The public dashboard cannot trade, send Telegram messages, or mutate paper records. Authenticated Vercel functions can run the read-only scanner, provider, and Telegram intelligence workflows.</p>
+  <p>No strategy is validated. Day-trade backtests are historical research. Shadow challengers are not official strategies. The public dashboard cannot trade, send Telegram messages, or mutate paper records. Authenticated Vercel functions can run read-only scanner, provider, and Telegram intelligence workflows.</p>
 </section>
 """
+
+
+def _watchlist_section(data: dict[str, Any]) -> str:
+    watchlist = _dict(data.get("watchlist"))
+    rows = [_dict(row) for row in _list(watchlist.get("top_five"))]
+    if not rows:
+        return """
+<section class="story-section panel" id="top-five">
+  <h2>Top 5 Operator Watchlist</h2>
+  <article class="soft-card"><strong>No watchlist artifact found.</strong><p>Run AlphaOps to rebuild the current ranked candidates.</p></article>
+</section>
+"""
+    rows_html = "".join(_watchlist_card(row) for row in rows)
+    return f"""
+<section class="story-section panel" id="top-five">
+  <div class="section-heading"><div><p class="eyebrow">AlphaOps</p><h2>Top 5 Operator Watchlist</h2></div><span class="pill">{_esc(str(watchlist.get("count", "n/a")))} candidates</span></div>
+  <p class="operator-note">These are the latest ranked AlphaOps names. They are watch-only because every Top 5 row is currently blocked by gate checks; Dawnstrike is not placing or recommending live orders.</p>
+  <div class="data-table watchlist-table" role="table" aria-label="Top 5 operator watchlist">
+    <div class="data-row data-head" role="row"><span>Rank</span><span>Ticker</span><span>Score</span><span>Gate</span><span>Gap</span><span>Trigger</span><span>R/R</span></div>
+    {rows_html}
+  </div>
+  <p class="source-line">Source: {_esc(watchlist.get("source", "n/a"))} / latest {_esc(watchlist.get("latest_as_of", "n/a"))}</p>
+</section>
+"""
+
+
+def _watchlist_card(row: dict[str, Any]) -> str:
+    rank = str(row.get("rank") or "n/a")
+    ticker = str(row.get("ticker") or "n/a").upper()
+    company = str(row.get("company") or "Unknown company")
+    score = str(row.get("score") or "n/a")
+    gap = str(row.get("gap_pct") or "n/a")
+    gate = str(row.get("gate") or "n/a").upper()
+    watch = str(row.get("watch") or "n/a")
+    reward_risk = _decimal_text(row.get("reward_risk"), 2)
+    return f"""<div class="data-row" role="row" data-filter-item>
+  <span>{_esc(rank)}</span>
+  <span><b>{_esc(ticker)}</b><em>{_esc(company)}</em></span>
+  <span class="num">{_esc(score)}</span>
+  <span class="status-bad">{_esc(gate)}</span>
+  <span class="num">{_esc(gap)}%</span>
+  <span>{_esc(watch)}</span>
+  <span class="num">{_esc(reward_risk)}R</span>
+</div>"""
+
+
+def _watchlist_source_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"web_url", "web url", "url"}:
+        return "Ranked scan"
+    if not text:
+        return "Research"
+    return _translate_system_text(_humanize(text))
+
+
+def _current_state_panel(data: dict[str, Any], *, day: dict[str, Any], risk: dict[str, str]) -> str:
+    watchlist = _dict(data.get("watchlist"))
+    top = _dict(_list(watchlist.get("top_five"))[0]) if _list(watchlist.get("top_five")) else {}
+    return f"""<aside class="hero-state">
+  <span>Current state</span>
+  <dl>
+    <dt>Latest run</dt><dd>{_esc(str(day.get("date", "n/a")))}</dd>
+    <dt>Status</dt><dd>{_esc(risk.get("label", "n/a"))} / alerts blocked by gates</dd>
+    <dt>Top watch</dt><dd>{_esc(str(top.get("ticker", "n/a")).upper())} / {_esc(str(top.get("gate", "n/a")).upper())}</dd>
+  </dl>
+</aside>"""
+
+
+def _evidence_rail(data: dict[str, Any]) -> str:
+    app = _dict(data.get("app"))
+    refs = [_dict(row) for row in _list(app.get("source_refs"))]
+    watchlist = _dict(data.get("watchlist"))
+    month = _dict(_list(data.get("months"))[-1]) if _list(data.get("months")) else {}
+    automation = _dict(data.get("automation"))
+    cards = [
+        (
+            "AlphaOps scan",
+            watchlist.get("source", "outputs/alpha_cycle/alpha_signals.json"),
+            "local artifact",
+            f"{watchlist.get('count', 'n/a')} candidates; Top 5 restored as real symbols",
+        ),
+        (
+            "PaperOps",
+            "X3 compact paper evidence",
+            "official paper",
+            f"{len(_trade_rows(data))} paper rows available",
+        ),
+        (
+            "Calendar",
+            f"{month.get('month', 'n/a')} heatmap",
+            "artifact backed",
+            "n/a remains n/a on no-trade days",
+        ),
+        (
+            "Automation",
+            str(automation.get("latest_scheduler_status", "OMEGA scheduler")),
+            "status",
+            f"{len(_list(automation.get('task_statuses')))} scheduled task rows",
+        ),
+        (
+            "Boundary",
+            "research only",
+            "no execution",
+            "Static dashboard exposes no internal raw route archive",
+        ),
+    ]
+    rows = "".join(
+        f"""<article><span>{_esc(title)}</span><strong>{_esc(str(primary))}</strong><b>{_esc(str(badge))}</b><p>{_esc(str(detail))}</p></article>"""
+        for title, primary, badge, detail in cards
+    )
+    source_count = len([row for row in refs if row.get("exists") is True])
+    return f"""<aside class="evidence-rail">
+  <p class="eyebrow">Evidence</p>
+  <h2>Provenance Rail</h2>
+  {rows}
+  <p class="source-line">{source_count} local source references are linked in System.</p>
+</aside>"""
+
+
+def _paper_ticket_section(data: dict[str, Any]) -> str:
+    trade = _trade_rows(data)[0] if _trade_rows(data) else {}
+    if not trade:
+        return """<section class="story-section panel"><div class="section-heading"><div><p class="eyebrow">PaperOps</p><h2>Current Paper Ticket</h2></div><span class="pill">n/a</span></div><article class="soft-card"><strong>No paper rows found.</strong><p>Paper Book has no available rows in the current artifacts.</p></article></section>"""
+    return f"""<section class="story-section panel">
+  <div class="section-heading"><div><p class="eyebrow">PaperOps</p><h2>Current Paper Ticket</h2></div><span class="pill">Official paper evidence</span></div>
+  <article class="ticket-card">
+    <div><span>{_esc(str(trade.get("session_date", "n/a")))}</span><strong>{_esc(str(trade.get("symbol", "n/a")).upper())}</strong><b>official paper evidence</b></div>
+    <dl>
+      <dt>Strategy</dt><dd>{_esc(_strategy_label(trade.get("strategy_id")))}</dd>
+      <dt>Direction</dt><dd>{_esc(str(trade.get("direction", "n/a")))}</dd>
+      <dt>Entry</dt><dd>{_esc(str(trade.get("entry_price", "n/a")))}</dd>
+      <dt>Stop</dt><dd>{_esc(str(trade.get("stop", "n/a")))}</dd>
+      <dt>Target</dt><dd>{_esc(str(trade.get("target", "n/a")))}</dd>
+      <dt>R</dt><dd>{_esc(_decimal_text(trade.get("r_multiple"), 2))}</dd>
+    </dl>
+  </article>
+</section>"""
+
+
+def _calendar_preview_section(data: dict[str, Any], *, actions_base: str) -> str:
+    months = [_dict(row) for row in _list(data.get("months"))]
+    current = months[-1] if months else {}
+    calendar = _calendar_grid(current, from_pages=True)
+    if actions_base == "pages/":
+        calendar = calendar.replace('href="../days/', 'href="days/')
+    return f"""<section class="story-section panel">
+  <div class="section-heading"><div><p class="eyebrow">Calendar</p><h2>Paper Calendar</h2></div><a class="pill link-pill" href="{actions_base}calendar.html">Open calendar</a></div>
+  {calendar}
+</section>"""
+
+
+def _strategy_health_section(data: dict[str, Any]) -> str:
+    rows = _day_trade_strategy_rows(data)[:7]
+    cards = "".join(
+        f"""<article class="strategy-card soft-card" data-filter-item>
+  <span>Strategy Evidence / Experimental</span>
+  <strong>{_esc(str(row.get("strategy_name") or _strategy_label(row.get("strategy_id"))))}</strong>
+  <div class="mini-metrics"><b>Trades {_esc(str(row.get("trade_count", "n/a")))}</b><b>Win {_esc(_percent_text(row.get("win_rate")))}</b><b>Return {_esc(_percent_text(row.get("total_return_pct")))}</b><b>Drawdown {_esc(_percent_text(row.get("max_drawdown_pct")))}</b></div>
+  <em>0% - not validated</em>
+</article>"""
+        for row in rows
+    )
+    return f"""<section class="story-section panel">
+  <div class="section-heading"><div><p class="eyebrow">Strategy Evidence</p><h2>Strategy Health</h2></div><span class="pill">Experimental</span></div>
+  <div class="card-grid strategy-grid">{cards or '<article class="soft-card"><strong>No strategy health rows found.</strong></article>'}</div>
+</section>"""
+
+
+def _system_readiness_section(data: dict[str, Any]) -> str:
+    automation = _dict(data.get("automation"))
+    flow = [
+        _dict(row)
+        for row in _list(data.get("system_flow"))
+        if isinstance(row, dict)
+    ]
+    task_rows = [_dict(row) for row in _list(automation.get("task_statuses"))[:4]]
+    flow_html = "".join(
+        f"""<article><strong>{_esc(_translate_system_text(str(row.get("name", "System"))))}</strong><p>{_esc(_translate_system_text(str(row.get("description", "No description."))))}</p><span class="pill">{_esc(str(row.get("status", "n/a")))}</span></article>"""
+        for row in flow[:10]
+    )
+    task_html = "".join(
+        f"""<article><strong>{_esc(str(row.get("task_name", "Scheduled task")))}</strong><p>Last {_esc(str(row.get("last_run_time", "n/a")))} / next {_esc(str(row.get("next_run_time", "n/a")))}</p><span class="pill">Ready result {_esc(str(row.get("last_result", "n/a")))}</span></article>"""
+        for row in task_rows
+    )
+    return f"""<section class="story-section panel">
+  <div class="section-heading"><div><p class="eyebrow">Automation</p><h2>System Readiness</h2></div><span class="pill">{_esc(str(automation.get("latest_scheduler_status", "artifact-linked")))}</span></div>
+  <div class="readiness-grid"><div class="readiness-list">{flow_html}</div><div class="readiness-tasks">{task_html}</div></div>
+</section>"""
 
 
 def _calendar_body(data: dict[str, Any]) -> str:
@@ -443,7 +726,7 @@ def _calendar_body(data: dict[str, Any]) -> str:
     )
     return f"""
 <section class="hero compact-hero">
-  <div><p class="eyebrow">Calendar</p><h1>Performance should be understood by day.</h1><p class="story-summary">The calendar is the primary product view: green days, red days, warnings, learning dots, no-trade states, and clickable day stories.</p></div>
+  <div><p class="eyebrow">Calendar</p><h1>Performance should be understood by day.</h1><p class="story-summary">The calendar is the primary product view: positive days, loss days, warnings, learning dots, no-trade states, and clickable day stories.</p></div>
 </section>
 {_month_summary_strip(current)}
 <section class="month-picker">{month_links or '<span class="muted">No month artifacts found.</span>'}</section>
@@ -554,7 +837,7 @@ def _trades_body(data: dict[str, Any]) -> str:
     cards = "".join(_trade_card(row) for row in rows[:160])
     return f"""
 <section class="hero compact-hero">
-  <div><p class="eyebrow">Trades</p><h1>Clean blotter with proof boundaries.</h1><p class="story-summary">Every card shows entry, exit, hold time, result R, and exit reason. The page is read-only, cannot trade, and does not fetch providers.</p></div>
+  <div><p class="eyebrow">Paper Trading</p><h1>Paper Book with proof boundaries.</h1><p class="story-summary">Every card shows entry, exit, hold time, result R, and exit reason. The page is read-only, cannot trade, and does not fetch providers.</p></div>
 </section>
 <section class="trade-filters">
   <input data-x3-search placeholder="Filter symbol, strategy, date, result">
@@ -629,7 +912,7 @@ def _month_summary_strip(month: dict[str, Any]) -> str:
 <section class="metric-strip">
   <article><span>Month return</span><strong class="{_tone_class(month.get("monthly_return_pct"))}">{_esc(str(month.get("monthly_return_pct", "n/a")))}</strong><em>Paper calendar</em></article>
   <article><span>Cumulative</span><strong>{_esc(str(month.get("cumulative_return_pct", "n/a")))}</strong><em>Running total</em></article>
-  <article><span>Best day</span><strong>{_esc(str(month.get("best_day", "n/a")))}</strong><em>Green days: {_esc(str(month.get("green_days", "n/a")))}</em></article>
+  <article><span>Best day</span><strong>{_esc(str(month.get("best_day", "n/a")))}</strong><em>Positive days: {_esc(str(month.get("green_days", "n/a")))}</em></article>
   <article><span>Worst day</span><strong>{_esc(str(month.get("worst_day", "n/a")))}</strong><em>Loss days: {_esc(str(month.get("red_days", "n/a")))}</em></article>
   <article><span>No-trade days</span><strong>{_esc(str(month.get("no_trade_days", "n/a")))}</strong><em>Waiting is allowed</em></article>
 </section>
@@ -957,29 +1240,35 @@ def _untrusted_items(data: dict[str, Any]) -> list[str]:
 def _write_assets(output_root: Path) -> None:
     assets = output_root / "assets"
     _write_json(assets / "x3_tokens.json", _design_tokens())
-    (assets / "x3.css").write_text(_clean_generated_text(_base_css()), encoding="utf-8", newline="\n")
+    (assets / "x3.css").write_text(_clean_generated_text(_x3_css()), encoding="utf-8", newline="\n")
     (assets / "x3.js").write_text(_base_js(), encoding="utf-8", newline="\n")
     (assets / "x3_favicon.svg").write_text(_favicon_svg(), encoding="utf-8", newline="\n")
 
 
 def _design_tokens() -> dict[str, Any]:
     return {
-        "surface": "#070a0f",
-        "panel": "#0d131c",
-        "panel_soft": "#101a25",
-        "line": "#213245",
-        "text": "#f1f7ff",
-        "muted": "#8da1b7",
-        "cyan": "#35d5ff",
-        "green": "#35e6a1",
-        "red": "#ff5d74",
-        "amber": "#f6c453",
+        "surface": "#fffdf7",
+        "panel": "#fbf8f0",
+        "panel_soft": "#eee9de",
+        "line": "#26362f",
+        "text": "#2e332f",
+        "muted": "#858c86",
+        "accent": "#405978",
+        "positive": "#315f86",
+        "red": "#b23b45",
+        "amber": "#a36f20",
         "radius": 8,
     }
 
 
 def _base_css() -> str:
-    return """ :root{--bg:#070a0f;--panel:#0d131c;--panel2:#101a25;--line:#213245;--text:#f1f7ff;--muted:#8da1b7;--cyan:#35d5ff;--green:#35e6a1;--red:#ff5d74;--amber:#f6c453;--shadow:0 20px 70px rgba(0,0,0,.35)}*{box-sizing:border-box}html{background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif;letter-spacing:0}body{margin:0;min-height:100vh;background:linear-gradient(180deg,#070a0f 0%,#09111a 100%);display:grid;grid-template-columns:236px minmax(0,1fr)}a{color:inherit}.side-shell{position:sticky;top:0;height:100vh;border-right:1px solid var(--line);background:#080d14;padding:22px 18px;display:flex;flex-direction:column;gap:18px}.brand{text-decoration:none;display:flex;align-items:baseline;gap:8px}.brand span{font-weight:800;font-size:18px}.brand b{color:var(--cyan);font-size:12px;border:1px solid #24556a;border-radius:999px;padding:2px 7px}.brand-subtitle{margin:0;color:var(--muted);font-size:12px}.primary-nav{display:grid;gap:7px}.primary-nav a{text-decoration:none;border:1px solid transparent;border-radius:8px;color:#c9d8e8;padding:10px 11px;font-size:14px}.primary-nav a.active,.primary-nav a:hover{border-color:#24556a;background:#0d1b25;color:var(--text)}.safety-card{margin-top:auto;border:1px solid #294054;border-radius:8px;background:#0b1620;padding:12px}.safety-card strong{display:block;color:var(--cyan);font-size:12px;text-transform:uppercase}.safety-card span{display:block;color:var(--muted);font-size:12px;margin-top:5px;line-height:1.4}main{min-width:0;padding:18px 28px 60px}.topbar{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:12px}.topbar span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase}.topbar strong{font-size:14px}.toplink{text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:#d8f7ff;background:#0d1b25}.boundary-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}.boundary-strip span{font-size:11px;color:#d8f7ff;border:1px solid #24556a;background:#0a1b25;border-radius:999px;padding:5px 9px}.hero{border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,#101a25 0%,#0b111a 62%,#0b1d22 100%);box-shadow:var(--shadow);padding:26px;margin-bottom:16px;display:grid;grid-template-columns:minmax(0,1fr)260px;gap:18px;align-items:center}.compact-hero{grid-template-columns:1fr}.eyebrow{color:var(--cyan);font-size:11px;text-transform:uppercase;font-weight:800;margin:0 0 8px}.hero h1{font-size:clamp(30px,4vw,58px);line-height:1.02;margin:0 0 10px}.compact-hero h1{font-size:clamp(28px,3vw,44px)}.story-summary{color:#c7d8e8;font-size:16px;line-height:1.55;margin:0;max-width:980px}.hero-metric{border:1px solid #244054;border-radius:8px;background:#0b141d;padding:16px}.hero-metric span,.metric-strip span,.soft-card span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase}.hero-metric strong{display:block;font-size:24px;margin:4px 0}.hero-metric em,.metric-strip em,.soft-card em{display:block;color:var(--muted);font-style:normal;font-size:12px;line-height:1.4}.metric-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:16px 0}.metric-strip article,.soft-card,.big-card,.trust-panel{border:1px solid var(--line);border-radius:8px;background:rgba(13,19,28,.92);padding:14px}.metric-strip strong{display:block;font-size:22px;margin:4px 0;overflow-wrap:anywhere}.home-grid,.card-grid,.split-story{display:grid;gap:12px}.home-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin:16px 0}.big-card{text-decoration:none;min-height:150px}.big-card strong,.soft-card strong{display:block;font-size:20px;margin:8px 0;color:var(--text)}.big-card p,.soft-card p,.story-section p,.trust-panel p{color:#c7d8e8;line-height:1.5;margin:0}.warning{border-color:#665127}.trust-panel{margin-top:16px}.story-section{margin-top:18px}.story-section h2,.split-story h2{font-size:20px;margin:0 0 10px}.split-story{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:18px}.split-story article{border:1px solid var(--line);border-radius:8px;background:#0d131c;padding:16px}.split-story li,.story-section li{color:#c7d8e8;margin:7px 0}.month-picker{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.month-pill,.drill-links a{border:1px solid var(--line);border-radius:8px;background:#0d1b25;color:#d8f7ff;text-decoration:none;padding:8px 10px}.calendar-shell{border:1px solid var(--line);border-radius:8px;background:#0b111a;padding:12px}.weekday-row,.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}.weekday-row span{color:var(--muted);font-size:11px;text-transform:uppercase;padding:4px}.calendar-pad{min-height:92px}.day-tile{min-height:112px;border:1px solid #24384b;border-radius:8px;background:#0d1520;text-decoration:none;padding:10px;display:grid;gap:5px}.day-tile:hover{border-color:var(--cyan)}.day-tile b{font-size:18px}.day-tile strong{font-size:18px}.day-tile span,.day-tile em{font-style:normal;color:var(--muted);font-size:12px}.dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:4px;background:var(--muted)}.dot.warn{background:var(--amber)}.dot.learn{background:var(--cyan)}.dot.quiet{background:#516273}.drill-links{display:flex;gap:8px;margin-top:14px}.strategy-toolbar,.trade-filters{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.strategy-toolbar button,.trade-filters input,.trade-filters select{border:1px solid var(--line);border-radius:8px;background:#0d1b25;color:var(--text);padding:9px 10px}.trade-filters input{min-width:280px}.strategy-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.trade-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.mini-metrics{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.mini-metrics b{border:1px solid #294054;border-radius:999px;background:#0b1a24;color:#d8f7ff;padding:4px 8px;font-size:11px}.return-positive{color:var(--green)!important}.return-negative{color:var(--red)!important}.return-flat,.return-na{color:var(--muted)!important}.raw-drawer,.advanced-drawer{margin-top:18px;border:1px solid var(--line);border-radius:8px;background:#0b111a;padding:12px}.raw-drawer summary,.advanced-drawer summary{cursor:pointer;color:var(--cyan);font-weight:800}.raw-list{display:grid;gap:8px;margin-top:12px}.raw-list div,.artifact-list a{border-top:1px solid var(--line);padding:8px 0;display:grid;gap:3px}.raw-list strong,.artifact-list strong{overflow-wrap:anywhere}.raw-list span,.artifact-list span{color:var(--muted);overflow-wrap:anywhere}.artifact-list a{text-decoration:none}.legacy-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.legacy-links a{border:1px solid var(--line);border-radius:8px;padding:8px;text-decoration:none;color:#d8f7ff}.muted{color:var(--muted)}@media(max-width:1000px){body{grid-template-columns:1fr}.side-shell{position:relative;height:auto}.primary-nav{grid-template-columns:repeat(5,minmax(0,1fr))}.hero,.metric-strip,.home-grid,.split-story,.strategy-grid,.trade-grid,.system-grid{grid-template-columns:1fr}.calendar-grid,.weekday-row{grid-template-columns:repeat(7,minmax(84px,1fr));overflow:auto}.topbar{display:grid}} """
+    return """
+:root{--bg:#f4f1ea;--paper:#fffdf7;--surface:#fbf8f0;--surface2:#eee9de;--line:#26362f;--line-soft:#d7d0c2;--text:#2e332f;--muted:#858c86;--accent:#405978;--accent-soft:#e8eef5;--positive:#315f86;--red:#b23b45;--amber:#a36f20;--shadow:0 22px 60px rgba(39,42,38,.18)}*{box-sizing:border-box}html{background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif;letter-spacing:0}body{margin:0;min-height:100vh;background:var(--bg);display:grid;grid-template-columns:220px minmax(0,1fr)}a{color:inherit}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #d6a756;outline-offset:3px}.side-shell{position:sticky;top:0;height:100vh;border-right:1px solid var(--line);background:#fbfaf5;padding:24px 18px;display:flex;flex-direction:column;gap:18px}.brand{text-decoration:none;display:grid;gap:5px}.brand span{font-weight:900;font-size:11px;text-transform:uppercase;color:var(--accent);letter-spacing:.04em}.brand b{font-size:23px;line-height:1.05;color:#8b918c}.brand-subtitle{margin:0;color:var(--muted);font-size:12px}.primary-nav{display:grid;gap:7px}.primary-nav a{text-decoration:none;border:1px solid var(--line);border-radius:6px;color:#6f776f;background:#fffdf7;padding:10px 11px;font-size:14px;font-weight:800}.primary-nav a.active,.primary-nav a:hover{border-color:var(--accent);background:#f1f4f7;color:var(--text)}.safety-card{margin-top:6px;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:12px}.safety-card strong{display:block;color:var(--accent);font-size:11px;text-transform:uppercase}.safety-card span{display:block;color:#555d57;font-size:12px;margin-top:6px;line-height:1.45}main{min-width:0;padding:0 24px 48px}.topbar{min-height:58px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:16px}.page-title span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;font-weight:900}.page-title strong{font-size:15px}.status-chips,.boundary-strip{display:flex;flex-wrap:wrap;gap:8px}.chip,.boundary-strip span,.pill{font-size:12px;font-weight:900;border:1px solid var(--line);background:var(--paper);border-radius:999px;padding:6px 10px;color:var(--text);text-decoration:none}.chip-info{border-color:#92a4b9;color:var(--accent);background:var(--accent-soft)}.chip-warn{border-color:#d4b16c;color:var(--amber);background:#fff7df}.boundary-strip{margin-bottom:16px}.boundary-strip span{font-size:11px;color:#555d57}.hero{border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,#fffdf7 0%,#f6f3eb 68%,#ebe3d4 100%);box-shadow:var(--shadow);padding:24px;margin-bottom:12px;display:grid;grid-template-columns:minmax(0,1fr)270px;gap:18px;align-items:stretch}.compact-hero{grid-template-columns:1fr}.eyebrow{color:var(--accent);font-size:11px;text-transform:uppercase;font-weight:900;margin:0 0 8px}.hero h1{font-size:clamp(34px,5vw,64px);line-height:.98;margin:0 0 12px;color:#9aa09a}.compact-hero h1{font-size:clamp(28px,3vw,44px)}.story-summary{color:#4f5751;font-size:16px;line-height:1.55;margin:0;max-width:1020px}.hero-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.button-primary,.button-secondary{border:1px solid var(--accent);border-radius:6px;padding:10px 12px;text-decoration:none;font-weight:900;background:#eef4f8;color:var(--accent)}.button-secondary{background:var(--paper);border-color:var(--line);color:#6a716b}.hero-state{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:16px}.hero-state span,.hero-state dt{font-size:11px;text-transform:uppercase;font-weight:900;color:var(--accent)}.hero-state dl{margin:12px 0 0}.hero-state dt{border-top:1px solid var(--line);padding-top:12px;color:#2e332f}.hero-state dd{margin:5px 0 12px;color:#8b918c;font-weight:900}.metric-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:12px 0}.metric-strip article,.soft-card,.big-card,.trust-panel,.panel{min-width:0;border:1px solid var(--line);border-radius:8px;background:rgba(255,253,247,.96);padding:14px}.metric-strip span,.soft-card span{display:block;color:var(--accent);font-size:11px;text-transform:uppercase;font-weight:900}.metric-strip strong{display:block;font-size:22px;margin:5px 0;color:#9aa09a;overflow-wrap:anywhere}.metric-strip em,.soft-card em{display:block;color:var(--muted);font-style:normal;font-size:12px;line-height:1.4}.operator-grid{min-width:0;display:grid;grid-template-columns:minmax(0,1fr)280px;gap:12px;align-items:start}.operator-main{min-width:0;display:grid;gap:12px}.story-section{margin-top:0}.section-heading{display:flex;justify-content:space-between;gap:12px;align-items:start;margin-bottom:12px}.section-heading h2,.story-section h2,.split-story h2{font-size:24px;line-height:1.05;margin:0;color:#9aa09a}.operator-note,.big-card p,.soft-card p,.story-section p,.trust-panel p{color:#5b625d;line-height:1.5;margin:0}.source-line{font-size:12px;color:var(--muted);margin-top:10px}.data-table{max-width:100%;min-width:0;border:1px solid var(--line);border-radius:8px;overflow-x:auto;overflow-y:hidden;background:var(--paper)}.data-row{display:grid;grid-template-columns:42px minmax(120px,1.5fr)70px 80px 70px minmax(92px,1fr)62px;gap:8px;align-items:center;border-top:1px solid var(--line);padding:10px 12px;font-size:12px}.data-row:first-child{border-top:0}.data-head{background:#f1ece0;text-transform:uppercase;font-size:10px;font-weight:900;color:#2e332f}.data-row b{display:block;color:#8b918c;font-size:17px}.data-row em{display:block;color:#2e332f;font-size:11px;font-style:normal;font-weight:800;line-height:1.25}.num{font-variant-numeric:tabular-nums}.status-bad,.return-negative{color:var(--red)!important;font-weight:900}.return-positive{color:var(--positive)!important}.return-flat,.return-na{color:var(--muted)!important}.evidence-rail{position:sticky;top:16px;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:14px;display:grid;gap:10px}.evidence-rail h2{font-size:24px;color:#9aa09a;margin:0}.evidence-rail article{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fffdf7}.evidence-rail span{font-size:11px;text-transform:uppercase;font-weight:900;color:var(--accent)}.evidence-rail strong{display:block;color:#9aa09a;margin:5px 0;overflow-wrap:anywhere}.evidence-rail b{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:10px;text-transform:uppercase}.evidence-rail p{font-size:12px;color:#59615c;line-height:1.45}.ticket-card{max-width:360px;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:14px}.ticket-card>div{display:flex;align-items:center;justify-content:space-between;gap:10px}.ticket-card span{font-size:12px;font-weight:900}.ticket-card strong{font-size:28px;color:#9aa09a}.ticket-card b{border:1px solid var(--line);border-radius:999px;padding:5px 8px;font-size:10px}.ticket-card dl,.hero-state dl{display:grid;gap:0}.ticket-card dt{font-size:11px;text-transform:uppercase;font-weight:900;border-top:1px solid var(--line);padding-top:12px}.ticket-card dd{margin:3px 0 10px;font-weight:900;color:var(--accent)}.home-grid,.card-grid,.split-story{display:grid;gap:12px}.home-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin:16px 0}.big-card{text-decoration:none;min-height:150px}.big-card strong,.soft-card strong{display:block;font-size:20px;margin:8px 0;color:var(--text)}.warning{border-color:#d4b16c}.trust-panel{margin-top:14px}.split-story{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:18px}.split-story article{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:16px}.split-story li,.story-section li{color:#5b625d;margin:7px 0}.month-picker{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.month-pill,.drill-links a{border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--accent);text-decoration:none;padding:8px 10px;font-weight:900}.calendar-shell{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#fbfaf5;padding:12px;overflow-x:auto;overflow-y:hidden}.weekday-row,.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}.weekday-row span{color:var(--muted);font-size:11px;text-transform:uppercase;padding:4px;font-weight:900}.calendar-pad{min-height:72px}.day-tile{min-height:90px;border:1px solid var(--line);border-radius:8px;background:var(--paper);text-decoration:none;padding:10px;display:grid;gap:4px}.day-tile:hover{background:#f4f7fa;border-color:var(--accent)}.day-tile b{font-size:18px}.day-tile strong{font-size:15px}.day-tile span,.day-tile em{font-style:normal;color:#59615c;font-size:12px}.dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:4px;background:var(--muted)}.dot.warn{background:var(--amber)}.dot.learn{background:var(--accent)}.dot.quiet{background:#b8b0a2}.drill-links{display:flex;gap:8px;margin-top:14px}.strategy-toolbar,.trade-filters{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.strategy-toolbar button,.trade-filters input,.trade-filters select{border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--text);padding:9px 10px}.trade-filters input{min-width:280px}.strategy-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.trade-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.strategy-card,.trade-card{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:14px;min-width:0}.strategy-card h3,.trade-card h3{font-size:20px;margin:0 0 6px;overflow-wrap:anywhere}.strategy-card p,.trade-card p{color:#5b625d;line-height:1.45;margin:0 0 8px;overflow-wrap:anywhere}.card-topline{display:flex;justify-content:space-between;gap:8px;align-items:center;color:var(--accent);font-size:11px;text-transform:uppercase;font-weight:900;margin-bottom:8px}.mini-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:10px 0}.mini-metrics b{border:1px solid var(--line);border-radius:7px;background:#fffdf7;color:#2e332f;padding:7px 8px;font-size:11px}.readiness-grid{display:grid;grid-template-columns:minmax(0,1.1fr)minmax(280px,.9fr);gap:10px}.readiness-list,.readiness-tasks{display:grid;gap:8px}.readiness-list article,.readiness-tasks article{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:12px;display:grid;grid-template-columns:150px minmax(0,1fr)auto;gap:10px;align-items:center}.readiness-tasks article{grid-template-columns:1fr}.readiness-list strong,.readiness-tasks strong{color:#9aa09a}.readiness-list p,.readiness-tasks p{font-size:12px;color:#4f5751}.raw-drawer,.advanced-drawer{margin-top:18px;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:12px}.raw-drawer summary,.advanced-drawer summary{cursor:pointer;color:var(--accent);font-weight:900}.raw-list{display:grid;gap:8px;margin-top:12px}.raw-list div,.artifact-list a{border-top:1px solid var(--line);padding:8px 0;display:grid;gap:3px}.raw-list strong,.artifact-list strong{overflow-wrap:anywhere}.raw-list span,.artifact-list span{color:var(--muted);overflow-wrap:anywhere}.artifact-list a{text-decoration:none}.legacy-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.legacy-links a{border:1px solid var(--line);border-radius:8px;padding:8px;text-decoration:none;color:var(--accent);font-weight:900}.muted{color:var(--muted)}@media(max-width:1200px){.operator-grid{grid-template-columns:1fr}.evidence-rail{position:relative;top:auto}.strategy-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.data-row{grid-template-columns:42px minmax(120px,1.4fr)70px 80px 70px minmax(90px,1fr)62px}}@media(max-width:900px){body{grid-template-columns:1fr}.side-shell{position:relative;height:auto}.primary-nav{grid-template-columns:repeat(5,minmax(0,1fr))}.topbar{align-items:flex-start;display:grid}.hero,.metric-strip,.home-grid,.split-story,.strategy-grid,.trade-grid,.system-grid,.readiness-grid{grid-template-columns:1fr}.calendar-grid,.weekday-row{grid-template-columns:repeat(7,minmax(84px,1fr))}.data-table{overflow-x:auto}.data-row{min-width:650px}.readiness-list article{grid-template-columns:1fr}.hero h1{font-size:40px}}@media(max-width:640px){main{padding:0 12px 36px}.side-shell{padding:16px 12px}.primary-nav{grid-template-columns:1fr}.hero{padding:18px}.metric-strip strong{font-size:19px}.section-heading{display:grid}.ticket-card{max-width:none}}
+"""
+
+
+def _x3_css() -> str:
+    return _base_css()
 
 
 def _base_js() -> str:
@@ -988,9 +1277,9 @@ def _base_js() -> str:
 
 def _favicon_svg() -> str:
     return """<svg viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="12" fill="#070a0f"/>
-  <path d="M12 40 L25 27 L34 34 L52 16" fill="none" stroke="#35d5ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="46" cy="42" r="8" fill="#35e6a1"/>
+  <rect width="64" height="64" rx="12" fill="#fffdf7"/>
+  <path d="M12 40 L25 27 L34 34 L52 16" fill="none" stroke="#405978" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="46" cy="42" r="8" fill="#a36f20"/>
 </svg>
 """
 
@@ -1207,6 +1496,13 @@ def _root_link(path: Path, href: str) -> str:
 
 def _relative(start: Path, target: Path) -> str:
     return Path(os.path.relpath(target, start)).as_posix()
+
+
+def _relative_or_absolute(repo_root: Path, target: Path) -> str:
+    try:
+        return target.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return target.resolve().as_posix()
 
 
 def _source_href(value: Any, *, start_dir: Path) -> str:

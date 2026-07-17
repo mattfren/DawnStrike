@@ -7,6 +7,7 @@ from typing import Any
 from intraday_scanner.v2.data import DEFAULT_YAHOO_CHART_SYMBOLS, MarketBar, MarketDataset
 from intraday_scanner.v2.data.yahoo_chart import YahooChartFetchResult
 from intraday_scanner.v2.historical_backtest import core
+from intraday_scanner.v2.strategies import build_strategy_catalog
 
 
 def test_six_month_historical_workflow_generates_safe_artifacts(
@@ -77,15 +78,16 @@ def test_six_month_historical_workflow_generates_safe_artifacts(
     assert imported["data_quality"]["accepted_start"] >= "2026-01-03"
     assert imported["data_quality"]["total_bars"] > 600
     assert snapshot["immutable_snapshot"] is True
-    assert champions["strategy_count"] == 9
+    official_strategy_count = len(build_strategy_catalog())
+    assert champions["strategy_count"] == official_strategy_count
     assert shadow["shadow_challenger_count"] == 2
-    assert comparison["comparison_rows"] == 11
+    assert comparison["comparison_rows"] == official_strategy_count + 2
     assert report["quality_score"] == 100
     assert verified["status"] == "passed"
     assert verified["final_status"] == "COMPLETE_WITH_DATA_LIMITATIONS"
 
     strategy_set = core._read_json(output_root / "reports/strategy_set.json", {})
-    assert strategy_set["strategy_count"] == 9
+    assert strategy_set["strategy_count"] == official_strategy_count
     assert strategy_set["shadow_challenger_count"] == 2
     assert all(
         row["validation_status"] == "not_validated_historical_backtest_only"

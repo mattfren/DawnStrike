@@ -5,8 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -23,10 +26,16 @@ from intraday_scanner.v2.data_truth.models import (
     ProviderDisagreement,
 )
 
+SNAPSHOT_ARTIFACT_SCHEMA_VERSION = "v2.data_truth_snapshot_artifacts.v1"
+SNAPSHOT_IDENTITY_SCHEMA_VERSION = "v2.data_truth_snapshot_identity.v1"
+DATA_TRUTH_MANIFEST_SCHEMA_VERSION = "v2.data_truth_manifest.v2"
+DATA_TRUTH_NORMALIZED_TIMEFRAME = "1d"
+
 
 @dataclass(frozen=True)
 class DataTruthPaths:
     root: Path
+    snapshots: Path
     raw: Path
     imports: Path
     normalized: Path
@@ -39,6 +48,7 @@ class DataTruthPaths:
     def create(cls, root: Path) -> DataTruthPaths:
         paths = cls(
             root=root,
+            snapshots=root / "snapshots",
             raw=root / "raw",
             imports=root / "imports",
             normalized=root / "normalized",
@@ -49,6 +59,7 @@ class DataTruthPaths:
         )
         for path in (
             paths.root,
+            paths.snapshots,
             paths.raw,
             paths.imports,
             paths.normalized,
@@ -69,6 +80,14 @@ class DataTruthBuildResult:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _CapturedArtifact:
+    logical_path: str
+    source_path: Path
+    content: bytes
+    sha256: str
+
+
 def build_data_truth_snapshot(
     *,
     as_of_date: date,
@@ -77,6 +96,7 @@ def build_data_truth_snapshot(
     source_csv: Path | None = None,
     raw_dir: Path | None = None,
     allow_fetch: bool = True,
+    symbols: tuple[str, ...] | None = None,
 ) -> DataTruthBuildResult:
     now = created_at or datetime.now(timezone.utc)
     paths = DataTruthPaths.create(output_root)
@@ -85,21 +105,16 @@ def build_data_truth_snapshot(
         source_csv=source_csv,
         raw_dir=raw_dir,
         allow_fetch=allow_fetch,
+        symbols=symbols,
     )
-    raw_hashes = _artifact_hashes(tuple(sorted(raw_dir.glob("*.json"))) + (source_csv,))
-    raw_dataset = load_ohlcv_csv(
-        source_csv,
-        dataset_id="public_yahoo_chart_2y_1d",
-        source_kind="public_yahoo_chart",
-        timeframe="1d",
-    )
+    source_artifacts = _capture_source_artifacts(source_csv=source_csv, raw_dir=raw_dir)
+    raw_dataset = _load_captured_source_dataset(source_artifacts[0])
     normalized, rejected_count, skipped_incomplete, normalization_warnings = _normalize_daily(
         raw_dataset,
         as_of_date=as_of_date,
         source_refs=source_refs,
     )
-    normalized_path = paths.normalized / "latest_ohlcv.csv"
-    write_ohlcv_csv(normalized, normalized_path)
+    normalized_bytes = _serialize_ohlcv(normalized)
     validation = validate_dataset(
         normalized,
         min_bars_per_symbol=120,
@@ -117,17 +132,60 @@ def build_data_truth_snapshot(
     )
     accepted_start, accepted_end = _date_range(normalized)
     requested_start, requested_end = _date_range(raw_dataset)
-    snapshot_id = f"datatruth_public_yahoo_chart_1d_{accepted_end.replace('-', '')}"
-    normalized_hash = _sha256(normalized_path)
+    manifest_requested_end = (
+        as_of_date.isoformat() if requested_end != "n/a" else requested_end
+    )
+    normalized_hash = _sha256_bytes(normalized_bytes)
+    snapshot_content_hash = _snapshot_content_hash(
+        provider_id="public_yahoo_chart",
+        timeframe=normalized.timeframe,
+        symbols=normalized.symbols,
+        requested_start=requested_start,
+        requested_end=manifest_requested_end,
+        accepted_start=accepted_start,
+        accepted_end=accepted_end,
+        normalized_hash=normalized_hash,
+        source_artifacts=source_artifacts,
+    )
+    snapshot_id = _snapshot_id(
+        provider_id="public_yahoo_chart",
+        timeframe=normalized.timeframe,
+        accepted_end=accepted_end,
+        content_hash=snapshot_content_hash,
+    )
+    snapshot_relative_path = f"snapshots/{snapshot_id}"
+    normalized_artifact_path = f"{snapshot_relative_path}/normalized/ohlcv.csv"
+    raw_artifact_paths = tuple(
+        f"{snapshot_relative_path}/{artifact.logical_path}" for artifact in source_artifacts
+    )
+    raw_hashes = {
+        durable_path: artifact.sha256
+        for durable_path, artifact in zip(
+            raw_artifact_paths,
+            source_artifacts,
+            strict=True,
+        )
+    }
+    source_url_or_reference = _durable_source_references(
+        source_refs,
+        source_artifacts=source_artifacts,
+        durable_paths=raw_artifact_paths,
+    )
+    snapshot_manifest_path = paths.snapshots / snapshot_id / "manifest.json"
+    manifest_created_at = _retained_manifest_created_at(
+        snapshot_manifest_path,
+        snapshot_id=snapshot_id,
+        fallback=now.isoformat(),
+    )
     manifest = DataTruthManifest(
         snapshot_id=snapshot_id,
-        created_at=now.isoformat(),
+        created_at=manifest_created_at,
         provider_id="public_yahoo_chart",
         provider_name="Yahoo Finance Chart API",
         symbols=normalized.symbols,
         timeframe=normalized.timeframe,
         requested_start=requested_start,
-        requested_end=as_of_date.isoformat() if requested_end != "n/a" else requested_end,
+        requested_end=manifest_requested_end,
         accepted_start=accepted_start,
         accepted_end=accepted_end,
         bar_count=raw_dataset.total_bars,
@@ -138,11 +196,31 @@ def build_data_truth_snapshot(
         warnings=warnings,
         raw_artifact_hashes=raw_hashes,
         normalized_artifact_hash=normalized_hash,
-        source_url_or_reference=source_refs,
+        source_url_or_reference=source_url_or_reference,
+        snapshot_relative_path=snapshot_relative_path,
+        normalized_artifact_path=normalized_artifact_path,
+        raw_artifact_paths=raw_artifact_paths,
+        snapshot_content_hash=snapshot_content_hash,
+        artifact_schema_version=SNAPSHOT_ARTIFACT_SCHEMA_VERSION,
         code_version="0.1.0",
+        schema_version=DATA_TRUTH_MANIFEST_SCHEMA_VERSION,
     )
-    _write_json(paths.manifests / f"{snapshot_id}.json", manifest.to_dict())
-    _write_json(paths.manifests / "latest.json", manifest.to_dict())
+    manifest = replace(
+        manifest,
+        manifest_payload_hash=_manifest_payload_hash(manifest.to_dict()),
+    )
+    _retain_immutable_snapshot(
+        paths=paths,
+        manifest=manifest,
+        normalized_bytes=normalized_bytes,
+        source_artifacts=source_artifacts,
+    )
+    _write_latest_aliases(
+        paths=paths,
+        manifest=manifest,
+        normalized_bytes=normalized_bytes,
+        source_artifacts=source_artifacts,
+    )
 
     reconciliation = DataTruthReconciliationReport(
         reconciliation_id=f"{snapshot_id}:reconciliation",
@@ -199,10 +277,13 @@ def build_data_truth_snapshot(
         paths.reports / "data_truth_summary.md",
         _summary_markdown(manifest, reconciliation),
     )
-    _copy_raw_artifacts(raw_dir, paths.raw)
+    retained_dataset, retained_manifest = load_datatruth_snapshot(
+        snapshot_id,
+        output_root,
+    )
     return DataTruthBuildResult(
-        dataset=normalized,
-        manifest=manifest,
+        dataset=retained_dataset,
+        manifest=retained_manifest,
         reconciliation=reconciliation,
         warnings=tuple(dict.fromkeys(warnings + normalization_warnings)),
     )
@@ -211,50 +292,654 @@ def build_data_truth_snapshot(
 def load_datatruth_dataset(
     *,
     output_root: Path = Path("data/v2_data_truth"),
+    snapshot_id: str | None = None,
 ) -> tuple[MarketDataset, DataTruthManifest]:
+    if snapshot_id is not None:
+        return load_datatruth_snapshot(snapshot_id, output_root)
     paths = DataTruthPaths.create(output_root)
     manifest_payload = json.loads((paths.manifests / "latest.json").read_text(encoding="utf-8"))
-    dataset = load_ohlcv_csv(
-        paths.normalized / "latest_ohlcv.csv",
-        dataset_id=str(manifest_payload["snapshot_id"]),
-        source_kind=str(manifest_payload["provider_id"]),
-        timeframe=str(manifest_payload["timeframe"]),
+    if not isinstance(manifest_payload, dict):
+        raise ValueError("DataTruth latest manifest must be a JSON object")
+    manifest = _manifest_from_payload(manifest_payload)
+    if manifest.schema_version == DATA_TRUTH_MANIFEST_SCHEMA_VERSION:
+        return load_datatruth_snapshot(manifest.snapshot_id, output_root)
+    latest_path = paths.normalized / "latest_ohlcv.csv"
+    if not latest_path.is_file():
+        raise FileNotFoundError(f"DataTruth latest normalized alias is missing: {latest_path}")
+    if _sha256(latest_path) != manifest.normalized_artifact_hash:
+        raise ValueError("DataTruth latest normalized alias hash does not match its manifest")
+    return _load_manifest_dataset(latest_path, manifest)
+
+
+def load_datatruth_snapshot(
+    snapshot_id: str,
+    output_root: Path = Path("data/v2_data_truth"),
+) -> tuple[MarketDataset, DataTruthManifest]:
+    """Load one immutable named snapshot after verifying every retained byte."""
+
+    manifest = verify_datatruth_snapshot(snapshot_id, output_root)
+    assert manifest.normalized_artifact_path is not None
+    normalized_path = _artifact_path(output_root, manifest.normalized_artifact_path)
+    return _load_manifest_dataset(normalized_path, manifest)
+
+
+def verify_datatruth_snapshot(
+    snapshot_id: str,
+    output_root: Path = Path("data/v2_data_truth"),
+) -> DataTruthManifest:
+    """Verify a named snapshot's manifest identity and immutable artifact bytes."""
+
+    snapshot_root = _named_snapshot_root(output_root, snapshot_id)
+    manifest_path = snapshot_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"DataTruth snapshot manifest is missing: {manifest_path}")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("DataTruth immutable manifest must be a JSON object")
+    manifest = _manifest_from_payload(payload)
+    if manifest.snapshot_id != snapshot_id:
+        raise ValueError("DataTruth immutable manifest snapshot identity mismatch")
+    if manifest.schema_version != DATA_TRUTH_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("DataTruth immutable manifest schema is unsupported")
+    if manifest.artifact_schema_version != SNAPSHOT_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("DataTruth immutable artifact schema is unsupported")
+    expected_snapshot_relative = f"snapshots/{snapshot_id}"
+    if manifest.snapshot_relative_path != expected_snapshot_relative:
+        raise ValueError("DataTruth immutable snapshot path does not match its identity")
+    expected_manifest_hash = _manifest_payload_hash(payload)
+    if manifest.manifest_payload_hash != expected_manifest_hash:
+        raise ValueError("DataTruth immutable manifest payload hash mismatch")
+    if not manifest.normalized_artifact_path:
+        raise ValueError("DataTruth immutable normalized artifact path is missing")
+    normalized_path = _artifact_path(output_root, manifest.normalized_artifact_path)
+    if not normalized_path.is_file():
+        raise FileNotFoundError(
+            f"DataTruth immutable normalized artifact is missing: {normalized_path}"
+        )
+    if _sha256(normalized_path) != manifest.normalized_artifact_hash:
+        raise ValueError("DataTruth immutable normalized artifact hash mismatch")
+    if set(manifest.raw_artifact_paths) != set(manifest.raw_artifact_hashes):
+        raise ValueError("DataTruth immutable raw artifact path/hash inventory mismatch")
+    logical_raw_hashes: list[tuple[str, str]] = []
+    snapshot_relative = Path(expected_snapshot_relative)
+    for relative_path in manifest.raw_artifact_paths:
+        artifact_path = _artifact_path(output_root, relative_path)
+        if not artifact_path.is_file():
+            raise FileNotFoundError(
+                f"DataTruth immutable source artifact is missing: {artifact_path}"
+            )
+        expected_hash = manifest.raw_artifact_hashes[relative_path]
+        if _sha256(artifact_path) != expected_hash:
+            raise ValueError(
+                f"DataTruth immutable source artifact hash mismatch: {relative_path}"
+            )
+        try:
+            logical_path = Path(relative_path).relative_to(snapshot_relative).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "DataTruth immutable source artifact is outside its snapshot directory"
+            ) from exc
+        logical_raw_hashes.append((logical_path, expected_hash))
+    recomputed_content_hash = _snapshot_content_hash_from_hashes(
+        provider_id=manifest.provider_id,
+        timeframe=manifest.timeframe,
+        symbols=manifest.symbols,
+        requested_start=manifest.requested_start,
+        requested_end=manifest.requested_end,
+        accepted_start=manifest.accepted_start,
+        accepted_end=manifest.accepted_end,
+        normalized_hash=manifest.normalized_artifact_hash,
+        source_artifact_hashes=tuple(logical_raw_hashes),
     )
-    manifest = DataTruthManifest(
-        snapshot_id=str(manifest_payload["snapshot_id"]),
-        created_at=str(manifest_payload["created_at"]),
-        provider_id=str(manifest_payload["provider_id"]),
-        provider_name=str(manifest_payload["provider_name"]),
-        symbols=tuple(str(item) for item in manifest_payload["symbols"]),
-        timeframe=str(manifest_payload["timeframe"]),
-        requested_start=str(manifest_payload["requested_start"]),
-        requested_end=str(manifest_payload["requested_end"]),
-        accepted_start=str(manifest_payload["accepted_start"]),
-        accepted_end=str(manifest_payload["accepted_end"]),
-        bar_count=int(manifest_payload["bar_count"]),
-        accepted_bar_count=int(manifest_payload["accepted_bar_count"]),
-        rejected_bar_count=int(manifest_payload["rejected_bar_count"]),
-        skipped_incomplete_bars=int(manifest_payload["skipped_incomplete_bars"]),
-        validation_status=str(manifest_payload["validation_status"]),
-        warnings=tuple(str(item) for item in manifest_payload["warnings"]),
-        raw_artifact_hashes=dict(manifest_payload["raw_artifact_hashes"]),
-        normalized_artifact_hash=str(manifest_payload["normalized_artifact_hash"]),
-        source_url_or_reference=tuple(
-            str(item) for item in manifest_payload["source_url_or_reference"]
+    if manifest.snapshot_content_hash != recomputed_content_hash:
+        raise ValueError("DataTruth immutable snapshot content hash mismatch")
+    if snapshot_id != _snapshot_id(
+        provider_id=manifest.provider_id,
+        timeframe=manifest.timeframe,
+        accepted_end=manifest.accepted_end,
+        content_hash=recomputed_content_hash,
+    ):
+        raise ValueError("DataTruth snapshot ID is not bound to retained artifact content")
+    expected_files = {
+        "manifest.json",
+        Path(manifest.normalized_artifact_path)
+        .relative_to(snapshot_relative)
+        .as_posix(),
+        *(
+            Path(path).relative_to(snapshot_relative).as_posix()
+            for path in manifest.raw_artifact_paths
         ),
-        code_version=manifest_payload.get("code_version"),
-        schema_version=str(manifest_payload["schema_version"]),
+    }
+    actual_files = {
+        path.relative_to(snapshot_root).as_posix()
+        for path in snapshot_root.rglob("*")
+        if path.is_file()
+    }
+    if actual_files != expected_files:
+        raise ValueError("DataTruth immutable snapshot contains undeclared or missing files")
+    return manifest
+
+
+def _capture_source_artifacts(
+    *,
+    source_csv: Path,
+    raw_dir: Path,
+) -> tuple[_CapturedArtifact, ...]:
+    if not source_csv.is_file():
+        raise FileNotFoundError(f"DataTruth source CSV is missing: {source_csv}")
+    candidates = [
+        ("source/source.csv", source_csv),
+        *(
+            (f"raw/{path.name}", path)
+            for path in sorted(raw_dir.glob("*.json"))
+            if path.is_file()
+        ),
+    ]
+    logical_paths = [logical_path for logical_path, _path in candidates]
+    if len(logical_paths) != len(set(logical_paths)):
+        raise ValueError("DataTruth source artifact names are not unique")
+    captured: list[_CapturedArtifact] = []
+    for logical_path, source_path in candidates:
+        content = source_path.read_bytes()
+        captured.append(
+            _CapturedArtifact(
+                logical_path=logical_path,
+                source_path=source_path,
+                content=content,
+                sha256=_sha256_bytes(content),
+            )
+        )
+    return tuple(captured)
+
+
+def _serialize_ohlcv(dataset: MarketDataset) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="dawnstrike_datatruth_") as directory:
+        path = Path(directory) / "ohlcv.csv"
+        write_ohlcv_csv(dataset, path)
+        return path.read_bytes()
+
+
+def _load_captured_source_dataset(artifact: _CapturedArtifact) -> MarketDataset:
+    if artifact.logical_path != "source/source.csv":
+        raise ValueError("DataTruth captured source CSV is missing from the artifact inventory")
+    with tempfile.TemporaryDirectory(prefix="dawnstrike_datatruth_source_") as directory:
+        path = Path(directory) / "source.csv"
+        path.write_bytes(artifact.content)
+        return load_ohlcv_csv(
+            path,
+            dataset_id="public_yahoo_chart_2y_1d",
+            source_kind="public_yahoo_chart",
+            timeframe="1d",
+        )
+
+
+def _snapshot_content_hash(
+    *,
+    provider_id: str,
+    timeframe: str,
+    symbols: tuple[str, ...],
+    requested_start: str,
+    requested_end: str,
+    accepted_start: str,
+    accepted_end: str,
+    normalized_hash: str,
+    source_artifacts: tuple[_CapturedArtifact, ...],
+) -> str:
+    return _snapshot_content_hash_from_hashes(
+        provider_id=provider_id,
+        timeframe=timeframe,
+        symbols=symbols,
+        requested_start=requested_start,
+        requested_end=requested_end,
+        accepted_start=accepted_start,
+        accepted_end=accepted_end,
+        normalized_hash=normalized_hash,
+        source_artifact_hashes=tuple(
+            (artifact.logical_path, artifact.sha256) for artifact in source_artifacts
+        ),
     )
-    dataset = MarketDataset(
-        dataset_id=dataset.dataset_id,
-        source_kind=dataset.source_kind,
-        timeframe=dataset.timeframe,
+
+
+def _snapshot_content_hash_from_hashes(
+    *,
+    provider_id: str,
+    timeframe: str,
+    symbols: tuple[str, ...],
+    requested_start: str,
+    requested_end: str,
+    accepted_start: str,
+    accepted_end: str,
+    normalized_hash: str,
+    source_artifact_hashes: tuple[tuple[str, str], ...],
+) -> str:
+    payload = {
+        "accepted_end": accepted_end,
+        "accepted_start": accepted_start,
+        "normalized_artifact": {
+            "path": "normalized/ohlcv.csv",
+            "sha256": normalized_hash,
+        },
+        "provider_id": provider_id,
+        "requested_end": requested_end,
+        "requested_start": requested_start,
+        "schema_version": SNAPSHOT_IDENTITY_SCHEMA_VERSION,
+        "source_artifacts": [
+            {"path": path, "sha256": artifact_hash}
+            for path, artifact_hash in source_artifact_hashes
+        ],
+        "symbols": list(symbols),
+        "timeframe": timeframe,
+    }
+    return _sha256_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _snapshot_id(
+    *,
+    provider_id: str,
+    timeframe: str,
+    accepted_end: str,
+    content_hash: str,
+) -> str:
+    provider_token = _identifier_token(provider_id)
+    timeframe_token = _identifier_token(timeframe)
+    accepted_token = (
+        accepted_end.replace("-", "") if accepted_end != "n/a" else "noaccepteddate"
+    )
+    return f"datatruth_{provider_token}_{timeframe_token}_{accepted_token}_{content_hash}"
+
+
+def _identifier_token(value: str) -> str:
+    token = "".join(character.lower() if character.isalnum() else "_" for character in value)
+    token = "_".join(part for part in token.split("_") if part)
+    if not token:
+        raise ValueError("DataTruth snapshot identity token must not be blank")
+    return token
+
+
+def _durable_source_references(
+    source_refs: tuple[str, ...],
+    *,
+    source_artifacts: tuple[_CapturedArtifact, ...],
+    durable_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    replacements: dict[str, str] = {}
+    for artifact, durable_path in zip(source_artifacts, durable_paths, strict=True):
+        for representation in (
+            str(artifact.source_path),
+            artifact.source_path.as_posix(),
+            str(artifact.source_path.resolve()),
+            artifact.source_path.resolve().as_posix(),
+        ):
+            replacements[representation] = durable_path
+    retained: list[str] = []
+    for reference in source_refs:
+        replacement = replacements.get(reference)
+        if replacement is None and "://" not in reference:
+            try:
+                replacement = replacements.get(str(Path(reference).resolve()))
+            except OSError:
+                replacement = None
+        retained.append(replacement or reference)
+    return tuple(dict.fromkeys(retained))
+
+
+def _retained_manifest_created_at(
+    manifest_path: Path,
+    *,
+    snapshot_id: str,
+    fallback: str,
+) -> str:
+    if not manifest_path.exists():
+        return fallback
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("DataTruth retained manifest must be a JSON object")
+    if str(payload.get("snapshot_id") or "") != snapshot_id:
+        raise ValueError("DataTruth retained manifest snapshot identity conflict")
+    created_at = str(payload.get("created_at") or "")
+    if not created_at:
+        raise ValueError("DataTruth retained manifest created_at is missing")
+    return created_at
+
+
+def _manifest_payload_hash(payload: dict[str, object]) -> str:
+    hash_payload = dict(payload)
+    hash_payload.pop("manifest_payload_hash", None)
+    return _sha256_bytes(
+        json.dumps(hash_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _retain_immutable_snapshot(
+    *,
+    paths: DataTruthPaths,
+    manifest: DataTruthManifest,
+    normalized_bytes: bytes,
+    source_artifacts: tuple[_CapturedArtifact, ...],
+) -> None:
+    if not manifest.normalized_artifact_path:
+        raise ValueError("DataTruth immutable normalized path is missing")
+    if not manifest.snapshot_relative_path:
+        raise ValueError("DataTruth immutable snapshot path is missing")
+    if len(source_artifacts) != len(manifest.raw_artifact_paths):
+        raise ValueError("DataTruth immutable source artifact inventory is incomplete")
+    snapshot_relative = Path(manifest.snapshot_relative_path)
+    try:
+        normalized_logical_path = (
+            Path(manifest.normalized_artifact_path)
+            .relative_to(snapshot_relative)
+            .as_posix()
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "DataTruth immutable normalized artifact is outside its snapshot"
+        ) from exc
+    expected_files: dict[str, bytes] = {normalized_logical_path: normalized_bytes}
+    for artifact, relative_path in zip(
+        source_artifacts,
+        manifest.raw_artifact_paths,
+        strict=True,
+    ):
+        try:
+            logical_path = Path(relative_path).relative_to(snapshot_relative).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "DataTruth immutable source artifact is outside its snapshot"
+            ) from exc
+        if logical_path != artifact.logical_path:
+            raise ValueError("DataTruth immutable source artifact path identity mismatch")
+        expected_files[logical_path] = artifact.content
+    manifest_bytes = _json_bytes(manifest.to_dict())
+    expected_files["manifest.json"] = manifest_bytes
+    snapshot_root = _named_snapshot_root(paths.root, manifest.snapshot_id)
+    _install_snapshot_directory(
+        snapshot_root=snapshot_root,
+        staging_parent=paths.snapshots,
+        expected_files=expected_files,
+        staging_token=str(manifest.snapshot_content_hash or manifest.snapshot_id)[-16:],
+    )
+    _write_immutable_bytes(paths.manifests / f"{manifest.snapshot_id}.json", manifest_bytes)
+    verified = verify_datatruth_snapshot(manifest.snapshot_id, paths.root)
+    if verified.to_dict() != manifest.to_dict():
+        raise ValueError("DataTruth retained manifest differs from the proposed snapshot")
+
+
+def _install_snapshot_directory(
+    *,
+    snapshot_root: Path,
+    staging_parent: Path,
+    expected_files: dict[str, bytes],
+    staging_token: str,
+) -> None:
+    if snapshot_root.exists():
+        _complete_or_verify_snapshot_directory(snapshot_root, expected_files)
+        return
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(
+        tempfile.mkdtemp(
+            dir=staging_parent,
+            prefix=f".{staging_token}.",
+            suffix=".staging",
+        )
+    )
+    try:
+        for relative_path, content in sorted(expected_files.items()):
+            _write_new_file(_snapshot_member_path(staging_root, relative_path), content)
+        _assert_snapshot_directory_bytes(staging_root, expected_files)
+        try:
+            staging_root.rename(snapshot_root)
+        except OSError:
+            if not snapshot_root.exists():
+                raise
+            _complete_or_verify_snapshot_directory(snapshot_root, expected_files)
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+
+
+def _complete_or_verify_snapshot_directory(
+    snapshot_root: Path,
+    expected_files: dict[str, bytes],
+) -> None:
+    if not snapshot_root.is_dir():
+        raise ValueError(f"DataTruth immutable snapshot path is not a directory: {snapshot_root}")
+    actual_files = _snapshot_directory_files(snapshot_root)
+    unexpected = set(actual_files) - set(expected_files)
+    if unexpected:
+        raise ValueError(
+            "DataTruth immutable snapshot contains undeclared files: "
+            + ", ".join(sorted(unexpected))
+        )
+    for relative_path, actual_path in actual_files.items():
+        if actual_path.read_bytes() != expected_files[relative_path]:
+            raise ValueError(f"DataTruth immutable artifact conflict: {actual_path}")
+    for relative_path in sorted(set(expected_files) - set(actual_files)):
+        _write_immutable_bytes(
+            _snapshot_member_path(snapshot_root, relative_path),
+            expected_files[relative_path],
+        )
+    _assert_snapshot_directory_bytes(snapshot_root, expected_files)
+
+
+def _assert_snapshot_directory_bytes(
+    snapshot_root: Path,
+    expected_files: dict[str, bytes],
+) -> None:
+    actual_files = _snapshot_directory_files(snapshot_root)
+    if set(actual_files) != set(expected_files):
+        raise ValueError("DataTruth snapshot staging inventory is incomplete")
+    for relative_path, actual_path in actual_files.items():
+        if actual_path.read_bytes() != expected_files[relative_path]:
+            raise ValueError(f"DataTruth snapshot staging byte mismatch: {relative_path}")
+
+
+def _snapshot_directory_files(snapshot_root: Path) -> dict[str, Path]:
+    return {
+        path.relative_to(snapshot_root).as_posix(): path
+        for path in snapshot_root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _snapshot_member_path(snapshot_root: Path, relative_path: str) -> Path:
+    candidate = (snapshot_root / relative_path).resolve()
+    try:
+        candidate.relative_to(snapshot_root.resolve())
+    except ValueError as exc:
+        raise ValueError("DataTruth snapshot member path escapes its directory") from exc
+    return candidate
+
+
+def _write_new_file(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _write_latest_aliases(
+    *,
+    paths: DataTruthPaths,
+    manifest: DataTruthManifest,
+    normalized_bytes: bytes,
+    source_artifacts: tuple[_CapturedArtifact, ...],
+) -> None:
+    _write_mutable_bytes(paths.normalized / "latest_ohlcv.csv", normalized_bytes)
+    _write_json(paths.manifests / "latest.json", manifest.to_dict())
+    for artifact in source_artifacts:
+        if artifact.logical_path.startswith("raw/"):
+            _write_mutable_bytes(paths.raw / Path(artifact.logical_path).name, artifact.content)
+
+
+def _write_immutable_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        if not path.is_file() or path.read_bytes() != content:
+            raise ValueError(f"DataTruth immutable artifact conflict: {path}") from None
+
+
+def _write_mutable_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(file_descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_with_retry(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _json_bytes(payload: object) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _named_snapshot_root(output_root: Path, snapshot_id: str) -> Path:
+    if not snapshot_id or Path(snapshot_id).name != snapshot_id:
+        raise ValueError("DataTruth snapshot ID is invalid")
+    snapshots_root = (output_root / "snapshots").resolve()
+    snapshot_root = (snapshots_root / snapshot_id).resolve()
+    try:
+        snapshot_root.relative_to(snapshots_root)
+    except ValueError as exc:
+        raise ValueError("DataTruth snapshot path escapes the configured root") from exc
+    return snapshot_root
+
+
+def _artifact_path(output_root: Path, relative_path: str) -> Path:
+    path = Path(relative_path)
+    if path.is_absolute():
+        raise ValueError("DataTruth artifact paths must be relative to the configured root")
+    root = output_root.resolve()
+    resolved = (root / path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("DataTruth artifact path escapes the configured root") from exc
+    return resolved
+
+
+def _manifest_from_payload(payload: dict[str, object]) -> DataTruthManifest:
+    raw_hashes_payload = payload.get("raw_artifact_hashes", {})
+    if not isinstance(raw_hashes_payload, dict):
+        raise ValueError("DataTruth manifest raw_artifact_hashes must be an object")
+    return DataTruthManifest(
+        snapshot_id=str(payload["snapshot_id"]),
+        created_at=str(payload["created_at"]),
+        provider_id=str(payload["provider_id"]),
+        provider_name=str(payload["provider_name"]),
+        symbols=tuple(str(item) for item in _payload_list(payload, "symbols")),
+        timeframe=str(payload["timeframe"]),
+        requested_start=str(payload["requested_start"]),
+        requested_end=str(payload["requested_end"]),
+        accepted_start=str(payload["accepted_start"]),
+        accepted_end=str(payload["accepted_end"]),
+        bar_count=_manifest_int(payload, "bar_count"),
+        accepted_bar_count=_manifest_int(payload, "accepted_bar_count"),
+        rejected_bar_count=_manifest_int(payload, "rejected_bar_count"),
+        skipped_incomplete_bars=_manifest_int(payload, "skipped_incomplete_bars"),
+        validation_status=str(payload["validation_status"]),
+        warnings=tuple(str(item) for item in _payload_list(payload, "warnings")),
+        raw_artifact_hashes={
+            str(path): str(artifact_hash)
+            for path, artifact_hash in raw_hashes_payload.items()
+        },
+        normalized_artifact_hash=str(payload["normalized_artifact_hash"]),
+        source_url_or_reference=tuple(
+            str(item) for item in _payload_list(payload, "source_url_or_reference")
+        ),
+        snapshot_relative_path=_optional_manifest_string(payload, "snapshot_relative_path"),
+        normalized_artifact_path=_optional_manifest_string(
+            payload,
+            "normalized_artifact_path",
+        ),
+        raw_artifact_paths=tuple(
+            str(item) for item in _payload_list(payload, "raw_artifact_paths", required=False)
+        ),
+        snapshot_content_hash=_optional_manifest_string(payload, "snapshot_content_hash"),
+        manifest_payload_hash=_optional_manifest_string(payload, "manifest_payload_hash"),
+        artifact_schema_version=_optional_manifest_string(
+            payload,
+            "artifact_schema_version",
+        ),
+        code_version=_optional_manifest_string(payload, "code_version"),
+        schema_version=str(payload.get("schema_version") or "v2.data_truth_manifest.v1"),
+    )
+
+
+def _payload_list(
+    payload: dict[str, object],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> list[object]:
+    value = payload.get(field_name)
+    if value is None and not required:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"DataTruth manifest {field_name} must be an array")
+    return value
+
+
+def _optional_manifest_string(payload: dict[str, object], field_name: str) -> str | None:
+    value = payload.get(field_name)
+    return str(value) if value not in {None, ""} else None
+
+
+def _manifest_int(payload: dict[str, object], field_name: str) -> int:
+    value = payload.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise ValueError(f"DataTruth manifest {field_name} must be an integer")
+    return int(value)
+
+
+def _load_manifest_dataset(
+    normalized_path: Path,
+    manifest: DataTruthManifest,
+) -> tuple[MarketDataset, DataTruthManifest]:
+    dataset = load_ohlcv_csv(
+        normalized_path,
+        dataset_id=manifest.snapshot_id,
+        source_kind=manifest.provider_id,
+        timeframe=DATA_TRUTH_NORMALIZED_TIMEFRAME,
+    )
+    if dataset.timeframe != manifest.timeframe:
+        raise ValueError("DataTruth retained dataset timeframe does not match its manifest")
+    if dataset.symbols != manifest.symbols:
+        raise ValueError("DataTruth retained dataset symbols do not match its manifest")
+    if dataset.total_bars != manifest.accepted_bar_count:
+        raise ValueError("DataTruth retained dataset bar count does not match its manifest")
+    accepted_start, accepted_end = _date_range(dataset)
+    if accepted_start != manifest.accepted_start or accepted_end != manifest.accepted_end:
+        raise ValueError("DataTruth retained dataset accepted range does not match its manifest")
+    retained = MarketDataset(
+        dataset_id=manifest.snapshot_id,
+        source_kind=manifest.provider_id,
+        timeframe=manifest.timeframe,
         bars_by_symbol=dataset.bars_by_symbol,
-        source_path=str((paths.normalized / "latest_ohlcv.csv").as_posix()),
+        source_path=normalized_path.resolve().as_posix(),
         warnings=manifest.warnings,
         source_refs=manifest.source_url_or_reference,
     )
-    return dataset, manifest
+    return retained, manifest
 
 
 def reconcile_provider_datasets(
@@ -346,31 +1031,56 @@ def _resolve_public_yahoo_source(
     source_csv: Path | None,
     raw_dir: Path | None,
     allow_fetch: bool,
+    symbols: tuple[str, ...] | None,
 ) -> tuple[Path, Path, tuple[str, ...], tuple[str, ...]]:
     if source_csv is not None and raw_dir is not None:
         return source_csv, raw_dir, _source_refs_from_cache(source_csv, raw_dir), ()
-    alpha_cache = Path("data/v2_alpha_lab/fixtures/public_yahoo")
-    alpha_csv = alpha_cache / "public_yahoo_ohlcv.csv"
-    if alpha_csv.exists():
-        return alpha_csv, alpha_cache, _source_refs_from_cache(alpha_csv, alpha_cache), ()
     local_cache = paths.cache / "public_yahoo"
     local_csv = local_cache / "public_yahoo_ohlcv.csv"
-    if local_csv.exists():
-        return local_csv, local_cache, _source_refs_from_cache(local_csv, local_cache), ()
+    alpha_cache = Path("data/v2_alpha_lab/fixtures/public_yahoo")
+    alpha_csv = alpha_cache / "public_yahoo_ohlcv.csv"
+    fetch_warnings: tuple[str, ...] = ()
+    refresh_failure: str | None = None
     if allow_fetch:
         from intraday_scanner.public_data.yahoo_chart_fetcher import (
             fetch_yahoo_chart_daily_dataset,
         )
 
-        fetched = fetch_yahoo_chart_daily_dataset(cache_dir=local_cache)
-        if fetched.dataset.source_path:
-            fetched_csv = Path(fetched.dataset.source_path)
-            return (
-                fetched_csv,
-                local_cache,
-                fetched.dataset.source_refs,
-                fetched.warnings,
+        try:
+            fetched = (
+                fetch_yahoo_chart_daily_dataset(cache_dir=local_cache, symbols=symbols)
+                if symbols is not None
+                else fetch_yahoo_chart_daily_dataset(cache_dir=local_cache)
             )
+            fetch_warnings = tuple(fetched.warnings)
+            if fetched.dataset.source_path:
+                fetched_csv = Path(fetched.dataset.source_path)
+                if fetched.dataset.total_bars and fetched_csv.exists():
+                    return (
+                        fetched_csv,
+                        local_cache,
+                        fetched.dataset.source_refs,
+                        fetch_warnings,
+                    )
+            refresh_failure = "refresh returned no usable daily bars"
+        except (OSError, TimeoutError, TypeError, ValueError) as exc:
+            refresh_failure = f"{type(exc).__name__}: {exc}"
+
+    for cached_csv, cache_dir in ((local_csv, local_cache), (alpha_csv, alpha_cache)):
+        if not cached_csv.exists():
+            continue
+        fallback_warning: tuple[str, ...] = ()
+        if refresh_failure is not None:
+            fallback_warning = (
+                "public_yahoo_chart: refresh failed "
+                f"({refresh_failure}); using cached OHLCV from {cached_csv.as_posix()}",
+            )
+        return (
+            cached_csv,
+            cache_dir,
+            _source_refs_from_cache(cached_csv, cache_dir),
+            tuple(dict.fromkeys(fetch_warnings + fallback_warning)),
+        )
     raise FileNotFoundError("no cached public Yahoo OHLCV data was available")
 
 

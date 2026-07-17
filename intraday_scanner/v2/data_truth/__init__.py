@@ -5,7 +5,9 @@ from intraday_scanner.v2.data_truth.core import (
     DataTruthPaths,
     build_data_truth_snapshot,
     load_datatruth_dataset,
+    load_datatruth_snapshot,
     reconcile_provider_datasets,
+    verify_datatruth_snapshot,
 )
 from intraday_scanner.v2.data_truth.local_import import (
     LocalImportResult,
@@ -35,7 +37,9 @@ __all__ = [
     "build_data_truth_snapshot",
     "import_local_csv_provider",
     "load_datatruth_dataset",
+    "load_datatruth_snapshot",
     "reconcile_datasets_v2",
     "reconcile_provider_datasets",
+    "verify_datatruth_snapshot",
     "write_reconciliation_v2",
 ]

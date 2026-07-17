@@ -13,6 +13,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.dashboard.paper_ops_calendar_service import (
+    PaperOpsCalendarError,
+    load_paper_ops_calendar,
+)
+from intraday_scanner.paper_ops_root import production_paper_ops_root
 from intraday_scanner.v2.command_center_x2.story_models import (
     AppStoryModel,
     AutomationStoryModel,
@@ -32,9 +37,13 @@ from intraday_scanner.v2.command_center_x2.story_models import (
 MISSING = "n/a"
 
 
-def build_story_bundle(*, repo_root: Path = Path(".")) -> CommandCenterX2StoryBundle:
+def build_story_bundle(
+    *,
+    repo_root: Path = Path("."),
+    paper_ops_root: str | Path | None = None,
+) -> CommandCenterX2StoryBundle:
     """Build X2 story models from existing local artifacts only."""
-    ctx = _ArtifactContext(repo_root=repo_root)
+    ctx = _ArtifactContext(repo_root=repo_root, paper_ops_root=paper_ops_root)
     calendar_rows = _calendar_rows(ctx)
     latest_day = _latest_day(ctx, calendar_rows)
     strategy_models = _strategy_models(ctx, calendar_rows)
@@ -137,8 +146,9 @@ def write_story_models(
     *,
     output_root: Path,
     repo_root: Path = Path("."),
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    bundle = build_story_bundle(repo_root=repo_root)
+    bundle = build_story_bundle(repo_root=repo_root, paper_ops_root=paper_ops_root)
     data_dir = output_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     payload = to_plain(bundle)
@@ -158,8 +168,21 @@ def write_story_models(
 
 
 class _ArtifactContext:
-    def __init__(self, *, repo_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        repo_root: Path,
+        paper_ops_root: str | Path | None = None,
+    ) -> None:
         self.repo_root = repo_root
+        self.paper_ops_root = production_paper_ops_root(
+            repo_root=repo_root,
+            override=paper_ops_root,
+        )
+        try:
+            self.paper_calendar = load_paper_ops_calendar(self.paper_ops_root)
+        except (OSError, ValueError, PaperOpsCalendarError):
+            self.paper_calendar = {}
         self.sentinel = _read_json(repo_root / "data/v2_omega_sentinel/status/latest_status.json", {})
         self.scheduler = _read_json(repo_root / "data/v2_scheduler/status/latest_status.json", {})
         self.autonomous = _read_json(
@@ -187,13 +210,13 @@ class _ArtifactContext:
             _latest_file(repo_root / "data/v2_forward_evidence/frozen_picks", "*.json"), {}
         )
         self.pending_orders = _rows_from_payload(
-            _read_json(repo_root / "data/v2_paper_ops/state/pending_orders.json", [])
+            _read_json(self.paper_ops_root / "state/pending_orders.json", [])
         )
         self.open_positions = _rows_from_payload(
-            _read_json(repo_root / "data/v2_paper_ops/state/open_positions.json", [])
+            _read_json(self.paper_ops_root / "state/open_positions.json", [])
         )
         self.closed_trades = _rows_from_payload(
-            _read_json(repo_root / "data/v2_paper_ops/state/closed_trades.json", [])
+            _read_json(self.paper_ops_root / "state/closed_trades.json", [])
         )
         self.learning_verify = _read_json(
             repo_root / "data/v2_learning_foundry/reports/verify_latest.json", {}
@@ -225,24 +248,24 @@ class _ArtifactContext:
 
     def source_refs(self) -> list[SourceRef]:
         paths = [
-            "data/v2_forward_evidence/calendar/strategy_daily_returns.csv",
-            "data/v2_paper_ops/calendar/strategy_daily_returns.csv",
-            "data/v2_paper_ops/state/open_positions.json",
-            "data/v2_fill_truth/reports/filltruth_summary.json",
-            "data/v2_evidence_commit/reports/evidence_commit_summary.json",
-            "data/v2_learning_foundry/lessons",
-            "data/v2_market_masters/reports/report_latest.json",
-            "data/v2_autonomous_runner/status/latest_status.json",
-            "data/v2_telegram_intel/reports/verify_latest.json",
+            self.paper_ops_root / "calendar/strategy_daily_returns.csv",
+            self.paper_ops_root / "state/open_positions.json",
+            self.repo_root / "data/v2_fill_truth/reports/filltruth_summary.json",
+            self.repo_root / "data/v2_evidence_commit/reports/evidence_commit_summary.json",
+            self.repo_root / "data/v2_learning_foundry/lessons",
+            self.repo_root / "data/v2_market_masters/reports/report_latest.json",
+            self.repo_root / "data/v2_autonomous_runner/status/latest_status.json",
+            self.repo_root / "data/v2_telegram_intel/reports/verify_latest.json",
         ]
-        return [_source_ref(self.repo_root, path) for path in paths]
+        return [_source_ref_path(self.repo_root, path) for path in paths]
 
 
 def _calendar_rows(ctx: _ArtifactContext) -> list[dict[str, str]]:
-    preferred = ctx.repo_root / "data/v2_forward_evidence/calendar/strategy_daily_returns.csv"
-    fallback = ctx.repo_root / "data/v2_paper_ops/calendar/strategy_daily_returns.csv"
-    rows = _read_csv(preferred)
-    return rows if rows else _read_csv(fallback)
+    rows = _read_csv(ctx.paper_ops_root / "calendar/strategy_daily_returns.csv")
+    # Operator performance surfaces are forward-only. Replay/demo evidence
+    # remains in the canonical ledger and reports, but is never blended into a
+    # live return tile or silently relabeled as forward evidence.
+    return [row for row in rows if str(row.get("mode") or "").lower() == "forward"]
 
 
 def _latest_day(ctx: _ArtifactContext, calendar_rows: list[dict[str, str]]) -> str:
@@ -292,6 +315,7 @@ def _strategy_models(
                 daily_series=[
                     {
                         "date": str(row.get("date") or MISSING),
+                        "mode": str(row.get("mode") or MISSING),
                         "daily_return_pct": _fmt_pct(row.get("daily_return_pct")),
                         "cumulative_return_pct": _fmt_pct(row.get("cumulative_return_pct")),
                     }
@@ -299,6 +323,38 @@ def _strategy_models(
                 ],
             )
         )
+    existing_strategy_ids = {model.strategy_id for model in models}
+    for row in _rows_from_payload(ctx.paper_calendar.get("official_series", [])):
+        strategy_id = _text(row.get("strategy_id"), "unknown")
+        if strategy_id in existing_strategy_ids:
+            continue
+        inception = _text(row.get("registry_inception_date"), MISSING)
+        models.append(
+            StrategyStoryModel(
+                strategy_id=strategy_id,
+                strategy_name=_text(row.get("strategy_label"), _title(strategy_id)),
+                role="registered_forward_candidate",
+                status="registered / not yet eligible",
+                daily_return_pct=MISSING,
+                cumulative_return_pct=MISSING,
+                win_rate=MISSING,
+                average_r=MISSING,
+                expectancy=MISSING,
+                drawdown=MISSING,
+                trade_count=0,
+                forward_days=0,
+                validation_progress="0% - forward evidence not started",
+                latest_signal_state=f"Forward observation begins {inception}.",
+                latest_paper_state="No eligible forward session yet.",
+                latest_learning_notes="No forward outcome exists to learn from.",
+                evidence_quality="registered exact lineage; no eligible return",
+                warnings=[
+                    "Return is N/A until the first eligible forward session; not validated."
+                ],
+                daily_series=[],
+            )
+        )
+        existing_strategy_ids.add(strategy_id)
     for row in _rows_from_payload(ctx.learning_challengers)[:20]:
         strategy_id = _text(
             row.get("strategy_id") or row.get("challenger_id") or row.get("id") or row.get("name"),
@@ -1080,9 +1136,12 @@ def _system_description(name: str) -> str:
     return descriptions[name]
 
 
-def _source_ref(repo_root: Path, raw: str) -> SourceRef:
-    path = repo_root / raw
-    return SourceRef(path=raw, exists=path.exists(), kind="directory" if path.is_dir() else "file")
+def _source_ref_path(repo_root: Path, path: Path) -> SourceRef:
+    return SourceRef(
+        path=_rel(repo_root, path),
+        exists=path.exists(),
+        kind="directory" if path.is_dir() else "file",
+    )
 
 
 def _safe_link(path: str) -> str:

@@ -4,6 +4,10 @@ import ast
 import json
 from pathlib import Path
 
+import pytest
+
+from intraday_scanner.paper_ops_root import PAPER_OPS_ROOT_ENV
+from intraday_scanner.v2.command_center_x2 import adapters
 from intraday_scanner.v2.command_center_x2.adapters import build_story_bundle
 from intraday_scanner.v2.command_center_x2.core import (
     build_command_center_x2,
@@ -27,6 +31,40 @@ def test_story_bundle_handles_sparse_artifacts_without_fabrication(tmp_path: Pat
     assert bundle.no_picks.top_reasons
     assert bundle.automation.autonomous_runner_status == "missing"
     assert all(model.cumulative_return_pct == "n/a" for model in bundle.strategies)
+
+
+def test_story_bundle_shows_registered_strategy_before_first_eligible_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        adapters,
+        "load_paper_ops_calendar",
+        lambda _root: {
+            "official_series": [
+                {
+                    "strategy_id": "gap_up_continuation_atr",
+                    "strategy_label": "Gap-Up Continuation (ATR)",
+                    "strategy_version": "v1.0",
+                    "execution_policy_version": "paper-policy-v2",
+                    "strategy_semantics_fingerprint": "a" * 64,
+                    "registry_inception_date": "2026-07-17",
+                }
+            ]
+        },
+    )
+
+    bundle = build_story_bundle(repo_root=tmp_path)
+
+    model = next(
+        item
+        for item in bundle.strategies
+        if item.strategy_id == "gap_up_continuation_atr"
+    )
+    assert model.status == "registered / not yet eligible"
+    assert model.daily_return_pct == "n/a"
+    assert model.forward_days == 0
+    assert "2026-07-17" in model.latest_signal_state
 
 
 def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> None:
@@ -161,7 +199,13 @@ def test_production_launcher_promotes_canonical_operator_dashboard_without_live_
     assert not any(term in script for term in forbidden)
 
 
-def test_calendar_model_keeps_source_audit_and_no_fake_missing_values(tmp_path: Path) -> None:
+def test_calendar_model_keeps_source_audit_and_no_fake_missing_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Use the populated v1 tree as an explicit fixture. The production default
+    # can honestly have zero forward rows before its first scheduled close.
+    monkeypatch.setenv(PAPER_OPS_ROOT_ENV, str(REPO_ROOT / "data/v2_paper_ops"))
     output_root = tmp_path / "command_center_x2"
     build_command_center_x2(repo_root=REPO_ROOT, output_root=output_root)
 

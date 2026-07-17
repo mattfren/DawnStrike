@@ -14,6 +14,29 @@ class PaperDataMode(str, Enum):
     SYNTHETIC = "synthetic"
 
 
+PAPER_EXECUTION_POLICY_VERSION = "paperops_daily_next_open_risk_v2"
+DEFAULT_PAPEROPS_UNIVERSE: tuple[str, ...] = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA",
+    "AMD",
+    "AVGO",
+    "JPM",
+    "XOM",
+    "UNH",
+    "COST",
+    "WMT",
+)
+
+
 class PaperRunMode(str, Enum):
     FORWARD = "forward"
     REPLAY = "replay"
@@ -66,13 +89,17 @@ class PaperOpsConfig:
     risk_per_trade_pct: float = 0.005
     max_daily_loss_pct: float = 0.015
     max_open_risk_pct: float = 0.02
+    max_gross_exposure_pct: float = 1.0
     max_concurrent_positions: int = 3
     allow_experimental: bool = True
     allow_single_provider_forward: bool = True
     min_reward_risk: float = 1.0
     fee_bps: float = 1.0
     slippage_bps: float = 5.0
-    schema_version: str = "v2.paper_ops_config.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    universe_id: str = "us_liquid_daily_v1"
+    universe_symbols: tuple[str, ...] = DEFAULT_PAPEROPS_UNIVERSE
+    schema_version: str = "v2.paper_ops_config.v4"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -114,7 +141,8 @@ class PaperStrategyConfig:
     allow_entries: bool
     risk_per_trade_pct: float
     max_concurrent_positions: int
-    schema_version: str = "v2.paper_strategy_config.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    schema_version: str = "v2.paper_strategy_config.v2"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -143,7 +171,9 @@ class PaperPick:
     reason: str
     evidence: tuple[str, ...]
     warnings: tuple[str, ...] = ()
-    schema_version: str = "v2.paper_pick.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
+    schema_version: str = "v2.paper_pick.v2"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -175,8 +205,10 @@ class PaperOrder:
     notional_exposure: float
     max_loss_estimate: float
     strategy_equity_basis: float
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
     warnings: tuple[str, ...] = ()
-    schema_version: str = "v2.paper_order.v1"
+    schema_version: str = "v2.paper_order.v2"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -189,13 +221,16 @@ class PaperFill:
     run_id: str
     mode: PaperRunMode
     strategy_id: str
+    strategy_version: str
     symbol: str
     fill_time: str
     fill_price: float
     quantity: int
     fee: float
     slippage: float
-    schema_version: str = "v2.paper_fill.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
+    schema_version: str = "v2.paper_fill.v3"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -216,9 +251,12 @@ class PaperPosition:
     stop: float
     target: float | None
     last_mark_price: float
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
+    entry_fee: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
-    schema_version: str = "v2.paper_position.v1"
+    schema_version: str = "v2.paper_position.v2"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -231,6 +269,7 @@ class PaperClose:
     run_id: str
     mode: PaperRunMode
     strategy_id: str
+    strategy_version: str
     symbol: str
     close_time: str
     close_price: float
@@ -240,8 +279,11 @@ class PaperClose:
     r_multiple: float
     fee: float
     slippage: float
+    entry_fee: float = 0.0
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
     warnings: tuple[str, ...] = ()
-    schema_version: str = "v2.paper_close.v1"
+    schema_version: str = "v2.paper_close.v2"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -290,7 +332,9 @@ class StrategyPaperAccount:
     current_equity: float
     realized_pnl: float
     unrealized_pnl: float
-    schema_version: str = "v2.strategy_paper_account.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
+    schema_version: str = "v2.strategy_paper_account.v3"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -299,7 +343,7 @@ class StrategyPaperAccount:
 @dataclass(frozen=True)
 class PaperAccountState:
     accounts: tuple[StrategyPaperAccount, ...]
-    schema_version: str = "v2.paper_account_state.v1"
+    schema_version: str = "v2.paper_account_state.v3"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -350,7 +394,9 @@ class StrategyCalendarRow:
     slippage_estimate: float
     warnings: tuple[str, ...]
     run_id: str
-    schema_version: str = "v2.strategy_calendar_row.v1"
+    execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
+    strategy_semantics_fingerprint: str = "unknown"
+    schema_version: str = "v2.strategy_calendar_row.v3"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
@@ -373,7 +419,17 @@ class PaperOpsManifest:
     data_snapshot_id: str
     output_artifacts: tuple[str, ...]
     warnings: tuple[str, ...]
-    schema_version: str = "v2.paper_ops_manifest.v1"
+    execution_policy_version: str
+    execution_policy_fingerprint: str
+    universe_id: str
+    universe_symbols: tuple[str, ...]
+    data_snapshot_content_hash: str | None = None
+    data_snapshot_manifest_payload_hash: str | None = None
+    data_snapshot_normalized_hash: str | None = None
+    data_snapshot_normalized_path: str | None = None
+    data_truth_root_relative: str | None = None
+    manifest_payload_hash: str | None = None
+    schema_version: str = "v2.paper_ops_manifest.v3"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)

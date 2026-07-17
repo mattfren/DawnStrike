@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from statistics import mean, median, pstdev
 
@@ -18,7 +18,10 @@ class BacktestSettings:
     fee_bps: float = 1.0
     slippage_bps: float = 5.0
     commission_per_trade: float = 0.0
+    max_gross_exposure_pct: float = 1.0
+    max_concurrent_positions: int = 3
     risk: RiskSettings = RiskSettings()
+    holding_timeout_calendar_days: int = 10
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,30 @@ class _Position:
 class BacktestEngine:
     def __init__(self, settings: BacktestSettings | None = None) -> None:
         self.settings = settings or BacktestSettings()
+        if not math.isfinite(self.settings.initial_capital) or self.settings.initial_capital <= 0:
+            raise ValueError("backtest initial_capital must be finite and positive")
+        for name, value in (
+            ("fee_bps", self.settings.fee_bps),
+            ("slippage_bps", self.settings.slippage_bps),
+            ("commission_per_trade", self.settings.commission_per_trade),
+        ):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"backtest {name} must be finite and non-negative")
+        if (
+            not math.isfinite(self.settings.max_gross_exposure_pct)
+            or self.settings.max_gross_exposure_pct <= 0
+        ):
+            raise ValueError("backtest max_gross_exposure_pct must be finite and positive")
+        if self.settings.max_concurrent_positions < 1:
+            raise ValueError("backtest max_concurrent_positions must be at least 1")
+        if (
+            isinstance(self.settings.holding_timeout_calendar_days, bool)
+            or not isinstance(self.settings.holding_timeout_calendar_days, int)
+            or self.settings.holding_timeout_calendar_days < 1
+        ):
+            raise ValueError(
+                "backtest holding_timeout_calendar_days must be an integer of at least 1"
+            )
 
     def run(self, strategy: StrategySpec, dataset: MarketDataset) -> BacktestResult:
         alignment_issues = timestamp_alignment_issues(dataset)
@@ -111,12 +138,33 @@ class BacktestEngine:
                 if len(bars) <= index:
                     continue
                 eligible_symbol_days += 1
-                if symbol in positions:
+                if (
+                    symbol in positions
+                    or len(positions) >= self.settings.max_concurrent_positions
+                ):
                     continue
                 signal = strategy.signal(dataset, symbol, bars, index - 1)
                 if signal is None:
                     continue
-                position = self._enter_position(signal, bars[index], index, cash)
+                current_equity = self._mark_to_market_at_open(
+                    cash,
+                    positions,
+                    dataset,
+                    index,
+                )
+                gross_exposure = self._gross_exposure_at_open(
+                    positions,
+                    dataset,
+                    index,
+                )
+                position = self._enter_position(
+                    signal,
+                    bars[index],
+                    index,
+                    cash,
+                    current_equity=current_equity,
+                    current_gross_exposure=gross_exposure,
+                )
                 if position is None:
                     warnings.append(
                         f"{symbol}: risk engine rejected signal at "
@@ -212,29 +260,98 @@ class BacktestEngine:
         bar: MarketBar,
         index: int,
         cash: float,
+        *,
+        current_equity: float,
+        current_gross_exposure: float,
     ) -> _Position | None:
-        del cash
+        if current_equity <= 0 or self.settings.max_gross_exposure_pct <= 0:
+            return None
         if signal.direction == Direction.LONG:
+            if bar.open <= signal.stop:
+                return None
             entry_price = bar.open * (1.0 + self._slippage_rate())
             entry_slippage = max(0.0, entry_price - bar.open)
         elif signal.direction == Direction.SHORT:
+            if bar.open >= signal.stop:
+                return None
             entry_price = bar.open * (1.0 - self._slippage_rate())
             entry_slippage = max(0.0, bar.open - entry_price)
         else:
+            return None
+        if signal.target is None:
+            return None
+        if (
+            signal.direction == Direction.LONG
+            and entry_price >= signal.target
+            or signal.direction == Direction.SHORT
+            and entry_price <= signal.target
+        ):
             return None
 
         risk_decision = evaluate_signal_risk(
             signal,
             entry_price=entry_price,
-            settings=self.settings.risk,
+            settings=replace(self.settings.risk, account_equity=current_equity),
             stale=False,
         )
         if not risk_decision.allowed or risk_decision.quantity <= 0:
             return None
-        quantity = risk_decision.quantity
+        stop_fill = self._adverse_exit_fill(signal.direction, signal.stop)
+        target_fill = self._adverse_exit_fill(signal.direction, signal.target)
+        entry_bps_per_unit = entry_price * self.settings.fee_bps / 10_000.0
+        stop_bps_per_unit = stop_fill * self.settings.fee_bps / 10_000.0
+        target_bps_per_unit = target_fill * self.settings.fee_bps / 10_000.0
+        loss_per_unit = max(
+            0.0,
+            -self._directional_pnl(signal.direction, entry_price, stop_fill),
+        ) + entry_bps_per_unit + stop_bps_per_unit
+        reward_per_unit = self._directional_pnl(
+            signal.direction,
+            entry_price,
+            target_fill,
+        ) - entry_bps_per_unit - target_bps_per_unit
+        if loss_per_unit <= 0 or reward_per_unit <= 0:
+            return None
+        risk_budget = current_equity * min(
+            self.settings.risk.risk_per_trade_pct,
+            self.settings.risk.max_risk_per_trade_pct,
+        )
+        fixed_round_trip_cost = 2.0 * self.settings.commission_per_trade
+        quantity_from_after_cost_risk = int(
+            max(0.0, risk_budget - fixed_round_trip_cost) // loss_per_unit
+        )
+        remaining_gross = max(
+            0.0,
+            current_equity * self.settings.max_gross_exposure_pct
+            - current_gross_exposure,
+        )
+        quantity_from_gross = int(remaining_gross // entry_price)
+        quantity = min(
+            risk_decision.quantity,
+            quantity_from_after_cost_risk,
+            quantity_from_gross,
+        )
+        if signal.direction == Direction.LONG:
+            cash_after_commission = max(
+                0.0,
+                cash - self.settings.commission_per_trade,
+            )
+            quantity = min(
+                quantity,
+                int(cash_after_commission // (entry_price + entry_bps_per_unit)),
+            )
+        if quantity <= 0:
+            return None
+        modeled_loss = loss_per_unit * quantity + fixed_round_trip_cost
+        modeled_reward = reward_per_unit * quantity - fixed_round_trip_cost
+        if (
+            modeled_reward <= 0
+            or modeled_reward / modeled_loss < self.settings.risk.min_reward_risk
+        ):
+            return None
         notional = quantity * entry_price
         entry_fee = self._fee(notional)
-        initial_risk = abs(entry_price - signal.stop) * quantity
+        initial_risk = modeled_loss
         return _Position(
             symbol=signal.symbol,
             direction=signal.direction,
@@ -311,17 +428,77 @@ class BacktestEngine:
         return trade, new_cash
 
     def _exit_price(self, position: _Position, bar: MarketBar) -> tuple[float | None, str]:
+        """Return the raw exit price and its audit reason.
+
+        ``timeout`` means the position reached its configured calendar-day age and
+        was closed at that bar's close. Gap, stop, and target exits take precedence.
+        """
         if position.direction == Direction.LONG:
+            if bar.open <= position.stop:
+                return bar.open, "gap_stop"
+            if position.target is not None and bar.open >= position.target:
+                return bar.open, "gap_target"
             if bar.low <= position.stop:
                 return position.stop, "stop"
             if position.target is not None and bar.high >= position.target:
                 return position.target, "target"
-            return None, ""
-        if bar.high >= position.stop:
-            return position.stop, "stop"
-        if position.target is not None and bar.low <= position.target:
-            return position.target, "target"
+        else:
+            if bar.open >= position.stop:
+                return bar.open, "gap_stop"
+            if position.target is not None and bar.open <= position.target:
+                return bar.open, "gap_target"
+            if bar.high >= position.stop:
+                return position.stop, "stop"
+            if position.target is not None and bar.low <= position.target:
+                return position.target, "target"
+        if (
+            bar.timestamp.date() - position.entry_time.date()
+        ).days >= self.settings.holding_timeout_calendar_days:
+            return bar.close, "timeout"
         return None, ""
+
+    def _adverse_exit_fill(self, direction: str, raw_price: float) -> float:
+        if direction == Direction.LONG:
+            return raw_price * (1.0 - self._slippage_rate())
+        return raw_price * (1.0 + self._slippage_rate())
+
+    @staticmethod
+    def _directional_pnl(direction: str, entry: float, exit_price: float) -> float:
+        if direction == Direction.LONG:
+            return exit_price - entry
+        return entry - exit_price
+
+    def _mark_to_market_at_open(
+        self,
+        cash: float,
+        positions: dict[str, _Position],
+        dataset: MarketDataset,
+        index: int,
+    ) -> float:
+        equity = cash
+        for symbol, position in positions.items():
+            bars = dataset.bars_by_symbol[symbol]
+            if len(bars) <= index:
+                continue
+            mark = bars[index].open
+            equity += (
+                position.quantity * mark
+                if position.direction == Direction.LONG
+                else -position.quantity * mark
+            )
+        return equity
+
+    @staticmethod
+    def _gross_exposure_at_open(
+        positions: dict[str, _Position],
+        dataset: MarketDataset,
+        index: int,
+    ) -> float:
+        return sum(
+            abs(position.quantity * dataset.bars_by_symbol[symbol][index].open)
+            for symbol, position in positions.items()
+            if len(dataset.bars_by_symbol[symbol]) > index
+        )
 
     def _mark_to_market(
         self,

@@ -18,7 +18,12 @@ from intraday_scanner.v2.paper_ops.engine import (
 )
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
+from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
+from intraday_scanner.v2.paper_ops.trade_blotter import (
+    build_trade_blotter,
+    verify_trade_blotter,
+)
 
 __all__ = [
     "PaperOpsPaths",
@@ -38,4 +43,7 @@ __all__ = [
     "score_strategy_evidence",
     "forward_readiness",
     "write_calendar_view",
+    "build_trade_blotter",
+    "verify_trade_blotter",
+    "verify_source_bar_truth",
 ]

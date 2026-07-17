@@ -27,6 +27,12 @@ class DataTruthManifest:
     raw_artifact_hashes: dict[str, str]
     normalized_artifact_hash: str
     source_url_or_reference: tuple[str, ...]
+    snapshot_relative_path: str | None = None
+    normalized_artifact_path: str | None = None
+    raw_artifact_paths: tuple[str, ...] = ()
+    snapshot_content_hash: str | None = None
+    manifest_payload_hash: str | None = None
+    artifact_schema_version: str | None = None
     code_version: str | None = None
     schema_version: str = "v2.data_truth_manifest.v1"
 
@@ -34,6 +40,7 @@ class DataTruthManifest:
         payload = asdict(self)
         payload["symbols"] = list(self.symbols)
         payload["warnings"] = list(self.warnings)
+        payload["raw_artifact_paths"] = list(self.raw_artifact_paths)
         payload["source_url_or_reference"] = list(self.source_url_or_reference)
         return payload
 

@@ -6,12 +6,14 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths
+from intraday_scanner.v2.paper_ops.engine import (
+    PaperOpsPaths,
+    _recover_pending_transaction,
+)
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.storage import (
     read_json,
     read_jsonl,
-    upsert_rows,
     write_csv,
     write_json,
 )
@@ -22,6 +24,8 @@ CALENDAR_FIELDNAMES = (
     "strategy_id",
     "strategy_version",
     "strategy_status",
+    "execution_policy_version",
+    "strategy_semantics_fingerprint",
     "data_snapshot_id",
     "starting_equity",
     "ending_equity",
@@ -82,16 +86,20 @@ def rebuild_ledger(
     write_rebuilt: bool = False,
 ) -> LedgerRebuildResult:
     paths = PaperOpsPaths.create(output_root)
-    events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
+    _recover_pending_transaction(paths)
+    source_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
+    events: list[dict[str, object]] = []
     registry = _registry(paths)
     starting_equity = _starting_equity(paths)
     pending: dict[str, dict[str, object]] = {}
     open_positions: dict[str, dict[str, object]] = {}
     closed_positions: dict[str, dict[str, object]] = {}
-    realized_by_key: dict[tuple[str, str], float] = {}
+    realized_by_key: dict[tuple[str, str, str, str, str], float] = {}
     warnings: list[str] = []
+    if not source_events:
+        warnings.append("paper ledger contains no events")
 
-    for event in events:
+    for event in sorted(source_events, key=_event_sort_key):
         event_type = str(event.get("event_type", ""))
         event_mode = str(event.get("mode", ""))
         payload = event.get("payload", {})
@@ -103,15 +111,28 @@ def rebuild_ledger(
                 f"{event.get('event_id')}: event mode {event_mode} differs "
                 f"from payload mode {payload_mode}"
             )
+            continue
+        events.append(event)
         mode = (
             event_mode if event_mode in {item.value for item in PaperRunMode} else payload_mode
         )
         strategy_id = str(event.get("strategy_id") or payload.get("strategy_id") or "")
-        key = (mode, strategy_id)
+        strategy_version = _strategy_version(payload, registry, strategy_id)
+        execution_policy_version = _execution_policy_version(payload, registry, strategy_id)
+        strategy_semantics_fingerprint = _strategy_semantics_fingerprint(payload)
+        key = (
+            mode,
+            strategy_id,
+            strategy_version,
+            execution_policy_version,
+            strategy_semantics_fingerprint,
+        )
         if event_type == "paper_order_created":
             order_id = str(payload.get("order_id", ""))
             if order_id:
                 pending[order_id] = dict(payload)
+        elif event_type == "paper_order_blocked":
+            pending.pop(str(payload.get("order_id", "")), None)
         elif event_type == "paper_fill":
             order_id = str(payload.get("order_id", ""))
             pending.pop(order_id, None)
@@ -132,13 +153,23 @@ def rebuild_ledger(
                     payload.get("net_pnl")
                 )
 
-    account_rows = _account_rows(registry, starting_equity, realized_by_key, open_positions)
+    account_rows = _account_rows(
+        registry,
+        starting_equity,
+        realized_by_key,
+        open_positions,
+        events,
+    )
     calendar_rows = _calendar_rows_from_events(events, registry, starting_equity, open_positions)
     if write_rebuilt:
         _upsert_rebuilt_calendar(paths, calendar_rows)
     calendar_mismatches = _compare_calendar(paths, calendar_rows)
     account_mismatches = _compare_accounts(paths, account_rows)
-    status = "passed" if not calendar_mismatches and not account_mismatches else "mismatch"
+    status = (
+        "passed"
+        if not calendar_mismatches and not account_mismatches and not warnings
+        else "mismatch"
+    )
     result = LedgerRebuildResult(
         status=status,
         pending_orders=tuple(pending.values()),
@@ -171,25 +202,52 @@ def _starting_equity(paths: PaperOpsPaths) -> float:
 def _account_rows(
     registry: list[dict[str, object]],
     starting_equity: float,
-    realized_by_key: dict[tuple[str, str], float],
+    realized_by_key: dict[tuple[str, str, str, str, str], float],
     open_positions: dict[str, dict[str, object]],
+    events: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     modes = tuple(item.value for item in PaperRunMode)
     rows: list[dict[str, object]] = []
     for mode in modes:
-        for strategy in registry:
+        for strategy in _strategy_series_for_mode(events, registry, mode):
             strategy_id = str(strategy["strategy_id"])
+            strategy_version = str(strategy["strategy_version"])
+            execution_policy_version = str(
+                strategy.get("execution_policy_version")
+                or "legacy_unspecified"
+            )
+            strategy_semantics_fingerprint = str(
+                strategy.get("strategy_semantics_fingerprint") or "unknown"
+            )
             unrealized = sum(
                 _to_float(position.get("unrealized_pnl"))
                 for position in open_positions.values()
-                if _row_mode(position) == mode and position.get("strategy_id") == strategy_id
+                if _row_mode(position) == mode
+                and _row_matches_series(
+                    position,
+                    strategy_id,
+                    strategy_version,
+                    execution_policy_version,
+                    strategy_semantics_fingerprint,
+                )
             )
-            realized = realized_by_key.get((mode, strategy_id), 0.0)
+            realized = realized_by_key.get(
+                (
+                    mode,
+                    strategy_id,
+                    strategy_version,
+                    execution_policy_version,
+                    strategy_semantics_fingerprint,
+                ),
+                0.0,
+            )
             rows.append(
                 {
                     "mode": mode,
                     "strategy_id": strategy_id,
-                    "strategy_version": strategy["strategy_version"],
+                    "strategy_version": strategy_version,
+                    "execution_policy_version": execution_policy_version,
+                    "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
                     "starting_equity": starting_equity,
                     "realized_pnl": realized,
                     "unrealized_pnl": unrealized,
@@ -207,8 +265,9 @@ def _calendar_rows_from_events(
 ) -> list[dict[str, object]]:
     dates = sorted({str(event.get("trade_date")) for event in events if event.get("trade_date")})
     rows: list[dict[str, object]] = []
-    cumulative: dict[tuple[str, str], float] = {}
-    peak_equity: dict[tuple[str, str], float] = {}
+    cumulative: dict[tuple[str, str, str, str, str], float] = {}
+    peak_equity: dict[tuple[str, str, str, str, str], float] = {}
+    previous_equity: dict[tuple[str, str, str, str, str], float] = {}
     pending: dict[str, dict[str, object]] = {}
     open_positions: dict[str, dict[str, object]] = {}
     for row_date in dates:
@@ -222,6 +281,8 @@ def _calendar_rows_from_events(
                 order_id = str(payload.get("order_id", ""))
                 if order_id:
                     pending[order_id] = dict(payload)
+            elif event_type == "paper_order_blocked":
+                pending.pop(str(payload.get("order_id", "")), None)
             elif event_type == "paper_fill":
                 pending.pop(str(payload.get("order_id", "")), None)
             elif event_type == "paper_position_opened":
@@ -241,27 +302,74 @@ def _calendar_rows_from_events(
                     open_positions.pop(position_id, None)
                 mode = str(event.get("mode", ""))
                 strategy_id = str(event.get("strategy_id") or payload.get("strategy_id") or "")
-                key = (mode, strategy_id)
+                key = (
+                    mode,
+                    strategy_id,
+                    _strategy_version(payload, registry, strategy_id),
+                    _execution_policy_version(payload, registry, strategy_id),
+                    _strategy_semantics_fingerprint(payload),
+                )
                 cumulative[key] = cumulative.get(key, 0.0) + _to_float(payload.get("net_pnl"))
         modes = sorted({str(event.get("mode")) for event in day_events_all if event.get("mode")})
         for mode in modes:
-            for strategy in registry:
+            for strategy in _strategy_series_for_mode(events, registry, mode):
                 strategy_id = str(strategy["strategy_id"])
-                key = (mode, strategy_id)
+                strategy_version = str(strategy["strategy_version"])
+                execution_policy_version = str(
+                    strategy.get("execution_policy_version")
+                    or "legacy_unspecified"
+                )
+                strategy_semantics_fingerprint = str(
+                    strategy.get("strategy_semantics_fingerprint") or "unknown"
+                )
+                key = (
+                    mode,
+                    strategy_id,
+                    strategy_version,
+                    execution_policy_version,
+                    strategy_semantics_fingerprint,
+                )
                 day_events = [
                     event
                     for event in events
                     if event.get("trade_date") == row_date
                     and event.get("mode") == mode
                     and event.get("strategy_id") == strategy_id
+                    and _event_matches_series(
+                        event,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
                 ]
+                has_live_series_state = any(
+                    _row_mode(row) == mode
+                    and _row_matches_series(
+                        row,
+                        strategy_id,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
+                    for row in [*pending.values(), *open_positions.values()]
+                )
+                if not day_events and not has_live_series_state:
+                    continue
                 closes = _payloads(day_events, "paper_position_closed")
                 fills = _payloads(day_events, "paper_fill")
+                r_values = [_to_float(payload.get("r_multiple")) for payload in closes]
                 realized = sum(_to_float(payload.get("net_pnl")) for payload in closes)
                 unrealized = sum(
                     _to_float(position.get("unrealized_pnl"))
                     for position in open_positions.values()
-                    if _row_mode(position) == mode and position.get("strategy_id") == strategy_id
+                    if _row_mode(position) == mode
+                    and _row_matches_series(
+                        position,
+                        strategy_id,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
                 )
                 fees_paid = sum(_to_float(payload.get("fee")) for payload in closes + fills)
                 slippage = sum(_to_float(payload.get("slippage")) for payload in closes + fills)
@@ -271,29 +379,57 @@ def _calendar_rows_from_events(
                 open_count = sum(
                     1
                     for position in open_positions.values()
-                    if _row_mode(position) == mode and position.get("strategy_id") == strategy_id
+                    if _row_mode(position) == mode
+                    and _row_matches_series(
+                        position,
+                        strategy_id,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
                 )
                 pending_count = sum(
                     1
                     for order in pending.values()
-                    if _row_mode(order) == mode and order.get("strategy_id") == strategy_id
+                    if _row_mode(order) == mode
+                    and _row_matches_series(
+                        order,
+                        strategy_id,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
                 )
                 cumulative_pnl = cumulative.get(key, 0.0)
                 equity = starting_equity + cumulative_pnl + unrealized
+                prior_equity = previous_equity.get(key, starting_equity)
+                daily_pnl = equity - prior_equity
                 peak_equity[key] = max(peak_equity.get(key, starting_equity), equity)
                 drawdown = (
                     (equity - peak_equity[key]) / peak_equity[key]
                     if peak_equity[key]
                     else 0.0
                 )
+                gross_exposure = sum(
+                    _position_gross_exposure(position)
+                    for position in open_positions.values()
+                    if _row_mode(position) == mode
+                    and _row_matches_series(
+                        position,
+                        strategy_id,
+                        strategy_version,
+                        execution_policy_version,
+                        strategy_semantics_fingerprint,
+                    )
+                )
                 rows.append(
                     {
                         "data_snapshot_id": "ledger_rebuild",
                         "date": row_date,
                         "ending_equity": equity,
-                        "average_r": 0.0,
-                        "expectancy_r": 0.0,
-                        "exposure_pct": 0.0,
+                        "average_r": sum(r_values) / len(r_values) if r_values else 0.0,
+                        "expectancy_r": sum(r_values) / len(r_values) if r_values else 0.0,
+                        "exposure_pct": gross_exposure / equity if equity > 0 else 0.0,
                         "fees_paid": fees_paid,
                         "flats": flats,
                         "losses": losses,
@@ -305,11 +441,15 @@ def _calendar_rows_from_events(
                         "starting_equity": starting_equity,
                         "strategy_id": strategy_id,
                         "strategy_status": strategy.get("strategy_status", "unknown"),
-                        "strategy_version": strategy.get("strategy_version", "unknown"),
+                        "strategy_version": strategy_version,
+                        "execution_policy_version": execution_policy_version,
+                        "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
                         "realized_pnl": realized,
                         "unrealized_pnl": unrealized,
-                        "total_pnl": realized + unrealized,
-                        "daily_return_pct": (realized + unrealized) / starting_equity,
+                        "total_pnl": daily_pnl,
+                        "daily_return_pct": (
+                            daily_pnl / prior_equity if prior_equity else 0.0
+                        ),
                         "cumulative_return_pct": (equity - starting_equity) / starting_equity,
                         "drawdown_pct": min(0.0, drawdown),
                         "trades_opened": len(fills),
@@ -318,14 +458,20 @@ def _calendar_rows_from_events(
                         "wins": wins,
                     }
                 )
+                previous_equity[key] = equity
     return rows
 
 
 def _upsert_rebuilt_calendar(paths: PaperOpsPaths, rows: list[dict[str, object]]) -> None:
-    upsert_rows(
+    stored_rows = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
+    reference_rows: list[dict[str, object]] = [
+        dict(row)
+        for row in stored_rows
+        if str(row.get("strategy_status") or "") in {"baseline", "benchmark"}
+    ]
+    write_csv(
         paths.calendar / "strategy_daily_returns.csv",
-        rows,
-        ("date", "mode", "strategy_id"),
+        [*reference_rows, *rows],
         CALENDAR_FIELDNAMES,
     )
     stored = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
@@ -346,13 +492,35 @@ def _payloads(events: list[dict[str, object]], event_type: str) -> list[dict[str
 def _compare_calendar(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]]) -> list[str]:
     stored = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
     by_key = {
-        (row["date"], row["mode"], row["strategy_id"]): row
+        (
+            row["date"],
+            row["mode"],
+            row["strategy_id"],
+            row.get("strategy_version", "unknown"),
+            row.get(
+                "execution_policy_version",
+                "legacy_unspecified",
+            ),
+            row.get("strategy_semantics_fingerprint", "unknown"),
+        ): row
         for row in stored
         if {"date", "mode", "strategy_id"}.issubset(row)
     }
     mismatches: list[str] = []
+    rebuilt_keys: set[tuple[str, str, str, str, str, str]] = set()
     for row in rebuilt_rows:
-        key = (str(row["date"]), str(row["mode"]), str(row["strategy_id"]))
+        key = (
+            str(row["date"]),
+            str(row["mode"]),
+            str(row["strategy_id"]),
+            str(row.get("strategy_version") or "unknown"),
+            str(
+                row.get("execution_policy_version")
+                or "legacy_unspecified"
+            ),
+            str(row.get("strategy_semantics_fingerprint") or "unknown"),
+        )
+        rebuilt_keys.add(key)
         stored_row = by_key.get(key)
         if stored_row is None:
             has_activity = (
@@ -363,33 +531,115 @@ def _compare_calendar(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
             if has_activity:
                 mismatches.append(f"missing stored calendar row {key}")
             continue
-        for field in ("realized_pnl", "daily_return_pct", "trades_opened", "trades_closed"):
+        for field in (
+            "starting_equity",
+            "ending_equity",
+            "realized_pnl",
+            "unrealized_pnl",
+            "total_pnl",
+            "daily_return_pct",
+            "cumulative_return_pct",
+            "drawdown_pct",
+            "trades_opened",
+            "trades_closed",
+            "pending_orders",
+            "open_positions",
+            "wins",
+            "losses",
+            "flats",
+            "average_r",
+            "expectancy_r",
+            "exposure_pct",
+            "fees_paid",
+            "slippage_estimate",
+        ):
             if abs(_to_float(stored_row.get(field)) - _to_float(row.get(field))) > 0.0001:
                 mismatches.append(f"calendar mismatch {key} {field}")
+    for stored_candidate in stored:
+        if str(stored_candidate.get("strategy_status") or "") in {
+            "baseline",
+            "benchmark",
+        }:
+            continue
+        key = (
+            str(stored_candidate.get("date") or ""),
+            str(stored_candidate.get("mode") or ""),
+            str(stored_candidate.get("strategy_id") or ""),
+            str(stored_candidate.get("strategy_version") or "unknown"),
+            str(
+                stored_candidate.get("execution_policy_version")
+                or "legacy_unspecified"
+            ),
+            str(stored_candidate.get("strategy_semantics_fingerprint") or "unknown"),
+        )
+        if key not in rebuilt_keys:
+            mismatches.append(f"stored calendar row has no ledger reconstruction {key}")
     return sorted(set(mismatches))
 
 
 def _compare_accounts(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]]) -> list[str]:
-    stored = read_json(paths.state / "paper_accounts.json", {})
-    if not isinstance(stored, dict):
-        return ["paper_accounts.json is not an object"]
-    stored_accounts = {
-        str(row.get("strategy_id")): row
-        for row in stored.get("accounts", [])
-        if isinstance(row, dict)
-    }
-    forward_rows = [row for row in rebuilt_rows if row["mode"] == PaperRunMode.FORWARD.value]
     mismatches: list[str] = []
-    for row in forward_rows:
-        stored_row = stored_accounts.get(str(row["strategy_id"]))
-        if not stored_row:
-            mismatches.append(f"missing account {row['strategy_id']}")
+    for mode in PaperRunMode:
+        account_path = (
+            paths.state / "paper_accounts.json"
+            if mode is PaperRunMode.FORWARD
+            else paths.state / f"{mode.value}_paper_accounts.json"
+        )
+        if not account_path.exists():
             continue
-        if (
-            abs(_to_float(stored_row.get("current_equity")) - _to_float(row.get("current_equity")))
-            > 0.01
-        ):
-            mismatches.append(f"account equity mismatch {row['strategy_id']}")
+        stored = read_json(account_path, {})
+        if not isinstance(stored, dict):
+            mismatches.append(f"{account_path.name} is not an object")
+            continue
+        stored_accounts = {
+            (
+                str(row.get("strategy_id") or ""),
+                str(row.get("strategy_version") or "unknown"),
+                str(
+                    row.get("execution_policy_version")
+                    or "legacy_unspecified"
+                ),
+                str(row.get("strategy_semantics_fingerprint") or "unknown"),
+            ): row
+            for row in stored.get("accounts", [])
+            if isinstance(row, dict)
+        }
+        mode_rows = [row for row in rebuilt_rows if row["mode"] == mode.value]
+        rebuilt_keys: set[tuple[str, str, str, str]] = set()
+        for row in mode_rows:
+            key = (
+                str(row["strategy_id"]),
+                str(row.get("strategy_version") or "unknown"),
+                str(
+                    row.get("execution_policy_version")
+                    or "legacy_unspecified"
+                ),
+                str(row.get("strategy_semantics_fingerprint") or "unknown"),
+            )
+            rebuilt_keys.add(key)
+            stored_row = stored_accounts.get(key)
+            if not stored_row:
+                mismatches.append(f"missing {mode.value} account {key}")
+                continue
+            for field in (
+                "starting_equity",
+                "current_equity",
+                "realized_pnl",
+                "unrealized_pnl",
+            ):
+                if (
+                    abs(
+                        _to_float(stored_row.get(field))
+                        - _to_float(row.get(field))
+                    )
+                    > 0.01
+                ):
+                    mismatches.append(
+                        f"account {field} mismatch {mode.value} {key}"
+                    )
+        for key in stored_accounts:
+            if key not in rebuilt_keys:
+                mismatches.append(f"stored {mode.value} account has no ledger series {key}")
     return mismatches
 
 
@@ -460,3 +710,149 @@ def _to_float(value: object) -> float:
     if isinstance(value, str | int | float):
         return float(value)
     return 0.0
+
+
+def _position_gross_exposure(row: dict[str, object]) -> float:
+    mark = _to_float(row.get("last_mark_price") or row.get("entry_price"))
+    quantity = _to_float(row.get("quantity"))
+    return abs(mark * quantity)
+
+
+def _strategy_version(
+    payload: dict[str, object],
+    _registry: list[dict[str, object]],
+    _strategy_id: str,
+) -> str:
+    explicit = str(payload.get("strategy_version") or "")
+    if explicit:
+        return explicit
+    return "unknown"
+
+
+def _execution_policy_version(
+    payload: dict[str, object],
+    _registry: list[dict[str, object]],
+    _strategy_id: str,
+) -> str:
+    explicit = str(payload.get("execution_policy_version") or "")
+    if explicit:
+        return explicit
+    return "legacy_unspecified"
+
+
+def _strategy_semantics_fingerprint(payload: dict[str, object]) -> str:
+    return str(payload.get("strategy_semantics_fingerprint") or "unknown")
+
+
+def _strategy_series_for_mode(
+    events: list[dict[str, object]],
+    registry: list[dict[str, object]],
+    mode: str,
+) -> list[dict[str, object]]:
+    """Return current and observed archived series without blending their evidence."""
+
+    by_key: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for row in registry:
+        strategy_id = str(row.get("strategy_id") or "")
+        strategy_version = str(row.get("strategy_version") or "unknown")
+        execution_policy_version = str(
+            row.get("execution_policy_version")
+            or "legacy_unspecified"
+        )
+        strategy_semantics_fingerprint = str(
+            row.get("strategy_semantics_fingerprint") or "unknown"
+        )
+        if strategy_id:
+            by_key[
+                (
+                    strategy_id,
+                    strategy_version,
+                    execution_policy_version,
+                    strategy_semantics_fingerprint,
+                )
+            ] = dict(row)
+    for event in events:
+        if str(event.get("mode") or "") != mode:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        strategy_id = str(event.get("strategy_id") or payload.get("strategy_id") or "")
+        if not strategy_id:
+            continue
+        strategy_version = _strategy_version(payload, registry, strategy_id)
+        execution_policy_version = _execution_policy_version(
+            payload,
+            registry,
+            strategy_id,
+        )
+        strategy_semantics_fingerprint = _strategy_semantics_fingerprint(payload)
+        key = (
+            strategy_id,
+            strategy_version,
+            execution_policy_version,
+            strategy_semantics_fingerprint,
+        )
+        if key not in by_key:
+            by_key[key] = {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
+                "strategy_status": str(payload.get("strategy_status") or "archived"),
+            }
+    return [by_key[key] for key in sorted(by_key)]
+
+
+def _event_matches_series(
+    event: dict[str, object],
+    strategy_version: str,
+    execution_policy_version: str,
+    strategy_semantics_fingerprint: str,
+) -> bool:
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    return (
+        str(payload.get("strategy_version") or "unknown") == strategy_version
+        and str(payload.get("execution_policy_version") or "legacy_unspecified")
+        == execution_policy_version
+        and _strategy_semantics_fingerprint(payload) == strategy_semantics_fingerprint
+    )
+
+
+def _row_matches_series(
+    row: dict[str, object],
+    strategy_id: str,
+    strategy_version: str,
+    execution_policy_version: str,
+    strategy_semantics_fingerprint: str,
+) -> bool:
+    return (
+        str(row.get("strategy_id") or "") == strategy_id
+        and str(row.get("strategy_version") or "unknown") == strategy_version
+        and str(row.get("execution_policy_version") or "legacy_unspecified")
+        == execution_policy_version
+        and _strategy_semantics_fingerprint(row) == strategy_semantics_fingerprint
+    )
+
+
+def _event_sort_key(event: dict[str, object]) -> tuple[str, str, int, str, str]:
+    """Return deterministic lifecycle order independent of JSONL append history."""
+
+    event_order = {
+        "paper_order_created": 10,
+        "paper_order_pending_no_fill_data": 20,
+        "paper_fill": 30,
+        "paper_position_opened": 40,
+        "paper_position_checked_no_action": 50,
+        "paper_position_marked_to_market": 60,
+        "paper_position_closed": 70,
+    }
+    return (
+        str(event.get("trade_date") or ""),
+        str(event.get("mode") or ""),
+        event_order.get(str(event.get("event_type") or ""), 100),
+        str(event.get("strategy_id") or ""),
+        str(event.get("event_id") or ""),
+    )

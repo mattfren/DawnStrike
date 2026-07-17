@@ -8,6 +8,9 @@ from pathlib import Path
 
 from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.calendar_view import write_calendar_view
+from intraday_scanner.v2.paper_ops.challenger_evaluation import (
+    evaluate_paperops_challengers,
+)
 from intraday_scanner.v2.paper_ops.engine import (
     calendar,
     check,
@@ -25,7 +28,17 @@ from intraday_scanner.v2.paper_ops.engine import (
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
+from intraday_scanner.v2.paper_ops.shadow_runner import (
+    initialize_shadow_registry,
+    register_shadow_challenger,
+    run_shadow_day,
+)
+from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
+from intraday_scanner.v2.paper_ops.trade_blotter import (
+    build_trade_blotter,
+    verify_trade_blotter,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +63,13 @@ def main(argv: list[str] | None = None) -> int:
             "evidence",
             "readiness",
             "calendar-view",
+            "blotter",
+            "verify-blotter",
+            "verify-source-bars",
+            "shadow-init",
+            "shadow-register",
+            "shadow-run",
+            "challenger-evaluate",
         ),
     )
     parser.add_argument("--date", default=date.today().isoformat())
@@ -58,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=("forward", "replay", "demo"), default="forward")
     parser.add_argument("--output-root", default="data/v2_paper_ops")
     parser.add_argument("--write-rebuilt", action="store_true")
+    parser.add_argument("--manifest")
     args = parser.parse_args(argv)
 
     output_root = Path(args.output_root)
@@ -100,10 +121,59 @@ def main(argv: list[str] | None = None) -> int:
         result = forward_readiness(output_root=output_root).to_dict()
     elif args.command == "calendar-view":
         result = write_calendar_view(output_root=output_root)
+    elif args.command == "blotter":
+        result = build_trade_blotter(
+            output_root=output_root,
+            mode=mode.value,
+            run_date=run_date.isoformat(),
+        )
+    elif args.command == "verify-blotter":
+        result = verify_trade_blotter(output_root=output_root, mode=mode.value)
+    elif args.command == "verify-source-bars":
+        result = verify_source_bar_truth(output_root=output_root, mode=mode).to_dict()
+    elif args.command == "shadow-init":
+        result = initialize_shadow_registry(output_root=output_root)
+    elif args.command == "shadow-register":
+        if not args.manifest:
+            parser.error("shadow-register requires --manifest")
+        result = register_shadow_challenger(
+            manifest_path=Path(args.manifest),
+            output_root=output_root,
+        )
+    elif args.command == "shadow-run":
+        result = run_shadow_day(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+        )
+    elif args.command == "challenger-evaluate":
+        result = evaluate_paperops_challengers(output_root=output_root)
     else:
         result = demo(output_root=output_root)
     for key, value in result.items():
         print(f"{key}: {value}")
+    return _result_exit_code(args.command, result)
+
+
+def _result_exit_code(command: str, result: dict[str, object]) -> int:
+    """Make scheduler-visible evidence failures return a nonzero process code."""
+
+    if command == "run-day":
+        reconciliation = result.get("reconcile")
+        if isinstance(reconciliation, dict):
+            status = str(reconciliation.get("status") or "").lower()
+            if status and status != "passed":
+                return 2
+    status = str(result.get("status") or "").lower()
+    if status in {
+        "blocked",
+        "failed",
+        "invalid",
+        "mismatch",
+        "not_ready",
+        "not ready",
+    }:
+        return 2
     return 0
 
 
