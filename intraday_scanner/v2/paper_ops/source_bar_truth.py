@@ -23,6 +23,7 @@ ATTESTED_EVENT_TYPES = {
     "paper_position_closed",
 }
 _MANIFEST_SCHEMA = "v2.paper_ops_manifest.v3"
+_SHADOW_RUN_MANIFEST_SCHEMA = "v2.paper_ops_shadow_run.v1"
 _POLICY_MANIFEST_SCHEMA = "v2.paper_execution_policy_manifest.v1"
 _REFERENCE_STRATEGIES = {
     "benchmark_buy_hold_equal_weight",
@@ -347,6 +348,12 @@ def _run_manifests(
     for path in sorted(manifest_dir.glob("*.json")):
         payload = read_json(path, {})
         if not isinstance(payload, dict) or not payload.get("run_id"):
+            continue
+        if payload.get("schema_version") == _SHADOW_RUN_MANIFEST_SCHEMA:
+            # A shadow execution artifact is bound to the champion run_id so
+            # candidate events can reuse the exact immutable source snapshot.
+            # It is not itself a PaperOps run manifest and must not compete
+            # with the champion manifest for that run_id.
             continue
         mode = str(payload.get("mode") or "")
         if selected_mode is not None and mode != selected_mode:

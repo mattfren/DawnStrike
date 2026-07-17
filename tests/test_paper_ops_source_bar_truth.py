@@ -168,6 +168,52 @@ def test_full_lifecycle_matches_exact_immutable_daily_snapshot_bytes(tmp_path: P
     ) == result.to_dict()
 
 
+def test_known_shadow_manifest_coexists_with_champion_source_bar_audit(
+    tmp_path: Path,
+) -> None:
+    scenario = _immutable_lifecycle_scenario(tmp_path)
+    run_date = date(2026, 1, 7)
+    _write_shadow_manifest(
+        scenario,
+        run_date,
+        schema_version="v2.paper_ops_shadow_run.v1",
+    )
+
+    result = verify_source_bar_truth(
+        output_root=scenario.output_root,
+        mode=PaperRunMode.REPLAY,
+    )
+
+    assert result.status == "passed"
+    assert result.audited_run_count == 4
+    assert result.audited_event_count == 4
+    assert result.warnings == ()
+
+
+def test_unknown_conflicting_manifest_is_not_treated_as_a_shadow_artifact(
+    tmp_path: Path,
+) -> None:
+    scenario = _immutable_lifecycle_scenario(tmp_path)
+    run_date = date(2026, 1, 7)
+    _write_shadow_manifest(
+        scenario,
+        run_date,
+        schema_version="v2.paper_ops_unknown_run.v1",
+    )
+
+    result = verify_source_bar_truth(
+        output_root=scenario.output_root,
+        mode=PaperRunMode.REPLAY,
+    )
+
+    assert result.status == "failed"
+    assert (
+        "run paper-run-2026-01-07 has conflicting PaperOps manifests"
+        in result.warnings
+    )
+    assert result.audited_event_count == 4
+
+
 def test_event_source_bar_tamper_breaks_event_hash_and_retained_bar_match(
     tmp_path: Path,
 ) -> None:
@@ -822,6 +868,37 @@ def _write_paper_manifest(
     manifest.pop("manifest_payload_hash")
     manifest["manifest_payload_hash"] = _payload_sha256(manifest)
     write_json(output_root / "manifests" / f"{_run_id(run_date)}.json", manifest)
+
+
+def _write_shadow_manifest(
+    scenario: _ImmutableLifecycleScenario,
+    run_date: date,
+    *,
+    schema_version: str,
+) -> None:
+    snapshot = scenario.snapshots_by_date[run_date.isoformat()]
+    challenger_id = "ts_momentum_sma_atr_shadow_v2"
+    write_json(
+        scenario.output_root
+        / "manifests"
+        / f"shadow_replay_{run_date}_{challenger_id}.json",
+        {
+            "schema_version": schema_version,
+            "status": "completed",
+            "date": run_date.isoformat(),
+            "mode": PaperRunMode.REPLAY.value,
+            "run_id": _run_id(run_date),
+            "data_snapshot_id": snapshot.snapshot_id,
+            "challenger_id": challenger_id,
+            "strategy_id": STRATEGY_ID,
+            "strategy_version": "v2.0",
+            "execution_policy_version": scenario.lifecycle_config.execution_policy_version,
+            "decision_coverage_status": "complete",
+            "research_only": True,
+            "automatic_promotion_enabled": False,
+            "broker_execution_allowed": False,
+        },
+    )
 
 
 def _write_execution_policy_manifest(
