@@ -1,0 +1,490 @@
+{
+  "schemaVersion": "dawnstrike.static-dashboard-source.v1",
+  "generatedAt": "2026-07-16T23:57:00Z",
+  "latestRunDate": "2026-07-16",
+  "sourceCommit": "UI 08c88c7 / canonical evidence 2026-07-16",
+  "sourceEvidence": {
+    "calendarTruthStatus": "passed",
+    "sourceBarTruthStatus": "passed",
+    "calendarSha256": "1ae76f0a0d58a6f551550ff4180082f6a39c0cdea926d1baf87753bd36fba39d",
+    "registrySha256": "5b6e8cc75b6d3fa62865c6631fc3d7ee849cd83799e9ee13d075ede158d8435d",
+    "fleetReportStatus": "complete",
+    "paperOpsRunId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+    "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+    "dataSnapshotNormalizedSha256": "91988d560a1a42b37cf4303406ae62d37aff41e2bd65ce0cf61069e61c1e62a0",
+    "strategyFingerprints": {
+      "gap_up_continuation@v1.0": "e5388d9dc52bbc827426d733e8f31cd8cc41a17e3792091b598bedde816e30e3",
+      "gap_up_continuation_atr@v1.0": "441bbf043349c79d6ae87d79cbb68509fb5eaaae9ba0b790f066555005393608"
+    }
+  },
+  "alphaOps": {
+    "status": "complete",
+    "marketDate": "2026-07-16",
+    "observedAt": "2026-07-16T08:10:13-05:00",
+    "scanId": "ae7f10de-aac2-452f-a05a-84b11d0b6019",
+    "modelVersion": "dawnstrike-alphaops-v4",
+    "candidateCount": 3,
+    "manualConfirmationCount": 1,
+    "blockedCount": 2,
+    "cleanAcceptedCount": 0,
+    "notification": {
+      "channel": "telegram",
+      "status": "delivery recorded",
+      "sent": 1,
+      "dryRun": false
+    },
+    "topReasons": [
+      "Halt status was not verified for 3 of 3 candidates.",
+      "Float was unknown for 3 of 3 candidates.",
+      "SEC risk was not checked for 3 of 3 candidates.",
+      "Two candidates had unresolved source conflicts.",
+      "No candidate had enough first-touch history for a measured hit rate."
+    ],
+    "candidates": [
+      {
+        "rank": 1,
+        "ticker": "IQST",
+        "company": "iQSTEL Inc.",
+        "score": "52.46",
+        "gate": "NEEDS CONFIRMATION",
+        "gapPct": "19.99%",
+        "entryTrigger": "$1.3869",
+        "rewardRisk": "1.50R",
+        "source": "stockanalysis_premarket",
+        "sourceCount": 2,
+        "sourceConfidence": "34.5%"
+      },
+      {
+        "rank": 2,
+        "ticker": "TGHL",
+        "company": "The Growhub Limited",
+        "score": "61.03",
+        "gate": "BLOCKED",
+        "gapPct": "93.56%",
+        "entryTrigger": "$1.4773",
+        "rewardRisk": "1.50R",
+        "source": "stockanalysis_premarket",
+        "sourceCount": 2,
+        "sourceConfidence": "22.0%"
+      },
+      {
+        "rank": 3,
+        "ticker": "RUBI",
+        "company": "Rubico Inc.",
+        "score": "48.15",
+        "gate": "BLOCKED",
+        "gapPct": "23.83%",
+        "entryTrigger": "$8.4621",
+        "rewardRisk": "1.50R",
+        "source": "stockanalysis_premarket",
+        "sourceCount": 2,
+        "sourceConfidence": "22.0%"
+      }
+    ]
+  },
+  "paperOps": {
+    "status": "verified",
+    "mode": "forward",
+    "nextActivationDate": "2026-07-17",
+    "rawBlotterRows": 252,
+    "noSetupRows": 221,
+    "signalLinkedLifecycleRows": 31,
+    "strategies": [
+      {
+        "id": "ts_momentum_sma_atr",
+        "name": "Trend Momentum · SMA / ATR",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "30585b86085f588041cdebca394fc8fe42aed8daf73a18aceb6e57bbf31bb602"
+      },
+      {
+        "id": "gap_up_continuation",
+        "name": "Gap-Up Continuation",
+        "version": "v1.0",
+        "activationDate": "2026-07-17",
+        "fingerprint": "e5388d9dc52bbc827426d733e8f31cd8cc41a17e3792091b598bedde816e30e3"
+      },
+      {
+        "id": "gap_up_continuation_atr",
+        "name": "ATR Gap-Up Continuation",
+        "version": "v1.0",
+        "activationDate": "2026-07-17",
+        "fingerprint": "441bbf043349c79d6ae87d79cbb68509fb5eaaae9ba0b790f066555005393608"
+      },
+      {
+        "id": "cross_sectional_relative_strength",
+        "name": "Cross-Sectional Strength",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "5eaeb6846dac04479212a72c7f6a04a1e44e91b9f5dcffa4024c141ecbaf6fe0"
+      },
+      {
+        "id": "donchian_breakout_20_10",
+        "name": "Donchian Breakout · 20 / 10",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "7e00b23b67ae059f30671b3b1086096fa83c90cea9755a617bcf7dadfc4912f0"
+      },
+      {
+        "id": "bullish_fvg_continuation",
+        "name": "Bullish FVG Continuation",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "8dadc36ae35f119159fa811ac53396ec63983bffd3b43577bce4f5b4a4813ed7"
+      },
+      {
+        "id": "failed_breakout_reversal_short",
+        "name": "Failed Breakout · Short",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "24d94ee059695bb8e47b7bf721c52f63bbeaf85fd8840756009656df37b5cec8"
+      },
+      {
+        "id": "pullback_reclaim_uptrend",
+        "name": "Pullback Reclaim",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "e13691fa30994163372d106f8ccd7b253b1417ec25b2179099c6906622740a3e"
+      },
+      {
+        "id": "volatility_contraction_breakout",
+        "name": "Volatility Contraction",
+        "version": "v1.0",
+        "activationDate": "2026-07-15",
+        "fingerprint": "045e4abcd4f86379d469fde5a30126684e4fb4727efba42726233b353c7f69c1"
+      }
+    ],
+    "days": [
+      {
+        "date": "2026-07-15",
+        "fleetDailyReturnFraction": "0",
+        "fleetCumulativeReturnFraction": "0",
+        "fleetDailyPnl": "0",
+        "fleetStartingEquity": "700000",
+        "fleetEndingEquity": "700000",
+        "coveragePresent": 7,
+        "coverageExpected": 7,
+        "notYetEligible": 2,
+        "tradesOpened": 0,
+        "tradesClosed": 0,
+        "openPositions": 0,
+        "pendingOrders": 9,
+        "status": "flat",
+        "strategies": [
+          {
+            "id": "ts_momentum_sma_atr",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 3
+          },
+          {
+            "id": "cross_sectional_relative_strength",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 2
+          },
+          {
+            "id": "donchian_breakout_20_10",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 3
+          },
+          {
+            "id": "bullish_fvg_continuation",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 1
+          },
+          {
+            "id": "failed_breakout_reversal_short",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 0
+          },
+          {
+            "id": "pullback_reclaim_uptrend",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 0
+          },
+          {
+            "id": "volatility_contraction_breakout",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 0
+          }
+        ]
+      },
+      {
+        "date": "2026-07-16",
+        "fleetDailyReturnFraction": "-0.00008466195284285714285714285714",
+        "fleetCumulativeReturnFraction": "-0.00008466195284285714285714285714",
+        "fleetDailyPnl": "-59.26336699",
+        "fleetStartingEquity": "700000",
+        "fleetEndingEquity": "699940.73663301",
+        "coveragePresent": 7,
+        "coverageExpected": 7,
+        "notYetEligible": 2,
+        "tradesOpened": 5,
+        "tradesClosed": 0,
+        "openPositions": 5,
+        "pendingOrders": 5,
+        "status": "negative",
+        "strategies": [
+          {
+            "id": "ts_momentum_sma_atr",
+            "dailyReturnFraction": "0.00021323",
+            "cumulativeReturnFraction": "0.00021323",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "21.32332408",
+            "totalPnl": "21.32332408",
+            "tradesOpened": 2,
+            "tradesClosed": 0,
+            "openPositions": 2,
+            "pendingOrders": 0
+          },
+          {
+            "id": "cross_sectional_relative_strength",
+            "dailyReturnFraction": "-0.00034782",
+            "cumulativeReturnFraction": "-0.00034782",
+            "drawdownFraction": "-0.00034782",
+            "realizedPnl": "0",
+            "unrealizedPnl": "-34.78249387",
+            "totalPnl": "-34.78249387",
+            "tradesOpened": 1,
+            "tradesClosed": 0,
+            "openPositions": 1,
+            "pendingOrders": 0
+          },
+          {
+            "id": "donchian_breakout_20_10",
+            "dailyReturnFraction": "-0.00045804",
+            "cumulativeReturnFraction": "-0.00045804",
+            "drawdownFraction": "-0.00045804",
+            "realizedPnl": "0",
+            "unrealizedPnl": "-45.8041972",
+            "totalPnl": "-45.8041972",
+            "tradesOpened": 2,
+            "tradesClosed": 0,
+            "openPositions": 2,
+            "pendingOrders": 0
+          },
+          {
+            "id": "bullish_fvg_continuation",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 2
+          },
+          {
+            "id": "failed_breakout_reversal_short",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 3
+          },
+          {
+            "id": "pullback_reclaim_uptrend",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 0
+          },
+          {
+            "id": "volatility_contraction_breakout",
+            "dailyReturnFraction": "0",
+            "cumulativeReturnFraction": "0",
+            "drawdownFraction": "0",
+            "realizedPnl": "0",
+            "unrealizedPnl": "0",
+            "totalPnl": "0",
+            "tradesOpened": 0,
+            "tradesClosed": 0,
+            "openPositions": 0,
+            "pendingOrders": 0
+          }
+        ]
+      }
+    ],
+    "openPositions": [
+      {
+        "fillDate": "2026-07-16",
+        "symbol": "AMD",
+        "strategyName": "Cross-Sectional Strength",
+        "direction": "long",
+        "fillPrice": "509.584665",
+        "stop": "429.05071428571426",
+        "target": "829.4078571428572",
+        "lastMark": "500.94",
+        "unrealizedPnl": "-34.782493865999896"
+      },
+      {
+        "fillDate": "2026-07-16",
+        "symbol": "AAPL",
+        "strategyName": "Donchian Breakout · 20 / 10",
+        "direction": "long",
+        "fillPrice": "328.1690025",
+        "stop": "308.5342857142857",
+        "target": "384.39714285714285",
+        "lastMark": "333.26",
+        "unrealizedPnl": "126.45451499375037"
+      },
+      {
+        "fillDate": "2026-07-16",
+        "symbol": "AMZN",
+        "strategyName": "Donchian Breakout · 20 / 10",
+        "direction": "long",
+        "fillPrice": "255.24756",
+        "stop": "239.89428571428573",
+        "target": "300.15714285714284",
+        "lastMark": "249.89",
+        "unrealizedPnl": "-172.25871219200022"
+      },
+      {
+        "fillDate": "2026-07-16",
+        "symbol": "AAPL",
+        "strategyName": "Trend Momentum · SMA / ATR",
+        "direction": "long",
+        "fillPrice": "328.1690025",
+        "stop": "308.5342857142857",
+        "target": "355.9485714285714",
+        "lastMark": "333.26",
+        "unrealizedPnl": "126.45451499375037"
+      },
+      {
+        "fillDate": "2026-07-16",
+        "symbol": "META",
+        "strategyName": "Trend Momentum · SMA / ATR",
+        "direction": "long",
+        "fillPrice": "677.6136375",
+        "stop": "623.7471571428571",
+        "target": "767.6542642857142",
+        "lastMark": "664.54",
+        "unrealizedPnl": "-105.13119091000014"
+      }
+    ],
+    "pendingOrders": [
+      {
+        "signalDate": "2026-07-16",
+        "symbol": "AMZN",
+        "strategyName": "Bullish FVG Continuation",
+        "direction": "long",
+        "entryReference": "249.89",
+        "stop": "245.8349107142857",
+        "target": "258.00017857142853"
+      },
+      {
+        "signalDate": "2026-07-16",
+        "symbol": "JPM",
+        "strategyName": "Bullish FVG Continuation",
+        "direction": "long",
+        "entryReference": "343.15",
+        "stop": "334.5423892857143",
+        "target": "360.3652214285713"
+      },
+      {
+        "signalDate": "2026-07-16",
+        "symbol": "AMZN",
+        "strategyName": "Failed Breakout · Short",
+        "direction": "short",
+        "entryReference": "249.89",
+        "stop": "259.99004464285713",
+        "target": "229.6899107142857"
+      },
+      {
+        "signalDate": "2026-07-16",
+        "symbol": "UNH",
+        "strategyName": "Failed Breakout · Short",
+        "direction": "short",
+        "entryReference": "423.38",
+        "stop": "464.1492857142857",
+        "target": "341.84142857142854"
+      },
+      {
+        "signalDate": "2026-07-16",
+        "symbol": "XOM",
+        "strategyName": "Failed Breakout · Short",
+        "direction": "short",
+        "entryReference": "145.95",
+        "stop": "147.6005357142857",
+        "target": "142.64892857142854"
+      }
+    ]
+  },
+  "system": {
+    "scheduler": {
+      "status": "passed",
+      "runDate": "2026-07-12",
+      "completedAt": "2026-07-12T22:10:06.0244583Z",
+      "exitCode": 0
+    }
+  }
+}

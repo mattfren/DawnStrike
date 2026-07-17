@@ -23,14 +23,14 @@ py -m intraday_scanner.cli web-auto-collect --config config\web_sources.yaml --d
 py -m intraday_scanner.cli web-telegram-daemon --config config\web_sources.yaml --automation-config config\automation.yaml --db-path data\shadow_real.sqlite --out-root outputs\web_telegram --ai-mode none --notify telegram --max-cycles 1
 ```
 
-4. Start the operator dashboard:
+4. Start dashboard:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py --server.port 8502
 ```
 
-5. Open `http://127.0.0.1:8502/` and review Today, Review, History, Calendar,
-Performance, and System. Any broker action remains outside Dawnstrike.
+5. Review picks, source confidence, risk flags, and Telegram preview. Any broker
+action remains outside Dawnstrike.
 
 ## AlphaOps Flow
 

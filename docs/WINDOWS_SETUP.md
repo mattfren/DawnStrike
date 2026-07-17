@@ -22,8 +22,7 @@ intraday-scan --help
 Recommended local app command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py --server.port 8502
 ```
 
-Open `http://127.0.0.1:8502/`. This is the canonical local operator dashboard.
 The app does not place orders, hold broker credentials, or execute trades.

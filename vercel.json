@@ -1,84 +1,65 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "functions": {
-    "api/cron_after_close.py": {
-      "maxDuration": 300
-    },
-    "api/cron_morning.py": {
-      "maxDuration": 300
-    },
-    "api/health.py": {
-      "maxDuration": 300
-    },
-    "api/readiness.py": {
-      "maxDuration": 300
-    },
-    "api/scanner.py": {
-      "maxDuration": 300
-    },
-    "api/telegram.py": {
-      "maxDuration": 300
-    },
-    "api/ui.py": {
-      "includeFiles": "data/v2_command_center_x3/**",
-      "maxDuration": 300
-    }
-  },
-  "crons": [
+  "routes": [
     {
-      "path": "/api/cron_morning",
-      "schedule": "10 14 * * 1-5"
+      "src": "^/api/health$",
+      "dest": "/api/health.json",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store"
+      }
     },
     {
-      "path": "/api/cron_after_close",
-      "schedule": "35 21 * * 1-5"
-    }
-  ],
-  "rewrites": [
-    {
-      "source": "/",
-      "destination": "/api/ui?asset=index.html"
+      "src": "^/assets/(.*)$",
+      "dest": "/assets/$1",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff"
+      }
     },
     {
-      "source": "/index.html",
-      "destination": "/api/ui?asset=index.html"
+      "src": "^/calendar$",
+      "dest": "/index.html",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store"
+      }
     },
     {
-      "source": "/assets/:path*",
-      "destination": "/api/ui?asset=assets/:path*"
+      "src": "^/pages/calendar\\.html$",
+      "dest": "/index.html",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store"
+      }
     },
     {
-      "source": "/pages/:path*",
-      "destination": "/api/ui?asset=pages/:path*"
+      "src": "^/$",
+      "dest": "/index.html",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff"
+      }
     },
     {
-      "source": "/days/:path*",
-      "destination": "/api/ui?asset=days/:path*"
+      "src": "^/index\\.html$",
+      "status": 308,
+      "headers": {
+        "Location": "/"
+      }
     },
     {
-      "source": "/months/:path*",
-      "destination": "/api/ui?asset=months/:path*"
-    },
-    {
-      "source": "/strategies/:path*",
-      "destination": "/api/ui?asset=strategies/:path*"
-    },
-    {
-      "source": "/data/:path*",
-      "destination": "/api/ui?asset=data/:path*"
-    },
-    {
-      "source": "/manifests/:path*",
-      "destination": "/api/ui?asset=manifests/:path*"
-    },
-    {
-      "source": "/qa/:path*",
-      "destination": "/api/ui?asset=qa/:path*"
-    },
-    {
-      "source": "/reports/:path*",
-      "destination": "/api/ui?asset=reports/:path*"
+      "src": "^/(.*)$",
+      "status": 404,
+      "dest": "/404.html",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff"
+      }
     }
   ]
 }

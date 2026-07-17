@@ -1,9 +1,0 @@
-{
-  "boundary": "Historical backtest only \u2014 not validated forward performance.",
-  "checked_at": "2026-07-02T02:38:01.503629+00:00",
-  "comparison_rows": 24,
-  "schema_version": "v2.historical_backtest.comparison.v1",
-  "shadow_rows": 15,
-  "status": "passed",
-  "top_strategy": "volatility_contraction_breakout"
-}

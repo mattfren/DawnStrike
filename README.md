@@ -261,15 +261,23 @@ Outputs:
 - `outputs\sample_scan\avoid_list.csv`
 - `outputs\sample_scan\scan_summary.json`
 
-## Run the Operator Dashboard
+## Run the Dashboard
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py
 ```
 
-Open `http://127.0.0.1:8502/`. This launches the canonical Streamlit operator
-dashboard in `app.py`. It is research-only/paper-only, does not require Alpaca
-credentials, and does not place orders.
+The dashboard can read sample CSV data, latest output files, or SQLite. It does not require Alpaca credentials for sample mode.
+
+Use the `Run Center` tab to run the local workflow from the web UI:
+
+- initialize SQLite
+- run the scan
+- run the paper audit
+- preview notification events
+- monitor the saved setup list against a fresh snapshot
+- register/check the 5-minute local monitor tasks
+- run the full sample backtest in one click
 
 ## Dawnstrike Signal Engine v3
 

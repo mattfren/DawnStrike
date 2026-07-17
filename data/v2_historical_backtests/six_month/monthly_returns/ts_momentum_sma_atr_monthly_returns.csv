@@ -1,8 +1,0 @@
-strategy_id,month,start_equity,end_equity,return_pct
-ts_momentum_sma_atr,2026-01,100000,100000,0
-ts_momentum_sma_atr,2026-02,100000,100000,0
-ts_momentum_sma_atr,2026-03,100000,100000,0
-ts_momentum_sma_atr,2026-04,100000,106305.2991,0.06305299
-ts_momentum_sma_atr,2026-05,107849.8602,114349.2529,0.06026334
-ts_momentum_sma_atr,2026-06,114347.6807,105867.7677,-0.07415903
-ts_momentum_sma_atr,2026-07,105867.7677,105867.7677,0

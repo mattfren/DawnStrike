@@ -1,0 +1,1111 @@
+{
+  "calendar": {
+    "currentMonth": "2026-07",
+    "summary": {
+      "monthlyReturn": "-0.008466%",
+      "noTradeDays": 1,
+      "observedDays": 2,
+      "totalTrades": 5
+    },
+    "tiles": [
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-01",
+        "day": "01",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-02",
+        "day": "02",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-03",
+        "day": "03",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-04",
+        "day": "04",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-05",
+        "day": "05",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-06",
+        "day": "06",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-07",
+        "day": "07",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-08",
+        "day": "08",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-09",
+        "day": "09",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-10",
+        "day": "10",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-11",
+        "day": "11",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-12",
+        "day": "12",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-13",
+        "day": "13",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-14",
+        "day": "14",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "0 opened \u00b7 0 closed",
+        "dailyReturn": "0.000000%",
+        "date": "2026-07-15",
+        "day": "15",
+        "detailNote": "7 of 7 eligible strategies observed; 2 registered strategies were not yet eligible.",
+        "noTrade": true,
+        "observed": true,
+        "state": "flat \u00b7 official forward",
+        "strategyReturns": [
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
+            "date": "2026-07-15",
+            "id": "ts_momentum_sma_atr",
+            "name": "Trend Momentum \u00b7 SMA / ATR",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "not yet eligible",
+            "id": "gap_up_continuation",
+            "name": "Gap-Up Continuation",
+            "pnl": null,
+            "return": null,
+            "status": "Registered \u00b7 starts 2026-07-17"
+          },
+          {
+            "activity": "not yet eligible",
+            "id": "gap_up_continuation_atr",
+            "name": "ATR Gap-Up Continuation",
+            "pnl": null,
+            "return": null,
+            "status": "Registered \u00b7 starts 2026-07-17"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 2 pending",
+            "date": "2026-07-15",
+            "id": "cross_sectional_relative_strength",
+            "name": "Cross-Sectional Strength",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
+            "date": "2026-07-15",
+            "id": "donchian_breakout_20_10",
+            "name": "Donchian Breakout \u00b7 20 / 10",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 1 pending",
+            "date": "2026-07-15",
+            "id": "bullish_fvg_continuation",
+            "name": "Bullish FVG Continuation",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
+            "date": "2026-07-15",
+            "id": "failed_breakout_reversal_short",
+            "name": "Failed Breakout \u00b7 Short",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
+            "date": "2026-07-15",
+            "id": "pullback_reclaim_uptrend",
+            "name": "Pullback Reclaim",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
+            "date": "2026-07-15",
+            "id": "volatility_contraction_breakout",
+            "name": "Volatility Contraction",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          }
+        ],
+        "tone": "flat",
+        "tradeCount": 0,
+        "warning": false
+      },
+      {
+        "activity": "5 opened \u00b7 0 closed",
+        "dailyReturn": "-0.008466%",
+        "date": "2026-07-16",
+        "day": "16",
+        "detailNote": "7 of 7 eligible strategies observed; 2 registered strategies were not yet eligible.",
+        "noTrade": false,
+        "observed": true,
+        "state": "negative \u00b7 official forward",
+        "strategyReturns": [
+          {
+            "activity": "2 opened \u00b7 0 closed \u00b7 2 open \u00b7 0 pending",
+            "date": "2026-07-16",
+            "id": "ts_momentum_sma_atr",
+            "name": "Trend Momentum \u00b7 SMA / ATR",
+            "pnl": "+$21.32 unrealized",
+            "return": "+0.021323%",
+            "status": "official forward \u00b7 unrealized mark"
+          },
+          {
+            "activity": "not yet eligible",
+            "id": "gap_up_continuation",
+            "name": "Gap-Up Continuation",
+            "pnl": null,
+            "return": null,
+            "status": "Registered \u00b7 starts 2026-07-17"
+          },
+          {
+            "activity": "not yet eligible",
+            "id": "gap_up_continuation_atr",
+            "name": "ATR Gap-Up Continuation",
+            "pnl": null,
+            "return": null,
+            "status": "Registered \u00b7 starts 2026-07-17"
+          },
+          {
+            "activity": "1 opened \u00b7 0 closed \u00b7 1 open \u00b7 0 pending",
+            "date": "2026-07-16",
+            "id": "cross_sectional_relative_strength",
+            "name": "Cross-Sectional Strength",
+            "pnl": "-$34.78 unrealized",
+            "return": "-0.034782%",
+            "status": "official forward \u00b7 unrealized mark"
+          },
+          {
+            "activity": "2 opened \u00b7 0 closed \u00b7 2 open \u00b7 0 pending",
+            "date": "2026-07-16",
+            "id": "donchian_breakout_20_10",
+            "name": "Donchian Breakout \u00b7 20 / 10",
+            "pnl": "-$45.80 unrealized",
+            "return": "-0.045804%",
+            "status": "official forward \u00b7 unrealized mark"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 2 pending",
+            "date": "2026-07-16",
+            "id": "bullish_fvg_continuation",
+            "name": "Bullish FVG Continuation",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
+            "date": "2026-07-16",
+            "id": "failed_breakout_reversal_short",
+            "name": "Failed Breakout \u00b7 Short",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
+            "date": "2026-07-16",
+            "id": "pullback_reclaim_uptrend",
+            "name": "Pullback Reclaim",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          },
+          {
+            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
+            "date": "2026-07-16",
+            "id": "volatility_contraction_breakout",
+            "name": "Volatility Contraction",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward \u00b7 observed"
+          }
+        ],
+        "tone": "negative",
+        "tradeCount": 5,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-17",
+        "day": "17",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-18",
+        "day": "18",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-19",
+        "day": "19",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-20",
+        "day": "20",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-21",
+        "day": "21",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-22",
+        "day": "22",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-23",
+        "day": "23",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-24",
+        "day": "24",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-25",
+        "day": "25",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-26",
+        "day": "26",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-27",
+        "day": "27",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-28",
+        "day": "28",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-29",
+        "day": "29",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-30",
+        "day": "30",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      },
+      {
+        "activity": "not observed",
+        "dailyReturn": null,
+        "date": "2026-07-31",
+        "day": "31",
+        "detailNote": "No retained official forward session exists for this date.",
+        "noTrade": false,
+        "observed": false,
+        "state": "not observed",
+        "strategyReturns": [],
+        "tone": "not-observed",
+        "tradeCount": null,
+        "warning": false
+      }
+    ]
+  },
+  "current": {
+    "note": "Five paper positions were filled July 16 from July 15 signals. Every displayed P&L is an unrealized close mark; no strategy has a closed-trade win rate yet.",
+    "records": [
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$509.58",
+        "pnl": "-$34.78 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$429.05",
+        "strategy": "Cross-Sectional Strength",
+        "symbol": "AMD",
+        "target": "+$829.41"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$126.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Donchian Breakout \u00b7 20 / 10",
+        "symbol": "AAPL",
+        "target": "+$384.40"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$255.25",
+        "pnl": "-$172.26 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$239.89",
+        "strategy": "Donchian Breakout \u00b7 20 / 10",
+        "symbol": "AMZN",
+        "target": "+$300.16"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$126.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Trend Momentum \u00b7 SMA / ATR",
+        "symbol": "AAPL",
+        "target": "+$355.95"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$677.61",
+        "pnl": "-$105.13 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$623.75",
+        "strategy": "Trend Momentum \u00b7 SMA / ATR",
+        "symbol": "META",
+        "target": "+$767.65"
+      }
+    ]
+  },
+  "deploymentStatus": "Data verified",
+  "evidenceRail": [
+    {
+      "detail": "7/7 eligible strategies; run paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "label": "PaperOps run",
+      "status": "verified",
+      "value": "2026-07-16 forward"
+    },
+    {
+      "detail": "20 lifecycle events, 4 reference rows, and 2 runs audited.",
+      "label": "Source bars",
+      "status": "passed",
+      "value": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7"
+    },
+    {
+      "detail": "Both gap-up strategies first become eligible 2026-07-17.",
+      "label": "Registry",
+      "status": "2 pending activation",
+      "value": "9 registered / 7 eligible"
+    },
+    {
+      "detail": "1 watch-only message recorded; manual confirmation remains required.",
+      "label": "AlphaOps delivery",
+      "status": "delivery recorded",
+      "value": "ae7f10de-aac2-452f-a05a-84b11d0b6019"
+    },
+    {
+      "detail": "Missing and pre-inception observations remain n/a, never zero.",
+      "label": "Boundary",
+      "status": "no broker execution",
+      "value": "research and paper audit only"
+    }
+  ],
+  "freshnessLabel": "AlphaOps + PaperOps 2026-07-16",
+  "generatedAt": "2026-07-16T23:57:00Z",
+  "latestRunDate": "2026-07-16",
+  "noPicks": {
+    "acceptedCount": 0,
+    "blockedCount": 2,
+    "headline": "No clean trade recommendation: 1 watch-only alert needs confirmation.",
+    "topReasons": [
+      "Halt status was not verified for 3 of 3 candidates.",
+      "Float was unknown for 3 of 3 candidates.",
+      "SEC risk was not checked for 3 of 3 candidates.",
+      "Two candidates had unresolved source conflicts.",
+      "No candidate had enough first-touch history for a measured hit rate."
+    ],
+    "watchCount": 3
+  },
+  "operatorWatchlist": {
+    "blockedCount": 2,
+    "candidateCount": 3,
+    "clearedCount": 1,
+    "date": "2026-07-16",
+    "gateSummary": "2 blocked / 1 needs confirmation / 0 clean",
+    "note": "Watch-only research. One name reached manual-confirmation delivery; no clean trade recommendation was recorded, and broker execution remains disabled.",
+    "rows": [
+      {
+        "company": "iQSTEL Inc.",
+        "entryTrigger": "$1.3869",
+        "gapPct": "19.99%",
+        "gate": "NEEDS CONFIRMATION",
+        "rank": 1,
+        "rewardRisk": "1.50R",
+        "score": "52.46",
+        "source": "stockanalysis_premarket",
+        "sourceConfidence": "34.5%",
+        "sourceCount": 2,
+        "ticker": "IQST"
+      },
+      {
+        "company": "The Growhub Limited",
+        "entryTrigger": "$1.4773",
+        "gapPct": "93.56%",
+        "gate": "BLOCKED",
+        "rank": 2,
+        "rewardRisk": "1.50R",
+        "score": "61.03",
+        "source": "stockanalysis_premarket",
+        "sourceConfidence": "22.0%",
+        "sourceCount": 2,
+        "ticker": "TGHL"
+      },
+      {
+        "company": "Rubico Inc.",
+        "entryTrigger": "$8.4621",
+        "gapPct": "23.83%",
+        "gate": "BLOCKED",
+        "rank": 3,
+        "rewardRisk": "1.50R",
+        "score": "48.15",
+        "source": "stockanalysis_premarket",
+        "sourceConfidence": "22.0%",
+        "sourceCount": 2,
+        "ticker": "RUBI"
+      }
+    ],
+    "title": "Operator Watchlist"
+  },
+  "overallStatus": "verified paper evidence / no broker execution",
+  "paperTrading": {
+    "note": "252 canonical blotter rows include 221 explicit no-setup rows.",
+    "recentRows": [
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$509.58",
+        "pnl": "-$34.78 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$429.05",
+        "strategy": "Cross-Sectional Strength",
+        "symbol": "AMD",
+        "target": "+$829.41"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$126.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Donchian Breakout \u00b7 20 / 10",
+        "symbol": "AAPL",
+        "target": "+$384.40"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$255.25",
+        "pnl": "-$172.26 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$239.89",
+        "strategy": "Donchian Breakout \u00b7 20 / 10",
+        "symbol": "AMZN",
+        "target": "+$300.16"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$126.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Trend Momentum \u00b7 SMA / ATR",
+        "symbol": "AAPL",
+        "target": "+$355.95"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$677.61",
+        "pnl": "-$105.13 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$623.75",
+        "strategy": "Trend Momentum \u00b7 SMA / ATR",
+        "symbol": "META",
+        "target": "+$767.65"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$249.89",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$245.83",
+        "strategy": "Bullish FVG Continuation",
+        "symbol": "AMZN",
+        "target": "+$258.00"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$343.15",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$334.54",
+        "strategy": "Bullish FVG Continuation",
+        "symbol": "JPM",
+        "target": "+$360.37"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "short",
+        "entry": "+$249.89",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$259.99",
+        "strategy": "Failed Breakout \u00b7 Short",
+        "symbol": "AMZN",
+        "target": "+$229.69"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "short",
+        "entry": "+$423.38",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$464.15",
+        "strategy": "Failed Breakout \u00b7 Short",
+        "symbol": "UNH",
+        "target": "+$341.84"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "short",
+        "entry": "+$145.95",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$147.60",
+        "strategy": "Failed Breakout \u00b7 Short",
+        "symbol": "XOM",
+        "target": "+$142.65"
+      }
+    ],
+    "rowLabel": "31 signal-linked paper rows",
+    "totalRows": 31
+  },
+  "quickActions": [
+    {
+      "href": "#watchlist",
+      "label": "Review Watchlist",
+      "tone": "primary"
+    },
+    {
+      "href": "#calendar",
+      "label": "Inspect Calendar",
+      "tone": "secondary"
+    },
+    {
+      "href": "#strategies",
+      "label": "Compare Strategies",
+      "tone": "secondary"
+    }
+  ],
+  "schemaVersion": "dawnstrike.static-dashboard.v2",
+  "sourceCommit": "UI 08c88c7 / canonical evidence 2026-07-16",
+  "sourceEvidence": {
+    "calendarSha256": "1ae76f0a0d58a6f551550ff4180082f6a39c0cdea926d1baf87753bd36fba39d",
+    "calendarTruthStatus": "passed",
+    "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+    "dataSnapshotNormalizedSha256": "91988d560a1a42b37cf4303406ae62d37aff41e2bd65ce0cf61069e61c1e62a0",
+    "fleetReportStatus": "complete",
+    "paperOpsRunId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+    "registrySha256": "5b6e8cc75b6d3fa62865c6631fc3d7ee849cd83799e9ee13d075ede158d8435d",
+    "sourceBarTruthStatus": "passed",
+    "strategyFingerprints": {
+      "gap_up_continuation@v1.0": "e5388d9dc52bbc827426d733e8f31cd8cc41a17e3792091b598bedde816e30e3",
+      "gap_up_continuation_atr@v1.0": "441bbf043349c79d6ae87d79cbb68509fb5eaaae9ba0b790f066555005393608"
+    }
+  },
+  "strategies": [
+    {
+      "drawdown": "0.000000%",
+      "id": "ts_momentum_sma_atr",
+      "name": "Trend Momentum \u00b7 SMA / ATR",
+      "return": "+0.021323%",
+      "status": "official forward paper",
+      "trades": "2 opened / 0 closed",
+      "validation": "2026-07-16 unrealized mark; 2 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": null,
+      "id": "gap_up_continuation",
+      "name": "Gap-Up Continuation",
+      "return": null,
+      "status": "registered / not yet eligible",
+      "trades": null,
+      "validation": "Registered with immutable lineage. First eligible session 2026-07-17; no pre-inception return exists.",
+      "winRate": null
+    },
+    {
+      "drawdown": null,
+      "id": "gap_up_continuation_atr",
+      "name": "ATR Gap-Up Continuation",
+      "return": null,
+      "status": "registered / not yet eligible",
+      "trades": null,
+      "validation": "Registered with immutable lineage. First eligible session 2026-07-17; no pre-inception return exists.",
+      "winRate": null
+    },
+    {
+      "drawdown": "-0.034782%",
+      "id": "cross_sectional_relative_strength",
+      "name": "Cross-Sectional Strength",
+      "return": "-0.034782%",
+      "status": "official forward paper",
+      "trades": "1 opened / 0 closed",
+      "validation": "2026-07-16 unrealized mark; 1 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "-0.045804%",
+      "id": "donchian_breakout_20_10",
+      "name": "Donchian Breakout \u00b7 20 / 10",
+      "return": "-0.045804%",
+      "status": "official forward paper",
+      "trades": "2 opened / 0 closed",
+      "validation": "2026-07-16 unrealized mark; 2 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "bullish_fvg_continuation",
+      "name": "Bullish FVG Continuation",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-16 official forward observation; 0 open and 2 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "failed_breakout_reversal_short",
+      "name": "Failed Breakout \u00b7 Short",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-16 official forward observation; 0 open and 3 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "pullback_reclaim_uptrend",
+      "name": "Pullback Reclaim",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-16 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "volatility_contraction_breakout",
+      "name": "Volatility Contraction",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-16 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    }
+  ],
+  "subheadline": "July 16 forward paper truth, the live AlphaOps watchlist, and every registered strategy in one research-only view. Returns marked from open positions remain unrealized until a canonical close exists.",
+  "system": {
+    "flow": [
+      {
+        "description": "3 ranked watch names; one manual-confirmation delivery recorded.",
+        "name": "AlphaOps",
+        "status": "complete"
+      },
+      {
+        "description": "Forward calendar, lifecycle blotter, and 7/7 eligible coverage verified.",
+        "name": "PaperOps",
+        "status": "verified"
+      },
+      {
+        "description": "Retained source-bar and calendar truth gates passed.",
+        "name": "Source truth",
+        "status": "passed"
+      },
+      {
+        "description": "Two gap-up strategies registered; no evidence claimed before July 17.",
+        "name": "Strategy activation",
+        "status": "pending"
+      },
+      {
+        "description": "Research and paper audit only. No order-placement path is exposed.",
+        "name": "Broker boundary",
+        "status": "disabled by design"
+      }
+    ],
+    "schedulerStatus": "passed artifact \u00b7 2026-07-12",
+    "taskStatuses": [
+      {
+        "last_result": 0,
+        "last_run_time": "2026-07-16T08:10:13-05:00",
+        "next_run_time": null,
+        "state": "complete",
+        "task_name": "AlphaOps scan"
+      },
+      {
+        "last_result": 0,
+        "last_run_time": "2026-07-16",
+        "next_run_time": null,
+        "state": "verified",
+        "task_name": "PaperOps forward evidence"
+      },
+      {
+        "last_result": 0,
+        "last_run_time": "2026-07-12T22:10:06.0244583Z",
+        "next_run_time": null,
+        "state": "passed",
+        "task_name": "Scheduler verification artifact"
+      }
+    ],
+    "telegramReadiness": "delivery recorded \u00b7 2026-07-16"
+  },
+  "topMetrics": [
+    {
+      "context": "-$59.26 across 7 independent $100k paper sleeves; 0 closed",
+      "label": "PaperOps Fleet",
+      "tone": "danger",
+      "value": "-0.008466%"
+    },
+    {
+      "context": "Trend Momentum \u00b7 SMA / ATR; +$21.32 unrealized",
+      "label": "Best Strategy",
+      "tone": "positive",
+      "value": "+0.021323%"
+    },
+    {
+      "context": "2 registered strategies start 2026-07-17",
+      "label": "Strategy Coverage",
+      "tone": "info",
+      "value": "7 / 7 eligible"
+    },
+    {
+      "context": "5 opened, 0 closed; realized P&L $0.00",
+      "label": "Paper Activity",
+      "tone": "warning",
+      "value": "5 open / 5 pending"
+    },
+    {
+      "context": "1 needs confirmation; 2 blocked; 0 clean recommendations",
+      "label": "AlphaOps",
+      "tone": "warning",
+      "value": "3 watch names"
+    }
+  ]
+}

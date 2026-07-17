@@ -1,8 +1,0 @@
-strategy_id,month,start_equity,end_equity,return_pct
-bullish_fvg_continuation,2026-01,100000,100000,0
-bullish_fvg_continuation,2026-02,100000,96930.0417,-0.03069958
-bullish_fvg_continuation,2026-03,96993.6445,95753.2508,-0.0127884
-bullish_fvg_continuation,2026-04,95753.2508,101360.1611,0.05855582
-bullish_fvg_continuation,2026-05,102506.6411,107940.024,0.05300518
-bullish_fvg_continuation,2026-06,108304.1545,100524.3646,-0.07183279
-bullish_fvg_continuation,2026-07,100652.0446,100646.5343,-0.00005475

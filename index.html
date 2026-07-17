@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dawnstrike Operator Dashboard</title>
+    <meta
+      name="description"
+      content="Dawnstrike operator dashboard for AlphaOps watchlists, paper trading, calendar evidence, strategy health, and automation readiness."
+    />
+    <link rel="stylesheet" href="/assets/dashboard.css" />
+    <script defer src="/assets/dashboard.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#dashboard">Skip to dashboard</a>
+    <div class="app-frame">
+      <aside class="side-nav" aria-label="Dawnstrike navigation">
+        <a class="brand" href="#dashboard" aria-label="Dawnstrike dashboard home">
+          <span>Dawnstrike</span>
+          <strong>Operator</strong>
+        </a>
+        <nav>
+          <a href="#watchlist">Watchlist</a>
+          <a href="#calendar">Calendar</a>
+          <a href="#paper">Paper Book</a>
+          <a href="#strategies">Strategies</a>
+          <a href="#system">System</a>
+        </nav>
+        <section class="nav-card" aria-label="Execution boundary">
+          <span>Boundary</span>
+          <strong>Research only</strong>
+          <p>No broker execution. Missing values stay n/a.</p>
+        </section>
+      </aside>
+
+      <header class="statusbar" aria-label="Dawnstrike status">
+        <span class="status-pill quiet" id="status-deployment">Dashboard loading</span>
+        <span class="status-pill warn" id="status-gate">Gate loading</span>
+        <span class="status-pill quiet" id="status-paper">Paper evidence</span>
+        <span class="status-pill quiet" id="status-freshness">Freshness loading</span>
+      </header>
+
+      <main id="dashboard" class="workspace">
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <p class="eyebrow">Trading research terminal</p>
+            <h1 id="hero-title">Dawnstrike Operator Dashboard</h1>
+            <p id="subheadline">Loading the compact Dawnstrike evidence bundle.</p>
+            <div class="action-row" id="quick-actions"></div>
+          </div>
+          <aside class="command-ticket" aria-label="Current state">
+            <div class="section-label">Current State</div>
+            <dl>
+              <div>
+                <dt>Latest run</dt>
+                <dd id="latest-run-date">n/a</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd id="overall-status">n/a</dd>
+              </div>
+              <div>
+                <dt>Top watch</dt>
+                <dd id="hero-top-symbol">n/a</dd>
+              </div>
+            </dl>
+          </aside>
+        </section>
+
+        <section class="kpi-strip" id="metric-grid" aria-label="Key metrics"></section>
+
+        <div class="content-grid">
+          <section class="panel panel-large" id="watchlist" aria-labelledby="watchlist-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-label">AlphaOps</p>
+                <h2 id="watchlist-title">Current Operator Watchlist</h2>
+              </div>
+              <div class="badge-row">
+                <span class="status-pill warn" id="watchlist-date">n/a</span>
+                <span class="status-pill quiet" id="watchlist-count">n/a</span>
+              </div>
+            </div>
+            <div class="watchlist-note" id="watchlist-note"></div>
+            <div class="table-wrap">
+              <table id="watchlist-table" data-sortable>
+                <thead>
+                  <tr>
+                    <th><button type="button" data-sort="rank">Rank</button></th>
+                    <th><button type="button" data-sort="ticker">Ticker</button></th>
+                    <th><button type="button" data-sort="score">Score</button></th>
+                    <th><button type="button" data-sort="gate">Gate</button></th>
+                    <th><button type="button" data-sort="gapPct">Gap</button></th>
+                    <th><button type="button" data-sort="entryTrigger">Trigger</button></th>
+                    <th><button type="button" data-sort="rewardRisk">R/R</button></th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody id="watchlist-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="evidence-rail" id="evidence" aria-labelledby="evidence-title">
+            <div class="section-heading compact">
+              <div>
+                <p class="section-label">Evidence</p>
+                <h2 id="evidence-title">Provenance Rail</h2>
+              </div>
+            </div>
+            <div class="rail-stack" id="evidence-rail"></div>
+          </aside>
+        </div>
+
+        <section class="panel paper-ticket-panel" aria-labelledby="ticket-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">PaperOps</p>
+              <h2 id="ticket-title">Open Paper Positions</h2>
+            </div>
+            <span class="status-pill quiet" id="current-ticket-label">Verified forward paper</span>
+          </div>
+          <div class="ticket-grid" id="current-records"></div>
+          <p class="note" id="current-note"></p>
+        </section>
+
+        <section class="panel" id="calendar" aria-labelledby="calendar-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">Calendar</p>
+              <h2 id="calendar-title">Strategy Performance Calendar</h2>
+            </div>
+            <div class="calendar-summary" id="calendar-summary"></div>
+          </div>
+          <div class="calendar-layout">
+            <div class="calendar-grid" id="calendar-grid" aria-label="Calendar day tiles"></div>
+            <aside class="calendar-detail" aria-label="Selected calendar day" aria-live="polite">
+              <span>Selected day</span>
+              <strong id="calendar-selected-date">n/a</strong>
+              <dl>
+                <div><dt>Return</dt><dd id="calendar-selected-return">n/a</dd></div>
+                <div><dt>Trades</dt><dd id="calendar-selected-trades">n/a</dd></div>
+                <div><dt>State</dt><dd id="calendar-selected-state">n/a</dd></div>
+              </dl>
+              <p class="calendar-detail-note" id="calendar-selected-note"></p>
+              <section class="calendar-strategy-detail" aria-labelledby="calendar-strategy-title">
+                <h3 id="calendar-strategy-title">Return by strategy</h3>
+                <div id="calendar-selected-strategies" role="list"></div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="panel" id="paper" aria-labelledby="paper-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">Paper trading</p>
+              <h2 id="paper-title">Recent Paper Evidence</h2>
+            </div>
+            <span class="status-pill quiet" id="paper-count">n/a</span>
+          </div>
+          <div class="split-layout">
+            <div class="table-wrap">
+              <table id="paper-table" data-sortable>
+                <thead>
+                  <tr>
+                    <th><button type="button" data-sort="date">Date</button></th>
+                    <th><button type="button" data-sort="symbol">Symbol</button></th>
+                    <th><button type="button" data-sort="strategy">Strategy</button></th>
+                    <th>Entry</th>
+                    <th>Stop</th>
+                    <th>Target</th>
+                    <th><button type="button" data-sort="pnl">PnL</button></th>
+                    <th><button type="button" data-sort="r">R</button></th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-body"></tbody>
+              </table>
+            </div>
+            <aside class="risk-panel">
+              <p class="section-label">No-trade / risk</p>
+              <h3 id="no-picks-headline">n/a</h3>
+              <dl class="risk-stats">
+                <div><dt>Watch</dt><dd id="risk-watch">n/a</dd></div>
+                <div><dt>Accepted</dt><dd id="risk-accepted">n/a</dd></div>
+                <div><dt>Blocked</dt><dd id="risk-blocked">n/a</dd></div>
+              </dl>
+              <ul id="risk-reasons" class="reason-list"></ul>
+            </aside>
+          </div>
+        </section>
+
+        <section class="panel" id="strategies" aria-labelledby="strategies-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">Strategy evidence</p>
+              <h2 id="strategies-title">Strategy Health</h2>
+            </div>
+            <span class="status-pill warn">Forward paper</span>
+          </div>
+          <div class="strategy-grid" id="strategy-grid"></div>
+        </section>
+
+        <section class="panel" id="system" aria-labelledby="system-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">Automation</p>
+              <h2 id="system-title">System Readiness</h2>
+            </div>
+            <span class="status-pill quiet" id="system-status">n/a</span>
+          </div>
+          <div class="system-grid">
+            <div class="flow-stack" id="system-flow"></div>
+            <div class="timeline" id="audit-timeline"></div>
+          </div>
+        </section>
+
+        <footer class="audit-footer">
+          <span id="source-line">Source evidence loading...</span>
+          <span>Dawnstrike does not place trades or store broker execution credentials.</span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

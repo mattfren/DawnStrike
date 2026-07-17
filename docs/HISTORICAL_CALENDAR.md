@@ -10,10 +10,10 @@ selling. Public/free data is labeled unverified shadow data.
 
 ## Web UI
 
-Open the operator dashboard and select `Calendar`.
+Open the Streamlit dashboard and select `Historical Calendar`.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1
+py -m streamlit run app.py --server.port 8502
 ```
 
 Default database:
@@ -115,20 +115,6 @@ The command writes:
 - `missing_outcomes.csv`
 - `historical_report.md`
 - `historical_report.json`
-
-Daily Review adds post-market comparison exports to `historical-report`:
-
-- `daily_review_runs.csv`
-- `daily_review_items.csv`
-- `learning_backfeed_events.csv`
-- `review_by_source.csv`
-- `review_by_setup.csv`
-- `review_by_risk_flag.csv`
-
-The report includes caught top mover rate, missed winner rate, false positive
-rate, source coverage rate, pick precision, top mover recall, review
-completeness, and proposed/applied learning event counts. Recall can be measured
-from the mover list; return precision needs outcome rows.
 
 ## Evidence Rules
 
