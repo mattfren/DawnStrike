@@ -2003,11 +2003,20 @@ def _champion_source_context(
         or preflight.get("latest_completed_date") != run_date.isoformat()
     ):
         raise ValueError("champion preflight lineage does not match completed close report")
-    calendar_rows = paper_engine._read_calendar_rows(
-        paper_engine.PaperOpsPaths.create(output_root)
-    )
+    paths = paper_engine.PaperOpsPaths.create(output_root)
+    calendar_rows = paper_engine._read_calendar_rows(paths)
     registry = _champion_registry(output_root)
     for strategy_id, (version, policy, semantics) in registry.items():
+        if not paper_engine._series_is_eligible_for_run(
+            paths,
+            run_date=run_date,
+            mode=mode,
+            strategy_id=strategy_id,
+            strategy_version=version,
+            execution_policy_version=policy,
+            strategy_semantics_fingerprint=semantics,
+        ):
+            continue
         matches = [
             row
             for row in calendar_rows

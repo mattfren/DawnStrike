@@ -81,6 +81,69 @@ def test_shadow_activation_uses_new_york_market_date_at_utc_midnight() -> None:
     ) == date(2026, 7, 16)
 
 
+def test_champion_source_context_skips_only_pre_inception_forward_series(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "paper"
+    parent = _parent_strategy()
+    monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
+    run_date = date(2026, 7, 16)
+    _seed_root(root, parent)
+    _seed_champion_day(root, run_date)
+    paths = paper_engine.PaperOpsPaths.create(root)
+    future_strategy_id = "future_registered_strategy"
+    future_fingerprint = "f" * 64
+    registry = read_json(paths.state / "strategy_registry.json", [])
+    assert isinstance(registry, list)
+    registry.append(
+        {
+            "strategy_id": future_strategy_id,
+            "strategy_version": "v1.0",
+            "strategy_status": "experimental",
+            "execution_policy_version": PAPER_EXECUTION_POLICY_VERSION,
+            "strategy_semantics_fingerprint": future_fingerprint,
+        }
+    )
+    write_json(paths.state / "strategy_registry.json", registry)
+    semantics_manifest = read_json(
+        paths.state / "strategy_semantics_manifest.json",
+        {},
+    )
+    assert isinstance(semantics_manifest, dict)
+    strategies = semantics_manifest["strategies"]
+    assert isinstance(strategies, dict)
+    future_entry = {
+        "activation_policy": "next_market_session_after_registration",
+        "configuration": {},
+        "coverage_inception_date": "2026-07-17",
+        "fingerprint": future_fingerprint,
+        "registered_at": "2026-07-16T18:00:00+00:00",
+    }
+    strategies[f"{future_strategy_id}@v1.0"] = future_entry
+    write_json(paths.state / "strategy_semantics_manifest.json", semantics_manifest)
+
+    source = shadow_runner._champion_source_context(
+        root,
+        run_date,
+        PaperRunMode.FORWARD,
+    )
+
+    assert source["run_id"].startswith("paper_ops:forward:2026-07-16:")
+    future_entry["registered_at"] = "2026-07-15T18:00:00+00:00"
+    future_entry["coverage_inception_date"] = "2026-07-16"
+    write_json(paths.state / "strategy_semantics_manifest.json", semantics_manifest)
+    with pytest.raises(
+        ValueError,
+        match=r"champion calendar lineage is incomplete for future_registered_strategy@v1.0",
+    ):
+        shadow_runner._champion_source_context(
+            root,
+            run_date,
+            PaperRunMode.FORWARD,
+        )
+
+
 def test_new_candidate_semantics_ignore_unrelated_runner_module_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -655,6 +718,7 @@ def test_shadow_day_runs_eligible_challengers_while_preserving_ineligible_as_na(
 
 def _seed_root(root: Path, parent: StrategySpec) -> None:
     paths = paper_engine.PaperOpsPaths.create(root)
+    parent_semantics = paper_engine._strategy_semantics_fingerprint(parent)
     write_json(
         paths.state / "paper_ops_config.json",
         {
@@ -681,11 +745,40 @@ def _seed_root(root: Path, parent: StrategySpec) -> None:
                 "strategy_version": parent.version,
                 "strategy_status": parent.status,
                 "execution_policy_version": PAPER_EXECUTION_POLICY_VERSION,
-                "strategy_semantics_fingerprint": (
-                    paper_engine._strategy_semantics_fingerprint(parent)
-                ),
+                "strategy_semantics_fingerprint": parent_semantics,
             }
         ],
+    )
+    write_json(
+        paths.state / "strategy_semantics_manifest.json",
+        {
+            "schema_version": "v2.strategy_semantics_manifest.v1",
+            "strategies": {
+                f"{parent.strategy_id}@{parent.version}": {
+                    "activation_policy": "next_market_session_after_registration",
+                    "configuration": {},
+                    "coverage_inception_date": "2026-07-02",
+                    "fingerprint": parent_semantics,
+                    "registered_at": "2026-07-01T18:00:00+00:00",
+                }
+            },
+        },
+    )
+    write_json(
+        paths.state / "execution_policy_manifest.json",
+        {
+            "active_execution_policy_version": PAPER_EXECUTION_POLICY_VERSION,
+            "policies": {
+                PAPER_EXECUTION_POLICY_VERSION: {
+                    "activation_policy": "next_market_session_after_registration",
+                    "configuration": {},
+                    "coverage_inception_date": "2026-07-02",
+                    "fingerprint": "a" * 64,
+                    "registered_at": "2026-07-01T18:00:00+00:00",
+                }
+            },
+            "schema_version": "v2.paper_execution_policy_manifest.v1",
+        },
     )
     champion_account = StrategyPaperAccount(
         strategy_id=parent.strategy_id,
@@ -695,9 +788,7 @@ def _seed_root(root: Path, parent: StrategySpec) -> None:
         realized_pnl=0.0,
         unrealized_pnl=0.0,
         execution_policy_version=PAPER_EXECUTION_POLICY_VERSION,
-        strategy_semantics_fingerprint=(
-            paper_engine._strategy_semantics_fingerprint(parent)
-        ),
+        strategy_semantics_fingerprint=parent_semantics,
     )
     write_json(
         paper_engine._paper_accounts_path(paths, PaperRunMode.FORWARD),
