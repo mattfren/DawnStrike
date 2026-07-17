@@ -7,6 +7,7 @@ from pathlib import Path
 from intraday_scanner.public_data.nasdaq_historical_fetcher import (
     fetch_nasdaq_historical_daily_dataset,
 )
+
 from intraday_scanner.v2.command_center import build_command_center
 from intraday_scanner.v2.decision_engine import build_decision_engine
 from intraday_scanner.v2.quality import score_titan_quality

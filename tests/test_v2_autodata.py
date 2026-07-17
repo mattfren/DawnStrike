@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from intraday_scanner.public_data.autodata_fetcher import ProviderHttpError
+
 from intraday_scanner.v2.autodata import (
     build,
     feed_filltruth,
