@@ -1441,41 +1441,36 @@ def test_cli_and_eod_chain_gate_digest_after_verified_fleet() -> None:
     assert parsed.command == "strategy-fleet-telegram"
     assert parsed.max_attempts == 3
 
-    batch = Path("scripts/run_alphaops_eod_full.bat").read_text(encoding="utf-8")
+    batch = Path("scripts/run_paperops_fleet_eod.bat").read_text(encoding="utf-8")
     digest_command = "intraday_scanner.cli strategy-fleet-telegram"
     assert digest_command in batch
-    assert batch.index("paper_ops verify-calendar") < batch.index(digest_command)
-    shadow_run = batch.index("paper_ops shadow-run")
-    post_reconcile = batch.index("paper_ops reconcile", shadow_run)
-    post_verify = batch.index("paper_ops verify-calendar", post_reconcile)
-    post_rebuild = batch.index("paper_ops rebuild-ledger", post_verify)
-    blotter = batch.index("paper_ops blotter", post_rebuild)
+    run_day = batch.index("paper_ops run-day")
+    reconcile = batch.index("paper_ops reconcile", run_day)
+    verify = batch.index("paper_ops verify-calendar", reconcile)
+    rebuild = batch.index("paper_ops rebuild-ledger", verify)
+    source_truth = batch.index("paper_ops verify-source-bars", rebuild)
+    blotter = batch.index("paper_ops blotter", source_truth)
     verify_blotter = batch.index("paper_ops verify-blotter", blotter)
-    challenger_evaluate = batch.index("paper_ops challenger-evaluate", verify_blotter)
+    evidence = batch.index("paper_ops evidence", verify_blotter)
+    fleet_report = batch.index("strategy-fleet-report", evidence)
+    digest = batch.index(digest_command, fleet_report)
     assert (
-        shadow_run
-        < post_reconcile
-        < post_verify
-        < post_rebuild
+        run_day
+        < reconcile
+        < verify
+        < rebuild
+        < source_truth
         < blotter
         < verify_blotter
-        < challenger_evaluate
+        < evidence
+        < fleet_report
+        < digest
     )
-    assert "set PAPEROPS_SHADOW_ATTEMPTED=1" in batch[:shadow_run]
-    assert 'if "%PAPEROPS_SHADOW_ATTEMPTED%"=="1"' in batch[shadow_run:post_reconcile]
-    assert 'if "%POST_SHADOW_TRUTH_OK%"=="1"' in batch
-    assert 'if not "%POST_SHADOW_TRUTH_OK%"=="1" set PAPEROPS_DIGEST_READY=0' in batch
-    assert 'if not "%PAPEROPS_BLOTTER_OK%"=="1" set PAPEROPS_DIGEST_READY=0' in batch
-    init_failure = batch.index("Shadow challenger registry initialization failed.")
-    shadow_failure = batch.index("Frozen shadow challenger execution failed.")
-    assert "set PAPEROPS_VERIFY_OK=0" in batch[init_failure:shadow_run]
-    assert "set POST_SHADOW_TRUTH_OK=0" in batch[init_failure:shadow_run]
-    assert "set PAPEROPS_VERIFY_OK=0" in batch[shadow_failure:post_reconcile]
-    assert "set POST_SHADOW_TRUTH_OK=0" in batch[shadow_failure:post_reconcile]
-    assert batch.index("strategy-fleet-report") < batch.index(digest_command)
-    assert 'if "%PAPEROPS_DIGEST_READY%"=="1"' in batch
+    assert "--start %RUN_DATE% --end %RUN_DATE%" in batch
+    assert batch.count("if errorlevel 1 goto :TRUTH_FAILED") == 8
+    assert ":SEND_DIGEST" in batch
     assert "durable outbox remains available for retry" in batch
-    assert "set EXITCODE=1" in batch[batch.index(digest_command) :]
+    assert "exit /b 1" in batch[batch.index(digest_command) :]
 
 
 def test_sourced_zero_selection_alpha_day_sends_complete_paperops_digest(

@@ -157,12 +157,14 @@ PaperOps file ledger:
 - `data/v2_paper_ops_live/reports/strategy_evidence_scores.json`
 - `data/v2_paper_ops_live/reports/challenger_evaluation_latest.json`
 
-`data/v2_paper_ops_live` is the canonical scheduled-production root. The EOD
-chain sets `DAWNSTRIKE_PAPER_OPS_ROOT` to that path when the variable is absent,
-and passes the same value to every PaperOps phase and the fleet report. Read-only
-operator adapters use the same variable and default. An explicit function or CLI
-argument still wins for isolated tests and research runs. `data/v2_paper_ops` is
-the original v1/demo artifact tree and must not be used as current live truth.
+`data/v2_paper_ops_live` is the canonical scheduled-production root. The
+PaperOps-only EOD entrypoint is
+`scripts/run_paperops_fleet_eod.bat [YYYY-MM-DD]`. It sets
+`DAWNSTRIKE_PAPER_OPS_ROOT` to that path when the variable is absent and passes
+the same value to every PaperOps phase and the fleet report. Read-only operator
+adapters use the same variable and default. An explicit function or CLI argument
+still wins for isolated tests and research runs. `data/v2_paper_ops` is the
+original v1/demo artifact tree and must not be used as current live truth.
 See `docs/architecture/paper_ops_production_root.md` for consumer scope and the
 intentionally parked legacy surfaces.
 

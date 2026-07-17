@@ -40,7 +40,7 @@ def test_production_root_rejects_blank_explicit_override() -> None:
 
 
 def test_eod_chain_passes_one_root_to_every_paperops_phase() -> None:
-    script = Path("scripts/run_alphaops_eod_full.bat").read_text(encoding="utf-8")
+    script = Path("scripts/run_paperops_fleet_eod.bat").read_text(encoding="utf-8")
 
     assert (
         'if not defined DAWNSTRIKE_PAPER_OPS_ROOT set '
@@ -63,37 +63,20 @@ def test_eod_chain_passes_one_root_to_every_paperops_phase() -> None:
         "verify-calendar",
         "verify-source-bars",
         "rebuild-ledger",
-        "shadow-init",
-        "shadow-run",
         "blotter",
         "verify-blotter",
-        "challenger-evaluate",
         "evidence",
     }
-    assert commands.count("reconcile") == 2
-    assert commands.count("verify-calendar") == 2
-    assert commands.count("rebuild-ledger") == 2
-    assert commands.count("verify-source-bars") == 2
+    assert commands.count("reconcile") == 1
+    assert commands.count("verify-calendar") == 1
+    assert commands.count("rebuild-ledger") == 1
+    assert commands.count("verify-source-bars") == 1
     assert commands.count("blotter") == 1
     assert commands.count("verify-blotter") == 1
     assert (
         'if not defined DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS set '
-        '"DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS=12"'
+        '"DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS=3"'
     ) in script
-    assert (
-        'if not defined DAWNSTRIKE_PAPEROPS_RETRY_DELAY_SECONDS set '
-        '"DAWNSTRIKE_PAPEROPS_RETRY_DELAY_SECONDS=300"'
-    ) in script
-    assert "call :RUN_PAPEROPS_FORWARD_WITH_RETRY" in script
-    assert ":PAPEROPS_FORWARD_RETRY_LOOP" in script
-    assert 'if not "!PAPEROPS_CURRENT_DATE!"=="%RUN_DATE%"' in script
-    assert (
-        "if !PAPEROPS_ATTEMPT! GEQ %DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS%"
-        in script
-    )
-    assert (
-        "timeout /t %DAWNSTRIKE_PAPEROPS_RETRY_DELAY_SECONDS% /nobreak >nul"
-        in script
-    )
     assert '--paper-ops-root "%DAWNSTRIKE_PAPER_OPS_ROOT%"' in script
-    assert "intraday_scanner.v2.command_center_x3 build" in script
+    assert "--start %RUN_DATE% --end %RUN_DATE%" in script
+    assert "--date %RUN_DATE%" in script

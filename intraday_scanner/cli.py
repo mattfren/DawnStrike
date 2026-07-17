@@ -27,6 +27,7 @@ from intraday_scanner.notifiers import (
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.paper_audit import main as paper_audit_main
+from intraday_scanner.paper_ops_root import PAPER_OPS_ROOT_ENV
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_enrichment_provider import CsvEnrichmentProvider
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider, read_snapshot_csv
@@ -82,6 +83,9 @@ from intraday_scanner.services.mover_discovery_service import (
     require_universe,
     resolve_universe,
 )
+from intraday_scanner.services.paperops_fleet_telegram_service import (
+    send_paperops_fleet_digest,
+)
 from intraday_scanner.services.performance_service import (
     build_performance_report,
     format_performance_report,
@@ -106,6 +110,9 @@ from intraday_scanner.services.screener_automation import (
     watch_screener_inbox,
 )
 from intraday_scanner.services.setup_monitor import run_setup_monitor
+from intraday_scanner.services.strategy_fleet_report_service import (
+    build_strategy_fleet_report,
+)
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
 from intraday_scanner.services.web_collection_service import (
@@ -378,6 +385,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-outcomes", help="Label saved AlphaOps signals from manual outcomes"
     )
     alpha_outcomes_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    strategy_fleet_parser = subparsers.add_parser(
+        "strategy-fleet-report",
+        help=(
+            "Write horizon-separated AlphaOps and official PaperOps fleet "
+            "daily/cumulative reports"
+        ),
+    )
+    strategy_fleet_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    strategy_fleet_parser.add_argument(
+        "--paper-ops-root",
+        default=None,
+        help=(
+            "PaperOps production root (defaults to "
+            f"${PAPER_OPS_ROOT_ENV} or data/v2_paper_ops_live)"
+        ),
+    )
+    strategy_fleet_parser.add_argument("--out-dir", default="outputs/strategy_fleet")
+    strategy_fleet_parser.add_argument("--start", default=None)
+    strategy_fleet_parser.add_argument("--end", default=None)
+
+    strategy_fleet_telegram_parser = subparsers.add_parser(
+        "strategy-fleet-telegram",
+        help="Send the verified forward PaperOps fleet digest through a durable outbox",
+    )
+    strategy_fleet_telegram_parser.add_argument("--date", required=True)
+    strategy_fleet_telegram_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    strategy_fleet_telegram_parser.add_argument(
+        "--paper-ops-root",
+        default=None,
+        help=(
+            "PaperOps production root (defaults to "
+            f"${PAPER_OPS_ROOT_ENV} or data/v2_paper_ops_live)"
+        ),
+    )
+    strategy_fleet_telegram_parser.add_argument(
+        "--fleet-report",
+        default="outputs/strategy_fleet/strategy_fleet_report.json",
+    )
+    strategy_fleet_telegram_parser.add_argument(
+        "--notify", choices=["telegram", "console"], default="telegram"
+    )
+    strategy_fleet_telegram_parser.add_argument(
+        "--max-attempts", type=int, default=3
+    )
 
     alpha_learn_parser = subparsers.add_parser(
         "alpha-learn", help="Update AlphaOps setup memory and performance truth"
@@ -696,6 +750,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_monitor(args)
         if args.command == "alpha-outcomes":
             return _run_alpha_outcomes(args)
+        if args.command == "strategy-fleet-report":
+            return _run_strategy_fleet_report(args)
+        if args.command == "strategy-fleet-telegram":
+            return _run_strategy_fleet_telegram(args)
         if args.command == "alpha-learn":
             return _run_alpha_learn(args)
         if args.command == "alpha-status":
@@ -1150,6 +1208,33 @@ def _run_alpha_monitor(args: argparse.Namespace) -> int:
 
 def _run_alpha_outcomes(args: argparse.Namespace) -> int:
     result = alpha_outcomes(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_strategy_fleet_report(args: argparse.Namespace) -> int:
+    result = build_strategy_fleet_report(
+        db_path=args.db_path,
+        paper_ops_root=args.paper_ops_root,
+        out_dir=args.out_dir,
+        start=args.start,
+        end=args.end,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("status") == "complete":
+        return 0
+    return 2 if result.get("status") == "partial" else 1
+
+
+def _run_strategy_fleet_telegram(args: argparse.Namespace) -> int:
+    result = send_paperops_fleet_digest(
+        market_date=args.date,
+        db_path=args.db_path,
+        paper_ops_root=args.paper_ops_root,
+        fleet_report_path=args.fleet_report,
+        notify=args.notify,
+        max_attempts=args.max_attempts,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

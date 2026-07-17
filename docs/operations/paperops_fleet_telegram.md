@@ -1,9 +1,9 @@
 # PaperOps Fleet Telegram Digest
 
-The end-of-day PaperOps digest is a research/paper notification for the seven
-daily-swing strategies and the exact official AlphaOps Telegram cohort. It does
-not place broker orders and does not describe paper evidence as investment
-advice or a profit guarantee.
+The end-of-day PaperOps digest is a research/paper notification for every
+currently eligible daily-swing strategy and the exact official AlphaOps
+Telegram cohort. It does not place broker orders and does not describe paper
+evidence as investment advice or a profit guarantee.
 
 ## Truth contract
 
@@ -66,8 +66,8 @@ from being published.
 
 Before delivery, every PaperOps row is also rebound to the current live state:
 `state/strategy_registry.json` must contain the exact active
-`strategy_id + strategy_version + execution_policy_version` for all seven
-strategies, and `state/execution_policy_manifest.json` must agree with the
+`strategy_id + strategy_version + execution_policy_version` for every eligible
+strategy, and `state/execution_policy_manifest.json` must agree with the
 configured active policy and its immutable configuration fingerprint. The
 digest recomputes the complete execution-semantic payload from the current
 PaperOps config; a fee, risk, universe, or other execution-affecting edit under
@@ -132,8 +132,8 @@ For safe local inspection without Telegram credentials, use `--notify console`.
 
 ## Scheduler order
 
-`scripts/run_alphaops_eod_full.bat` sends the digest only after all four gates
-have succeeded for the same date:
+`scripts/run_paperops_fleet_eod.bat [YYYY-MM-DD]` sends the digest only after
+all four gates have succeeded for the same date:
 
 1. the complete forward run for every currently eligible PaperOps strategy;
 2. calendar verification;
