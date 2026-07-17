@@ -29,6 +29,7 @@ from intraday_scanner.services.strategy_fleet_report_service import (
     PAPEROPS_SOURCE,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from intraday_scanner.v2.paper_ops import shadow_runner
 from intraday_scanner.v2.paper_ops.engine import (
     _config_from_payload,
     _execution_policy_fingerprint_payload,
@@ -257,6 +258,261 @@ def test_digest_reports_registered_strategies_pending_activation_without_day_evi
     assert "Gap-up continuation: registered / not yet eligible" in digest["message"]
     assert "ATR gap-up continuation: registered / not yet eligible" in digest["message"]
     assert "starts 2026-07-16 | return N/A (pending)" in digest["message"]
+
+
+def test_digest_excludes_exact_registered_shadow_series_from_official_fleet_math(
+    tmp_path: Path,
+) -> None:
+    paper_root, report_path, db_path = _write_digest_fixture(tmp_path)
+    shadow_runner.initialize_shadow_registry(output_root=paper_root)
+    template_path = (
+        paper_root / "state" / "shadow_challenger_registration_template.json"
+    )
+    raw_registration = json.loads(template_path.read_text(encoding="utf-8"))
+    raw_registration["frozen_at"] = f"{DAY}T12:00:00+00:00"
+    registration = shadow_runner._freeze_registration(
+        raw_registration,
+        paper_root,
+        registered_at=f"{DAY}T12:05:00+00:00",
+    )
+    (paper_root / "state" / "strategy_challenger_registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": shadow_runner.SHADOW_REGISTRY_SCHEMA,
+                "challengers": [registration],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (paper_root / "state" / "shadow_registration_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": shadow_runner.REGISTRATION_EVENT_SCHEMA,
+                "event_type": "shadow_challenger_registered",
+                "registration_event_id": registration["registration_id"],
+                "registered_at": registration["registered_at"],
+                "registration": registration,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calendar_path = paper_root / "calendar" / "strategy_daily_returns.csv"
+    with calendar_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    champion = next(
+        row for row in rows if row["strategy_id"] == registration["strategy_id"]
+    )
+    rows.append(
+        {
+            **champion,
+            "strategy_version": registration["candidate_strategy_version"],
+            "strategy_status": "shadow",
+            "strategy_semantics_fingerprint": registration[
+                "candidate_strategy_semantics_fingerprint"
+            ],
+            "daily_return_pct": "9.99",
+            "trades_opened": "999",
+            "trades_closed": "999",
+        }
+    )
+    with calendar_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=tuple(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    ledger_path = paper_root / "ledger" / "paper_ledger.jsonl"
+    challenger_events: list[dict[str, Any]] = []
+    for symbol in ("AAPL", "META"):
+        order_id = (
+            f"order:forward:{DAY}:{registration['strategy_id']}:"
+            f"{registration['candidate_strategy_version']}:{symbol}"
+        )
+        payload = {
+            "challenger_id": registration["challenger_id"],
+            "direction": "long",
+            "earliest_fill_date": "2026-07-16",
+            "entry": 100.0,
+            "execution_policy_version": registration["execution_policy_version"],
+            "expected_fill_rule": (
+                "daily signal fills no earlier than next valid bar open"
+            ),
+            "mode": "forward",
+            "order_id": order_id,
+            "order_status": "pending",
+            "pick_id": f"pick:{order_id}",
+            "quantity": 5,
+            "run_id": champion["run_id"],
+            "signal_time": f"{DAY}T20:00:00+00:00",
+            "stop": 95.0,
+            "strategy_id": registration["strategy_id"],
+            "strategy_semantics_fingerprint": registration[
+                "candidate_strategy_semantics_fingerprint"
+            ],
+            "strategy_version": registration["candidate_strategy_version"],
+            "symbol": symbol,
+            "target": 110.0,
+            "trade_date": DAY,
+        }
+        challenger_events.extend(
+            [
+                {
+                    "event_id": f"shadow:create:{symbol}",
+                    "event_type": "paper_order_created",
+                    "mode": "forward",
+                    "payload": payload,
+                    "run_id": champion["run_id"],
+                    "schema_version": "v2.paper_ledger_event.v1",
+                    "strategy_id": registration["strategy_id"],
+                    "symbol": symbol,
+                    "trade_date": DAY,
+                },
+                {
+                    "event_id": f"shadow:pending:{symbol}",
+                    "event_type": "paper_order_pending_no_fill_data",
+                    "mode": "forward",
+                    "payload": {
+                        **payload,
+                        "lifecycle_run_id": champion["run_id"],
+                        "origin_run_id": champion["run_id"],
+                    },
+                    "run_id": champion["run_id"],
+                    "schema_version": "v2.paper_ledger_event.v1",
+                    "strategy_id": registration["strategy_id"],
+                    "symbol": symbol,
+                    "trade_date": DAY,
+                },
+            ]
+        )
+    with ledger_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            "".join(
+                json.dumps(event, sort_keys=True) + "\n"
+                for event in challenger_events
+            )
+        )
+
+    digest = build_paperops_fleet_digest(
+        market_date=DAY,
+        db_path=db_path,
+        paper_ops_root=paper_root,
+        fleet_report_path=report_path,
+    )
+
+    assert digest["ready"] is True
+    assert digest["summary"]["challenger_calendar_rows_excluded"] == 1
+    assert digest["summary"]["challenger_lifecycle_events_excluded"] == 4
+    assert digest["summary"]["opened"] == 1
+    assert digest["summary"]["closed"] == 0
+    assert len(digest["challenger_calendar_rows"]) == 1
+    assert digest["challenger_calendar_rows"][0]["strategy_status"] == "shadow"
+    assert len(digest["challenger_lifecycle_ledger_events"]) == 4
+    assert {
+        event["event_type"]
+        for event in digest["challenger_lifecycle_ledger_events"]
+    } == {"paper_order_created", "paper_order_pending_no_fill_data"}
+    challenger_event_ids = {
+        event["event_id"]
+        for event in digest["challenger_lifecycle_ledger_events"]
+    }
+    assert not any(
+        challenger_event_ids.intersection(detail["source_event_ids"])
+        for detail in digest["lifecycle_details"]
+    )
+    assert "999" not in digest["message"]
+    assert "+999.00%" not in digest["message"]
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "version", "status"),
+    [
+        (STRATEGIES[0], "v99.0", "shadow"),
+        (STRATEGIES[0], "v1.0", "experimental"),
+        ("unknown_calendar_strategy", "v1.0", "experimental"),
+    ],
+)
+def test_digest_rejects_unknown_or_conflicting_calendar_series(
+    tmp_path: Path,
+    strategy_id: str,
+    version: str,
+    status: str,
+) -> None:
+    paper_root, report_path, db_path = _write_digest_fixture(tmp_path)
+    calendar_path = paper_root / "calendar" / "strategy_daily_returns.csv"
+    with calendar_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    malicious = {
+        **rows[0],
+        "strategy_id": strategy_id,
+        "strategy_version": version,
+        "strategy_status": status,
+        "strategy_semantics_fingerprint": "f" * 64,
+        "daily_return_pct": "999.0",
+    }
+    rows.append(malicious)
+    with calendar_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=tuple(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    digest = build_paperops_fleet_digest(
+        market_date=DAY,
+        db_path=db_path,
+        paper_ops_root=paper_root,
+        fleet_report_path=report_path,
+    )
+
+    assert digest["ready"] is False
+    assert any(
+        "unknown or conflicting calendar series" in blocker
+        or "unknown strategy series" in blocker
+        for blocker in digest["blockers"]
+    )
+
+
+def test_digest_rejects_unknown_same_strategy_ledger_version(tmp_path: Path) -> None:
+    paper_root, report_path, db_path = _write_digest_fixture(tmp_path)
+    ledger_path = paper_root / "ledger" / "paper_ledger.jsonl"
+    ledger = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    malicious = json.loads(
+        json.dumps(
+            next(
+                event
+                for event in ledger
+                if event["trade_date"] == DAY
+                and event["event_type"] == "paper_order_created"
+            )
+        )
+    )
+    malicious["event_id"] = "malicious:unknown-ledger-version"
+    malicious["payload"]["strategy_version"] = "v99.0"
+    malicious["payload"]["strategy_semantics_fingerprint"] = "f" * 64
+    ledger.append(malicious)
+    ledger_path.write_text(
+        "".join(json.dumps(event, sort_keys=True) + "\n" for event in ledger),
+        encoding="utf-8",
+    )
+
+    digest = build_paperops_fleet_digest(
+        market_date=DAY,
+        db_path=db_path,
+        paper_ops_root=paper_root,
+        fleet_report_path=report_path,
+    )
+
+    assert digest["ready"] is False
+    assert any(
+        "strategy version mismatch" in blocker for blocker in digest["blockers"]
+    )
 
 
 def test_digest_still_fails_closed_when_eligible_strategy_row_is_missing(
@@ -1680,6 +1936,7 @@ def _write_digest_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "mode": "forward",
                 "strategy_id": strategy_id,
                 "strategy_version": "v1.0",
+                "strategy_status": "experimental",
                 "execution_policy_version": "paperops_daily_next_open_risk_v2",
                 "strategy_semantics_fingerprint": semantic_fingerprints[strategy_id],
                 "run_id": f"paper_ops:forward:{DAY}:snapshot",

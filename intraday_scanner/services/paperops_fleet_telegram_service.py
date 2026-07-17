@@ -47,6 +47,11 @@ from intraday_scanner.v2.paper_ops.engine import (
     _strategy_semantics_payload,
 )
 from intraday_scanner.v2.paper_ops.models import PAPER_EXECUTION_POLICY_VERSION
+from intraday_scanner.v2.paper_ops.shadow_runner import (
+    REGISTERED_CHALLENGER_SCHEMA,
+    SHADOW_REGISTRY_SCHEMA,
+    verify_registration_integrity,
+)
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import (
     exclusive_file_lock,
@@ -303,7 +308,17 @@ def build_paperops_fleet_digest(
     ):
         blockers.append(f"AlphaOps fleet evidence is {alpha_source_status}")
 
-    calendar_rows = _load_calendar_rows(expected_calendar, day, blockers)
+    raw_calendar_rows = _load_calendar_rows(expected_calendar, day, blockers)
+    (
+        calendar_rows,
+        challenger_calendar_rows,
+        challenger_series_by_identity,
+    ) = _partition_calendar_rows(
+        rows=raw_calendar_rows,
+        root=root,
+        active_identities=list(live_lineage.get("strategy_identities") or []),
+        blockers=blockers,
+    )
     calendar_by_id = _unique_by_strategy(calendar_rows, blockers, "PaperOps calendar")
     if set(calendar_by_id) != set(eligible_ids):
         missing = sorted(set(eligible_ids) - set(calendar_by_id))
@@ -466,7 +481,11 @@ def build_paperops_fleet_digest(
 
     ledger_path = root / "ledger" / "paper_ledger.jsonl"
     ledger_events = _load_ledger_events(ledger_path, blockers)
-    lifecycle_details, lifecycle_ledger_events = _resolve_lifecycle_details(
+    (
+        lifecycle_details,
+        lifecycle_ledger_events,
+        challenger_lifecycle_ledger_events,
+    ) = _resolve_lifecycle_details(
         market_date=day,
         expected_ids=eligible_ids,
         registered_ids=expected_ids,
@@ -474,6 +493,7 @@ def build_paperops_fleet_digest(
         calendar_by_id=calendar_by_id,
         decisions_by_id=decisions_by_id,
         strategy_semantics_fingerprints=live_semantic_fingerprints,
+        challenger_series_by_identity=challenger_series_by_identity,
         execution_configuration=_mapping(
             live_lineage.get("current_execution_configuration")
         ),
@@ -525,6 +545,8 @@ def build_paperops_fleet_digest(
     evidence = {
         "alpha_truth": alpha_truth["evidence"],
         "calendar_truth": calendar_truth_evidence,
+        "challenger_calendar_rows": challenger_calendar_rows,
+        "challenger_lifecycle_ledger_events": challenger_lifecycle_ledger_events,
         "source_bar_truth": source_bar_truth_evidence,
         "calendar_rows": [calendar_by_id[value] for value in eligible_ids],
         "decision_rows": decisions,
@@ -616,6 +638,8 @@ def build_paperops_fleet_digest(
         "ledger_path": str(ledger_path),
         "lifecycle_artifact_path": str(lifecycle_artifact_path),
         "lifecycle_details": lifecycle_details,
+        "challenger_calendar_rows": challenger_calendar_rows,
+        "challenger_lifecycle_ledger_events": challenger_lifecycle_ledger_events,
         "event_key": event_key,
         "evidence_fingerprint": fingerprint,
         "message": message,
@@ -635,6 +659,10 @@ def build_paperops_fleet_digest(
             "benchmark_return_pct": benchmark,
             "cash_return_pct": cash,
             "replay_rows_excluded": replay_count,
+            "challenger_calendar_rows_excluded": len(challenger_calendar_rows),
+            "challenger_lifecycle_events_excluded": len(
+                challenger_lifecycle_ledger_events
+            ),
             "alpha_status": alpha_truth["status"],
             "alpha_optional": alpha_optional,
             "active_execution_policy_version": live_lineage.get(
@@ -713,6 +741,10 @@ def send_paperops_fleet_digest(
             "evidence_fingerprint": fingerprint,
             "ledger_path": digest["ledger_path"],
             "lifecycle_details": digest["lifecycle_details"],
+            "challenger_calendar_rows": digest["challenger_calendar_rows"],
+            "challenger_lifecycle_ledger_events": digest[
+                "challenger_lifecycle_ledger_events"
+            ],
         },
     )
     outbox_path = root.joinpath(
@@ -859,10 +891,17 @@ def _resolve_lifecycle_details(
     calendar_by_id: Mapping[str, Mapping[str, Any]],
     decisions_by_id: Mapping[str, list[dict[str, Any]]],
     strategy_semantics_fingerprints: Mapping[str, Any],
+    challenger_series_by_identity: Mapping[
+        tuple[str, str, str, str], Mapping[str, Any]
+    ],
     execution_configuration: Mapping[str, Any],
     ledger_events: list[dict[str, Any]],
     blockers: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     """Resolve exact forward order/position lifecycle rows from the ledger."""
 
     lifecycle_types = {
@@ -876,6 +915,7 @@ def _resolve_lifecycle_details(
         "paper_position_opened",
     }
     exact_events: list[dict[str, Any]] = []
+    challenger_events: list[dict[str, Any]] = []
     for raw_event in ledger_events:
         event = _mapping(raw_event)
         event_type = str(event.get("event_type") or "")
@@ -903,13 +943,53 @@ def _resolve_lifecycle_details(
         ):
             continue
         payload = _mapping(event.get("payload"))
+        payload_identity = _calendar_series_identity(payload)
+        challenger_series = challenger_series_by_identity.get(payload_identity)
+        event_date = str(event.get("trade_date") or "")[:10]
+        if challenger_series is not None:
+            registration = _mapping(challenger_series.get("registration"))
+            challenger_calendar = _mapping(challenger_series.get("calendar_row"))
+            expected_challenger_id = str(registration.get("challenger_id") or "")
+            observed_challenger_id = str(payload.get("challenger_id") or "")
+            challenger_label = (
+                f"{payload_identity[0]}@{payload_identity[1]}"
+            )
+            valid_challenger_event = True
+            if str(payload.get("strategy_id") or "") != strategy_id:
+                blockers.append(
+                    f"registered challenger {challenger_label} {event_type} payload "
+                    "strategy mismatch"
+                )
+                valid_challenger_event = False
+            if not expected_challenger_id or observed_challenger_id != expected_challenger_id:
+                blockers.append(
+                    f"registered challenger {challenger_label} {event_type} identity "
+                    "does not match its frozen registration"
+                )
+                valid_challenger_event = False
+            if event_date == market_date:
+                expected_run_id = str(challenger_calendar.get("run_id") or "")
+                if str(event.get("run_id") or "") != expected_run_id:
+                    blockers.append(
+                        f"registered challenger {challenger_label} same-day "
+                        f"{event_type} run identity mismatch"
+                    )
+                    valid_challenger_event = False
+                if str(payload.get("run_id") or "") != expected_run_id:
+                    blockers.append(
+                        f"registered challenger {challenger_label} same-day "
+                        f"{event_type} payload run identity mismatch"
+                    )
+                    valid_challenger_event = False
+                if valid_challenger_event:
+                    challenger_events.append(event)
+            continue
         expected_row = paper_by_id.get(strategy_id, {})
         expected_version = str(expected_row.get("strategy_version") or "")
         expected_policy = str(expected_row.get("execution_policy_version") or "")
         expected_semantics = str(
             strategy_semantics_fingerprints.get(strategy_id) or ""
         )
-        event_date = str(event.get("trade_date") or "")[:10]
         if event_date == market_date:
             calendar_run_id = str(
                 calendar_by_id.get(strategy_id, {}).get("run_id") or ""
@@ -1275,7 +1355,11 @@ def _resolve_lifecycle_details(
         ],
         key=lambda event: str(event.get("event_id") or ""),
     )
-    return sorted_details, evidence_events
+    return (
+        sorted_details,
+        evidence_events,
+        sorted(challenger_events, key=lambda event: str(event.get("event_id") or "")),
+    )
 
 
 def _unique_events_by_payload_id(
@@ -1975,6 +2059,7 @@ def _resolve_live_paperops_lineage(
         {
             "strategy_id": strategy_id,
             "strategy_version": registry_by_id[strategy_id].get("strategy_version"),
+            "strategy_status": registry_by_id[strategy_id].get("strategy_status"),
             "execution_policy_version": registry_by_id[strategy_id].get(
                 "execution_policy_version"
             ),
@@ -2262,6 +2347,213 @@ def _load_calendar_rows(path: Path, market_date: str, blockers: list[str]) -> li
         and str(row.get("strategy_id") or "")
         not in {CASH_BASELINE_ID, "benchmark_buy_hold_equal_weight"}
     ]
+
+
+def _calendar_series_identity(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(row.get("strategy_id") or ""),
+        str(row.get("strategy_version") or ""),
+        str(row.get("execution_policy_version") or ""),
+        str(row.get("strategy_semantics_fingerprint") or ""),
+    )
+
+
+def _registered_challenger_identities(
+    root: Path,
+    blockers: list[str],
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    """Load exact, integrity-verified challenger series identities."""
+
+    path = root / "state" / "strategy_challenger_registry.json"
+    registry = _load_mapping(path, "PaperOps shadow challenger registry", blockers)
+    if not registry:
+        return {}
+    if str(registry.get("schema_version") or "") != SHADOW_REGISTRY_SCHEMA:
+        blockers.append("PaperOps shadow challenger registry schema is unsupported")
+    raw_rows = registry.get("challengers")
+    if not isinstance(raw_rows, list):
+        blockers.append("PaperOps shadow challenger registry rows must be a list")
+        return {}
+
+    result: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for index, raw in enumerate(raw_rows, start=1):
+        if not isinstance(raw, Mapping):
+            blockers.append(
+                f"PaperOps shadow challenger registry row {index} must be an object"
+            )
+            continue
+        registration = dict(raw)
+        challenger_id = str(registration.get("challenger_id") or "<unknown>")
+        if str(registration.get("schema_version") or "") != REGISTERED_CHALLENGER_SCHEMA:
+            blockers.append(
+                f"registered shadow challenger {challenger_id} schema is unsupported"
+            )
+            continue
+        try:
+            reasons = verify_registration_integrity(registration, output_root=root)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            blockers.append(
+                f"registered shadow challenger {challenger_id} is invalid: "
+                f"{_safe_error(exc)}"
+            )
+            continue
+        if reasons:
+            blockers.append(
+                f"registered shadow challenger {challenger_id} failed integrity: "
+                + " | ".join(reasons)
+            )
+            continue
+        identity = (
+            str(registration.get("strategy_id") or ""),
+            str(registration.get("candidate_strategy_version") or ""),
+            str(registration.get("execution_policy_version") or ""),
+            str(registration.get("candidate_strategy_semantics_fingerprint") or ""),
+        )
+        if not all(identity):
+            blockers.append(
+                f"registered shadow challenger {challenger_id} has incomplete lineage"
+            )
+        elif identity in result:
+            blockers.append(
+                "PaperOps shadow challenger registry duplicates exact series "
+                + "/".join(identity[:3])
+            )
+        else:
+            result[identity] = registration
+    return result
+
+
+def _partition_calendar_rows(
+    *,
+    rows: list[dict[str, Any]],
+    root: Path,
+    active_identities: list[Any],
+    blockers: list[str],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[tuple[str, str, str, str], dict[str, Any]],
+]:
+    """Separate official champion rows from registered shadow evidence.
+
+    Official fleet math is bounded to the exact active registry identity:
+    strategy, version, execution policy, and semantics fingerprint.  A
+    non-champion row is tolerated only when it is the exact series of an
+    integrity-verified frozen challenger; that row remains audit evidence and
+    is never returned as an official calendar row.
+    """
+
+    active_by_id: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(active_identities, start=1):
+        if not isinstance(raw, Mapping):
+            blockers.append(f"active champion identity row {index} must be an object")
+            continue
+        identity_row = dict(raw)
+        identity = _calendar_series_identity(identity_row)
+        strategy_id = identity[0]
+        if not all(identity):
+            blockers.append(
+                f"active champion identity row {index} has incomplete exact lineage"
+            )
+        elif strategy_id in active_by_id:
+            blockers.append(f"active champion identity is duplicated for {strategy_id}")
+        else:
+            active_by_id[strategy_id] = identity_row
+
+    non_champion_rows = [
+        row
+        for row in rows
+        if _calendar_series_identity(row)
+        != _calendar_series_identity(active_by_id.get(str(row.get("strategy_id") or ""), {}))
+    ]
+    challenger_by_identity = (
+        _registered_challenger_identities(root, blockers)
+        if non_champion_rows
+        else {}
+    )
+
+    official_rows: list[dict[str, Any]] = []
+    challenger_rows: list[dict[str, Any]] = []
+    challenger_series_by_identity: dict[
+        tuple[str, str, str, str], dict[str, Any]
+    ] = {}
+    challenger_counts: Counter[tuple[str, str, str, str]] = Counter()
+    for row in rows:
+        identity = _calendar_series_identity(row)
+        strategy_id = identity[0]
+        active = active_by_id.get(strategy_id)
+        active_identity = _calendar_series_identity(active or {})
+        if active is not None and identity == active_identity:
+            expected_status = str(active.get("strategy_status") or "")
+            observed_status = str(row.get("strategy_status") or "")
+            if not expected_status:
+                blockers.append(f"{strategy_id} active champion status is missing")
+            elif observed_status != expected_status:
+                blockers.append(
+                    f"{strategy_id} exact champion calendar series has status "
+                    f"{observed_status or '<blank>'}, expected {expected_status}"
+                )
+            else:
+                official_rows.append(row)
+            continue
+
+        registration = challenger_by_identity.get(identity)
+        if registration is not None:
+            if str(row.get("strategy_status") or "") != "shadow":
+                blockers.append(
+                    f"registered challenger calendar series {strategy_id}@{identity[1]} "
+                    "is not labeled shadow"
+                )
+                continue
+            challenger_counts[identity] += 1
+            challenger_rows.append(row)
+            challenger_series_by_identity[identity] = {
+                "calendar_row": row,
+                "registration": registration,
+            }
+            continue
+
+        if strategy_id in active_by_id:
+            blockers.append(
+                f"{strategy_id} has an unknown or conflicting calendar series "
+                f"{identity[1] or '<blank>'}/{identity[2] or '<blank>'}/"
+                f"{identity[3] or '<blank>'}"
+            )
+        else:
+            blockers.append(
+                f"PaperOps calendar has an unknown strategy series: "
+                f"{strategy_id or '<blank>'}@{identity[1] or '<blank>'}"
+            )
+
+    for identity, count in challenger_counts.items():
+        if count != 1:
+            blockers.append(
+                f"PaperOps calendar has {count} rows for registered challenger "
+                f"{identity[0]}@{identity[1]}"
+            )
+
+    official_by_id = _unique_by_strategy(
+        official_rows,
+        blockers,
+        "exact champion PaperOps calendar",
+    )
+    for row in challenger_rows:
+        strategy_id = str(row.get("strategy_id") or "")
+        champion = official_by_id.get(strategy_id)
+        if champion is None:
+            blockers.append(
+                f"registered challenger {strategy_id}@{row.get('strategy_version')} "
+                "has no exact same-day champion row"
+            )
+            continue
+        for field in ("run_id", "data_snapshot_id"):
+            if str(row.get(field) or "") != str(champion.get(field) or ""):
+                blockers.append(
+                    f"registered challenger {strategy_id}@{row.get('strategy_version')} "
+                    f"does not match champion {field}"
+                )
+
+    return official_rows, challenger_rows, challenger_series_by_identity
 
 
 def _unique_by_strategy(
