@@ -321,7 +321,14 @@ def test_story_bundle_fails_closed_when_canonical_calendar_truth_is_blocked(
     )
 
 
-def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> None:
+def test_build_generates_story_pages_assets_bridges_and_docs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        PAPER_OPS_ROOT_ENV,
+        str(REPO_ROOT / "data/test_empty_paper_ops"),
+    )
     output_root = tmp_path / "command_center_x2"
 
     inventory = inventory_command_center_x2(repo_root=REPO_ROOT, output_root=output_root)
@@ -336,8 +343,9 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
     assert build["status"] == "passed"
     assert build["day_count"] > 0
     assert build["month_count"] > 0
-    assert build["strategy_count"] > 0
+    assert build["strategy_count"] == 0
     assert qa["status"] == "passed"
+    assert qa["checks"]["strategy_surface_truthful"] is True
     assert qa["checks"]["hero_present_all_pages"] is True
     assert qa["checks"]["warning_drawers_collapsed"] is True
     assert qa["checks"]["dense_card_walls_clear"] is True
@@ -385,6 +393,8 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
         encoding="utf-8"
     )
     interactions_js = (output_root / "assets/x2_interactions.js").read_text(encoding="utf-8")
+    assert 'data-strategy-empty-state="true"' in strategies_page
+    assert "Returns are N/A" in strategies_page
     assert "Day Trade Lab" in day_trade_page
     assert "Intraday-only strategy research" in day_trade_page
     assert "Corpus sessions" in day_trade_page
@@ -393,7 +403,7 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
     assert "same-session" in day_trade_page
     assert "Daily Swing Research" in day_trade_page
     assert "Ranked Day Trade Strategies" in day_strategies_page
-    assert "Day Trade Ledger" in day_strategies_page
+    assert "No Day Trade Lab strategy comparison found" in day_strategies_page
     assert "Robustness score" in day_strategies_page
     assert "Day Trade Robustness" in robustness_page
     assert "Provider/Data Limitations" in robustness_page
@@ -410,7 +420,7 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
     assert "historical_daytrade_backtest" in assumptions_page
     assert "Day-trade corpus" in today_page
     assert "Research Lane Separation" in strategies_page
-    assert "data-x2-toggle" in day_strategies_page
+    assert "data-x2-toggle" not in day_strategies_page
     assert "data-x2-toggle" in backtest_page
     assert "trade-menu" in backtest_page
     assert 'role="dialog"' in backtest_page
@@ -427,7 +437,7 @@ def test_build_generates_story_pages_assets_bridges_and_docs(tmp_path: Path) -> 
     assert "aria-expanded" in interactions_js
     assert list((output_root / "days").glob("*.html"))
     assert list((output_root / "months").glob("*.html"))
-    assert list((output_root / "strategies").glob("*.html"))
+    assert not list((output_root / "strategies").glob("*.html"))
     assert (REPO_ROOT / "data/v2_command_center/command_center_x2.html").exists()
     assert (REPO_ROOT / "data/v2_command_center_x/command_center_x2.html").exists()
 
@@ -519,6 +529,32 @@ def test_x2_qa_rejects_tampered_output(tmp_path: Path) -> None:
     assert qa["checks"]["local_js_safe"] is False
     assert qa["checks"]["warning_drawers_collapsed"] is False
     assert qa["checks"]["dense_card_walls_clear"] is False
+
+
+def test_x2_qa_rejects_empty_strategy_state_without_na_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        PAPER_OPS_ROOT_ENV,
+        str(REPO_ROOT / "data/test_empty_paper_ops"),
+    )
+    output_root = tmp_path / "command_center_x2"
+    build_command_center_x2(repo_root=REPO_ROOT, output_root=output_root)
+    target = output_root / "pages/strategies.html"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            "Returns are N/A until exact, source-gated forward evidence exists.",
+            "Returns unavailable.",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    qa = run_command_center_x2_qa(output_root=output_root, repo_root=REPO_ROOT)
+
+    assert qa["status"] == "failed"
+    assert qa["checks"]["strategy_surface_truthful"] is False
 
 
 def test_x2_package_keeps_read_only_local_import_surface() -> None:

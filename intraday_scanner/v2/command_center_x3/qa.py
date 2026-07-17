@@ -60,6 +60,26 @@ def run_command_center_x3_qa(
     missing_warning_visibility = [
         path for path, text in texts.items() if "Warnings stay visible" not in text
     ]
+    strategy_text = texts.get((pages_dir / "strategies.html").as_posix(), "")
+    trade_text = texts.get((pages_dir / "trades.html").as_posix(), "")
+    truthful_strategy_empty_state = all(
+        value in strategy_text
+        for value in (
+            'data-day-strategy-empty-state="true"',
+            "Performance is N/A until a retained research artifact is available.",
+            'data-official-strategy-empty-state="true"',
+            "Official return is N/A; missing evidence is not shown as zero.",
+            'data-experimental-strategy-empty-state="true"',
+            "Experimental return is N/A.",
+        )
+    )
+    truthful_trade_empty_state = all(
+        value in trade_text
+        for value in (
+            'data-trade-empty-state="true"',
+            "Trade return is N/A until retained paper evidence exists.",
+        )
+    )
     checks = {
         "required_pages_exist": not missing_pages,
         "required_assets_exist": not missing_assets,
@@ -69,8 +89,14 @@ def run_command_center_x3_qa(
         "calendar_exists": (pages_dir / "calendar.html").exists() and bool(month_pages),
         "calendar_has_day_links": 'href="../days/' in texts.get((pages_dir / "calendar.html").as_posix(), ""),
         "day_pages_exist": bool(day_pages),
-        "strategy_cards_exist": "strategy-card" in texts.get((pages_dir / "strategies.html").as_posix(), ""),
-        "trade_cards_exist": "trade-card" in texts.get((pages_dir / "trades.html").as_posix(), ""),
+        "strategy_surface_truthful": (
+            "strategy-card" in strategy_text
+            or truthful_strategy_empty_state
+        ),
+        "trade_surface_truthful": (
+            "trade-card" in trade_text
+            or truthful_trade_empty_state
+        ),
         "no_picks_reasons_visible": "Why Dawnstrike waited" in texts.get((pages_dir / "no_picks.html").as_posix(), ""),
         "system_page_contains_technical_details": "Advanced artifact links" in texts.get((pages_dir / "system.html").as_posix(), "") and "FillTruth" in texts.get((pages_dir / "system.html").as_posix(), ""),
         "raw_tables_not_primary": not primary_raw_hits,

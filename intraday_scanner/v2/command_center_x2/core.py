@@ -243,8 +243,10 @@ def verify_command_center_x2(
         failures.append("day_pages_missing")
     if int(manifest.get("month_count") or 0) <= 0:
         failures.append("month_pages_missing")
-    if int(manifest.get("strategy_count") or 0) <= 0:
-        failures.append("strategy_pages_missing")
+    # Zero official strategy detail pages is a valid fail-closed state when no
+    # verified PaperOps series is available.  The required Strategies surface
+    # still exists and renders the explicit N/A state; missing truth must not be
+    # replaced with demo rows merely to satisfy a release counter.
     if missing_docs:
         failures.append("missing_required_docs")
     if missing_pages:
@@ -914,7 +916,7 @@ def _strategies_body(data: dict[str, Any]) -> str:
 <section class="panel table-panel" data-filter-scope>
   <div class="table-scroll"><table class="backtest-table">
     <thead><tr><th>Strategy</th><th>Role</th><th>State</th><th>Daily</th><th>Cumulative</th><th>Trust</th></tr></thead>
-    <tbody>{''.join(rows)}</tbody>
+    <tbody>{''.join(rows) or '<tr data-strategy-empty-state="true"><td colspan="6"><strong>No verified official PaperOps strategy rows.</strong><br>Returns are N/A until exact, source-gated forward evidence exists.</td></tr>'}</tbody>
   </table></div>
 </section>
 """
@@ -2427,7 +2429,7 @@ def _quality_score(*, qa: dict[str, Any], manifest: dict[str, Any], data: dict[s
         qa.get("status") == "passed",
         int(manifest.get("day_count") or 0) > 0,
         int(manifest.get("month_count") or 0) > 0,
-        int(manifest.get("strategy_count") or 0) > 0,
+        qa.get("checks", {}).get("strategy_surface_truthful") is True,
         bool(data.get("no_picks")),
         bool(data.get("automation")),
         bool(data.get("learning_cards")),
@@ -2437,8 +2439,6 @@ def _quality_score(*, qa: dict[str, Any], manifest: dict[str, Any], data: dict[s
         manifest.get("live_trading_enabled") is False,
     ]
     return 100 if all(checks) else int(sum(1 for item in checks if item) / len(checks) * 100)
-
-
 def _untrusted_items(data: dict[str, Any]) -> list[str]:
     warnings = data.get("app", {}).get("warnings", [])
     items = [str(item) for item in warnings[:80]]

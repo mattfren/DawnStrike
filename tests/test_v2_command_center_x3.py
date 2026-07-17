@@ -22,6 +22,10 @@ def _primary_nav_labels(html: str) -> list[str]:
 
 
 def test_x3_builds_simplified_story_first_dashboard(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DAWNSTRIKE_PAPER_OPS_ROOT",
+        str(REPO_ROOT / "data/test_empty_paper_ops"),
+    )
     monkeypatch.setattr(
         "intraday_scanner.v2.command_center_x3.core._alphaops_watchlist_payload",
         lambda _repo_root: {
@@ -88,10 +92,12 @@ def test_x3_builds_simplified_story_first_dashboard(tmp_path: Path, monkeypatch)
     assert "calendar-grid" in calendar
     assert 'href="../days/' in calendar
     assert list((output_root / "days").glob("*.html"))
-    assert "strategy-card" in strategies
+    assert 'data-official-strategy-empty-state="true"' in strategies
+    assert "Official return is N/A" in strategies
     assert "Swing research, separated" in strategies
     assert "Paper Book with proof boundaries" in trades
-    assert "trade-card" in trades
+    assert 'data-trade-empty-state="true"' in trades
+    assert "Trade return is N/A" in trades
     assert "Why Dawnstrike waited" in no_picks
     assert "Advanced artifact links" in system
     assert "FillTruth" in system
@@ -108,7 +114,11 @@ def test_x3_builds_simplified_story_first_dashboard(tmp_path: Path, monkeypatch)
     assert (REPO_ROOT / "data/v2_command_center_x2/index.html").exists()
 
 
-def test_x3_demo_runs_full_cli_path(tmp_path: Path) -> None:
+def test_x3_demo_runs_full_cli_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DAWNSTRIKE_PAPER_OPS_ROOT",
+        str(REPO_ROOT / "data/test_empty_paper_ops"),
+    )
     output_root = tmp_path / "command_center_x3"
 
     result = demo_command_center_x3(repo_root=REPO_ROOT, output_root=output_root)
@@ -118,6 +128,39 @@ def test_x3_demo_runs_full_cli_path(tmp_path: Path) -> None:
     assert result["quality_score"] == 100
     assert result["qa_status"] == "passed"
     assert result["verify_status"] == "passed"
+
+
+def test_x3_qa_rejects_empty_surfaces_without_na_copy(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DAWNSTRIKE_PAPER_OPS_ROOT",
+        str(REPO_ROOT / "data/test_empty_paper_ops"),
+    )
+    output_root = tmp_path / "command_center_x3"
+    build_command_center_x3(repo_root=REPO_ROOT, output_root=output_root)
+    strategies = output_root / "pages/strategies.html"
+    strategies.write_text(
+        strategies.read_text(encoding="utf-8").replace(
+            "Official return is N/A; missing evidence is not shown as zero.",
+            "Official return unavailable.",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    trades = output_root / "pages/trades.html"
+    trades.write_text(
+        trades.read_text(encoding="utf-8").replace(
+            "Trade return is N/A until retained paper evidence exists.",
+            "Trade return unavailable.",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    qa = qa_command_center_x3(repo_root=REPO_ROOT, output_root=output_root)
+
+    assert qa["status"] == "failed"
+    assert qa["checks"]["strategy_surface_truthful"] is False
+    assert qa["checks"]["trade_surface_truthful"] is False
 
 
 def test_x3_separates_official_swing_cards_from_experimental_audit_evidence() -> None:

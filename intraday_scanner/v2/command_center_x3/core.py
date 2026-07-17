@@ -806,10 +806,10 @@ def _strategies_body(data: dict[str, Any]) -> str:
   <div><p class="eyebrow">Strategies</p><h1>Strategy report cards, not a ranking wall.</h1><p class="story-summary">Day-trade strategies come first. Swing research and shadow challengers are separated so historical swing results cannot masquerade as day-trading proof.</p></div>
 </section>
 <section class="strategy-toolbar"><button type="button" data-filter-button="all">All</button><button type="button" data-filter-button="watch">Watch</button><button type="button" data-filter-button="quarantine">Quarantine</button><button type="button" data-filter-button="shadow">Shadow</button></section>
-<section class="story-section"><h2>Active day-trade research</h2><div class="card-grid strategy-grid">{day_cards or '<article class="soft-card"><strong>No Day Trade Lab strategy rows found.</strong><p>Run the Day Trade Lab robustness report first.</p></article>'}</div></section>
+<section class="story-section"><h2>Active day-trade research</h2><div class="card-grid strategy-grid">{day_cards or '<article class="soft-card" data-day-strategy-empty-state="true"><strong>No retained day-trade strategy rows.</strong><p>Performance is N/A until a retained research artifact is available.</p></article>'}</div></section>
 <section class="story-section"><h2>Shadow challengers</h2><div class="card-grid strategy-grid">{challenger_cards or '<article class="soft-card"><strong>No shadow challengers found.</strong><p>No refinement candidates were generated.</p></article>'}</div></section>
-<section class="story-section secondary"><h2>Swing research, separated</h2><div class="card-grid strategy-grid">{swing_cards or '<article class="soft-card"><strong>No swing research cards found.</strong></article>'}</div></section>
-<section class="story-section secondary"><h2>Experimental / audit evidence</h2><p>These cards are excluded from official strategy counts, calendar returns, and fleet performance.</p><div class="card-grid strategy-grid">{experimental_cards or '<article class="soft-card"><strong>No experimental PaperOps evidence found.</strong></article>'}</div></section>
+<section class="story-section secondary"><h2>Swing research, separated</h2><div class="card-grid strategy-grid">{swing_cards or '<article class="soft-card" data-official-strategy-empty-state="true"><strong>No verified official PaperOps swing rows.</strong><p>Official return is N/A; missing evidence is not shown as zero.</p></article>'}</div></section>
+<section class="story-section secondary"><h2>Experimental / audit evidence</h2><p>These cards are excluded from official strategy counts, calendar returns, and fleet performance.</p><div class="card-grid strategy-grid">{experimental_cards or '<article class="soft-card" data-experimental-strategy-empty-state="true"><strong>No verified experimental PaperOps evidence.</strong><p>Experimental return is N/A.</p></article>'}</div></section>
 """
 
 
@@ -857,7 +857,7 @@ def _trades_body(data: dict[str, Any]) -> str:
   <select data-x3-select="result"><option value="">All results</option><option value="win">Wins</option><option value="loss">Losses</option></select>
   <select data-x3-select="exit"><option value="">All exits</option><option value="target">Target</option><option value="stop">Stop</option><option value="timeout">Timeout</option><option value="eod">EOD</option></select>
 </section>
-<section class="card-grid trade-grid" data-filter-scope>{cards or '<article class="soft-card"><strong>No trade rows found.</strong><p>Run Day Trade Lab first.</p></article>'}</section>
+<section class="card-grid trade-grid" data-filter-scope>{cards or '<article class="soft-card" data-trade-empty-state="true"><strong>No verified trade rows.</strong><p>Trade return is N/A until retained paper evidence exists.</p></article>'}</section>
 <details class="raw-drawer"><summary>View raw trade file location</summary><p>data/v2_day_trade_lab/trades/corpus_day_trade_trades.csv</p></details>
 """
 
@@ -1308,8 +1308,8 @@ def _quality_score(*, qa: dict[str, Any], manifest: dict[str, Any], data: dict[s
         int(manifest.get("top_level_nav_count") or 99) <= 6,
         int(manifest.get("day_count") or 0) > 0,
         int(manifest.get("month_count") or 0) > 0,
-        bool(_day_trade_strategy_rows(data)),
-        bool(_trade_rows(data)),
+        qa.get("checks", {}).get("strategy_surface_truthful") is True,
+        qa.get("checks", {}).get("trade_surface_truthful") is True,
         manifest.get("x2_preserved") is True,
         qa.get("checks", {}).get("no_live_trading_controls") is True,
         qa.get("checks", {}).get("research_banner_present") is True,

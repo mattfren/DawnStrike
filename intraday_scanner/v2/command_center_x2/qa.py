@@ -83,14 +83,29 @@ def run_command_center_x2_qa(
     missing_scan_tables = _missing_scan_tables(output_root, texts)
     calendar_default_issue = _calendar_default_issue(output_root, texts)
     calendar_audit = _read_json(output_root / "reports/calendar_audit.json", {})
+    manifest = _read_json(
+        output_root / "manifests/command_center_x2_manifest.json",
+        {},
+    )
     bridge_x2_old = repo_root / "data/v2_command_center/command_center_x2.html"
     bridge_x2_x = repo_root / "data/v2_command_center_x/command_center_x2.html"
+    strategy_text = texts.get((pages_dir / "strategies.html").as_posix(), "")
+    expected_strategy_pages = int(manifest.get("strategy_count") or 0)
+    strategy_surface_truthful = (
+        expected_strategy_pages > 0
+        and len(strategy_pages) == expected_strategy_pages
+    ) or (
+        expected_strategy_pages == 0
+        and 'data-strategy-empty-state="true"' in strategy_text
+        and "Returns are N/A until exact, source-gated forward evidence exists."
+        in strategy_text
+    )
     checks = {
         "required_pages_exist": not missing_pages,
         "assets_exist": not missing_assets,
         "day_pages_generated": bool(day_pages),
         "month_pages_generated": bool(month_pages),
-        "strategy_pages_generated": bool(strategy_pages),
+        "strategy_surface_truthful": strategy_surface_truthful,
         "broken_links_clear": not broken_links,
         "approved_local_script_tags_only": not script_hits,
         "local_js_safe": not js_hits,
