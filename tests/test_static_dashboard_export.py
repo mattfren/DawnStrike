@@ -395,6 +395,57 @@ def test_blocks_nonfinite_values_from_public_json(
         _build(canonical_sources)
 
 
+def test_position_without_mode_requires_immutable_forward_lineage(
+    canonical_sources: dict[str, Any],
+) -> None:
+    state_path = canonical_sources["root"] / "state" / "open_positions.json"
+    order_id = (
+        "order:forward:2026-07-16:first:v1.0:policy-v1:GAIN:"
+        "2026-07-16T13:30:00+00:00:long"
+    )
+    row = {
+        "schema_version": "v2.paper_position.v2",
+        "order_id": order_id,
+        "position_id": f"position:{order_id}",
+        "opened_at": "2026-07-17T13:30:00+00:00",
+        "symbol": "GAIN",
+        "strategy_id": "first",
+        "direction": "long",
+        "entry_price": 10.0,
+        "stop": 9.0,
+        "target": 12.0,
+        "unrealized_pnl": 1.0,
+    }
+    state_path.write_text(json.dumps([row]), encoding="utf-8")
+
+    payload = _build(canonical_sources)
+    assert payload["paperTrading"]["recentRows"][0]["symbol"] == "GAIN"
+
+    row["order_id"] = str(row["order_id"]).replace(
+        "order:forward:", "order:replay:"
+    )
+    row["position_id"] = f"position:{row['order_id']}"
+    state_path.write_text(json.dumps([row]), encoding="utf-8")
+    with pytest.raises(
+        exporter.StaticDashboardExportError, match="immutable forward provenance"
+    ):
+        _build(canonical_sources)
+
+
+def test_blocks_latest_alpha_day_without_scan_evidence(
+    canonical_sources: dict[str, Any],
+) -> None:
+    detail = canonical_sources["alpha"][DAY_TWO]
+    detail["status"] = "NO DATA"
+    detail["picks"] = []
+    detail["return_rows"] = []
+
+    with pytest.raises(
+        exporter.StaticDashboardExportError, match="lacks complete scan evidence"
+    ):
+        _build(canonical_sources)
+
+
 def test_evidence_hashes_bind_calendar_database_registry_and_public_payload(
     canonical_sources: dict[str, Any],
 ) -> None:

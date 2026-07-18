@@ -353,6 +353,10 @@ def _public_position_rows(
     names = {str(row["id"]): str(row["name"]) for row in registry}
     open_rows = _load_json_rows(root / "state" / "open_positions.json", required=True)
     pending_rows = _load_json_rows(root / "state" / "pending_orders.json", required=True)
+    for index, row in enumerate(open_rows):
+        _assert_forward_state_row(row, kind="position", index=index)
+    for index, row in enumerate(pending_rows):
+        _assert_forward_state_row(row, kind="order", index=index)
     public_open = [
         {
             "fillDate": str(row.get("opened_at") or "")[:10] or None,
@@ -367,7 +371,6 @@ def _public_position_rows(
             "unrealizedPnl": row.get("unrealized_pnl"),
         }
         for row in open_rows
-        if row.get("mode", "forward") == "forward"
     ]
     public_pending = [
         {
@@ -382,9 +385,41 @@ def _public_position_rows(
             "target": row.get("target"),
         }
         for row in pending_rows
-        if row.get("mode", "forward") == "forward"
     ]
     return public_open, public_pending
+
+
+def _assert_forward_state_row(
+    row: Mapping[str, Any], *, kind: str, index: int
+) -> None:
+    """Require explicit forward mode or immutable forward identifier lineage."""
+
+    mode = str(row.get("mode") or "").strip().lower()
+    schema_version = str(row.get("schema_version") or "")
+    expected_schema = f"v2.paper_{kind}.v2"
+    if schema_version != expected_schema:
+        raise StaticDashboardExportError(
+            f"PaperOps {kind} row {index} has unsupported schema provenance."
+        )
+    if mode:
+        if mode != "forward":
+            raise StaticDashboardExportError(
+                f"PaperOps {kind} row {index} is not forward evidence."
+            )
+        return
+
+    order_id = str(row.get("order_id") or "")
+    has_forward_order = order_id.startswith("order:forward:")
+    has_forward_identity = has_forward_order
+    if kind == "position":
+        position_id = str(row.get("position_id") or "")
+        has_forward_identity = position_id.startswith(
+            "position:order:forward:"
+        ) and position_id.endswith(order_id)
+    if not has_forward_identity:
+        raise StaticDashboardExportError(
+            f"PaperOps {kind} row {index} lacks explicit or immutable forward provenance."
+        )
 
 
 def _load_json_rows(path: Path, *, required: bool) -> list[dict[str, Any]]:
@@ -409,6 +444,31 @@ def _public_alpha_day(detail: Mapping[str, Any], expected_date: str) -> dict[str
     ):
         raise StaticDashboardExportError(f"AlphaOps day {expected_date} is not retained.")
     picks = _rows(detail.get("picks"))
+    decision = str(overview.get("alphaops_decision") or "").strip()
+    model_version = str(overview.get("model_version") or "").strip()
+    source_status = str(overview.get("source_status") or "").strip()
+    day_status = str(detail.get("status") or "").strip()
+    unavailable_markers = ("no data", "no_data", "unavailable", "failed", "error")
+    source_unavailable = not source_status or any(
+        marker in source_status.lower() for marker in unavailable_markers
+    )
+    day_unavailable = not day_status or any(
+        marker in day_status.lower() for marker in unavailable_markers
+    )
+    explicit_no_trade = decision.upper().replace(" ", "_") in {
+        "NO_TRADE",
+        "NO_PICKS",
+    }
+    if (
+        source_unavailable
+        or day_unavailable
+        or not decision
+        or not model_version
+        or (not picks and not explicit_no_trade)
+    ):
+        raise StaticDashboardExportError(
+            f"AlphaOps day {expected_date} lacks complete scan evidence."
+        )
     returns = {
         (int(row.get("rank") or 0), str(row.get("ticker") or "")): row
         for row in _rows(detail.get("return_rows"))
@@ -462,9 +522,9 @@ def _public_alpha_day(detail: Mapping[str, Any], expected_date: str) -> dict[str
     return {
         "date": expected_date,
         "status": str(detail.get("status") or "UNAVAILABLE"),
-        "decision": overview.get("alphaops_decision"),
-        "modelVersion": overview.get("model_version"),
-        "sourceStatus": overview.get("source_status"),
+        "decision": decision,
+        "modelVersion": model_version,
+        "sourceStatus": source_status,
         "sourceLabel": overview.get("source_label"),
         "pickCount": len(public_picks),
         "outcomeCoverage": {

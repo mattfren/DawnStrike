@@ -1003,7 +1003,7 @@
       "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
       "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
     ],
-    "publicPayloadSha256": "f9fbceba184e50cb0098ed3b52b0580e287d099c4caa30bd7e869e3473c087b8",
+    "publicPayloadSha256": "124f938f971680697957c891bf81026b8fef366273744dae05e8b10bbdc0b9d0",
     "reconciliationStatus": "passed",
     "sourceBarTruthStatus": "passed",
     "tradeBlotterStatus": "passed"
@@ -1047,7 +1047,7 @@
     "statusAtGeneration": "fresh"
   },
   "freshnessDeadline": "2026-07-20T22:00:00Z",
-  "generatedAt": "2026-07-18T04:57:02.459937Z",
+  "generatedAt": "2026-07-18T05:22:47.849531Z",
   "latestRunDate": "2026-07-17",
   "noPicks": {
     "acceptedCount": 0,

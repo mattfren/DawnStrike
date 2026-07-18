@@ -40,6 +40,12 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repoRoot
 
+$vercelCliPackage = 'vercel@56.3.1'
+$expectedVercelScope = 'mattfrens-projects'
+$expectedVercelProject = 'dawnstrike-command-center-x3'
+$expectedVercelProjectId = 'prj_5pef3EZF1u5YadebEz3dFjnkWOXy'
+$canonicalProductionHost = 'dawnstrike-command-center-x3.vercel.app'
+
 function Resolve-RepositoryPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -127,6 +133,121 @@ function Assert-DashboardPayload {
     if ($Payload.evidence.alphaDatabaseSha256 -notmatch '^[a-fA-F0-9]{64}$') {
         throw "$Label is missing a valid Alpha database evidence hash."
     }
+
+    $latestAlpha = @(
+        $Payload.alphaOps.days |
+            Where-Object { $_.date -eq $ExpectedRunDate }
+    ) | Select-Object -First 1
+    if ($null -eq $latestAlpha) {
+        throw "$Label is missing AlphaOps scan evidence for $ExpectedRunDate."
+    }
+    $alphaUnavailable = (
+        -not $latestAlpha.sourceStatus -or
+        -not $latestAlpha.status -or
+        [string]$latestAlpha.sourceStatus -match '(?i)(no[_ ]?data|unavailable|failed|error)' -or
+        [string]$latestAlpha.status -match '(?i)(no[_ ]?data|unavailable|failed|error)'
+    )
+    if ($alphaUnavailable) {
+        throw "$Label has unavailable AlphaOps scan evidence for $ExpectedRunDate."
+    }
+    $explicitNoTrade = [string]$latestAlpha.decision -match '(?i)^NO[_ ]?(TRADE|PICKS)$'
+    if ([int]$latestAlpha.pickCount -le 0 -and -not $explicitNoTrade) {
+        throw "$Label has no retained AlphaOps picks or explicit no-trade decision for $ExpectedRunDate."
+    }
+}
+
+function Assert-VercelProjectIdentity {
+    $arguments = @(
+        '--yes', $vercelCliPackage,
+        'project', 'inspect', $expectedVercelProject,
+        '--scope', $expectedVercelScope,
+        '--no-color'
+    )
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $projectOutput = @(& npx @arguments 2>&1)
+        $projectExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $projectOutput | ForEach-Object { Write-Host $_ }
+    if ($projectExit -ne 0) {
+        throw "Could not verify the intended Vercel project (exit $projectExit)."
+    }
+    $projectText = $projectOutput -join "`n"
+    $expectedProjectPath = "$expectedVercelScope/$expectedVercelProject"
+    if (
+        $projectText -notmatch [regex]::Escape($expectedProjectPath) -or
+        $projectText -notmatch [regex]::Escape($expectedVercelProjectId)
+    ) {
+        throw "Vercel identity mismatch; expected $expectedProjectPath ($expectedVercelProjectId)."
+    }
+}
+
+function Assert-RemoteDashboardArtifact {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedRunDate,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$LocalPayload,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArtifactSha256
+    )
+
+    $remoteResponse = $null
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        try {
+            $remoteResponse = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers @{
+                'Cache-Control' = 'no-cache'
+            }
+            if ($remoteResponse.StatusCode -eq 200) {
+                break
+            }
+        }
+        catch {
+            if ($attempt -eq 6) {
+                throw
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    if ($null -eq $remoteResponse -or $remoteResponse.StatusCode -ne 200) {
+        throw "$Label dashboard asset could not be retrieved from $Uri."
+    }
+
+    $remoteContent = [string]$remoteResponse.Content
+    $remotePayload = $remoteContent | ConvertFrom-Json
+    Assert-DashboardPayload -Payload $remotePayload -ExpectedRunDate $ExpectedRunDate -Label $Label
+
+    if ($remotePayload.evidence.paperOpsCalendarSha256 -ne $LocalPayload.evidence.paperOpsCalendarSha256) {
+        throw "$Label PaperOps calendar evidence hash does not match the local verified artifact."
+    }
+    if ($remotePayload.evidence.alphaDatabaseSha256 -ne $LocalPayload.evidence.alphaDatabaseSha256) {
+        throw "$Label Alpha database evidence hash does not match the local verified artifact."
+    }
+
+    $remoteBytes = [System.Text.Encoding]::UTF8.GetBytes($remoteContent)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $remoteSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($remoteBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+    if ($remoteSha256 -ne $ArtifactSha256) {
+        throw "$Label artifact hash mismatch; expected $ArtifactSha256, received $remoteSha256."
+    }
+    Write-Host "$Label dashboard artifact verified: $Uri"
 }
 
 $normalizedTarget = $PublishTarget.Trim().ToLowerInvariant()
@@ -213,7 +334,14 @@ try {
         throw "Remote publication requires the canonical asset path: $canonicalOutput"
     }
 
-    $deployArguments = @('vercel', 'deploy', '--yes')
+    Assert-VercelProjectIdentity
+
+    $deployArguments = @(
+        '--yes', $vercelCliPackage,
+        'deploy', '--yes',
+        '--project', $expectedVercelProject,
+        '--scope', $expectedVercelScope
+    )
     if ($normalizedTarget -eq 'production') {
         $deployArguments += '--prod'
     }
@@ -244,48 +372,10 @@ try {
     $deploymentUrl = $deploymentUrls[-1].TrimEnd('/')
     $remoteUri = "$deploymentUrl/assets/dashboard-data.json?artifact=$artifactSha256"
 
-    $remoteResponse = $null
-    for ($attempt = 1; $attempt -le 6; $attempt++) {
-        try {
-            $remoteResponse = Invoke-WebRequest -UseBasicParsing -Uri $remoteUri -Headers @{
-                'Cache-Control' = 'no-cache'
-            }
-            if ($remoteResponse.StatusCode -eq 200) {
-                break
-            }
-        }
-        catch {
-            if ($attempt -eq 6) {
-                throw
-            }
-        }
-        Start-Sleep -Seconds 2
-    }
-    if ($null -eq $remoteResponse -or $remoteResponse.StatusCode -ne 200) {
-        throw "Deployed dashboard asset could not be retrieved from $remoteUri."
-    }
-
-    $remoteContent = [string]$remoteResponse.Content
-    $remotePayload = $remoteContent | ConvertFrom-Json
-    Assert-DashboardPayload -Payload $remotePayload -ExpectedRunDate $RunDate -Label 'Deployed asset'
-
-    if ($remotePayload.evidence.paperOpsCalendarSha256 -ne $localPayload.evidence.paperOpsCalendarSha256) {
-        throw 'Deployed PaperOps calendar evidence hash does not match the local verified artifact.'
-    }
-    if ($remotePayload.evidence.alphaDatabaseSha256 -ne $localPayload.evidence.alphaDatabaseSha256) {
-        throw 'Deployed Alpha database evidence hash does not match the local verified artifact.'
-    }
-
-    $remoteBytes = [System.Text.Encoding]::UTF8.GetBytes($remoteContent)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $remoteSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($remoteBytes))).Replace('-', '').ToLowerInvariant()
-    }
-    finally {
-        $sha.Dispose()
-    }
-    if ($remoteSha256 -ne $artifactSha256) {
-        throw "Deployed artifact hash mismatch; expected $artifactSha256, received $remoteSha256."
+    Assert-RemoteDashboardArtifact -Uri $remoteUri -Label 'Deployment URL' -ExpectedRunDate $RunDate -LocalPayload $localPayload -ArtifactSha256 $artifactSha256
+    if ($normalizedTarget -eq 'production') {
+        $canonicalUri = "https://$canonicalProductionHost/assets/dashboard-data.json?artifact=$artifactSha256"
+        Assert-RemoteDashboardArtifact -Uri $canonicalUri -Label 'Canonical production host' -ExpectedRunDate $RunDate -LocalPayload $localPayload -ArtifactSha256 $artifactSha256
     }
 
     Write-Host "Static dashboard publication verified: target=$normalizedTarget url=$deploymentUrl date=$RunDate sha256=$artifactSha256"
