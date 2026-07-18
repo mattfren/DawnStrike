@@ -1,4 +1,5 @@
 const tableState = new Map();
+const DASHBOARD_SCHEMA = "dawnstrike.static-dashboard.v3";
 
 const formatValue = (value) => {
   if (value === null || value === undefined || value === "") return "n/a";
@@ -10,6 +11,45 @@ const byId = (id) => document.getElementById(id);
 const text = (id, value) => {
   const element = byId(id);
   if (element) element.textContent = formatValue(value);
+};
+
+const resolveFreshness = (data, now = Date.now()) => {
+  if (data.schemaVersion !== DASHBOARD_SCHEMA) {
+    return {
+      healthy: false,
+      deployment: "Evidence contract unsupported",
+      label: "Freshness unavailable",
+      detail: "The loaded dashboard payload does not use the current evidence contract.",
+    };
+  }
+
+  const freshness = data.freshness || {};
+  const asOfDate = freshness.asOfDate || data.latestRunDate;
+  const deadlineAt = freshness.deadlineAt || data.freshnessDeadline;
+  const statusAtGeneration = freshness.statusAtGeneration;
+  const deadline = Date.parse(deadlineAt);
+  const generated = Date.parse(data.generatedAt);
+  if (
+    !asOfDate ||
+    !Number.isFinite(deadline) ||
+    !Number.isFinite(generated) ||
+    !["fresh", "stale"].includes(statusAtGeneration)
+  ) {
+    return {
+      healthy: false,
+      deployment: "Evidence freshness unknown",
+      label: "Freshness unavailable",
+      detail: "The payload is missing a valid generation time, as-of date, or freshness deadline.",
+    };
+  }
+
+  const stale = statusAtGeneration === "stale" || now > deadline;
+  return {
+    healthy: !stale,
+    deployment: stale ? "Evidence stale" : "Current evidence loaded",
+    label: stale ? `Stale · as of ${asOfDate}` : `Fresh · as of ${asOfDate}`,
+    detail: `${stale ? "Freshness deadline passed" : "Fresh through"} ${deadlineAt}`,
+  };
 };
 
 const clear = (element) => {
@@ -433,14 +473,27 @@ const renderSystem = (system = {}) => {
 };
 
 const renderDashboard = (data) => {
-  text("status-deployment", data.deploymentStatus || "Data verified");
+  const freshness = resolveFreshness(data);
+  text("status-deployment", freshness.deployment);
   const deployment = byId("status-deployment");
-  if (deployment) deployment.className = "status-pill ok";
+  if (deployment) deployment.className = `status-pill ${freshness.healthy ? "ok" : "bad"}`;
   text("subheadline", data.subheadline);
   text("latest-run-date", data.latestRunDate);
-  text("overall-status", data.overallStatus);
-  text("status-freshness", data.freshnessLabel || `${formatValue(data.latestRunDate)} scan`);
-  text("source-line", `Source ${formatValue(data.sourceCommit)} - generated ${formatValue(data.generatedAt)}`);
+  text(
+    "overall-status",
+    freshness.healthy
+      ? data.overallStatus
+      : `${formatValue(data.overallStatus)} · ${freshness.detail}`
+  );
+  text("status-freshness", freshness.label);
+  const freshnessBadge = byId("status-freshness");
+  if (freshnessBadge) {
+    freshnessBadge.className = `status-pill ${freshness.healthy ? "ok" : "bad"}`;
+  }
+  text(
+    "source-line",
+    `Source ${formatValue(data.sourceCommit)} - generated ${formatValue(data.generatedAt)} - ${freshness.detail}`
+  );
 
   renderQuickActions(data.quickActions || []);
   renderMetrics(data.topMetrics || []);

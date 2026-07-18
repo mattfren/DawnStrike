@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from intraday_scanner.v2.mover_pattern_lab.calendar_report import (
 )
 
 DEFAULT_MOVER_LAB_ROOT = Path("data/v2_mover_pattern_lab")
+MOVER_LAB_ROOT_ENV = "DAWNSTRIKE_MOVER_LAB_ROOT"
 
 
 def render_mover_strategy_calendar(
@@ -22,7 +24,10 @@ def render_mover_strategy_calendar(
 ) -> bool:
     """Render retained mover strategy days; return false when none are available."""
 
-    root = Path(output_root) if output_root is not None else DEFAULT_MOVER_LAB_ROOT
+    configured_root = output_root
+    if configured_root is None:
+        configured_root = os.environ.get(MOVER_LAB_ROOT_ENV) or DEFAULT_MOVER_LAB_ROOT
+    root = Path(configured_root)
     reports_directory = (root / "reports").resolve()
     latest_path = reports_directory / "mover_pattern_analysis_latest.json"
     if not latest_path.is_file():

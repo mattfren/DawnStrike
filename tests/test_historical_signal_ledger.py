@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 from intraday_scanner.cli import main
-from intraday_scanner.dashboard.data_loader import load_calendar_day_detail
+from intraday_scanner.dashboard.data_loader import _day_status, load_calendar_day_detail
 from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.services.free_shadow_mode import import_manual_outcomes
 from intraday_scanner.services.return_attribution_service import (
@@ -220,6 +220,163 @@ def test_partial_outcome_does_not_become_zero_and_calendar_statuses(tmp_path: Pa
     pending = load_calendar_day_detail(pending_db, DAY)
     assert pending["status"] == "PICKS PENDING OUTCOMES"
     assert pending["missing_outcomes"][0]["audit_status"] == "Outcome needed"
+
+
+def test_sourced_not_triggered_outcome_is_resolved_without_a_zero_return(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite"
+    store = SQLiteScanStore(db_path)
+    _seed_signals(store, [("NOVA", 1, 10.0)])
+    signal_id = "scan-ledger:1:NOVA"
+    store.persist_signal_outcomes(
+        [
+            {
+                "signal_id": signal_id,
+                "market_date": DAY,
+                "ticker": "NOVA",
+                "outcome_source": "complete_sourced_rth_1min",
+                "outcome_status": "complete_not_triggered",
+                "notes": "Complete bars proved the saved trigger was never reached.",
+                "validated_against_signal_timestamp": True,
+            }
+        ]
+    )
+
+    detail = load_calendar_day_detail(db_path, DAY)
+    row = detail["return_rows"][0]
+
+    assert detail["status"] == "RESOLVED NO ENTRY"
+    assert detail["missing_outcome_count"] == 0
+    assert detail["outcome_coverage_pct"] == 100.0
+    assert detail["missing_outcomes"] == []
+    assert row["audit_status"] == "resolved_no_entry"
+    assert row["outcome_source"] == "complete_sourced_rth_1min"
+    assert row["return_kind"] == "no entry"
+    assert row["close_return"] is None
+    assert row["recommended_exit_return"] is None
+    assert detail["basket_returns"]["top1_close_return"] is None
+
+
+def test_sourced_no_entry_overrides_an_older_partial_label(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.sqlite"
+    store = SQLiteScanStore(db_path)
+    _seed_signals(store, [("NOVA", 1, 10.0)])
+    signal_id = "scan-ledger:1:NOVA"
+    store.persist_alpha_outcome_labels(
+        [
+            {
+                "label_key": "older-partial:NOVA",
+                "scan_id": "scan-ledger",
+                "ticker": "NOVA",
+                "created_at": f"{DAY}T14:00:00+00:00",
+                "entry_price": 10.0,
+                "close_return_pct": 3.0,
+            }
+        ]
+    )
+    store.persist_signal_outcomes(
+        [
+            {
+                "signal_id": signal_id,
+                "market_date": DAY,
+                "ticker": "NOVA",
+                "outcome_source": "complete_sourced_rth_1min",
+                "outcome_status": "complete_not_triggered",
+                "notes": "Later complete bars proved there was no entry.",
+                "validated_against_signal_timestamp": True,
+            }
+        ]
+    )
+
+    row = load_calendar_day_detail(db_path, DAY)["return_rows"][0]
+
+    assert row["audit_status"] == "resolved_no_entry"
+    assert row["entry_price"] is None
+    assert row["entry_time"] == ""
+    assert row["close_return"] is None
+    assert row["high_after_entry_return"] is None
+    assert row["low_after_entry_drawdown"] is None
+
+
+def test_resolved_no_entry_nulls_conflicting_attribution_returns(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.sqlite"
+    store = SQLiteScanStore(db_path)
+    _seed_signals(store, [("NOVA", 1, 10.0)])
+    signal_id = "scan-ledger:1:NOVA"
+    store.persist_signal_outcomes(
+        [
+            {
+                "signal_id": signal_id,
+                "market_date": DAY,
+                "ticker": "NOVA",
+                "outcome_source": "complete_sourced_rth_1min",
+                "outcome_status": "complete_not_triggered",
+                "notes": "The saved trigger never activated.",
+                "validated_against_signal_timestamp": True,
+            }
+        ]
+    )
+    store.persist_signal_return_attribution(
+        [
+            {
+                "attribution_id": "conflicting-scenario-close",
+                "signal_id": signal_id,
+                "ticker": "NOVA",
+                "market_date": DAY,
+                "entry_policy": "first_available_after_signal",
+                "exit_policy": "close",
+                "entry_price": 10.0,
+                "exit_price": 10.5,
+                "return_pct": 5.0,
+                "drawdown_pct": -2.0,
+                "audit_status": "audited",
+                "scenario_or_recommended": "scenario",
+                "calculated_at": f"{DAY}T21:00:00+00:00",
+            },
+            {
+                "attribution_id": "saved-trigger-not-reached",
+                "signal_id": signal_id,
+                "ticker": "NOVA",
+                "market_date": DAY,
+                "entry_policy": "trigger_touch",
+                "exit_policy": "not_triggered",
+                "trigger_activated": False,
+                "audit_status": "resolved_no_entry",
+                "scenario_or_recommended": "scenario",
+                "resolution_note": "The saved trigger never activated.",
+                "calculated_at": f"{DAY}T21:00:00+00:00",
+            },
+        ]
+    )
+
+    row = load_calendar_day_detail(db_path, DAY)["return_rows"][0]
+
+    assert row["audit_status"] == "resolved_no_entry"
+    assert row["entry_price"] is None
+    assert row["entry_time"] == ""
+    assert row["recommended_exit_price"] is None
+    assert row["recommended_exit_return"] is None
+    assert row["price_1m_return"] is None
+    assert row["close_return"] is None
+    assert row["breakout_entry_return"] is None
+    assert row["high_after_entry_return"] is None
+    assert row["low_after_entry_drawdown"] is None
+
+
+def test_mixed_resolved_day_status_distinguishes_complete_from_missing() -> None:
+    common = {
+        "has_data": True,
+        "source_failure": False,
+        "no_trade": False,
+        "pick_count": 2,
+        "partial_count": 0,
+        "audited_count": 1,
+        "resolved_no_entry_count": 1,
+    }
+
+    assert _day_status(**common, missing_count=0) == "AUDITED"
+    assert _day_status(**common, missing_count=1) == "OUTCOMES PARTIAL"
 
 
 def test_historical_outputs_redact_secret_text_and_implementation_has_no_execution_path(

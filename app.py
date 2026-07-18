@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar as calendar_lib
 import csv
 import json
+import os
 import subprocess
 from datetime import date, timedelta
 from pathlib import Path
@@ -52,6 +53,7 @@ from intraday_scanner.notifiers.telegram_formatter import format_morning_watchli
 from intraday_scanner.providers import CSVProvider
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.reporting import read_csv_dicts, write_scan_outputs
+from intraday_scanner.runtime_paths import operational_runtime_root
 from intraday_scanner.services.audit_service import run_paper_audit_rows
 from intraday_scanner.services.scan_service import ScanService
 from intraday_scanner.services.setup_monitor import run_setup_monitor
@@ -178,10 +180,13 @@ FRIENDLY = {
     "low_dollar_volume": "Low dollar volume",
 }
 
+APP_REPO_ROOT = Path(__file__).resolve().parent
+
 
 def main() -> None:
     st.set_page_config(page_title="Dawnstrike", layout="wide", initial_sidebar_state="collapsed")
     _theme()
+    _configure_runtime_environment()
     config = load_config()
     _init_defaults(config)
 
@@ -216,6 +221,27 @@ def main() -> None:
         st.rerun()
 
 
+def _configure_runtime_environment() -> None:
+    """Point worktree UIs at retained operational evidence before loading config."""
+
+    runtime_root = operational_runtime_root(APP_REPO_ROOT)
+    os.environ["DAWNSTRIKE_RUNTIME_ROOT"] = str(runtime_root)
+    candidates = {
+        "INTRADAY_DATABASE_PATH": runtime_root / "data" / "shadow_real.sqlite",
+        "DAWNSTRIKE_PAPER_OPS_ROOT": runtime_root / "data" / "v2_paper_ops_live",
+        "DAWNSTRIKE_MOVER_LAB_ROOT": runtime_root / "data" / "v2_mover_pattern_lab",
+    }
+    for variable, path in candidates.items():
+        configured = str(os.environ.get(variable) or "").strip()
+        if configured:
+            configured_path = Path(configured).expanduser()
+            if not configured_path.is_absolute():
+                configured_path = runtime_root / configured_path
+            os.environ[variable] = str(configured_path.resolve())
+        elif path.exists():
+            os.environ[variable] = str(path.resolve())
+
+
 def _init_defaults(config: Any) -> None:
     defaults = {
         "data_source": "SQLite",
@@ -233,10 +259,22 @@ def _init_defaults(config: Any) -> None:
 
 
 def _default_dashboard_db_path(config: Any) -> str:
-    alphaops_db = Path("data/shadow_real.sqlite")
+    configured = Path(config.database_path).expanduser()
+    runtime_root = operational_runtime_root(APP_REPO_ROOT)
+    if str(os.environ.get("INTRADAY_DATABASE_PATH") or "").strip():
+        explicit = configured if configured.is_absolute() else runtime_root / configured
+        return str(explicit.resolve())
+
+    alphaops_db = runtime_root / "data" / "shadow_real.sqlite"
     if alphaops_db.exists():
-        return str(alphaops_db)
-    return str(config.database_path)
+        return str(alphaops_db.resolve())
+
+    if configured.is_absolute():
+        return str(configured.resolve())
+    runtime_configured = runtime_root / configured
+    if runtime_configured.exists():
+        return str(runtime_configured.resolve())
+    return str((APP_REPO_ROOT / configured).resolve())
 
 
 def _sidebar(config: Any) -> dict[str, Any]:
@@ -3190,7 +3228,10 @@ def _calendar_summary_cards(
 ) -> str:
     audited = [row for row in days if row.get("status") == "AUDITED"]
     outcome_days = [
-        row for row in days if row.get("status") in {"AUDITED", "OUTCOMES PARTIAL"}
+        row
+        for row in days
+        if row.get("status")
+        in {"AUDITED", "OUTCOMES PARTIAL", "RESOLVED NO ENTRY"}
     ]
     evidence = _calendar_evidence_label(len(audited))
     top3_values: list[float] = []
@@ -3202,16 +3243,29 @@ def _calendar_summary_cards(
     best = max(top3_values) if top3_values else None
     worst = min(top3_values) if top3_values else None
     tracked_days = len([row for row in days if row.get("status") != "NO DATA"])
+    pending_returns = any(
+        row.get("status") in {"PICKS PENDING OUTCOMES", "OUTCOMES PARTIAL"}
+        for row in days
+    )
+    unavailable_return_label = "Pending" if pending_returns or not outcome_days else "N/A"
     cards = [
         ("Days tracked", _format_number(tracked_days), "Saved rows"),
         ("Days with outcomes", _format_number(len(outcome_days)), evidence),
         (
             "Top3 total return",
-            _signed_pct(top3_total) if top3_total is not None else "Pending",
+            _signed_pct(top3_total) if top3_total is not None else unavailable_return_label,
             "Audited close",
         ),
-        ("Best day", _signed_pct(best) if best is not None else "Pending", "Top3 close"),
-        ("Worst day", _signed_pct(worst) if worst is not None else "Pending", "Top3 close"),
+        (
+            "Best day",
+            _signed_pct(best) if best is not None else unavailable_return_label,
+            "Top3 close",
+        ),
+        (
+            "Worst day",
+            _signed_pct(worst) if worst is not None else unavailable_return_label,
+            "Top3 close",
+        ),
         ("Outcome needed", _format_number(len(missing)), "Needs import/audit rows"),
     ]
     return _step_strip(cards)
@@ -3232,9 +3286,11 @@ def _calendar_grid_html(days: list[dict[str, Any]], year: int, month: int) -> st
 
 def _calendar_card(row: dict[str, Any], *, outside: bool) -> str:
     status = str(row.get("status") or "NO DATA")
+    mixed_resolved_no_entry = _calendar_day_has_mixed_resolved_no_entry(row)
     labels = {
         "NO DATA": "No data",
         "NO TRADE": "No trade",
+        "RESOLVED NO ENTRY": "Resolved · no entry",
         "PICKS PENDING OUTCOMES": "Picks pending",
         "OUTCOMES PARTIAL": "Partial outcomes",
         "AUDITED": "Audited",
@@ -3249,8 +3305,20 @@ def _calendar_card(row: dict[str, Any], *, outside: bool) -> str:
         badges.append("Outcome needed")
     if status == "NO TRADE":
         badges.append("No trade")
+    if status == "RESOLVED NO ENTRY":
+        badges.append("Trigger not reached")
+    if mixed_resolved_no_entry:
+        badges.append("Mixed entry outcomes")
     badge_html = "".join(f'<span class="ds-calendar-badge">{_html(item)}</span>' for item in badges)
-    top3_text = _signed_pct(top3) if top3 is not None else "Pending"
+    top3_text = (
+        _signed_pct(top3)
+        if top3 is not None
+        else "N/A · no entry"
+        if status == "RESOLVED NO ENTRY"
+        else "N/A · mixed entries"
+        if mixed_resolved_no_entry
+        else "Pending"
+    )
     date_text = str(row.get("date") or "")[-2:]
     top_pick = str(row.get("top_pick") or "None")
     return (
@@ -3275,7 +3343,7 @@ def _calendar_status_class(status: str, top3: float | None) -> str:
         return "ds-calendar-card--partial"
     if status == "PICKS PENDING OUTCOMES":
         return "ds-calendar-card--pending"
-    if status in {"NO DATA", "NO TRADE", "SOURCE FAILURE"}:
+    if status in {"NO DATA", "NO TRADE", "RESOLVED NO ENTRY", "SOURCE FAILURE"}:
         return "ds-calendar-card--empty"
     return ""
 
@@ -3303,12 +3371,22 @@ def _calendar_day_drilldown(detail: dict[str, Any]) -> None:
     st.markdown(_step_strip(cards), unsafe_allow_html=True)
     picks = list(detail.get("picks") or [])
     missing = list(detail.get("missing_outcomes") or [])
+    resolved_no_entry = _calendar_day_is_resolved_no_entry(detail)
+    mixed_resolved_no_entry = _calendar_day_has_mixed_resolved_no_entry(detail)
     top3 = _calendar_number(dict(detail.get("basket_returns") or {}).get("top3_close_return"))
-    return_read = (
-        _signed_pct(top3)
-        if top3 is not None
-        else "Return not available yet because outcome data has not been imported."
-    )
+    if top3 is not None:
+        return_read = _signed_pct(top3)
+    elif resolved_no_entry:
+        return_read = "N/A — trigger never activated."
+    elif mixed_resolved_no_entry:
+        return_read = (
+            "N/A — this complete day includes both an audited entry and a saved "
+            "trigger that never activated. See the per-pick returns below."
+        )
+    elif missing:
+        return_read = "Return not available yet because outcome data has not been imported."
+    else:
+        return_read = "N/A — no return-bearing entry was recorded."
     plain_cards = [
         (
             "What did Dawnstrike pick?",
@@ -3390,18 +3468,45 @@ def _calendar_day_drilldown(detail: dict[str, Any]) -> None:
             "notes",
         ],
     )
-    _calendar_basket_panel(dict(detail.get("basket_returns") or {}))
+    empty_basket_label = "Pending"
+    if resolved_no_entry:
+        empty_basket_label = "N/A · trigger not reached"
+    elif mixed_resolved_no_entry:
+        empty_basket_label = "N/A · mixed entries"
+    _calendar_basket_panel(
+        dict(detail.get("basket_returns") or {}),
+        empty_label=empty_basket_label,
+    )
     _calendar_missing_panel(detail)
 
 
-def _calendar_basket_panel(basket: dict[str, Any]) -> None:
+def _calendar_basket_panel(
+    basket: dict[str, Any],
+    *,
+    empty_label: str = "Pending",
+) -> None:
     cards = [
-        ("Top1 close", _pct_or_pending(basket.get("top1_close_return")), "Equal-weight"),
-        ("Top3 close", _pct_or_pending(basket.get("top3_close_return")), "Equal-weight"),
-        ("Top5 close", _pct_or_pending(basket.get("top5_close_return")), "Equal-weight"),
+        (
+            "Top1 close",
+            _pct_or_pending(basket.get("top1_close_return"), empty_label=empty_label),
+            "Equal-weight",
+        ),
+        (
+            "Top3 close",
+            _pct_or_pending(basket.get("top3_close_return"), empty_label=empty_label),
+            "Equal-weight",
+        ),
+        (
+            "Top5 close",
+            _pct_or_pending(basket.get("top5_close_return"), empty_label=empty_label),
+            "Equal-weight",
+        ),
         (
             "Monitor exit",
-            _pct_or_pending(basket.get("top3_monitor_exit_if_available_return")),
+            _pct_or_pending(
+                basket.get("top3_monitor_exit_if_available_return"),
+                empty_label=empty_label,
+            ),
             "Only if saved",
         ),
     ]
@@ -3617,7 +3722,7 @@ def _filter_calendar_days(
     output = []
     setup_query = setup_filter.strip().lower()
     for row in days:
-        if audited_only and row.get("status") != "AUDITED":
+        if audited_only and row.get("status") not in {"AUDITED", "RESOLVED NO ENTRY"}:
             continue
         if not show_pending and row.get("status") in {"PICKS PENDING OUTCOMES", "OUTCOMES PARTIAL"}:
             continue
@@ -3653,9 +3758,25 @@ def _coverage_text(value: Any) -> str:
     return "Pending" if number is None else f"{_format_number(number)}%"
 
 
-def _pct_or_pending(value: Any) -> str:
+def _pct_or_pending(value: Any, *, empty_label: str = "Pending") -> str:
     number = _calendar_number(value)
-    return "Pending" if number is None else _signed_pct(number)
+    return empty_label if number is None else _signed_pct(number)
+
+
+def _calendar_day_is_resolved_no_entry(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "")
+    if status == "RESOLVED NO ENTRY":
+        return True
+    pick_count = int(_number(row.get("top_pick_count")))
+    resolved_count = int(_number(row.get("resolved_no_entry_count")))
+    return pick_count > 0 and resolved_count == pick_count
+
+
+def _calendar_day_has_mixed_resolved_no_entry(row: dict[str, Any]) -> bool:
+    if str(row.get("status") or "") != "AUDITED":
+        return False
+    resolved_count = int(_number(row.get("resolved_no_entry_count")))
+    return resolved_count > 0 and not _calendar_day_is_resolved_no_entry(row)
 
 
 def _calendar_number(value: Any) -> float | None:
@@ -4391,7 +4512,7 @@ def _table(rows: list[dict[str, Any]], columns: list[str]) -> None:
     for row in rows:
         cells = []
         for column in visible:
-            value = _format_cell(column, row.get(column))
+            value = _format_table_cell(row, column)
             css_class = "ds-num" if _is_numeric_column(column) else ""
             cells.append(f'<td class="{css_class}">{_html(value)}</td>')
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
@@ -4614,6 +4735,25 @@ def _format_cell(column: str, value: Any) -> str:
     if column == "checked_at":
         return _short_timestamp(value)
     return str(value)
+
+
+def _format_table_cell(row: dict[str, Any], column: str) -> str:
+    value = row.get(column)
+    audit_status = str(row.get("audit_status") or "").strip().lower()
+    if audit_status == "resolved_no_entry":
+        if value in {None, ""} and (
+            _is_return_column(column)
+            or column
+            in {
+                "entry_price",
+                "entry_time",
+                "recommended_exit_price",
+            }
+        ):
+            return "N/A"
+        if column == "recommended_exit_policy" and value in {None, "", "not_recorded"}:
+            return "N/A · no entry"
+    return _format_cell(column, value)
 
 
 def _is_numeric_column(column: str) -> bool:

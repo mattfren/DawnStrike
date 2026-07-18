@@ -11,12 +11,13 @@ import argparse
 import calendar as month_calendar
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 SOURCE_SCHEMA = "dawnstrike.static-dashboard-source.v1"
-OUTPUT_SCHEMA = "dawnstrike.static-dashboard.v2"
+OUTPUT_SCHEMA = "dawnstrike.static-dashboard.v3"
 
 
 class StaticDashboardError(ValueError):
@@ -69,6 +70,42 @@ def _required_rows(parent: Mapping[str, Any], key: str) -> list[Mapping[str, Any
     if not isinstance(value, list) or not all(isinstance(row, Mapping) for row in value):
         raise StaticDashboardError(f"{key} must be an array of objects")
     return list(value)
+
+
+def _iso_utc(value: object, *, field: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise StaticDashboardError(f"{field} must be an ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise StaticDashboardError(f"{field} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        raise StaticDashboardError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _freshness(source: Mapping[str, Any], latest_date: str) -> dict[str, str]:
+    """Return a deterministic deadline that the browser must re-evaluate at render time."""
+
+    generated = _iso_utc(source.get("generatedAt"), field="generatedAt")
+    configured = source.get("freshness")
+    configured_deadline = configured.get("deadlineAt") if isinstance(configured, Mapping) else None
+    deadline_value = configured_deadline or source.get("freshnessDeadline")
+    deadline = (
+        _iso_utc(deadline_value, field="freshness.deadlineAt")
+        if deadline_value
+        else generated + timedelta(hours=24)
+    )
+    return {
+        "asOfDate": latest_date,
+        "deadlineAt": _utc_text(deadline),
+        "statusAtGeneration": "fresh" if generated <= deadline else "stale",
+    }
 
 
 def _strategy_index(paper: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -134,10 +171,14 @@ def _validate_source(source: Mapping[str, Any]) -> None:
     if int(latest.get("coveragePresent") or -1) != len(observed_ids):
         raise StaticDashboardError("Latest coveragePresent disagrees with observed rows")
     reported_pnl = _decimal(latest.get("fleetDailyPnl"))
-    row_pnl = sum(
-        (_decimal(row.get("totalPnl")) or Decimal(0) for row in returns),
-        start=Decimal(0),
-    )
+    row_pnl = Decimal(0)
+    for row in returns:
+        strategy_pnl = _decimal(row.get("totalPnl"))
+        if strategy_pnl is None:
+            raise StaticDashboardError(
+                "Latest strategy P&L must be explicit, never inferred as zero"
+            )
+        row_pnl += strategy_pnl
     if reported_pnl != row_pnl:
         raise StaticDashboardError("Fleet daily P&L disagrees with strategy rows")
     starting_equity = _decimal(latest.get("fleetStartingEquity"))
@@ -169,17 +210,25 @@ def _watchlist(alpha: Mapping[str, Any]) -> dict[str, Any]:
                 "sourceConfidence": row.get("sourceConfidence"),
             }
         )
+    candidate_count = len(rendered)
+    confirmation_count = int(alpha.get("manualConfirmationCount") or 0)
+    blocked_count = int(alpha.get("blockedCount") or 0)
+    accepted_count = int(alpha.get("cleanAcceptedCount") or 0)
     return {
         "title": "Operator Watchlist",
         "date": alpha.get("marketDate"),
-        "candidateCount": len(rendered),
-        "clearedCount": alpha.get("manualConfirmationCount"),
-        "blockedCount": alpha.get("blockedCount"),
-        "gateSummary": "2 blocked / 1 needs confirmation / 0 clean",
+        "candidateCount": candidate_count,
+        "clearedCount": confirmation_count,
+        "blockedCount": blocked_count,
+        "gateSummary": (
+            f"{blocked_count} blocked / {confirmation_count} needs confirmation / "
+            f"{accepted_count} clean"
+        ),
         "rows": rendered,
         "note": (
-            "Watch-only research. One name reached manual-confirmation delivery; no clean "
-            "trade recommendation was recorded, and broker execution remains disabled."
+            f"Watch-only research. {confirmation_count} of {candidate_count} candidates reached "
+            f"manual-confirmation delivery; {accepted_count} clean trade recommendations were "
+            "recorded, and broker execution remains disabled."
         ),
     }
 
@@ -401,26 +450,60 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
     eligible_rows = list(observed.values())
     best = max(
         eligible_rows,
-        key=lambda row: _decimal(row.get("dailyReturnFraction")) or Decimal("-Infinity"),
+        key=lambda row: (
+            value
+            if (value := _decimal(row.get("dailyReturnFraction"))) is not None
+            else Decimal("-Infinity")
+        ),
     )
     best_registry = strategies[str(best["id"])]
     current, recent = _paper_records(paper)
     scheduler = _required_mapping(system, "scheduler")
     notification = _required_mapping(alpha, "notification")
     upcoming = len(strategies) - len(observed)
+    eligible_count = len(observed)
+    expected_count = int(latest.get("coverageExpected") or 0)
+    opened_count = int(latest.get("tradesOpened") or 0)
+    closed_count = int(latest.get("tradesClosed") or 0)
+    open_count = int(latest.get("openPositions") or 0)
+    pending_count = int(latest.get("pendingOrders") or 0)
+    candidate_count = int(alpha.get("candidateCount") or 0)
+    confirmation_count = int(alpha.get("manualConfirmationCount") or 0)
+    blocked_count = int(alpha.get("blockedCount") or 0)
+    accepted_count = int(alpha.get("cleanAcceptedCount") or 0)
+    sent_count = int(notification.get("sent") or 0)
+    realized_values = [_decimal(row.get("realizedPnl")) for row in eligible_rows]
+    realized_pnl = (
+        sum((value for value in realized_values if value is not None), start=Decimal(0))
+        if all(value is not None for value in realized_values)
+        else None
+    )
+    realized_pnl_label = (
+        _money(realized_pnl) if realized_pnl is not None else "n/a (incomplete evidence)"
+    )
+    freshness = _freshness(source, latest_date)
+    observed_dates = sorted(_day_index(paper))
+    activation_detail = (
+        f"{upcoming} registered strategies first become eligible "
+        f"{paper.get('nextActivationDate')}."
+        if upcoming
+        else f"All {len(strategies)} registered strategies are eligible as of {latest_date}."
+    )
     return {
         "schemaVersion": OUTPUT_SCHEMA,
         "generatedAt": source.get("generatedAt"),
         "sourceCommit": source.get("sourceCommit"),
+        "freshness": freshness,
+        "freshnessDeadline": freshness["deadlineAt"],
+        "sourceObservedDates": observed_dates,
+        "evidence": dict(evidence),
         "sourceEvidence": dict(evidence),
         "subheadline": (
-            "July 16 forward paper truth, the live AlphaOps watchlist, and every registered "
-            "strategy in one research-only view. Returns marked from open positions remain "
-            "unrealized until a canonical close exists."
+            f"Forward paper truth through {latest_date}, the AlphaOps watchlist, and all "
+            f"{len(strategies)} registered strategies in one research-only view. Returns marked "
+            "from open positions remain unrealized until a canonical close exists."
         ),
         "latestRunDate": latest_date,
-        "freshnessLabel": f"AlphaOps + PaperOps {latest_date}",
-        "deploymentStatus": "Data verified",
         "overallStatus": "verified paper evidence / no broker execution",
         "quickActions": [
             {"label": "Review Watchlist", "href": "#watchlist", "tone": "primary"},
@@ -432,8 +515,8 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
                 "label": "PaperOps Fleet",
                 "value": _pct(latest.get("fleetDailyReturnFraction")),
                 "context": (
-                    f"{_money(latest.get('fleetDailyPnl'))} across 7 independent $100k "
-                    "paper sleeves; 0 closed"
+                    f"{_money(latest.get('fleetDailyPnl'))} across {expected_count} eligible "
+                    f"paper sleeves; {closed_count} closed"
                 ),
                 "tone": "danger",
             },
@@ -453,20 +536,17 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
                     f"{latest.get('coverageExpected')} eligible"
                 ),
                 "context": (
-                    f"{upcoming} registered strategies start "
-                    f"{paper.get('nextActivationDate')}"
+                    f"{activation_detail} Latest observed coverage is "
+                    f"{eligible_count}/{expected_count}."
                 ),
                 "tone": "info",
             },
             {
                 "label": "Paper Activity",
-                "value": (
-                    f"{latest.get('openPositions')} open / "
-                    f"{latest.get('pendingOrders')} pending"
-                ),
+                "value": f"{open_count} open / {pending_count} pending",
                 "context": (
-                    f"{latest.get('tradesOpened')} opened, {latest.get('tradesClosed')} closed; "
-                    "realized P&L $0.00"
+                    f"{opened_count} opened, {closed_count} closed; "
+                    f"realized P&L {realized_pnl_label}"
                 ),
                 "tone": "warning",
             },
@@ -474,8 +554,8 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
                 "label": "AlphaOps",
                 "value": f"{alpha.get('candidateCount')} watch names",
                 "context": (
-                    f"{alpha.get('manualConfirmationCount')} needs confirmation; "
-                    f"{alpha.get('blockedCount')} blocked; 0 clean recommendations"
+                    f"{confirmation_count} needs confirmation; {blocked_count} blocked; "
+                    f"{accepted_count} clean recommendations"
                 ),
                 "tone": "warning",
             },
@@ -484,30 +564,33 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
         "evidenceRail": [
             {
                 "label": "PaperOps run",
-                "value": "2026-07-16 forward",
+                "value": f"{latest_date} forward",
                 "status": "verified",
-                "detail": f"7/7 eligible strategies; run {evidence.get('paperOpsRunId')}",
+                "detail": (
+                    f"{eligible_count}/{expected_count} eligible strategies observed; "
+                    f"run {evidence.get('paperOpsRunId')}"
+                ),
             },
             {
                 "label": "Source bars",
                 "value": evidence.get("dataSnapshotId"),
                 "status": evidence.get("sourceBarTruthStatus"),
-                "detail": "20 lifecycle events, 4 reference rows, and 2 runs audited.",
+                "detail": "Canonical snapshot identity and retained source-bar gate are exposed.",
             },
             {
                 "label": "Registry",
-                "value": "9 registered / 7 eligible",
-                "status": "2 pending activation",
-                "detail": (
-                    "Both gap-up strategies first become eligible "
-                    f"{paper.get('nextActivationDate')}."
-                ),
+                "value": f"{len(strategies)} registered / {eligible_count} eligible",
+                "status": f"{upcoming} pending activation" if upcoming else "all eligible",
+                "detail": activation_detail,
             },
             {
                 "label": "AlphaOps delivery",
                 "value": alpha.get("scanId"),
                 "status": notification.get("status"),
-                "detail": "1 watch-only message recorded; manual confirmation remains required.",
+                "detail": (
+                    f"{sent_count} watch-only messages recorded; {confirmation_count} candidates "
+                    "still require manual confirmation."
+                ),
             },
             {
                 "label": "Boundary",
@@ -519,8 +602,9 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
         "current": {
             "records": current,
             "note": (
-                "Five paper positions were filled July 16 from July 15 signals. Every displayed "
-                "P&L is an unrealized close mark; no strategy has a closed-trade win rate yet."
+                f"{len(current)} open paper positions are retained through {latest_date}. Every "
+                f"displayed P&L is an unrealized close mark; {closed_count} trades are closed in "
+                "the latest canonical session."
             ),
         },
         "calendar": _calendar(paper, latest_date),
@@ -548,14 +632,16 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
                 {
                     "name": "AlphaOps",
                     "description": (
-                        "3 ranked watch names; one manual-confirmation delivery recorded."
+                        f"{candidate_count} ranked watch names; {sent_count} watch-only "
+                        "deliveries recorded."
                     ),
                     "status": alpha.get("status"),
                 },
                 {
                     "name": "PaperOps",
                     "description": (
-                        "Forward calendar, lifecycle blotter, and 7/7 eligible coverage verified."
+                        "Forward calendar, lifecycle blotter, and "
+                        f"{eligible_count}/{expected_count} eligible coverage verified."
                     ),
                     "status": paper.get("status"),
                 },
@@ -566,10 +652,8 @@ def build_dashboard_payload(source: Mapping[str, Any]) -> dict[str, Any]:
                 },
                 {
                     "name": "Strategy activation",
-                    "description": (
-                        "Two gap-up strategies registered; no evidence claimed before July 17."
-                    ),
-                    "status": "pending",
+                    "description": activation_detail,
+                    "status": "pending" if upcoming else "active",
                 },
                 {
                     "name": "Broker boundary",

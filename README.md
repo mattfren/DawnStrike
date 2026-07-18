@@ -127,6 +127,38 @@ Then open `http://127.0.0.1:8502/`. The only dashboard to refine is the
 Streamlit operator dashboard in `app.py`, with tabs for Today, Review, History,
 Calendar, Performance, and System.
 
+The launcher resolves the primary Git checkout as the operational runtime when
+it is invoked from a linked worktree. It prints the absolute SQLite and PaperOps
+paths before returning. Override that discovery only when needed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\open_command_center_production.ps1 `
+  -RuntimeRoot C:\path\to\the\retained\runtime
+```
+
+The production launcher fails closed when its resolved SQLite evidence path or
+canonical PaperOps calendar is absent; it never silently creates or reads an
+empty worktree database.
+
+The EOD PaperOps chain also refreshes the static hosted dashboard only after
+calendar truth, source-bar truth, blotter, evidence, and fleet-report gates
+pass. Its default publication mode is `production`; a successful deployment is
+accepted only when the remote `latestRunDate`, PaperOps calendar hash, Alpha
+database hash, and complete asset hash match the locally verified artifact.
+Exporter, contract-test, deployment, or remote-verification failure returns a
+non-zero EOD result and leaves canonical PaperOps and AlphaOps evidence
+untouched. Operators may explicitly change the delivery target without editing
+the script:
+
+```powershell
+$env:DAWNSTRIKE_STATIC_DASHBOARD_PUBLISH_MODE = 'preview' # or local / disabled
+scripts\run_paperops_fleet_eod.bat YYYY-MM-DD
+```
+
+`disabled` prints a stale-host warning. `local` refreshes only
+`assets\dashboard-data.json`. Neither mode claims that the hosted calendar was
+updated.
+
 Telegram messages are watchlist/status alerts only:
 
 - `Dawnstrike Alpha Watch`: review these names manually.

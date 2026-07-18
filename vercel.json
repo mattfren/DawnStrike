@@ -12,6 +12,15 @@
       }
     },
     {
+      "src": "^/assets/dashboard-data\\.json$",
+      "dest": "/assets/dashboard-data.json",
+      "headers": {
+        "X-Dawnstrike-Surface": "one-dashboard",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store, max-age=0"
+      }
+    },
+    {
       "src": "^/assets/(.*)$",
       "dest": "/assets/$1",
       "headers": {

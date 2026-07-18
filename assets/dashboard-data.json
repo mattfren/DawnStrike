@@ -1,11 +1,221 @@
 {
+  "alphaOps": {
+    "days": [
+      {
+        "date": "2026-07-15",
+        "decision": "WATCHLIST",
+        "missingOutcomes": [
+          {
+            "rank": 1,
+            "status": "Outcome needed",
+            "ticker": "SOBR"
+          },
+          {
+            "rank": 3,
+            "status": "Outcome needed",
+            "ticker": "ERNA"
+          }
+        ],
+        "modelVersion": "dawnstrike-alphaops-v4",
+        "outcomeCoverage": {
+          "audited": 0,
+          "complete": false,
+          "eligible": 2,
+          "missing": 2,
+          "resolvedNoEntry": 0
+        },
+        "pickCount": 2,
+        "picks": [
+          {
+            "action": "WATCH ONLY",
+            "company": "SOBR Safe, Inc.",
+            "gapPct": 38.5,
+            "invalidation": "$1.1229",
+            "outcome": {
+              "closeReturnPct": null,
+              "entryPrice": null,
+              "entryTime": null,
+              "highAfterEntryReturnPct": null,
+              "lowAfterEntryDrawdownPct": null,
+              "monitorExitReturnPct": null,
+              "notes": "Outcome is incomplete; unavailable returns remain uncounted.",
+              "recommendedExitPolicy": "not_recorded",
+              "recommendedExitPrice": null,
+              "recommendedExitReturnPct": null,
+              "source": "none",
+              "status": "Outcome needed"
+            },
+            "rank": 1,
+            "score": 60.22,
+            "source": "stockanalysis_premarket",
+            "target": "$3.1899",
+            "ticker": "SOBR",
+            "trigger": "$1.9497"
+          },
+          {
+            "action": "WATCH ONLY",
+            "company": "Ernexa Therapeutics Inc.",
+            "gapPct": 65.16,
+            "invalidation": "$6.2547",
+            "outcome": {
+              "closeReturnPct": null,
+              "entryPrice": null,
+              "entryTime": null,
+              "highAfterEntryReturnPct": null,
+              "lowAfterEntryDrawdownPct": null,
+              "monitorExitReturnPct": null,
+              "notes": "Outcome is incomplete; unavailable returns remain uncounted.",
+              "recommendedExitPolicy": "not_recorded",
+              "recommendedExitPrice": null,
+              "recommendedExitReturnPct": null,
+              "source": "none",
+              "status": "Outcome needed"
+            },
+            "rank": 3,
+            "score": 55.76,
+            "source": "stockanalysis_premarket",
+            "target": "$22.8283",
+            "ticker": "ERNA",
+            "trigger": "$12.8841"
+          }
+        ],
+        "sourceLabel": "public/free unverified shadow data",
+        "sourceStatus": "ok",
+        "status": "PICKS PENDING OUTCOMES"
+      },
+      {
+        "date": "2026-07-16",
+        "decision": "WATCHLIST",
+        "missingOutcomes": [],
+        "modelVersion": "dawnstrike-alphaops-v4",
+        "outcomeCoverage": {
+          "audited": 0,
+          "complete": true,
+          "eligible": 1,
+          "missing": 0,
+          "resolvedNoEntry": 1
+        },
+        "pickCount": 1,
+        "picks": [
+          {
+            "action": "WATCH ONLY",
+            "company": "iQSTEL Inc.",
+            "gapPct": 19.99,
+            "invalidation": "$0.8668",
+            "outcome": {
+              "closeReturnPct": null,
+              "entryPrice": null,
+              "entryTime": null,
+              "highAfterEntryReturnPct": null,
+              "lowAfterEntryDrawdownPct": null,
+              "monitorExitReturnPct": null,
+              "notes": "Saved trigger did not activate; trade return is not applicable.",
+              "recommendedExitPolicy": "not_recorded",
+              "recommendedExitPrice": null,
+              "recommendedExitReturnPct": null,
+              "source": "yahoo_finance_chart",
+              "status": "resolved_no_entry"
+            },
+            "rank": 1,
+            "score": 52.46,
+            "source": "stockanalysis_premarket",
+            "target": "$2.1671",
+            "ticker": "IQST",
+            "trigger": "$1.3869"
+          }
+        ],
+        "sourceLabel": "public/free unverified shadow data",
+        "sourceStatus": "ok",
+        "status": "RESOLVED NO ENTRY"
+      },
+      {
+        "date": "2026-07-17",
+        "decision": "WATCHLIST",
+        "missingOutcomes": [
+          {
+            "rank": 2,
+            "status": "Outcome needed",
+            "ticker": "SDOT"
+          }
+        ],
+        "modelVersion": "dawnstrike-alphaops-v4",
+        "outcomeCoverage": {
+          "audited": 1,
+          "complete": false,
+          "eligible": 2,
+          "missing": 1,
+          "resolvedNoEntry": 0
+        },
+        "pickCount": 2,
+        "picks": [
+          {
+            "action": "WATCH ONLY",
+            "company": "Southland Holdings, Inc.",
+            "gapPct": 60.34,
+            "invalidation": "$0.6217",
+            "outcome": {
+              "closeReturnPct": -1.3438,
+              "entryPrice": 1.1758,
+              "entryTime": "2026-07-17T16:43:00Z",
+              "highAfterEntryReturnPct": 3.7591,
+              "lowAfterEntryDrawdownPct": -11.5496,
+              "monitorExitReturnPct": -0.5103,
+              "notes": "Audited sourced outcome.",
+              "recommendedExitPolicy": "monitor_exit_signal",
+              "recommendedExitPrice": 1.1698,
+              "recommendedExitReturnPct": -0.5103,
+              "source": "yahoo_finance_chart",
+              "status": "audited"
+            },
+            "rank": 1,
+            "score": 64.98,
+            "source": "stockanalysis_premarket",
+            "target": "$2.0070",
+            "ticker": "SLND",
+            "trigger": "$1.1758"
+          },
+          {
+            "action": "WATCH ONLY",
+            "company": "Sadot Group Inc.",
+            "gapPct": 43.08,
+            "invalidation": "$13.9377",
+            "outcome": {
+              "closeReturnPct": null,
+              "entryPrice": null,
+              "entryTime": null,
+              "highAfterEntryReturnPct": null,
+              "lowAfterEntryDrawdownPct": null,
+              "monitorExitReturnPct": null,
+              "notes": "Outcome is incomplete; unavailable returns remain uncounted.",
+              "recommendedExitPolicy": "not_recorded",
+              "recommendedExitPrice": null,
+              "recommendedExitReturnPct": null,
+              "source": "none",
+              "status": "Outcome needed"
+            },
+            "rank": 2,
+            "score": 63.2,
+            "source": "stockanalysis_premarket",
+            "target": "$39.8960",
+            "ticker": "SDOT",
+            "trigger": "$24.3210"
+          }
+        ],
+        "sourceLabel": "public/free unverified shadow data",
+        "sourceStatus": "ok",
+        "status": "OUTCOMES PARTIAL"
+      }
+    ],
+    "researchOnly": true,
+    "scope": "watchlist outcome audit"
+  },
   "calendar": {
     "currentMonth": "2026-07",
     "summary": {
-      "monthlyReturn": "-0.008466%",
+      "monthlyReturn": "-0.020244%",
       "noTradeDays": 1,
-      "observedDays": 2,
-      "totalTrades": 5
+      "observedDays": 3,
+      "totalTrades": 7
     },
     "tiles": [
       {
@@ -205,23 +415,77 @@
         "warning": false
       },
       {
-        "activity": "0 opened \u00b7 0 closed",
+        "activity": "0 opened · 0 closed",
         "dailyReturn": "0.000000%",
         "date": "2026-07-15",
         "day": "15",
         "detailNote": "7 of 7 eligible strategies observed; 2 registered strategies were not yet eligible.",
         "noTrade": true,
         "observed": true,
-        "state": "flat \u00b7 official forward",
+        "state": "flat · official forward",
         "strategyReturns": [
           {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
+            "activity": "0 opened · 0 closed · 0 open · 1 pending",
             "date": "2026-07-15",
-            "id": "ts_momentum_sma_atr",
-            "name": "Trend Momentum \u00b7 SMA / ATR",
+            "id": "bullish_fvg_continuation",
+            "name": "Bullish FVG Continuation",
             "pnl": "$0.00 observed",
             "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 2 pending",
+            "date": "2026-07-15",
+            "id": "cross_sectional_relative_strength",
+            "name": "Cross-Sectional Strength",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 3 pending",
+            "date": "2026-07-15",
+            "id": "donchian_breakout_20_10",
+            "name": "Donchian Breakout · 20 / 10",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-15",
+            "id": "failed_breakout_reversal_short",
+            "name": "Failed Breakout · Short",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-15",
+            "id": "pullback_reclaim_uptrend",
+            "name": "Pullback Reclaim",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 3 pending",
+            "date": "2026-07-15",
+            "id": "ts_momentum_sma_atr",
+            "name": "Trend Momentum · SMA / ATR",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-15",
+            "id": "volatility_contraction_breakout",
+            "name": "Volatility Contraction",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
           },
           {
             "activity": "not yet eligible",
@@ -229,7 +493,7 @@
             "name": "Gap-Up Continuation",
             "pnl": null,
             "return": null,
-            "status": "Registered \u00b7 starts 2026-07-17"
+            "status": "Registered · starts 2026-07-17"
           },
           {
             "activity": "not yet eligible",
@@ -237,61 +501,7 @@
             "name": "ATR Gap-Up Continuation",
             "pnl": null,
             "return": null,
-            "status": "Registered \u00b7 starts 2026-07-17"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 2 pending",
-            "date": "2026-07-15",
-            "id": "cross_sectional_relative_strength",
-            "name": "Cross-Sectional Strength",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
-            "date": "2026-07-15",
-            "id": "donchian_breakout_20_10",
-            "name": "Donchian Breakout \u00b7 20 / 10",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 1 pending",
-            "date": "2026-07-15",
-            "id": "bullish_fvg_continuation",
-            "name": "Bullish FVG Continuation",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
-            "date": "2026-07-15",
-            "id": "failed_breakout_reversal_short",
-            "name": "Failed Breakout \u00b7 Short",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
-            "date": "2026-07-15",
-            "id": "pullback_reclaim_uptrend",
-            "name": "Pullback Reclaim",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
-            "date": "2026-07-15",
-            "id": "volatility_contraction_breakout",
-            "name": "Volatility Contraction",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
+            "status": "Registered · starts 2026-07-17"
           }
         ],
         "tone": "flat",
@@ -299,23 +509,77 @@
         "warning": false
       },
       {
-        "activity": "5 opened \u00b7 0 closed",
+        "activity": "5 opened · 0 closed",
         "dailyReturn": "-0.008466%",
         "date": "2026-07-16",
         "day": "16",
         "detailNote": "7 of 7 eligible strategies observed; 2 registered strategies were not yet eligible.",
         "noTrade": false,
         "observed": true,
-        "state": "negative \u00b7 official forward",
+        "state": "negative · official forward",
         "strategyReturns": [
           {
-            "activity": "2 opened \u00b7 0 closed \u00b7 2 open \u00b7 0 pending",
+            "activity": "0 opened · 0 closed · 0 open · 2 pending",
+            "date": "2026-07-16",
+            "id": "bullish_fvg_continuation",
+            "name": "Bullish FVG Continuation",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "1 opened · 0 closed · 1 open · 0 pending",
+            "date": "2026-07-16",
+            "id": "cross_sectional_relative_strength",
+            "name": "Cross-Sectional Strength",
+            "pnl": "-$34.78 unrealized",
+            "return": "-0.034782%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "2 opened · 0 closed · 2 open · 0 pending",
+            "date": "2026-07-16",
+            "id": "donchian_breakout_20_10",
+            "name": "Donchian Breakout · 20 / 10",
+            "pnl": "-$45.80 unrealized",
+            "return": "-0.045804%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 3 pending",
+            "date": "2026-07-16",
+            "id": "failed_breakout_reversal_short",
+            "name": "Failed Breakout · Short",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-16",
+            "id": "pullback_reclaim_uptrend",
+            "name": "Pullback Reclaim",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "2 opened · 0 closed · 2 open · 0 pending",
             "date": "2026-07-16",
             "id": "ts_momentum_sma_atr",
-            "name": "Trend Momentum \u00b7 SMA / ATR",
+            "name": "Trend Momentum · SMA / ATR",
             "pnl": "+$21.32 unrealized",
             "return": "+0.021323%",
-            "status": "official forward \u00b7 unrealized mark"
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-16",
+            "id": "volatility_contraction_breakout",
+            "name": "Volatility Contraction",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
           },
           {
             "activity": "not yet eligible",
@@ -323,7 +587,7 @@
             "name": "Gap-Up Continuation",
             "pnl": null,
             "return": null,
-            "status": "Registered \u00b7 starts 2026-07-17"
+            "status": "Registered · starts 2026-07-17"
           },
           {
             "activity": "not yet eligible",
@@ -331,61 +595,7 @@
             "name": "ATR Gap-Up Continuation",
             "pnl": null,
             "return": null,
-            "status": "Registered \u00b7 starts 2026-07-17"
-          },
-          {
-            "activity": "1 opened \u00b7 0 closed \u00b7 1 open \u00b7 0 pending",
-            "date": "2026-07-16",
-            "id": "cross_sectional_relative_strength",
-            "name": "Cross-Sectional Strength",
-            "pnl": "-$34.78 unrealized",
-            "return": "-0.034782%",
-            "status": "official forward \u00b7 unrealized mark"
-          },
-          {
-            "activity": "2 opened \u00b7 0 closed \u00b7 2 open \u00b7 0 pending",
-            "date": "2026-07-16",
-            "id": "donchian_breakout_20_10",
-            "name": "Donchian Breakout \u00b7 20 / 10",
-            "pnl": "-$45.80 unrealized",
-            "return": "-0.045804%",
-            "status": "official forward \u00b7 unrealized mark"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 2 pending",
-            "date": "2026-07-16",
-            "id": "bullish_fvg_continuation",
-            "name": "Bullish FVG Continuation",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 3 pending",
-            "date": "2026-07-16",
-            "id": "failed_breakout_reversal_short",
-            "name": "Failed Breakout \u00b7 Short",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
-            "date": "2026-07-16",
-            "id": "pullback_reclaim_uptrend",
-            "name": "Pullback Reclaim",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
-          },
-          {
-            "activity": "0 opened \u00b7 0 closed \u00b7 0 open \u00b7 0 pending",
-            "date": "2026-07-16",
-            "id": "volatility_contraction_breakout",
-            "name": "Volatility Contraction",
-            "pnl": "$0.00 observed",
-            "return": "0.000000%",
-            "status": "official forward \u00b7 observed"
+            "status": "Registered · starts 2026-07-17"
           }
         ],
         "tone": "negative",
@@ -393,17 +603,99 @@
         "warning": false
       },
       {
-        "activity": "not observed",
-        "dailyReturn": null,
+        "activity": "2 opened · 0 closed",
+        "dailyReturn": "-0.013660%",
         "date": "2026-07-17",
         "day": "17",
-        "detailNote": "No retained official forward session exists for this date.",
+        "detailNote": "9 of 9 eligible strategies observed; 0 registered strategies were not yet eligible.",
         "noTrade": false,
-        "observed": false,
-        "state": "not observed",
-        "strategyReturns": [],
-        "tone": "not-observed",
-        "tradeCount": null,
+        "observed": true,
+        "state": "negative · official forward",
+        "strategyReturns": [
+          {
+            "activity": "1 opened · 0 closed · 1 open · 1 pending",
+            "date": "2026-07-17",
+            "id": "bullish_fvg_continuation",
+            "name": "Bullish FVG Continuation",
+            "pnl": "+$102.66 unrealized",
+            "return": "+0.102661%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 1 open · 1 pending",
+            "date": "2026-07-17",
+            "id": "cross_sectional_relative_strength",
+            "name": "Cross-Sectional Strength",
+            "pnl": "-$20.72 unrealized",
+            "return": "-0.020727%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 2 open · 1 pending",
+            "date": "2026-07-17",
+            "id": "donchian_breakout_20_10",
+            "name": "Donchian Breakout · 20 / 10",
+            "pnl": "-$73.12 unrealized",
+            "return": "-0.073154%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "1 opened · 0 closed · 1 open · 0 pending",
+            "date": "2026-07-17",
+            "id": "failed_breakout_reversal_short",
+            "name": "Failed Breakout · Short",
+            "pnl": "+$4.49 unrealized",
+            "return": "+0.004488%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-17",
+            "id": "pullback_reclaim_uptrend",
+            "name": "Pullback Reclaim",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 2 open · 1 pending",
+            "date": "2026-07-17",
+            "id": "ts_momentum_sma_atr",
+            "name": "Trend Momentum · SMA / ATR",
+            "pnl": "-$136.24 unrealized",
+            "return": "-0.136211%",
+            "status": "official forward · unrealized mark"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 1 pending",
+            "date": "2026-07-17",
+            "id": "volatility_contraction_breakout",
+            "name": "Volatility Contraction",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-17",
+            "id": "gap_up_continuation",
+            "name": "Gap-Up Continuation",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          },
+          {
+            "activity": "0 opened · 0 closed · 0 open · 0 pending",
+            "date": "2026-07-17",
+            "id": "gap_up_continuation_atr",
+            "name": "ATR Gap-Up Continuation",
+            "pnl": "$0.00 observed",
+            "return": "0.000000%",
+            "status": "official forward · observed"
+          }
+        ],
+        "tone": "negative",
+        "tradeCount": 2,
         "warning": false
       },
       {
@@ -605,13 +897,61 @@
     ]
   },
   "current": {
-    "note": "Five paper positions were filled July 16 from July 15 signals. Every displayed P&L is an unrealized close mark; no strategy has a closed-trade win rate yet.",
+    "note": "7 open paper positions are retained through 2026-07-17. Every displayed P&L is an unrealized close mark; 0 trades are closed in the latest canonical session.",
     "records": [
       {
         "date": "2026-07-16",
         "direction": "long",
+        "entry": "+$677.61",
+        "pnl": "-$253.37 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$623.75",
+        "strategy": "Trend Momentum · SMA / ATR",
+        "symbol": "META",
+        "target": "+$767.65"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$138.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Trend Momentum · SMA / ATR",
+        "symbol": "AAPL",
+        "target": "+$355.95"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$138.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Donchian Breakout · 20 / 10",
+        "symbol": "AAPL",
+        "target": "+$384.40"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$255.25",
+        "pnl": "-$257.38 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$239.89",
+        "strategy": "Donchian Breakout · 20 / 10",
+        "symbol": "AMZN",
+        "target": "+$300.16"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
         "entry": "+$509.58",
-        "pnl": "-$34.78 unrealized",
+        "pnl": "-$55.50 unrealized",
         "r": null,
         "status": "open / unrealized",
         "stop": "+$429.05",
@@ -620,80 +960,78 @@
         "target": "+$829.41"
       },
       {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$328.17",
-        "pnl": "+$126.45 unrealized",
+        "date": "2026-07-17",
+        "direction": "short",
+        "entry": "+$426.51",
+        "pnl": "+$4.49 unrealized",
         "r": null,
         "status": "open / unrealized",
-        "stop": "+$308.53",
-        "strategy": "Donchian Breakout \u00b7 20 / 10",
-        "symbol": "AAPL",
-        "target": "+$384.40"
+        "stop": "+$464.15",
+        "strategy": "Failed Breakout · Short",
+        "symbol": "UNH",
+        "target": "+$341.84"
       },
       {
-        "date": "2026-07-16",
+        "date": "2026-07-17",
         "direction": "long",
-        "entry": "+$255.25",
-        "pnl": "-$172.26 unrealized",
+        "entry": "+$339.20",
+        "pnl": "+$102.66 unrealized",
         "r": null,
         "status": "open / unrealized",
-        "stop": "+$239.89",
-        "strategy": "Donchian Breakout \u00b7 20 / 10",
-        "symbol": "AMZN",
-        "target": "+$300.16"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$328.17",
-        "pnl": "+$126.45 unrealized",
-        "r": null,
-        "status": "open / unrealized",
-        "stop": "+$308.53",
-        "strategy": "Trend Momentum \u00b7 SMA / ATR",
-        "symbol": "AAPL",
-        "target": "+$355.95"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$677.61",
-        "pnl": "-$105.13 unrealized",
-        "r": null,
-        "status": "open / unrealized",
-        "stop": "+$623.75",
-        "strategy": "Trend Momentum \u00b7 SMA / ATR",
-        "symbol": "META",
-        "target": "+$767.65"
+        "stop": "+$334.54",
+        "strategy": "Bullish FVG Continuation",
+        "symbol": "JPM",
+        "target": "+$360.37"
       }
     ]
   },
-  "deploymentStatus": "Data verified",
+  "evidence": {
+    "alphaDatabaseSha256": "ec82b3905e6a8be0615017ab5567b32f071d58ef85916c77f2b0652751b01f92",
+    "alphaPublicDaysSha256": "a8207a6c9f3198eb539f03b0ef99b202e5710f76494e91f2ab32436bb7f7714f",
+    "calendarTruthStatus": "passed",
+    "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+    "dataSnapshotIds": [
+      "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+      "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
+    ],
+    "paperOpsCalendarSha256": "bf44aee799b9f68328b83b448f525ff0f95f364312bc27778087ff67f30a2481",
+    "paperOpsRegistrySha256": "8d8c723e1097bf70c2df1066edfed3056426017d5c464a67cfc5444300b4570a",
+    "paperOpsRunId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+    "paperOpsRunIds": [
+      "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+      "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
+    ],
+    "publicPayloadSha256": "f9fbceba184e50cb0098ed3b52b0580e287d099c4caa30bd7e869e3473c087b8",
+    "reconciliationStatus": "passed",
+    "sourceBarTruthStatus": "passed",
+    "tradeBlotterStatus": "passed"
+  },
   "evidenceRail": [
     {
-      "detail": "7/7 eligible strategies; run paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "detail": "9/9 eligible strategies observed; run paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
       "label": "PaperOps run",
       "status": "verified",
-      "value": "2026-07-16 forward"
+      "value": "2026-07-17 forward"
     },
     {
-      "detail": "20 lifecycle events, 4 reference rows, and 2 runs audited.",
+      "detail": "Canonical snapshot identity and retained source-bar gate are exposed.",
       "label": "Source bars",
       "status": "passed",
-      "value": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7"
+      "value": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
     },
     {
-      "detail": "Both gap-up strategies first become eligible 2026-07-17.",
+      "detail": "All 9 registered strategies are eligible as of 2026-07-17.",
       "label": "Registry",
-      "status": "2 pending activation",
-      "value": "9 registered / 7 eligible"
+      "status": "all eligible",
+      "value": "9 registered / 9 eligible"
     },
     {
-      "detail": "1 watch-only message recorded; manual confirmation remains required.",
+      "detail": "10 watch-only messages recorded; 2 candidates still require manual confirmation.",
       "label": "AlphaOps delivery",
       "status": "delivery recorded",
-      "value": "ae7f10de-aac2-452f-a05a-84b11d0b6019"
+      "value": null
     },
     {
       "detail": "Missing and pre-inception observations remain n/a, never zero.",
@@ -702,81 +1040,624 @@
       "value": "research and paper audit only"
     }
   ],
-  "freshnessLabel": "AlphaOps + PaperOps 2026-07-16",
-  "generatedAt": "2026-07-16T23:57:00Z",
-  "latestRunDate": "2026-07-16",
+  "freshness": {
+    "asOfDate": "2026-07-17",
+    "deadlineAt": "2026-07-20T22:00:00Z",
+    "expectedNextSessionDate": "2026-07-20",
+    "statusAtGeneration": "fresh"
+  },
+  "freshnessDeadline": "2026-07-20T22:00:00Z",
+  "generatedAt": "2026-07-18T04:57:02.459937Z",
+  "latestRunDate": "2026-07-17",
   "noPicks": {
     "acceptedCount": 0,
-    "blockedCount": 2,
+    "blockedCount": 0,
     "headline": "No clean trade recommendation: 1 watch-only alert needs confirmation.",
     "topReasons": [
-      "Halt status was not verified for 3 of 3 candidates.",
-      "Float was unknown for 3 of 3 candidates.",
-      "SEC risk was not checked for 3 of 3 candidates.",
-      "Two candidates had unresolved source conflicts.",
-      "No candidate had enough first-touch history for a measured hit rate."
+      "Watch-only research; Alpha outcomes are reported separately from PaperOps.",
+      "Missing outcomes remain ineligible and are never treated as zero."
     ],
-    "watchCount": 3
+    "watchCount": 2
   },
   "operatorWatchlist": {
-    "blockedCount": 2,
-    "candidateCount": 3,
-    "clearedCount": 1,
-    "date": "2026-07-16",
-    "gateSummary": "2 blocked / 1 needs confirmation / 0 clean",
-    "note": "Watch-only research. One name reached manual-confirmation delivery; no clean trade recommendation was recorded, and broker execution remains disabled.",
+    "blockedCount": 0,
+    "candidateCount": 2,
+    "clearedCount": 2,
+    "date": "2026-07-17",
+    "gateSummary": "0 blocked / 2 needs confirmation / 0 clean",
+    "note": "Watch-only research. 2 of 2 candidates reached manual-confirmation delivery; 0 clean trade recommendations were recorded, and broker execution remains disabled.",
     "rows": [
       {
-        "company": "iQSTEL Inc.",
-        "entryTrigger": "$1.3869",
-        "gapPct": "19.99%",
-        "gate": "NEEDS CONFIRMATION",
+        "company": "Southland Holdings, Inc.",
+        "entryTrigger": "$1.1758",
+        "gapPct": 60.34,
+        "gate": "WATCH ONLY",
         "rank": 1,
-        "rewardRisk": "1.50R",
-        "score": "52.46",
+        "rewardRisk": null,
+        "score": 64.98,
         "source": "stockanalysis_premarket",
-        "sourceConfidence": "34.5%",
-        "sourceCount": 2,
-        "ticker": "IQST"
+        "sourceConfidence": null,
+        "sourceCount": null,
+        "ticker": "SLND"
       },
       {
-        "company": "The Growhub Limited",
-        "entryTrigger": "$1.4773",
-        "gapPct": "93.56%",
-        "gate": "BLOCKED",
+        "company": "Sadot Group Inc.",
+        "entryTrigger": "$24.3210",
+        "gapPct": 43.08,
+        "gate": "WATCH ONLY",
         "rank": 2,
-        "rewardRisk": "1.50R",
-        "score": "61.03",
+        "rewardRisk": null,
+        "score": 63.2,
         "source": "stockanalysis_premarket",
-        "sourceConfidence": "22.0%",
-        "sourceCount": 2,
-        "ticker": "TGHL"
-      },
-      {
-        "company": "Rubico Inc.",
-        "entryTrigger": "$8.4621",
-        "gapPct": "23.83%",
-        "gate": "BLOCKED",
-        "rank": 3,
-        "rewardRisk": "1.50R",
-        "score": "48.15",
-        "source": "stockanalysis_premarket",
-        "sourceConfidence": "22.0%",
-        "sourceCount": 2,
-        "ticker": "RUBI"
+        "sourceConfidence": null,
+        "sourceCount": null,
+        "ticker": "SDOT"
       }
     ],
     "title": "Operator Watchlist"
   },
   "overallStatus": "verified paper evidence / no broker execution",
+  "paperOps": {
+    "brokerExecutionAllowed": false,
+    "claimScope": "official_forward",
+    "days": [
+      {
+        "coverageExpected": 7,
+        "coveragePresent": 7,
+        "date": "2026-07-15",
+        "fleetCumulativeReturnFraction": "0",
+        "fleetDailyPnl": "0",
+        "fleetDailyReturnFraction": "0",
+        "fleetEndingEquity": "700000",
+        "fleetStartingEquity": "700000",
+        "notYetEligible": 2,
+        "openPositions": 0,
+        "pendingOrders": 9,
+        "status": "flat",
+        "strategies": [
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "bullish_fvg_continuation",
+            "openPositions": 0,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "cross_sectional_relative_strength",
+            "openPositions": 0,
+            "pendingOrders": 2,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "donchian_breakout_20_10",
+            "openPositions": 0,
+            "pendingOrders": 3,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "failed_breakout_reversal_short",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "pullback_reclaim_uptrend",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "ts_momentum_sma_atr",
+            "openPositions": 0,
+            "pendingOrders": 3,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "drawdownFraction": "0",
+            "id": "volatility_contraction_breakout",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          }
+        ],
+        "tradesClosed": 0,
+        "tradesOpened": 0
+      },
+      {
+        "coverageExpected": 7,
+        "coveragePresent": 7,
+        "date": "2026-07-16",
+        "fleetCumulativeReturnFraction": "-0.00008466195284285714285714285714",
+        "fleetDailyPnl": "-59.26336699",
+        "fleetDailyReturnFraction": "-0.00008466195284285714285714285714",
+        "fleetEndingEquity": "699940.73663301",
+        "fleetStartingEquity": "700000.00000000",
+        "notYetEligible": 2,
+        "openPositions": 5,
+        "pendingOrders": 5,
+        "status": "negative",
+        "strategies": [
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "0",
+            "id": "bullish_fvg_continuation",
+            "openPositions": 0,
+            "pendingOrders": 2,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "-0.00034782",
+            "dailyReturnFraction": "-0.00034782",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "-0.00034782",
+            "id": "cross_sectional_relative_strength",
+            "openPositions": 1,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "-34.78249387",
+            "tradesClosed": 0,
+            "tradesOpened": 1,
+            "unrealizedPnl": "-34.78249387",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "-0.00045804",
+            "dailyReturnFraction": "-0.00045804",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "-0.00045804",
+            "id": "donchian_breakout_20_10",
+            "openPositions": 2,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "-45.8041972",
+            "tradesClosed": 0,
+            "tradesOpened": 2,
+            "unrealizedPnl": "-45.8041972",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "0",
+            "id": "failed_breakout_reversal_short",
+            "openPositions": 0,
+            "pendingOrders": 3,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "0",
+            "id": "pullback_reclaim_uptrend",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0.00021323",
+            "dailyReturnFraction": "0.00021323",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "0",
+            "id": "ts_momentum_sma_atr",
+            "openPositions": 2,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "21.32332408",
+            "tradesClosed": 0,
+            "tradesOpened": 2,
+            "unrealizedPnl": "21.32332408",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "drawdownFraction": "0",
+            "id": "volatility_contraction_breakout",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          }
+        ],
+        "tradesClosed": 0,
+        "tradesOpened": 5
+      },
+      {
+        "coverageExpected": 9,
+        "coveragePresent": 9,
+        "date": "2026-07-17",
+        "fleetCumulativeReturnFraction": "-0.0002024382414333333333333333333",
+        "fleetDailyPnl": "-122.93105030",
+        "fleetDailyReturnFraction": "-0.0001365990506885238217771459293",
+        "fleetEndingEquity": "899817.80558271",
+        "fleetStartingEquity": "899940.73663301",
+        "notYetEligible": 0,
+        "openPositions": 7,
+        "pendingOrders": 5,
+        "status": "negative",
+        "strategies": [
+          {
+            "cumulativeReturnFraction": "0.00102661",
+            "dailyReturnFraction": "0.00102661",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "bullish_fvg_continuation",
+            "openPositions": 1,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "102.66107767",
+            "tradesClosed": 0,
+            "tradesOpened": 1,
+            "unrealizedPnl": "102.66107767",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "-0.00055502",
+            "dailyReturnFraction": "-0.00020727",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "-0.00055502",
+            "id": "cross_sectional_relative_strength",
+            "openPositions": 1,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "-20.72",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "-55.50249387",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "-0.00118924",
+            "dailyReturnFraction": "-0.00073154",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "-0.00118924",
+            "id": "donchian_breakout_20_10",
+            "openPositions": 2,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "-73.12",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "-118.9241972",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0.00004488",
+            "dailyReturnFraction": "0.00004488",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "failed_breakout_reversal_short",
+            "openPositions": 1,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "4.48787203",
+            "tradesClosed": 0,
+            "tradesOpened": 1,
+            "unrealizedPnl": "4.48787203",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "gap_up_continuation",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "gap_up_continuation_atr",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "pullback_reclaim_uptrend",
+            "openPositions": 0,
+            "pendingOrders": 0,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "-0.00114917",
+            "dailyReturnFraction": "-0.00136211",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "-0.00136211",
+            "id": "ts_momentum_sma_atr",
+            "openPositions": 2,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "-136.24",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "-114.91667592",
+            "winRate": null
+          },
+          {
+            "cumulativeReturnFraction": "0",
+            "dailyReturnFraction": "0",
+            "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "drawdownFraction": "0",
+            "id": "volatility_contraction_breakout",
+            "openPositions": 0,
+            "pendingOrders": 1,
+            "realizedPnl": "0",
+            "runId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+            "totalPnl": "0",
+            "tradesClosed": 0,
+            "tradesOpened": 0,
+            "unrealizedPnl": "0",
+            "winRate": null
+          }
+        ],
+        "tradesClosed": 0,
+        "tradesOpened": 2
+      }
+    ],
+    "mode": "forward",
+    "researchOnly": true,
+    "status": "verified",
+    "strategies": [
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "8dadc36ae35f119159fa811ac53396ec63983bffd3b43577bce4f5b4a4813ed7",
+        "id": "bullish_fvg_continuation",
+        "name": "Bullish FVG Continuation",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "5eaeb6846dac04479212a72c7f6a04a1e44e91b9f5dcffa4024c141ecbaf6fe0",
+        "id": "cross_sectional_relative_strength",
+        "name": "Cross-Sectional Strength",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "7e00b23b67ae059f30671b3b1086096fa83c90cea9755a617bcf7dadfc4912f0",
+        "id": "donchian_breakout_20_10",
+        "name": "Donchian Breakout · 20 / 10",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "24d94ee059695bb8e47b7bf721c52f63bbeaf85fd8840756009656df37b5cec8",
+        "id": "failed_breakout_reversal_short",
+        "name": "Failed Breakout · Short",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "e13691fa30994163372d106f8ccd7b253b1417ec25b2179099c6906622740a3e",
+        "id": "pullback_reclaim_uptrend",
+        "name": "Pullback Reclaim",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "30585b86085f588041cdebca394fc8fe42aed8daf73a18aceb6e57bbf31bb602",
+        "id": "ts_momentum_sma_atr",
+        "name": "Trend Momentum · SMA / ATR",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-15",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "045e4abcd4f86379d469fde5a30126684e4fb4727efba42726233b353c7f69c1",
+        "id": "volatility_contraction_breakout",
+        "name": "Volatility Contraction",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-17",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "e5388d9dc52bbc827426d733e8f31cd8cc41a17e3792091b598bedde816e30e3",
+        "id": "gap_up_continuation",
+        "name": "Gap-Up Continuation",
+        "version": "v1.0"
+      },
+      {
+        "activationDate": "2026-07-17",
+        "executionPolicyVersion": "paperops_daily_next_open_risk_v2",
+        "fingerprint": "441bbf043349c79d6ae87d79cbb68509fb5eaaae9ba0b790f066555005393608",
+        "id": "gap_up_continuation_atr",
+        "name": "ATR Gap-Up Continuation",
+        "version": "v1.0"
+      }
+    ]
+  },
   "paperTrading": {
-    "note": "252 canonical blotter rows include 221 explicit no-setup rows.",
+    "note": "450 canonical blotter rows include 400 explicit no-setup rows.",
     "recentRows": [
       {
         "date": "2026-07-16",
         "direction": "long",
+        "entry": "+$677.61",
+        "pnl": "-$253.37 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$623.75",
+        "strategy": "Trend Momentum · SMA / ATR",
+        "symbol": "META",
+        "target": "+$767.65"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$138.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Trend Momentum · SMA / ATR",
+        "symbol": "AAPL",
+        "target": "+$355.95"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$328.17",
+        "pnl": "+$138.45 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$308.53",
+        "strategy": "Donchian Breakout · 20 / 10",
+        "symbol": "AAPL",
+        "target": "+$384.40"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
+        "entry": "+$255.25",
+        "pnl": "-$257.38 unrealized",
+        "r": null,
+        "status": "open / unrealized",
+        "stop": "+$239.89",
+        "strategy": "Donchian Breakout · 20 / 10",
+        "symbol": "AMZN",
+        "target": "+$300.16"
+      },
+      {
+        "date": "2026-07-16",
+        "direction": "long",
         "entry": "+$509.58",
-        "pnl": "-$34.78 unrealized",
+        "pnl": "-$55.50 unrealized",
         "r": null,
         "status": "open / unrealized",
         "stop": "+$429.05",
@@ -785,116 +1666,92 @@
         "target": "+$829.41"
       },
       {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$328.17",
-        "pnl": "+$126.45 unrealized",
+        "date": "2026-07-17",
+        "direction": "short",
+        "entry": "+$426.51",
+        "pnl": "+$4.49 unrealized",
         "r": null,
         "status": "open / unrealized",
-        "stop": "+$308.53",
-        "strategy": "Donchian Breakout \u00b7 20 / 10",
-        "symbol": "AAPL",
-        "target": "+$384.40"
+        "stop": "+$464.15",
+        "strategy": "Failed Breakout · Short",
+        "symbol": "UNH",
+        "target": "+$341.84"
       },
       {
-        "date": "2026-07-16",
+        "date": "2026-07-17",
         "direction": "long",
-        "entry": "+$255.25",
-        "pnl": "-$172.26 unrealized",
+        "entry": "+$339.20",
+        "pnl": "+$102.66 unrealized",
         "r": null,
         "status": "open / unrealized",
-        "stop": "+$239.89",
-        "strategy": "Donchian Breakout \u00b7 20 / 10",
-        "symbol": "AMZN",
-        "target": "+$300.16"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$328.17",
-        "pnl": "+$126.45 unrealized",
-        "r": null,
-        "status": "open / unrealized",
-        "stop": "+$308.53",
-        "strategy": "Trend Momentum \u00b7 SMA / ATR",
-        "symbol": "AAPL",
-        "target": "+$355.95"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$677.61",
-        "pnl": "-$105.13 unrealized",
-        "r": null,
-        "status": "open / unrealized",
-        "stop": "+$623.75",
-        "strategy": "Trend Momentum \u00b7 SMA / ATR",
-        "symbol": "META",
-        "target": "+$767.65"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$249.89",
-        "pnl": null,
-        "r": null,
-        "status": "pending next-session fill gate",
-        "stop": "+$245.83",
-        "strategy": "Bullish FVG Continuation",
-        "symbol": "AMZN",
-        "target": "+$258.00"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "long",
-        "entry": "+$343.15",
-        "pnl": null,
-        "r": null,
-        "status": "pending next-session fill gate",
         "stop": "+$334.54",
         "strategy": "Bullish FVG Continuation",
         "symbol": "JPM",
         "target": "+$360.37"
       },
       {
-        "date": "2026-07-16",
-        "direction": "short",
-        "entry": "+$249.89",
+        "date": "2026-07-17",
+        "direction": "long",
+        "entry": "+$147.36",
         "pnl": null,
         "r": null,
         "status": "pending next-session fill gate",
-        "stop": "+$259.99",
-        "strategy": "Failed Breakout \u00b7 Short",
-        "symbol": "AMZN",
-        "target": "+$229.69"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "short",
-        "entry": "+$423.38",
-        "pnl": null,
-        "r": null,
-        "status": "pending next-session fill gate",
-        "stop": "+$464.15",
-        "strategy": "Failed Breakout \u00b7 Short",
-        "symbol": "UNH",
-        "target": "+$341.84"
-      },
-      {
-        "date": "2026-07-16",
-        "direction": "short",
-        "entry": "+$145.95",
-        "pnl": null,
-        "r": null,
-        "status": "pending next-session fill gate",
-        "stop": "+$147.60",
-        "strategy": "Failed Breakout \u00b7 Short",
+        "stop": "+$141.17",
+        "strategy": "Donchian Breakout · 20 / 10",
         "symbol": "XOM",
-        "target": "+$142.65"
+        "target": "+$165.92"
+      },
+      {
+        "date": "2026-07-17",
+        "direction": "long",
+        "entry": "+$147.36",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$136.01",
+        "strategy": "Volatility Contraction",
+        "symbol": "XOM",
+        "target": "+$175.74"
+      },
+      {
+        "date": "2026-07-17",
+        "direction": "long",
+        "entry": "+$426.09",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$394.18",
+        "strategy": "Cross-Sectional Strength",
+        "symbol": "UNH",
+        "target": "+$521.81"
+      },
+      {
+        "date": "2026-07-17",
+        "direction": "long",
+        "entry": "+$426.09",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$400.57",
+        "strategy": "Trend Momentum · SMA / ATR",
+        "symbol": "UNH",
+        "target": "+$464.38"
+      },
+      {
+        "date": "2026-07-17",
+        "direction": "long",
+        "entry": "+$333.74",
+        "pnl": null,
+        "r": null,
+        "status": "pending next-session fill gate",
+        "stop": "+$312.06",
+        "strategy": "Bullish FVG Continuation",
+        "symbol": "AAPL",
+        "target": "+$377.09"
       }
     ],
-    "rowLabel": "31 signal-linked paper rows",
-    "totalRows": 31
+    "rowLabel": "50 signal-linked paper rows",
+    "totalRows": 50
   },
   "quickActions": [
     {
@@ -913,91 +1770,77 @@
       "tone": "secondary"
     }
   ],
-  "schemaVersion": "dawnstrike.static-dashboard.v2",
-  "sourceCommit": "UI 08c88c7 / canonical evidence 2026-07-16",
+  "schemaVersion": "dawnstrike.static-dashboard.v3",
+  "sourceCommit": "canonical local evidence export",
   "sourceEvidence": {
-    "calendarSha256": "1ae76f0a0d58a6f551550ff4180082f6a39c0cdea926d1baf87753bd36fba39d",
+    "alphaDatabaseSha256": "ec82b3905e6a8be0615017ab5567b32f071d58ef85916c77f2b0652751b01f92",
+    "alphaPublicDaysSha256": "a8207a6c9f3198eb539f03b0ef99b202e5710f76494e91f2ab32436bb7f7714f",
+    "calendarSha256": "bf44aee799b9f68328b83b448f525ff0f95f364312bc27778087ff67f30a2481",
     "calendarTruthStatus": "passed",
-    "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
-    "dataSnapshotNormalizedSha256": "91988d560a1a42b37cf4303406ae62d37aff41e2bd65ce0cf61069e61c1e62a0",
+    "dataSnapshotId": "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+    "dataSnapshotIds": [
+      "datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+      "datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
+    ],
     "fleetReportStatus": "complete",
-    "paperOpsRunId": "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
-    "registrySha256": "5b6e8cc75b6d3fa62865c6631fc3d7ee849cd83799e9ee13d075ede158d8435d",
+    "paperOpsCalendarSha256": "bf44aee799b9f68328b83b448f525ff0f95f364312bc27778087ff67f30a2481",
+    "paperOpsRegistrySha256": "8d8c723e1097bf70c2df1066edfed3056426017d5c464a67cfc5444300b4570a",
+    "paperOpsRunId": "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13",
+    "paperOpsRunIds": [
+      "paper_ops:forward:2026-07-15:datatruth_public_yahoo_chart_1d_20260715_c056b4e59d5942009e26f30865c5bd57879bf28ee5168d46055aab8fa9e2eabe",
+      "paper_ops:forward:2026-07-16:datatruth_public_yahoo_chart_1d_20260716_c30893c3ff38da466851300a8fe5ae96aecfcc50f1fd3745812bee10ef8833e7",
+      "paper_ops:forward:2026-07-17:datatruth_public_yahoo_chart_1d_20260717_81d191f808ed85ced7140e12b6fbfb9f7a18482a4b31155793e91a4481010c13"
+    ],
+    "reconciliationStatus": "passed",
+    "registrySha256": "8d8c723e1097bf70c2df1066edfed3056426017d5c464a67cfc5444300b4570a",
     "sourceBarTruthStatus": "passed",
-    "strategyFingerprints": {
-      "gap_up_continuation@v1.0": "e5388d9dc52bbc827426d733e8f31cd8cc41a17e3792091b598bedde816e30e3",
-      "gap_up_continuation_atr@v1.0": "441bbf043349c79d6ae87d79cbb68509fb5eaaae9ba0b790f066555005393608"
-    }
+    "tradeBlotterStatus": "passed"
   },
+  "sourceObservedDates": [
+    "2026-07-15",
+    "2026-07-16",
+    "2026-07-17"
+  ],
   "strategies": [
-    {
-      "drawdown": "0.000000%",
-      "id": "ts_momentum_sma_atr",
-      "name": "Trend Momentum \u00b7 SMA / ATR",
-      "return": "+0.021323%",
-      "status": "official forward paper",
-      "trades": "2 opened / 0 closed",
-      "validation": "2026-07-16 unrealized mark; 2 open and 0 pending. Realized P&L is $0.00.",
-      "winRate": null
-    },
-    {
-      "drawdown": null,
-      "id": "gap_up_continuation",
-      "name": "Gap-Up Continuation",
-      "return": null,
-      "status": "registered / not yet eligible",
-      "trades": null,
-      "validation": "Registered with immutable lineage. First eligible session 2026-07-17; no pre-inception return exists.",
-      "winRate": null
-    },
-    {
-      "drawdown": null,
-      "id": "gap_up_continuation_atr",
-      "name": "ATR Gap-Up Continuation",
-      "return": null,
-      "status": "registered / not yet eligible",
-      "trades": null,
-      "validation": "Registered with immutable lineage. First eligible session 2026-07-17; no pre-inception return exists.",
-      "winRate": null
-    },
-    {
-      "drawdown": "-0.034782%",
-      "id": "cross_sectional_relative_strength",
-      "name": "Cross-Sectional Strength",
-      "return": "-0.034782%",
-      "status": "official forward paper",
-      "trades": "1 opened / 0 closed",
-      "validation": "2026-07-16 unrealized mark; 1 open and 0 pending. Realized P&L is $0.00.",
-      "winRate": null
-    },
-    {
-      "drawdown": "-0.045804%",
-      "id": "donchian_breakout_20_10",
-      "name": "Donchian Breakout \u00b7 20 / 10",
-      "return": "-0.045804%",
-      "status": "official forward paper",
-      "trades": "2 opened / 0 closed",
-      "validation": "2026-07-16 unrealized mark; 2 open and 0 pending. Realized P&L is $0.00.",
-      "winRate": null
-    },
     {
       "drawdown": "0.000000%",
       "id": "bullish_fvg_continuation",
       "name": "Bullish FVG Continuation",
-      "return": "0.000000%",
+      "return": "+0.102661%",
+      "status": "official forward paper",
+      "trades": "1 opened / 0 closed",
+      "validation": "2026-07-17 unrealized mark; 1 open and 1 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "-0.055502%",
+      "id": "cross_sectional_relative_strength",
+      "name": "Cross-Sectional Strength",
+      "return": "-0.020727%",
       "status": "official forward paper",
       "trades": "0 opened / 0 closed",
-      "validation": "2026-07-16 official forward observation; 0 open and 2 pending. Realized P&L is $0.00.",
+      "validation": "2026-07-17 unrealized mark; 1 open and 1 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "-0.118924%",
+      "id": "donchian_breakout_20_10",
+      "name": "Donchian Breakout · 20 / 10",
+      "return": "-0.073154%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-17 unrealized mark; 2 open and 1 pending. Realized P&L is $0.00.",
       "winRate": null
     },
     {
       "drawdown": "0.000000%",
       "id": "failed_breakout_reversal_short",
-      "name": "Failed Breakout \u00b7 Short",
-      "return": "0.000000%",
+      "name": "Failed Breakout · Short",
+      "return": "+0.004488%",
       "status": "official forward paper",
-      "trades": "0 opened / 0 closed",
-      "validation": "2026-07-16 official forward observation; 0 open and 3 pending. Realized P&L is $0.00.",
+      "trades": "1 opened / 0 closed",
+      "validation": "2026-07-17 unrealized mark; 1 open and 0 pending. Realized P&L is $0.00.",
       "winRate": null
     },
     {
@@ -1007,7 +1850,17 @@
       "return": "0.000000%",
       "status": "official forward paper",
       "trades": "0 opened / 0 closed",
-      "validation": "2026-07-16 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "validation": "2026-07-17 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "-0.136211%",
+      "id": "ts_momentum_sma_atr",
+      "name": "Trend Momentum · SMA / ATR",
+      "return": "-0.136211%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-17 unrealized mark; 2 open and 1 pending. Realized P&L is $0.00.",
       "winRate": null
     },
     {
@@ -1017,20 +1870,40 @@
       "return": "0.000000%",
       "status": "official forward paper",
       "trades": "0 opened / 0 closed",
-      "validation": "2026-07-16 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "validation": "2026-07-17 official forward observation; 0 open and 1 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "gap_up_continuation",
+      "name": "Gap-Up Continuation",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-17 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
+      "winRate": null
+    },
+    {
+      "drawdown": "0.000000%",
+      "id": "gap_up_continuation_atr",
+      "name": "ATR Gap-Up Continuation",
+      "return": "0.000000%",
+      "status": "official forward paper",
+      "trades": "0 opened / 0 closed",
+      "validation": "2026-07-17 official forward observation; 0 open and 0 pending. Realized P&L is $0.00.",
       "winRate": null
     }
   ],
-  "subheadline": "July 16 forward paper truth, the live AlphaOps watchlist, and every registered strategy in one research-only view. Returns marked from open positions remain unrealized until a canonical close exists.",
+  "subheadline": "Forward paper truth through 2026-07-17, the AlphaOps watchlist, and all 9 registered strategies in one research-only view. Returns marked from open positions remain unrealized until a canonical close exists.",
   "system": {
     "flow": [
       {
-        "description": "3 ranked watch names; one manual-confirmation delivery recorded.",
+        "description": "2 ranked watch names; 10 watch-only deliveries recorded.",
         "name": "AlphaOps",
         "status": "complete"
       },
       {
-        "description": "Forward calendar, lifecycle blotter, and 7/7 eligible coverage verified.",
+        "description": "Forward calendar, lifecycle blotter, and 9/9 eligible coverage verified.",
         "name": "PaperOps",
         "status": "verified"
       },
@@ -1040,9 +1913,9 @@
         "status": "passed"
       },
       {
-        "description": "Two gap-up strategies registered; no evidence claimed before July 17.",
+        "description": "All 9 registered strategies are eligible as of 2026-07-17.",
         "name": "Strategy activation",
-        "status": "pending"
+        "status": "active"
       },
       {
         "description": "Research and paper audit only. No order-placement path is exposed.",
@@ -1050,62 +1923,62 @@
         "status": "disabled by design"
       }
     ],
-    "schedulerStatus": "passed artifact \u00b7 2026-07-12",
+    "schedulerStatus": "not assessed by static exporter artifact · 2026-07-17",
     "taskStatuses": [
       {
         "last_result": 0,
-        "last_run_time": "2026-07-16T08:10:13-05:00",
+        "last_run_time": "2026-07-17",
         "next_run_time": null,
         "state": "complete",
         "task_name": "AlphaOps scan"
       },
       {
         "last_result": 0,
-        "last_run_time": "2026-07-16",
+        "last_run_time": "2026-07-17",
         "next_run_time": null,
         "state": "verified",
         "task_name": "PaperOps forward evidence"
       },
       {
-        "last_result": 0,
-        "last_run_time": "2026-07-12T22:10:06.0244583Z",
+        "last_result": null,
+        "last_run_time": null,
         "next_run_time": null,
-        "state": "passed",
+        "state": "not assessed by static exporter",
         "task_name": "Scheduler verification artifact"
       }
     ],
-    "telegramReadiness": "delivery recorded \u00b7 2026-07-16"
+    "telegramReadiness": "delivery recorded · 2026-07-17"
   },
   "topMetrics": [
     {
-      "context": "-$59.26 across 7 independent $100k paper sleeves; 0 closed",
+      "context": "-$122.93 across 9 eligible paper sleeves; 0 closed",
       "label": "PaperOps Fleet",
       "tone": "danger",
-      "value": "-0.008466%"
+      "value": "-0.013660%"
     },
     {
-      "context": "Trend Momentum \u00b7 SMA / ATR; +$21.32 unrealized",
+      "context": "Bullish FVG Continuation; +$102.66 unrealized",
       "label": "Best Strategy",
       "tone": "positive",
-      "value": "+0.021323%"
+      "value": "+0.102661%"
     },
     {
-      "context": "2 registered strategies start 2026-07-17",
+      "context": "All 9 registered strategies are eligible as of 2026-07-17. Latest observed coverage is 9/9.",
       "label": "Strategy Coverage",
       "tone": "info",
-      "value": "7 / 7 eligible"
+      "value": "9 / 9 eligible"
     },
     {
-      "context": "5 opened, 0 closed; realized P&L $0.00",
+      "context": "2 opened, 0 closed; realized P&L $0.00",
       "label": "Paper Activity",
       "tone": "warning",
-      "value": "5 open / 5 pending"
+      "value": "7 open / 5 pending"
     },
     {
-      "context": "1 needs confirmation; 2 blocked; 0 clean recommendations",
+      "context": "2 needs confirmation; 0 blocked; 0 clean recommendations",
       "label": "AlphaOps",
       "tone": "warning",
-      "value": "3 watch names"
+      "value": "2 watch names"
     }
   ]
 }

@@ -7,6 +7,7 @@ if not defined DAWNSTRIKE_PAPER_OPS_ROOT set "DAWNSTRIKE_PAPER_OPS_ROOT=data\v2_
 if not defined DAWNSTRIKE_DB_PATH set "DAWNSTRIKE_DB_PATH=data\shadow_real.sqlite"
 if not defined DAWNSTRIKE_PAPEROPS_NOTIFY set "DAWNSTRIKE_PAPEROPS_NOTIFY=telegram"
 if not defined DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS set "DAWNSTRIKE_PAPEROPS_MAX_ATTEMPTS=3"
+if not defined DAWNSTRIKE_STATIC_DASHBOARD_PUBLISH_MODE set "DAWNSTRIKE_STATIC_DASHBOARD_PUBLISH_MODE=production"
 
 if "%~1"=="" (
   for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set "RUN_DATE=%%I"
@@ -60,8 +61,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [%DATE% %TIME%] Publishing the verified dashboard snapshot in %DAWNSTRIKE_STATIC_DASHBOARD_PUBLISH_MODE% mode.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_static_dashboard.ps1 -RunDate %RUN_DATE% -PaperOpsRoot "%DAWNSTRIKE_PAPER_OPS_ROOT%" -DatabasePath "%DAWNSTRIKE_DB_PATH%" -PublishTarget %DAWNSTRIKE_STATIC_DASHBOARD_PUBLISH_MODE%
+if errorlevel 1 goto :PUBLICATION_FAILED
+
 echo [%DATE% %TIME%] PaperOps fleet EOD completed for %RUN_DATE%.
 exit /b 0
+
+:PUBLICATION_FAILED
+echo Static dashboard publication failed after canonical evidence and digest delivery; stale hosted data was not silently accepted.
+exit /b 1
 
 :TRUTH_FAILED
 echo PaperOps fleet truth gate failed; no digest was sent.

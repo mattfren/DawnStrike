@@ -338,9 +338,11 @@ def _display_system_health(
 
 def _display_calendar_day(row: dict[str, Any]) -> dict[str, Any]:
     status = str(row.get("status") or "NO DATA")
+    resolved_no_entry_count = _int(row.get("resolved_no_entry_count"), 0)
     labels = {
         "NO DATA": "No data",
         "NO TRADE": "No trade",
+        "RESOLVED NO ENTRY": "Resolved · trigger not reached",
         "PICKS PENDING OUTCOMES": "Picks pending",
         "OUTCOMES PARTIAL": "Partial outcomes",
         "AUDITED": "Audited",
@@ -354,6 +356,7 @@ def _display_calendar_day(row: dict[str, Any]) -> dict[str, Any]:
     )
     css = {
         "AUDITED": audited_class,
+        "RESOLVED NO ENTRY": "empty",
         "PICKS PENDING OUTCOMES": "pending",
         "OUTCOMES PARTIAL": "partial",
         "NO TRADE": "empty",
@@ -365,7 +368,15 @@ def _display_calendar_day(row: dict[str, Any]) -> dict[str, Any]:
         "status_label": labels.get(status, status.title()),
         "status_class": css,
         "top_pick": row.get("top_pick") or "None",
-        "top3_return_label": f"{top3:+.2f}%" if top3 is not None else "Pending",
+        "top3_return_label": (
+            f"{top3:+.2f}%"
+            if top3 is not None
+            else "N/A · trigger not reached"
+            if status == "RESOLVED NO ENTRY"
+            else "N/A · mixed entries"
+            if status == "AUDITED" and resolved_no_entry_count > 0
+            else "Pending"
+        ),
     }
 
 
@@ -1128,6 +1139,9 @@ def _calendar_detail_for_day(context: dict[str, Any], day: str) -> dict[str, Any
     top_pick_count = 0 if no_trade else len(pick_source_rows)
     missing_count = 0 if no_trade else len(missing)
     audited_count = sum(1 for row in return_rows if row.get("audit_status") == "audited")
+    resolved_no_entry_count = sum(
+        1 for row in return_rows if row.get("audit_status") == "resolved_no_entry"
+    )
     partial_count = sum(1 for row in return_rows if row.get("audit_status") == "partial")
     status = _day_status(
         has_data=bool(
@@ -1149,6 +1163,7 @@ def _calendar_detail_for_day(context: dict[str, Any], day: str) -> dict[str, Any
         missing_count=missing_count,
         partial_count=partial_count,
         audited_count=audited_count,
+        resolved_no_entry_count=resolved_no_entry_count,
     )
     overview = _day_overview(
         day=day,
@@ -1189,6 +1204,7 @@ def _calendar_detail_for_day(context: dict[str, Any], day: str) -> dict[str, Any
         "top_pick_count": top_pick_count,
         "missing_outcome_count": missing_count,
         "partial_outcome_count": partial_count,
+        "resolved_no_entry_count": resolved_no_entry_count,
         "avoided_count": len(avoid),
         "top1_return": basket.get("top1_close_return"),
         "top3_return": basket.get("top3_close_return"),
@@ -1227,6 +1243,7 @@ def _calendar_day_summary(detail: dict[str, Any]) -> dict[str, Any]:
         "signal_count": detail.get("signal_count", 0),
         "top_pick_count": detail.get("top_pick_count", 0),
         "missing_outcome_count": detail.get("missing_outcome_count", 0),
+        "resolved_no_entry_count": detail.get("resolved_no_entry_count", 0),
         "avoided_count": detail.get("avoided_count", 0),
         "top_pick": str(dict((detail.get("picks") or [{}])[0]).get("ticker") or "None")
         if detail.get("picks")
@@ -1382,6 +1399,8 @@ def _return_row_for_pick(
         row["audit_status"] = "NO TRADE"
         row["notes"] = "No-trade decision saved for this day."
         return row
+    if imported and _is_resolved_no_entry_status(imported.get("outcome_status")):
+        return _resolved_no_entry_row(pick, outcome=imported)
     if audit:
         row["audit_status"] = str(audit.get("audit_status") or "audited").lower()
         row["outcome_source"] = "manual_audit_trades"
@@ -1422,6 +1441,19 @@ def _return_row_from_attribution(
     ]
     by_policy = {str(row.get("exit_policy") or ""): row for row in first_available}
     outcome = dict(context["outcomes_by_signal_id"].get(signal_id, {}) or {})
+    resolved_no_entry: dict[str, Any] = next(
+        (
+            row
+            for row in rows
+            if str(row.get("audit_status") or "").lower() == "resolved_no_entry"
+            or str(row.get("exit_policy") or "").lower() == "not_triggered"
+        ),
+        {},
+    )
+    outcome_status = str(outcome.get("outcome_status") or "").lower()
+    is_resolved_no_entry = bool(resolved_no_entry) or _is_resolved_no_entry_status(
+        outcome_status
+    )
     close = by_policy.get("close", {})
     high = by_policy.get("high_opportunity", {})
     low = close or by_policy.get("invalidation", {})
@@ -1439,11 +1471,32 @@ def _return_row_from_attribution(
         {},
     )
     any_return = any(_number_or_none(row.get("return_pct")) is not None for row in rows)
-    audit_status = "audited" if _number_or_none(close.get("return_pct")) is not None else (
-        "partial" if any_return else "Outcome needed"
+    audit_status = (
+        "resolved_no_entry"
+        if is_resolved_no_entry
+        else (
+            "audited"
+            if _number_or_none(close.get("return_pct")) is not None
+            else "partial"
+            if any_return
+            else "Outcome needed"
+        )
     )
-    if missing and not any_return:
+    if missing and not any_return and not is_resolved_no_entry:
         audit_status = "Outcome needed"
+    resolved_note = _first_non_empty(
+        outcome.get("notes"),
+        resolved_no_entry.get("resolution_note") if resolved_no_entry else None,
+        "Complete sourced bars proved the saved trigger was never reached; "
+        "trade return is not applicable.",
+    )
+    if is_resolved_no_entry:
+        return _resolved_no_entry_row(
+            pick,
+            outcome=outcome,
+            resolution=resolved_no_entry,
+            notes=str(resolved_note),
+        )
     return {
         "rank": _int(pick.get("rank"), 0) or "",
         "ticker": str(pick.get("ticker") or "").upper(),
@@ -1477,7 +1530,9 @@ def _return_row_from_attribution(
         "high_after_entry_label": "opportunity, not realized",
         "audit_status": audit_status,
         "outcome_source": (
-            "signal_return_attribution" if audit_status != "Outcome needed" else "none"
+            str(outcome.get("outcome_source") or "signal_return_attribution")
+            if audit_status != "Outcome needed"
+            else "none"
         ),
         "notes": (
             "Scenario return from imported historical outcome."
@@ -1492,6 +1547,67 @@ def _trigger_return(rows: list[dict[str, Any]], exit_policy: str) -> float | Non
         if row.get("entry_policy") == "trigger_touch" and row.get("exit_policy") == exit_policy:
             return _number_or_none(row.get("return_pct"))
     return None
+
+
+def _is_resolved_no_entry_status(value: Any) -> bool:
+    return str(value or "").strip().lower() in {
+        "complete_not_triggered",
+        "not_triggered",
+        "resolved_no_entry",
+    }
+
+
+def _resolved_no_entry_row(
+    pick: dict[str, Any],
+    *,
+    outcome: dict[str, Any],
+    resolution: dict[str, Any] | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    resolution = resolution or {}
+    source = _first_non_empty(
+        outcome.get("outcome_source"),
+        outcome.get("source"),
+        resolution.get("outcome_source"),
+        resolution.get("source"),
+        "signal_return_attribution" if resolution else "sourced outcome",
+    )
+    resolved_notes = _first_non_empty(
+        notes,
+        outcome.get("notes"),
+        resolution.get("resolution_note"),
+        "Complete sourced bars proved the saved trigger was never reached; "
+        "trade return is not applicable.",
+    )
+    return {
+        "rank": _int(pick.get("rank"), 0) or "",
+        "ticker": str(pick.get("ticker") or "").upper(),
+        "entry_price": None,
+        "entry_time": "",
+        "signal_time": _first_non_empty(
+            pick.get("generated_at"),
+            pick.get("timestamp"),
+            pick.get("as_of_timestamp"),
+        ),
+        "recommended_exit_policy": "not_recorded",
+        "recommended_exit_price": None,
+        "recommended_exit_return": None,
+        "price_1m_return": None,
+        "price_5m_return": None,
+        "price_15m_return": None,
+        "lunch_return": None,
+        "close_return": None,
+        "open_entry_return": None,
+        "breakout_entry_return": None,
+        "monitor_exit_return": None,
+        "high_after_entry_return": None,
+        "low_after_entry_drawdown": None,
+        "return_kind": "no entry",
+        "high_after_entry_label": "not applicable",
+        "audit_status": "resolved_no_entry",
+        "outcome_source": str(source),
+        "notes": str(resolved_notes),
+    }
 
 
 def _pick_row(row: dict[str, Any], *, no_trade: bool) -> dict[str, Any]:
@@ -1675,6 +1791,7 @@ def _day_status(
     missing_count: int,
     partial_count: int,
     audited_count: int,
+    resolved_no_entry_count: int,
 ) -> str:
     if not has_data:
         return "NO DATA"
@@ -1682,11 +1799,13 @@ def _day_status(
         return "SOURCE FAILURE"
     if no_trade:
         return "NO TRADE"
+    if pick_count and resolved_no_entry_count == pick_count:
+        return "RESOLVED NO ENTRY"
     if pick_count and missing_count == pick_count:
         return "PICKS PENDING OUTCOMES"
     if pick_count and (missing_count or partial_count):
         return "OUTCOMES PARTIAL"
-    if pick_count and audited_count == pick_count:
+    if pick_count and audited_count + resolved_no_entry_count == pick_count:
         return "AUDITED"
     return "PICKS PENDING OUTCOMES" if pick_count else "NO DATA"
 
