@@ -3,8 +3,9 @@
 Status: `BLOCKED_APPROVAL_REQUIRED`
 
 A production rollback was not executed because this candidate has not received
-the required preview deployment or production approval. The rollback command
-and verification sequence are documented in
+production approval. The verified preview is
+`dpl_EK3mf9AHCYeaZrtivRiXXyTc2Hyb`; the rollback command and verification
+sequence are documented in
 `docs/operations/public_dashboard_rollback.md`.
 
 Required evidence before production promotion: prior deployment ID, candidate

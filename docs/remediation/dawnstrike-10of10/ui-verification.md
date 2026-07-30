@@ -24,6 +24,7 @@ Current local Playwright proof recorded in `evidence/`:
 
 The current real-data artifact is degraded because its source evidence is
 incomplete; the UI exposes that state rather than showing a prior return as
-today's result. The previously recorded axe pass remains part of the local
-proof history; the current pass specifically rechecked rendering, navigation,
-overflow, console, page errors, and failed requests.
+today's result. The latest current-artifact pass rechecked rendering,
+navigation, overflow, the safety panel, console errors, and the hosted
+Deployment Protection limitation. The hosted preview's API and static-manifest
+proof are recorded separately in `deployment-verification.md`.
