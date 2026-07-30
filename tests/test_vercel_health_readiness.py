@@ -12,6 +12,20 @@ def test_minimal_health_and_readiness_modules_import_without_scanner_runtime() -
     assert readiness.handler is not None
 
 
+def test_health_uses_embedded_public_state_when_static_manifest_is_not_packaged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from api import health
+
+    monkeypatch.setattr(health, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        health,
+        "PUBLIC_STATE",
+        {"build_manifest": {"source_sha": "abc123", "build_id": "build123"}},
+    )
+    assert health._build_metadata() == {"source_sha": "abc123", "build_id": "build123"}
+
+
 def test_readiness_accepts_complete_hash_consistent_public_state(
     tmp_path: Path, monkeypatch
 ) -> None:

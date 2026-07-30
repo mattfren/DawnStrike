@@ -46,7 +46,11 @@ class handler(BaseHTTPRequestHandler):
 def _build_metadata() -> dict[str, object]:
     manifest_path = _public_root() / "build-manifest.json"
     if not manifest_path.is_file():
-        return {}
+        return (
+            PUBLIC_STATE.get("build_manifest", {})
+            if isinstance(PUBLIC_STATE.get("build_manifest"), dict)
+            else {}
+        )
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
