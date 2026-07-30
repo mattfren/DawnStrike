@@ -23,7 +23,7 @@ REQUIRED_FILES = (
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
 
 
-def verify(root: Path) -> dict[str, object]:
+def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
     errors: list[str] = []
     missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
     errors.extend(f"missing:{name}" for name in missing)
@@ -41,24 +41,36 @@ def verify(root: Path) -> dict[str, object]:
     snapshot: dict[str, object] = {}
     manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
+    snapshot_row_count = 0
+    compressed_byte_count: int | None = None
     if snapshot_path.is_file():
         encoded = snapshot_path.read_bytes()
         compressed_byte_count = len(gzip.compress(encoded, compresslevel=9, mtime=0))
         if compressed_byte_count > MAX_SNAPSHOT_BYTES:
             errors.append(f"snapshot_compressed_too_large:{compressed_byte_count}")
         snapshot = json.loads(encoded)
-        if len(snapshot.get("rows") or []) > 250:
+        rows = snapshot.get("rows")
+        if isinstance(rows, list):
+            snapshot_row_count = len(rows)
+        if snapshot_row_count > 250:
             errors.append("row_limit_exceeded")
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("status") not in {"complete", "no_trade"}:
+        snapshot_status = manifest.get("status")
+        if snapshot_status not in {"complete", "no_trade"} and not (
+            allow_degraded and snapshot_status == "degraded"
+        ):
             errors.append("snapshot_not_publishable")
-        if manifest.get("payload_sha256") != hashlib.sha256(snapshot_path.read_bytes()).hexdigest():
-            errors.append("snapshot_hash_mismatch")
-        if int(manifest.get("byte_count") or 0) != snapshot_path.stat().st_size:
-            errors.append("snapshot_byte_count_mismatch")
-        if int(manifest.get("compressed_byte_count") or 0) != compressed_byte_count:
-            errors.append("snapshot_compressed_byte_count_mismatch")
+        if snapshot_path.is_file():
+            if (
+                manifest.get("payload_sha256")
+                != hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+            ):
+                errors.append("snapshot_hash_mismatch")
+            if manifest.get("byte_count") != snapshot_path.stat().st_size:
+                errors.append("snapshot_byte_count_mismatch")
+            if manifest.get("compressed_byte_count") != compressed_byte_count:
+                errors.append("snapshot_compressed_byte_count_mismatch")
         if manifest.get("compression") != "gzip":
             errors.append("snapshot_compression_missing")
     if build_manifest_path.is_file():
@@ -88,7 +100,16 @@ def verify(root: Path) -> dict[str, object]:
         readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
         if readiness.get("live_trading_enabled") is True:
             errors.append("live_trading_enabled")
-        if readiness.get("status") != "ready" or readiness.get("http_status") != 200:
+        readiness_is_ready = (
+            readiness.get("status") == "ready" and readiness.get("http_status") == 200
+        )
+        readiness_is_approved_degraded = (
+            allow_degraded
+            and manifest.get("status") == "degraded"
+            and readiness.get("status") == "not_ready"
+            and readiness.get("http_status") == 503
+        )
+        if not readiness_is_ready and not readiness_is_approved_degraded:
             errors.append("readiness_not_publishable")
 
     result = {
@@ -101,13 +122,18 @@ def verify(root: Path) -> dict[str, object]:
             if snapshot_path.is_file()
             else None
         ),
-        "snapshot_rows": len(snapshot.get("rows") or []),
+        "snapshot_rows": snapshot_row_count,
         "snapshot_status": manifest.get("status"),
         "readiness_status": readiness.get("status"),
         "readiness_http_status": readiness.get("http_status"),
         "source_sha": build_manifest.get("source_sha"),
         "build_id": build_manifest.get("build_id"),
         "data_hash_sha256": build_manifest.get("data_hash_sha256"),
+        "publication_policy": (
+            "complete_or_no_trade_or_approved_degraded"
+            if allow_degraded
+            else "complete_or_no_trade"
+        ),
     }
     return result
 
@@ -115,8 +141,9 @@ def verify(root: Path) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="build/public")
+    parser.add_argument("--allow-degraded", action="store_true")
     args = parser.parse_args(argv)
-    result = verify(Path(args.root).resolve())
+    result = verify(Path(args.root).resolve(), allow_degraded=args.allow_degraded)
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0 if result["status"] == "PASS" else 2
 

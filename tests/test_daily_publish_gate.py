@@ -12,7 +12,13 @@ def test_artifact_gate_reports_bounded_public_payload(tmp_path: Path) -> None:
     assert "missing:build-manifest.json" in result["errors"]
 
 
-def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -> None:
+def _write_publishable_fixture(
+    tmp_path: Path,
+    *,
+    snapshot_status: str,
+    readiness_status: str,
+    readiness_http_status: int,
+) -> Path:
     root = tmp_path / "public"
     (root / "data").mkdir(parents=True)
     required = {
@@ -20,9 +26,9 @@ def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -
         "favicon.svg": b"<svg />",
         "readiness.json": json.dumps(
             {
-                "status": "ready",
-                "http_status": 200,
-                "snapshot_status": "no_trade",
+                "status": readiness_status,
+                "http_status": readiness_http_status,
+                "snapshot_status": snapshot_status,
                 "live_trading_enabled": False,
             }
         ).encode(),
@@ -40,7 +46,7 @@ def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -
     (root / "data" / "performance.json.manifest.json").write_text(
         json.dumps(
             {
-                "status": "no_trade",
+                "status": snapshot_status,
                 "payload_sha256": snapshot_hash,
                 "byte_count": snapshot.stat().st_size,
                 "compressed_byte_count": len(
@@ -69,8 +75,41 @@ def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
+    return root
+
+
+def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -> None:
+    root = _write_publishable_fixture(
+        tmp_path,
+        snapshot_status="no_trade",
+        readiness_status="ready",
+        readiness_http_status=200,
+    )
 
     result = verify(root)
 
     assert result["status"] == "PASS"
     assert result["snapshot_status"] == "no_trade"
+
+
+def test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture(
+    tmp_path: Path,
+) -> None:
+    root = _write_publishable_fixture(
+        tmp_path,
+        snapshot_status="degraded",
+        readiness_status="not_ready",
+        readiness_http_status=503,
+    )
+
+    blocked = verify(root)
+    approved = verify(root, allow_degraded=True)
+
+    assert blocked["status"] == "FAIL"
+    assert blocked["errors"] == [
+        "snapshot_not_publishable",
+        "readiness_not_publishable",
+    ]
+    assert approved["status"] == "PASS"
+    assert approved["snapshot_status"] == "degraded"
+    assert approved["readiness_http_status"] == 503
