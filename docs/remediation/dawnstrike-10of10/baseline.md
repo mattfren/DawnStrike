@@ -71,7 +71,7 @@ shared_dirty_path_count=22972
 shared_modified_or_deleted=833
 shared_untracked=22139
 candidate_branch=codex/dawnstrike-10of10
-candidate_HEAD=77cf182e25a655515e1d52d3da4ee5496d9f5139
+candidate_HEAD=1b2c6aa9a690d5a0fe4339c781710ae590802fdc
 candidate_dirty_path_count=0
 ```
 
@@ -85,13 +85,21 @@ The current scheduled-task state is:
 | Dawnstrike X3 Vercel Daily Publish | 1 | false | 0 | Contained; do not restore |
 | Dawnstrike 10of10 Daily Finalize | missing | n/a | n/a | Register only from approved checkout |
 
-The current shared database was opened read-only. It contains 7 positions, 14
-fills, 8 outcomes, 228 historical signals, 5 canonical performance rows, 2
-canonical daily rows, 0 benchmark rows, 0 automation-run rows, and 91
-notifications. The current PaperOps reconciliation command, run against that
-authoritative shared source as of `2026-07-29`, reports 425 canonical rows,
-222 daily records, 156 discrepancies, 85 accepted PaperOps rows, 105
-quarantined rows, 131 PaperOps issues, and 85 source return-field mismatches.
+Before the fresh candidate build, the shared database was opened read-only and
+contained 7 positions, 14 fills, 8 outcomes, 228 historical signals, 5
+canonical performance rows, 2 canonical daily rows, 0 benchmark rows, 0
+automation-run rows, and 91 notifications. A later build was mistakenly
+pointed at that shared database; the persistence-enabled finalize path added
+the derived 425 canonical rows, 222 daily rows, and one console notification
+(`id=92`, build `c23bc49297c71c60e62a`). No raw positions, fills, outcomes, or
+broker orders were changed. No pre-write copy with the original 5/2 derived
+rows was found, so recovery is an owner decision: supply a trusted backup or
+explicitly retain and audit the derived read model. Do not write the shared DB
+again from the isolated candidate.
+
+The authoritative PaperOps reconciliation reports 425 canonical rows, 222
+daily records, 156 discrepancies, 85 accepted PaperOps rows, 105 quarantined
+rows, 131 PaperOps issues, and 85 source return-field mismatches.
 
 Production was re-inspected as deployment
 `dpl_ErcbSKoHYNf595t7zHK6HxyMdLge`
@@ -100,12 +108,12 @@ is still the old X3 deployment: `/api/health` is HTTP 200, `/api/readiness`
 is HTTP 500 `FUNCTION_INVOCATION_FAILED`, and health exposes scanner,
 Telegram, and cron routes. No production mutation occurred.
 
-The exact isolated preview remains deployment
-`dpl_EK3mf9AHCYeaZrtivRiXXyTc2Hyb` at
-`https://dawnstrike-command-center-x3-m9pqo1ru6-mattfrens-projects.vercel.app`.
+The latest isolated preview is deployment
+`dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ` at
+`https://dawnstrike-command-center-x3-ebrudj18t-mattfrens-projects.vercel.app`.
 Its health endpoint is HTTP 200 with source SHA
-`108835991179145fa3e59b9bfb954de1a8cf222f`, build ID
-`f58708827e2dbd9f1531`, research-only true, and live trading false. Its
+`1b2c6aa9a690d5a0fe4339c781710ae590802fdc`, build ID
+`c23bc49297c71c60e62a`, research-only true, and live trading false. Its
 readiness endpoint is the intended HTTP 503 with
 `snapshot_not_publishable` and `pipeline_not_ready`; the build manifest
 matches the same source/build/data hashes.

@@ -6,15 +6,15 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
 |---|---|---|
-| Full pytest suite | PASS: 220 passed | `py -m pytest -q` |
-| Ruff | PASS | `py -m ruff check intraday_scanner tests` |
+| Full pytest suite | PASS: 223 passed | `py -m pytest -q` |
+| Ruff | PASS | `py -m ruff check .` |
 | Mypy | PASS: 109 source files | `py -m mypy intraday_scanner` |
-| Focused canonical tests | PASS: 12 passed | PaperOps, scheduler, canonical, and snapshot tests |
+| Focused canonical tests | PASS: 16 passed | PaperOps, scheduler, canonical, and snapshot tests |
 | Compile | PASS | `py -m compileall -q intraday_scanner scripts` |
 | PowerShell parse | PASS: 16 scripts | Windows PowerShell parser pass |
 | Real-database copied reconcile | PASS/FAIL-CLOSED | 425 rows, 222 daily records, 156 discrepancies, CLI exit 2 |
-| Diagnostic public build | PASS/DEGRADED | 425 canonical rows, 222 daily records, 632,094 raw bytes / 38,420 deterministic-gzip bytes, 250 public rows, snapshot `degraded`, readiness HTTP 503 |
-| Artifact verifier | FAIL-CLOSED | Build source SHA `108835991179145fa3e59b9bfb954de1a8cf222f` rejects only `snapshot_not_publishable` and `readiness_not_publishable`; compressed-size and row-limit checks pass |
+| Diagnostic public build | PASS/DEGRADED | 425 canonical rows, 222 daily records, 632,094 raw bytes / 38,419 deterministic-gzip bytes, 250 public rows, snapshot `degraded`, readiness HTTP 503 |
+| Artifact verifier | FAIL-CLOSED | Build source SHA `1b2c6aa9a690d5a0fe4339c781710ae590802fdc` rejects only `snapshot_not_publishable` and `readiness_not_publishable`; compressed-size and row-limit checks pass |
 | Readiness truth | PASS | `degraded` snapshot -> `not_ready`, HTTP 503 |
 | Static UI 360x800 | PASS | no horizontal overflow; screenshot in `evidence/` |
 | Static UI 390x844 | PASS | no horizontal overflow |
@@ -24,7 +24,7 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Semantic navigation | PASS | All four public controls activate their matching visible panels |
 | Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
 | Browser console/page errors/network | PASS | Current-artifact browser pass returned empty console/page-error channels; hosted preview visual access is limited by Vercel Deployment Protection |
-| Vercel-native build | PREVIEW_VERIFIED | Explicit Dawnstrike project build succeeds with Vercel CLI 58.4.0; 18 prebuilt files, 861,548 bytes, embedded public-state dependency, two functions, zero forbidden files; exact preview API proof is recorded in deployment-verification.md. The preview is truthfully degraded and readiness is HTTP 503. |
+| Vercel-native build | PREVIEW_VERIFIED | Explicit Dawnstrike project build succeeds with Vercel CLI 58.4.0; exact preview `dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ` exposes matching source/build/data hashes, zero live trading, and readiness HTTP 503. |
 | Daily task registration | BLOCKED_EXTERNAL | `Dawnstrike 10of10 Daily Finalize` is absent; registration script is ready but intentionally not run |
 
 ## Non-green by design
@@ -35,3 +35,7 @@ candidate writes the bounded diagnostic snapshot but holds readiness at 503
 and leaves unsupported after-cost/excess return fields unreported. Strategy quality remains
 `WAITING_FOR_FORWARD_EVIDENCE` until the required forward sample is actually
 observed.
+
+The fresh build was mistakenly pointed at the shared DB and persisted the
+derived 425/222 read model plus one console notification. This is an audit
+incident and recovery decision, not a green publication result.

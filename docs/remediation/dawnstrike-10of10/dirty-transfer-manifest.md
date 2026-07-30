@@ -5,12 +5,11 @@ Source branch/SHA: `codex/command-center-x3-vercel` /
 `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`  
 Target worktree: `C:\r\dawnstrike-10of10-20260729`  
 Target branch/SHA: `codex/dawnstrike-10of10` /
-`77cf182e25a655515e1d52d3da4ee5496d9f5139`
+`1b2c6aa9a690d5a0fe4339c781710ae590802fdc`
 
 Latest clean implementation/build source SHA used for the current preview:
-`108835991179145fa3e59b9bfb954de1a8cf222f`. The current target SHA is a
-documentation-only evidence refresh after that preview build; the preview
-manifest remains the authority for the deployed source SHA.
+`1b2c6aa9a690d5a0fe4339c781710ae590802fdc`. The current preview deployment is
+`dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ`.
 
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because
@@ -53,6 +52,10 @@ files in this directory.
 - Do not register the replacement task from this isolated worktree; the
   scheduler doctor must remain `BLOCKED_EXTERNAL` until an approved checkout
   exists.
+- Do not point persistence-enabled builds at the shared database. The isolated
+  candidate's fresh build accidentally wrote derived canonical rows and one
+  console notification to the shared database; recovery is blocked pending a
+  trusted pre-write backup or explicit owner decision.
 
 ## Transfer protocol
 

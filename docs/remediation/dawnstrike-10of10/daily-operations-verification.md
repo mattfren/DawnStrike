@@ -29,3 +29,10 @@ disabled, `Dawnstrike AlphaOps EOD Full Report` is enabled but last returned
 code `1`, and `Dawnstrike 10of10 Daily Finalize` is missing. The shared source
 database was read-only during this audit; no scheduler registration or daily
 finalize was run from the isolated worktree.
+
+Correction: the fresh artifact build was later invoked with the shared
+database as its persistence target, so a persistence-enabled finalize did run
+against the shared DB by mistake. It wrote the derived 425/222 read model and
+one console notification. No raw source rows or broker state changed. The
+shared DB must not be used again by this candidate until recovery is explicitly
+decided by the owner.

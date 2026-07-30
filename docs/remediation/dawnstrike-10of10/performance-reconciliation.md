@@ -5,7 +5,7 @@ The source tables contain seven official paper positions, fourteen fills, eight
 outcome rows, and 228 research signals. The canonical service keeps the
 cohorts separate.
 
-Read-only as-of evidence from a copied database at
+Copied-source evidence from a database at
 `C:\r\dawnstrike-10of10-evidence\shared.sqlite`, reconciled with the PaperOps
 calendar export:
 
@@ -53,7 +53,7 @@ evidence keeps readiness degraded.
 The same reconciliation was rerun read-only against
 `C:\Users\MattFields\Dawnstrike\data\shadow_real.sqlite` and
 `C:\Users\MattFields\Dawnstrike\data\v2_paper_ops_live` as of
-`2026-07-29`. It returned `status=DEGRADED`, `row_count=425`,
+`2026-07-29` before the fresh build. It returned `status=DEGRADED`, `row_count=425`,
 `daily_count=222`, `issue_count=156`, and CLI exit code `2`. The input hash was
 `c5b422baac4fc37a02cefa9a0851b9343f0859ad7efce3dad2c3ab85da0d7891` and the
 output hash was
@@ -61,4 +61,8 @@ output hash was
 PaperOps reported 190 source rows, 85 accepted, 105 quarantined, 131 issues,
 and 85 source return-field mismatches. The current shared database itself has
 only 5 portfolio-performance rows, 2 daily-performance rows, and 0 benchmark
-rows, so it cannot support a green canonical return publication.
+rows, so it cannot support a green canonical return publication. The fresh
+build was then mistakenly run with the shared DB as its persistence target;
+the shared DB now contains the 425/222 derived rows and one additional console
+notification. Exact recovery of the prior 5/2 derived state requires an
+owner-supplied backup or an explicit retention decision.
