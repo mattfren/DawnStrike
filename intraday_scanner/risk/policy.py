@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 POLICY_VERSION = "dawnstrike-risk-policy-v1"
 MAX_RISK_PER_TRADE_PCT = 0.25
@@ -119,7 +120,7 @@ def _within_eod_window(value: str) -> bool:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return True
-    # 16:00 CT is 21:00 UTC during daylight time. The policy accepts UTC or
-    # an offset-bearing value and applies the local wall-clock time supplied.
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(ZoneInfo("America/Chicago"))
     local = parsed.timetz().replace(tzinfo=None)
     return local >= time(15, 30) or local < time(9, 0)

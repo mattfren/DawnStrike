@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from intraday_scanner.performance.contracts import (
     Cohort,
@@ -58,8 +59,9 @@ class CanonicalPerformanceService:
         persist: bool = True,
         now: str | None = None,
     ) -> dict[str, Any]:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as connection:
+        if persist:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with _open_database(self.db_path, read_only=not persist) as connection:
             connection.row_factory = sqlite3.Row
             if persist:
                 run_migrations(connection)
@@ -256,7 +258,9 @@ class CanonicalPerformanceService:
             )
             gross_return_pct = percentage_from_prices(entry, exit_price)
             source_net_cents = money_to_cents(raw.get("realized_pnl"))
-            fill_costs = _fill_costs(fills_by_position.get(position_id, []))
+            position_fills = fills_by_position.get(position_id, [])
+            fill_costs = _fill_costs(position_fills)
+            fill_gross_pnl_cents = _fill_gross_pnl_cents(position_fills)
             fees_cents = _optional_money(payload, "fees_cents", "fees")
             slippage_cents = _optional_money(payload, "slippage_cost_cents", "slippage_cost")
             if slippage_cents is None:
@@ -274,6 +278,18 @@ class CanonicalPerformanceService:
             quarantine_reason = _position_quarantine(
                 raw, market_date, ticker, quantity, notional_cents
             )
+            if status in {"CLOSED", "REALIZED", "COMPLETE"}:
+                if fill_gross_pnl_cents is None:
+                    quarantine_reason = quarantine_reason or "missing_fill_pnl_reconciliation"
+                elif source_net_cents is not None and abs(
+                    source_net_cents - fill_gross_pnl_cents
+                ) > 1:
+                    quarantine_reason = quarantine_reason or (
+                        "position_fill_pnl_mismatch:"
+                        f"position={source_net_cents}:fills={fill_gross_pnl_cents}"
+                    )
+                if fill_gross_pnl_cents is not None:
+                    gross_pnl_cents = fill_gross_pnl_cents
             if quarantine_reason:
                 record_status = RecordStatus.QUARANTINED
             net_pnl_cents = source_net_cents if fees_cents is not None else None
@@ -764,6 +780,44 @@ def _fill_costs(rows: Iterable[dict[str, Any]]) -> dict[str, int | None]:
         found = True
         slippage += money_to_cents(notional * bps / 10000) or 0
     return {"slippage_cents": slippage if found else None}
+
+
+def _fill_gross_pnl_cents(rows: Iterable[dict[str, Any]]) -> int | None:
+    """Return the signed gross P&L implied by complete buy/sell fills."""
+
+    buy_cents = 0
+    sell_cents = 0
+    saw_buy = False
+    saw_sell = False
+    for row in rows:
+        side = str(row.get("side") or "").strip().upper()
+        notional = money_to_cents(row.get("gross_notional"))
+        if notional is None:
+            price = as_decimal(row.get("fill_price"))
+            quantity = as_decimal(row.get("quantity"))
+            if price is None or quantity is None:
+                return None
+            notional = money_to_cents(price * quantity)
+        if notional is None or side not in {"BUY", "SELL"}:
+            return None
+        if side == "BUY":
+            saw_buy = True
+            buy_cents += notional
+        else:
+            saw_sell = True
+            sell_cents += notional
+    if not saw_buy or not saw_sell:
+        return None
+    return sell_cents - buy_cents
+
+
+def _open_database(path: Path, *, read_only: bool) -> sqlite3.Connection:
+    if not read_only:
+        return sqlite3.connect(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Read-only reconciliation database not found: {path}")
+    uri = f"file:{quote(path.resolve().as_posix(), safe='/:')}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
 
 
 def _optional_money(payload: dict[str, Any], *keys: str) -> int | None:

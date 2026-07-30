@@ -24,6 +24,19 @@ def test_read_only_reconcile_does_not_create_canonical_tables(tmp_path: Path) ->
     assert after == before
 
 
+def test_read_only_reconcile_does_not_create_a_missing_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing.sqlite"
+
+    try:
+        CanonicalPerformanceService(db_path).reconcile(persist=False)
+    except FileNotFoundError:
+        pass
+    else:  # pragma: no cover - the assertion documents the required failure mode
+        raise AssertionError("read-only reconciliation created or opened a missing database")
+
+    assert not db_path.exists()
+
+
 def test_as_of_reconcile_includes_history_through_requested_date(tmp_path: Path) -> None:
     db_path = tmp_path / "as-of.sqlite"
     SQLiteScanStore(db_path).initialize()

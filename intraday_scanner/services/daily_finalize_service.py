@@ -54,7 +54,9 @@ class DailyFinalizeService:
     ) -> dict[str, Any]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         acquired = False
-        run_id = hashlib.sha256(f"{market_date}:{now or _utc_now()}".encode()).hexdigest()[:20]
+        run_id = hashlib.sha256(
+            f"dawnstrike:daily-finalize:v1:{market_date}".encode()
+        ).hexdigest()[:20]
         try:
             self.lock_path.touch(exist_ok=False)
             acquired = True

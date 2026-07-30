@@ -74,6 +74,25 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE paper_trade_fills (
+                fill_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                intent_id TEXT,
+                signal_id TEXT,
+                market_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                fill_time TEXT NOT NULL,
+                fill_price REAL,
+                quantity REAL,
+                gross_notional REAL,
+                slippage_bps REAL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
             INSERT INTO paper_positions
             (position_id, signal_id, market_date, ticker, status, quantity,
              entry_price, exit_price, notional, realized_pnl, updated_at, payload_json)
@@ -101,6 +120,46 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
             ),
         )
         run_migrations(connection)
+        connection.executemany(
+            """
+            INSERT INTO paper_trade_fills
+            (fill_id, position_id, intent_id, signal_id, market_date, ticker, side,
+             fill_time, fill_price, quantity, gross_notional, slippage_bps, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    "fill-buy-1",
+                    "position-1",
+                    "entry-intent",
+                    "signal-1",
+                    "2026-07-29",
+                    "NOVA",
+                    "BUY",
+                    "2026-07-29T19:00:00+00:00",
+                    10.0,
+                    100.0,
+                    1000.0,
+                    None,
+                    "{}",
+                ),
+                (
+                    "fill-sell-1",
+                    "position-1",
+                    "exit-intent",
+                    "signal-1",
+                    "2026-07-29",
+                    "NOVA",
+                    "SELL",
+                    "2026-07-29T20:00:00+00:00",
+                    11.0,
+                    100.0,
+                    1100.0,
+                    None,
+                    "{}",
+                ),
+            ),
+        )
         connection.execute(
             """
             INSERT INTO portfolio_equity_observations
@@ -139,6 +198,19 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
     assert daily["return_pct"] == 9.7
     assert daily["opening_equity_cents"] == 100_000
     assert daily["ending_equity_cents"] == 109_700
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE paper_positions SET realized_pnl = ? WHERE position_id = ?",
+            (999.0, "position-1"),
+        )
+    mismatched = CanonicalPerformanceService(db_path).reconcile(
+        now="2026-07-29T21:05:00+00:00"
+    )
+    mismatched_row = mismatched["rows"][0]
+    assert mismatched_row["record_status"] == "quarantined"
+    assert "position_fill_pnl_mismatch" in str(mismatched_row["quarantine_reason"])
+    assert any(issue["issue_code"] == "quarantined" for issue in mismatched["issues"])
 
 
 def test_reconciliation_and_snapshot_are_idempotent_and_bounded(tmp_path: Path) -> None:

@@ -9,3 +9,14 @@ def test_daily_finalize_repeated_fixed_run_is_logically_idempotent(tmp_path: Pat
     second = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
     assert first["run_id"] == second["run_id"]
     assert first["readiness"] == second["readiness"]
+
+
+def test_daily_finalize_run_id_is_market_date_keyed(tmp_path: Path) -> None:
+    service = DailyFinalizeService(tmp_path / "date-keyed.sqlite", tmp_path / "public")
+
+    first = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
+    second = service.run(market_date="2026-07-29", now="2026-07-30T01:00:00+00:00")
+    other_day = service.run(market_date="2026-07-30", now="2026-07-30T21:00:00+00:00")
+
+    assert first["run_id"] == second["run_id"]
+    assert first["run_id"] != other_day["run_id"]

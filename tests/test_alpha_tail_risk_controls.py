@@ -1,4 +1,4 @@
-from intraday_scanner.risk.policy import RiskInput, evaluate_risk
+from intraday_scanner.risk.policy import RiskInput, _within_eod_window, evaluate_risk
 
 
 def test_daily_loss_limit_blocks_new_paper_entry() -> None:
@@ -22,3 +22,8 @@ def test_daily_loss_limit_blocks_new_paper_entry() -> None:
     )
     assert decision.allowed_for_paper is False
     assert "daily_loss_exceeds_1_pct" in decision.reasons
+
+
+def test_eod_window_converts_offset_bearing_time_to_chicago() -> None:
+    assert _within_eod_window("2026-07-29T20:00:00+00:00") is False
+    assert _within_eod_window("2026-07-29T20:30:00+00:00") is True

@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 from intraday_scanner.performance.service import CanonicalPerformanceService
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 FIELDS = [
     "date",
@@ -96,9 +97,11 @@ def _write_calendar(root: Path) -> None:
 def test_paper_ops_is_cohort_separated_and_quarantines_bad_equity_math(tmp_path: Path) -> None:
     root = tmp_path / "paper_ops"
     _write_calendar(root)
+    db_path = tmp_path / "empty.sqlite"
+    SQLiteScanStore(db_path).initialize()
 
     result = CanonicalPerformanceService(
-        tmp_path / "empty.sqlite",
+        db_path,
         paper_ops_root=root,
     ).reconcile(persist=False, now="2026-07-29T21:00:00+00:00")
 
