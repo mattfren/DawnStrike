@@ -5,11 +5,12 @@ Source branch/SHA: `codex/command-center-x3-vercel` /
 `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`  
 Target worktree: `C:\r\dawnstrike-10of10-20260729`  
 Target branch/SHA: `codex/dawnstrike-10of10` /
-`6886900de5960a90c8693e476c8c32d26f864375`
+`51f79ff2a738110b486111d85c4d93cfda9f4ec8`
 
-Latest clean implementation/build source SHA used for the current preview:
-`6886900de5960a90c8693e476c8c32d26f864375`. The current preview deployment is
-`dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg`.
+Latest clean implementation/build source SHA used for production:
+`51f79ff2a738110b486111d85c4d93cfda9f4ec8`. The verified preview is
+`dpl_CgpNe75UctboW7BavVTZWqLH7wQG`; production is
+`dpl_AbTsQJzj1EvMQ5Bd51naboU1BMv6`.
 
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because
@@ -55,9 +56,9 @@ files in this directory.
   dirty shared fallback, import the absent legacy X3 runtime, and are not part
   of clean `origin/main`. The replacement static UI, semantic tests, rendered
   browser proof, and artifact gates cover the candidate release surface.
-- Do not register the replacement task from this isolated worktree; the
-  scheduler doctor must remain `BLOCKED_EXTERNAL` until an approved checkout
-  exists.
+- Do not register another publication task. After explicit owner approval, the
+  single replacement task was registered from this isolated, clean worktree
+  and the legacy X3 publisher remained disabled.
 - Do not point persistence-enabled builds at the shared database. The isolated
   candidate's fresh build accidentally wrote derived canonical rows and one
   console notification to the shared database. The owner approved retaining

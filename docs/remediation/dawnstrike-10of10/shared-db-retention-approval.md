@@ -1,5 +1,11 @@
 # Shared derived-state retention approval
 
+Historical scope note: this approval preceded and was superseded for scheduler
+registration and production promotion by the owner's later explicit
+authorization to perform all external actions needed to unblock the directive.
+It did not and does not authorize broker execution. The final publisher reads
+the shared database through a read-only online backup.
+
 Status: `LOCAL_VERIFIED`
 
 Owner decision recorded in the Codex task on 2026-07-30: retain the current

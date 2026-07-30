@@ -1,89 +1,82 @@
 # Performance reconciliation
 
+Status: `PARTIAL`
+
+Authoritative source:
+`C:\Users\MattFields\Dawnstrike\data\shadow_real.sqlite`
+
+The daily publisher reads that database through SQLite read-only mode and
+creates an online backup at
+`C:\r\dawnstrike-10of10-20260729\data\daily_publication.sqlite`. The final
+production rehearsal left the source file SHA-256 unchanged at:
+
+`A9CF497463BBA78591D72BB038C7C3374D4B308895D07975E47FE0DB3CE8CEE4`
+
 ## Current evidence
 
-The read-only source database is
-C:/Users/MattFields/Dawnstrike/data/shadow_real.sqlite. It contains seven
-official paper positions, fourteen fills, eight outcome rows, and 228 research
-signals. The isolated copied-source rehearsal uses
-C:/r/dawnstrike-10of10-evidence/shared.sqlite; no shared database write was
-used for this revalidation.
+As of the 2026-07-29 publication:
 
-As of market date 2026-07-29, the canonical service reports:
+- 431 canonical performance rows;
+- 223 daily cohort records;
+- 49 reconciliation issues;
+- 142 eligible outcomes;
+- 114 observed outcomes;
+- 28 missing outcomes;
+- 80.2817% eligible-outcome coverage;
+- 190 PaperOps source rows;
+- 190 accepted PaperOps rows;
+- 0 quarantined PaperOps rows;
+- 21 PaperOps component-scope warnings;
+- 0 PaperOps source-return mismatches;
+- 0 benchmark observations.
 
-- 425 rows: 228 alphaops_signal_research, 7 official_forward_paper, 63
-  historical_backtest, and 127 shadow_challenger;
-- 222 daily cohort records;
-- 46 discrepancies: 25 missing-outcome warnings plus 21 PaperOps
-  component-scope warnings;
-- PaperOps source: 190 rows, 190 accepted, 0 quarantined, 21 warnings, and
-  0 source return-field mismatches;
-- input hash
-  81b64fbc7695c1ace3b3d6f983bb802a35a9808a10979dff530974d6aad3f001;
-- output hash
-  9ae942a4ba0a0132e1ad2b3e60e785be16db957ea1af39712e4dd8c9ef902579;
-- service status PARTIAL; the CLI remains non-green because unresolved
-  outcomes and upstream readiness evidence remain.
+Input hash:
 
-No benchmark-performance rows are present in the source database. The
-official-paper balance/return path still lacks the complete benchmark and
-cost evidence required for a green public return or excess-return claim.
-Missing truth remains null; it is not converted to zero.
+`4062e9e0ea86036a930f82c79b0c78e49983a0fe7dd1253703996ff1585c3b8e`
 
-## PaperOps semantics and adapter correction
+Final production data hash:
 
-The producer writes total_pnl as current_equity - previous_ending in
-intraday_scanner/v2/paper_ops/shadow_runner.py. Its realized and unrealized
-fields are not guaranteed to have the same period scope as the ending-equity
-series. The canonical adapter now:
+`3a134cc971e69a6f01a50c63687f9440883e82e833afa09bd120d319270cd56d`
 
-1. tracks prior ending equity within each
-   mode/strategy/version/policy/semantics series;
-2. derives daily P&L and return from the observed equity delta;
-3. accepts a row only when the daily or cumulative P&L identity is provable;
-4. retains component-scope mismatches as warnings when the daily equity delta
-   is proven;
-5. reports PaperOps costs as reported_not_reconciled unless their inclusion
-   in the observed equity delta is proven; and
-6. keeps replay and forward rows in separate cohorts.
+## PaperOps semantics
 
-The source's daily_return_pct field is diagnostic only. The current export
-matches the derived equity return for all 190 rows. The 21 warnings identify
-rows where the source's realized/unrealized component fields do not reconcile
-to fixed policy starting equity even though the day-over-day equity delta is
-auditable. They do not authorize an after-cost profitability claim.
+The PaperOps adapter:
 
-## Official-paper limitations
+1. separates mode, strategy, version, policy, and evidence cohorts;
+2. derives daily P&L and return from verified prior-to-current equity changes;
+3. accepts a row only when its daily or cumulative identity is provable;
+4. retains realized/unrealized component-scope differences as warnings when
+   the day-over-day equity identity is still auditable;
+5. keeps reported costs non-authoritative until their inclusion in ending
+   equity is proven; and
+6. does not mix replay, research, shadow, historical, and official paper
+   totals.
 
-The raw seven-position source P&L reconciles exactly to -$459.6706 using the
-source's four-decimal dollar values. That is a diagnostic, not a portfolio
-return: official opening-equity, benchmark, and complete cost evidence remain
-incomplete. The public service therefore keeps official unsupported return,
-excess-return, and calibrated-probability fields unavailable.
+All 190 source `daily_return_pct` values agree with the adapter's derived
+equity return. The 21 warning rows do not authorize an after-cost profitability
+claim.
 
-## Retention incident
+## Official-paper limitation
 
-A persistence-enabled build was accidentally pointed at the shared database.
-It added the derived 425 canonical rows, 222 daily rows, and notification
-id=92; raw positions, fills, outcomes, signals, and broker state were
-unchanged. No trusted pre-write copy with the original 5/2 derived counts was
-found. The owner approved retaining the current derived state on 2026-07-30.
-That approval is scoped to retention/audit only; it does not authorize further
-shared writes, scheduler registration, production promotion, or broker
-execution.
+The seven raw official positions and fourteen fills are preserved. Their
+source P&L can be audited, but the database lacks a complete official opening
+equity, complete fee/slippage evidence, and same-policy benchmark series.
+Therefore:
 
-## Deployment truth
+- official daily return is not reported;
+- official cumulative return is not reported;
+- benchmark and excess return are not reported;
+- official net P&L and drawdown are not promoted as complete;
+- missing outcomes do not enter averages, win rates, equity curves, or labels.
 
-Production remains the old X3 deployment
-dpl_ErcbSKoHYNf595t7zHK6HxyMdLge. Its /api/health endpoint is HTTP 200, while
-/api/readiness remains HTTP 500 FUNCTION_INVOCATION_FAILED; it exposes the old
-scanner, Telegram, and cron surface.
+This is why production readiness is a controlled HTTP 503. It is the expected
+truth-preserving result, not a deployment crash.
 
-The current preview is
-dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg at
-https://dawnstrike-command-center-x3-qseiaiddm-mattfrens-projects.vercel.app.
-It is built from implementation SHA
-6886900de5960a90c8693e476c8c32d26f864375 with data hash
-5487936639b61c95695500f7975cb901fc2c7f00e4665b158c7ce7ebbb03a7aa.
-Its readiness is intentionally HTTP 503 with snapshot_not_publishable and
-pipeline_not_ready. Production was not promoted.
+## Production identity
+
+- deployment: `dpl_AbTsQJzj1EvMQ5Bd51naboU1BMv6`;
+- source: `51f79ff2a738110b486111d85c4d93cfda9f4ec8`;
+- build: `5ef6a274f37fd1dbae87`;
+- data:
+  `3a134cc971e69a6f01a50c63687f9440883e82e833afa09bd120d319270cd56d`;
+- readiness: degraded/not_ready, HTTP 503.

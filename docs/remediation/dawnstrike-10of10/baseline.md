@@ -5,6 +5,12 @@ Remediation branch: `codex/dawnstrike-10of10`
 Remediation worktree: `C:\r\dawnstrike-10of10-20260729`
 Status: `IN_PROGRESS`
 
+This file is the immutable pre-remediation baseline. It is historical evidence,
+not the current release state. Current production, scheduler, reconciliation,
+and rollback truth is recorded in `deployment-verification.md`,
+`daily-operations-verification.md`, `performance-reconciliation.md`, and
+`final-scorecard.md`.
+
 ## Shared checkout
 
 Authoritative shared checkout: `C:\Users\MattFields\Dawnstrike`
