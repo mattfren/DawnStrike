@@ -188,12 +188,21 @@ def test_reconciliation_reuses_timestamp_for_unchanged_inputs(tmp_path: Path) ->
     second_public = service.load_public_data()
     first_public["generated_at"] = None
     second_public["generated_at"] = None
+    first_snapshot_path = tmp_path / "public" / "first-performance.json"
+    second_snapshot_path = tmp_path / "public" / "second-performance.json"
+    write_public_snapshot(db_path, first_snapshot_path)
+    write_public_snapshot(db_path, second_snapshot_path)
+    first_snapshot = json.loads(first_snapshot_path.read_text(encoding="utf-8"))
+    second_snapshot = json.loads(second_snapshot_path.read_text(encoding="utf-8"))
+    first_snapshot["generated_at"] = None
+    second_snapshot["generated_at"] = None
 
     assert second["input_hash_sha256"] == first["input_hash_sha256"]
     assert second["calculated_at"] == first["calculated_at"]
     assert second["rows"] == first["rows"]
     assert second["daily"] == first["daily"]
     assert second_public == first_public
+    assert second_snapshot == first_snapshot
 
 
 def test_full_reconcile_clears_stale_canonical_rows(tmp_path: Path) -> None:
