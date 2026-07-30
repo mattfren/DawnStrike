@@ -59,6 +59,11 @@ Database: `data/shadow_real.sqlite`
 Size: `85,684,224` bytes  
 Tables: `72`
 
+This is a point-in-time baseline. Later validation against the shared checkout
+added only the candidate's additive canonical schema objects; the raw source
+rows were not rewritten. The remediation implementation itself remains
+isolated in the candidate worktree.
+
 | Table | Rows |
 |---|---:|
 | notifications_sent | 91 |

@@ -74,6 +74,26 @@ def write_public_snapshot(
         run_migrations(connection)
         connection.execute(
             """
+            INSERT OR IGNORE INTO public_snapshot_versions
+            (manifest_id, market_date, status, generated_at, input_hash_sha256,
+             payload_sha256, artifact_path, row_count, byte_count, failure_reason, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            (
+                manifest["manifest_id"],
+                effective_date,
+                status,
+                generated_at,
+                input_hash,
+                payload_sha256,
+                manifest["artifact_path"],
+                manifest["row_count"],
+                manifest["byte_count"],
+                json.dumps(manifest, sort_keys=True),
+            ),
+        )
+        connection.execute(
+            """
             INSERT INTO public_snapshot_manifests
             (manifest_id, market_date, status, generated_at, input_hash_sha256,
              payload_sha256, artifact_path, row_count, byte_count, failure_reason, payload_json)

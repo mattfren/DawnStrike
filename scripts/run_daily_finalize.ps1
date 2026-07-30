@@ -10,6 +10,21 @@ $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $dbPath = Join-Path $resolvedRoot "data\shadow_real.sqlite"
 $outputPath = Join-Path $resolvedRoot "build\public"
+$marketDateWasExplicit = $PSBoundParameters.ContainsKey("MarketDate")
+
+if (-not $marketDateWasExplicit) {
+    Push-Location $resolvedRoot
+    try {
+        $isMarketDay = (& py.exe -c "from datetime import date; from intraday_scanner.services.market_calendar import is_market_day; print('1' if is_market_day(date.today()) else '0')").Trim()
+    }
+    finally {
+        Pop-Location
+    }
+    if ($isMarketDay -ne "1") {
+        Write-Output "Skipping non-market date $MarketDate; no publication was attempted."
+        exit 0
+    }
+}
 
 if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
     throw "Dawnstrike database not found: $dbPath"

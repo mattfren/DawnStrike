@@ -14,6 +14,21 @@ from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
 from intraday_scanner.storage.migrations import run_migrations
 
+DAILY_STAGE_NAMES = (
+    "source_collection",
+    "candidate_normalization",
+    "selection",
+    "delivery",
+    "paper_fills",
+    "outcome_capture",
+    "paper_reconciliation",
+    "canonical_performance",
+    "public_snapshot",
+    "preview_deployment",
+    "production_promotion",
+    "readiness",
+)
+
 
 class DailyFinalizeService:
     """Finalize one market date and fail readiness if any upstream step is incomplete."""
@@ -56,7 +71,10 @@ class DailyFinalizeService:
                         self.output_root / "data" / "performance.json",
                         market_date=market_date,
                     )
-                    readiness = self._write_readiness(result, publication, market_date)
+                    upstream_status = self._read_upstream_stage(market_date)
+                    readiness = self._write_readiness(
+                        result, publication, market_date, upstream_status
+                    )
                     stage = self._write_stage_manifest(result, publication, readiness, attempt)
                     status = str(result.get("status") or "DEGRADED")
                     self._record_run(
@@ -82,6 +100,7 @@ class DailyFinalizeService:
                             "issue_count": result.get("issue_count"),
                             "input_hash_sha256": result.get("input_hash_sha256"),
                         },
+                        "upstream_status": upstream_status,
                     }
                 except (
                     Exception
@@ -110,27 +129,73 @@ class DailyFinalizeService:
         reconciliation: dict[str, Any],
         publication: dict[str, Any],
         market_date: str,
+        upstream_status: str = "not_recorded",
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
-        status = "ready" if snapshot_status in {"complete", "no_trade"} else "not_ready"
+        status = (
+            "ready"
+            if snapshot_status in {"complete", "no_trade"} and upstream_status == "complete"
+            else "not_ready"
+        )
         payload = {
             "schema_version": "dawnstrike.readiness.v1",
             "market_date": market_date,
             "status": status,
             "http_status": 200 if status == "ready" else 503,
             "snapshot_status": snapshot_status,
+            "upstream_status": upstream_status,
             "reconciliation_status": reconciliation.get("status"),
             "input_hash_sha256": reconciliation.get("input_hash_sha256"),
             "payload_sha256": publication["manifest"].get("payload_sha256"),
             "live_trading_enabled": False,
             "research_only": True,
-            "reason": "complete_or_explicit_no_trade"
+            "reason": "complete_or_explicit_no_trade_with_upstream_success"
             if status == "ready"
             else "missing_or_degraded_upstream_truth",
         }
         path = self.output_root / "readiness.json"
         path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
         return payload
+
+    def _read_upstream_stage(self, market_date: str) -> str:
+        """Read the latest local EOD automation result without mutating it."""
+
+        try:
+            with sqlite3.connect(self.db_path) as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_runs'"
+                ).fetchone()
+                if not exists:
+                    return "not_recorded"
+                rows = connection.execute(
+                    """
+                    SELECT run_type, status, completed_at, payload_json
+                    FROM automation_runs
+                    WHERE lower(run_type) LIKE '%eod%'
+                    ORDER BY completed_at DESC, rowid DESC
+                    LIMIT 20
+                    """
+                ).fetchall()
+        except sqlite3.Error:
+            return "unreadable"
+        for _run_type, status, completed_at, payload_json in rows:
+            try:
+                payload = json.loads(str(payload_json or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            observed_date = str(
+                payload.get("market_date")
+                or payload.get("run_date")
+                or payload.get("date")
+                or str(completed_at or "")[:10]
+            )[:10]
+            if observed_date != market_date:
+                continue
+            normalized = str(status or payload.get("status") or "").lower()
+            if normalized in {"complete", "completed", "success", "ok", "passed", "ready"}:
+                return "complete"
+            return "failed"
+        return "not_recorded"
 
     def _write_stage_manifest(
         self,
@@ -139,12 +204,143 @@ class DailyFinalizeService:
         readiness: dict[str, Any],
         retry_count: int,
     ) -> dict[str, Any]:
+        input_hash = reconciliation.get("input_hash_sha256")
+        canonical_output_hash = reconciliation.get("output_hash_sha256")
+        output_hash = publication["manifest"].get("payload_sha256")
+        upstream_status = str(readiness.get("upstream_status") or "not_recorded")
+        reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
+        snapshot_status = str(publication["manifest"].get("status") or "degraded")
+        readiness_status = str(readiness.get("status") or "not_ready")
+        generated_at = _utc_now()
+        stages = [
+            self._stage_record(
+                "source_collection",
+                upstream_status,
+                "local-eod-stage-v1",
+                input_hash=input_hash,
+                output_hash=input_hash if upstream_status == "complete" else None,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Continue to normalization only after the upstream EOD stage records success."
+                    if upstream_status != "complete"
+                    else "Confirm source lineage and continue with the upstream manifest."
+                ),
+                warning=(
+                    None
+                    if upstream_status == "complete"
+                    else "upstream stage not recorded as successful"
+                ),
+            ),
+            *[
+                self._stage_record(
+                    name,
+                    "not_recorded",
+                    f"dawnstrike-{name}-v1",
+                    input_hash=None,
+                    output_hash=None,
+                    retry_count=retry_count,
+                    generated_at=generated_at,
+                    next_action="Record and verify this upstream stage before publication.",
+                )
+                for name in (
+                    "candidate_normalization",
+                    "selection",
+                    "delivery",
+                    "paper_fills",
+                    "outcome_capture",
+                )
+            ],
+            self._stage_record(
+                "paper_reconciliation",
+                reconciliation_status,
+                "dawnstrike-paper-reconciliation-v1",
+                input_hash=input_hash,
+                output_hash=canonical_output_hash,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Resolve reconciliation issues before declaring complete."
+                    if reconciliation.get("issue_count", 0)
+                    else "Keep the reconciled read model as the source for canonical performance."
+                ),
+                warning=(
+                    f"{reconciliation.get('issue_count', 0)} reconciliation issue(s)"
+                    if reconciliation.get("issue_count", 0)
+                    else None
+                ),
+            ),
+            self._stage_record(
+                "canonical_performance",
+                reconciliation_status,
+                "dawnstrike-performance-v2",
+                input_hash=input_hash,
+                output_hash=canonical_output_hash,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Collect eligible source outcomes and equity observations before publication."
+                    if reconciliation_status == "NO_DATA"
+                    else "Review any pending or degraded rows before promotion."
+                ),
+            ),
+            self._stage_record(
+                "public_snapshot",
+                snapshot_status,
+                "dawnstrike-public-snapshot-v1",
+                input_hash=input_hash,
+                output_hash=output_hash,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Do not promote until the snapshot is complete or explicit no-trade."
+                    if snapshot_status not in {"complete", "no_trade"}
+                    else "Run artifact and browser verification."
+                ),
+            ),
+            self._stage_record(
+                "preview_deployment",
+                "not_recorded",
+                "vercel-preview-v1",
+                input_hash=output_hash,
+                output_hash=None,
+                retry_count=0,
+                generated_at=generated_at,
+                next_action="Run Vercel native build and deploy a preview from a clean SHA.",
+            ),
+            self._stage_record(
+                "production_promotion",
+                "not_recorded",
+                "vercel-promotion-v1",
+                input_hash=None,
+                output_hash=None,
+                retry_count=0,
+                generated_at=generated_at,
+                next_action="Obtain explicit production approval after preview and rollback proof.",
+            ),
+            self._stage_record(
+                "readiness",
+                readiness_status,
+                "dawnstrike-readiness-v1",
+                input_hash=output_hash,
+                output_hash=output_hash,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Resolve the exact failed checks before treating the publication as ready."
+                    if readiness_status != "ready"
+                    else "Proceed to browser and deployment verification."
+                ),
+                warning=readiness.get("reason") if readiness_status != "ready" else None,
+            ),
+        ]
         payload = {
             "schema_version": "dawnstrike.daily_stage_manifest.v1",
-            "generated_at": _utc_now(),
-            "input_hash_sha256": reconciliation.get("input_hash_sha256"),
-            "output_hash_sha256": publication["manifest"].get("payload_sha256"),
+            "generated_at": generated_at,
+            "input_hash_sha256": input_hash,
+            "output_hash_sha256": output_hash,
             "retry_count": retry_count,
+            "stages": stages,
             "readiness": readiness,
             "artifacts": [
                 "data/performance.json",
@@ -158,6 +354,35 @@ class DailyFinalizeService:
             json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8"
         )
         return payload
+
+    @staticmethod
+    def _stage_record(
+        name: str,
+        domain_status: str,
+        stage_version: str,
+        *,
+        input_hash: object,
+        output_hash: object,
+        retry_count: int,
+        generated_at: str,
+        next_action: str,
+        warning: object = None,
+    ) -> dict[str, Any]:
+        status = _stage_status(domain_status)
+        return {
+            "stage": name,
+            "stage_version": stage_version,
+            "status": status,
+            "domain_status": domain_status,
+            "input_hash_sha256": input_hash,
+            "output_hash_sha256": output_hash,
+            "started_at": generated_at if status != "NOT_STARTED" else None,
+            "completed_at": generated_at if status != "NOT_STARTED" else None,
+            "attempt_count": retry_count + 1 if status != "NOT_STARTED" else 0,
+            "warnings": warning,
+            "error": warning if status == "FAILED" else None,
+            "next_action": next_action,
+        }
 
     def _record_run(
         self,
@@ -224,3 +449,14 @@ class DailyFinalizeService:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _stage_status(domain_status: str) -> str:
+    normalized = domain_status.strip().lower()
+    if normalized in {"complete", "no_trade", "ready", "passed", "success"}:
+        return "LOCAL_VERIFIED"
+    if normalized in {"failed", "unreadable", "error"}:
+        return "FAILED"
+    if normalized in {"not_recorded", "missing", "not_started", "unknown"}:
+        return "NOT_STARTED"
+    return "IN_PROGRESS"

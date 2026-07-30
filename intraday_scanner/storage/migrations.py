@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 9
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -415,12 +415,80 @@ def _migration_006_canonical_performance_repair(connection: sqlite3.Connection) 
 def _migration_007_canonical_gross_return_fields(connection: sqlite3.Connection) -> None:
     """Keep observed gross return separate from after-cost return."""
 
+    _add_column_if_missing(connection, "portfolio_performance_rows", "gross_return_pct REAL")
+    _add_column_if_missing(connection, "portfolio_daily_performance", "gross_return_pct REAL")
+
+
+def _migration_008_equity_and_contract_metadata(connection: sqlite3.Connection) -> None:
+    """Add optional portfolio-equity evidence and explicit daily metadata."""
+
     connection.executescript(
         """
-        ALTER TABLE portfolio_performance_rows ADD COLUMN gross_return_pct REAL;
-        ALTER TABLE portfolio_daily_performance ADD COLUMN gross_return_pct REAL;
+        CREATE TABLE IF NOT EXISTS portfolio_equity_observations (
+            observation_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            cohort TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            opening_equity_cents INTEGER,
+            ending_equity_cents INTEGER,
+            source_refs_json TEXT NOT NULL,
+            source_hash_sha256 TEXT NOT NULL,
+            observed_at TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (market_date, cohort, strategy_id, strategy_version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_portfolio_equity_observations_day
+        ON portfolio_equity_observations(market_date, cohort);
         """
     )
+    for column in (
+        "opening_equity_cents INTEGER",
+        "ending_equity_cents INTEGER",
+        "unrealized_pnl_cents INTEGER",
+        "cumulative_return_pct REAL",
+        "drawdown_pct REAL",
+        "exposure_cents INTEGER",
+        "execution_policy_version TEXT",
+        "calculation_version TEXT",
+        "evidence_state TEXT",
+        "coverage_json TEXT",
+        "source_refs_json TEXT",
+    ):
+        _add_column_if_missing(connection, "portfolio_daily_performance", column)
+
+
+def _migration_009_snapshot_versions(connection: sqlite3.Connection) -> None:
+    """Keep every distinct public snapshot version append-only by manifest id."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS public_snapshot_versions (
+            manifest_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL,
+            payload_sha256 TEXT,
+            artifact_path TEXT,
+            row_count INTEGER NOT NULL,
+            byte_count INTEGER,
+            failure_reason TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_public_snapshot_versions_day
+        ON public_snapshot_versions(market_date, generated_at);
+        """
+    )
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection, table: str, column_definition: str
+) -> None:
+    column_name = column_definition.split()[0]
+    existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column_name not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column_definition}")
 
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -431,4 +499,6 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (5, _migration_005_canonical_performance),
     (6, _migration_006_canonical_performance_repair),
     (7, _migration_007_canonical_gross_return_fields),
+    (8, _migration_008_equity_and_contract_metadata),
+    (9, _migration_009_snapshot_versions),
 )

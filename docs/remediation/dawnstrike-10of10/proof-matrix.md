@@ -5,22 +5,23 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
 |---|---|---|
-| Full pytest suite | PASS: 187 passed | `py -m pytest` |
+| Full pytest suite | PASS: 209 passed | `py -m pytest` |
 | Ruff | PASS | `py -m ruff check .` |
-| Mypy | PASS: 102 source files | `py -m mypy intraday_scanner` |
+| Mypy | PASS: 107 source files | `py -m mypy intraday_scanner` |
 | Focused canonical tests | PASS: 8 passed | `tests/test_canonical_performance.py` |
 | Compile | PASS | `py -m compileall -q intraday_scanner api scripts/verify_public_artifact.py` |
-| Real-database copied build | PASS | 235 rows, 32 daily records, 219,678 bytes |
-| Artifact verifier | PASS | `scripts/verify_public_artifact.py --root build/public` |
+| Real-database copied reconcile | PASS/FAIL-CLOSED | 235 rows, 32 daily records, 25 discrepancies, CLI exit 2 |
+| Diagnostic public build | PASS/DEGRADED | 235 rows, 232,001 bytes, snapshot `degraded`, readiness HTTP 503 |
+| Artifact verifier | FAIL-CLOSED | Rejects `snapshot_not_publishable`, `readiness_not_publishable`, and `source_not_clean` |
 | Readiness truth | PASS | `degraded` snapshot -> `not_ready`, HTTP 503 |
 | Static UI 360x800 | PASS | no horizontal overflow; screenshot in `evidence/` |
 | Static UI 390x844 | PASS | no horizontal overflow |
 | Static UI 768x1024 | PASS | no horizontal overflow |
 | Static UI 1280x720 | PASS | no horizontal overflow |
 | Static UI 1440x900 | PASS | no horizontal overflow; screenshot in `evidence/` |
-| Semantic navigation | PASS | Performance view activates through the public control |
+| Semantic navigation | PASS | All four public controls activate their matching visible panels |
 | Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
-| Browser console/page errors | PASS | cleared console and error channels returned no errors |
+| Browser console/page errors/network | PASS | Current Playwright pass returned empty console/page-error/request-failure channels |
 | Vercel-native build | WAITING_EXTERNAL | CLI stopped because `uv` is not installed; no deployment or promotion was made |
 | Daily task registration | WAITING_APPROVED_CHECKOUT | registration script is ready; isolated candidate intentionally has no live DB |
 

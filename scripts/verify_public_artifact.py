@@ -36,8 +36,10 @@ def verify(root: Path) -> dict[str, object]:
 
     snapshot_path = root / "data" / "performance.json"
     manifest_path = root / "data" / "performance.json.manifest.json"
+    build_manifest_path = root / "build-manifest.json"
     snapshot: dict[str, object] = {}
     manifest: dict[str, object] = {}
+    build_manifest: dict[str, object] = {}
     if snapshot_path.is_file():
         encoded = snapshot_path.read_bytes()
         if len(encoded) > MAX_SNAPSHOT_BYTES:
@@ -47,10 +49,32 @@ def verify(root: Path) -> dict[str, object]:
             errors.append("row_limit_exceeded")
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("status") not in {"complete", "no_trade"}:
+            errors.append("snapshot_not_publishable")
         if manifest.get("payload_sha256") != hashlib.sha256(snapshot_path.read_bytes()).hexdigest():
             errors.append("snapshot_hash_mismatch")
         if int(manifest.get("byte_count") or 0) != snapshot_path.stat().st_size:
             errors.append("snapshot_byte_count_mismatch")
+    if build_manifest_path.is_file():
+        build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
+        if not build_manifest.get("source_sha"):
+            errors.append("source_sha_missing")
+        if build_manifest.get("source_clean") is not True:
+            errors.append("source_not_clean")
+        if not build_manifest.get("build_id"):
+            errors.append("build_id_missing")
+        if build_manifest.get("data_hash_sha256") != manifest.get("payload_sha256"):
+            errors.append("build_data_hash_mismatch")
+        recorded_hashes = build_manifest.get("file_hashes")
+        if not isinstance(recorded_hashes, dict):
+            errors.append("file_hashes_missing")
+        else:
+            for name, expected_hash in recorded_hashes.items():
+                path = root / str(name)
+                if not path.is_file():
+                    errors.append(f"file_hash_path_missing:{name}")
+                elif hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+                    errors.append(f"file_hash_mismatch:{name}")
 
     readiness_path = root / "readiness.json"
     readiness: dict[str, object] = {}
@@ -58,6 +82,8 @@ def verify(root: Path) -> dict[str, object]:
         readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
         if readiness.get("live_trading_enabled") is True:
             errors.append("live_trading_enabled")
+        if readiness.get("status") != "ready" or readiness.get("http_status") != 200:
+            errors.append("readiness_not_publishable")
 
     result = {
         "status": "PASS" if not errors else "FAIL",
@@ -68,6 +94,9 @@ def verify(root: Path) -> dict[str, object]:
         "snapshot_status": manifest.get("status"),
         "readiness_status": readiness.get("status"),
         "readiness_http_status": readiness.get("http_status"),
+        "source_sha": build_manifest.get("source_sha"),
+        "build_id": build_manifest.get("build_id"),
+        "data_hash_sha256": build_manifest.get("data_hash_sha256"),
     }
     return result
 

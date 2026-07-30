@@ -34,6 +34,8 @@ class CanonicalPerformanceService:
 
     DEFAULT_STRATEGY_ID = "alphaops_v4"
     DEFAULT_STRATEGY_VERSION = "dawnstrike-alphaops-v4"
+    CALCULATION_VERSION = "dawnstrike-performance-v2"
+    EXECUTION_POLICY_VERSION = "unregistered-policy"
 
     def __init__(
         self,
@@ -57,7 +59,8 @@ class CanonicalPerformanceService:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as connection:
             connection.row_factory = sqlite3.Row
-            run_migrations(connection)
+            if persist:
+                run_migrations(connection)
             inputs = self._read_inputs(connection, market_date=market_date)
             benchmark = inputs["benchmark"]
             rows = [
@@ -79,19 +82,23 @@ class CanonicalPerformanceService:
             )
             input_hash = stable_hash(inputs["hash_inputs"])
             rows = [_replace_input_hash(row, input_hash) for row in rows]
-            daily = _aggregate_daily(rows, calculated_at, input_hash)
+            daily = _aggregate_daily(rows, calculated_at, input_hash, inputs["equity"])
+            _add_cumulative_metrics(daily)
             issues = _issues(rows, calculated_at)
             if persist:
                 self._persist(connection, rows, daily, issues, market_date=market_date)
+            row_payload = [row.to_dict() for row in rows]
+            output_hash = stable_hash({"rows": row_payload, "daily": daily, "issues": issues})
             return {
                 "status": _overall_status(rows, daily),
                 "market_date": market_date,
                 "calculated_at": calculated_at,
                 "input_hash_sha256": input_hash,
+                "output_hash_sha256": output_hash,
                 "row_count": len(rows),
                 "daily_count": len(daily),
                 "issue_count": len(issues),
-                "rows": [row.to_dict() for row in rows],
+                "rows": row_payload,
                 "daily": daily,
                 "issues": issues,
             }
@@ -150,6 +157,7 @@ class CanonicalPerformanceService:
         fills = _select_rows(connection, "paper_trade_fills", market_date)
         strategy_trades = _select_rows(connection, "strategy_paper_trades", market_date)
         benchmark_rows = _select_rows(connection, "benchmark_performance", market_date)
+        equity_rows = _select_rows(connection, "portfolio_equity_observations", market_date)
         benchmark = _benchmark_lookup(benchmark_rows)
         return {
             "signals": signals,
@@ -157,6 +165,7 @@ class CanonicalPerformanceService:
             "positions": positions,
             "fills": fills,
             "strategy_trades": strategy_trades,
+            "equity": equity_rows,
             "benchmark": benchmark,
             "hash_inputs": {
                 "signals": signals,
@@ -164,6 +173,7 @@ class CanonicalPerformanceService:
                 "positions": positions,
                 "fills": fills,
                 "strategy_trades": strategy_trades,
+                "equity": equity_rows,
                 "benchmark": benchmark_rows,
             },
         }
@@ -529,38 +539,33 @@ class CanonicalPerformanceService:
                 INSERT INTO portfolio_daily_performance (
                     performance_id, market_date, cohort, strategy_id, strategy_version,
                     status, gross_pnl_cents, fees_cents, slippage_cents, gross_return_pct,
-                    net_pnl_cents,
-                    allocated_capital_cents, return_pct, benchmark_return_pct,
-                    excess_return_pct, realized_trade_count, unrealized_trade_count,
+                    unrealized_pnl_cents, opening_equity_cents, ending_equity_cents,
+                    net_pnl_cents, allocated_capital_cents, return_pct, cumulative_return_pct,
+                    benchmark_return_pct, excess_return_pct, drawdown_pct, exposure_cents,
+                    realized_trade_count, unrealized_trade_count,
                     missing_outcome_count, quarantined_count, source_hash_sha256,
-                    input_hash_sha256, calculated_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    input_hash_sha256, calculated_at, execution_policy_version,
+                    calculation_version, evidence_state, coverage_json, source_refs_json,
+                    payload_json
+                ) VALUES (
+                    :performance_id, :market_date, :cohort, :strategy_id, :strategy_version,
+                    :status, :gross_pnl_cents, :fees_cents, :slippage_cents,
+                    :gross_return_pct, :unrealized_pnl_cents, :opening_equity_cents,
+                    :ending_equity_cents, :net_pnl_cents, :allocated_capital_cents,
+                    :return_pct, :cumulative_return_pct, :benchmark_return_pct,
+                    :excess_return_pct, :drawdown_pct, :exposure_cents,
+                    :realized_trade_count, :unrealized_trade_count, :missing_outcome_count,
+                    :quarantined_count, :source_hash_sha256, :input_hash_sha256,
+                    :calculated_at, :execution_policy_version, :calculation_version,
+                    :evidence_state, :coverage_json, :source_refs_json, :payload_json
+                )
                 """,
-                (
-                    daily_row["performance_id"],
-                    daily_row["market_date"],
-                    daily_row["cohort"],
-                    daily_row["strategy_id"],
-                    daily_row["strategy_version"],
-                    daily_row["status"],
-                    daily_row["gross_pnl_cents"],
-                    daily_row["fees_cents"],
-                    daily_row["slippage_cents"],
-                    daily_row["gross_return_pct"],
-                    daily_row["net_pnl_cents"],
-                    daily_row["allocated_capital_cents"],
-                    daily_row["return_pct"],
-                    daily_row["benchmark_return_pct"],
-                    daily_row["excess_return_pct"],
-                    daily_row["realized_trade_count"],
-                    daily_row["unrealized_trade_count"],
-                    daily_row["missing_outcome_count"],
-                    daily_row["quarantined_count"],
-                    daily_row["source_hash_sha256"],
-                    daily_row["input_hash_sha256"],
-                    daily_row["calculated_at"],
-                    json.dumps(daily_row, sort_keys=True),
-                ),
+                {
+                    **daily_row,
+                    "coverage_json": json.dumps(daily_row["coverage"], sort_keys=True),
+                    "source_refs_json": json.dumps(daily_row["source_refs"], sort_keys=True),
+                    "payload_json": json.dumps(daily_row, sort_keys=True),
+                },
             )
         for issue in issues:
             connection.execute(
@@ -596,7 +601,7 @@ def _select_rows(
     if market_date:
         try:
             rows = connection.execute(
-                f"SELECT * FROM {table} WHERE market_date = ? ORDER BY market_date ASC, rowid ASC",
+                f"SELECT * FROM {table} WHERE market_date <= ? ORDER BY market_date ASC, rowid ASC",
                 (market_date,),
             ).fetchall()
         except sqlite3.OperationalError:
@@ -699,9 +704,13 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _aggregate_daily(
-    rows: list[PerformanceRow], calculated_at: str, input_hash: str
+    rows: list[PerformanceRow],
+    calculated_at: str,
+    input_hash: str,
+    equity_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str, str], list[PerformanceRow]] = defaultdict(list)
+    equity = _equity_lookup(equity_rows)
     for row in rows:
         grouped[(row.market_date, row.cohort.value, row.strategy_id, row.strategy_version)].append(
             row
@@ -713,39 +722,53 @@ def _aggregate_daily(
         missing = [row for row in group if row.record_status == RecordStatus.MISSING_OUTCOME]
         quarantined = [row for row in group if row.record_status == RecordStatus.QUARANTINED]
         no_trade = [row for row in group if row.record_status == RecordStatus.NO_TRADE]
+        explicit_no_trade = bool(no_trade) and not realized and not unrealized and not missing
         gross = _sum_optional(row.gross_pnl_cents for row in realized)
         net = _sum_if_complete(row.net_pnl_cents for row in realized)
         fees = _sum_if_complete(row.fees_cents for row in realized)
         slippage = _sum_if_complete(row.slippage_cents for row in realized)
+        if explicit_no_trade:
+            gross = net = fees = slippage = 0
         capital = _sum_optional(row.notional_cents for row in realized)
-        net_return = round(net / capital * 100.0, 4) if net is not None and capital else None
-        gross_return_values = [
-            row.gross_return_pct for row in realized if row.gross_return_pct is not None
-        ]
-        gross_return = (
-            round(gross / capital * 100.0, 4)
-            if gross is not None and capital
-            else (
-                round(sum(gross_return_values) / len(gross_return_values), 4)
-                if gross_return_values
-                else None
-            )
-        )
+        key = (market_date, cohort, strategy_id, strategy_version)
+        equity_observation = equity.get(key, {})
+        opening_equity = _int_or_none(equity_observation.get("opening_equity_cents"))
+        ending_equity = _int_or_none(equity_observation.get("ending_equity_cents"))
+        net_return = _portfolio_return(net, opening_equity)
+        gross_return = _portfolio_return(gross, opening_equity)
         benchmark_values = [
             row.benchmark_return_pct for row in realized if row.benchmark_return_pct is not None
         ]
         benchmark = (
             round(sum(benchmark_values) / len(benchmark_values), 4) if benchmark_values else None
         )
-        status = (
-            "NO_TRADE"
-            if not realized and not unrealized and not missing and not quarantined and no_trade
-            else "COMPLETE"
-        )
-        if missing or unrealized:
+        status = "NO_TRADE" if explicit_no_trade and not quarantined else "COMPLETE"
+        if (
+            missing
+            or unrealized
+            or (realized and (net is None or fees is None or slippage is None))
+        ):
+            status = "PARTIAL"
+        if realized and benchmark is None:
             status = "PARTIAL"
         if quarantined:
             status = "DEGRADED"
+        evidence_state = {
+            "COMPLETE": "complete",
+            "NO_TRADE": "no_trade",
+            "PARTIAL": "pending",
+            "DEGRADED": "degraded",
+        }[status]
+        eligible_count = len(group) - len(no_trade)
+        observed_count = len(realized)
+        excluded_count = len(quarantined)
+        missing_count = len(missing) + len(unrealized)
+        coverage_pct = (
+            round(observed_count / eligible_count * 100.0, 4) if eligible_count else 100.0
+        )
+        exposure = _sum_if_complete(row.notional_cents for row in group)
+        unrealized_pnl = _sum_if_complete(row.gross_pnl_cents for row in unrealized)
+        source_refs = _source_refs(*(ref for row in group for ref in row.source_refs))
         source_hash = stable_hash(sorted(row.source_hash_sha256 for row in group))
         output.append(
             {
@@ -764,6 +787,12 @@ def _aggregate_daily(
                 "gross_return_pct": gross_return,
                 "benchmark_return_pct": benchmark,
                 "excess_return_pct": _excess(net_return, benchmark),
+                "opening_equity_cents": opening_equity,
+                "ending_equity_cents": ending_equity,
+                "unrealized_pnl_cents": unrealized_pnl,
+                "cumulative_return_pct": None,
+                "drawdown_pct": None,
+                "exposure_cents": exposure,
                 "realized_trade_count": len(realized),
                 "unrealized_trade_count": len(unrealized),
                 "missing_outcome_count": len(missing),
@@ -772,6 +801,18 @@ def _aggregate_daily(
                 "source_hash_sha256": source_hash,
                 "input_hash_sha256": input_hash,
                 "calculated_at": calculated_at,
+                "generated_at": calculated_at,
+                "calculation_version": CanonicalPerformanceService.CALCULATION_VERSION,
+                "execution_policy_version": CanonicalPerformanceService.EXECUTION_POLICY_VERSION,
+                "evidence_state": evidence_state,
+                "coverage": {
+                    "eligible_count": eligible_count,
+                    "observed_count": observed_count,
+                    "missing_count": missing_count,
+                    "excluded_count": excluded_count,
+                    "coverage_pct": coverage_pct,
+                },
+                "source_refs": list(source_refs),
                 "cost_status": "complete"
                 if fees is not None and slippage is not None
                 else "missing_cost_component",
@@ -781,6 +822,61 @@ def _aggregate_daily(
             }
         )
     return output
+
+
+def _equity_lookup(
+    rows: Iterable[dict[str, Any]],
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    output: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        cohort = normalize_cohort(row.get("cohort"), default=Cohort.OFFICIAL_FORWARD_PAPER).value
+        key = (
+            str(row.get("market_date") or ""),
+            cohort,
+            str(row.get("strategy_id") or CanonicalPerformanceService.DEFAULT_STRATEGY_ID),
+            str(
+                row.get("strategy_version") or CanonicalPerformanceService.DEFAULT_STRATEGY_VERSION
+            ),
+        )
+        output[key] = row
+    return output
+
+
+def _portfolio_return(pnl_cents: int | None, opening_equity_cents: int | None) -> float | None:
+    if pnl_cents is None or opening_equity_cents is None or opening_equity_cents <= 0:
+        return None
+    return round(pnl_cents / opening_equity_cents * 100.0, 4)
+
+
+def _add_cumulative_metrics(daily: list[dict[str, Any]]) -> None:
+    states: dict[tuple[str, str, str], dict[str, float | bool]] = {}
+    for row in sorted(
+        daily,
+        key=lambda item: (
+            str(item.get("cohort") or ""),
+            str(item.get("strategy_id") or ""),
+            str(item.get("strategy_version") or ""),
+            str(item.get("market_date") or ""),
+        ),
+    ):
+        key = (
+            str(row.get("cohort") or ""),
+            str(row.get("strategy_id") or ""),
+            str(row.get("strategy_version") or ""),
+        )
+        state = states.setdefault(key, {"wealth": 1.0, "peak": 1.0, "invalid": False})
+        daily_return = row.get("return_pct")
+        if bool(state["invalid"]) or not isinstance(daily_return, (int, float)):
+            state["invalid"] = True
+            row["cumulative_return_pct"] = None
+            row["drawdown_pct"] = None
+            continue
+        state["wealth"] = float(state["wealth"]) * (1.0 + float(daily_return) / 100.0)
+        state["peak"] = max(float(state["peak"]), float(state["wealth"]))
+        row["cumulative_return_pct"] = round((float(state["wealth"]) - 1.0) * 100.0, 4)
+        row["drawdown_pct"] = round(
+            (float(state["wealth"]) / float(state["peak"]) - 1.0) * 100.0, 4
+        )
 
 
 def _sum_optional(values: Iterable[int | None]) -> int | None:
@@ -854,8 +950,14 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
         "allocated_capital_cents",
         "return_pct",
         "gross_return_pct",
+        "opening_equity_cents",
+        "ending_equity_cents",
+        "unrealized_pnl_cents",
+        "cumulative_return_pct",
         "benchmark_return_pct",
         "excess_return_pct",
+        "drawdown_pct",
+        "exposure_cents",
         "realized_trade_count",
         "unrealized_trade_count",
         "missing_outcome_count",
@@ -864,6 +966,12 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
         "source_hash_sha256",
         "input_hash_sha256",
         "calculated_at",
+        "generated_at",
+        "calculation_version",
+        "execution_policy_version",
+        "evidence_state",
+        "coverage",
+        "source_refs",
         "cost_status",
         "return_basis",
     )

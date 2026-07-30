@@ -19,7 +19,10 @@ class Cohort(str, Enum):
     """Evidence populations that must never be blended in public reporting."""
 
     OFFICIAL_FORWARD_PAPER = "official_forward_paper"
-    ALPHAOPS_RESEARCH = "alphaops_research"
+    ALPHAOPS_SIGNAL_RESEARCH = "alphaops_signal_research"
+    # Backward-compatible source-code name; the serialized identifier is the
+    # directive's explicit alphaops_signal_research value.
+    ALPHAOPS_RESEARCH = "alphaops_signal_research"
     HISTORICAL_BACKTEST = "historical_backtest"
     SHADOW_CHALLENGER = "shadow_challenger"
 
@@ -30,6 +33,124 @@ class RecordStatus(str, Enum):
     NO_TRADE = "no_trade"
     MISSING_OUTCOME = "missing_outcome"
     QUARANTINED = "quarantined"
+
+
+class EvidenceState(str, Enum):
+    COMPLETE = "complete"
+    NO_TRADE = "no_trade"
+    PENDING = "pending"
+    DEGRADED = "degraded"
+    MISSING = "missing"
+    NOT_ELIGIBLE = "not_eligible"
+
+
+PerformanceCohort = Cohort
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnMethodology:
+    """Versioned description of how a return is allowed to be calculated."""
+
+    calculation_version: str
+    execution_policy_version: str
+    portfolio_return_basis: str
+    price_basis: str
+    fee_policy: str
+    slippage_policy: str
+    benchmark_policy: str
+    timezone: str = "America/Chicago"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceCoverage:
+    eligible_count: int
+    observed_count: int
+    missing_count: int
+    excluded_count: int
+    coverage_pct: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkPerformance:
+    market_date: str
+    symbol: str
+    return_pct: float | None
+    source_refs: tuple[str, ...]
+    source_hash_sha256: str
+    observed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DailyPortfolioPerformance:
+    market_date: str
+    cohort: Cohort
+    strategy_id: str
+    strategy_version: str
+    evidence_state: EvidenceState
+    opening_equity_cents: int | None
+    ending_equity_cents: int | None
+    realized_pnl_cents: int | None
+    unrealized_pnl_cents: int | None
+    fees_cents: int | None
+    slippage_cents: int | None
+    net_pnl_cents: int | None
+    daily_return_pct: float | None
+    cumulative_return_pct: float | None
+    benchmark_return_pct: float | None
+    excess_return_pct: float | None
+    drawdown_pct: float | None
+    exposure_cents: int | None
+    trade_count: int
+    coverage: EvidenceCoverage
+    methodology: ReturnMethodology
+    source_refs: tuple[str, ...]
+    input_hash_sha256: str
+    generated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalPerformanceSnapshot:
+    schema_version: str
+    generated_at: str
+    as_of_market_date: str | None
+    daily: tuple[DailyPortfolioPerformance, ...]
+    trades: tuple[TradePerformance, ...]
+    benchmarks: tuple[BenchmarkPerformance, ...]
+    input_hash_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TradePerformance:
+    record_id: str
+    market_date: str
+    ticker: str
+    cohort: Cohort
+    evidence_state: EvidenceState
+    gross_pnl_cents: int | None
+    fees_cents: int | None
+    slippage_cents: int | None
+    net_pnl_cents: int | None
+    return_pct: float | None
+    source_refs: tuple[str, ...]
+    input_hash_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicSnapshotManifest:
+    schema_version: str
+    manifest_id: str
+    source_sha: str | None
+    build_id: str | None
+    market_date: str
+    generated_at: str
+    status: str
+    input_hash_sha256: str
+    payload_sha256: str
+    row_count: int
+    byte_count: int
+    coverage: EvidenceCoverage | None
+    research_only: bool
+    live_trading_enabled: bool
 
 
 def stable_hash(value: Any) -> str:
@@ -72,9 +193,10 @@ def normalize_cohort(value: Any, *, default: Cohort) -> Cohort:
         "official_telegram": Cohort.OFFICIAL_FORWARD_PAPER,
         "official_forward": Cohort.OFFICIAL_FORWARD_PAPER,
         "official_forward_paper": Cohort.OFFICIAL_FORWARD_PAPER,
-        "research": Cohort.ALPHAOPS_RESEARCH,
-        "alphaops": Cohort.ALPHAOPS_RESEARCH,
-        "alphaops_research": Cohort.ALPHAOPS_RESEARCH,
+        "research": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
+        "alphaops": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
+        "alphaops_research": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
+        "alphaops_signal_research": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
         "backtest": Cohort.HISTORICAL_BACKTEST,
         "historical_backtest": Cohort.HISTORICAL_BACKTEST,
         "shadow": Cohort.SHADOW_CHALLENGER,

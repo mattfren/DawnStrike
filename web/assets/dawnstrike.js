@@ -1,5 +1,6 @@
 const COHORTS = {
   official_forward_paper: "Official paper",
+  alphaops_signal_research: "Research observations",
   alphaops_research: "Research observations",
   historical_backtest: "Historical backtest",
   shadow_challenger: "Shadow challenger",
@@ -105,7 +106,7 @@ function renderPerformance(daily) {
 
 function renderResearch(rows) {
   const body = document.getElementById("research-table");
-  const research = rows.filter((row) => row.cohort === "alphaops_research").slice(0, 80);
+  const research = rows.filter((row) => ["alphaops_signal_research", "alphaops_research"].includes(row.cohort)).slice(0, 80);
   if (!research.length) { body.innerHTML = '<tr><td colspan="6">No research observations are published.</td></tr>'; return; }
   body.innerHTML = research.map((row) => `<tr>
     <td>${escapeHtml(row.market_date || "Not reported")}</td><td><strong>${escapeHtml(row.ticker || "Not reported")}</strong></td>

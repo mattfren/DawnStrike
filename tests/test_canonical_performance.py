@@ -8,6 +8,7 @@ from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
 from intraday_scanner.risk.policy import RiskInput, evaluate_risk
 from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
+from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -99,6 +100,29 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
                 ),
             ),
         )
+        run_migrations(connection)
+        connection.execute(
+            """
+            INSERT INTO portfolio_equity_observations
+            (observation_id, market_date, cohort, strategy_id, strategy_version,
+             opening_equity_cents, ending_equity_cents, source_refs_json,
+             source_hash_sha256, observed_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "equity-2026-07-29",
+                "2026-07-29",
+                "official_forward_paper",
+                "alphaops_v4",
+                "dawnstrike-alphaops-v4",
+                100_000,
+                109_700,
+                '["https://example.test/equity"]',
+                "equity-source-hash",
+                "2026-07-29T21:00:00+00:00",
+                "{}",
+            ),
+        )
 
     result = CanonicalPerformanceService(db_path).reconcile(now="2026-07-29T21:00:00+00:00")
     row = result["rows"][0]
@@ -112,6 +136,9 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
     assert row["return_pct"] == 9.7
     assert daily["return_basis"] == "net_after_costs"
     assert daily["net_pnl_cents"] == 9700
+    assert daily["return_pct"] == 9.7
+    assert daily["opening_equity_cents"] == 100_000
+    assert daily["ending_equity_cents"] == 109_700
 
 
 def test_reconciliation_and_snapshot_are_idempotent_and_bounded(tmp_path: Path) -> None:
