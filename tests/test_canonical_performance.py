@@ -157,6 +157,45 @@ def test_reconciliation_and_snapshot_are_idempotent_and_bounded(tmp_path: Path) 
     assert (tmp_path / "public" / "performance.json.manifest.json").exists()
 
 
+def test_reconciliation_reuses_timestamp_for_unchanged_inputs(tmp_path: Path) -> None:
+    db_path = tmp_path / "stable.sqlite"
+    _raw_db(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO historical_signals
+            (signal_id, scan_id, generated_at, market_date, ticker, signal_label,
+             risk_flags_json, avoid_reasons_json, raw_payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stable-signal",
+                "stable-scan",
+                "2026-07-29T13:00:00+00:00",
+                "2026-07-29",
+                "NOVA",
+                "WATCH",
+                "[]",
+                "[]",
+                json.dumps({"source_url": "https://example.test/stable-signal"}),
+            ),
+        )
+    service = CanonicalPerformanceService(db_path)
+
+    first = service.reconcile(now="2026-07-29T21:00:00+00:00")
+    second = service.reconcile()
+    first_public = service.load_public_data()
+    second_public = service.load_public_data()
+    first_public["generated_at"] = None
+    second_public["generated_at"] = None
+
+    assert second["input_hash_sha256"] == first["input_hash_sha256"]
+    assert second["calculated_at"] == first["calculated_at"]
+    assert second["rows"] == first["rows"]
+    assert second["daily"] == first["daily"]
+    assert second_public == first_public
+
+
 def test_full_reconcile_clears_stale_canonical_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "stale.sqlite"
     _raw_db(db_path)

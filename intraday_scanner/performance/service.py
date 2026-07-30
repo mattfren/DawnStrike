@@ -58,13 +58,18 @@ class CanonicalPerformanceService:
         persist: bool = True,
         now: str | None = None,
     ) -> dict[str, Any]:
-        calculated_at = now or _utc_now()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as connection:
             connection.row_factory = sqlite3.Row
             if persist:
                 run_migrations(connection)
             inputs = self._read_inputs(connection, market_date=market_date)
+            input_hash = stable_hash(inputs["hash_inputs"])
+            calculated_at = (
+                now
+                or _existing_calculated_at(connection, input_hash)
+                or _utc_now()
+            )
             benchmark = inputs["benchmark"]
             rows = [
                 *self._position_rows(
@@ -84,7 +89,6 @@ class CanonicalPerformanceService:
                     item.record_id,
                 )
             )
-            input_hash = stable_hash(inputs["hash_inputs"])
             rows = [_replace_input_hash(row, input_hash) for row in rows]
             daily = _aggregate_daily(
                 rows,
@@ -1141,3 +1145,34 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _existing_calculated_at(connection: sqlite3.Connection, input_hash: str) -> str | None:
+    """Reuse the calculation timestamp when the canonical inputs are unchanged."""
+
+    try:
+        row = connection.execute(
+            """
+            SELECT calculated_at
+            FROM portfolio_daily_performance
+            WHERE input_hash_sha256 = ? AND calculated_at IS NOT NULL
+            ORDER BY calculated_at ASC, performance_id ASC
+            LIMIT 1
+            """,
+            (input_hash,),
+        ).fetchone()
+        if row is None:
+            row = connection.execute(
+                """
+                SELECT reconciled_at
+                FROM portfolio_performance_rows
+                WHERE input_hash_sha256 = ? AND reconciled_at IS NOT NULL
+                ORDER BY reconciled_at ASC, record_id ASC
+                LIMIT 1
+                """,
+                (input_hash,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    value = str(row[0]) if row and row[0] is not None else ""
+    return value or None
