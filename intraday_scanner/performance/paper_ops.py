@@ -3,7 +3,7 @@
 PaperOps is an input source, not a second performance ledger.  Its daily
 strategy summaries are normalized into the canonical performance row shape,
 with replay evidence kept historical and forward shadow evidence kept in the
-shadow-challenger cohort.  Rows whose equity, P&L, or cost identity cannot be
+shadow-challenger cohort. Rows whose equity, P&L, or source identity cannot be
 proven are retained as quarantined observations and never contribute to valid
 returns.
 """
@@ -59,6 +59,7 @@ def load_paper_ops(
     issues: list[dict[str, Any]] = []
     source_return_field_mismatch_count = 0
     seen_ids: set[str] = set()
+    previous_ending_by_series: dict[tuple[str, str, str, str, str], int] = {}
     source_row_count = 0
 
     with source_path.open(newline="", encoding="utf-8") as stream:
@@ -73,6 +74,9 @@ def load_paper_ops(
                 raw_row,
                 row_number=row_number,
                 file_hash=file_hash,
+                previous_ending_cents=previous_ending_by_series.get(
+                    _series_key(raw_row)
+                ),
             )
             record_id = str(observation["record_id"])
             if record_id in seen_ids:
@@ -100,6 +104,9 @@ def load_paper_ops(
             row_equity = observation.pop("equity", None)
             if row_equity is not None:
                 equity.append(row_equity)
+                previous_ending_by_series[_series_key(raw_row)] = int(
+                    row_equity["ending_equity_cents"]
+                )
             rows.append(observation)
 
     quarantined_count = sum(row.get("record_status") == "quarantined" for row in rows)
@@ -135,7 +142,23 @@ def load_paper_ops(
     return report
 
 
-def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> dict[str, Any]:
+def _series_key(raw: dict[str, str]) -> tuple[str, str, str, str, str]:
+    return (
+        raw.get("mode", "").strip().lower(),
+        raw.get("strategy_id", "").strip(),
+        raw.get("strategy_version", "").strip(),
+        raw.get("execution_policy_version", "").strip(),
+        raw.get("strategy_semantics_fingerprint", "").strip(),
+    )
+
+
+def _normalize_row(
+    raw: dict[str, str],
+    *,
+    row_number: int,
+    file_hash: str,
+    previous_ending_cents: int | None,
+) -> dict[str, Any]:
     date_value = raw.get("date", "").strip()
     mode = raw.get("mode", "").strip().lower()
     strategy_id = raw.get("strategy_id", "").strip()
@@ -167,6 +190,7 @@ def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> d
     closed = _int(raw.get("trades_closed"))
     open_positions = _int(raw.get("open_positions"))
     exposure_pct = _decimal(raw.get("exposure_pct"))
+    return_basis_cents = previous_ending_cents or starting
     reasons: list[str] = []
     if not date_value or not strategy_id or not strategy_version or not run_id:
         reasons.append("missing_paper_ops_identity")
@@ -176,28 +200,60 @@ def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> d
         reasons.append("missing_paper_ops_pnl_component")
     if fees is None or slippage is None:
         reasons.append("missing_paper_ops_cost_component")
-    if total is not None and realized is not None and unrealized is not None:
-        if abs(total - (realized + unrealized)) > 1:
-            reasons.append("paper_ops_total_pnl_mismatch")
-    if (
+    component_identity = (
+        starting is not None
+        and ending is not None
+        and realized is not None
+        and unrealized is not None
+        and abs((ending - starting) - (realized + unrealized)) <= 1
+    )
+    after_cost_identity = (
         starting is not None
         and ending is not None
         and realized is not None
         and unrealized is not None
         and fees is not None
         and slippage is not None
-        and abs((ending - starting) - (realized + unrealized - fees - slippage)) > 1
+        and abs((ending - starting) - (realized + unrealized - fees - slippage))
+        <= 1
+    )
+    daily_total_identity = (
+        ending is not None
+        and total is not None
+        and return_basis_cents is not None
+        and abs((ending - return_basis_cents) - total) <= 1
+    )
+    cumulative_total_identity = (
+        total is not None
+        and realized is not None
+        and unrealized is not None
+        and abs(total - (realized + unrealized)) <= 1
+    )
+    if (
+        ending is not None
+        and total is not None
+        and return_basis_cents is not None
+        and not (daily_total_identity or cumulative_total_identity)
     ):
-        reasons.append("paper_ops_equity_pnl_cost_mismatch")
+        reasons.append("paper_ops_total_pnl_mismatch")
+    component_mismatch = (
+        starting is not None
+        and ending is not None
+        and realized is not None
+        and unrealized is not None
+        and not (component_identity or after_cost_identity)
+    )
+    if component_mismatch and not daily_total_identity:
+        reasons.append("paper_ops_equity_pnl_component_mismatch")
 
     return_value = _decimal(raw.get("daily_return_pct"))
     source_return_field_mismatch = False
     derived_return_pct: float | None = None
-    if starting is not None and ending is not None and starting > 0:
+    if ending is not None and return_basis_cents is not None and return_basis_cents > 0:
         derived_return_pct = round(
             float(
-                (Decimal(ending) - Decimal(starting))
-                / Decimal(starting)
+                (Decimal(ending) - Decimal(return_basis_cents))
+                / Decimal(return_basis_cents)
                 * Decimal("100")
             ),
             4,
@@ -212,14 +268,13 @@ def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> d
 
     valid = not reasons
     status = "realized" if valid else "quarantined"
-    if valid and (closed or 0) == 0 and (open_positions or 0) == 0 and (ending == starting):
+    if (
+        valid
+        and (closed or 0) == 0
+        and (open_positions or 0) == 0
+        and (ending == return_basis_cents)
+    ):
         status = "no_trade"
-    gross = (
-        realized + unrealized
-        if valid and realized is not None and unrealized is not None
-        else None
-    )
-    net = ending - starting if valid and starting is not None and ending is not None else None
     notional = (
         int(round(starting * exposure_pct / Decimal("100")))
         if starting is not None and exposure_pct is not None
@@ -232,15 +287,25 @@ def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> d
     issue_rows = [
         _issue(record_id, date_value, reason, _message(reason)) for reason in reasons
     ]
+    if component_mismatch and daily_total_identity:
+        issue_rows.append(
+            _issue(
+                record_id,
+                date_value,
+                "paper_ops_equity_pnl_component_mismatch",
+                _message("paper_ops_equity_pnl_component_mismatch"),
+                severity="warning",
+            )
+        )
     equity = None
-    if starting is not None and ending is not None:
+    if ending is not None and return_basis_cents is not None:
         equity = {
             "observation_id": f"paper_ops_equity:{record_id}",
             "market_date": date_value,
             "cohort": cohort.value,
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
-            "opening_equity_cents": starting,
+            "opening_equity_cents": return_basis_cents,
             "ending_equity_cents": ending,
             "source_refs": source_refs,
             "source_hash_sha256": stable_hash({"file": file_hash, "row": raw}),
@@ -260,15 +325,19 @@ def _normalize_row(raw: dict[str, str], *, row_number: int, file_hash: str) -> d
         "exit_price": None,
         "quantity": None,
         "notional_cents": notional,
-        "gross_pnl_cents": gross,
-        "gross_return_pct": (
-            round(float(Decimal(gross) / Decimal(starting) * Decimal("100")), 4)
-            if gross is not None and starting is not None and starting > 0
-            else None
-        ),
+        # The source reports cumulative realized/unrealized components while
+        # total_pnl is the observed equity delta for the current day. There is
+        # no source identity proving a daily gross/net split, so only the
+        # observed equity delta is eligible for the canonical daily return.
+        "gross_pnl_cents": None,
+        "gross_return_pct": None,
         "fees_cents": fees if valid else None,
         "slippage_cents": slippage if valid else None,
-        "net_pnl_cents": net,
+        "net_pnl_cents": (
+            ending - return_basis_cents
+            if valid and ending is not None and return_basis_cents is not None
+            else None
+        ),
         "return_pct": derived_return_pct,
         "benchmark_return_pct": None,
         "excess_return_pct": None,
@@ -322,12 +391,19 @@ def _int(value: Any) -> int | None:
     return int(decimal) if decimal is not None else None
 
 
-def _issue(record_id: str, market_date: str, code: str, message: str) -> dict[str, Any]:
+def _issue(
+    record_id: str,
+    market_date: str,
+    code: str,
+    message: str,
+    *,
+    severity: str = "error",
+) -> dict[str, Any]:
     return {
         "issue_id": stable_hash([record_id, code]),
         "record_id": record_id,
         "market_date": market_date,
-        "severity": "error",
+        "severity": severity,
         "issue_code": code,
         "message": message,
     }
@@ -346,11 +422,12 @@ def _message(code: str) -> str:
         ),
         "missing_paper_ops_cost_component": "PaperOps daily row lacks explicit fees or slippage.",
         "paper_ops_total_pnl_mismatch": (
-            "PaperOps total P&L does not equal realized plus unrealized P&L within one cent."
+            "PaperOps total P&L does not equal the observed equity change from the "
+            "prior series observation within one cent."
         ),
-        "paper_ops_equity_pnl_cost_mismatch": (
-            "PaperOps ending equity does not equal opening equity plus after-cost P&L "
-            "within one cent."
+        "paper_ops_equity_pnl_component_mismatch": (
+            "PaperOps ending equity does not equal policy starting equity plus the "
+            "reported realized and unrealized P&L components within one cent."
         ),
         "duplicate_paper_ops_identity": "PaperOps calendar identity occurred more than once.",
     }.get(code, "PaperOps row failed canonical reconciliation.")

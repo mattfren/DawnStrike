@@ -18,14 +18,14 @@ approval.
 ## Known current truth
 
 The current source database has unresolved research outcomes and incomplete
-cost/benchmark inputs. The PaperOps export adds 190 daily rows: 85 are
-accepted, 105 are quarantined, and 131 source issues remain; cents-level
-identity checks also report 85 source return-field mismatches. The reconciled
-artifact contains 425 canonical rows, 156 discrepancies, 142 eligible rows,
-and only 12 observed rows (8.4507% coverage). Therefore the candidate
-intentionally shows only supported observations while leaving unsupported
-after-cost return or excess return unreported. That is a data-quality
-limitation, not a UI failure to hide.
+cost/benchmark inputs. The PaperOps export adds 190 daily rows: all 190 are
+accepted, none are quarantined, 21 component-scope warnings remain, and there
+are 0 source return-field mismatches. The reconciled artifact contains 425
+canonical rows, 46 discrepancies, 139 eligible rows, and 114 observed rows
+(82.0144% coverage). Therefore the candidate shows supported observed equity
+returns while leaving unsupported after-cost, benchmark-relative, and
+calibrated claims unreported. That is a data-quality limitation, not a UI
+failure to hide.
 
 Recovery blocker: the fresh build was accidentally run against the shared
 database and persisted the derived canonical read model. The shared DB now

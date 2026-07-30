@@ -950,6 +950,9 @@ def _aggregate_daily(
         source_hash = stable_hash(sorted(row.source_hash_sha256 for row in group))
         policies = sorted({row.execution_policy_version for row in group})
         execution_policy_version = policies[0] if len(policies) == 1 else "mixed"
+        has_portfolio_observation = any(
+            row.record_type == "portfolio_observation" for row in group
+        )
         realized_trade_count = sum(
             row.trade_count if row.record_type == "portfolio_observation" else 1
             for row in realized
@@ -1003,12 +1006,24 @@ def _aggregate_daily(
                     "coverage_pct": coverage_pct,
                 },
                 "source_refs": list(source_refs),
-                "cost_status": "complete"
-                if fees is not None and slippage is not None
-                else "missing_cost_component",
-                "return_basis": "net_after_costs"
-                if net_return is not None
-                else "gross_observed_or_missing",
+                "cost_status": (
+                    "reported_not_reconciled"
+                    if has_portfolio_observation and fees is not None and slippage is not None
+                    else (
+                        "complete"
+                        if fees is not None and slippage is not None
+                        else "missing_cost_component"
+                    )
+                ),
+                "return_basis": (
+                    "observed_equity_change"
+                    if has_portfolio_observation and net_return is not None
+                    else (
+                        "net_after_costs"
+                        if net_return is not None
+                        else "gross_observed_or_missing"
+                    )
+                ),
             }
         )
     return output

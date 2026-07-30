@@ -7,6 +7,12 @@ The candidate configuration uses native static output at `build/public` and
 only `api/health.py` and `api/readiness.py`. The public artifact verifier rejects
 SQLite, database, scanner, Telegram, UI-runtime, secret, and path leakage.
 
+The current local adapter correction was rebuilt read-only from the copied
+database and the external PaperOps source. It produced 425 canonical rows,
+222 daily records, 633,502 raw snapshot bytes / 42,287 deterministic-gzip
+bytes, 190 accepted PaperOps rows, 0 quarantined rows, 21 component-scope
+warnings, and readiness HTTP 503. This local artifact is not a deployment.
+
 The Vercel CLI initially reported that `uv` was not available in the local
 PATH. `uv` was then installed in the local development environment. A Windows
 PowerShell UTF-8 BOM in the stage writer was also corrected because Vercel

@@ -147,3 +147,107 @@ def test_persisted_daily_metadata_is_retained_in_public_data(tmp_path: Path) -> 
     assert replay["performance_id"] == "2026-07-29:historical_backtest:replay_strategy:v1"
     assert replay["timezone"] == "America/Chicago"
     assert public["safety_evidence"]["halt_status"]["state"] == "unknown"
+
+
+def test_paper_ops_daily_delta_is_used_when_components_are_mark_scoped(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    calendar = root / "calendar"
+    calendar.mkdir(parents=True)
+    rows = [
+        {
+            "date": "2026-07-29",
+            "mode": "forward",
+            "strategy_id": "shadow_strategy",
+            "strategy_version": "v2",
+            "execution_policy_version": "paper-policy-v2",
+            "strategy_semantics_fingerprint": "semantics-v2",
+            "data_snapshot_id": "snapshot-1",
+            "starting_equity": "100000",
+            "ending_equity": "100000",
+            "realized_pnl": "0",
+            "unrealized_pnl": "0",
+            "total_pnl": "0",
+            "daily_return_pct": "0",
+            "fees_paid": "0",
+            "slippage_estimate": "0",
+            "trades_closed": "0",
+            "open_positions": "0",
+            "exposure_pct": "0",
+            "run_id": "run-1",
+        },
+        {
+            "date": "2026-07-30",
+            "mode": "forward",
+            "strategy_id": "shadow_strategy",
+            "strategy_version": "v2",
+            "execution_policy_version": "paper-policy-v2",
+            "strategy_semantics_fingerprint": "semantics-v2",
+            "data_snapshot_id": "snapshot-2",
+            "starting_equity": "100000",
+            "ending_equity": "100100",
+            "realized_pnl": "0",
+            "unrealized_pnl": "100",
+            "total_pnl": "100",
+            "daily_return_pct": "0.001",
+            "fees_paid": "0",
+            "slippage_estimate": "0",
+            "trades_closed": "0",
+            "open_positions": "1",
+            "exposure_pct": "10",
+            "run_id": "run-2",
+        },
+        {
+            "date": "2026-07-31",
+            "mode": "forward",
+            "strategy_id": "shadow_strategy",
+            "strategy_version": "v2",
+            "execution_policy_version": "paper-policy-v2",
+            "strategy_semantics_fingerprint": "semantics-v2",
+            "data_snapshot_id": "snapshot-3",
+            "starting_equity": "100000",
+            "ending_equity": "100030",
+            "realized_pnl": "0",
+            "unrealized_pnl": "20",
+            "total_pnl": "-70",
+            "daily_return_pct": "-0.000699",
+            "fees_paid": "0",
+            "slippage_estimate": "0",
+            "trades_closed": "0",
+            "open_positions": "1",
+            "exposure_pct": "10",
+            "run_id": "run-3",
+        },
+    ]
+    with (calendar / "strategy_daily_returns.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in FIELDS})
+
+    db_path = tmp_path / "empty.sqlite"
+    SQLiteScanStore(db_path).initialize()
+    result = CanonicalPerformanceService(
+        db_path,
+        paper_ops_root=root,
+    ).reconcile(persist=False, now="2026-07-31T21:00:00+00:00")
+
+    by_date = {
+        row["market_date"]: row
+        for row in result["rows"]
+        if row["strategy_id"] == "shadow_strategy"
+    }
+    assert result["paper_ops_reconciliation"]["accepted_count"] == 3
+    assert result["paper_ops_reconciliation"]["quarantined_count"] == 0
+    assert by_date["2026-07-30"]["net_pnl_cents"] == 10_000
+    assert by_date["2026-07-30"]["return_pct"] == 0.1
+    assert by_date["2026-07-31"]["net_pnl_cents"] == -7_000
+    assert by_date["2026-07-31"]["return_pct"] == -0.0699
+    assert any(
+        issue["severity"] == "warning"
+        and issue["issue_code"] == "paper_ops_equity_pnl_component_mismatch"
+        for issue in result["issues"]
+    )

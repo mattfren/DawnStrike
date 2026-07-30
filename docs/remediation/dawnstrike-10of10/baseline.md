@@ -105,9 +105,11 @@ unchanged: positions 7,
 signals 228,
 `b9115a500a89b2305e3e6d06572761299530a67b8d4c9abe104bc85ddacfd93b`.
 
-The authoritative PaperOps reconciliation reports 425 canonical rows, 222
-daily records, 156 discrepancies, 85 accepted PaperOps rows, 105 quarantined
-rows, 131 PaperOps issues, and 85 source return-field mismatches.
+The current authoritative PaperOps revalidation reports 425 canonical rows,
+222 daily records, 46 discrepancies, 190 accepted PaperOps rows, 0 quarantined
+rows, 21 PaperOps component-scope warnings, and 0 source return-field
+mismatches. Daily returns now derive from the verified prior-to-current equity
+delta; readiness remains HTTP 503.
 
 Production was re-inspected as deployment
 `dpl_ErcbSKoHYNf595t7zHK6HxyMdLge`
@@ -201,5 +203,5 @@ scheduler work:
 - The copied evidence database now contains 425 canonical rows and 222 daily
   records after the rehearsal. The shared source database was not used as a
   write target.
-- PaperOps source reconciliation is 190 rows, 85 accepted, 105 quarantined,
-  and 131 row-level issues; readiness is correctly HTTP 503.
+- PaperOps source reconciliation is 190 rows, 190 accepted, 0 quarantined,
+  and 21 warning-level component-scope issues; readiness is correctly HTTP 503.

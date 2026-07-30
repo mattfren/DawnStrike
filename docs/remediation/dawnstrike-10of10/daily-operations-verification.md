@@ -14,8 +14,9 @@ preserves historical canonical days, clears stale canonical rows on a full
 rebuild, records the source-to-promotion stage chain with hashes, timestamps,
 errors, and next actions, and returns 503 semantics for no-data/degraded
 states. The real copied-source rehearsal produced 425 rows, 222 daily records,
-and 156 discrepancies (including 105 quarantined PaperOps rows); it did not
-publish a green snapshot. Each finalize attempt now records one auditable
+and 46 discrepancies (25 missing-outcome warnings plus 21 PaperOps
+component-scope warnings); it did not publish a green snapshot. Each finalize
+attempt now records one auditable
 console notification containing market date, stage, build ID, data hash,
 coverage, PaperOps summary, deployment URL (null until one is supplied), and
 next action. `scheduler-doctor` confirms that

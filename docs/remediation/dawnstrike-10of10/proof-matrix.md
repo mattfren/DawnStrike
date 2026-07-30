@@ -6,14 +6,14 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
 |---|---|---|
-| Full pytest suite | PASS: 224 passed | `py -m pytest -q` |
+| Full pytest suite | PASS | `py -m pytest -q` |
 | Ruff | PASS | `py -m ruff check .` |
 | Mypy | PASS: 109 source files | `py -m mypy intraday_scanner` |
-| Focused canonical tests | PASS: 16 passed | PaperOps, scheduler, canonical, and snapshot tests |
+| Focused canonical tests | PASS: 17 passed | PaperOps, scheduler, canonical, and snapshot tests |
 | Compile | PASS | `py -m compileall -q intraday_scanner scripts` |
 | PowerShell parse | PASS: 16 scripts | Windows PowerShell parser pass |
-| Real-database copied reconcile | PASS/FAIL-CLOSED | 425 rows, 222 daily records, 156 discrepancies, CLI exit 2 |
-| Diagnostic public build | PASS/DEGRADED | 425 canonical rows, 222 daily records, 632,094 raw bytes / 38,419 deterministic-gzip bytes, 250 public rows, snapshot `degraded`, readiness HTTP 503 |
+| Real-database copied reconcile | PASS/FAIL-CLOSED | 425 rows, 222 daily records, 46 discrepancies, CLI exit 2; PaperOps 190 accepted / 0 quarantined / 21 warnings |
+| Diagnostic public build | PASS/DEGRADED | 425 canonical rows, 222 daily records, 633,502 raw bytes / 42,287 deterministic-gzip bytes, 250 public rows, snapshot `degraded`, readiness HTTP 503 |
 | Artifact verifier | FAIL-CLOSED | Build source SHA `808bbceabdfc931d83fe9a1d827375a7d622a586` rejects only `snapshot_not_publishable` and `readiness_not_publishable`; compressed-size and row-limit checks pass |
 | Readiness truth | PASS | `degraded` snapshot -> `not_ready`, HTTP 503 |
 | Persistence target safety | PASS/FAIL-CLOSED | External `--db-path` rejected before opening the database; covered by `tests/test_public_build_safety.py` |
@@ -31,9 +31,10 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 ## Non-green by design
 
 The copied real dataset is partial: unresolved outcomes, absent benchmark rows,
-incomplete cost inputs, and 105 quarantined PaperOps rows remain visible. The
-candidate writes the bounded diagnostic snapshot but holds readiness at 503
-and leaves unsupported after-cost/excess return fields unreported. Strategy quality remains
+incomplete cost inputs, 21 PaperOps component-scope warnings, and 25 missing
+outcomes remain visible. The candidate writes the bounded diagnostic snapshot
+but holds readiness at 503 and leaves unsupported after-cost/excess return
+fields unreported. Strategy quality remains
 `WAITING_FOR_FORWARD_EVIDENCE` until the required forward sample is actually
 observed.
 

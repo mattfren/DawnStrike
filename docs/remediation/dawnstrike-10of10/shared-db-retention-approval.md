@@ -29,10 +29,13 @@ Observed at `2026-07-30T05:30:48-05:00`, SHA-256
 | `automation_runs` | 0 |
 | `notifications_sent` | 92 |
 
-The derived state remains `DEGRADED`: 156 reconciliation issues, 85 accepted
-PaperOps rows, 105 quarantined rows, 131 PaperOps issues, and 85 source return
-field mismatches. Raw-table hashes match the existing evidence copy; no raw
-positions, fills, outcomes, or historical signals were changed.
+The derived state remains non-green: the current isolated adapter reports 46
+reconciliation issues (25 missing-outcome warnings and 21 PaperOps
+component-scope warnings), 190 accepted PaperOps rows, 0 quarantined rows,
+and 0 source return-field mismatches. Raw-table hashes match the existing
+evidence copy; no raw positions, fills, outcomes, or historical signals were
+changed. Readiness remains HTTP 503 because upstream benchmark/outcome truth is
+still incomplete.
 
 ## Remaining boundaries
 
