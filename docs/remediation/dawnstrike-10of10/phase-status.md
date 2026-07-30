@@ -10,8 +10,8 @@ approval.
 | Daily publication | `LOCAL_VERIFIED` | One lock/retry/finalize chain writes snapshot, readiness, and stage manifest. |
 | Risk controls | `LOCAL_VERIFIED` | Unknown safety inputs fail closed; live execution remains disabled. |
 | Public UI | `LOCAL_VERIFIED` | Static responsive site, semantic navigation, bounded payload, and zero axe violations in the local browser pass. |
-| Vercel packaging | `BLOCKED_EXTERNAL` | Minimal static stage and liveness/readiness contracts are implemented; clean-source packaging passes, while the real-data artifact is correctly rejected as degraded/not ready and local CLI packaging requires missing `uv`. |
-| Preview deployment | `BLOCKED_APPROVAL_REQUIRED` | Requires explicit approval and an exact clean candidate SHA. |
+| Vercel packaging | `IN_PROGRESS` | Minimal static stage and liveness/readiness contracts are implemented; clean-source packaging passes, while the real-data artifact is correctly rejected as degraded/not ready. |
+| Preview deployment | `IN_PROGRESS` | Minimal Vercel build passes; candidate verification is waiting on publishable real-data readiness. |
 | Production promotion | `BLOCKED_APPROVAL_REQUIRED` | Do not promote until preview, rollback, and owner approval are recorded. |
 | Strategy evidence | `WAITING_FOR_FORWARD_EVIDENCE` | The existing dataset does not prove the required forward sample or benchmark evidence. |
 

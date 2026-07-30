@@ -1,6 +1,6 @@
 # Deployment verification
 
-Status: `BLOCKED_EXTERNAL` for local Vercel packaging and
+Status: `IN_PROGRESS` for local Vercel packaging and
 `BLOCKED_APPROVAL_REQUIRED` for production promotion.
 
 The candidate configuration uses native static output at `build/public` and

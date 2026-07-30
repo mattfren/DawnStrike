@@ -23,7 +23,7 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Semantic navigation | PASS | All four public controls activate their matching visible panels |
 | Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
 | Browser console/page errors/network | PASS | Current Playwright pass returned empty console/page-error/request-failure channels |
-| Vercel-native build | WAITING_EXTERNAL | CLI stopped because `uv` is not installed; no deployment or promotion was made |
+| Vercel-native build | PASS/NO_DEPLOY | Minimal stage build succeeds at 456,405 bytes with two functions; no deployment because candidate data readiness is not publishable |
 | Daily task registration | WAITING_APPROVED_CHECKOUT | registration script is ready; isolated candidate intentionally has no live DB |
 
 ## Non-green by design
