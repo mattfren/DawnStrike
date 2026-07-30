@@ -1070,6 +1070,13 @@ def _overall_status(rows: list[PerformanceRow], daily: list[dict[str, Any]]) -> 
 
 
 def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_object(row.pop("payload_json", "{}"))
+    payload.update(row)
+    if not isinstance(payload.get("coverage"), dict):
+        payload["coverage"] = _json_object(payload.get("coverage_json", "{}"))
+    if not isinstance(payload.get("source_refs"), list):
+        payload["source_refs"] = _json_list(payload.get("source_refs_json", "[]"))
+    payload["generated_at"] = payload.get("generated_at") or payload.get("calculated_at")
     allowed = (
         "market_date",
         "cohort",
@@ -1108,7 +1115,7 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
         "cost_status",
         "return_basis",
     )
-    return {key: row.get(key) for key in allowed}
+    return {key: payload.get(key) for key in allowed}
 
 
 def _public_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -1122,6 +1129,14 @@ def _json_list(value: Any) -> list[str]:
     except (TypeError, json.JSONDecodeError):
         return []
     return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _utc_now() -> str:

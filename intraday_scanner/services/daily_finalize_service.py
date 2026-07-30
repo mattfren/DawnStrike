@@ -108,6 +108,10 @@ class DailyFinalizeService:
                             "daily_count": result.get("daily_count"),
                             "issue_count": result.get("issue_count"),
                             "input_hash_sha256": result.get("input_hash_sha256"),
+                            "coverage": _coverage_summary(result.get("daily")),
+                            "paper_ops": _paper_ops_summary(
+                                result.get("paper_ops_reconciliation")
+                            ),
                         },
                         "upstream_status": upstream_status,
                     }
@@ -469,3 +473,53 @@ def _stage_status(domain_status: str) -> str:
     if normalized in {"not_recorded", "missing", "not_started", "unknown"}:
         return "NOT_STARTED"
     return "IN_PROGRESS"
+
+
+def _coverage_summary(value: object) -> dict[str, object]:
+    daily = value if isinstance(value, list) else []
+    eligible = observed = missing = excluded = 0
+    for row in daily:
+        if not isinstance(row, dict):
+            continue
+        coverage = row.get("coverage")
+        if not isinstance(coverage, dict):
+            continue
+        eligible += _non_negative_int(coverage.get("eligible_count"))
+        observed += _non_negative_int(coverage.get("observed_count"))
+        missing += _non_negative_int(coverage.get("missing_count"))
+        excluded += _non_negative_int(coverage.get("excluded_count"))
+    return {
+        "eligible_count": eligible,
+        "observed_count": observed,
+        "missing_count": missing,
+        "excluded_count": excluded,
+        "coverage_pct": round(observed / eligible * 100.0, 4) if eligible else None,
+    }
+
+
+def _paper_ops_summary(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "state",
+            "source_row_count",
+            "accepted_count",
+            "quarantined_count",
+            "issue_count",
+            "source_return_field_mismatch_count",
+            "source_file_sha256",
+        )
+    }
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, str):
+            return max(0, int(value))
+        return 0
+    except (TypeError, ValueError):
+        return 0

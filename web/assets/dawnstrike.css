@@ -32,7 +32,7 @@ h3 { margin-bottom:.4rem; font-size:1.05rem; }
 .hero-note strong { font-size:.9rem; }
 .hero-note p { color:var(--muted); margin:.2rem 0 0; font-size:.8rem; }
 .note-dot { width:9px; height:9px; margin-top:.35rem; flex:0 0 auto; background:var(--accent); border-radius:50%; box-shadow:0 0 0 5px rgba(130,230,196,.13); }
-.kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.8rem; margin-bottom:1rem; }
+.kpi-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:.8rem; margin-bottom:1rem; }
 .kpi-card,.panel { background:rgba(16,24,39,.86); border:1px solid var(--line); border-radius:var(--radius); }
 .kpi-card { padding:1.15rem; min-height:124px; }
 .kpi-card span,.kpi-card small { display:block; color:var(--muted); font-size:.76rem; }
@@ -75,5 +75,6 @@ tr:last-child td { border-bottom:0; }
 .detail-list { display:grid; grid-template-columns:1fr 1.4fr; gap:.8rem 1rem; margin:1.2rem 0 0; font-size:.8rem; }.detail-list dt { color:var(--muted); }.detail-list dd { margin:0; text-align:right; overflow-wrap:anywhere; }.detail-list dd.good { color:var(--accent); }.detail-list dd.bad { color:var(--danger); }
 .site-footer { max-width:1440px; margin:auto; padding:1.25rem clamp(1rem,4vw,3.5rem) 2rem; display:flex; justify-content:space-between; gap:1rem; color:var(--faint); font-size:.72rem; border-top:1px solid rgba(255,255,255,.07); }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+@media (max-width:1100px) { .kpi-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
 @media (max-width:900px) { .site-header { flex-wrap:wrap; gap:.8rem 1rem; }.primary-nav { order:3; flex-basis:100%; overflow-x:auto; }.header-status { margin-left:auto; }.hero { grid-template-columns:1fr; gap:1.4rem; }.kpi-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.overview-grid,.research-grid,.system-grid { grid-template-columns:1fr; } }
 @media (max-width:560px) { main { padding-top:2.2rem; }.site-header { padding-top:.8rem; }.brand-lockup { min-width:auto; }.header-status { font-size:.68rem; max-width:110px; text-align:right; white-space:normal; }.nav-link { padding:.45rem .55rem; font-size:.85rem; }.hero { padding-bottom:2rem; } h1 { font-size:2.55rem; }.section-heading { align-items:flex-start; flex-direction:column; }.kpi-card { padding:.9rem; min-height:112px; }.kpi-card strong { font-size:1.25rem; }.panel { padding:1rem; }.mini-bars { gap:.35rem; }.site-footer { flex-direction:column; gap:.3rem; } }

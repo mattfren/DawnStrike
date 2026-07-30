@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None)
     parser.add_argument("--retry-limit", type=int, default=2)
     parser.add_argument("--retry-delay-seconds", type=int, default=0)
+    parser.add_argument("--deployment-url", default=None)
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
@@ -70,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
         f"{source.get('source_sha')}:{data_hash}:{market_date}".encode()
     ).hexdigest()[:20]
     file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
+    notification = _record_build_notification(
+        root / args.db_path,
+        result,
+        market_date=market_date,
+        build_id=build_id,
+        data_hash=data_hash,
+        deployment_url=args.deployment_url,
+    )
+    result["notification"] = notification
     (output_root / "build-manifest.json").write_text(
         json.dumps(
             {
@@ -93,6 +104,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
     return 2 if result.get("status") == "FAILED" else 0
+
+
+def _record_build_notification(
+    db_path: Path,
+    result: dict[str, object],
+    *,
+    market_date: str,
+    build_id: str,
+    data_hash: str,
+    deployment_url: str | None,
+) -> dict[str, object]:
+    readiness = result.get("readiness")
+    readiness_payload = readiness if isinstance(readiness, dict) else {}
+    status = str(result.get("status") or "FAILED")
+    next_action = str(
+        readiness_payload.get("reason")
+        or "Inspect the daily stage manifest and rerun the bounded finalize flow."
+    )
+    reconciliation = result.get("reconciliation")
+    reconciliation_payload = reconciliation if isinstance(reconciliation, dict) else {}
+    notification = {
+        "status": status,
+        "market_date": market_date,
+        "stage": "readiness",
+        "build_id": build_id,
+        "data_hash_sha256": data_hash,
+        "coverage": reconciliation_payload.get("coverage"),
+        "paper_ops": reconciliation_payload.get("paper_ops"),
+        "deployment_url": deployment_url,
+        "next_action": next_action,
+    }
+    SQLiteScanStore(db_path).record_notification(
+        event_key=f"dawnstrike:daily-finalize:{market_date}:{build_id}",
+        channel="console",
+        payload=notification,
+        run_id=str(result.get("run_id") or "") or None,
+    )
+    return notification
 
 
 def _source_metadata(root: Path) -> dict[str, object]:

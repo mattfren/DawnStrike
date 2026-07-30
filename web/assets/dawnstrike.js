@@ -59,8 +59,18 @@ function render() {
   document.getElementById("kpi-date-note").textContent = latest ? labelForStatus(latest.status) : "Waiting for snapshot";
   document.getElementById("kpi-return").innerHTML = formatPercent(latest?.return_pct);
   document.getElementById("kpi-return-note").textContent = latest?.return_pct == null ? "Cost inputs incomplete" : "Net after sourced costs";
-  document.getElementById("kpi-days").textContent = String(official.filter((item) => item.realized_trade_count > 0).length || 0);
-  document.getElementById("kpi-missing").textContent = String(missing);
+  document.getElementById("kpi-cumulative").innerHTML = formatPercent(latest?.cumulative_return_pct);
+  document.getElementById("kpi-benchmark").innerHTML = formatPercent(latest?.benchmark_return_pct);
+  document.getElementById("kpi-excess").innerHTML = formatPercent(latest?.excess_return_pct);
+  document.getElementById("kpi-pnl").innerHTML = formatMoney(latest?.net_pnl_cents);
+  document.getElementById("kpi-drawdown").innerHTML = formatPercent(latest?.drawdown_pct);
+  document.getElementById("kpi-open").textContent = latest?.unrealized_trade_count == null ? "Not reported" : String(latest.unrealized_trade_count);
+  const coverage = latest?.coverage?.coverage_pct;
+  document.getElementById("kpi-coverage").innerHTML = coverage == null ? '<span class="value-muted">Not reported</span>' : `${Number(coverage).toFixed(1)}%`;
+  document.getElementById("kpi-coverage-note").textContent = `${missing} unresolved outcome${missing === 1 ? "" : "s"} excluded`;
+  const readinessStatus = state.readiness?.payload?.status;
+  document.getElementById("kpi-system").textContent = readinessStatus === "ready" ? "Ready" : readinessStatus === "not_ready" ? "Not ready" : "Not reported";
+  document.getElementById("kpi-system-note").textContent = state.readiness?.payload?.http_status ? `Readiness HTTP ${state.readiness.payload.http_status}` : "Readiness is separate from liveness";
   renderOverview(official, latest);
   renderPerformance(daily);
   renderResearch(rows);
@@ -141,6 +151,7 @@ function setStatus(id, text, status) { const node = document.getElementById(id);
 function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
 function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
 function formatPercent(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%</span>`; }
+function formatMoney(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : "-"}$${Math.abs(Number(value) / 100).toFixed(2)}</span>`; }
 function numberOrZero(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
 function shortDate(value) { return value ? value.slice(5) : "—"; }
 function shortHash(value) { return value ? `${String(value).slice(0, 10)}…` : "Not reported"; }

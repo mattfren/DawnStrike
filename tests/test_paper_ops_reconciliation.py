@@ -122,3 +122,22 @@ def test_paper_ops_is_cohort_separated_and_quarantines_bad_equity_math(tmp_path:
     assert report["quarantined_count"] == 1
     assert report["issue_count"] == 1
     assert result["issue_count"] == 1
+
+
+def test_persisted_daily_metadata_is_retained_in_public_data(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    _write_calendar(root)
+    db_path = tmp_path / "persisted.sqlite"
+
+    service = CanonicalPerformanceService(db_path, paper_ops_root=root)
+    service.reconcile(persist=True, now="2026-07-29T21:00:00+00:00")
+    public = service.load_public_data(days=30, row_limit=250)
+
+    replay = next(
+        row
+        for row in public["daily"]
+        if row["strategy_id"] == "replay_strategy"
+    )
+    assert replay["coverage"]["coverage_pct"] == 100.0
+    assert replay["source_refs"]
+    assert replay["generated_at"] == "2026-07-29T21:00:00+00:00"
