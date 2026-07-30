@@ -62,7 +62,10 @@ function Invoke-VercelJson {
         [string[]]$Arguments,
         [string]$Label
     )
-    $output = & npx @vercel @Arguments 2>$null
+    # PowerShell's ErrorActionPreference=Stop turns Vercel's normal Node
+    # warnings on stderr into terminating errors. Merge streams, then parse
+    # the JSON object from the combined output.
+    $output = & npx @vercel @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
@@ -77,7 +80,7 @@ function Set-VercelAlias {
     )
     $deploymentHost = ($DeploymentUrl -replace "^https?://", "").TrimEnd("/")
     $aliasHost = ($AliasUrl -replace "^https?://", "").TrimEnd("/")
-    & npx @vercel alias set $deploymentHost $aliasHost
+    $null = & npx @vercel alias set $deploymentHost $aliasHost 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
@@ -175,7 +178,7 @@ if ($Promote) {
     $priorProduction = Invoke-VercelJson `
         -Arguments @("inspect", $ProductionAlias, "--json") `
         -Label "Prior production inspect"
-    & npx @vercel promote $previewUrl --yes
+    $null = & npx @vercel promote $previewUrl --yes 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Vercel promotion failed with exit code $LASTEXITCODE."
     }
