@@ -45,7 +45,12 @@ function Convert-VercelJson {
         throw "$Label returned no JSON output."
     }
     try {
-        return $text | ConvertFrom-Json
+        $start = $text.IndexOf("{")
+        $end = $text.LastIndexOf("}")
+        if ($start -lt 0 -or $end -lt $start) {
+            throw "No JSON object found in CLI output."
+        }
+        return $text.Substring($start, $end - $start + 1) | ConvertFrom-Json
     }
     catch {
         throw "$Label returned invalid JSON: $text"
