@@ -22,6 +22,18 @@ Current local Playwright proof recorded in `evidence/`:
   `Unknown — not reported` states when no source evidence exists;
 - research and official paper cohorts remain visibly separate.
 
+Fresh current-artifact browser proof on 2026-07-30 used the corrected
+633,502-byte snapshot:
+
+- `evidence/ui-current-overview.png` and
+  `evidence/ui-current-mobile.png` capture the refreshed Overview surface;
+- the page had meaningful content and no framework error overlay;
+- console and page-error channels were empty;
+- Overview, Performance, Research, and System navigation each activated the
+  expected panel;
+- 360×800 had no horizontal overflow;
+- axe 4.12.1 reported 0 violations, 0 incomplete checks, and 37 passes.
+
 The current real-data artifact is degraded because its source evidence is
 incomplete; the UI exposes that state rather than showing a prior return as
 today's result. The latest current-artifact pass rechecked rendering,

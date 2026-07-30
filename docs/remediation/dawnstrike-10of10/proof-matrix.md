@@ -23,7 +23,7 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Static UI 1280x720 | PASS | no horizontal overflow |
 | Static UI 1440x900 | PASS | no horizontal overflow; screenshot in `evidence/` |
 | Semantic navigation | PASS | All four public controls activate their matching visible panels |
-| Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
+| Accessibility | PASS: 0 violations, 37 passes | agent-browser axe 4.12.1 on the corrected current artifact |
 | Browser console/page errors/network | PASS | Current-artifact browser pass returned empty console/page-error channels; hosted preview visual access is limited by Vercel Deployment Protection |
 | Vercel-native build | PREVIEW_VERIFIED | Explicit Dawnstrike project build succeeds with Vercel CLI 58.4.0; exact preview `dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg` exposes matching source/build/data hashes, zero live trading, and readiness HTTP 503. |
 | Daily task registration | BLOCKED_EXTERNAL | `Dawnstrike 10of10 Daily Finalize` is absent; registration script is ready but intentionally not run |
