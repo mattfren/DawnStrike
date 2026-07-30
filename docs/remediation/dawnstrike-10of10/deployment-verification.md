@@ -26,20 +26,20 @@ blocked until the data and approval gates close.
   contains 18 files / 861,548 bytes including diagnostics (15 payload files /
   852,024 bytes excluding diagnostics); a direct scan found zero forbidden
   files. The build used Vercel CLI 58.4.0 and the generated public manifest
-  records `source_sha=1b2c6aa9a690d5a0fe4339c781710ae590802fdc`,
-  `build_id=c23bc49297c71c60e62a`,
-  `data_hash=248ea48baf82e7f5784f3af4de28cdb46f2ade356d2fa36d7d38ee720dae65b0`,
+  records `source_sha=808bbceabdfc931d83fe9a1d827375a7d622a586`,
+  `build_id=8b5797e67474926f72c9`,
+  `data_hash=c5a70f448e5a3269bc35fa512b7f885c1e3a3e48d4ac9afaaf83b240f35cea64`,
   `market_date=2026-07-29`, `snapshot_bytes=632,094`, and
-  `snapshot_compressed_bytes=38,419`.
+  `snapshot_compressed_bytes=38,426`.
 - A first preview exposed a real runtime packaging defect (`snapshot_missing`).
   The candidate now embeds the generated public readiness/build/snapshot state
   as a direct dependency of both minimal Python functions. The corrected
-  preview is deployment `dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ` at
-  `https://dawnstrike-command-center-x3-ebrudj18t-mattfrens-projects.vercel.app`.
+  preview is deployment `dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj` at
+  `https://dawnstrike-command-center-x3-f3n649rln-mattfrens-projects.vercel.app`.
   It is `READY`, preview-targeted, and was deployed without `--prod`.
 - Vercel CLI `curl` proof on that exact deployment: `/api/health` returns 200
-  with `source_sha=1b2c6aa9a690d5a0fe4339c781710ae590802fdc`,
-  `build_id=c23bc49297c71c60e62a`, research-only true, and live trading false;
+  with `source_sha=808bbceabdfc931d83fe9a1d827375a7d622a586`,
+  `build_id=8b5797e67474926f72c9`, research-only true, and live trading false;
   `/api/readiness` returns the intended HTTP 503 with only
   `snapshot_not_publishable` and `pipeline_not_ready`; `/build-manifest.json`
   matches the same source SHA, build ID, and data hash.
@@ -57,7 +57,7 @@ blocked until the data and approval gates close.
   deployment or traffic; future runs must pass the Dawnstrike project ID
   explicitly.
 
-## Shared database write incident
+## Persistence safety and shared database write incident
 
 The fresh candidate build was correctly source-clean but was invoked with the
 shared database path. Its persistence-enabled finalize chain wrote 425 derived
@@ -66,3 +66,5 @@ the shared DB. Raw positions, fills, outcomes, and broker state were not
 changed. No pre-write backup with the original 5/2 derived counts was found;
 production promotion and further shared-DB writes are blocked until the owner
 supplies a trusted backup or explicitly approves retaining the derived state.
+The candidate now rejects any `--db-path` outside its repository before opening
+the database; the guard is covered by `tests/test_public_build_safety.py`.

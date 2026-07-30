@@ -10,8 +10,8 @@ approval.
 | Daily publication | `LOCAL_VERIFIED` | One lock/retry/finalize chain writes snapshot, readiness, and stage manifest. |
 | Risk controls | `LOCAL_VERIFIED` | Unknown safety inputs fail closed; live execution remains disabled. |
 | Public UI | `LOCAL_VERIFIED` | Static responsive site, semantic navigation, bounded payload, and zero axe violations in the local browser pass. |
-| Vercel packaging | `LOCAL_VERIFIED` | Clean build source SHA `1b2c6aa9a690d5a0fe4339c781710ae590802fdc` produces an 18-file native stage with zero forbidden files; the real snapshot is 632,094 raw bytes / 38,419 deterministic-gzip bytes and remains correctly rejected as degraded/not ready. |
-| Preview deployment | `PREVIEW_VERIFIED` | Deployment `dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ` is READY but truthfully degraded; health, readiness, and build-manifest checks agree on SHA/build/data hash. Hosted browser visual proof is limited by Vercel Deployment Protection; current static artifact proof passes locally. |
+| Vercel packaging | `LOCAL_VERIFIED` | Clean build source SHA `808bbceabdfc931d83fe9a1d827375a7d622a586` produces an 18-file native stage with zero forbidden files; the real snapshot is 632,094 raw bytes / 38,426 deterministic-gzip bytes and remains correctly rejected as degraded/not ready. External persistence database paths now fail closed before opening. |
+| Preview deployment | `PREVIEW_VERIFIED` | Deployment `dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj` is READY but truthfully degraded; health, readiness, and build-manifest checks agree on SHA/build/data hash. Hosted browser visual proof is limited by Vercel Deployment Protection; current static artifact proof passes locally. |
 | Production promotion | `BLOCKED_APPROVAL_REQUIRED` | Do not promote until preview, rollback, and owner approval are recorded. |
 | Strategy evidence | `WAITING_FOR_FORWARD_EVIDENCE` | The existing dataset does not prove the required forward sample or benchmark evidence. |
 

@@ -71,7 +71,7 @@ shared_dirty_path_count=22972
 shared_modified_or_deleted=833
 shared_untracked=22139
 candidate_branch=codex/dawnstrike-10of10
-candidate_HEAD=1b2c6aa9a690d5a0fe4339c781710ae590802fdc
+candidate_HEAD=808bbceabdfc931d83fe9a1d827375a7d622a586
 candidate_dirty_path_count=0
 ```
 
@@ -109,11 +109,11 @@ is HTTP 500 `FUNCTION_INVOCATION_FAILED`, and health exposes scanner,
 Telegram, and cron routes. No production mutation occurred.
 
 The latest isolated preview is deployment
-`dpl_2DnSdAdjhEr1mnSt22uBXMaPSwwQ` at
-`https://dawnstrike-command-center-x3-ebrudj18t-mattfrens-projects.vercel.app`.
+`dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj` at
+`https://dawnstrike-command-center-x3-f3n649rln-mattfrens-projects.vercel.app`.
 Its health endpoint is HTTP 200 with source SHA
-`1b2c6aa9a690d5a0fe4339c781710ae590802fdc`, build ID
-`c23bc49297c71c60e62a`, research-only true, and live trading false. Its
+`808bbceabdfc931d83fe9a1d827375a7d622a586`, build ID
+`8b5797e67474926f72c9`, research-only true, and live trading false. Its
 readiness endpoint is the intended HTTP 503 with
 `snapshot_not_publishable` and `pipeline_not_ready`; the build manifest
 matches the same source/build/data hashes.

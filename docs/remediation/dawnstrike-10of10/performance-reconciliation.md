@@ -56,12 +56,12 @@ The same reconciliation was rerun read-only against
 `2026-07-29` before the fresh build. It returned `status=DEGRADED`, `row_count=425`,
 `daily_count=222`, `issue_count=156`, and CLI exit code `2`. The input hash was
 `c5b422baac4fc37a02cefa9a0851b9343f0859ad7efce3dad2c3ab85da0d7891` and the
-output hash was
-`9a390c4bb10e7cf6ade20458526ae5499f9dbf783f5470e9cb97c3e28bd68d53`.
+latest isolated public output hash is
+`c5a70f448e5a3269bc35fa512b7f885c1e3a3e48d4ac9afaaf83b240f35cea64`.
 PaperOps reported 190 source rows, 85 accepted, 105 quarantined, 131 issues,
-and 85 source return-field mismatches. The current shared database itself has
-only 5 portfolio-performance rows, 2 daily-performance rows, and 0 benchmark
-rows, so it cannot support a green canonical return publication. The fresh
+and 85 source return-field mismatches. The pre-build shared database had only
+5 portfolio-performance rows, 2 daily-performance rows, and 0 benchmark
+rows, so it could not support a green canonical return publication. The fresh
 build was then mistakenly run with the shared DB as its persistence target;
 the shared DB now contains the 425/222 derived rows and one additional console
 notification. Exact recovery of the prior 5/2 derived state requires an
