@@ -54,3 +54,33 @@ def test_scheduler_doctor_accepts_one_healthy_task(tmp_path: Path, monkeypatch) 
     )
 
     assert scheduler_service.scheduler_doctor(tmp_path)["status"] == "LOCAL_VERIFIED"
+
+
+def test_scheduler_doctor_accepts_newly_registered_never_run_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in (
+        "run_daily_finalize.ps1",
+        "register_daily_finalize_task.ps1",
+        "restore_previous_publish_task.ps1",
+    ):
+        (scripts / name).write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scheduler_service,
+        "_query_scheduled_task",
+        lambda: {
+            "name": scheduler_service.CANONICAL_TASK_NAME,
+            "state": "Ready",
+            "enabled": True,
+            "last_task_result": scheduler_service.SCHED_S_TASK_HAS_NOT_RUN,
+            "last_run_time": "1999-11-30T00:00:00-06:00",
+        },
+    )
+
+    result = scheduler_service.scheduler_doctor(tmp_path)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    assert "dated finalize rehearsal" in result["next_action"]
