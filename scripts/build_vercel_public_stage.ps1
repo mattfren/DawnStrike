@@ -30,7 +30,8 @@ $config = @{
         'api/readiness.py' = @{ includeFiles = 'public/**'; maxDuration = 10 }
     }
 } | ConvertTo-Json -Depth 6
-Set-Content -LiteralPath (Join-Path $stage "vercel.json") -Value $config -Encoding utf8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $stage "vercel.json"), $config, $utf8NoBom)
 $stagePyproject = @"
 [project]
 name = "dawnstrike-public-stage"
@@ -38,5 +39,5 @@ version = "0.0.0"
 requires-python = ">=3.13"
 dependencies = []
 "@
-Set-Content -LiteralPath (Join-Path $stage "pyproject.toml") -Value $stagePyproject -Encoding utf8
+[System.IO.File]::WriteAllText((Join-Path $stage "pyproject.toml"), $stagePyproject, $utf8NoBom)
 Write-Output "Staged minimal Vercel publication at $stage"
