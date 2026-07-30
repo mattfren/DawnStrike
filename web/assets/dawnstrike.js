@@ -71,6 +71,7 @@ function render() {
   const readinessStatus = state.readiness?.payload?.status;
   document.getElementById("kpi-system").textContent = readinessStatus === "ready" ? "Ready" : readinessStatus === "not_ready" ? "Not ready" : "Not reported";
   document.getElementById("kpi-system-note").textContent = state.readiness?.payload?.http_status ? `Readiness HTTP ${state.readiness.payload.http_status}` : "Readiness is separate from liveness";
+  document.getElementById("kpi-context").textContent = latest ? returnContext(latest) : "Official paper context pending: cohort, period, denominator, cost treatment, coverage, and as-of time will appear with the latest record.";
   renderOverview(official, latest);
   renderPerformance(daily);
   renderResearch(rows);
@@ -139,10 +140,17 @@ function renderSystem(readiness, manifest, data) {
   ]);
   document.getElementById("manifest-details").innerHTML = detailRows([
     ["Snapshot", manifest.status || "Not reported", manifest.status === "complete" || manifest.status === "no_trade"],
-    ["Bytes", manifest.byte_count ? `${Number(manifest.byte_count).toLocaleString()} / 250,000` : "Not reported", true],
+    ["Payload size", manifest.byte_count ? `${Number(manifest.byte_count).toLocaleString()} raw / ${Number(manifest.compressed_byte_count || 0).toLocaleString()} gzip bytes` : "Not reported", Number(manifest.compressed_byte_count || 0) <= 250 * 1024],
     ["Rows", manifest.row_count ?? "Not reported", true],
     ["Payload hash", shortHash(manifest.payload_sha256), true],
     ["Generated", formatTimestamp(manifest.generated_at), true],
+  ]);
+  const safety = data.safety_evidence || {};
+  document.getElementById("safety-details").innerHTML = detailRows([
+    ["Source quality", safetyLabel(safety.source_quality), false],
+    ["Halt status", safetyLabel(safety.halt_status), false],
+    ["Corporate actions", safetyLabel(safety.corporate_action_status), false],
+    ["Liquidity evidence", safetyLabel(safety.liquidity_evidence), false],
   ]);
 }
 
@@ -152,6 +160,16 @@ function statusChip(status) { const label = labelForStatus(status); const cls = 
 function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
 function formatPercent(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%</span>`; }
 function formatMoney(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : "-"}$${Math.abs(Number(value) / 100).toFixed(2)}</span>`; }
+function returnContext(item) {
+  const coverage = item.coverage?.coverage_pct == null ? "coverage not reported" : `coverage ${Number(item.coverage.coverage_pct).toFixed(1)}%`;
+  const denominator = item.opening_equity_cents == null ? "opening-equity denominator not reported" : `opening-equity denominator ${formatCents(item.opening_equity_cents)}`;
+  const sample = Number(item.realized_trade_count || 0) + Number(item.unrealized_trade_count || 0) + Number(item.missing_outcome_count || 0);
+  return `Official paper · daily period ending ${item.market_date || "not reported"} · ${returnBasisLabel(item.return_basis)} · ${costStatusLabel(item.cost_status)} · ${denominator} · ${sample} observed/outcome row${sample === 1 ? "" : "s"} · ${coverage} · as of ${formatTimestamp(item.generated_at || item.calculated_at)}`;
+}
+function formatCents(value) { return `$${(Number(value) / 100).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`; }
+function returnBasisLabel(value) { return ({ net_after_costs: "net after fees/slippage", gross_observed_or_missing: "gross observed; complete net result pending", gross_observed: "gross observed" }[value] || "return basis not reported"); }
+function costStatusLabel(value) { return ({ complete: "fees/slippage complete", missing_cost_component: "fees/slippage incomplete", unknown: "cost treatment unknown" }[value] || "cost treatment not reported"); }
+function safetyLabel(value) { return value?.state === "verified" ? "Verified" : value?.state === "blocked" ? "Blocked" : "Unknown — not reported"; }
 function numberOrZero(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
 function shortDate(value) { return value ? value.slice(5) : "—"; }
 function shortHash(value) { return value ? `${String(value).slice(0, 10)}…` : "Not reported"; }

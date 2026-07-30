@@ -7,6 +7,8 @@ def test_public_dashboard_has_one_four_section_information_architecture() -> Non
         assert f">{label}<" in html
     assert "api/ui" not in html
     assert "No broker connection" in html
+    assert 'id="safety-details"' in html
+    assert "Market safety evidence" in html
 
 
 def test_public_dashboard_overview_exposes_required_portfolio_metrics() -> None:
@@ -25,3 +27,4 @@ def test_public_dashboard_overview_exposes_required_portfolio_metrics() -> None:
     ):
         assert f'id="{metric_id}"' in html
     assert "Not reported" in html
+    assert 'id="kpi-context"' in html

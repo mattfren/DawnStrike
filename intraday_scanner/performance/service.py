@@ -180,6 +180,7 @@ class CanonicalPerformanceService:
             "generated_at": _utc_now(),
             "research_only": True,
             "live_trading_enabled": False,
+            "safety_evidence": _unknown_safety_evidence(),
             "daily": [_public_daily(row) for row in daily_rows],
             "rows": [_public_row(row) for row in performance_rows],
             "limits": {"days": days, "row_limit": row_limit},
@@ -1176,3 +1177,17 @@ def _existing_calculated_at(connection: sqlite3.Connection, input_hash: str) -> 
         return None
     value = str(row[0]) if row and row[0] is not None else ""
     return value or None
+
+
+def _unknown_safety_evidence() -> dict[str, dict[str, Any]]:
+    """Publish explicit unknown safety inputs instead of silently omitting them."""
+
+    return {
+        key: {"state": "unknown", "value": None, "source_refs": []}
+        for key in (
+            "source_quality",
+            "halt_status",
+            "corporate_action_status",
+            "liquidity_evidence",
+        )
+    }

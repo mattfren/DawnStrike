@@ -18,6 +18,10 @@ returns in browser code.
 - Money is reconciled in integer cents. Every row carries source references,
   source hash, input hash, observation time, and reconciliation time.
 - No output authorizes a broker order or claims personalized investment advice.
+- Public snapshots carry explicit `unknown` safety-evidence states for source
+  quality, halt status, corporate-action status, and liquidity evidence when
+  those inputs are not available. Unknown is displayed as not reported and
+  fails closed; it is never interpreted as a clean safety result.
 
 ## Public contract
 
