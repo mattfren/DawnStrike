@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -482,6 +482,19 @@ def _migration_009_snapshot_versions(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_010_performance_row_metadata(connection: sqlite3.Connection) -> None:
+    """Keep execution policy and portfolio-observation metadata on each row."""
+
+    for column in (
+        "execution_policy_version TEXT NOT NULL DEFAULT 'unregistered-policy'",
+        "trade_count INTEGER NOT NULL DEFAULT 1",
+        "open_position_count INTEGER NOT NULL DEFAULT 0",
+        "unrealized_pnl_cents INTEGER",
+        "record_type TEXT NOT NULL DEFAULT 'trade'",
+    ):
+        _add_column_if_missing(connection, "portfolio_performance_rows", column)
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -501,4 +514,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (7, _migration_007_canonical_gross_return_fields),
     (8, _migration_008_equity_and_contract_metadata),
     (9, _migration_009_snapshot_versions),
+    (10, _migration_010_performance_row_metadata),
 )

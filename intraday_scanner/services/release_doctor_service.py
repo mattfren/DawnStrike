@@ -7,6 +7,16 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.services.scheduler_doctor_service import (
+    scheduler_doctor as _scheduler_doctor,
+)
+
+
+def scheduler_doctor(root: str | Path) -> dict[str, Any]:
+    """Compatibility entry point for the CLI release-doctor command."""
+
+    return _scheduler_doctor(root)
+
 
 def probability_doctor(db_path: str | Path) -> dict[str, Any]:
     tables = _table_names(db_path)
@@ -21,24 +31,6 @@ def probability_doctor(db_path: str | Path) -> dict[str, Any]:
         "next_action": "Collect sourced forward outcomes; do not display calibrated probability."
         if status == "Uncalibrated"
         else "Run independent calibration and holdout checks.",
-    }
-
-
-def scheduler_doctor(root: str | Path) -> dict[str, Any]:
-    base = Path(root)
-    required = {
-        "daily_runner": base / "scripts" / "run_daily_finalize.ps1",
-        "task_registration": base / "scripts" / "register_daily_finalize_task.ps1",
-        "restore_previous": base / "scripts" / "restore_previous_publish_task.ps1",
-    }
-    present: dict[str, bool] = {name: path.is_file() for name, path in required.items()}
-    return {
-        "status": "LOCAL_VERIFIED" if all(present.values()) else "FAILED",
-        "required_files": present,
-        "scheduled_task": "must be checked on approved checkout",
-        "next_action": "Register exactly one replacement task after merge."
-        if all(present.values())
-        else "Restore missing scheduler artifacts.",
     }
 
 

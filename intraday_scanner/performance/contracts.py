@@ -236,6 +236,11 @@ class PerformanceRow:
     observed_at: str | None
     reconciled_at: str
     quarantine_reason: str | None = None
+    execution_policy_version: str = "unregistered-policy"
+    trade_count: int = 1
+    open_position_count: int = 0
+    unrealized_pnl_cents: int | None = None
+    record_type: str = "trade"
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

@@ -26,7 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = CanonicalPerformanceService(Path(args.db_path)).reconcile(
+    result = CanonicalPerformanceService(
+        Path(args.db_path),
+        paper_ops_root=Path(args.paper_ops_root),
+    ).reconcile(
         market_date=args.date,
         persist=args.persist,
     )
@@ -65,6 +68,9 @@ def _summary(result: dict[str, object]) -> dict[str, object]:
         "cohort_counts": cohort_counts,
         "discrepancies": result.get("issues") or [],
         "paper_ops": result.get("paper_ops"),
+        "paper_ops_reconciliation": _paper_ops_summary(
+            result.get("paper_ops_reconciliation")
+        ),
         "publication": result.get("publication"),
     }
 
@@ -80,6 +86,16 @@ def _paper_ops_inventory(root: Path) -> dict[str, object]:
         if path.is_file() and path.suffix.lower() in {".jsonl", ".csv", ".json"}
     )
     return {"root": str(root), "state": "present", "files": files[:100], "file_count": len(files)}
+
+
+def _paper_ops_summary(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: item
+        for key, item in value.items()
+        if key not in {"rows", "equity", "hash_inputs", "root"}
+    }
 
 
 if __name__ == "__main__":

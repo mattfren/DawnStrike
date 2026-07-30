@@ -4,6 +4,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Boundary: this script owns research/watchlist tasks only. Canonical daily
+# performance publication is registered separately by register_daily_finalize_task.ps1.
+# Do not add the daily-finalize task here or create a second publisher.
+
 if ([string]::IsNullOrWhiteSpace($Root)) {
     $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 } else {

@@ -21,6 +21,7 @@ from intraday_scanner.performance.contracts import (
     safe_float,
     stable_hash,
 )
+from intraday_scanner.performance.paper_ops import load_paper_ops
 from intraday_scanner.storage.migrations import run_migrations
 
 
@@ -43,10 +44,12 @@ class CanonicalPerformanceService:
         *,
         strategy_id: str = DEFAULT_STRATEGY_ID,
         strategy_version: str = DEFAULT_STRATEGY_VERSION,
+        paper_ops_root: str | Path | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.strategy_id = strategy_id
         self.strategy_version = strategy_version
+        self.paper_ops_root = Path(paper_ops_root) if paper_ops_root is not None else None
 
     def reconcile(
         self,
@@ -71,6 +74,7 @@ class CanonicalPerformanceService:
                     inputs["signals"], inputs["outcomes"], benchmark, calculated_at
                 ),
                 *self._strategy_trade_rows(inputs["strategy_trades"], benchmark, calculated_at),
+                *self._paper_ops_rows(inputs["paper_ops"]["rows"], benchmark, calculated_at),
             ]
             rows.sort(
                 key=lambda item: (
@@ -82,9 +86,21 @@ class CanonicalPerformanceService:
             )
             input_hash = stable_hash(inputs["hash_inputs"])
             rows = [_replace_input_hash(row, input_hash) for row in rows]
-            daily = _aggregate_daily(rows, calculated_at, input_hash, inputs["equity"])
+            daily = _aggregate_daily(
+                rows,
+                calculated_at,
+                input_hash,
+                [*inputs["equity"], *inputs["paper_ops"]["equity"]],
+            )
             _add_cumulative_metrics(daily)
             issues = _issues(rows, calculated_at)
+            issues.extend(
+                {
+                    **issue,
+                    "created_at": calculated_at,
+                }
+                for issue in inputs["paper_ops"]["issues"]
+            )
             if persist:
                 self._persist(connection, rows, daily, issues, market_date=market_date)
             row_payload = [row.to_dict() for row in rows]
@@ -101,6 +117,7 @@ class CanonicalPerformanceService:
                 "rows": row_payload,
                 "daily": daily,
                 "issues": issues,
+                "paper_ops_reconciliation": inputs["paper_ops"],
             }
 
     def load_public_data(self, *, days: int = 30, row_limit: int = 250) -> dict[str, Any]:
@@ -114,7 +131,14 @@ class CanonicalPerformanceService:
                 for row in connection.execute(
                     """
                     SELECT * FROM portfolio_daily_performance
-                    ORDER BY market_date DESC, cohort ASC, strategy_id ASC
+                    ORDER BY CASE cohort
+                               WHEN 'official_forward_paper' THEN 0
+                               WHEN 'alphaops_signal_research' THEN 1
+                               WHEN 'shadow_challenger' THEN 2
+                               WHEN 'historical_backtest' THEN 3
+                               ELSE 4
+                             END,
+                             market_date DESC, strategy_id ASC
                     LIMIT ?
                     """,
                     (max(1, days) * 8,),
@@ -130,9 +154,18 @@ class CanonicalPerformanceService:
                            net_pnl_cents, return_pct, benchmark_return_pct,
                            excess_return_pct, source_refs_json, source_hash_sha256,
                            input_hash_sha256, observed_at, reconciled_at,
-                           quarantine_reason
+                           quarantine_reason, execution_policy_version,
+                           trade_count, open_position_count, unrealized_pnl_cents,
+                           record_type
                     FROM portfolio_performance_rows
-                    ORDER BY market_date DESC, cohort ASC, rank ASC, record_id ASC
+                    ORDER BY CASE cohort
+                               WHEN 'official_forward_paper' THEN 0
+                               WHEN 'alphaops_signal_research' THEN 1
+                               WHEN 'shadow_challenger' THEN 2
+                               WHEN 'historical_backtest' THEN 3
+                               ELSE 4
+                             END,
+                             market_date DESC, rank ASC, record_id ASC
                     LIMIT ?
                     """,
                     (max(1, row_limit),),
@@ -158,6 +191,7 @@ class CanonicalPerformanceService:
         strategy_trades = _select_rows(connection, "strategy_paper_trades", market_date)
         benchmark_rows = _select_rows(connection, "benchmark_performance", market_date)
         equity_rows = _select_rows(connection, "portfolio_equity_observations", market_date)
+        paper_ops = load_paper_ops(self.paper_ops_root, market_date=market_date)
         benchmark = _benchmark_lookup(benchmark_rows)
         return {
             "signals": signals,
@@ -166,6 +200,11 @@ class CanonicalPerformanceService:
             "fills": fills,
             "strategy_trades": strategy_trades,
             "equity": equity_rows,
+            "paper_ops": {
+                **paper_ops,
+                "rows": paper_ops["rows"],
+                "equity": paper_ops["equity"],
+            },
             "benchmark": benchmark,
             "hash_inputs": {
                 "signals": signals,
@@ -175,6 +214,7 @@ class CanonicalPerformanceService:
                 "strategy_trades": strategy_trades,
                 "equity": equity_rows,
                 "benchmark": benchmark_rows,
+                "paper_ops": paper_ops["hash_inputs"],
             },
         }
 
@@ -281,6 +321,9 @@ class CanonicalPerformanceService:
                 observed_at=observed_at,
                 reconciled_at=calculated_at,
                 quarantine_reason=quarantine_reason,
+                execution_policy_version=str(
+                    payload.get("execution_policy_version") or self.EXECUTION_POLICY_VERSION
+                ),
             )
             rows.append(row)
         return rows
@@ -379,6 +422,11 @@ class CanonicalPerformanceService:
                     or None,
                     reconciled_at=calculated_at,
                     quarantine_reason=None,
+                    execution_policy_version=str(
+                        outcome_payload.get("execution_policy_version")
+                        or payload.get("execution_policy_version")
+                        or self.EXECUTION_POLICY_VERSION
+                    ),
                 )
             )
         return rows
@@ -453,6 +501,62 @@ class CanonicalPerformanceService:
                     quarantine_reason="missing_trade_identity"
                     if status == RecordStatus.QUARANTINED
                     else None,
+                    execution_policy_version=str(
+                        raw.get("execution_policy_version")
+                        or payload.get("execution_policy_version")
+                        or self.EXECUTION_POLICY_VERSION
+                    ),
+                )
+            )
+        return rows
+
+    def _paper_ops_rows(
+        self,
+        source_rows: list[dict[str, Any]],
+        benchmark: dict[str, float],
+        calculated_at: str,
+    ) -> list[PerformanceRow]:
+        rows: list[PerformanceRow] = []
+        for raw in source_rows:
+            market_date = str(raw.get("market_date") or "")
+            benchmark_return = benchmark.get(market_date)
+            return_pct = safe_float(raw.get("return_pct"))
+            rows.append(
+                PerformanceRow(
+                    record_id=str(raw["record_id"]),
+                    market_date=market_date,
+                    ticker=str(raw.get("ticker") or "PORTFOLIO"),
+                    cohort=raw["cohort"],
+                    strategy_id=str(raw.get("strategy_id") or ""),
+                    strategy_version=str(raw.get("strategy_version") or ""),
+                    signal_id=None,
+                    rank=None,
+                    record_status=RecordStatus(str(raw.get("record_status") or "quarantined")),
+                    entry_price=None,
+                    exit_price=None,
+                    quantity=None,
+                    notional_cents=_int_or_none(raw.get("notional_cents")),
+                    gross_pnl_cents=_int_or_none(raw.get("gross_pnl_cents")),
+                    gross_return_pct=safe_float(raw.get("gross_return_pct")),
+                    fees_cents=_int_or_none(raw.get("fees_cents")),
+                    slippage_cents=_int_or_none(raw.get("slippage_cents")),
+                    net_pnl_cents=_int_or_none(raw.get("net_pnl_cents")),
+                    return_pct=return_pct,
+                    benchmark_return_pct=benchmark_return,
+                    excess_return_pct=_excess(return_pct, benchmark_return),
+                    source_refs=tuple(raw.get("source_refs") or ()),
+                    source_hash_sha256=str(raw.get("source_hash_sha256") or stable_hash(raw)),
+                    input_hash_sha256="",
+                    observed_at=raw.get("observed_at"),
+                    reconciled_at=calculated_at,
+                    quarantine_reason=raw.get("quarantine_reason"),
+                    execution_policy_version=str(
+                        raw.get("execution_policy_version") or "unknown-paper-ops-policy"
+                    ),
+                    trade_count=max(_int_or_none(raw.get("trade_count")) or 0, 0),
+                    open_position_count=max(_int_or_none(raw.get("open_position_count")) or 0, 0),
+                    unrealized_pnl_cents=_int_or_none(raw.get("unrealized_pnl_cents")),
+                    record_type="portfolio_observation",
                 )
             )
         return rows
@@ -496,10 +600,12 @@ class CanonicalPerformanceService:
                     slippage_cents,
                     net_pnl_cents, return_pct, benchmark_return_pct, excess_return_pct,
                     source_refs_json, source_hash_sha256, input_hash_sha256,
-                    observed_at, reconciled_at, quarantine_reason, payload_json
+                    observed_at, reconciled_at, quarantine_reason,
+                    execution_policy_version, trade_count, open_position_count,
+                    unrealized_pnl_cents, record_type, payload_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -530,6 +636,11 @@ class CanonicalPerformanceService:
                     row.observed_at,
                     row.reconciled_at,
                     row.quarantine_reason,
+                    row.execution_policy_version,
+                    row.trade_count,
+                    row.open_position_count,
+                    row.unrealized_pnl_cents,
+                    row.record_type,
                     json.dumps(row.to_dict(), sort_keys=True),
                 ),
             )
@@ -767,9 +878,29 @@ def _aggregate_daily(
             round(observed_count / eligible_count * 100.0, 4) if eligible_count else 100.0
         )
         exposure = _sum_if_complete(row.notional_cents for row in group)
-        unrealized_pnl = _sum_if_complete(row.gross_pnl_cents for row in unrealized)
+        unrealized_values = [row.gross_pnl_cents for row in unrealized]
+        unrealized_values.extend(
+            row.unrealized_pnl_cents
+            for row in group
+            if row.record_type == "portfolio_observation"
+            and row.unrealized_pnl_cents is not None
+            and row.record_status != RecordStatus.QUARANTINED
+        )
+        unrealized_pnl = _sum_if_complete(unrealized_values)
         source_refs = _source_refs(*(ref for row in group for ref in row.source_refs))
         source_hash = stable_hash(sorted(row.source_hash_sha256 for row in group))
+        policies = sorted({row.execution_policy_version for row in group})
+        execution_policy_version = policies[0] if len(policies) == 1 else "mixed"
+        realized_trade_count = sum(
+            row.trade_count if row.record_type == "portfolio_observation" else 1
+            for row in realized
+        )
+        unrealized_trade_count = sum(
+            row.open_position_count
+            for row in group
+            if row.record_type == "portfolio_observation"
+            and row.record_status != RecordStatus.QUARANTINED
+        ) + sum(1 for row in unrealized if row.record_type != "portfolio_observation")
         output.append(
             {
                 "performance_id": f"{market_date}:{cohort}:{strategy_id}:{strategy_version}",
@@ -793,8 +924,8 @@ def _aggregate_daily(
                 "cumulative_return_pct": None,
                 "drawdown_pct": None,
                 "exposure_cents": exposure,
-                "realized_trade_count": len(realized),
-                "unrealized_trade_count": len(unrealized),
+                "realized_trade_count": realized_trade_count,
+                "unrealized_trade_count": unrealized_trade_count,
                 "missing_outcome_count": len(missing),
                 "quarantined_count": len(quarantined),
                 "no_trade_count": len(no_trade),
@@ -803,7 +934,7 @@ def _aggregate_daily(
                 "calculated_at": calculated_at,
                 "generated_at": calculated_at,
                 "calculation_version": CanonicalPerformanceService.CALCULATION_VERSION,
-                "execution_policy_version": CanonicalPerformanceService.EXECUTION_POLICY_VERSION,
+                "execution_policy_version": execution_policy_version,
                 "evidence_state": evidence_state,
                 "coverage": {
                     "eligible_count": eligible_count,
@@ -896,6 +1027,8 @@ def _sum_if_complete(values: Iterable[int | None]) -> int | None:
 def _issues(rows: Iterable[PerformanceRow], created_at: str) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     for row in rows:
+        if row.record_type == "portfolio_observation":
+            continue
         if row.record_status in {RecordStatus.MISSING_OUTCOME, RecordStatus.UNREALIZED}:
             issues.append(
                 {

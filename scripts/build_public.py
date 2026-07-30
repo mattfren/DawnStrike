@@ -19,6 +19,7 @@ from intraday_scanner.services.daily_finalize_service import DailyFinalizeServic
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    parser.add_argument("--paper-ops-root", default="data/v2_paper_ops_live")
     parser.add_argument("--out-dir", default="build/public")
     parser.add_argument("--date", default=None)
     parser.add_argument("--retry-limit", type=int, default=2)
@@ -49,7 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     _clear_known_outputs(output_root)
     market_date = args.date or datetime.now().date().isoformat()
-    result = DailyFinalizeService(root / args.db_path, output_root).run(
+    paper_ops_root = Path(args.paper_ops_root)
+    if not paper_ops_root.is_absolute():
+        paper_ops_root = root / paper_ops_root
+    result = DailyFinalizeService(
+        root / args.db_path,
+        output_root,
+        paper_ops_root=paper_ops_root,
+    ).run(
         market_date=market_date,
         retry_limit=max(0, args.retry_limit),
         retry_delay_seconds=max(0, args.retry_delay_seconds),

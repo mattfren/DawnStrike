@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $dbPath = Join-Path $resolvedRoot "data\shadow_real.sqlite"
+$paperOpsRoot = Join-Path $resolvedRoot "data\v2_paper_ops_live"
 $outputPath = Join-Path $resolvedRoot "build\public"
 $marketDateWasExplicit = $PSBoundParameters.ContainsKey("MarketDate")
 
@@ -34,6 +35,7 @@ Push-Location $resolvedRoot
 try {
     & py.exe scripts\build_public.py `
         --db-path $dbPath `
+        --paper-ops-root $paperOpsRoot `
         --out-dir $outputPath `
         --date $MarketDate `
         --retry-limit $RetryLimit `

@@ -33,9 +33,15 @@ DAILY_STAGE_NAMES = (
 class DailyFinalizeService:
     """Finalize one market date and fail readiness if any upstream step is incomplete."""
 
-    def __init__(self, db_path: str | Path, output_root: str | Path = "build/public") -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        output_root: str | Path = "build/public",
+        paper_ops_root: str | Path | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.output_root = Path(output_root)
+        self.paper_ops_root = Path(paper_ops_root) if paper_ops_root is not None else None
         self.lock_path = self.output_root / ".daily-finalize.lock"
 
     def run(
@@ -62,7 +68,10 @@ class DailyFinalizeService:
                     # Rebuild the canonical read model from all raw history.
                     # The run date scopes the publication/readiness record; it
                     # must not delete prior canonical days.
-                    result = CanonicalPerformanceService(self.db_path).reconcile(
+                    result = CanonicalPerformanceService(
+                        self.db_path,
+                        paper_ops_root=self.paper_ops_root,
+                    ).reconcile(
                         persist=True,
                         now=now,
                     )
