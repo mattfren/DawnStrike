@@ -6,14 +6,15 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
 |---|---|---|
-| Full pytest suite | PASS: 211 passed | `py -m pytest` |
-| Ruff | PASS | `py -m ruff check .` |
-| Mypy | PASS: 107 source files | `py -m mypy intraday_scanner` |
-| Focused canonical tests | PASS: 8 passed | `tests/test_canonical_performance.py` |
-| Compile | PASS | `py -m compileall -q api intraday_scanner scripts` |
-| Real-database copied reconcile | PASS/FAIL-CLOSED | 235 rows, 32 daily records, 25 discrepancies, CLI exit 2 |
-| Diagnostic public build | PASS/DEGRADED | 235 rows, 232,001 bytes, snapshot `degraded`, readiness HTTP 503 |
-| Artifact verifier | FAIL-CLOSED | Clean source SHA passes; real-data stage rejects `snapshot_not_publishable` and `readiness_not_publishable` |
+| Full pytest suite | PASS: 214 passed | `py -m pytest` |
+| Ruff | PASS | `py -m ruff check intraday_scanner tests` |
+| Mypy | PASS: 109 source files | `py -m mypy intraday_scanner` |
+| Focused canonical tests | PASS: 12 passed | PaperOps, scheduler, canonical, and snapshot tests |
+| Compile | PASS | `py -m compileall -q intraday_scanner scripts` |
+| PowerShell parse | PASS: 16 scripts | Windows PowerShell parser pass |
+| Real-database copied reconcile | PASS/FAIL-CLOSED | 425 rows, 222 daily records, 156 discrepancies, CLI exit 2 |
+| Diagnostic public build | PASS/DEGRADED | 425 canonical rows, 255,154 bytes, snapshot `degraded`, readiness HTTP 503 |
+| Artifact verifier | FAIL-CLOSED | SHA `86832fdae938f03f07ddbb919a2a5f2f2c5de970` rejects `snapshot_not_publishable` and `readiness_not_publishable` |
 | Readiness truth | PASS | `degraded` snapshot -> `not_ready`, HTTP 503 |
 | Static UI 360x800 | PASS | no horizontal overflow; screenshot in `evidence/` |
 | Static UI 390x844 | PASS | no horizontal overflow |
@@ -23,14 +24,14 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Semantic navigation | PASS | All four public controls activate their matching visible panels |
 | Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
 | Browser console/page errors/network | PASS | Current Playwright pass returned empty console/page-error/request-failure channels |
-| Vercel-native build | PASS/NO_DEPLOY | Minimal stage build succeeds at 456,409 bytes with two functions; no deployment because candidate data readiness is not publishable |
-| Daily task registration | WAITING_APPROVED_CHECKOUT | registration script is ready; isolated candidate intentionally has no live DB |
+| Vercel-native build | PASS/NO_DEPLOY | Explicit Dawnstrike project build succeeds; 18 prebuilt files, 479,521 bytes, two functions, zero forbidden files |
+| Daily task registration | BLOCKED_EXTERNAL | `Dawnstrike 10of10 Daily Finalize` is absent; registration script is ready but intentionally not run |
 
 ## Non-green by design
 
 The copied real dataset is partial: unresolved outcomes, absent benchmark rows,
-and incomplete cost inputs remain visible. The candidate publishes the bounded
-snapshot but holds readiness at 503 and leaves unsupported after-cost/excess
-return fields unreported. Strategy quality remains
+incomplete cost inputs, and 105 quarantined PaperOps rows remain visible. The
+candidate writes the bounded diagnostic snapshot but holds readiness at 503
+and leaves unsupported after-cost/excess return fields unreported. Strategy quality remains
 `WAITING_FOR_FORWARD_EVIDENCE` until the required forward sample is actually
 observed.

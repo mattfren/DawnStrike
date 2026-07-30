@@ -13,7 +13,10 @@ It retries transient exceptions with a bounded delay, records retry count,
 preserves historical canonical days, clears stale canonical rows on a full
 rebuild, records the source-to-promotion stage chain with hashes, timestamps,
 errors, and next actions, and returns 503 semantics for no-data/degraded
-states. The real copied-source rehearsal produced 235 rows, 32 daily records,
-and 25 missing-outcome discrepancies; it did not publish a green snapshot. The
-replacement task is not registered yet because the isolated candidate has no
-approved live checkout. Register it only against the approved merged checkout.
+states. The real copied-source rehearsal produced 425 rows, 222 daily records,
+and 156 discrepancies (including 105 quarantined PaperOps rows); it did not
+publish a green snapshot. `scheduler-doctor` confirms that
+`Dawnstrike 10of10 Daily Finalize` is absent and returns `BLOCKED_EXTERNAL`.
+The replacement task is not registered yet because the isolated candidate has
+no approved live checkout. Register it only against the approved merged
+checkout, then rerun the doctor and one dated finalize rehearsal.

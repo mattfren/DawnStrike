@@ -5,7 +5,7 @@ Source branch/SHA: `codex/command-center-x3-vercel` /
 `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`  
 Target worktree: `C:\r\dawnstrike-10of10-20260729`  
 Target branch/SHA: `codex/dawnstrike-10of10` /
-`268b4946bc149f00ec6cc7fd31a040be3baa86a6`
+`86832fdae938f03f07ddbb919a2a5f2f2c5de970`
 
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because
@@ -28,10 +28,12 @@ dirty application/runtime surface.
 ## Candidate-authored surface
 
 The following files were authored in the isolated worktree rather than copied
-from the dirty checkout: `intraday_scanner/performance/**`,
+from the dirty checkout: `intraday_scanner/performance/**` including the
+PaperOps adapter, `intraday_scanner/services/scheduler_doctor_service.py`,
 `intraday_scanner/risk/**`, `intraday_scanner/services/daily_finalize_service.py`,
 `scripts/build_public.py`, `scripts/verify_public_artifact.py`,
 `scripts/run_daily_finalize.ps1`, `scripts/register_daily_finalize_task.ps1`,
+`scripts/build_vercel_public_stage.ps1`,
 `api/health.py`, `api/readiness.py`, `web/**`, and the remediation tests/docs.
 Their source-level proof is recorded by the focused test and browser evidence
 files in this directory.
@@ -43,6 +45,9 @@ files in this directory.
 - Do not transfer `logs/`, private outputs, `.env` values, or Telegram secrets.
 - Do not transfer the full dirty checkout.
 - Do not copy historical X/X2/X3/Apex HTML bundles into the new public build.
+- Do not register the replacement task from this isolated worktree; the
+  scheduler doctor must remain `BLOCKED_EXTERNAL` until an approved checkout
+  exists.
 
 ## Transfer protocol
 

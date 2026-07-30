@@ -118,3 +118,20 @@ The required isolation and evidence work is active. Production remains an
 unmodified rollback reference. No production promotion, broad deletion, or
 unrelated task disablement was performed. The single X3 publisher task is
 disabled pending replacement by the canonical daily chain.
+
+## Continuation revalidation
+
+Rechecked 2026-07-29 22:36 America/Chicago after the candidate PaperOps and
+scheduler work:
+
+- The shared checkout is still untouched at 1,207 dirty paths (833 modified or
+  deleted and 374 untracked), on `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`.
+- The isolated candidate is clean at
+  `86832fdae938f03f07ddbb919a2a5f2f2c5de970`.
+- `Dawnstrike X3 Vercel Daily Publish` remains disabled; the canonical
+  `Dawnstrike 10of10 Daily Finalize` task is absent. No task was registered.
+- The copied evidence database now contains 425 canonical rows and 222 daily
+  records after the rehearsal. The shared source database was not used as a
+  write target.
+- PaperOps source reconciliation is 190 rows, 85 accepted, 105 quarantined,
+  and 131 row-level issues; readiness is correctly HTTP 503.

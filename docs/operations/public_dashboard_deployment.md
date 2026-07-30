@@ -7,7 +7,7 @@ outside Vercel.
 ## Candidate flow
 
 ```powershell
-py scripts\build_public.py --db-path data\shadow_real.sqlite --out-dir build\public --date YYYY-MM-DD
+py scripts\build_public.py --db-path data\shadow_real.sqlite --paper-ops-root data\v2_paper_ops_live --out-dir build\public --date YYYY-MM-DD
 py scripts\verify_public_artifact.py --root build\public
 pwsh -File scripts\build_vercel_public_stage.ps1
 pwsh -File scripts\verify_vercel_candidate.ps1
