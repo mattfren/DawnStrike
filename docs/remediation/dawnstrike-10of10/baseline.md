@@ -53,6 +53,11 @@ after its XML, identity, and restore command were captured in
 `evidence/x3-vercel-daily-publish-task-before-disable.xml`. The morning,
 monitor, and EOD tasks remain unchanged.
 
+Post-containment scheduler recheck: `Dawnstrike X3 Vercel Daily Publish` is
+now `Disabled` with last result `0`; no replacement finalize task has been
+registered from the isolated candidate. The replacement must be registered
+only from an approved merged checkout.
+
 ## Database
 
 Database: `data/shadow_real.sqlite`  

@@ -7,25 +7,35 @@ The candidate configuration uses native static output at `build/public` and
 only `api/health.py` and `api/readiness.py`. The public artifact verifier rejects
 SQLite, database, scanner, Telegram, UI-runtime, secret, and path leakage.
 
-The Vercel CLI was invoked against the linked project and stopped before any
-deployment because `uv` is not installed in the local PATH. No preview or
-production deployment was created by this candidate. The clean-source portion
-of the local gate now passes at the committed candidate SHA; the copied
-real-data snapshot is still correctly rejected as degraded/not ready. Once
-`uv` is available, run the stage build, `vercel build --prod`, one `vercel
-deploy --prebuilt`, and the browser/health/readiness proof before requesting
-promotion approval.
+The Vercel CLI initially reported that `uv` was not available in the local
+PATH. `uv` was then installed in the local development environment and the
+dependency-free stage build completed against the explicit Dawnstrike project
+ID. No preview or production deployment was created by this candidate. The
+clean-source portion of the local gate passes at the committed candidate SHA;
+the copied real-data snapshot is still correctly rejected as degraded/not
+ready. A preview must wait for a publishable approved snapshot and the full
+browser/health/readiness proof.
 
 ## Latest Vercel build evidence
 
 - Building from the full repository failed at 502.21 MB because the root
   `pyproject.toml` pulls the scanner dependency graph into the functions.
 - Building from `build/vercel-stage` with the explicit Dawnstrike project ID
-  succeeded. The prebuilt output is approximately 456 KB and contains only
-  `api/health` and `api/readiness` functions plus static output.
-- The final candidate verifier still fails closed with
-  `snapshot_not_publishable` and `readiness_not_publishable`; therefore no
-  preview deployment was created and no alias was changed.
+  `prj_5pef3EZF1u5YadebEz3dFjnkWOXy` succeeded. The prebuilt output is
+  approximately 456 KB and contains only `api/health` and `api/readiness`
+  functions plus static output. The generated public manifest records:
+  `source_sha=1e013ce5e28b7a9c114c06a046951bfbc34e68f5`,
+  `build_id=744fd74fb29502394dec`,
+  `data_hash=da3493744269cb82cbcb6ec8ea3f4e1de63255e0751f663d9d310fdf698d90fb`,
+  `market_date=2026-07-29`, and `snapshot_bytes=232001`.
+- The final candidate verifier fails closed with
+  `snapshot_not_publishable` and `readiness_not_publishable`; the artifact
+  reports 235 rows, `snapshot_status=degraded`, and readiness HTTP 503.
+  Therefore no preview deployment was created and no alias was changed.
+- A live recheck of the existing production alias remains the old X3 surface:
+  `/api/health` returns 200 while `/api/readiness` returns HTTP 500
+  (`FUNCTION_INVOCATION_FAILED`). The old health payload still exposes
+  scanner, Telegram, and cron routes. This candidate has not altered it.
 - An initial stage-root build without `--project` auto-created the separate
   Vercel project `vercel-stage` (`prj_xecuX03xwHT01EdsYewnezFUpeoG`). It has no
   deployment or traffic; future runs must pass the Dawnstrike project ID

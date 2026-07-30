@@ -6,11 +6,11 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
 |---|---|---|
-| Full pytest suite | PASS: 209 passed | `py -m pytest` |
+| Full pytest suite | PASS: 211 passed | `py -m pytest` |
 | Ruff | PASS | `py -m ruff check .` |
 | Mypy | PASS: 107 source files | `py -m mypy intraday_scanner` |
 | Focused canonical tests | PASS: 8 passed | `tests/test_canonical_performance.py` |
-| Compile | PASS | `py -m compileall -q intraday_scanner api scripts/verify_public_artifact.py` |
+| Compile | PASS | `py -m compileall -q api intraday_scanner scripts` |
 | Real-database copied reconcile | PASS/FAIL-CLOSED | 235 rows, 32 daily records, 25 discrepancies, CLI exit 2 |
 | Diagnostic public build | PASS/DEGRADED | 235 rows, 232,001 bytes, snapshot `degraded`, readiness HTTP 503 |
 | Artifact verifier | FAIL-CLOSED | Clean source SHA passes; real-data stage rejects `snapshot_not_publishable` and `readiness_not_publishable` |
