@@ -33,6 +33,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
+    try:
+        db_path = _resolve_repository_database(root, args.db_path)
+    except ValueError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "FAILED",
+                    "reason": "database_path_outside_repository",
+                    "message": str(exc),
+                    "next_action": (
+                        "Copy the source database into the approved checkout before "
+                        "running a persistence-enabled build."
+                    ),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return 2
     source = _source_metadata(root)
     if source.get("source_clean") is not True and not args.allow_dirty:
         print(
@@ -56,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     if not paper_ops_root.is_absolute():
         paper_ops_root = root / paper_ops_root
     result = DailyFinalizeService(
-        root / args.db_path,
+        db_path,
         output_root,
         paper_ops_root=paper_ops_root,
     ).run(
@@ -73,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     ).hexdigest()[:20]
     file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
     notification = _record_build_notification(
-        root / args.db_path,
+        db_path,
         result,
         market_date=market_date,
         build_id=build_id,
@@ -104,6 +123,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
     return 2 if result.get("status") == "FAILED" else 0
+
+
+def _resolve_repository_database(root: Path, value: str) -> Path:
+    """Resolve a persistence target and keep it inside this checkout."""
+
+    repository = root.resolve()
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = repository / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(repository)
+    except ValueError as exc:
+        raise ValueError(
+            f"database path must be inside the repository: {resolved}"
+        ) from exc
+    return resolved
 
 
 def _record_build_notification(

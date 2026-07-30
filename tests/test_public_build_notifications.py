@@ -13,6 +13,11 @@ def test_public_build_records_auditable_finalize_notification(tmp_path: Path, mo
     )
     db_path = tmp_path / "notification.sqlite"
     output = tmp_path / "public"
+    monkeypatch.setattr(
+        build_public,
+        "_resolve_repository_database",
+        lambda root, value: db_path,
+    )
 
     status = build_public.main(
         [
