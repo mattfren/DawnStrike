@@ -76,3 +76,12 @@ For every future transfer, append:
 6. focused tests;
 7. reviewer/phase evidence;
 8. final target hash where applicable.
+
+## Continuation transfer additions — 2026-07-30
+
+| Target | Source | State | Boundary |
+|---|---|---|---|
+| `scripts/run_alphaops_eod_full.bat` | Existing shared AlphaOps EOD runner | Owned wrapper added | Requires explicit `SourceRoot`; records exit status and dated stage receipt; refuses recursion |
+| `scripts/run_alphaops_monitor_full.bat` | Existing shared AlphaOps monitor runner | Owned wrapper added | Requires explicit `SourceRoot`; refuses recursion |
+| `scripts/record_automation_stage.py` | New candidate code | Added | SQLite receipt only; no synthetic market data and no broker actions |
+| `scripts/send_daily_finalize_notification.py` | New candidate code | Added | Optional Telegram delivery from environment secrets; idempotent DB receipt; absent secrets remain visible as `not_configured` |

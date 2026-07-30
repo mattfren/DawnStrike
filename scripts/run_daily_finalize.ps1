@@ -69,7 +69,14 @@ try {
             AllowDegraded = [bool]$AllowDegraded
             Promote = ($PublicationMode -eq "Production")
         }
-        & .\scripts\publish_vercel_public.ps1 @publishArgs
+    & .\scripts\publish_vercel_public.ps1 @publishArgs
+    }
+
+    & py.exe scripts\send_daily_finalize_notification.py `
+        --result-file (Join-Path $outputPath "daily-finalize-result.json") `
+        --db-path $dbPath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Daily finalize notification could not be recorded or sent."
     }
 }
 finally {

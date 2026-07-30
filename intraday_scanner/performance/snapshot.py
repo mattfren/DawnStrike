@@ -27,7 +27,11 @@ def write_public_snapshot(
     service = CanonicalPerformanceService(db_path)
     chosen: dict[str, Any] | None = None
     for limit in range(max(1, row_limit), 0, -1):
-        payload = service.load_public_data(days=days, row_limit=limit)
+        payload = service.load_public_data(
+            days=days,
+            row_limit=limit,
+            market_date=market_date,
+        )
         encoded = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")
@@ -56,7 +60,7 @@ def write_public_snapshot(
     payload_sha256 = hashlib.sha256(encoded).hexdigest()
     input_hash = _input_hash(payload)
     effective_date = market_date or _latest_date(payload)
-    status = _snapshot_status(payload)
+    status = _snapshot_status(payload, effective_date)
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     manifest = {
         "schema_version": "dawnstrike.public_snapshot_manifest.v1",
@@ -68,12 +72,13 @@ def write_public_snapshot(
         "generated_at": generated_at,
         "input_hash_sha256": input_hash,
         "payload_sha256": payload_sha256,
-        "artifact_path": str(path).replace("\\", "/"),
+        "artifact_path": path.name,
         "row_count": len(payload.get("rows") or []),
         "byte_count": len(encoded),
         "compressed_byte_count": compressed_byte_count,
         "compression": "gzip",
         "limits": payload.get("limits", {}),
+        "safety_evidence": payload.get("safety_evidence", {}),
         "research_only": True,
         "live_trading_enabled": False,
     }
@@ -152,8 +157,11 @@ def _latest_date(payload: dict[str, Any]) -> str:
     return max(dates) if dates else "unknown"
 
 
-def _snapshot_status(payload: dict[str, Any]) -> str:
-    daily = list(payload.get("daily") or [])
+def _snapshot_status(payload: dict[str, Any], effective_date: str) -> str:
+    daily = [
+        row for row in (payload.get("daily") or [])
+        if str(row.get("market_date") or "") == effective_date
+    ]
     if not daily:
         return "no_data"
     if any(str(row.get("status")) == "DEGRADED" for row in daily):

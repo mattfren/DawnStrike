@@ -71,6 +71,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         "market_date": "2026-07-29",
         "live_trading_enabled": False,
         "research_only": True,
+        "safety_status": "verified",
     }
     monkeypatch.setattr(readiness, "PUBLIC_ROOT", public_root)
     monkeypatch.setattr(readiness, "SNAPSHOT_PATH", snapshot)
@@ -130,6 +131,7 @@ def test_readiness_rejects_degraded_public_state(tmp_path: Path, monkeypatch) ->
             "market_date": "2026-07-29",
             "live_trading_enabled": False,
             "research_only": True,
+            "safety_status": "verified",
         }
     )
     assert "snapshot_not_publishable" in failures

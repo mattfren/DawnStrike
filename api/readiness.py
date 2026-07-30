@@ -161,6 +161,8 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("live_trading_enabled")
     if readiness.get("research_only") is not True:
         failures.append("research_only_flag_missing")
+    if readiness.get("safety_status") != "verified":
+        failures.append("safety_evidence_unverified")
     if readiness.get("snapshot_status") not in {"complete", "no_trade"}:
         failures.append("snapshot_not_publishable")
     if snapshot_manifest and snapshot_manifest.get("status") != readiness.get("snapshot_status"):
@@ -227,6 +229,8 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("live_trading_enabled")
     if readiness.get("research_only") is not True:
         failures.append("research_only_flag_missing")
+    if readiness.get("safety_status") != "verified":
+        failures.append("safety_evidence_unverified")
     if readiness.get("snapshot_status") not in {"complete", "no_trade"}:
         failures.append("snapshot_not_publishable")
     if snapshot_manifest and snapshot_manifest.get("status") != readiness.get("snapshot_status"):

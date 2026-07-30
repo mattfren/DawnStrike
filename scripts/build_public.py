@@ -90,7 +90,6 @@ def main(argv: list[str] | None = None) -> int:
     build_id = hashlib.sha256(
         f"{source.get('source_sha')}:{data_hash}:{market_date}".encode()
     ).hexdigest()[:20]
-    file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
     notification = _record_build_notification(
         db_path,
         result,
@@ -100,6 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         deployment_url=args.deployment_url,
     )
     result["notification"] = notification
+    result["deployment_url"] = args.deployment_url
+    (output_root / "daily-finalize-result.json").write_text(
+        json.dumps(result, sort_keys=True, indent=2, default=str),
+        encoding="utf-8",
+    )
+    file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
     (output_root / "build-manifest.json").write_text(
         json.dumps(
             {

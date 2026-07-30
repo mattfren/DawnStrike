@@ -11,6 +11,7 @@ const state = {
   data: null,
   readiness: null,
   manifest: null,
+  stage: null,
   performancePage: 0,
   researchPage: 0,
 };
@@ -53,14 +54,16 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest] = await Promise.all([
+    const [snapshot, readiness, manifest, stage] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/stage-manifest.json").catch(() => ({ payload: {}, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
     state.manifest = manifest.payload;
+    state.stage = stage.payload;
     render();
   } catch (error) {
     document.getElementById("header-status").textContent = "Snapshot unavailable";
@@ -75,7 +78,7 @@ function render() {
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const official = daily.filter((item) => item.cohort === "official_forward_paper");
   const latest = official[0];
-  const missing = daily.reduce((total, item) => total + numberOrZero(item.missing_outcome_count), 0);
+  const missing = numberOrZero(latest?.missing_outcome_count);
   document.getElementById("header-status").textContent = latest ? `Updated ${latest.market_date}` : "No paper result yet";
   document.getElementById("footer-date").textContent = latest ? `Latest record ${latest.market_date}` : "Snapshot date pending";
   document.getElementById("kpi-date").textContent = latest?.market_date || "Not reported";
@@ -98,7 +101,11 @@ function render() {
   renderOverview(official, latest);
   renderPerformance(daily);
   renderResearch(rows);
-  renderSystem(state.readiness, state.manifest, data);
+  renderToday(rows, latest);
+  renderLedger(rows, latest);
+  renderCurve(official);
+  renderResearchCohorts(daily);
+  renderSystem(state.readiness, state.manifest, state.stage, data);
 }
 
 function renderOverview(official, latest) {
@@ -148,6 +155,55 @@ function renderPerformance(daily) {
   updatePager("performance", start, visible.length, daily.length);
 }
 
+function renderToday(rows, latest) {
+  document.getElementById("today-date").textContent = latest?.market_date || "Not reported";
+  const dated = rows.filter((row) => row.cohort === "official_forward_paper" && row.market_date === latest?.market_date);
+  const counts = {
+    selected: dated.length,
+    entered: dated.filter((row) => ["realized", "unrealized"].includes(row.record_status)).length,
+    closed: dated.filter((row) => row.record_status === "realized").length,
+    open: dated.filter((row) => row.record_status === "unrealized").length,
+    unresolved: dated.filter((row) => ["missing_outcome", "quarantined"].includes(row.record_status)).length,
+  };
+  document.getElementById("today-activity").innerHTML = Object.entries(counts).map(([label, value]) => `<div class="activity-card"><span>${escapeHtml(label)}</span><strong>${value}</strong><small>${value ? "Source rows" : "None reported"}</small></div>`).join("");
+}
+
+function renderLedger(rows, latest) {
+  const body = document.getElementById("ledger-table");
+  const dated = rows.filter((row) => row.cohort === "official_forward_paper" && row.market_date === latest?.market_date).slice(0, 12);
+  body.innerHTML = dated.length ? dated.map((row) => `<tr><td>${escapeHtml(row.market_date || "Not reported")}</td><td><strong>${escapeHtml(row.ticker || "Not reported")}</strong></td><td>${statusChip(row.record_status)}</td><td>${formatMoney(row.net_pnl_cents)}</td><td>${row.source_refs?.length ? `${row.source_refs.length} ref${row.source_refs.length === 1 ? "" : "s"}` : "Not reported"}</td></tr>`).join("") : '<tr><td colspan="5">No official ledger rows for the latest dated record.</td></tr>';
+}
+
+function renderCurve(official) {
+  const node = document.getElementById("return-curve");
+  const points = official.slice().sort((a, b) => String(a.market_date).localeCompare(String(b.market_date))).slice(-30);
+  if (!points.length) {
+    node.innerHTML = '<span class="muted">No sourced official curve is available.</span>';
+    return;
+  }
+  const values = points.map((item) => Number(item.cumulative_return_pct)).filter(Number.isFinite);
+  if (!values.length) {
+    node.innerHTML = '<span class="muted">Cumulative return is not reported for the available days.</span>';
+    return;
+  }
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const range = Math.max(max - min, 0.01);
+  const polyline = values.map((value, index) => `${(index / Math.max(values.length - 1, 1)) * 100},${92 - ((value - min) / range) * 82}`).join(" ");
+  node.innerHTML = `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="92" x2="100" y2="92" class="curve-axis"></line><polyline points="${polyline}" class="curve-line"></polyline></svg><div class="curve-labels"><span>${escapeHtml(points[0].market_date)}</span><strong>${formatPercent(points.at(-1).cumulative_return_pct)}</strong><span>${escapeHtml(points.at(-1).market_date)}</span></div>`;
+}
+
+function renderResearchCohorts(daily) {
+  const groups = new Map();
+  daily.filter((row) => row.cohort !== "official_forward_paper").forEach((row) => {
+    const current = groups.get(row.cohort) || { days: 0, complete: 0 };
+    current.days += 1;
+    if (["COMPLETE", "NO_TRADE"].includes(row.status)) current.complete += 1;
+    groups.set(row.cohort, current);
+  });
+  document.getElementById("research-cohorts").innerHTML = groups.size ? [...groups.entries()].map(([cohort, value]) => `<div class="cohort-row"><strong>${escapeHtml(COHORTS[cohort] || cohort)}</strong><span>${value.days} day${value.days === 1 ? "" : "s"} · ${value.complete} complete</span></div>`).join("") : '<span class="muted">No backtest or challenger rows are published.</span>';
+}
+
 function renderResearch(rows) {
   const body = document.getElementById("research-table");
   const research = rows.filter((row) => ["alphaops_signal_research", "alphaops_research"].includes(row.cohort));
@@ -178,7 +234,7 @@ function updatePager(table, start, visibleCount, total) {
   next.disabled = start + visibleCount >= total;
 }
 
-function renderSystem(readiness, manifest, data) {
+function renderSystem(readiness, manifest, stage, data) {
   const readinessPayload = readiness?.payload || {};
   const readinessStatus = readinessPayload.status || "not_reported";
   setStatus("system-pill", readinessStatus === "ready" ? "Ready" : "Needs attention", readinessStatus === "ready" ? "COMPLETE" : "DEGRADED");
@@ -191,12 +247,15 @@ function renderSystem(readiness, manifest, data) {
     ["Trading", readinessPayload.live_trading_enabled === false ? "Disabled" : "Not reported", readinessPayload.live_trading_enabled === false],
   ]);
   document.getElementById("manifest-details").innerHTML = detailRows([
+    ["As of", data.as_of_market_date || manifest.market_date || "Not reported", true],
     ["Snapshot", manifest.status || "Not reported", manifest.status === "complete" || manifest.status === "no_trade"],
     ["Payload size", manifest.byte_count ? `${Number(manifest.byte_count).toLocaleString()} raw / ${Number(manifest.compressed_byte_count || 0).toLocaleString()} gzip bytes` : "Not reported", Number(manifest.compressed_byte_count || 0) <= 250 * 1024],
     ["Rows", manifest.row_count ?? "Not reported", true],
     ["Payload hash", shortHash(manifest.payload_sha256), true],
     ["Generated", formatTimestamp(manifest.generated_at), true],
   ]);
+  const stages = Array.isArray(stage?.stages) ? stage.stages : [];
+  document.getElementById("stage-details").innerHTML = stages.length ? stages.map((item) => `<div class="stage-row"><span>${escapeHtml(item.stage || "Not reported")}</span><strong class="${stageClass(item.status)}">${escapeHtml(item.status || "NOT_STARTED")}</strong><small>${escapeHtml(item.next_action || "No next action reported")}</small></div>`).join("") : '<span class="muted">Stage manifest not published.</span>';
   const safety = data.safety_evidence || {};
   document.getElementById("safety-details").innerHTML = detailRows([
     ["Source quality", safetyLabel(safety.source_quality), false],
@@ -205,6 +264,8 @@ function renderSystem(readiness, manifest, data) {
     ["Liquidity evidence", safetyLabel(safety.liquidity_evidence), false],
   ]);
 }
+
+function stageClass(status) { return ["LOCAL_VERIFIED", "COMPLETE"].includes(String(status)) ? "good" : ["FAILED", "DEGRADED"].includes(String(status)) ? "bad" : "warn"; }
 
 function detailRows(rows) { return rows.map(([label, value, good]) => `<dt>${escapeHtml(label)}</dt><dd class="${good ? "good" : "bad"}">${escapeHtml(String(value))}</dd>`).join(""); }
 function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "FAILED"].includes(String(status))); }

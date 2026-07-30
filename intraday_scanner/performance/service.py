@@ -126,17 +126,32 @@ class CanonicalPerformanceService:
                 "paper_ops_reconciliation": inputs["paper_ops"],
             }
 
-    def load_public_data(self, *, days: int = 30, row_limit: int = 250) -> dict[str, Any]:
+    def load_public_data(
+        self,
+        *,
+        days: int = 30,
+        row_limit: int = 250,
+        market_date: str | None = None,
+    ) -> dict[str, Any]:
         """Return a bounded, secret-free payload for the static public site."""
 
         with sqlite3.connect(self.db_path) as connection:
             connection.row_factory = sqlite3.Row
             run_migrations(connection)
+            as_of = market_date
+            if as_of is None:
+                latest = connection.execute(
+                    "SELECT MAX(market_date) FROM portfolio_daily_performance"
+                ).fetchone()
+                as_of = str(latest[0]) if latest and latest[0] else None
+            date_clause = " AND market_date <= ?" if as_of else ""
+            date_params: tuple[object, ...] = (as_of,) if as_of else ()
             daily_rows = [
                 dict(row)
                 for row in connection.execute(
-                    """
+                    f"""
                     SELECT * FROM portfolio_daily_performance
+                    WHERE 1 = 1 {date_clause}
                     ORDER BY CASE cohort
                                WHEN 'official_forward_paper' THEN 0
                                WHEN 'alphaops_signal_research' THEN 1
@@ -147,13 +162,13 @@ class CanonicalPerformanceService:
                              market_date DESC, strategy_id ASC
                     LIMIT ?
                     """,
-                    (max(1, days) * 8,),
+                    (*date_params, max(1, days) * 8),
                 )
             ]
             performance_rows = [
                 dict(row)
                 for row in connection.execute(
-                    """
+                    f"""
                     SELECT record_id, market_date, ticker, cohort, strategy_id,
                            strategy_version, record_status, notional_cents,
                            gross_pnl_cents, gross_return_pct, fees_cents, slippage_cents,
@@ -164,6 +179,7 @@ class CanonicalPerformanceService:
                            trade_count, open_position_count, unrealized_pnl_cents,
                            record_type
                     FROM portfolio_performance_rows
+                    WHERE 1 = 1 {date_clause}
                     ORDER BY CASE cohort
                                WHEN 'official_forward_paper' THEN 0
                                WHEN 'alphaops_signal_research' THEN 1
@@ -174,12 +190,13 @@ class CanonicalPerformanceService:
                              market_date DESC, rank ASC, record_id ASC
                     LIMIT ?
                     """,
-                    (max(1, row_limit),),
+                    (*date_params, max(1, row_limit)),
                 )
             ]
         return {
             "schema_version": "dawnstrike.public_performance.v1",
             "generated_at": _utc_now(),
+            "as_of_market_date": as_of,
             "research_only": True,
             "live_trading_enabled": False,
             "safety_evidence": _unknown_safety_evidence(),

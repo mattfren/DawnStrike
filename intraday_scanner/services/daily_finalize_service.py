@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -57,12 +58,12 @@ class DailyFinalizeService:
         run_id = hashlib.sha256(
             f"dawnstrike:daily-finalize:v1:{market_date}".encode()
         ).hexdigest()[:20]
-        try:
-            self.lock_path.touch(exist_ok=False)
+        if self._acquire_lock(run_id):
             acquired = True
-        except FileExistsError:
+        else:
             return self._failure(market_date, run_id, "lock_held", http_status=503)
         try:
+            self._log_event("run_started", run_id=run_id, market_date=market_date)
             self._record_run(run_id, market_date, "IN_PROGRESS", "lock_acquired", now=now)
             last_error: str | None = None
             for attempt in range(retry_limit + 1):
@@ -82,11 +83,17 @@ class DailyFinalizeService:
                         self.output_root / "data" / "performance.json",
                         market_date=market_date,
                     )
-                    upstream_status = self._read_upstream_stage(market_date)
+                    upstream_status, upstream_stages = self._read_upstream_stages(market_date)
                     readiness = self._write_readiness(
                         result, publication, market_date, upstream_status
                     )
-                    stage = self._write_stage_manifest(result, publication, readiness, attempt)
+                    stage = self._write_stage_manifest(
+                        result,
+                        publication,
+                        readiness,
+                        attempt,
+                        upstream_stages=upstream_stages,
+                    )
                     status = str(result.get("status") or "DEGRADED")
                     self._record_run(
                         run_id,
@@ -97,6 +104,13 @@ class DailyFinalizeService:
                         retry_count=attempt,
                         input_hash=result.get("input_hash_sha256"),
                         output_hash=publication["manifest"].get("payload_sha256"),
+                    )
+                    self._log_event(
+                        "run_completed",
+                        run_id=run_id,
+                        market_date=market_date,
+                        status=status,
+                        retry_count=attempt,
                     )
                     return {
                         "run_id": run_id,
@@ -110,7 +124,7 @@ class DailyFinalizeService:
                             "daily_count": result.get("daily_count"),
                             "issue_count": result.get("issue_count"),
                             "input_hash_sha256": result.get("input_hash_sha256"),
-                            "coverage": _coverage_summary(result.get("daily")),
+                            "coverage": _coverage_summary(result.get("daily"), market_date),
                             "paper_ops": _paper_ops_summary(
                                 result.get("paper_ops_reconciliation")
                             ),
@@ -132,12 +146,52 @@ class DailyFinalizeService:
                 retry_count=retry_limit,
                 failure_reason=last_error,
             )
+            self._log_event(
+                "run_failed",
+                run_id=run_id,
+                market_date=market_date,
+                reason=last_error or "finalize_failed",
+            )
             return self._failure(
                 market_date, run_id, last_error or "finalize_failed", http_status=503
             )
         finally:
             if acquired and self.lock_path.exists():
                 self.lock_path.unlink()
+
+    def _acquire_lock(self, run_id: str) -> bool:
+        """Acquire a bounded lock and recover only a provably stale lock."""
+
+        if self.lock_path.exists():
+            age_seconds = max(0.0, time.time() - self.lock_path.stat().st_mtime)
+            if age_seconds <= 4 * 60 * 60:
+                return False
+            self.lock_path.unlink()
+        payload = json.dumps(
+            {
+                "run_id": run_id,
+                "pid": os.getpid(),
+                "started_at": _utc_now(),
+            },
+            sort_keys=True,
+        )
+        try:
+            descriptor = os.open(
+                self.lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+        except FileExistsError:
+            return False
+        return True
+
+    def _log_event(self, event: str, **payload: object) -> None:
+        record = {"event": event, "at": _utc_now(), **payload}
+        with (self.output_root / "daily-finalize.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
     def _write_readiness(
         self,
@@ -147,9 +201,15 @@ class DailyFinalizeService:
         upstream_status: str = "not_recorded",
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
+        safety_evidence = publication["manifest"].get("safety_evidence")
+        safety_verified = _safety_is_verified(safety_evidence)
         status = (
             "ready"
-            if snapshot_status in {"complete", "no_trade"} and upstream_status == "complete"
+            if (
+                snapshot_status in {"complete", "no_trade"}
+                and upstream_status == "complete"
+                and safety_verified
+            )
             else "not_ready"
         )
         payload = {
@@ -159,14 +219,15 @@ class DailyFinalizeService:
             "http_status": 200 if status == "ready" else 503,
             "snapshot_status": snapshot_status,
             "upstream_status": upstream_status,
+            "safety_status": "verified" if safety_verified else "blocked_or_unknown",
             "reconciliation_status": reconciliation.get("status"),
             "input_hash_sha256": reconciliation.get("input_hash_sha256"),
             "payload_sha256": publication["manifest"].get("payload_sha256"),
             "live_trading_enabled": False,
             "research_only": True,
-            "reason": "complete_or_explicit_no_trade_with_upstream_success"
+            "reason": "complete_or_explicit_no_trade_with_upstream_success_and_safety"
             if status == "ready"
-            else "missing_or_degraded_upstream_truth",
+            else "missing_or_degraded_upstream_truth_or_safety",
         }
         path = self.output_root / "readiness.json"
         path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
@@ -175,13 +236,24 @@ class DailyFinalizeService:
     def _read_upstream_stage(self, market_date: str) -> str:
         """Read the latest local EOD automation result without mutating it."""
 
+        return self._read_upstream_stages(market_date)[0]
+
+    def _read_upstream_stages(
+        self, market_date: str
+    ) -> tuple[str, dict[str, str]]:
+        """Read one dated upstream receipt and its stage statuses.
+
+        The receipt is written by the owned AlphaOps runner after the upstream
+        chain exits.  Absence is intentionally not inferred as success.
+        """
+
         try:
             with sqlite3.connect(self.db_path) as connection:
                 exists = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_runs'"
                 ).fetchone()
                 if not exists:
-                    return "not_recorded"
+                    return "not_recorded", {}
                 rows = connection.execute(
                     """
                     SELECT run_type, status, completed_at, payload_json
@@ -192,7 +264,7 @@ class DailyFinalizeService:
                     """
                 ).fetchall()
         except sqlite3.Error:
-            return "unreadable"
+            return "unreadable", {}
         for _run_type, status, completed_at, payload_json in rows:
             try:
                 payload = json.loads(str(payload_json or "{}"))
@@ -207,10 +279,16 @@ class DailyFinalizeService:
             if observed_date != market_date:
                 continue
             normalized = str(status or payload.get("status") or "").lower()
+            stages = payload.get("stages")
+            stage_map = {
+                str(item.get("stage")): str(item.get("status") or "")
+                for item in stages
+                if isinstance(item, dict) and item.get("stage")
+            } if isinstance(stages, list) else {}
             if normalized in {"complete", "completed", "success", "ok", "passed", "ready"}:
-                return "complete"
-            return "failed"
-        return "not_recorded"
+                return "complete", stage_map
+            return "failed", stage_map
+        return "not_recorded", {}
 
     def _write_stage_manifest(
         self,
@@ -218,6 +296,7 @@ class DailyFinalizeService:
         publication: dict[str, Any],
         readiness: dict[str, Any],
         retry_count: int,
+        upstream_stages: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         input_hash = reconciliation.get("input_hash_sha256")
         canonical_output_hash = reconciliation.get("output_hash_sha256")
@@ -227,10 +306,19 @@ class DailyFinalizeService:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
         readiness_status = str(readiness.get("status") or "not_ready")
         generated_at = _utc_now()
+        upstream_stages = upstream_stages or {}
+        upstream_stage_names = {
+            "source_collection",
+            "candidate_normalization",
+            "selection",
+            "delivery",
+            "paper_fills",
+            "outcome_capture",
+        }
         stages = [
             self._stage_record(
                 "source_collection",
-                upstream_status,
+                upstream_stages.get("source_collection", upstream_status),
                 "local-eod-stage-v1",
                 input_hash=input_hash,
                 output_hash=input_hash if upstream_status == "complete" else None,
@@ -250,13 +338,19 @@ class DailyFinalizeService:
             *[
                 self._stage_record(
                     name,
-                    "not_recorded",
+                    upstream_stages.get(name, upstream_status)
+                    if name in upstream_stage_names
+                    else "not_recorded",
                     f"dawnstrike-{name}-v1",
                     input_hash=None,
                     output_hash=None,
                     retry_count=retry_count,
                     generated_at=generated_at,
-                    next_action="Record and verify this upstream stage before publication.",
+                    next_action=(
+                        "Record and verify this upstream stage before publication."
+                        if name not in upstream_stages
+                        else "Review the upstream receipt and preserve its source lineage."
+                    ),
                 )
                 for name in (
                     "candidate_normalization",
@@ -472,16 +566,20 @@ def _stage_status(domain_status: str) -> str:
         return "LOCAL_VERIFIED"
     if normalized in {"failed", "unreadable", "error"}:
         return "FAILED"
+    if normalized in {"partial", "degraded", "no_data"}:
+        return "DEGRADED"
     if normalized in {"not_recorded", "missing", "not_started", "unknown"}:
         return "NOT_STARTED"
     return "IN_PROGRESS"
 
 
-def _coverage_summary(value: object) -> dict[str, object]:
+def _coverage_summary(value: object, market_date: str | None = None) -> dict[str, object]:
     daily = value if isinstance(value, list) else []
     eligible = observed = missing = excluded = 0
     for row in daily:
         if not isinstance(row, dict):
+            continue
+        if market_date and str(row.get("market_date") or "") != market_date:
             continue
         coverage = row.get("coverage")
         if not isinstance(coverage, dict):
@@ -514,6 +612,17 @@ def _paper_ops_summary(value: object) -> dict[str, object] | None:
             "source_file_sha256",
         )
     }
+
+
+def _safety_is_verified(value: object) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    required = ("source_quality", "halt_status", "corporate_action_status", "liquidity_evidence")
+    return all(
+        isinstance(value.get(key), dict)
+        and value[key].get("state") == "verified"
+        for key in required
+    )
 
 
 def _non_negative_int(value: object) -> int:
