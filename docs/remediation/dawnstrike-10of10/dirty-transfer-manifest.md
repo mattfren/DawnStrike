@@ -49,6 +49,12 @@ files in this directory.
 - Do not transfer `logs/`, private outputs, `.env` values, or Telegram secrets.
 - Do not transfer the full dirty checkout.
 - Do not copy historical X/X2/X3/Apex HTML bundles into the new public build.
+- Do not transfer `tests/test_v2_command_center_x3.py`,
+  `tests/test_command_center_x3_official_fleet_truth.py`, or
+  `intraday_scanner/v2/command_center_x3/qa.py`: these files exist only in the
+  dirty shared fallback, import the absent legacy X3 runtime, and are not part
+  of clean `origin/main`. The replacement static UI, semantic tests, rendered
+  browser proof, and artifact gates cover the candidate release surface.
 - Do not register the replacement task from this isolated worktree; the
   scheduler doctor must remain `BLOCKED_EXTERNAL` until an approved checkout
   exists.
