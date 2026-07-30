@@ -1,6 +1,6 @@
 # Proof matrix
 
-Candidate: `codex/dawnstrike-10of10` at the commit produced from this packet.
+Candidate: `codex/dawnstrike-10of10` at `1f0719f85951bbc45a8d4e1235897f92825cab40`.
 The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
@@ -12,7 +12,7 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Compile | PASS | `py -m compileall -q intraday_scanner api scripts/verify_public_artifact.py` |
 | Real-database copied reconcile | PASS/FAIL-CLOSED | 235 rows, 32 daily records, 25 discrepancies, CLI exit 2 |
 | Diagnostic public build | PASS/DEGRADED | 235 rows, 232,001 bytes, snapshot `degraded`, readiness HTTP 503 |
-| Artifact verifier | FAIL-CLOSED | Rejects `snapshot_not_publishable`, `readiness_not_publishable`, and `source_not_clean` |
+| Artifact verifier | FAIL-CLOSED | Clean source SHA passes; real-data stage rejects `snapshot_not_publishable` and `readiness_not_publishable` |
 | Readiness truth | PASS | `degraded` snapshot -> `not_ready`, HTTP 503 |
 | Static UI 360x800 | PASS | no horizontal overflow; screenshot in `evidence/` |
 | Static UI 390x844 | PASS | no horizontal overflow |

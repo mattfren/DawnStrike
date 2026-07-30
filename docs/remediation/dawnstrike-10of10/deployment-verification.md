@@ -9,9 +9,9 @@ SQLite, database, scanner, Telegram, UI-runtime, secret, and path leakage.
 
 The Vercel CLI was invoked against the linked project and stopped before any
 deployment because `uv` is not installed in the local PATH. No preview or
-production deployment was created by this candidate. The local source/artifact
-gate also rejects the current diagnostic build because the checkout is dirty
-and the copied real-data snapshot is degraded. Once `uv` is available and the
-candidate is committed cleanly, run the stage build, `vercel build --prod`, one
-`vercel deploy --prebuilt`, and the browser/health/readiness proof before
-requesting promotion approval.
+production deployment was created by this candidate. The clean-source portion
+of the local gate now passes at the committed candidate SHA; the copied
+real-data snapshot is still correctly rejected as degraded/not ready. Once
+`uv` is available, run the stage build, `vercel build --prod`, one `vercel
+deploy --prebuilt`, and the browser/health/readiness proof before requesting
+promotion approval.
