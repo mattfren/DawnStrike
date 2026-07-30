@@ -6,10 +6,21 @@ const COHORTS = {
   shadow_challenger: "Shadow challenger",
 };
 
-const state = { data: null, readiness: null, manifest: null };
+const PAGE_SIZE = 10;
+const state = {
+  data: null,
+  readiness: null,
+  manifest: null,
+  performancePage: 0,
+  researchPage: 0,
+};
 
 document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
+});
+
+document.querySelectorAll("[data-table][data-direction]").forEach((button) => {
+  button.addEventListener("click", () => changePage(button.dataset.table, Number(button.dataset.direction)));
 });
 
 function showView(name) {
@@ -18,8 +29,20 @@ function showView(name) {
   });
   document.querySelectorAll(".nav-link").forEach((link) => {
     link.classList.toggle("is-active", link.dataset.view === name);
+    link.setAttribute("aria-pressed", String(link.dataset.view === name));
   });
   document.getElementById(`view-${name}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function changePage(table, direction) {
+  if (!["performance", "research"].includes(table) || ![-1, 1].includes(direction)) return;
+  const key = `${table}Page`;
+  state[key] = Math.max(0, Number(state[key] || 0) + direction);
+  if (table === "performance") {
+    renderPerformance(Array.isArray(state.data?.daily) ? state.data.daily : []);
+  } else {
+    renderResearch(Array.isArray(state.data?.rows) ? state.data.rows : []);
+  }
 }
 
 async function loadJson(path) {
@@ -96,15 +119,24 @@ function renderOverview(official, latest) {
   bars.innerHTML = recent.length ? recent.map((item) => {
     const value = numberOrZero(item.gross_return_pct);
     const height = Math.max(5, Math.round(Math.abs(value) / scale * 78));
-    return `<div class="mini-bar"><span class="mini-bar-fill ${value < 0 ? "negative" : ""}" style="height:${height}px" title="${formatPercent(item.gross_return_pct)}"></span><span class="mini-bar-label">${escapeHtml(shortDate(item.market_date))}</span></div>`;
+    const label = `${shortDate(item.market_date)}: ${formatPercentText(item.gross_return_pct)}`;
+    return `<div class="mini-bar"><span class="mini-bar-fill ${value < 0 ? "negative" : ""}" style="height:${height}px" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span><span class="mini-bar-label">${escapeHtml(shortDate(item.market_date))}</span></div>`;
   }).join("") : "<span class=\"muted\">No official paper days yet.</span>";
 }
 
 function renderPerformance(daily) {
   const body = document.getElementById("performance-table");
   document.getElementById("performance-updated").textContent = state.data?.generated_at ? `Snapshot ${formatTimestamp(state.data.generated_at)}` : "";
-  if (!daily.length) { body.innerHTML = '<tr><td colspan="7">No published performance rows.</td></tr>'; return; }
-  body.innerHTML = daily.slice(0, 60).map((item) => `<tr>
+  if (!daily.length) {
+    body.innerHTML = '<tr><td colspan="7">No published performance rows.</td></tr>';
+    updatePager("performance", 0, 0, 0);
+    return;
+  }
+  const pageCount = Math.ceil(daily.length / PAGE_SIZE);
+  state.performancePage = Math.min(state.performancePage, pageCount - 1);
+  const start = state.performancePage * PAGE_SIZE;
+  const visible = daily.slice(start, start + PAGE_SIZE);
+  body.innerHTML = visible.map((item) => `<tr>
     <td>${escapeHtml(item.market_date || "Not reported")}</td>
     <td><span class="cohort-label ${item.cohort === "official_forward_paper" ? "official" : ""}">${escapeHtml(COHORTS[item.cohort] || item.cohort || "Not reported")}</span></td>
     <td>${statusChip(item.status)}</td>
@@ -113,17 +145,37 @@ function renderPerformance(daily) {
     <td>${formatPercent(item.excess_return_pct)}</td>
     <td>${numberOrZero(item.unrealized_trade_count) + numberOrZero(item.missing_outcome_count) + numberOrZero(item.quarantined_count)}</td>
   </tr>`).join("");
+  updatePager("performance", start, visible.length, daily.length);
 }
 
 function renderResearch(rows) {
   const body = document.getElementById("research-table");
-  const research = rows.filter((row) => ["alphaops_signal_research", "alphaops_research"].includes(row.cohort)).slice(0, 80);
-  if (!research.length) { body.innerHTML = '<tr><td colspan="6">No research observations are published.</td></tr>'; return; }
-  body.innerHTML = research.map((row) => `<tr>
+  const research = rows.filter((row) => ["alphaops_signal_research", "alphaops_research"].includes(row.cohort));
+  if (!research.length) {
+    body.innerHTML = '<tr><td colspan="6">No research observations are published.</td></tr>';
+    updatePager("research", 0, 0, 0);
+    return;
+  }
+  const pageCount = Math.ceil(research.length / PAGE_SIZE);
+  state.researchPage = Math.min(state.researchPage, pageCount - 1);
+  const start = state.researchPage * PAGE_SIZE;
+  const visible = research.slice(start, start + PAGE_SIZE);
+  body.innerHTML = visible.map((row) => `<tr>
     <td>${escapeHtml(row.market_date || "Not reported")}</td><td><strong>${escapeHtml(row.ticker || "Not reported")}</strong></td>
     <td>${statusChip(row.record_status)}</td><td>${formatPercent(row.gross_return_pct)}</td>
     <td>${formatPercent(row.return_pct)}</td><td>${row.source_refs?.length ? `${row.source_refs.length} reference${row.source_refs.length === 1 ? "" : "s"}` : "Not reported"}</td>
   </tr>`).join("");
+  updatePager("research", start, visible.length, research.length);
+}
+
+function updatePager(table, start, visibleCount, total) {
+  const page = Number(state[`${table}Page`] || 0);
+  const status = document.getElementById(`${table}-page-status`);
+  const previous = document.querySelector(`[data-table="${table}"][data-direction="-1"]`);
+  const next = document.querySelector(`[data-table="${table}"][data-direction="1"]`);
+  status.textContent = total ? `Showing ${start + 1}–${start + visibleCount} of ${total}` : "No rows to show";
+  previous.disabled = page <= 0;
+  next.disabled = start + visibleCount >= total;
 }
 
 function renderSystem(readiness, manifest, data) {
@@ -158,7 +210,8 @@ function detailRows(rows) { return rows.map(([label, value, good]) => `<dt>${esc
 function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "FAILED"].includes(String(status))); }
 function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
 function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
-function formatPercent(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%</span>`; }
+function formatPercent(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
+function formatPercentText(value) { return value == null || value === "" ? "Not reported" : `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`; }
 function formatMoney(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : "-"}$${Math.abs(Number(value) / 100).toFixed(2)}</span>`; }
 function returnContext(item) {
   const coverage = item.coverage?.coverage_pct == null ? "coverage not reported" : `coverage ${Number(item.coverage.coverage_pct).toFixed(1)}%`;
