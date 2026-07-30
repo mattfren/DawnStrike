@@ -18,7 +18,20 @@ if (@(Compare-Object -ReferenceObject ($expectedFunctions | Sort-Object) -Differ
 }
 & py.exe scripts\verify_public_artifact.py --root $public
 if ($LASTEXITCODE -ne 0) { throw "Public artifact verification failed" }
-if (Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -match 'sqlite|\.db$|telegram|scanner|ui\.py|\.env' }) {
+$scanRoots = @(
+    $public,
+    (Join-Path $stage "api")
+)
+$prebuiltRoots = Get-ChildItem -LiteralPath $stage -Directory -Force |
+    Where-Object { $_.Name -like ".vercel-output*" }
+$scanRoots += @($prebuiltRoots.FullName)
+$forbidden = foreach ($root in $scanRoots) {
+    if (Test-Path -LiteralPath $root) {
+        Get-ChildItem -LiteralPath $root -Recurse -File -Force |
+            Where-Object { $_.Name -match 'sqlite|\.db$|telegram|scanner|ui\.py|\.env' }
+    }
+}
+if ($forbidden) {
     throw "Forbidden runtime or secret file found in Vercel candidate"
 }
 Write-Output "Vercel candidate verified: $stage"
