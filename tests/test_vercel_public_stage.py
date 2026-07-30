@@ -34,3 +34,5 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "promote" in script
     assert "rollback" in script
     assert "Assert-PublicationState" in script
+    assert "Production verification did not converge" in script
+    assert "Start-Sleep -Seconds 3" in script

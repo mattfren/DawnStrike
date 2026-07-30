@@ -157,25 +157,45 @@ if ($Promote) {
 
 try {
     if ($Promote) {
-        $production = Invoke-VercelJson `
-            -Arguments @("inspect", $ProductionAlias, "--json") `
-            -Label "Production inspect"
-        $productionHealth = Invoke-VercelJson `
-            -Arguments @("curl", "$ProductionAlias/api/health") `
-            -Label "Production health"
-        $productionReadiness = Invoke-VercelJson `
-            -Arguments @("curl", "$ProductionAlias/api/readiness") `
-            -Label "Production readiness"
-        $productionManifest = Invoke-VercelJson `
-            -Arguments @("curl", "$ProductionAlias/build-manifest.json") `
-            -Label "Production build manifest"
-        Assert-PublicationState `
-            -Health $productionHealth `
-            -Readiness $productionReadiness `
-            -BuildManifest $productionManifest `
-            -Label "Production"
-        if ($productionManifest.data_hash_sha256 -ne $previewManifest.data_hash_sha256) {
-            throw "Production data hash does not match the verified preview."
+        $productionVerificationError = $null
+        for ($attempt = 1; $attempt -le 6; $attempt++) {
+            try {
+                $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                $production = Invoke-VercelJson `
+                    -Arguments @("inspect", $ProductionAlias, "--json") `
+                    -Label "Production inspect"
+                $productionHealth = Invoke-VercelJson `
+                    -Arguments @("curl", "$ProductionAlias/api/health?verify=$cacheBuster") `
+                    -Label "Production health"
+                $productionReadiness = Invoke-VercelJson `
+                    -Arguments @("curl", "$ProductionAlias/api/readiness?verify=$cacheBuster") `
+                    -Label "Production readiness"
+                $productionManifest = Invoke-VercelJson `
+                    -Arguments @("curl", "$ProductionAlias/build-manifest.json?verify=$cacheBuster") `
+                    -Label "Production build manifest"
+                Assert-PublicationState `
+                    -Health $productionHealth `
+                    -Readiness $productionReadiness `
+                    -BuildManifest $productionManifest `
+                    -Label "Production"
+                if (
+                    $productionManifest.data_hash_sha256 -ne
+                    $previewManifest.data_hash_sha256
+                ) {
+                    throw "Production data hash does not match the verified preview."
+                }
+                $productionVerificationError = $null
+                break
+            }
+            catch {
+                $productionVerificationError = $_.Exception.Message
+                if ($attempt -lt 6) {
+                    Start-Sleep -Seconds 3
+                }
+            }
+        }
+        if ($productionVerificationError) {
+            throw "Production verification did not converge: $productionVerificationError"
         }
     }
     else {
