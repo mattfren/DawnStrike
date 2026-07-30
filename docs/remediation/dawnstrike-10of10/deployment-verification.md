@@ -24,9 +24,9 @@ browser/health/readiness proof.
   `prj_5pef3EZF1u5YadebEz3dFjnkWOXy` succeeded. The prebuilt output is
   approximately 456 KB and contains only `api/health` and `api/readiness`
   functions plus static output. The generated public manifest records:
-  `source_sha=2dd26cba24eae0b189c6f7890fd86faa0a9c71b4`,
-  `build_id=1c4e911cd52bb8156de7`,
-  `data_hash=4f1bfb9dacb968d989e0ab842c1cdbfdfa120b88299a56246fa18625d019504a`,
+  `source_sha=30a64a3a714aa40cb6a1e3036697591bd80ffc96`,
+  `build_id=e20668c5644e058df6de`,
+  `data_hash=91bc4d492f3d1dad4dce6f980e867671635bb823593ed955b0af08f8c0d4365b`,
   `market_date=2026-07-29`, and `snapshot_bytes=232001`.
 - The final candidate verifier fails closed with
   `snapshot_not_publishable` and `readiness_not_publishable`; the artifact
