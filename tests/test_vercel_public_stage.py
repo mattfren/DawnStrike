@@ -14,3 +14,5 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     script = Path("scripts/build_vercel_public_stage.ps1").read_text(encoding="utf-8")
     assert "dawnstrike-public-stage" in script
     assert "dependencies = []" in script
+    assert 'api/public/**' in script
+    assert '$functionPublic = Join-Path $stage "api\\public"' in script

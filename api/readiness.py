@@ -10,11 +10,18 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_ROOT = (
-    REPOSITORY_ROOT / "public"
-    if (REPOSITORY_ROOT / "public").is_dir()
-    else REPOSITORY_ROOT / "build" / "public"
-)
+
+
+def _resolve_public_root() -> Path:
+    candidates = (
+        REPOSITORY_ROOT / "public",
+        REPOSITORY_ROOT / "api" / "public",
+        REPOSITORY_ROOT / "build" / "public",
+    )
+    return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
+
+
+PUBLIC_ROOT = _resolve_public_root()
 READINESS_PATH = PUBLIC_ROOT / "readiness.json"
 SNAPSHOT_PATH = PUBLIC_ROOT / "data" / "performance.json"
 SNAPSHOT_MANIFEST_PATH = PUBLIC_ROOT / "data" / "performance.json.manifest.json"

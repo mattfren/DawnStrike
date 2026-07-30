@@ -10,10 +10,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _public_root() -> Path:
-    stage_root = REPOSITORY_ROOT / "public"
-    if stage_root.is_dir():
-        return stage_root
-    return REPOSITORY_ROOT / "build" / "public"
+    candidates = (
+        REPOSITORY_ROOT / "public",
+        REPOSITORY_ROOT / "api" / "public",
+        REPOSITORY_ROOT / "build" / "public",
+    )
+    return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
 
 
 class handler(BaseHTTPRequestHandler):
