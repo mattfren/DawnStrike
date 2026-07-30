@@ -15,7 +15,10 @@ rebuild, records the source-to-promotion stage chain with hashes, timestamps,
 errors, and next actions, and returns 503 semantics for no-data/degraded
 states. The real copied-source rehearsal produced 425 rows, 222 daily records,
 and 156 discrepancies (including 105 quarantined PaperOps rows); it did not
-publish a green snapshot. `scheduler-doctor` confirms that
+publish a green snapshot. Each finalize attempt now records one auditable
+console notification containing market date, stage, build ID, data hash,
+coverage, PaperOps summary, deployment URL (null until one is supplied), and
+next action. `scheduler-doctor` confirms that
 `Dawnstrike 10of10 Daily Finalize` is absent and returns `BLOCKED_EXTERNAL`.
 The replacement task is not registered yet because the isolated candidate has
 no approved live checkout. Register it only against the approved merged

@@ -7,6 +7,11 @@ Target worktree: `C:\r\dawnstrike-10of10-20260729`
 Target branch/SHA: `codex/dawnstrike-10of10` /
 `86832fdae938f03f07ddbb919a2a5f2f2c5de970`
 
+Latest clean implementation/build source SHA used for the current evidence:
+`6e172db6d32844d93f63057ac28df50f052ce1d6`. The target-SHA line above is the
+initial transfer checkpoint; subsequent candidate commits are recorded by the
+build manifest and phase evidence.
+
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because
 the source checkout contains the current raw-table migration history; it was

@@ -17,7 +17,8 @@ calendar export:
   reconciliation errors;
 - no benchmark observations and no portfolio-equity observations;
 - CLI exit code `2` because the discrepancies remain unexplained;
-- the bounded diagnostic snapshot is 255,154 bytes for 15 public rows;
+- the bounded diagnostic snapshot is 607,268 raw bytes and 37,457 deterministic-
+  gzip bytes for 250 public rows; the compressed bound passes;
 - readiness remains HTTP 503 with `snapshot_status=degraded` and
   `upstream_status=not_recorded`.
 

@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -42,6 +43,10 @@ def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -
                 "status": "no_trade",
                 "payload_sha256": snapshot_hash,
                 "byte_count": snapshot.stat().st_size,
+                "compressed_byte_count": len(
+                    gzip.compress(snapshot.read_bytes(), compresslevel=9, mtime=0)
+                ),
+                "compression": "gzip",
             }
         ),
         encoding="utf-8",

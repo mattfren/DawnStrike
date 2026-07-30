@@ -24,18 +24,21 @@ browser/health/readiness proof.
   `pyproject.toml` pulls the scanner dependency graph into the functions.
 - Building from `build/vercel-stage` with the explicit Dawnstrike project ID
   `prj_5pef3EZF1u5YadebEz3dFjnkWOXy` succeeded. The prebuilt output contains 18
-  files and 479,521 bytes, with only `api/health` and `api/readiness`
+  files and 834,208 bytes, with only `api/health` and `api/readiness`
   functions plus static output; a direct scan found zero forbidden files. The
-  generated public manifest records:
-  `source_sha=86832fdae938f03f07ddbb919a2a5f2f2c5de970`,
-  `build_id=38fdbfb26d8daa9be6e8`,
-  `data_hash=72054225892ed2abb21a692310ec5eb4636e87f560175ff3d58a668866c3f876`,
-  `market_date=2026-07-29`, and `snapshot_bytes=255154`.
+  build used Vercel CLI 58.4.0 and the generated public manifest records:
+  `source_sha=6e172db6d32844d93f63057ac28df50f052ce1d6`,
+  `build_id=80e88316f9d8418f1232`,
+  `data_hash=1faeea9bb03f7151d832493e4c4b93e9aedab404a0545d15b9a3d03577706048`,
+  `market_date=2026-07-29`, `snapshot_bytes=607268`, and
+  `snapshot_compressed_bytes=37457`.
 - The final candidate verifier fails closed with
   `snapshot_not_publishable` and `readiness_not_publishable`; the artifact
   reports 425 canonical rows, 156 discrepancies, `snapshot_status=degraded`,
   and readiness HTTP 503.
-  Therefore no preview deployment was created and no alias was changed.
+  The compressed-size and 250-row bounds pass; the only verifier failures are
+  the intentional `snapshot_not_publishable` and `readiness_not_publishable`
+  gates. Therefore no preview deployment was created and no alias was changed.
 - A live recheck of the existing production alias remains the old X3 surface:
   `/api/health` returns 200 while `/api/readiness` returns HTTP 500
   (`FUNCTION_INVOCATION_FAILED`). The old health payload still exposes
