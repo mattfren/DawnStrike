@@ -11,7 +11,7 @@ approval.
 | Risk controls | `LOCAL_VERIFIED` | Unknown safety inputs fail closed; live execution remains disabled. |
 | Public UI | `LOCAL_VERIFIED` | Static responsive site, semantic navigation, bounded payload, and zero axe violations in the local browser pass. |
 | Vercel packaging | `LOCAL_VERIFIED` | Clean build source SHA `108835991179145fa3e59b9bfb954de1a8cf222f` produces an 18-file, 861,548-byte native output including diagnostics (15 payload files / 852,024 bytes excluding diagnostics), zero forbidden files, and embedded function state; the real snapshot is 632,094 raw bytes / 38,420 deterministic-gzip bytes and remains correctly rejected as degraded/not ready. |
-| Preview deployment | `PREVIEW_VERIFIED_DEGRADED` | Deployment `dpl_EK3mf9AHCYeaZrtivRiXXyTc2Hyb` is READY; health, readiness, and build-manifest checks agree on SHA/build/data hash. Hosted browser visual proof is limited by Vercel Deployment Protection; current static artifact proof passes locally. |
+| Preview deployment | `PREVIEW_VERIFIED` | Deployment `dpl_EK3mf9AHCYeaZrtivRiXXyTc2Hyb` is READY but truthfully degraded; health, readiness, and build-manifest checks agree on SHA/build/data hash. Hosted browser visual proof is limited by Vercel Deployment Protection; current static artifact proof passes locally. |
 | Production promotion | `BLOCKED_APPROVAL_REQUIRED` | Do not promote until preview, rollback, and owner approval are recorded. |
 | Strategy evidence | `WAITING_FOR_FORWARD_EVIDENCE` | The existing dataset does not prove the required forward sample or benchmark evidence. |
 

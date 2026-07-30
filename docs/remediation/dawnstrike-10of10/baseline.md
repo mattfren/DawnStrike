@@ -58,6 +58,58 @@ now `Disabled` with last result `0`; no replacement finalize task has been
 registered from the isolated candidate. The replacement must be registered
 only from an approved merged checkout.
 
+## Current authoritative revalidation
+
+Rechecked 2026-07-30 in the isolated candidate after fetching `origin/main`
+with no changes to the shared checkout:
+
+```text
+shared_branch=codex/command-center-x3-vercel
+shared_HEAD=67f02726c915aad7ce5a857567d3d3fcc1b0bf98
+origin/main=268b4946bc149f00ec6cc7fd31a040be3baa86a6
+shared_dirty_path_count=22972
+shared_modified_or_deleted=833
+shared_untracked=22139
+candidate_branch=codex/dawnstrike-10of10
+candidate_HEAD=77cf182e25a655515e1d52d3da4ee5496d9f5139
+candidate_dirty_path_count=0
+```
+
+The current scheduled-task state is:
+
+| Task | State | Enabled | Last result | Next action |
+|---|---:|---:|---:|---|
+| Dawnstrike AlphaOps EOD Full Report | 3 | true | 1 | Existing task; do not treat as canonical finalize success |
+| Dawnstrike AlphaOps Monitor 5m | 3 | true | 0 | Unchanged |
+| Dawnstrike AlphaOps Morning | 3 | true | 0 | Unchanged |
+| Dawnstrike X3 Vercel Daily Publish | 1 | false | 0 | Contained; do not restore |
+| Dawnstrike 10of10 Daily Finalize | missing | n/a | n/a | Register only from approved checkout |
+
+The current shared database was opened read-only. It contains 7 positions, 14
+fills, 8 outcomes, 228 historical signals, 5 canonical performance rows, 2
+canonical daily rows, 0 benchmark rows, 0 automation-run rows, and 91
+notifications. The current PaperOps reconciliation command, run against that
+authoritative shared source as of `2026-07-29`, reports 425 canonical rows,
+222 daily records, 156 discrepancies, 85 accepted PaperOps rows, 105
+quarantined rows, 131 PaperOps issues, and 85 source return-field mismatches.
+
+Production was re-inspected as deployment
+`dpl_ErcbSKoHYNf595t7zHK6HxyMdLge`
+(`dawnstrike-command-center-x3-c0brl0wa9-mattfrens-projects.vercel.app`). It
+is still the old X3 deployment: `/api/health` is HTTP 200, `/api/readiness`
+is HTTP 500 `FUNCTION_INVOCATION_FAILED`, and health exposes scanner,
+Telegram, and cron routes. No production mutation occurred.
+
+The exact isolated preview remains deployment
+`dpl_EK3mf9AHCYeaZrtivRiXXyTc2Hyb` at
+`https://dawnstrike-command-center-x3-m9pqo1ru6-mattfrens-projects.vercel.app`.
+Its health endpoint is HTTP 200 with source SHA
+`108835991179145fa3e59b9bfb954de1a8cf222f`, build ID
+`f58708827e2dbd9f1531`, research-only true, and live trading false. Its
+readiness endpoint is the intended HTTP 503 with
+`snapshot_not_publishable` and `pipeline_not_ready`; the build manifest
+matches the same source/build/data hashes.
+
 ## Database
 
 Database: `data/shadow_real.sqlite`  

@@ -24,7 +24,7 @@ The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 | Semantic navigation | PASS | All four public controls activate their matching visible panels |
 | Accessibility | PASS: 0 violations, 33 passes | agent-browser axe 4.12.1 |
 | Browser console/page errors/network | PASS | Current-artifact browser pass returned empty console/page-error channels; hosted preview visual access is limited by Vercel Deployment Protection |
-| Vercel-native build | PASS/PREVIEW_VERIFIED_DEGRADED | Explicit Dawnstrike project build succeeds with Vercel CLI 58.4.0; 18 prebuilt files, 861,548 bytes, embedded public-state dependency, two functions, zero forbidden files; exact preview API proof is recorded in deployment-verification.md |
+| Vercel-native build | PREVIEW_VERIFIED | Explicit Dawnstrike project build succeeds with Vercel CLI 58.4.0; 18 prebuilt files, 861,548 bytes, embedded public-state dependency, two functions, zero forbidden files; exact preview API proof is recorded in deployment-verification.md. The preview is truthfully degraded and readiness is HTTP 503. |
 | Daily task registration | BLOCKED_EXTERNAL | `Dawnstrike 10of10 Daily Finalize` is absent; registration script is ready but intentionally not run |
 
 ## Non-green by design

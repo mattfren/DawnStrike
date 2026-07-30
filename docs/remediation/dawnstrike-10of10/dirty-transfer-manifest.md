@@ -5,12 +5,12 @@ Source branch/SHA: `codex/command-center-x3-vercel` /
 `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`  
 Target worktree: `C:\r\dawnstrike-10of10-20260729`  
 Target branch/SHA: `codex/dawnstrike-10of10` /
-`86832fdae938f03f07ddbb919a2a5f2f2c5de970`
+`77cf182e25a655515e1d52d3da4ee5496d9f5139`
 
-Latest clean implementation/build source SHA used for the current evidence:
-`edd228ae1e2d56631b6684458425c653b2b3814f`. The target-SHA line above is the
-initial transfer checkpoint; subsequent candidate commits are recorded by the
-build manifest and phase evidence.
+Latest clean implementation/build source SHA used for the current preview:
+`108835991179145fa3e59b9bfb954de1a8cf222f`. The current target SHA is a
+documentation-only evidence refresh after that preview build; the preview
+manifest remains the authority for the deployed source SHA.
 
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because

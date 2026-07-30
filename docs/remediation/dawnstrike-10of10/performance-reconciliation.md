@@ -47,3 +47,18 @@ are separate fields.
 The current seven-trade source statistic remains a diagnostic and must not be
 presented as a validated portfolio return. Missing benchmark, equity, and cost
 evidence keeps readiness degraded.
+
+## Current authoritative revalidation
+
+The same reconciliation was rerun read-only against
+`C:\Users\MattFields\Dawnstrike\data\shadow_real.sqlite` and
+`C:\Users\MattFields\Dawnstrike\data\v2_paper_ops_live` as of
+`2026-07-29`. It returned `status=DEGRADED`, `row_count=425`,
+`daily_count=222`, `issue_count=156`, and CLI exit code `2`. The input hash was
+`c5b422baac4fc37a02cefa9a0851b9343f0859ad7efce3dad2c3ab85da0d7891` and the
+output hash was
+`9a390c4bb10e7cf6ade20458526ae5499f9dbf783f5470e9cb97c3e28bd68d53`.
+PaperOps reported 190 source rows, 85 accepted, 105 quarantined, 131 issues,
+and 85 source return-field mismatches. The current shared database itself has
+only 5 portfolio-performance rows, 2 daily-performance rows, and 0 benchmark
+rows, so it cannot support a green canonical return publication.

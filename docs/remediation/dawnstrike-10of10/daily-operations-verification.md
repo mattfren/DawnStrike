@@ -23,3 +23,9 @@ next action. `scheduler-doctor` confirms that
 The replacement task is not registered yet because the isolated candidate has
 no approved live checkout. Register it only against the approved merged
 checkout, then rerun the doctor and one dated finalize rehearsal.
+
+Current authoritative scheduler recheck on 2026-07-30: the legacy X3 task is
+disabled, `Dawnstrike AlphaOps EOD Full Report` is enabled but last returned
+code `1`, and `Dawnstrike 10of10 Daily Finalize` is missing. The shared source
+database was read-only during this audit; no scheduler registration or daily
+finalize was run from the isolated worktree.

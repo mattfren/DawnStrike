@@ -1,6 +1,6 @@
 # Deployment verification
 
-Status: `PREVIEW_VERIFIED_DEGRADED` for the isolated preview and
+Status: `PREVIEW_VERIFIED` for the isolated preview (truthfully degraded) and
 `BLOCKED_APPROVAL_REQUIRED` for production promotion.
 
 The candidate configuration uses native static output at `build/public` and
