@@ -65,9 +65,21 @@ function Invoke-VercelJson {
     # PowerShell's ErrorActionPreference=Stop turns Vercel's normal Node
     # warnings on stderr into terminating errors. Merge streams, then parse
     # the JSON object from the combined output.
-    $output = & npx @vercel @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE."
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Native Vercel warnings are emitted on stderr. PowerShell 7 can turn
+        # those records into terminating errors under Stop, even when the
+        # process exits successfully. Capture both streams while the native
+        # command runs and use its exit code as the authoritative result.
+        $ErrorActionPreference = "Continue"
+        $output = & npx @vercel @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode."
     }
     return Convert-VercelJson -Output @($output) -Label $Label
 }
@@ -80,9 +92,17 @@ function Set-VercelAlias {
     )
     $deploymentHost = ($DeploymentUrl -replace "^https?://", "").TrimEnd("/")
     $aliasHost = ($AliasUrl -replace "^https?://", "").TrimEnd("/")
-    $null = & npx @vercel alias set $deploymentHost $aliasHost 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE."
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = & npx @vercel alias set $deploymentHost $aliasHost 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode."
     }
 }
 
@@ -178,9 +198,17 @@ if ($Promote) {
     $priorProduction = Invoke-VercelJson `
         -Arguments @("inspect", $ProductionAlias, "--json") `
         -Label "Prior production inspect"
-    $null = & npx @vercel promote $previewUrl --yes 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Vercel promotion failed with exit code $LASTEXITCODE."
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = & npx @vercel promote $previewUrl --yes 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "Vercel promotion failed with exit code $exitCode."
     }
     $promoted = $true
 }
