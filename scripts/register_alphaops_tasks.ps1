@@ -1,13 +1,26 @@
 param(
-    [string]$Root = ""
+    [string]$Root = "",
+    [string]$SourceRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Boundary: this script owns research/watchlist tasks only. Canonical daily
+# performance publication is registered separately by register_daily_finalize_task.ps1.
+# Do not add the daily-finalize task here or create a second publisher.
 
 if ([string]::IsNullOrWhiteSpace($Root)) {
     $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 } else {
     $Root = (Resolve-Path $Root).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    throw "SourceRoot is required so the owned task wrapper can identify the legacy AlphaOps source explicitly."
+}
+$SourceRoot = (Resolve-Path $SourceRoot).Path
+if ($SourceRoot -eq $Root) {
+    throw "SourceRoot must differ from the owned runtime root; refusing recursive task registration."
 }
 
 $logsDir = Join-Path $Root "logs"
@@ -78,7 +91,7 @@ $repetitionXml
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
-  <Settings>
+    <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
@@ -93,7 +106,11 @@ $repetitionXml
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
+    <WakeToRun>true</WakeToRun>
+    <RestartOnFailure>
+      <Interval>PT5M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
     <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
@@ -136,19 +153,19 @@ Register-AlphaOpsTask `
     -TaskName "Dawnstrike AlphaOps Morning" `
     -Description "Dawnstrike AlphaOps weekday morning research/watchlist cycle. No orders placed." `
     -StartTime "08:10:00" `
-    -CommandLine "py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram >> logs\alpha_morning.log 2>&1"
+    -CommandLine "cd /d `"$SourceRoot`" && py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram >> `"$Root\logs\alpha_morning.log`" 2>&1"
 
 Register-AlphaOpsTask `
     -TaskName "Dawnstrike AlphaOps Monitor 5m" `
     -Description "Dawnstrike AlphaOps weekday 5-minute research monitor. No orders placed." `
     -StartTime "08:35:00" `
     -Repeats $true `
-    -CommandLine "py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram >> logs\alpha_monitor.log 2>&1"
+    -CommandLine "scripts\run_alphaops_monitor_full.bat `"$SourceRoot`" >> `"$Root\logs\alpha_monitor.log`" 2>&1"
 
 Register-AlphaOpsTask `
-    -TaskName "Dawnstrike AlphaOps EOD Report" `
+    -TaskName "Dawnstrike AlphaOps EOD Full Report" `
     -Description "Dawnstrike AlphaOps weekday end-of-day research, attribution, and historical reports. No orders placed." `
     -StartTime "15:15:00" `
-    -CommandLine "py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report && py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist && py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report >> logs\alpha_report.log 2>&1"
+    -CommandLine "scripts\run_alphaops_eod_full.bat `"$SourceRoot`" >> `"$Root\logs\alpha_report.log`" 2>&1"
 
 Write-Host "AlphaOps scheduled tasks registered for root: $Root"

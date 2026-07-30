@@ -1,7 +1,0 @@
-{
-  "status": "ok",
-  "service": "dawnstrike-one-dashboard",
-  "surface": "single static dashboard",
-  "research_only": true,
-  "broker_execution": false
-}

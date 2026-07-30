@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1020" />
+    <meta name="description" content="Dawnstrike research and paper performance with evidence attached." />
+    <title>Dawnstrike | Research performance</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/dawnstrike.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">D</div>
+        <div>
+          <p class="eyebrow">Research desk</p>
+          <p class="brand-name">Dawnstrike</p>
+        </div>
+      </div>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <button class="nav-link is-active" data-view="overview" aria-controls="view-overview" aria-pressed="true">Overview</button>
+        <button class="nav-link" data-view="performance" aria-controls="view-performance" aria-pressed="false">Performance</button>
+        <button class="nav-link" data-view="research" aria-controls="view-research" aria-pressed="false">Research</button>
+        <button class="nav-link" data-view="system" aria-controls="view-system" aria-pressed="false">System</button>
+      </nav>
+      <div class="header-status" id="header-status" aria-live="polite">Loading evidence</div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+          <p class="eyebrow accent">Evidence before confidence</p>
+          <h1 id="page-title">A clear record of what was observed.</h1>
+          <p class="hero-lede">
+            Dawnstrike keeps paper results, research observations, and unresolved outcomes separate.
+            Every number here has a source trail—or says when it does not.
+          </p>
+          <div class="hero-actions">
+            <button class="button button-primary" data-view="performance">View returns</button>
+            <button class="button button-secondary" data-view="system">Check freshness</button>
+          </div>
+        </div>
+        <div class="hero-note">
+          <span class="note-dot" aria-hidden="true"></span>
+          <div>
+            <strong>Research only</strong>
+            <p>No broker connection. No orders. Missing data is never treated as zero.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="kpi-grid" aria-label="Official portfolio evidence">
+        <article class="kpi-card"><span>Latest market date</span><strong id="kpi-date">Not reported</strong><small id="kpi-date-note">Waiting for snapshot</small></article>
+        <article class="kpi-card"><span>Daily return</span><strong id="kpi-return">Not reported</strong><small id="kpi-return-note">Net after sourced costs</small></article>
+        <article class="kpi-card"><span>Cumulative return</span><strong id="kpi-cumulative">Not reported</strong><small>Compounded official paper days</small></article>
+        <article class="kpi-card"><span>Benchmark return</span><strong id="kpi-benchmark">Not reported</strong><small>Same market date and policy</small></article>
+        <article class="kpi-card"><span>Excess return</span><strong id="kpi-excess">Not reported</strong><small>Portfolio minus benchmark</small></article>
+        <article class="kpi-card"><span>Net dollar P&amp;L</span><strong id="kpi-pnl">Not reported</strong><small>After fees and slippage</small></article>
+        <article class="kpi-card"><span>Drawdown</span><strong id="kpi-drawdown">Not reported</strong><small>From canonical equity curve</small></article>
+        <article class="kpi-card"><span>Open positions</span><strong id="kpi-open">Not reported</strong><small>Official paper portfolio</small></article>
+        <article class="kpi-card"><span>Evidence coverage</span><strong id="kpi-coverage">Not reported</strong><small id="kpi-coverage-note">Outcomes remain ineligible when missing</small></article>
+        <article class="kpi-card"><span>System state</span><strong id="kpi-system">Not reported</strong><small id="kpi-system-note">Readiness is separate from liveness</small></article>
+      </section>
+      <p id="kpi-context" class="kpi-context" role="note">Official paper context pending: cohort, period, denominator, cost treatment, coverage, and as-of time will appear with the latest record.</p>
+
+      <div id="app-alert" class="alert" role="status" aria-live="polite"></div>
+
+      <section id="view-overview" class="page-view is-visible" aria-labelledby="overview-title">
+        <div class="section-heading"><div><p class="eyebrow">At a glance</p><h2 id="overview-title">The latest evidence, in plain English.</h2></div><span class="section-pill" id="overview-pill">Loading</span></div>
+        <div class="overview-grid">
+          <article class="panel panel-large"><div class="panel-heading"><div><p class="eyebrow">Official paper</p><h3>What the paper record says</h3></div><span class="status-chip" id="paper-status">Loading</span></div><div id="paper-summary" class="summary-copy"></div><div id="paper-days" class="mini-bars"><span class="sr-only">Recent official paper returns</span></div></article>
+          <article class="panel"><p class="eyebrow">How to read this</p><h3>Three kinds of evidence</h3><div class="legend-list"><div><span class="legend-swatch swatch-paper"></span><div><strong>Official paper</strong><p>Saved research calls carried through the paper workflow.</p></div></div><div><span class="legend-swatch swatch-research"></span><div><strong>Research observations</strong><p>Sourced market observations used for learning, not claims.</p></div></div><div><span class="legend-swatch swatch-missing"></span><div><strong>Not reported</strong><p>The source did not support a complete result yet.</p></div></div></div></article>
+        </div>
+        <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Today</p><h3>Selections and position changes</h3><p class="muted">This is the dated paper record, not a broker blotter.</p></div><span class="section-pill" id="today-date">Not reported</span></div><div class="activity-grid" id="today-activity"></div></article>
+      </section>
+
+      <section id="view-performance" class="page-view" aria-labelledby="performance-title">
+        <div class="section-heading"><div><p class="eyebrow">Returns</p><h2 id="performance-title">Performance with the missing pieces visible.</h2></div><span class="section-pill">Cohorts stay separate</span></div>
+        <article class="panel"><div class="panel-heading"><div><h3>Daily record</h3><p class="muted">Net return is shown only when the cost inputs support it.</p></div><span class="muted" id="performance-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Daily Dawnstrike performance by evidence cohort</caption><thead><tr><th scope="col">Date</th><th scope="col">Evidence</th><th scope="col">Status</th><th scope="col">Gross observed</th><th scope="col">Net after costs</th><th scope="col">Against benchmark</th><th scope="col">Open / missing</th></tr></thead><tbody id="performance-table"><tr><td colspan="7">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" aria-label="Daily record pagination"><p id="performance-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="performance" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="performance" data-direction="1" disabled>Next</button></div></div></article>
+        <div class="performance-grid"><article class="panel"><div class="panel-heading"><div><h3>Equity and benchmark path</h3><p class="muted">Only sourced daily observations are plotted; gaps remain visible.</p></div></div><div id="return-curve" class="return-curve" role="img" aria-label="Cumulative official paper and benchmark returns"></div></article><article class="panel"><div class="panel-heading"><div><h3>Trade ledger</h3><p class="muted">Realized, open, missing, and quarantined rows stay distinct.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Official paper trade ledger</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Net P&amp;L</th><th scope="col">Source</th></tr></thead><tbody id="ledger-table"><tr><td colspan="5">Loading evidence…</td></tr></tbody></table></div></article></div>
+        <article class="panel methodology"><p class="eyebrow">Methodology</p><h3>What is allowed to become a return</h3><div class="methodology-grid"><span>Price basis</span><strong>Source-bar or verified equity observation</strong><span>Costs</span><strong>Fees and slippage must be sourced or the net result is withheld</strong><span>Benchmark</span><strong>Same market date and registered benchmark policy</strong><span>Missing truth</span><strong>Excluded from realized totals, never converted to zero</strong></div></article>
+      </section>
+
+      <section id="view-research" class="page-view" aria-labelledby="research-title">
+        <div class="section-heading"><div><p class="eyebrow">Research</p><h2 id="research-title">The learning set is not the paper scorecard.</h2></div><span class="section-pill">No personalized advice</span></div>
+        <div class="research-grid"><article class="panel panel-large"><div class="panel-heading"><div><h3>Research observations</h3><p class="muted">Sourced observations remain labeled as research and keep unresolved rows visible.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Research observations</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Observed return</th><th scope="col">Net result</th><th scope="col">Source trail</th></tr></thead><tbody id="research-table"><tr><td colspan="6">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" aria-label="Research observation pagination"><p id="research-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="research" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="research" data-direction="1" disabled>Next</button></div></div></article><div class="research-stack"><article class="panel"><p class="eyebrow">Forward calibration</p><h3 id="forward-state">WAITING_FOR_FORWARD_EVIDENCE</h3><p class="summary-copy">No challenger or forward sample is promoted from a short backtest. The evidence gate stays explicit until the required sourced outcomes exist.</p></article><article class="panel"><p class="eyebrow">Backtest and challengers</p><div id="research-cohorts" class="cohort-summary"></div></article></div></div>
+      </section>
+
+      <section id="view-system" class="page-view" aria-labelledby="system-title">
+        <div class="section-heading"><div><p class="eyebrow">System</p><h2 id="system-title">Freshness and publication health.</h2></div><span class="section-pill" id="system-pill">Loading</span></div>
+        <div class="system-grid"><article class="panel"><div class="panel-heading"><div><h3>Publication readiness</h3><p class="muted">Liveness and readiness are different checks.</p></div><span class="status-chip" id="readiness-status">Loading</span></div><dl class="detail-list" id="readiness-details"></dl></article><article class="panel"><div class="panel-heading"><div><h3>Snapshot manifest</h3><p class="muted">The artifact records its input and output hashes.</p></div></div><dl class="detail-list" id="manifest-details"></dl></article><article class="panel"><div class="panel-heading"><div><h3>Stage chain</h3><p class="muted">Every missing or failed stage has a next action.</p></div></div><div id="stage-details" class="stage-list"></div></article><article class="panel"><div class="panel-heading"><div><h3>Market safety evidence</h3><p class="muted">Unknown critical inputs remain blocked; no safety claim is inferred.</p></div></div><dl class="detail-list" id="safety-details"></dl></article></div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>Dawnstrike research desk</span><span>Read-only publication · <span id="footer-date">Snapshot date pending</span></span></footer>
+    <script type="module" src="/assets/dawnstrike.js"></script>
+  </body>
+</html>

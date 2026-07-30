@@ -11,6 +11,13 @@ DEFAULT_MORNING_MAX_CHARS = 1200
 DEFAULT_ALERT_MAX_CHARS = 600
 DEFAULT_SUMMARY_MAX_CHARS = 900
 
+CANONICAL_COHORT_LABELS = {
+    "official_forward_paper": "Official paper",
+    "alphaops_signal_research": "Research observations",
+    "historical_backtest": "Historical backtest",
+    "shadow_challenger": "Shadow challenger",
+}
+
 
 def format_telegram_event(
     event: NotificationEvent,
@@ -147,6 +154,60 @@ def format_daily_summary(summary: dict[str, Any]) -> str:
             "Manual/free shadow results only.",
         ]
     )
+
+
+def format_canonical_daily_performance(
+    row: dict[str, Any],
+    *,
+    max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+) -> str:
+    """Format one canonical daily row without recomputing any metric."""
+
+    cohort = CANONICAL_COHORT_LABELS.get(
+        str(row.get("cohort") or ""), str(row.get("cohort") or "Not reported")
+    )
+    coverage = dict(row.get("coverage") or {})
+    coverage_text = (
+        "not reported"
+        if coverage.get("coverage_pct") is None
+        else f"{float(coverage['coverage_pct']):.1f}%"
+    )
+    lines = [
+        "📊 Dawnstrike Canonical Performance",
+        f"Cohort: {cohort}",
+        f"ID: {_text(row.get('performance_id'), 'not reported')}",
+        (
+            f"Date: {_text(row.get('market_date'), 'not reported')} "
+            f"({_text(row.get('timezone'), 'timezone not reported')})"
+        ),
+        (
+            f"Daily: {_canonical_percent(row.get('return_pct'))} | "
+            f"Cumulative: {_canonical_percent(row.get('cumulative_return_pct'))}"
+        ),
+        (
+            f"Benchmark: {_canonical_percent(row.get('benchmark_return_pct'))} | "
+            f"Excess: {_canonical_percent(row.get('excess_return_pct'))}"
+        ),
+        (
+            f"Net P&L: {_canonical_money(row.get('net_pnl_cents'))} | "
+            f"Drawdown: {_canonical_percent(row.get('drawdown_pct'))}"
+        ),
+        (
+            f"Basis: {_text(row.get('return_basis'), 'not reported')} | "
+            f"Costs: {_text(row.get('cost_status'), 'not reported')}"
+        ),
+        (
+            f"Coverage: {coverage_text} | "
+            f"Evidence: {_text(row.get('evidence_state'), 'not reported')}"
+        ),
+        (
+            f"Input: {_short_hash(row.get('input_hash_sha256'))} | "
+            f"Sources: {len(row.get('source_refs') or [])}"
+        ),
+        f"As of: {_text(row.get('generated_at') or row.get('calculated_at'), 'not reported')}",
+        "Research only. No orders placed.",
+    ]
+    return _clip("\n".join(lines), max_chars)
 
 
 def format_source_check(source_summary: dict[str, Any]) -> str:
@@ -318,6 +379,33 @@ def format_percent(value: Any, *, signed: bool = True) -> str:
 def format_price(value: Any) -> str:
     number = _number(value)
     return "n/a" if number is None else f"${number:.2f}"
+
+
+def _canonical_percent(value: Any) -> str:
+    number = _number_or_none(value)
+    return "not reported" if number is None else f"{number:+.2f}%"
+
+
+def _canonical_money(value: Any) -> str:
+    number = _number_or_none(value)
+    if number is None:
+        return "not reported"
+    sign = "+" if number >= 0 else "-"
+    return f"{sign}${abs(number) / 100:.2f}"
+
+
+def _short_hash(value: Any) -> str:
+    text = str(value or "")
+    return f"{text[:10]}…" if text else "not reported"
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("$", ""))
+    except ValueError:
+        return None
 
 
 def format_dollar_volume(value: Any) -> str:

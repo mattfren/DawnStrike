@@ -1,0 +1,52 @@
+{
+  "market_date": "2026-07-29",
+  "readiness": {
+    "http_status": 503,
+    "input_hash_sha256": "4632aa0bf7d2904ffdab7c6a7ea23e8369bad96f870a07a088f5a02ebdd74d42",
+    "live_trading_enabled": false,
+    "market_date": "2026-07-29",
+    "payload_sha256": "07e6a58d889649777da7f82fa6c93f6e9a7f92186e8030dadbd27fabab574573",
+    "reason": "missing_or_degraded_upstream_truth",
+    "reconciliation_status": "PARTIAL",
+    "research_only": true,
+    "schema_version": "dawnstrike.readiness.v1",
+    "snapshot_status": "degraded",
+    "status": "not_ready"
+  },
+  "reconciliation": {
+    "daily_count": 2,
+    "input_hash_sha256": "4632aa0bf7d2904ffdab7c6a7ea23e8369bad96f870a07a088f5a02ebdd74d42",
+    "issue_count": 1,
+    "row_count": 5
+  },
+  "retry_count": 0,
+  "run_id": "1d3be2f2757a9d2f96b8",
+  "stage_manifest": {
+    "artifacts": [
+      "data/performance.json",
+      "data/performance.json.manifest.json",
+      "readiness.json"
+    ],
+    "generated_at": "2026-07-30T01:15:47+00:00",
+    "input_hash_sha256": "4632aa0bf7d2904ffdab7c6a7ea23e8369bad96f870a07a088f5a02ebdd74d42",
+    "live_trading_enabled": false,
+    "output_hash_sha256": "07e6a58d889649777da7f82fa6c93f6e9a7f92186e8030dadbd27fabab574573",
+    "readiness": {
+      "http_status": 503,
+      "input_hash_sha256": "4632aa0bf7d2904ffdab7c6a7ea23e8369bad96f870a07a088f5a02ebdd74d42",
+      "live_trading_enabled": false,
+      "market_date": "2026-07-29",
+      "payload_sha256": "07e6a58d889649777da7f82fa6c93f6e9a7f92186e8030dadbd27fabab574573",
+      "reason": "missing_or_degraded_upstream_truth",
+      "reconciliation_status": "PARTIAL",
+      "research_only": true,
+      "schema_version": "dawnstrike.readiness.v1",
+      "snapshot_status": "degraded",
+      "status": "not_ready"
+    },
+    "research_only": true,
+    "retry_count": 0,
+    "schema_version": "dawnstrike.daily_stage_manifest.v1"
+  },
+  "status": "PARTIAL"
+}

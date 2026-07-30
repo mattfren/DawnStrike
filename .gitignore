@@ -9,6 +9,11 @@ __pycache__/
 .mypy_cache/
 outputs/
 logs/
+build/
+.vercel-output/
+.evidence-*/
+.evidence-*.sqlite
+.schema-check.sqlite
 .streamlit/secrets.toml
 config/web_sources.yaml
 config/automation.yaml

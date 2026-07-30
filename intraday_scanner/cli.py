@@ -27,6 +27,7 @@ from intraday_scanner.notifiers import (
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.paper_audit import main as paper_audit_main
+from intraday_scanner.performance.cli import main as performance_reconcile_main
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_enrichment_provider import CsvEnrichmentProvider
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider, read_snapshot_csv
@@ -93,6 +94,11 @@ from intraday_scanner.services.premarket_intelligence import (
 from intraday_scanner.services.provider_health_service import (
     record_health_check,
     record_health_status,
+)
+from intraday_scanner.services.release_doctor_service import (
+    dashboard_doctor,
+    probability_doctor,
+    scheduler_doctor,
 )
 from intraday_scanner.services.return_attribution_service import (
     attribute_returns,
@@ -582,9 +588,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     monitor_loop.add_argument("--sec-rss", action="store_true")
 
-    monitor_open = subparsers.add_parser(
-        "monitor-open", help="Run 1-minute market-open monitoring"
-    )
+    monitor_open = subparsers.add_parser("monitor-open", help="Run 1-minute market-open monitoring")
     monitor_open.add_argument("--snapshot", default="sample_data/premarket_snapshot_sample.csv")
     monitor_open.add_argument("--provider", choices=["csv", "alpaca"], default="csv")
     monitor_open.add_argument("--db-path", default=None)
@@ -609,6 +613,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     performance.add_argument("--db-path", default=None)
     performance.add_argument("--persist", action="store_true")
+
+    canonical_performance = subparsers.add_parser(
+        "performance-reconcile", help="Reconcile the canonical performance read model"
+    )
+    canonical_performance.add_argument("--db-path", default="data/shadow_real.sqlite")
+    canonical_performance.add_argument("--paper-ops-root", default="data/v2_paper_ops_live")
+    canonical_performance.add_argument("--as-of", dest="as_of", default=None)
+    canonical_performance.add_argument("--persist", action="store_true")
+    canonical_performance.add_argument("--print", action="store_true", dest="print_result")
 
     ingest = subparsers.add_parser("ingest-minute-bars", help="Validate/copy local minute bars")
     ingest.add_argument("--input", required=True)
@@ -636,6 +649,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     schedule = subparsers.add_parser("scheduler", help="Print the local production schedule")
     schedule.add_argument("--json", action="store_true", dest="as_json")
+
+    probability_doctor_parser = subparsers.add_parser(
+        "probability-doctor", help="Report calibration evidence without claiming calibration"
+    )
+    probability_doctor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    probability_doctor_parser.add_argument("--print", action="store_true", dest="print_result")
+
+    scheduler_doctor_parser = subparsers.add_parser(
+        "scheduler-doctor", help="Check daily publication scheduler artifacts"
+    )
+    scheduler_doctor_parser.add_argument("--root", default=".")
+    scheduler_doctor_parser.add_argument("--print", action="store_true", dest="print_result")
+
+    dashboard_doctor_parser = subparsers.add_parser(
+        "dashboard-doctor", help="Check canonical public dashboard publication state"
+    )
+    dashboard_doctor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    dashboard_doctor_parser.add_argument("--root", default=".")
+    dashboard_doctor_parser.add_argument("--print", action="store_true", dest="print_result")
     return parser
 
 
@@ -774,6 +806,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_notify_test(args)
         if args.command == "performance-report":
             return _run_performance_report(args)
+        if args.command == "performance-reconcile":
+            return _run_canonical_performance_reconcile(args)
         if args.command == "ingest-minute-bars":
             return _run_ingest_minute_bars(args)
         if args.command == "backfill-snapshots":
@@ -782,6 +816,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_tune_strategy(args)
         if args.command == "scheduler":
             return _run_scheduler(args)
+        if args.command == "probability-doctor":
+            return _run_release_doctor(probability_doctor(args.db_path))
+        if args.command == "scheduler-doctor":
+            return _run_release_doctor(scheduler_doctor(args.root))
+        if args.command == "dashboard-doctor":
+            return _run_release_doctor(dashboard_doctor(args.db_path, args.root))
         parser.error("Unknown command")
         return 2
     except (ConfigError, DataProviderError, SnapshotValidationError, StorageError) as exc:
@@ -1640,6 +1680,27 @@ def _run_backfill_snapshots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_canonical_performance_reconcile(args: argparse.Namespace) -> int:
+    argv = [
+        "--db-path",
+        args.db_path,
+        "--paper-ops-root",
+        args.paper_ops_root,
+    ]
+    if args.as_of:
+        argv.extend(["--as-of", args.as_of])
+    if args.persist:
+        argv.append("--persist")
+    if args.print_result:
+        argv.append("--print")
+    return performance_reconcile_main(argv)
+
+
+def _run_release_doctor(result: dict[str, Any]) -> int:
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0 if result.get("status") not in {"FAILED"} else 2
+
+
 def _run_performance_report(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
     store = SQLiteScanStore(config.database_path)
@@ -1697,9 +1758,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         print(json.dumps(rows, indent=2, sort_keys=True))
         return 0
     for row in rows:
-        print(
-            f"{row['time_ct']} CT | {row['name']} | {row['command']} | {row['description']}"
-        )
+        print(f"{row['time_ct']} CT | {row['name']} | {row['command']} | {row['description']}")
     return 0
 
 
