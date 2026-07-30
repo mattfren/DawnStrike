@@ -58,7 +58,7 @@ now `Disabled` with last result `0`; no replacement finalize task has been
 registered from the isolated candidate. The replacement must be registered
 only from an approved merged checkout.
 
-## Current authoritative revalidation
+## Prior candidate revalidation (historical; superseded below)
 
 Rechecked 2026-07-30 in the isolated candidate after fetching `origin/main`
 with no changes to the shared checkout:
@@ -181,6 +181,44 @@ api/readiness.py -> vercel_dawnstrike/runtime.py:174
 
 The EOD publisher therefore succeeded after the EOD report failed, while the
 production readiness endpoint continued to crash.
+
+## Fresh continuation audit — 2026-07-30 06:09:57 America/Chicago
+
+The following is the current authoritative state after rereading the controlling
+directive and fetching `origin` with `git fetch origin --prune`:
+
+```text
+directive_sha256=E3E0DA843C0E5CEE80CDAA5B3682BD2F344B7FF76EE9D87289DAF5A68223EA2A
+directive_lines=1431
+shared_branch=codex/command-center-x3-vercel
+shared_HEAD=67f02726c915aad7ce5a857567d3d3fcc1b0bf98
+origin/main=268b4946bc149f00ec6cc7fd31a040be3baa86a6
+shared_dirty_path_count=1207
+candidate_branch=codex/dawnstrike-10of10
+candidate_HEAD=19e90e6156fc1161a4e7ee84923d18e3aa7b2aa1
+candidate_dirty_path_count=0
+database_sha256=ED9FA44363E595DE993D333E71803949F9254F5269867041E6D13F8D5EEF8164
+paper_positions=7
+paper_trade_fills=14
+signal_outcomes=8
+historical_signals=228
+portfolio_performance_rows=425
+portfolio_daily_performance=222
+benchmark_performance=0
+automation_runs=0
+notifications_sent=92
+```
+
+The legacy `Dawnstrike X3 Vercel Daily Publish` task remains disabled. The
+replacement `Dawnstrike 10of10 Daily Finalize` task remains absent, and
+`scheduler-doctor` returns `BLOCKED_EXTERNAL`. The shared checkout remains
+untouched; no scheduler registration or shared-database write was performed in
+this audit.
+
+The isolated candidate remains clean after the full test/lint/typecheck pass.
+The candidate's current build artifact is still based on implementation commit
+`6886900d`; commits `8eb82c33` and `19e90e61` add evidence and screenshots only
+and were not included in that already-verified preview deployment.
 
 ## Phase 0 conclusion
 

@@ -37,3 +37,30 @@ against the shared DB by mistake. It wrote the derived 425/222 read model and
 one console notification. No raw source rows or broker state changed. The
 shared DB must not be used again by this candidate until recovery is explicitly
 decided by the owner.
+
+## Fresh continuation audit — 2026-07-30 06:09 America/Chicago
+
+The exact Windows task inventory still shows the legacy X3 publisher disabled
+with last result `0`, `Dawnstrike AlphaOps EOD Full Report` enabled with last
+result `1`, and no `Dawnstrike 10of10 Daily Finalize` task. The doctor output is:
+
+```json
+{
+  "expected_task_name": "Dawnstrike 10of10 Daily Finalize",
+  "next_action": "Register exactly one replacement task on the approved checkout, then rerun scheduler-doctor.",
+  "scheduled_task": {
+    "enabled": null,
+    "last_run_time": null,
+    "last_task_result": null,
+    "name": "Dawnstrike 10of10 Daily Finalize",
+    "next_run_time": null,
+    "state": "missing"
+  },
+  "status": "BLOCKED_EXTERNAL"
+}
+```
+
+Registration remains intentionally unperformed because the candidate is not an
+approved merged checkout and the user has not approved that external task
+mutation. The registration script itself is covered by the passing scheduler
+tests and refuses to overwrite an existing task.

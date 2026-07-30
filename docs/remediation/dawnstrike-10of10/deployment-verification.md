@@ -90,3 +90,19 @@ raw-data delta: `paper_positions` 7 rows/hash
 `b9115a500a89b2305e3e6d06572761299530a67b8d4c9abe104bc85ddacfd93b` match
 exactly. The incident is confined to derived canonical tables and the one
 console notification.
+
+## Fresh live production recheck — 2026-07-30 06:08:50 America/Chicago
+
+The production alias remains unchanged at the old X3 deployment. The live
+`/api/health` response returned HTTP 200 and `status=ok`, with
+`live_trading_enabled=false` and `research_only=true`, but still listed
+`/api/scanner`, `/api/telegram`, `/api/cron_morning`, and
+`/api/cron_after_close`; it also reported `static_ui_served_by_rewrite=true`.
+The response exposed a safety inconsistency: `env.present.TELEGRAM_DRY_RUN=true`
+was reported alongside `telegram_dry_run=false` and
+`telegram_ready_for_external_send=true`. No production mutation was made.
+
+The live `/api/readiness` response again returned HTTP 500
+`FUNCTION_INVOCATION_FAILED` rather than a controlled readiness response. This
+is a production failure in the old deployment, not evidence against the
+isolated candidate's controlled HTTP 503 degraded response.
