@@ -68,3 +68,15 @@ production promotion and further shared-DB writes are blocked until the owner
 supplies a trusted backup or explicitly approves retaining the derived state.
 The candidate now rejects any `--db-path` outside its repository before opening
 the database; the guard is covered by `tests/test_public_build_safety.py`.
+
+Read-only raw-table comparison against the existing evidence copy shows no
+raw-data delta: `paper_positions` 7 rows/hash
+`bfc24644cee76cfa48a7fec48741ee1c896636375cfc99ceb5bd0b35be5f0c74`,
+`paper_trade_fills` 14 rows/hash
+`833187f8ec93dab3dc6a06c4e9e3862e1e224651a435f9119b9dc089053285ce`,
+`signal_outcomes` 8 rows/hash
+`31e7de936c6666321695651406cabc03707b8c524cd3fe3faa700f4461914d18`, and
+`historical_signals` 228 rows/hash
+`b9115a500a89b2305e3e6d06572761299530a67b8d4c9abe104bc85ddacfd93b` match
+exactly. The incident is confined to derived canonical tables and the one
+console notification.

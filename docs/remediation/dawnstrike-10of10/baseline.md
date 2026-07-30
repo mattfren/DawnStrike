@@ -97,6 +97,14 @@ rows was found, so recovery is an owner decision: supply a trusted backup or
 explicitly retain and audit the derived read model. Do not write the shared DB
 again from the isolated candidate.
 
+Read-only hashes against the existing evidence copy confirm the raw tables are
+unchanged: positions 7,
+`bfc24644cee76cfa48a7fec48741ee1c896636375cfc99ceb5bd0b35be5f0c74`; fills 14,
+`833187f8ec93dab3dc6a06c4e9e3862e1e224651a435f9119b9dc089053285ce`; outcomes
+8, `31e7de936c6666321695651406cabc03707b8c524cd3fe3faa700f4461914d18`;
+signals 228,
+`b9115a500a89b2305e3e6d06572761299530a67b8d4c9abe104bc85ddacfd93b`.
+
 The authoritative PaperOps reconciliation reports 425 canonical rows, 222
 daily records, 156 discrepancies, 85 accepted PaperOps rows, 105 quarantined
 rows, 131 PaperOps issues, and 85 source return-field mismatches.
