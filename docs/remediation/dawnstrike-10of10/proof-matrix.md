@@ -1,6 +1,7 @@
 # Proof matrix
 
-Candidate: `codex/dawnstrike-10of10` at `1f0719f85951bbc45a8d4e1235897f92825cab40`.
+Candidate: `codex/dawnstrike-10of10`; the latest clean build SHA is recorded in
+the ignored diagnostic `build/public/build-manifest.json`.
 The candidate is isolated at `C:\r\dawnstrike-10of10-20260729`.
 
 | Proof | Result | Evidence |
