@@ -4,6 +4,10 @@ param(
     [string]$StageRoot = "build\vercel-stage",
     [string]$ProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
     [string]$ProductionAlias = "https://dawnstrike-command-center-x3.vercel.app",
+    [string[]]$AdditionalProductionAliases = @(
+        "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
+        "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app"
+    ),
     [switch]$AllowDegraded,
     [switch]$Promote
 )
@@ -15,6 +19,9 @@ $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
 $promoted = $false
 $priorProduction = $null
+$promotedDeployment = $null
+$allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
+    Select-Object -Unique
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     $pythonScripts = (& py.exe -c "import sysconfig; print(sysconfig.get_path('scripts'))").Trim()
@@ -54,6 +61,18 @@ function Invoke-VercelJson {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
     return Convert-VercelJson -Output @($output) -Label $Label
+}
+
+function Set-VercelAlias {
+    param(
+        [string]$DeploymentUrl,
+        [string]$AliasUrl,
+        [string]$Label
+    )
+    & npx @vercel alias set $DeploymentUrl $AliasUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label failed with exit code $LASTEXITCODE."
+    }
 }
 
 function Assert-PublicationState {
@@ -157,8 +176,69 @@ if ($Promote) {
 
 try {
     if ($Promote) {
+        if (-not $AdditionalProductionAliases.Count) {
+            throw "At least one project-owned production alias is required."
+        }
+        $promotionVerificationError = $null
+        $promotionAnchorAlias = [string]$AdditionalProductionAliases[0]
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            try {
+                $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                $promotedDeployment = Invoke-VercelJson `
+                    -Arguments @("inspect", $promotionAnchorAlias, "--json") `
+                    -Label "Promoted deployment inspect"
+                $promotedHealth = Invoke-VercelJson `
+                    -Arguments @("curl", "$promotionAnchorAlias/api/health?verify=$cacheBuster") `
+                    -Label "Promoted deployment health"
+                $promotedReadiness = Invoke-VercelJson `
+                    -Arguments @("curl", "$promotionAnchorAlias/api/readiness?verify=$cacheBuster") `
+                    -Label "Promoted deployment readiness"
+                $promotedManifest = Invoke-VercelJson `
+                    -Arguments @(
+                        "curl",
+                        "$promotionAnchorAlias/build-manifest.json?verify=$cacheBuster"
+                    ) `
+                    -Label "Promoted deployment build manifest"
+                Assert-PublicationState `
+                    -Health $promotedHealth `
+                    -Readiness $promotedReadiness `
+                    -BuildManifest $promotedManifest `
+                    -Label "Promoted deployment"
+                if (
+                    $promotedManifest.source_sha -ne $previewManifest.source_sha -or
+                    $promotedManifest.build_id -ne $previewManifest.build_id -or
+                    $promotedManifest.data_hash_sha256 -ne
+                    $previewManifest.data_hash_sha256
+                ) {
+                    throw "Promoted deployment does not match the verified preview."
+                }
+                $promotionVerificationError = $null
+                break
+            }
+            catch {
+                $promotionVerificationError = $_.Exception.Message
+                if ($attempt -lt 10) {
+                    Start-Sleep -Seconds 3
+                }
+            }
+        }
+        if ($promotionVerificationError) {
+            throw "Promoted deployment verification did not converge: $promotionVerificationError"
+        }
+
+        $promotedUrl = [string]$promotedDeployment.url
+        if (-not $promotedDeployment.id -or -not $promotedUrl) {
+            throw "Promoted deployment inspect did not return a deployment ID and URL."
+        }
+        foreach ($alias in $allProductionAliases) {
+            Set-VercelAlias `
+                -DeploymentUrl $promotedUrl `
+                -AliasUrl ([string]$alias) `
+                -Label "Production alias assignment for $alias"
+        }
+
         $productionVerificationError = $null
-        for ($attempt = 1; $attempt -le 6; $attempt++) {
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
                 $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                 $production = Invoke-VercelJson `
@@ -179,17 +259,19 @@ try {
                     -BuildManifest $productionManifest `
                     -Label "Production"
                 if (
+                    $productionManifest.source_sha -ne $previewManifest.source_sha -or
+                    $productionManifest.build_id -ne $previewManifest.build_id -or
                     $productionManifest.data_hash_sha256 -ne
                     $previewManifest.data_hash_sha256
                 ) {
-                    throw "Production data hash does not match the verified preview."
+                    throw "Production does not match the verified preview."
                 }
                 $productionVerificationError = $null
                 break
             }
             catch {
                 $productionVerificationError = $_.Exception.Message
-                if ($attempt -lt 6) {
+                if ($attempt -lt 10) {
                     Start-Sleep -Seconds 3
                 }
             }
@@ -206,10 +288,25 @@ try {
     }
 }
 catch {
-    if ($promoted -and $priorProduction.id) {
-        & npx @vercel rollback ([string]$priorProduction.id) --yes
+    $publicationError = $_.Exception.Message
+    if ($promoted -and $priorProduction.id -and $priorProduction.url) {
+        $rollbackErrors = @()
+        foreach ($alias in $allProductionAliases) {
+            try {
+                Set-VercelAlias `
+                    -DeploymentUrl ([string]$priorProduction.url) `
+                    -AliasUrl ([string]$alias) `
+                    -Label "Production rollback for $alias"
+            }
+            catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($rollbackErrors.Count) {
+            throw "$publicationError Rollback errors: $($rollbackErrors -join '; ')"
+        }
     }
-    throw
+    throw $publicationError
 }
 
 $result = [ordered]@{
@@ -229,7 +326,8 @@ $result = [ordered]@{
     allow_degraded = [bool]$AllowDegraded
     promoted = [bool]$Promote
     prior_production_deployment_id = if ($priorProduction) { $priorProduction.id } else { $null }
-    production_alias = if ($Promote) { $ProductionAlias } else { $null }
+    production_aliases = if ($Promote) { @($allProductionAliases) } else { @() }
+    promoted_deployment_id = if ($promotedDeployment) { $promotedDeployment.id } else { $null }
     production_deployment_id = if ($production) { $production.id } else { $null }
     live_trading_enabled = $false
     research_only = $true

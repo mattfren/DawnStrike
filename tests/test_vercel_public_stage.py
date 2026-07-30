@@ -33,6 +33,11 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "AllowDegraded" in script
     assert "promote" in script
     assert "rollback" in script
+    assert "AdditionalProductionAliases" in script
+    assert "Set-VercelAlias" in script
+    assert "Promoted deployment does not match the verified preview" in script
+    assert "Production does not match the verified preview" in script
+    assert "foreach ($alias in $allProductionAliases)" in script
     assert "Assert-PublicationState" in script
     assert "Production verification did not converge" in script
     assert "Start-Sleep -Seconds 3" in script
