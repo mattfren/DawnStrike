@@ -16,6 +16,17 @@ $vercel = @("--yes", "vercel@58.4.0")
 $promoted = $false
 $priorProduction = $null
 
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    $pythonScripts = (& py.exe -c "import sysconfig; print(sysconfig.get_path('scripts'))").Trim()
+    $uvCandidate = Join-Path $pythonScripts "uv.exe"
+    if (Test-Path -LiteralPath $uvCandidate -PathType Leaf) {
+        $env:PATH = "$pythonScripts;$env:PATH"
+    }
+}
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    throw "uv is required for the pinned Vercel Python prebuild and was not found."
+}
+
 function Convert-VercelJson {
     param(
         [object[]]$Output,

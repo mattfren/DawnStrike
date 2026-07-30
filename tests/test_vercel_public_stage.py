@@ -26,6 +26,7 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
 
     assert "vercel@58.4.0" in script
+    assert "sysconfig.get_path('scripts')" in script
     assert "build --yes --project" in script
     assert '"--prebuilt"' in script
     assert "verify_vercel_candidate.ps1" in script
