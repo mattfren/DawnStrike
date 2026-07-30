@@ -16,6 +16,10 @@ Current local Playwright proof recorded in `evidence/`:
   the matching visible panel;
 - missing after-cost or benchmark values render as `Not reported` rather than
   zero;
+- return context shows cohort, period, denominator, cost treatment, coverage,
+  and as-of time;
+- source quality, halt, corporate-action, and liquidity evidence are explicit
+  `Unknown — not reported` states when no source evidence exists;
 - research and official paper cohorts remain visibly separate.
 
 The current real-data artifact is degraded because its source evidence is

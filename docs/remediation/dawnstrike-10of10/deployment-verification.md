@@ -27,11 +27,11 @@ browser/health/readiness proof.
   files and 834,208 bytes, with only `api/health` and `api/readiness`
   functions plus static output; a direct scan found zero forbidden files. The
   build used Vercel CLI 58.4.0 and the generated public manifest records:
-  `source_sha=81f0fb52e1ae624064b21352e287e6e95216f071`,
-  `build_id=c2e169708e2cb4bd4a00`,
-  `data_hash=ade3190c0ee9d6992f8d99a032f03e1f061be2f3af811c7da943e7909b7ef918`,
-  `market_date=2026-07-29`, `snapshot_bytes=607268`, and
-  `snapshot_compressed_bytes=37463`.
+  `source_sha=edd228ae1e2d56631b6684458425c653b2b3814f`,
+  `build_id=0cb02b4821698e7033e5`,
+  `data_hash=837168f80af4d3730d411c5c1a114f0d0442a0937509d5e7985d2f66a629f2dc`,
+  `market_date=2026-07-29`, `snapshot_bytes=632094`, and
+  `snapshot_compressed_bytes=38425`.
 - The final candidate verifier fails closed with
   `snapshot_not_publishable` and `readiness_not_publishable`; the artifact
   reports 425 canonical rows, 156 discrepancies, `snapshot_status=degraded`,
