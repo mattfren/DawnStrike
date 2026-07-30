@@ -4,7 +4,7 @@ Status: `BLOCKED_APPROVAL_REQUIRED`
 
 A production rollback was not executed because this candidate has not received
 production approval. The verified preview is
-`dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj`; the rollback command and verification
+`dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg`; the rollback command and verification
 sequence are documented in
 `docs/operations/public_dashboard_rollback.md`.
 

@@ -79,11 +79,11 @@ dpl_ErcbSKoHYNf595t7zHK6HxyMdLge. Its /api/health endpoint is HTTP 200, while
 /api/readiness remains HTTP 500 FUNCTION_INVOCATION_FAILED; it exposes the old
 scanner, Telegram, and cron surface.
 
-The latest preview is
-dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj at
-https://dawnstrike-command-center-x3-f3n649rln-mattfrens-projects.vercel.app.
-It was built from implementation SHA
-808bbceabdfc931d83fe9a1d827375a7d622a586, before the current PaperOps
-adapter correction. Its readiness is intentionally HTTP 503 with
-snapshot_not_publishable and pipeline_not_ready. A fresh local build and
-preview are required before any promotion discussion.
+The current preview is
+dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg at
+https://dawnstrike-command-center-x3-qseiaiddm-mattfrens-projects.vercel.app.
+It is built from implementation SHA
+6886900de5960a90c8693e476c8c32d26f864375 with data hash
+5487936639b61c95695500f7975cb901fc2c7f00e4665b158c7ce7ebbb03a7aa.
+Its readiness is intentionally HTTP 503 with snapshot_not_publishable and
+pipeline_not_ready. Production was not promoted.

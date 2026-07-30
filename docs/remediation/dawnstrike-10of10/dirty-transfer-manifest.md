@@ -5,11 +5,11 @@ Source branch/SHA: `codex/command-center-x3-vercel` /
 `67f02726c915aad7ce5a857567d3d3fcc1b0bf98`  
 Target worktree: `C:\r\dawnstrike-10of10-20260729`  
 Target branch/SHA: `codex/dawnstrike-10of10` /
-`808bbceabdfc931d83fe9a1d827375a7d622a586`
+`6886900de5960a90c8693e476c8c32d26f864375`
 
 Latest clean implementation/build source SHA used for the current preview:
-`808bbceabdfc931d83fe9a1d827375a7d622a586`. The current preview deployment is
-`dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj`.
+`6886900de5960a90c8693e476c8c32d26f864375`. The current preview deployment is
+`dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg`.
 
 The candidate was created from clean `origin/main`. New remediation modules
 are authored here. One shared migration file was ported intentionally because

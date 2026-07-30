@@ -119,11 +119,11 @@ is HTTP 500 `FUNCTION_INVOCATION_FAILED`, and health exposes scanner,
 Telegram, and cron routes. No production mutation occurred.
 
 The latest isolated preview is deployment
-`dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj` at
-`https://dawnstrike-command-center-x3-f3n649rln-mattfrens-projects.vercel.app`.
+`dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg` at
+`https://dawnstrike-command-center-x3-qseiaiddm-mattfrens-projects.vercel.app`.
 Its health endpoint is HTTP 200 with source SHA
-`808bbceabdfc931d83fe9a1d827375a7d622a586`, build ID
-`8b5797e67474926f72c9`, research-only true, and live trading false. Its
+`6886900de5960a90c8693e476c8c32d26f864375`, build ID
+`b0988a1e450a54fceb0e`, research-only true, and live trading false. Its
 readiness endpoint is the intended HTTP 503 with
 `snapshot_not_publishable` and `pipeline_not_ready`; the build manifest
 matches the same source/build/data hashes.

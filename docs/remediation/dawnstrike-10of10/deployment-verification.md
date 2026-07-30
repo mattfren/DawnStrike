@@ -8,10 +8,14 @@ only `api/health.py` and `api/readiness.py`. The public artifact verifier reject
 SQLite, database, scanner, Telegram, UI-runtime, secret, and path leakage.
 
 The current local adapter correction was rebuilt read-only from the copied
-database and the external PaperOps source. It produced 425 canonical rows,
-222 daily records, 633,502 raw snapshot bytes / 42,287 deterministic-gzip
-bytes, 190 accepted PaperOps rows, 0 quarantined rows, 21 component-scope
-warnings, and readiness HTTP 503. This local artifact is not a deployment.
+database and the external PaperOps source at candidate SHA
+`6886900de5960a90c8693e476c8c32d26f864375`. Build
+`b0988a1e450a54fceb0e` produced data hash
+`5487936639b61c95695500f7975cb901fc2c7f00e4665b158c7ce7ebbb03a7aa`,
+425 canonical rows, 222 daily records, 633,502 raw snapshot bytes /
+42,293 deterministic-gzip bytes, 190 accepted PaperOps rows, 0 quarantined
+rows, 21 component-scope warnings, and readiness HTTP 503. This local
+artifact is not a deployment.
 
 The Vercel CLI initially reported that `uv` was not available in the local
 PATH. `uv` was then installed in the local development environment. A Windows
@@ -29,26 +33,24 @@ blocked until the data and approval gates close.
   `pyproject.toml` pulls the scanner dependency graph into the functions.
 - Building from `build/vercel-stage` with the explicit Dawnstrike project ID
   `prj_5pef3EZF1u5YadebEz3dFjnkWOXy` succeeded. The native `.vercel/output`
-  contains 18 files / 861,548 bytes including diagnostics (15 payload files /
-  852,024 bytes excluding diagnostics); a direct scan found zero forbidden
-  files. The build used Vercel CLI 58.4.0 and the generated public manifest
-  records `source_sha=808bbceabdfc931d83fe9a1d827375a7d622a586`,
-  `build_id=8b5797e67474926f72c9`,
-  `data_hash=c5a70f448e5a3269bc35fa512b7f885c1e3a3e48d4ac9afaaf83b240f35cea64`,
-  `market_date=2026-07-29`, `snapshot_bytes=632,094`, and
-  `snapshot_compressed_bytes=38,426`.
-- A first preview exposed a real runtime packaging defect (`snapshot_missing`).
-  The candidate now embeds the generated public readiness/build/snapshot state
-  as a direct dependency of both minimal Python functions. The corrected
-  preview is deployment `dpl_H9oNEQrV9TBwCSkKtxa5f7hz5Auj` at
-  `https://dawnstrike-command-center-x3-f3n649rln-mattfrens-projects.vercel.app`.
-  It is `READY`, preview-targeted, and was deployed without `--prod`.
+  contains 18 files and a direct scan found zero forbidden files. The build
+  used Vercel CLI 58.4.0 and the generated public manifest records
+  `source_sha=6886900de5960a90c8693e476c8c32d26f864375`,
+  `build_id=b0988a1e450a54fceb0e`,
+  `data_hash=5487936639b61c95695500f7975cb901fc2c7f00e4665b158c7ce7ebbb03a7aa`,
+  `market_date=2026-07-29`, `snapshot_bytes=633,502`, and
+  `snapshot_compressed_bytes=42,293`.
+- The fresh corrected preview is deployment
+  `dpl_9UXadeGZsJTBoQt6g8BLdxopYYVg` at
+  `https://dawnstrike-command-center-x3-qseiaiddm-mattfrens-projects.vercel.app`.
+  Inspect reports `READY`, target `preview`, and only the two expected
+  Python functions. It was deployed without `--prod`.
 - Vercel CLI `curl` proof on that exact deployment: `/api/health` returns 200
-  with `source_sha=808bbceabdfc931d83fe9a1d827375a7d622a586`,
-  `build_id=8b5797e67474926f72c9`, research-only true, and live trading false;
-  `/api/readiness` returns the intended HTTP 503 with only
-  `snapshot_not_publishable` and `pipeline_not_ready`; `/build-manifest.json`
-  matches the same source SHA, build ID, and data hash.
+  with the corrected source SHA/build ID, research-only true, and live trading
+  false; `/api/readiness` returns HTTP 503 with
+  `snapshot_not_publishable` and `pipeline_not_ready`,
+  `reconciliation_status=PARTIAL`, and the corrected data hash;
+  `/build-manifest.json` matches the same source SHA, build ID, and data hash.
 - The local current-artifact browser pass renders the four sections, safety
   evidence panel, unknown-state copy, gzip-size text, and no console errors.
   Direct browser navigation to the hosted preview is protected by Vercel login
