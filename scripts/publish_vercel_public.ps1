@@ -3,6 +3,7 @@ param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [string]$StageRoot = "build\vercel-stage",
     [string]$ProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
+    [string]$ProjectName = "dawnstrike-command-center-x3",
     [string]$ProductionAlias = "https://dawnstrike-command-center-x3.vercel.app",
     [string[]]$AdditionalProductionAliases = @(
         "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
@@ -69,7 +70,9 @@ function Set-VercelAlias {
         [string]$AliasUrl,
         [string]$Label
     )
-    & npx @vercel alias set $DeploymentUrl $AliasUrl
+    $deploymentHost = ($DeploymentUrl -replace "^https?://", "").TrimEnd("/")
+    $aliasHost = ($AliasUrl -replace "^https?://", "").TrimEnd("/")
+    & npx @vercel alias set $deploymentHost $aliasHost
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
@@ -176,27 +179,42 @@ if ($Promote) {
 
 try {
     if ($Promote) {
-        if (-not $AdditionalProductionAliases.Count) {
-            throw "At least one project-owned production alias is required."
-        }
         $promotionVerificationError = $null
-        $promotionAnchorAlias = [string]$AdditionalProductionAliases[0]
         for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
+                $deploymentsResponse = Invoke-VercelJson `
+                    -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
+                    -Label "Promoted deployment list"
+                $promotedCandidates = @(
+                    $deploymentsResponse.deployments |
+                        Where-Object {
+                            $_.target -eq "production" -and
+                            $_.meta.action -eq "promote" -and
+                            $_.meta.originalDeploymentId -eq $deployment.id
+                        } |
+                        Sort-Object -Property createdAt -Descending
+                )
+                if (-not $promotedCandidates.Count) {
+                    throw "No promoted clone of the verified preview is visible yet."
+                }
+                $promotedUrl = [string]$promotedCandidates[0].url
+                if (-not $promotedUrl.StartsWith("http")) {
+                    $promotedUrl = "https://$promotedUrl"
+                }
                 $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                 $promotedDeployment = Invoke-VercelJson `
-                    -Arguments @("inspect", $promotionAnchorAlias, "--json") `
+                    -Arguments @("inspect", $promotedUrl, "--json") `
                     -Label "Promoted deployment inspect"
                 $promotedHealth = Invoke-VercelJson `
-                    -Arguments @("curl", "$promotionAnchorAlias/api/health?verify=$cacheBuster") `
+                    -Arguments @("curl", "$promotedUrl/api/health?verify=$cacheBuster") `
                     -Label "Promoted deployment health"
                 $promotedReadiness = Invoke-VercelJson `
-                    -Arguments @("curl", "$promotionAnchorAlias/api/readiness?verify=$cacheBuster") `
+                    -Arguments @("curl", "$promotedUrl/api/readiness?verify=$cacheBuster") `
                     -Label "Promoted deployment readiness"
                 $promotedManifest = Invoke-VercelJson `
                     -Arguments @(
                         "curl",
-                        "$promotionAnchorAlias/build-manifest.json?verify=$cacheBuster"
+                        "$promotedUrl/build-manifest.json?verify=$cacheBuster"
                     ) `
                     -Label "Promoted deployment build manifest"
                 Assert-PublicationState `
