@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -42,8 +43,9 @@ def verify(root: Path) -> dict[str, object]:
     build_manifest: dict[str, object] = {}
     if snapshot_path.is_file():
         encoded = snapshot_path.read_bytes()
-        if len(encoded) > MAX_SNAPSHOT_BYTES:
-            errors.append(f"snapshot_too_large:{len(encoded)}")
+        compressed_byte_count = len(gzip.compress(encoded, compresslevel=9, mtime=0))
+        if compressed_byte_count > MAX_SNAPSHOT_BYTES:
+            errors.append(f"snapshot_compressed_too_large:{compressed_byte_count}")
         snapshot = json.loads(encoded)
         if len(snapshot.get("rows") or []) > 250:
             errors.append("row_limit_exceeded")
@@ -55,6 +57,10 @@ def verify(root: Path) -> dict[str, object]:
             errors.append("snapshot_hash_mismatch")
         if int(manifest.get("byte_count") or 0) != snapshot_path.stat().st_size:
             errors.append("snapshot_byte_count_mismatch")
+        if int(manifest.get("compressed_byte_count") or 0) != compressed_byte_count:
+            errors.append("snapshot_compressed_byte_count_mismatch")
+        if manifest.get("compression") != "gzip":
+            errors.append("snapshot_compression_missing")
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):
@@ -90,6 +96,11 @@ def verify(root: Path) -> dict[str, object]:
         "root": str(root),
         "errors": errors,
         "snapshot_bytes": snapshot_path.stat().st_size if snapshot_path.is_file() else None,
+        "snapshot_compressed_bytes": (
+            len(gzip.compress(snapshot_path.read_bytes(), compresslevel=9, mtime=0))
+            if snapshot_path.is_file()
+            else None
+        ),
         "snapshot_rows": len(snapshot.get("rows") or []),
         "snapshot_status": manifest.get("status"),
         "readiness_status": readiness.get("status"),

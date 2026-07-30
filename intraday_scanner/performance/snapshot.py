@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import sqlite3
@@ -30,16 +31,23 @@ def write_public_snapshot(
         encoded = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")
-        if len(encoded) <= MAX_SNAPSHOT_BYTES:
-            chosen = {"payload": payload, "encoded": encoded}
+        compressed_byte_count = _compressed_byte_count(encoded)
+        if compressed_byte_count <= MAX_SNAPSHOT_BYTES:
+            chosen = {
+                "payload": payload,
+                "encoded": encoded,
+                "compressed_byte_count": compressed_byte_count,
+            }
             break
     if chosen is None:
         raise ValueError(
-            f"Public snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes even with no detail rows"
+            f"Public snapshot exceeds {MAX_SNAPSHOT_BYTES} compressed bytes "
+            "even with no detail rows"
         )
 
     payload = chosen["payload"]
     encoded = chosen["encoded"]
+    compressed_byte_count = int(chosen["compressed_byte_count"])
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -63,6 +71,8 @@ def write_public_snapshot(
         "artifact_path": str(path).replace("\\", "/"),
         "row_count": len(payload.get("rows") or []),
         "byte_count": len(encoded),
+        "compressed_byte_count": compressed_byte_count,
+        "compression": "gzip",
         "limits": payload.get("limits", {}),
         "research_only": True,
         "live_trading_enabled": False,
@@ -129,6 +139,12 @@ def write_public_snapshot(
 def _input_hash(payload: dict[str, Any]) -> str:
     hashes = [str(row.get("input_hash_sha256") or "") for row in payload.get("daily") or []]
     return hashlib.sha256(json.dumps(sorted(hashes), separators=(",", ":")).encode()).hexdigest()
+
+
+def _compressed_byte_count(encoded: bytes) -> int:
+    """Return deterministic gzip size used by the public snapshot size gate."""
+
+    return len(gzip.compress(encoded, compresslevel=9, mtime=0))
 
 
 def _latest_date(payload: dict[str, Any]) -> str:

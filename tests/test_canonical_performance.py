@@ -152,7 +152,8 @@ def test_reconciliation_and_snapshot_are_idempotent_and_bounded(tmp_path: Path) 
     assert first["rows"] == second["rows"]
     assert first["daily"] == second["daily"]
     assert output["manifest"]["status"] == "no_data"
-    assert output["manifest"]["byte_count"] <= 250 * 1024
+    assert output["manifest"]["compressed_byte_count"] <= 250 * 1024
+    assert output["manifest"]["compression"] == "gzip"
     assert (tmp_path / "public" / "performance.json.manifest.json").exists()
 
 

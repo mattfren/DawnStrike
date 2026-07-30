@@ -21,9 +21,11 @@ returns in browser code.
 
 ## Public contract
 
-`data/performance.json` is capped at 250 rows and 250 KiB. Its manifest records
-the payload hash, input hash, row count, byte count, status, and research-only
-flags. Statuses are explicit:
+`data/performance.json` is capped at 250 rows and 250 KiB compressed using
+deterministic gzip sizing. Its manifest records the payload hash, input hash,
+row count, raw byte count, compressed byte count, compression method, status,
+and research-only flags. The raw byte count remains visible so artifact size
+and transfer size cannot be conflated. Statuses are explicit:
 
 - `complete`: complete observed daily records;
 - `no_trade`: an explicit daily record says no trade;
