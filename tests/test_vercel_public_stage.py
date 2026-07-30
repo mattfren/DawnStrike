@@ -16,3 +16,5 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "dependencies = []" in script
     assert 'api/public/**' in script
     assert '$functionPublic = Join-Path $stage "api\\public"' in script
+    assert 'performance-snapshot.json' in script
+    assert 'performance-snapshot-manifest.json' in script

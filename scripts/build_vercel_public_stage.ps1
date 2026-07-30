@@ -10,6 +10,7 @@ $publicSource = Join-Path $resolvedRoot "build\public"
 $stage = Join-Path $resolvedRoot $StageRoot
 $stagePublic = Join-Path $stage "public"
 $functionPublic = Join-Path $stage "api\public"
+$functionData = Join-Path $functionPublic "data"
 
 if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json") -PathType Leaf)) {
     throw "Build the public artifact before staging it."
@@ -17,9 +18,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json")
 if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $stagePublic, $functionPublic | Out-Null
+New-Item -ItemType Directory -Force -Path $stagePublic, $functionData | Out-Null
 Copy-Item -Path (Join-Path $publicSource "*") -Destination $stagePublic -Recurse -Force
-Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "readiness.json") -Destination $functionPublic -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "build-manifest.json") -Destination $functionPublic -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json") -Destination (Join-Path $functionData "performance-snapshot.json") -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json.manifest.json") -Destination (Join-Path $functionData "performance-snapshot-manifest.json") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\health.py") -Destination (Join-Path $stage "api\health.py") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\readiness.py") -Destination (Join-Path $stage "api\readiness.py") -Force
 

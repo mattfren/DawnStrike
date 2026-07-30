@@ -23,8 +23,20 @@ def _resolve_public_root() -> Path:
 
 PUBLIC_ROOT = _resolve_public_root()
 READINESS_PATH = PUBLIC_ROOT / "readiness.json"
-SNAPSHOT_PATH = PUBLIC_ROOT / "data" / "performance.json"
-SNAPSHOT_MANIFEST_PATH = PUBLIC_ROOT / "data" / "performance.json.manifest.json"
+
+
+def _artifact_path(primary: Path, packaged: Path) -> Path:
+    return primary if primary.is_file() else packaged
+
+
+SNAPSHOT_PATH = _artifact_path(
+    PUBLIC_ROOT / "data" / "performance.json",
+    PUBLIC_ROOT / "data" / "performance-snapshot.json",
+)
+SNAPSHOT_MANIFEST_PATH = _artifact_path(
+    PUBLIC_ROOT / "data" / "performance.json.manifest.json",
+    PUBLIC_ROOT / "data" / "performance-snapshot-manifest.json",
+)
 BUILD_MANIFEST_PATH = PUBLIC_ROOT / "build-manifest.json"
 REQUIRED_HASHED_FILES = {
     "index.html",
