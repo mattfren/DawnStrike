@@ -1,47 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "routes": [
-    {
-      "src": "^/api/health$",
-      "dest": "/api/health.json",
-      "headers": {
-        "X-Dawnstrike-Surface": "one-dashboard",
-        "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "no-store"
-      }
+  "outputDirectory": "build/public",
+  "functions": {
+    "api/health.py": {
+      "includeFiles": "build/public/**",
+      "maxDuration": 10
     },
-    {
-      "src": "^/assets/(.*)$",
-      "dest": "/assets/$1",
-      "headers": {
-        "X-Dawnstrike-Surface": "one-dashboard",
-        "X-Content-Type-Options": "nosniff"
-      }
-    },
-    {
-      "src": "^/$",
-      "dest": "/index.html",
-      "headers": {
-        "X-Dawnstrike-Surface": "one-dashboard",
-        "X-Content-Type-Options": "nosniff"
-      }
-    },
-    {
-      "src": "^/index\\.html$",
-      "status": 308,
-      "headers": {
-        "Location": "/"
-      }
-    },
-    {
-      "src": "^/(.*)$",
-      "status": 404,
-      "dest": "/404.html",
-      "headers": {
-        "X-Dawnstrike-Surface": "one-dashboard",
-        "X-Content-Type-Options": "nosniff"
-      }
+    "api/readiness.py": {
+      "includeFiles": "build/public/**",
+      "maxDuration": 10
     }
-  ]
+  }
 }

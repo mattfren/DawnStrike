@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1020" />
+    <meta name="description" content="Dawnstrike research and paper performance with evidence attached." />
+    <title>Dawnstrike | Research performance</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/dawnstrike.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">D</div>
+        <div>
+          <p class="eyebrow">Research desk</p>
+          <p class="brand-name">Dawnstrike</p>
+        </div>
+      </div>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <button class="nav-link is-active" data-view="overview">Overview</button>
+        <button class="nav-link" data-view="performance">Performance</button>
+        <button class="nav-link" data-view="research">Research</button>
+        <button class="nav-link" data-view="system">System</button>
+      </nav>
+      <div class="header-status" id="header-status" aria-live="polite">Loading evidence</div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+          <p class="eyebrow accent">Evidence before confidence</p>
+          <h1 id="page-title">A clear record of what was observed.</h1>
+          <p class="hero-lede">
+            Dawnstrike keeps paper results, research observations, and unresolved outcomes separate.
+            Every number here has a source trail—or says when it does not.
+          </p>
+          <div class="hero-actions">
+            <button class="button button-primary" data-view="performance">View returns</button>
+            <button class="button button-secondary" data-view="system">Check freshness</button>
+          </div>
+        </div>
+        <div class="hero-note">
+          <span class="note-dot" aria-hidden="true"></span>
+          <div>
+            <strong>Research only</strong>
+            <p>No broker connection. No orders. Missing data is never treated as zero.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="kpi-grid" aria-label="Key figures">
+        <article class="kpi-card"><span>Latest paper day</span><strong id="kpi-date">Not reported</strong><small id="kpi-date-note">Waiting for snapshot</small></article>
+        <article class="kpi-card"><span>Paper return</span><strong id="kpi-return">Not reported</strong><small id="kpi-return-note">After-cost result</small></article>
+        <article class="kpi-card"><span>Observed paper days</span><strong id="kpi-days">Not reported</strong><small>Official forward paper cohort</small></article>
+        <article class="kpi-card"><span>Outcomes unresolved</span><strong id="kpi-missing">Not reported</strong><small>Kept out of return totals</small></article>
+      </section>
+
+      <div id="app-alert" class="alert" role="status" aria-live="polite"></div>
+
+      <section id="view-overview" class="page-view is-visible" aria-labelledby="overview-title">
+        <div class="section-heading"><div><p class="eyebrow">At a glance</p><h2 id="overview-title">The latest evidence, in plain English.</h2></div><span class="section-pill" id="overview-pill">Loading</span></div>
+        <div class="overview-grid">
+          <article class="panel panel-large"><div class="panel-heading"><div><p class="eyebrow">Official paper</p><h3>What the paper record says</h3></div><span class="status-chip" id="paper-status">Loading</span></div><div id="paper-summary" class="summary-copy"></div><div id="paper-days" class="mini-bars"><span class="sr-only">Recent official paper returns</span></div></article>
+          <article class="panel"><p class="eyebrow">How to read this</p><h3>Three kinds of evidence</h3><div class="legend-list"><div><span class="legend-swatch swatch-paper"></span><div><strong>Official paper</strong><p>Saved research calls carried through the paper workflow.</p></div></div><div><span class="legend-swatch swatch-research"></span><div><strong>Research observations</strong><p>Sourced market observations used for learning, not claims.</p></div></div><div><span class="legend-swatch swatch-missing"></span><div><strong>Not reported</strong><p>The source did not support a complete result yet.</p></div></div></div></article>
+        </div>
+      </section>
+
+      <section id="view-performance" class="page-view" aria-labelledby="performance-title">
+        <div class="section-heading"><div><p class="eyebrow">Returns</p><h2 id="performance-title">Performance with the missing pieces visible.</h2></div><span class="section-pill">Cohorts stay separate</span></div>
+        <article class="panel"><div class="panel-heading"><div><h3>Daily record</h3><p class="muted">Net return is shown only when the cost inputs support it.</p></div><span class="muted" id="performance-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Daily Dawnstrike performance by evidence cohort</caption><thead><tr><th scope="col">Date</th><th scope="col">Evidence</th><th scope="col">Status</th><th scope="col">Gross observed</th><th scope="col">Net after costs</th><th scope="col">Against benchmark</th><th scope="col">Open / missing</th></tr></thead><tbody id="performance-table"><tr><td colspan="7">Loading evidence…</td></tr></tbody></table></div></article>
+      </section>
+
+      <section id="view-research" class="page-view" aria-labelledby="research-title">
+        <div class="section-heading"><div><p class="eyebrow">Research</p><h2 id="research-title">The learning set is not the paper scorecard.</h2></div><span class="section-pill">No personalized advice</span></div>
+        <div class="research-grid"><article class="panel panel-large"><div class="panel-heading"><div><h3>Research observations</h3><p class="muted">Sourced observations remain labeled as research and keep unresolved rows visible.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Research observations</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Observed return</th><th scope="col">Net result</th><th scope="col">Source trail</th></tr></thead><tbody id="research-table"><tr><td colspan="6">Loading evidence…</td></tr></tbody></table></div></article><article class="panel"><p class="eyebrow">Guardrail</p><h3>Evidence is allowed to be incomplete.</h3><p class="summary-copy">A missing close, unknown cost, or unresolved observation stays out of the realized total. That can make the dashboard look less polished. It makes the result more trustworthy.</p><div class="callout"><strong>Forward evidence takes time.</strong><span>Strategy quality is not marked proven by a short sample or a backtest alone.</span></div></article></div>
+      </section>
+
+      <section id="view-system" class="page-view" aria-labelledby="system-title">
+        <div class="section-heading"><div><p class="eyebrow">System</p><h2 id="system-title">Freshness and publication health.</h2></div><span class="section-pill" id="system-pill">Loading</span></div>
+        <div class="system-grid"><article class="panel"><div class="panel-heading"><div><h3>Publication readiness</h3><p class="muted">Liveness and readiness are different checks.</p></div><span class="status-chip" id="readiness-status">Loading</span></div><dl class="detail-list" id="readiness-details"></dl></article><article class="panel"><div class="panel-heading"><div><h3>Snapshot manifest</h3><p class="muted">The artifact records its input and output hashes.</p></div></div><dl class="detail-list" id="manifest-details"></dl></article></div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>Dawnstrike research desk</span><span>Read-only publication · <span id="footer-date">Snapshot date pending</span></span></footer>
+    <script type="module" src="/assets/dawnstrike.js"></script>
+  </body>
+</html>

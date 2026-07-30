@@ -152,9 +152,7 @@ def _attach_display_ready(payload: dict[str, Any], db_path: str | Path | None = 
     top = list(payload.get("top_explosive") or [])
     signals = list(payload.get("alpha_signals") or [])
     clean_signals = [
-        row
-        for row in signals
-        if row.get("can_alert", True) and not row.get("no_trade_reason")
+        row for row in signals if row.get("can_alert", True) and not row.get("no_trade_reason")
     ]
     pick_source = top or ranked or clean_signals
     top_three = [display_pick_from_raw(row) for row in pick_source[:3]]
@@ -236,10 +234,7 @@ def _display_risk_summary(
     warnings = 0
     for row in [*list(payload.get("ranked_candidates") or []), *avoid]:
         warning_text = str(
-            row.get("coverage_warning")
-            or row.get("data_warnings")
-            or row.get("warning")
-            or ""
+            row.get("coverage_warning") or row.get("data_warnings") or row.get("warning") or ""
         )
         if warning_text:
             warnings += 1
@@ -347,11 +342,7 @@ def _display_calendar_day(row: dict[str, Any]) -> dict[str, Any]:
         "SOURCE FAILURE": "Data problem",
     }
     top3 = _number_or_none(row.get("top3_return"))
-    audited_class = (
-        "audited-positive"
-        if top3 is None or top3 >= 0
-        else "audited-negative"
-    )
+    audited_class = "audited-positive" if top3 is None or top3 >= 0 else "audited-negative"
     css = {
         "AUDITED": audited_class,
         "PICKS PENDING OUTCOMES": "pending",
@@ -378,9 +369,8 @@ def _latest_no_trade_reason(payload: dict[str, Any]) -> str:
 
 
 def _main_risk(row: dict[str, Any]) -> str:
-    return (
-        translate_list(row.get("risk_flags") or row.get("avoid_reasons"))
-        or no_trade_reason(row.get("no_trade_reason"))
+    return translate_list(row.get("risk_flags") or row.get("avoid_reasons")) or no_trade_reason(
+        row.get("no_trade_reason")
     )
 
 
@@ -1439,8 +1429,10 @@ def _return_row_from_attribution(
         {},
     )
     any_return = any(_number_or_none(row.get("return_pct")) is not None for row in rows)
-    audit_status = "audited" if _number_or_none(close.get("return_pct")) is not None else (
-        "partial" if any_return else "Outcome needed"
+    audit_status = (
+        "audited"
+        if _number_or_none(close.get("return_pct")) is not None
+        else ("partial" if any_return else "Outcome needed")
     )
     if missing and not any_return:
         audit_status = "Outcome needed"
@@ -1575,12 +1567,14 @@ def _telegram_rows(notifications: list[dict[str, Any]]) -> list[dict[str, Any]]:
         message = _notification_message(row)
         if channel.lower() != "telegram" and "telegram" not in event_key.lower() and not message:
             continue
-        rows.append({
-            "event_key": event_key,
-            "channel": channel,
-            "sent_at": str(row.get("sent_at") or ""),
-            "message": message,
-        })
+        rows.append(
+            {
+                "event_key": event_key,
+                "channel": channel,
+                "sent_at": str(row.get("sent_at") or ""),
+                "message": message,
+            }
+        )
     return rows
 
 
@@ -1605,13 +1599,15 @@ def _missing_outcome_rows(day: str, return_rows: list[dict[str, Any]]) -> list[d
     for row in return_rows:
         if row.get("audit_status") != "Outcome needed":
             continue
-        rows.append({
-            "date": day,
-            "ticker": row.get("ticker"),
-            "rank": row.get("rank"),
-            "audit_status": "Outcome needed",
-            "expected_path": f"data\\inbox\\outcomes\\outcomes_{day}.csv",
-        })
+        rows.append(
+            {
+                "date": day,
+                "ticker": row.get("ticker"),
+                "rank": row.get("rank"),
+                "audit_status": "Outcome needed",
+                "expected_path": f"data\\inbox\\outcomes\\outcomes_{day}.csv",
+            }
+        )
     return rows
 
 
@@ -1619,9 +1615,7 @@ def _basket_returns(return_rows: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for count in (1, 3, 5):
         for policy, field in CALENDAR_RETURN_POLICIES.items():
-            result[f"top{count}_{policy}_return"] = _equal_weight_return(
-                return_rows, field, count
-            )
+            result[f"top{count}_{policy}_return"] = _equal_weight_return(return_rows, field, count)
         result[f"top{count}_open_entry_return"] = _equal_weight_return(
             return_rows, "open_entry_return", count
         )
@@ -1711,9 +1705,7 @@ def _no_trade_reason(signals: list[dict[str, Any]], notifications: list[dict[str
             if line.lower().startswith("reason:"):
                 return line.split(":", 1)[1].strip()
     reasons = [
-        str(row.get("no_trade_reason") or "")
-        for row in signals
-        if row.get("no_trade_reason")
+        str(row.get("no_trade_reason") or "") for row in signals if row.get("no_trade_reason")
     ]
     return "; ".join(sorted(set(reasons)))
 
@@ -1869,8 +1861,7 @@ def _outcome_after_signal(row: dict[str, Any], signal_time: str) -> bool:
 
 def _has_any_return(row: dict[str, Any]) -> bool:
     return any(
-        _number_or_none(row.get(field)) is not None
-        for field in CALENDAR_RETURN_POLICIES.values()
+        _number_or_none(row.get(field)) is not None for field in CALENDAR_RETURN_POLICIES.values()
     )
 
 
@@ -2155,11 +2146,13 @@ def _default_calendar_range(db_path: str | Path) -> tuple[str, str]:
         except sqlite3.Error:
             dates = []
     if dates:
-        anchor = datetime.strptime(max(dates), "%Y-%m-%d").date()
+        earliest = datetime.strptime(min(dates), "%Y-%m-%d").date()
+        latest = datetime.strptime(max(dates), "%Y-%m-%d").date()
     else:
-        anchor = date.today()
-    start = anchor.replace(day=1)
-    next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        earliest = latest = date.today()
+    start = earliest.replace(day=1)
+    latest_month = latest.replace(day=1)
+    next_month = (latest_month.replace(day=28) + timedelta(days=4)).replace(day=1)
     end = next_month - timedelta(days=1)
     return start.isoformat(), end.isoformat()
 

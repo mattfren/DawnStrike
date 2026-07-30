@@ -1,0 +1,85 @@
+"""Verify the bounded, static Vercel artifact before it can be promoted."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+MAX_SNAPSHOT_BYTES = 250 * 1024
+REQUIRED_FILES = (
+    "index.html",
+    "favicon.svg",
+    "readiness.json",
+    "stage-manifest.json",
+    "build-manifest.json",
+    "assets/dawnstrike.css",
+    "assets/dawnstrike.js",
+    "data/performance.json",
+    "data/performance.json.manifest.json",
+)
+FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
+
+
+def verify(root: Path) -> dict[str, object]:
+    errors: list[str] = []
+    missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
+    errors.extend(f"missing:{name}" for name in missing)
+
+    forbidden = []
+    if root.exists():
+        for path in root.rglob("*"):
+            if path.is_file() and any(part in path.name.lower() for part in FORBIDDEN_FILE_PARTS):
+                forbidden.append(str(path.relative_to(root)).replace("\\", "/"))
+    errors.extend(f"forbidden_file:{name}" for name in forbidden)
+
+    snapshot_path = root / "data" / "performance.json"
+    manifest_path = root / "data" / "performance.json.manifest.json"
+    snapshot: dict[str, object] = {}
+    manifest: dict[str, object] = {}
+    if snapshot_path.is_file():
+        encoded = snapshot_path.read_bytes()
+        if len(encoded) > MAX_SNAPSHOT_BYTES:
+            errors.append(f"snapshot_too_large:{len(encoded)}")
+        snapshot = json.loads(encoded)
+        if len(snapshot.get("rows") or []) > 250:
+            errors.append("row_limit_exceeded")
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("payload_sha256") != hashlib.sha256(snapshot_path.read_bytes()).hexdigest():
+            errors.append("snapshot_hash_mismatch")
+        if int(manifest.get("byte_count") or 0) != snapshot_path.stat().st_size:
+            errors.append("snapshot_byte_count_mismatch")
+
+    readiness_path = root / "readiness.json"
+    readiness: dict[str, object] = {}
+    if readiness_path.is_file():
+        readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+        if readiness.get("live_trading_enabled") is True:
+            errors.append("live_trading_enabled")
+
+    result = {
+        "status": "PASS" if not errors else "FAIL",
+        "root": str(root),
+        "errors": errors,
+        "snapshot_bytes": snapshot_path.stat().st_size if snapshot_path.is_file() else None,
+        "snapshot_rows": len(snapshot.get("rows") or []),
+        "snapshot_status": manifest.get("status"),
+        "readiness_status": readiness.get("status"),
+        "readiness_http_status": readiness.get("http_status"),
+    }
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", default="build/public")
+    args = parser.parse_args(argv)
+    result = verify(Path(args.root).resolve())
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0 if result["status"] == "PASS" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

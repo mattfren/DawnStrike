@@ -26,6 +26,7 @@ browser = [
 intraday-scan = "intraday_scanner.cli:main"
 build-snapshot = "intraday_scanner.snapshot_builder:main"
 paper-audit = "intraday_scanner.paper_audit:main"
+performance-reconcile = "intraday_scanner.performance.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["intraday_scanner*"]
