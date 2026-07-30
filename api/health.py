@@ -6,6 +6,8 @@ import json
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from api.public_state import PUBLIC_STATE
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -49,4 +51,10 @@ def _build_metadata() -> dict[str, object]:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if isinstance(payload, dict):
+        return payload
+    return (
+        PUBLIC_STATE.get("build_manifest", {})
+        if isinstance(PUBLIC_STATE.get("build_manifest"), dict)
+        else {}
+    )

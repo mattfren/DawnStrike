@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from api.public_state import PUBLIC_STATE
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,20 +55,28 @@ REQUIRED_HASHED_FILES = {
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if not READINESS_PATH.is_file():
+        packaged_readiness = (
+            PUBLIC_STATE.get("readiness")
+            if isinstance(PUBLIC_STATE.get("readiness"), dict)
+            else {}
+        )
+        if not READINESS_PATH.is_file() and not packaged_readiness:
             _send(
                 self, {"status": "not_ready", "http_status": 503, "reason": "snapshot_missing"}, 503
             )
             return
-        try:
-            payload = json.loads(READINESS_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            _send(
-                self,
-                {"status": "not_ready", "http_status": 503, "reason": "snapshot_unreadable"},
-                503,
-            )
-            return
+        if READINESS_PATH.is_file():
+            try:
+                payload = json.loads(READINESS_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                _send(
+                    self,
+                    {"status": "not_ready", "http_status": 503, "reason": "snapshot_unreadable"},
+                    503,
+                )
+                return
+        else:
+            payload = packaged_readiness
         if not isinstance(payload, dict):
             _send(
                 self,
@@ -73,9 +84,15 @@ class handler(BaseHTTPRequestHandler):
                 503,
             )
             return
-        checks = _validate_public_state(payload)
+        checks = (
+            _validate_public_state(payload)
+            if READINESS_PATH.is_file()
+            else _validate_packaged_public_state(payload)
+        )
         status = 200 if not checks else 503
         build_manifest = _read_object(BUILD_MANIFEST_PATH)
+        if not build_manifest and isinstance(PUBLIC_STATE.get("build_manifest"), dict):
+            build_manifest = PUBLIC_STATE["build_manifest"]
         payload = {
             **payload,
             "status": "ready" if status == 200 else "not_ready",
@@ -89,6 +106,69 @@ class handler(BaseHTTPRequestHandler):
             else "public_integrity_check_failed",
         }
         _send(self, payload, status)
+
+
+def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    snapshot_manifest = (
+        PUBLIC_STATE.get("snapshot_manifest")
+        if isinstance(PUBLIC_STATE.get("snapshot_manifest"), dict)
+        else {}
+    )
+    build_manifest = (
+        PUBLIC_STATE.get("build_manifest")
+        if isinstance(PUBLIC_STATE.get("build_manifest"), dict)
+        else {}
+    )
+    encoded_snapshot = PUBLIC_STATE.get("snapshot_b64")
+    if not isinstance(encoded_snapshot, str):
+        failures.append("snapshot_missing")
+        payload_bytes = b""
+    else:
+        try:
+            payload_bytes = base64.b64decode(encoded_snapshot, validate=True)
+        except (ValueError, TypeError):
+            failures.append("snapshot_unreadable")
+            payload_bytes = b""
+    if not snapshot_manifest:
+        failures.append("snapshot_manifest_missing")
+    else:
+        if snapshot_manifest.get("payload_sha256") != hashlib.sha256(payload_bytes).hexdigest():
+            failures.append("snapshot_hash_mismatch")
+        if snapshot_manifest.get("byte_count") != len(payload_bytes):
+            failures.append("snapshot_byte_count_mismatch")
+    if not build_manifest:
+        failures.append("build_manifest_missing")
+    if not build_manifest.get("source_sha"):
+        failures.append("source_sha_missing")
+    if not build_manifest.get("build_id"):
+        failures.append("build_id_missing")
+    if build_manifest.get("source_clean") is not True:
+        failures.append("source_not_clean")
+    if build_manifest.get("data_hash_sha256") != snapshot_manifest.get("payload_sha256"):
+        failures.append("build_data_hash_mismatch")
+    file_hashes = build_manifest.get("file_hashes")
+    if not isinstance(file_hashes, dict):
+        failures.append("file_hashes_missing")
+    else:
+        failures.extend(
+            f"file_hash_missing:{name}"
+            for name in sorted(REQUIRED_HASHED_FILES - {str(key) for key in file_hashes})
+        )
+    if PUBLIC_STATE.get("static_file_hashes_verified") is not True:
+        failures.append("static_file_attestation_missing")
+    if readiness.get("live_trading_enabled") is True:
+        failures.append("live_trading_enabled")
+    if readiness.get("research_only") is not True:
+        failures.append("research_only_flag_missing")
+    if readiness.get("snapshot_status") not in {"complete", "no_trade"}:
+        failures.append("snapshot_not_publishable")
+    if snapshot_manifest and snapshot_manifest.get("status") != readiness.get("snapshot_status"):
+        failures.append("snapshot_manifest_status_mismatch")
+    if readiness.get("status") != "ready" or readiness.get("http_status") != 200:
+        failures.append("pipeline_not_ready")
+    failures.extend(_freshness_failures(readiness.get("market_date")))
+    return list(dict.fromkeys(failures))
 
 
 def _validate_public_state(readiness: dict[str, object]) -> list[str]:
