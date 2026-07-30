@@ -1082,8 +1082,11 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload.get("source_refs"), list):
         payload["source_refs"] = _json_list(payload.get("source_refs_json", "[]"))
     payload["generated_at"] = payload.get("generated_at") or payload.get("calculated_at")
+    payload["timezone"] = payload.get("timezone") or "America/Chicago"
     allowed = (
+        "performance_id",
         "market_date",
+        "timezone",
         "cohort",
         "strategy_id",
         "strategy_version",

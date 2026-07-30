@@ -141,4 +141,6 @@ def test_persisted_daily_metadata_is_retained_in_public_data(tmp_path: Path) -> 
     assert replay["coverage"]["coverage_pct"] == 100.0
     assert replay["source_refs"]
     assert replay["generated_at"] == "2026-07-29T21:00:00+00:00"
+    assert replay["performance_id"] == "2026-07-29:historical_backtest:replay_strategy:v1"
+    assert replay["timezone"] == "America/Chicago"
     assert public["safety_evidence"]["halt_status"]["state"] == "unknown"
