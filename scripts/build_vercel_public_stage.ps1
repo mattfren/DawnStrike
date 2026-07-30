@@ -31,4 +31,12 @@ $config = @{
     }
 } | ConvertTo-Json -Depth 6
 Set-Content -LiteralPath (Join-Path $stage "vercel.json") -Value $config -Encoding utf8
+$stagePyproject = @"
+[project]
+name = "dawnstrike-public-stage"
+version = "0.0.0"
+requires-python = ">=3.13"
+dependencies = []
+"@
+Set-Content -LiteralPath (Join-Path $stage "pyproject.toml") -Value $stagePyproject -Encoding utf8
 Write-Output "Staged minimal Vercel publication at $stage"
