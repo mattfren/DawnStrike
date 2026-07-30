@@ -6,7 +6,7 @@ approval.
 
 | Area | Candidate state | Closure gate |
 |---|---|---|
-| Truth model | `LOCAL_VERIFIED` | Canonical rows, cents reconciliation, PaperOps cohort separation/quarantine, and missing-outcome tests pass. |
+| Truth model | `LOCAL_VERIFIED` | Canonical rows, cents reconciliation, PaperOps cohort separation/quarantine, missing-outcome tests, and owner-approved derived-state retention evidence pass. |
 | Daily publication | `LOCAL_VERIFIED` | One lock/retry/finalize chain writes snapshot, readiness, and stage manifest. |
 | Risk controls | `LOCAL_VERIFIED` | Unknown safety inputs fail closed; live execution remains disabled. |
 | Public UI | `LOCAL_VERIFIED` | Static responsive site, semantic navigation, bounded payload, and zero axe violations in the local browser pass. |

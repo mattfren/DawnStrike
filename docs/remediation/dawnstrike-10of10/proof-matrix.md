@@ -38,5 +38,6 @@ and leaves unsupported after-cost/excess return fields unreported. Strategy qual
 observed.
 
 The fresh build was mistakenly pointed at the shared DB and persisted the
-derived 425/222 read model plus one console notification. This is an audit
-incident and recovery decision, not a green publication result.
+derived 425/222 read model plus one console notification. The owner approved
+retaining and auditing that state; it remains an audit incident, not a green
+publication result.

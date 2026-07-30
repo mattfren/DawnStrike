@@ -64,8 +64,10 @@ shared database path. Its persistence-enabled finalize chain wrote 425 derived
 performance rows, 222 daily rows, and one console notification (`id=92`) into
 the shared DB. Raw positions, fills, outcomes, and broker state were not
 changed. No pre-write backup with the original 5/2 derived counts was found;
-production promotion and further shared-DB writes are blocked until the owner
-supplies a trusted backup or explicitly approves retaining the derived state.
+production promotion and further shared-DB writes were blocked pending the
+owner decision. The owner has now approved retaining and auditing the derived
+state; that approval is recorded in
+`shared-db-retention-approval.md` and does not authorize production promotion.
 The candidate now rejects any `--db-path` outside its repository before opening
 the database; the guard is covered by `tests/test_public_build_safety.py`.
 

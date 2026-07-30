@@ -94,8 +94,8 @@ the derived 425 canonical rows, 222 daily rows, and one console notification
 (`id=92`, build `c23bc49297c71c60e62a`). No raw positions, fills, outcomes, or
 broker orders were changed. No pre-write copy with the original 5/2 derived
 rows was found, so recovery is an owner decision: supply a trusted backup or
-explicitly retain and audit the derived read model. Do not write the shared DB
-again from the isolated candidate.
+explicitly retain and audit the derived read model. The owner approved
+retention; do not write the shared DB again from the isolated candidate.
 
 Read-only hashes against the existing evidence copy confirm the raw tables are
 unchanged: positions 7,

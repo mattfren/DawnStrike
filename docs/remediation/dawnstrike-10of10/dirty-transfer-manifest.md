@@ -54,8 +54,8 @@ files in this directory.
   exists.
 - Do not point persistence-enabled builds at the shared database. The isolated
   candidate's fresh build accidentally wrote derived canonical rows and one
-  console notification to the shared database; recovery is blocked pending a
-  trusted pre-write backup or explicit owner decision.
+  console notification to the shared database. The owner approved retaining
+  and auditing that derived state; no further shared-DB writes are allowed.
 
 ## Transfer protocol
 

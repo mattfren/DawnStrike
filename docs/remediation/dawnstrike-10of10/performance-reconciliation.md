@@ -65,4 +65,5 @@ rows, so it could not support a green canonical return publication. The fresh
 build was then mistakenly run with the shared DB as its persistence target;
 the shared DB now contains the 425/222 derived rows and one additional console
 notification. Exact recovery of the prior 5/2 derived state requires an
-owner-supplied backup or an explicit retention decision.
+owner-supplied backup or an explicit retention decision. The owner has approved
+retaining the current derived state; it remains degraded and non-publishable.

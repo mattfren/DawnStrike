@@ -17,11 +17,9 @@ not strategy-validated, and does not claim profitable returns. The preview is
 verified only as a truthful degraded publication; it is not a promotion
 approval.
 
-Current authoritative source check before the fresh build: the shared database
-contained 5 canonical performance rows, 2 canonical daily rows, and 0
-benchmark rows. A later mistaken persistence-enabled build changed that
-shared derived state to 425 performance rows and 222 daily rows and added one
-console notification. No raw source rows or broker state changed. The recovery
-decision is unresolved and must be owner-approved. The PaperOps reconciliation
-remains `DEGRADED` with 156 discrepancies, so no return-rate or excess-return
-claim is promoted to green.
+Current authoritative source check: the owner approved retaining the derived
+state at 425 performance rows, 222 daily rows, and 92 notifications. No raw
+source rows or broker state changed. The PaperOps reconciliation remains
+`DEGRADED` with 156 discrepancies, so no return-rate or excess-return claim is
+promoted to green. This retention approval does not authorize scheduler
+registration or production promotion.
