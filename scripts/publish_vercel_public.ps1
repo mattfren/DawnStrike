@@ -108,15 +108,24 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Vercel prebuild failed with exit code $LASTEXITCODE."
     }
-    $deployment = Invoke-VercelJson `
+    $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
         -Label "Vercel prebuilt deploy"
+    $deployment = if ($deploymentResponse.deployment) {
+        $deploymentResponse.deployment
+    }
+    else {
+        $deploymentResponse
+    }
 }
 finally {
     Pop-Location
 }
 
 $previewUrl = [string]$deployment.url
+if (-not $deployment.id -or -not $previewUrl) {
+    throw "Vercel prebuilt deploy did not return a deployment ID and URL."
+}
 if (-not $previewUrl.StartsWith("http")) {
     $previewUrl = "https://$previewUrl"
 }
