@@ -62,24 +62,29 @@ function Invoke-VercelJson {
         [string[]]$Arguments,
         [string]$Label
     )
-    # PowerShell's ErrorActionPreference=Stop turns Vercel's normal Node
-    # warnings on stderr into terminating errors. Merge streams, then parse
-    # the JSON object from the combined output.
+    # Vercel and its bundled curl write banners, warnings, and transfer
+    # progress to stderr even when the command succeeds. Keep stderr separate:
+    # curl progress can otherwise be interleaved inside a multiline JSON body.
     $previousErrorActionPreference = $ErrorActionPreference
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $output = @()
+    $stderrText = ""
+    $exitCode = $null
     try {
-        # Native Vercel warnings are emitted on stderr. PowerShell 7 can turn
-        # those records into terminating errors under Stop, even when the
-        # process exits successfully. Capture both streams while the native
-        # command runs and use its exit code as the authoritative result.
         $ErrorActionPreference = "Continue"
-        $output = & npx @vercel @Arguments 2>&1
+        $output = & npx @vercel @Arguments 2> $stderrPath
         $exitCode = $LASTEXITCODE
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $stderrText = [System.IO.File]::ReadAllText($stderrPath).Trim()
+        }
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
     }
     if ($exitCode -ne 0) {
-        throw "$Label failed with exit code $exitCode."
+        $detail = if ($stderrText) { " stderr: $stderrText" } else { "" }
+        throw "$Label failed with exit code $exitCode.$detail"
     }
     return Convert-VercelJson -Output @($output) -Label $Label
 }
