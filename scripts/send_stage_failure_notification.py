@@ -41,6 +41,24 @@ def main() -> int:
     event_key = "dawnstrike:stage-failure:telegram:" + hashlib.sha256(
         f"{args.market_date}:{failed_stage}:{reason}".encode()
     ).hexdigest()
+    store = SQLiteScanStore(Path(args.db_path))
+    existing = store.load_notification(event_key)
+    if existing is not None and (
+        existing.get("sent") is True
+        or existing.get("channel") == "telegram:sent"
+    ):
+        print(
+            json.dumps(
+                {
+                    "deduplicated": True,
+                    "event_key": event_key,
+                    "status": "already_sent",
+                    "sent": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
         "INTRADAY_TELEGRAM_BOT_TOKEN"
     )
@@ -67,7 +85,7 @@ def main() -> int:
             response.read()
         delivery_status = "sent"
         sent = True
-    SQLiteScanStore(Path(args.db_path)).record_notification(
+    store.record_notification_delivery(
         event_key=event_key,
         channel=f"telegram:{delivery_status}",
         payload={
@@ -86,6 +104,7 @@ def main() -> int:
                 "event_key": event_key,
                 "status": delivery_status,
                 "sent": sent,
+                "deduplicated": False,
             },
             sort_keys=True,
         )

@@ -10,6 +10,8 @@ $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
+. (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
+Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null

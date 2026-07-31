@@ -28,3 +28,25 @@ def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
     assert 'Duration = "PT$([int]$definition.DurationHours)H"' in register
     assert "$trigger.Repetition = $repetition" in register
     assert "$trigger.Repetition.Interval =" not in register
+
+
+def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:
+    helper = Path("scripts/import_dawnstrike_environment.ps1").read_text(
+        encoding="utf-8"
+    )
+    runners = (
+        "run_alphaops_morning.ps1",
+        "run_alphaops_monitor.ps1",
+        "run_alphaops_eod.ps1",
+        "run_daily_finalize.ps1",
+    )
+
+    assert 'Join-Path $StateRoot "secrets\\runtime.env"' in helper
+    assert "SetEnvironmentVariable" in helper
+    assert "TELEGRAM_BOT_TOKEN" in helper
+    assert "TELEGRAM_CHAT_ID" in helper
+    assert "Write-Output" not in helper
+    for filename in runners:
+        runner = Path("scripts", filename).read_text(encoding="utf-8")
+        assert 'import_dawnstrike_environment.ps1"' in runner
+        assert "Import-DawnstrikeEnvironment -StateRoot $state" in runner
