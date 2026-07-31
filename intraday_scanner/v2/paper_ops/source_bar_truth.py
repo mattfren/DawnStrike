@@ -379,7 +379,7 @@ def _run_manifests(
         else:
             resolved = (output_root.resolve() / relative_root).resolve()
             expected = (
-                Path("data/v2_data_truth").resolve()
+                (output_root.resolve().parent / "v2_data_truth").resolve()
                 if mode == PaperRunMode.FORWARD.value
                 else (output_root.resolve() / "data_truth_replay").resolve()
             )

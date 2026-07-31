@@ -46,7 +46,7 @@ class ForwardReadinessResult:
 
 def forward_readiness(*, output_root: Path = Path("data/v2_paper_ops")) -> ForwardReadinessResult:
     paths = PaperOpsPaths.create(output_root)
-    data_status = _data_status(Path("data/v2_data_truth"))
+    data_status = _data_status(paths.root.parent / "v2_data_truth")
     ledger = rebuild_ledger(output_root=output_root)
     calendar = verify_calendar_truth(output_root=output_root)
     evidence = score_strategy_evidence(output_root=output_root)

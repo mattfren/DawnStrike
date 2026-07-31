@@ -328,7 +328,7 @@ def test_shadow_day_loads_exact_retained_champion_snapshot_when_latest_differs(
         "_current_utc_time",
         lambda: datetime(2026, 7, 15, 21, 30, tzinfo=timezone.utc),
     )
-    data_truth_root = Path("data/v2_data_truth")
+    data_truth_root = root.parent / "v2_data_truth"
     champion_manifest = _build_retained_data_truth_snapshot(
         data_truth_root=data_truth_root,
         fixture_root=tmp_path / "champion_source",
@@ -414,7 +414,7 @@ def test_shadow_day_fails_closed_when_retained_champion_snapshot_is_invalid(
         "_current_utc_time",
         lambda: datetime(2026, 7, 15, 21, 30, tzinfo=timezone.utc),
     )
-    data_truth_root = Path("data/v2_data_truth")
+    data_truth_root = root.parent / "v2_data_truth"
     champion_manifest = _build_retained_data_truth_snapshot(
         data_truth_root=data_truth_root,
         fixture_root=tmp_path / "champion_source",

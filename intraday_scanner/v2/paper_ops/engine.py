@@ -1480,7 +1480,7 @@ def _data_truth_root_for_mode(
     return (
         paths.root / "data_truth_replay"
         if mode is PaperRunMode.REPLAY
-        else Path("data/v2_data_truth")
+        else paths.root.parent / "v2_data_truth"
     )
 
 
