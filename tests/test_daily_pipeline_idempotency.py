@@ -8,7 +8,24 @@ def test_daily_finalize_repeated_fixed_run_is_logically_idempotent(tmp_path: Pat
     first = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
     second = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
     assert first["run_id"] == second["run_id"]
-    assert first["readiness"] == second["readiness"]
+    for key in (
+        "status",
+        "http_status",
+        "input_hash_sha256",
+        "payload_sha256",
+        "calendar_payload_sha256",
+        "publication_set_sha256",
+    ):
+        assert first["readiness"][key] == second["readiness"][key]
+    assert first["publication_set"]["publication_set_sha256"] == (
+        second["publication_set"]["publication_set_sha256"]
+    )
+    assert (
+        second["readiness"]["daily_run"]["latest_stage_statuses"]["readiness"][
+            "attempt_no"
+        ]
+        == 2
+    )
 
 
 def test_daily_finalize_run_id_is_market_date_keyed(tmp_path: Path) -> None:

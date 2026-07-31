@@ -12,10 +12,13 @@ from intraday_scanner.services.scheduler_doctor_service import (
 )
 
 
-def scheduler_doctor(root: str | Path) -> dict[str, Any]:
+def scheduler_doctor(
+    root: str | Path,
+    state_root: str | Path = r"C:\r\dawnstrike-state",
+) -> dict[str, Any]:
     """Compatibility entry point for the CLI release-doctor command."""
 
-    return _scheduler_doctor(root)
+    return _scheduler_doctor(root, state_root=state_root)
 
 
 def probability_doctor(db_path: str | Path) -> dict[str, Any]:

@@ -7,9 +7,9 @@ from typing import Any
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.services.time_utils import get_operator_time_label
 
-DEFAULT_MORNING_MAX_CHARS = 1200
-DEFAULT_ALERT_MAX_CHARS = 600
-DEFAULT_SUMMARY_MAX_CHARS = 900
+DEFAULT_MORNING_MAX_CHARS = 4096
+DEFAULT_ALERT_MAX_CHARS = 4096
+DEFAULT_SUMMARY_MAX_CHARS = 4096
 
 CANONICAL_COHORT_LABELS = {
     "official_forward_paper": "Official paper",
@@ -244,33 +244,37 @@ def format_alpha_watch(
     signals: list[dict[str, Any]],
     edge_label: str,
     source_summary: dict[str, Any] | None = None,
+    blocked_signals: list[dict[str, Any]] | None = None,
     timezone: str = "America/Chicago",
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
 ) -> str:
     source_summary = dict(source_summary or {})
-    picks = [row for row in signals if row.get("can_alert")][:3]
+    blocked_signals = list(blocked_signals or [])
+    candidates = [row for row in signals if row.get("can_alert")][:5]
+    official_candidates = [
+        row
+        for row in candidates
+        if str(row.get("decision_tier") or "").lower() == "clean_edge"
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and row.get("manual_confirmation_required") is False
+    ][:3]
+    research_watchlist = [
+        row for row in candidates if row not in official_candidates
+    ][:3]
     lines = [
         "🚀 Dawnstrike Alpha Watch",
-        f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | {len(picks)} picks",
+        (
+            f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | "
+            f"{len(official_candidates)} official candidates | "
+            f"{len(research_watchlist)} research"
+        ),
         "",
+        "OFFICIAL PAPER CANDIDATES",
+        "(pending fresh quote, session, cost, chase, and portfolio checks)",
     ]
-    if edge_label.upper() == "PROBABILITY WATCH":
-        lines.extend(
-            [
-                "Watch-only fallback: not a clean edge.",
-                "Confirm ticker, catalyst, volume, and levels manually.",
-                "",
-            ]
-        )
-    if not picks:
-        lines.extend([
-            "No clean edge today.",
-            f"Reason: {_text(source_summary.get('top_failure_reason'), 'risk/data filters')}",
-            "",
-            "No orders placed. Research only.",
-        ])
-        return _clip("\n".join(lines).strip(), max_chars)
-    for index, row in enumerate(picks, start=1):
+    if not official_candidates:
+        lines.append("- None")
+    for index, row in enumerate(official_candidates, start=1):
         lines.append(
             f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
             f"{format_score(row.get('alpha_score'))} | "
@@ -288,7 +292,49 @@ def format_alpha_watch(
         risk = _risk_text(row)
         if risk != "none":
             lines.append(f"   Risk {_truncate(risk, 80)}")
-        lines.append("")
+    lines.extend(["", "RESEARCH WATCHLIST"])
+    if not research_watchlist:
+        lines.append("- None")
+    for row in research_watchlist:
+        reasons = (
+            row.get("alert_gate_reasons")
+            or row.get("public_data_warning")
+            or row.get("no_trade_reason")
+            or "V5 official-paper checks not satisfied"
+        )
+        if isinstance(reasons, list):
+            reasons = "; ".join(str(item) for item in reasons)
+        lines.append(
+            f"- {_text(row.get('ticker'), 'n/a')}: "
+            f"{_truncate(str(reasons), 100)}"
+        )
+    lines.extend(["", "NO TRADE / BLOCKED REASONS"])
+    if blocked_signals:
+        for row in blocked_signals[:3]:
+            reason = (
+                row.get("no_trade_reason")
+                or row.get("alert_gate_reasons")
+                or row.get("avoid_reasons")
+                or row.get("risk_flags")
+                or "blocked by deterministic policy"
+            )
+            if isinstance(reason, list):
+                reason = "; ".join(str(item) for item in reason)
+            lines.append(
+                f"- {_text(row.get('ticker'), 'n/a')}: "
+                f"{_truncate(str(reason), 100)}"
+            )
+    else:
+        lines.append(
+            "- "
+            + _text(
+                source_summary.get("top_failure_reason"),
+                "No additional blocked rows",
+            )
+        )
+    if not official_candidates and not research_watchlist:
+        lines.extend(["", "No clean edge today."])
+    lines.append("")
     lines.append("No orders placed. Research only.")
     return _clip("\n".join(lines).strip(), max_chars)
 
@@ -304,7 +350,15 @@ def format_alpha_no_trade(
             [
                 "📡 Dawnstrike Alpha Check",
                 "No clean edge today.",
-                f"Reason: {reason}",
+                "",
+                "OFFICIAL PAPER CANDIDATES",
+                "- None",
+                "",
+                "RESEARCH WATCHLIST",
+                "- None",
+                "",
+                "NO TRADE / BLOCKED REASONS",
+                f"- {reason}",
                 f"Next: {next_action}",
                 "",
                 "No orders placed. Research only.",

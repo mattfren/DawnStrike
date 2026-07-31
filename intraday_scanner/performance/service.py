@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from intraday_scanner.alpha.v5_policy import (
+    ALPHAOPS_V5_ACCOUNT_ID,
+)
+from intraday_scanner.performance.account_ledger import (
+    build_v5_account_ledger,
+    ledger_equity_observations,
+    persist_v5_account_ledger,
+)
 from intraday_scanner.performance.contracts import (
     Cohort,
     PerformanceRow,
@@ -56,6 +64,7 @@ class CanonicalPerformanceService:
         self,
         *,
         market_date: str | None = None,
+        as_of_market_date: str | None = None,
         persist: bool = True,
         now: str | None = None,
     ) -> dict[str, Any]:
@@ -73,15 +82,30 @@ class CanonicalPerformanceService:
                 or _utc_now()
             )
             benchmark = inputs["benchmark"]
+            ledger = build_v5_account_ledger(
+                trades=inputs["strategy_trades"],
+                positions=inputs["positions"],
+                scorecards=inputs["scorecards"],
+                intents=inputs["intents"],
+                selections=inputs["selections"],
+                benchmark=benchmark,
+                input_hash_sha256=input_hash,
+                calculated_at=calculated_at,
+                as_of_market_date=market_date or as_of_market_date,
+            )
+            canonical_positions = _without_canonical_trade_duplicates(
+                inputs["positions"], inputs["strategy_trades"]
+            )
             rows = [
                 *self._position_rows(
-                    inputs["positions"], inputs["fills"], benchmark, calculated_at
+                    canonical_positions, inputs["fills"], benchmark, calculated_at
                 ),
                 *self._research_rows(
                     inputs["signals"], inputs["outcomes"], benchmark, calculated_at
                 ),
                 *self._strategy_trade_rows(inputs["strategy_trades"], benchmark, calculated_at),
                 *self._paper_ops_rows(inputs["paper_ops"]["rows"], benchmark, calculated_at),
+                *_account_observation_rows(ledger, calculated_at),
             ]
             rows.sort(
                 key=lambda item: (
@@ -96,7 +120,11 @@ class CanonicalPerformanceService:
                 rows,
                 calculated_at,
                 input_hash,
-                [*inputs["equity"], *inputs["paper_ops"]["equity"]],
+                [
+                    *inputs["equity"],
+                    *inputs["paper_ops"]["equity"],
+                    *ledger_equity_observations(ledger),
+                ],
             )
             _add_cumulative_metrics(daily)
             issues = _issues(rows, calculated_at)
@@ -108,6 +136,11 @@ class CanonicalPerformanceService:
                 for issue in inputs["paper_ops"]["issues"]
             )
             if persist:
+                persist_v5_account_ledger(
+                    connection,
+                    ledger,
+                    calculated_at=calculated_at,
+                )
                 self._persist(connection, rows, daily, issues, market_date=market_date)
             row_payload = [row.to_dict() for row in rows]
             output_hash = stable_hash({"rows": row_payload, "daily": daily, "issues": issues})
@@ -123,6 +156,7 @@ class CanonicalPerformanceService:
                 "rows": row_payload,
                 "daily": daily,
                 "issues": issues,
+                "account_ledger": ledger,
                 "paper_ops_reconciliation": inputs["paper_ops"],
             }
 
@@ -132,6 +166,7 @@ class CanonicalPerformanceService:
         days: int = 30,
         row_limit: int = 250,
         market_date: str | None = None,
+        generated_at: str | None = None,
     ) -> dict[str, Any]:
         """Return a bounded, secret-free payload for the static public site."""
 
@@ -170,7 +205,8 @@ class CanonicalPerformanceService:
                 for row in connection.execute(
                     f"""
                     SELECT record_id, market_date, ticker, cohort, strategy_id,
-                           strategy_version, record_status, notional_cents,
+                           strategy_version, signal_id, rank, record_status,
+                           entry_price, exit_price, quantity, notional_cents,
                            gross_pnl_cents, gross_return_pct, fees_cents, slippage_cents,
                            net_pnl_cents, return_pct, benchmark_return_pct,
                            excess_return_pct, source_refs_json, source_hash_sha256,
@@ -193,15 +229,49 @@ class CanonicalPerformanceService:
                     (*date_params, max(1, row_limit)),
                 )
             ]
+            account_rows = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT account_id, strategy_id, strategy_version,
+                           activation_timestamp, opening_equity_cents, currency,
+                           account_type, execution_policy_version,
+                           cost_model_version, research_only,
+                           broker_execution_enabled, created_at
+                    FROM paper_accounts
+                    ORDER BY activation_timestamp ASC, account_id ASC
+                    """
+                )
+            ]
+            ledger_rows = [
+                dict(row)
+                for row in connection.execute(
+                    f"""
+                    SELECT *
+                    FROM paper_account_daily_ledger
+                    WHERE 1 = 1 {date_clause}
+                    ORDER BY market_date DESC, account_id ASC
+                    LIMIT ?
+                    """,
+                    (*date_params, max(1, days) * 4),
+                )
+            ]
+            safety_evidence = _public_safety_evidence(
+                connection,
+                as_of=as_of,
+                daily_rows=daily_rows,
+            )
         return {
             "schema_version": "dawnstrike.public_performance.v1",
-            "generated_at": _utc_now(),
+            "generated_at": generated_at or _utc_now(),
             "as_of_market_date": as_of,
             "research_only": True,
             "live_trading_enabled": False,
-            "safety_evidence": _unknown_safety_evidence(),
+            "safety_evidence": safety_evidence,
             "daily": [_public_daily(row) for row in daily_rows],
             "rows": [_public_row(row) for row in performance_rows],
+            "accounts": account_rows,
+            "account_ledger": [_public_ledger(row) for row in ledger_rows],
             "limits": {"days": days, "row_limit": row_limit},
         }
 
@@ -215,6 +285,9 @@ class CanonicalPerformanceService:
         strategy_trades = _select_rows(connection, "strategy_paper_trades", market_date)
         benchmark_rows = _select_rows(connection, "benchmark_performance", market_date)
         equity_rows = _select_rows(connection, "portfolio_equity_observations", market_date)
+        selection_rows = _select_rows(connection, "signal_selections", market_date)
+        scorecard_rows = _select_rows(connection, "daily_strategy_scorecards", market_date)
+        intent_rows = _select_rows(connection, "trade_intents", market_date)
         paper_ops = load_paper_ops(self.paper_ops_root, market_date=market_date)
         benchmark = _benchmark_lookup(benchmark_rows)
         return {
@@ -224,6 +297,9 @@ class CanonicalPerformanceService:
             "fills": fills,
             "strategy_trades": strategy_trades,
             "equity": equity_rows,
+            "selections": selection_rows,
+            "scorecards": scorecard_rows,
+            "intents": intent_rows,
             "paper_ops": {
                 **paper_ops,
                 "rows": paper_ops["rows"],
@@ -237,6 +313,9 @@ class CanonicalPerformanceService:
                 "fills": fills,
                 "strategy_trades": strategy_trades,
                 "equity": equity_rows,
+                "selections": selection_rows,
+                "scorecards": scorecard_rows,
+                "intents": intent_rows,
                 "benchmark": benchmark_rows,
                 "paper_ops": paper_ops["hash_inputs"],
             },
@@ -480,6 +559,7 @@ class CanonicalPerformanceService:
             payload = _payload(raw)
             market_date = str(raw.get("market_date") or "")
             ticker = str(raw.get("ticker") or "").upper()
+            account_id = str(payload.get("account_id") or raw.get("account_id") or "")
             entry = safe_float(raw.get("entry_fill_price"))
             exit_price = safe_float(raw.get("exit_fill_price"))
             quantity = safe_float(raw.get("quantity"))
@@ -508,9 +588,13 @@ class CanonicalPerformanceService:
                     record_id=f"strategy_trade:{raw.get('trade_id')}",
                     market_date=market_date,
                     ticker=ticker,
-                    cohort=normalize_cohort(
-                        payload.get("cohort") or raw.get("cohort"),
-                        default=Cohort.HISTORICAL_BACKTEST,
+                    cohort=(
+                        Cohort.OFFICIAL_FORWARD_PAPER
+                        if account_id == ALPHAOPS_V5_ACCOUNT_ID
+                        else normalize_cohort(
+                            payload.get("cohort") or raw.get("cohort"),
+                            default=Cohort.HISTORICAL_BACKTEST,
+                        )
                     ),
                     strategy_id=str(raw.get("strategy_id") or self.strategy_id),
                     strategy_version=str(raw.get("strategy_version") or self.strategy_version),
@@ -530,7 +614,10 @@ class CanonicalPerformanceService:
                     benchmark_return_pct=benchmark_return,
                     excess_return_pct=_excess(return_pct, benchmark_return),
                     source_refs=_source_refs(
-                        raw.get("trade_id"), raw.get("source_bar_hash_sha256")
+                        raw.get("trade_id"),
+                        raw.get("selection_id"),
+                        raw.get("source_bar_hash_sha256"),
+                        account_id,
                     ),
                     source_hash_sha256=source_hash,
                     input_hash_sha256="",
@@ -689,6 +776,9 @@ class CanonicalPerformanceService:
                     performance_id, market_date, cohort, strategy_id, strategy_version,
                     status, gross_pnl_cents, fees_cents, slippage_cents, gross_return_pct,
                     unrealized_pnl_cents, opening_equity_cents, ending_equity_cents,
+                    account_id, external_flow_cents, cash_cents,
+                    position_market_value_cents, accounting_delta_cents,
+                    cash_benchmark_return_pct, ledger_status,
                     net_pnl_cents, allocated_capital_cents, return_pct, cumulative_return_pct,
                     benchmark_return_pct, excess_return_pct, drawdown_pct, exposure_cents,
                     realized_trade_count, unrealized_trade_count,
@@ -700,7 +790,10 @@ class CanonicalPerformanceService:
                     :performance_id, :market_date, :cohort, :strategy_id, :strategy_version,
                     :status, :gross_pnl_cents, :fees_cents, :slippage_cents,
                     :gross_return_pct, :unrealized_pnl_cents, :opening_equity_cents,
-                    :ending_equity_cents, :net_pnl_cents, :allocated_capital_cents,
+                    :ending_equity_cents, :account_id, :external_flow_cents,
+                    :cash_cents, :position_market_value_cents,
+                    :accounting_delta_cents, :cash_benchmark_return_pct,
+                    :ledger_status, :net_pnl_cents, :allocated_capital_cents,
                     :return_pct, :cumulative_return_pct, :benchmark_return_pct,
                     :excess_return_pct, :drawdown_pct, :exposure_cents,
                     :realized_trade_count, :unrealized_trade_count, :missing_outcome_count,
@@ -737,6 +830,119 @@ class CanonicalPerformanceService:
                     json.dumps(issue, sort_keys=True),
                 ),
             )
+
+
+def _without_canonical_trade_duplicates(
+    positions: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Exclude watcher positions once an exact EOD strategy trade supersedes them."""
+
+    signal_keys = {
+        (
+            str(row.get("market_date") or "")[:10],
+            str(row.get("signal_id") or ""),
+            str(row.get("strategy_id") or ""),
+        )
+        for row in trades
+        if str(row.get("signal_id") or "")
+    }
+    selection_keys = {
+        (
+            str(row.get("market_date") or "")[:10],
+            str(row.get("selection_id") or ""),
+            str(row.get("strategy_id") or ""),
+        )
+        for row in trades
+        if str(row.get("selection_id") or "")
+    }
+    output: list[dict[str, Any]] = []
+    for row in positions:
+        payload = _payload(row)
+        market_date = str(row.get("market_date") or "")[:10]
+        signal_id = str(row.get("signal_id") or payload.get("signal_id") or "")
+        selection_id = str(payload.get("selection_id") or "")
+        strategy_id = str(
+            payload.get("strategy_id")
+            or row.get("strategy_id")
+            or CanonicalPerformanceService.DEFAULT_STRATEGY_ID
+        )
+        if (
+            signal_id
+            and (market_date, signal_id, strategy_id) in signal_keys
+        ) or (
+            selection_id
+            and (market_date, selection_id, strategy_id) in selection_keys
+        ):
+            continue
+        output.append(row)
+    return output
+
+
+def _account_observation_rows(
+    ledger: list[dict[str, Any]],
+    calculated_at: str,
+) -> list[PerformanceRow]:
+    """Represent non-trade account days so missing and no-trade remain visible."""
+
+    output: list[PerformanceRow] = []
+    for raw in ledger:
+        if int(raw.get("trade_count") or 0) > 0:
+            continue
+        ledger_status = str(raw.get("status") or "MISSING").upper()
+        if ledger_status == "NO_TRADE":
+            record_status = RecordStatus.NO_TRADE
+        elif ledger_status == "DEGRADED":
+            record_status = RecordStatus.QUARANTINED
+        elif int(raw.get("open_position_count") or 0) > 0:
+            record_status = RecordStatus.UNREALIZED
+        else:
+            record_status = RecordStatus.MISSING_OUTCOME
+        net_return = safe_float(raw.get("net_return_pct"))
+        benchmark = safe_float(raw.get("market_benchmark_return_pct"))
+        output.append(
+            PerformanceRow(
+                record_id=f"paper_account:{raw['account_id']}:{raw['market_date']}",
+                market_date=str(raw["market_date"]),
+                ticker="ACCOUNT",
+                cohort=Cohort.OFFICIAL_FORWARD_PAPER,
+                strategy_id=str(raw["strategy_id"]),
+                strategy_version=str(raw["strategy_version"]),
+                signal_id=None,
+                rank=None,
+                record_status=record_status,
+                entry_price=None,
+                exit_price=None,
+                quantity=None,
+                notional_cents=None,
+                gross_pnl_cents=_int_or_none(raw.get("realized_gross_pnl_cents")),
+                gross_return_pct=safe_float(raw.get("gross_return_pct")),
+                fees_cents=_int_or_none(raw.get("fees_cents")),
+                slippage_cents=_int_or_none(raw.get("slippage_cents")),
+                net_pnl_cents=_int_or_none(raw.get("realized_net_pnl_cents")),
+                return_pct=net_return,
+                benchmark_return_pct=benchmark,
+                excess_return_pct=_excess(net_return, benchmark),
+                source_refs=tuple(str(value) for value in raw.get("source_refs") or ()),
+                source_hash_sha256=str(raw.get("source_hash_sha256") or stable_hash(raw)),
+                input_hash_sha256=str(raw.get("input_hash_sha256") or ""),
+                observed_at=calculated_at,
+                reconciled_at=calculated_at,
+                quarantine_reason=(
+                    "paper_account_accounting_identity_failed"
+                    if ledger_status == "DEGRADED"
+                    else None
+                ),
+                execution_policy_version=str(raw["execution_policy_version"]),
+                trade_count=0,
+                open_position_count=int(raw.get("open_position_count") or 0),
+                unrealized_pnl_cents=_int_or_none(
+                    raw.get("unrealized_pnl_change_cents")
+                ),
+                record_type="account_observation",
+            )
+        )
+    return output
 
 
 def _select_rows(
@@ -921,13 +1127,39 @@ def _aggregate_daily(
         equity_observation = equity.get(key, {})
         opening_equity = _int_or_none(equity_observation.get("opening_equity_cents"))
         ending_equity = _int_or_none(equity_observation.get("ending_equity_cents"))
-        net_return = _portfolio_return(net, opening_equity)
-        gross_return = _portfolio_return(gross, opening_equity)
+        account_id = str(equity_observation.get("account_id") or "") or None
+        ledger_status = str(equity_observation.get("ledger_status") or "") or None
+        external_flow = _int_or_none(equity_observation.get("external_flow_cents"))
+        cash = _int_or_none(equity_observation.get("cash_cents"))
+        position_market_value = _int_or_none(
+            equity_observation.get("position_market_value_cents")
+        )
+        accounting_delta = _int_or_none(
+            equity_observation.get("accounting_delta_cents")
+        )
+        if account_id:
+            net_return = safe_float(equity_observation.get("net_return_pct"))
+            gross_return = safe_float(equity_observation.get("gross_return_pct"))
+        else:
+            net_return = _portfolio_return(net, opening_equity)
+            gross_return = _portfolio_return(gross, opening_equity)
         benchmark_values = [
             row.benchmark_return_pct for row in realized if row.benchmark_return_pct is not None
         ]
+        ledger_benchmark = safe_float(
+            equity_observation.get("market_benchmark_return_pct")
+        )
         benchmark = (
-            round(sum(benchmark_values) / len(benchmark_values), 4) if benchmark_values else None
+            ledger_benchmark
+            if ledger_benchmark is not None
+            else (
+                round(sum(benchmark_values) / len(benchmark_values), 4)
+                if benchmark_values
+                else None
+            )
+        )
+        cash_benchmark = safe_float(
+            equity_observation.get("cash_benchmark_return_pct")
         )
         status = "NO_TRADE" if explicit_no_trade and not quarantined else "COMPLETE"
         if (
@@ -939,6 +1171,10 @@ def _aggregate_daily(
         if realized and benchmark is None:
             status = "PARTIAL"
         if quarantined:
+            status = "DEGRADED"
+        if ledger_status in {"MISSING", "PENDING"}:
+            status = "PARTIAL"
+        elif ledger_status == "DEGRADED":
             status = "DEGRADED"
         evidence_state = {
             "COMPLETE": "complete",
@@ -963,12 +1199,16 @@ def _aggregate_daily(
             and row.record_status != RecordStatus.QUARANTINED
         )
         unrealized_pnl = _sum_if_complete(unrealized_values)
-        source_refs = _source_refs(*(ref for row in group for ref in row.source_refs))
+        source_refs = _source_refs(
+            *(ref for row in group for ref in row.source_refs),
+            *_json_list(equity_observation.get("source_refs_json", "[]")),
+        )
         source_hash = stable_hash(sorted(row.source_hash_sha256 for row in group))
         policies = sorted({row.execution_policy_version for row in group})
         execution_policy_version = policies[0] if len(policies) == 1 else "mixed"
         has_portfolio_observation = any(
-            row.record_type == "portfolio_observation" for row in group
+            row.record_type in {"portfolio_observation", "account_observation"}
+            for row in group
         )
         realized_trade_count = sum(
             row.trade_count if row.record_type == "portfolio_observation" else 1
@@ -999,6 +1239,13 @@ def _aggregate_daily(
                 "excess_return_pct": _excess(net_return, benchmark),
                 "opening_equity_cents": opening_equity,
                 "ending_equity_cents": ending_equity,
+                "account_id": account_id,
+                "external_flow_cents": external_flow,
+                "cash_cents": cash,
+                "position_market_value_cents": position_market_value,
+                "accounting_delta_cents": accounting_delta,
+                "cash_benchmark_return_pct": cash_benchmark,
+                "ledger_status": ledger_status,
                 "unrealized_pnl_cents": unrealized_pnl,
                 "cumulative_return_pct": None,
                 "drawdown_pct": None,
@@ -1033,7 +1280,9 @@ def _aggregate_daily(
                     )
                 ),
                 "return_basis": (
-                    "observed_equity_change"
+                    "account_equity_identity_after_external_flows"
+                    if account_id and net_return is not None
+                    else "observed_equity_change"
                     if has_portfolio_observation and net_return is not None
                     else (
                         "net_after_costs"
@@ -1186,6 +1435,13 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
         "gross_return_pct",
         "opening_equity_cents",
         "ending_equity_cents",
+        "account_id",
+        "external_flow_cents",
+        "cash_cents",
+        "position_market_value_cents",
+        "accounting_delta_cents",
+        "cash_benchmark_return_pct",
+        "ledger_status",
         "unrealized_pnl_cents",
         "cumulative_return_pct",
         "benchmark_return_pct",
@@ -1215,6 +1471,15 @@ def _public_daily(row: dict[str, Any]) -> dict[str, Any]:
 def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     row["source_refs"] = _json_list(row.pop("source_refs_json", "[]"))
     return row
+
+
+def _public_ledger(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_object(row.pop("payload_json", "{}"))
+    payload.update(row)
+    if not isinstance(payload.get("source_refs"), list):
+        payload["source_refs"] = _json_list(payload.get("source_refs_json", "[]"))
+    payload.pop("source_refs_json", None)
+    return payload
 
 
 def _json_list(value: Any) -> list[str]:
@@ -1280,3 +1545,107 @@ def _unknown_safety_evidence() -> dict[str, dict[str, Any]]:
             "liquidity_evidence",
         )
     }
+
+
+def _public_safety_evidence(
+    connection: sqlite3.Connection,
+    *,
+    as_of: str | None,
+    daily_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Expose only exact v5 account safety traces; absence stays unknown."""
+
+    if not as_of:
+        return _unknown_safety_evidence()
+    account_day = next(
+        (
+            row
+            for row in daily_rows
+            if str(row.get("market_date") or "") == as_of
+            and str(row.get("account_id") or "") == ALPHAOPS_V5_ACCOUNT_ID
+            and str(row.get("cohort") or "") == Cohort.OFFICIAL_FORWARD_PAPER.value
+        ),
+        None,
+    )
+    if account_day is None:
+        return _unknown_safety_evidence()
+    account_payload = _json_object(account_day.get("payload_json", "{}"))
+    source_refs = (
+        _json_list(account_day.get("source_refs_json", "[]"))
+        or list(account_payload.get("source_refs") or [])
+    )
+    if str(account_day.get("status") or "").upper() == "NO_TRADE":
+        return {
+            key: {
+                "state": "verified",
+                "value": "not_applicable_explicit_no_position",
+                "source_refs": source_refs,
+            }
+            for key in (
+                "source_quality",
+                "halt_status",
+                "corporate_action_status",
+                "liquidity_evidence",
+            )
+        }
+    try:
+        rows = connection.execute(
+            """
+            SELECT intent_id, payload_json
+            FROM trade_intents
+            WHERE market_date = ? AND action = 'ENTER_LONG'
+            ORDER BY decision_time ASC, intent_id ASC
+            """,
+            (as_of,),
+        ).fetchall()
+    except sqlite3.Error:
+        return _unknown_safety_evidence()
+    traces: list[tuple[str, dict[str, Any]]] = []
+    for row in rows:
+        payload = _json_object(row["payload_json"])
+        if (
+            str(payload.get("account_id") or "") == ALPHAOPS_V5_ACCOUNT_ID
+            and payload.get("official_paper_eligible") is True
+        ):
+            trace = payload.get("decision_trace")
+            if isinstance(trace, dict):
+                traces.append((str(row["intent_id"]), trace))
+    if not traces:
+        return _unknown_safety_evidence()
+    mapping = {
+        "source_quality": "source_quality",
+        "halt_status": "halt_status",
+        "corporate_action_status": "corporate_action_status",
+        "liquidity_evidence": "liquidity_and_spread",
+    }
+    output: dict[str, dict[str, Any]] = {}
+    for public_key, check_id in mapping.items():
+        checks: list[dict[str, Any]] = []
+        refs: list[str] = []
+        for intent_id, trace in traces:
+            matching = next(
+                (
+                    item
+                    for item in trace.get("checks") or []
+                    if isinstance(item, dict) and item.get("check_id") == check_id
+                ),
+                None,
+            )
+            if matching is not None:
+                checks.append(matching)
+            refs.extend(
+                [
+                    intent_id,
+                    str(trace.get("decision_fingerprint") or ""),
+                    str(trace.get("policy_version") or ""),
+                ]
+            )
+        passed = len(checks) == len(traces) and all(
+            item.get("passed") is True for item in checks
+        )
+        output[public_key] = {
+            "state": "verified" if passed else "blocked",
+            "value": [item.get("observed") for item in checks] if checks else None,
+            "source_refs": list(_source_refs(*refs)),
+        }
+    return output

@@ -11,6 +11,7 @@ outputs/
 logs/
 build/
 .vercel-output/
+.evidence/
 .evidence-*/
 .evidence-*.sqlite
 .schema-check.sqlite

@@ -16,6 +16,10 @@ from intraday_scanner.services.premarket_intelligence import (
     build_premarket_intelligence,
 )
 
+TARGET_POLICY_VERSION = "alphaops-v5-premarket-range-extension-v1"
+FIRST_TARGET_RANGE_EXTENSION = 1.618
+STRETCH_TARGET_RANGE_EXTENSION = 2.618
+
 
 def score_universe(
     rows: list[SnapshotRow],
@@ -65,11 +69,21 @@ def score_snapshot(
     pullback_low = row.premarket_price * 0.94
     pullback_high = row.premarket_price * 0.98
     invalidation = row.premarket_low * 0.985
-    first_target = row.premarket_price + max(row.premarket_price - invalidation, 0) * 1.5
-    range_stretch_target = (
-        row.premarket_price + max(row.premarket_high - row.premarket_low, 0) * 1.25
+    observed_premarket_range = max(
+        row.premarket_high - row.premarket_low,
+        0,
     )
-    stretch_target = max(range_stretch_target, first_target * 1.08)
+    # Targets are anchored to observed market structure, not manufactured from
+    # entry-to-stop risk.  V5 calculates after-cost R only after these levels
+    # are frozen and blocks plans whose independently derived target is weak.
+    first_target = (
+        row.premarket_high
+        + observed_premarket_range * FIRST_TARGET_RANGE_EXTENSION
+    )
+    stretch_target = (
+        row.premarket_high
+        + observed_premarket_range * STRETCH_TARGET_RANGE_EXTENSION
+    )
     intelligence = build_premarket_intelligence(
         row,
         formula,
@@ -81,6 +95,24 @@ def score_snapshot(
         historical_outcomes=historical_outcomes,
     )
     intelligence_payload = intelligence.to_dict()
+    intelligence_payload.update(
+        {
+            "target_basis_kind": "premarket_range_extension",
+            "target_basis_value": round(first_target, 4),
+            "target_basis_source": str(
+                row.source_url
+                or row.preferred_source
+                or row.source
+                or "unknown"
+            ),
+            "target_basis_observed_high": round(row.premarket_high, 4),
+            "target_basis_observed_low": round(row.premarket_low, 4),
+            "target_basis_range": round(observed_premarket_range, 4),
+            "target_basis_extension": FIRST_TARGET_RANGE_EXTENSION,
+            "target_policy_version": TARGET_POLICY_VERSION,
+            "target_derived_from_risk": False,
+        }
+    )
     intelligence_payload.update(
         _v3_payload(
             row=row,

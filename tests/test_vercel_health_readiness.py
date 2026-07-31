@@ -38,9 +38,43 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     snapshot = data_root / "performance.json"
     snapshot.write_bytes(payload)
     snapshot_hash = hashlib.sha256(payload).hexdigest()
+    canonical_hash = hashlib.sha256(b"canonical-fixture").hexdigest()
     (data_root / "performance.json.manifest.json").write_text(
         json.dumps(
-            {"payload_sha256": snapshot_hash, "byte_count": len(payload), "status": "no_trade"}
+            {
+                "payload_sha256": snapshot_hash,
+                "byte_count": len(payload),
+                "status": "no_trade",
+                "input_hash_sha256": canonical_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calendar = data_root / "calendar.json"
+    calendar.write_bytes(b'{"days":[]}')
+    calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
+    calendar_manifest = data_root / "calendar.json.manifest.json"
+    calendar_manifest.write_text(
+        json.dumps(
+            {
+                "payload_sha256": calendar_hash,
+                "canonical_input_hash_sha256": canonical_hash,
+                "performance_payload_sha256": snapshot_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    publication_set_hash = hashlib.sha256(
+        f"{snapshot_hash}:{calendar_hash}".encode()
+    ).hexdigest()
+    publication_set = data_root / "publication-set.json"
+    publication_set.write_text(
+        json.dumps(
+            {
+                "performance_payload_sha256": snapshot_hash,
+                "calendar_payload_sha256": calendar_hash,
+                "publication_set_sha256": publication_set_hash,
+            }
         ),
         encoding="utf-8",
     )
@@ -57,9 +91,10 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
             {
                 "source_sha": "abc123",
                 "build_id": "build123",
-                "source_clean": True,
-                "data_hash_sha256": snapshot_hash,
-                "file_hashes": required_hashes,
+                    "source_clean": True,
+                    "data_hash_sha256": snapshot_hash,
+                    "publication_set_sha256": publication_set_hash,
+                    "file_hashes": required_hashes,
             }
         ),
         encoding="utf-8",
@@ -78,6 +113,9 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     monkeypatch.setattr(
         readiness, "SNAPSHOT_MANIFEST_PATH", data_root / "performance.json.manifest.json"
     )
+    monkeypatch.setattr(readiness, "CALENDAR_PATH", calendar)
+    monkeypatch.setattr(readiness, "CALENDAR_MANIFEST_PATH", calendar_manifest)
+    monkeypatch.setattr(readiness, "PUBLICATION_SET_PATH", publication_set)
     monkeypatch.setattr(readiness, "BUILD_MANIFEST_PATH", build_manifest)
     assert readiness._validate_public_state(readiness_payload) == []
 

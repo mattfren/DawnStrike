@@ -197,6 +197,7 @@ def normalize_cohort(value: Any, *, default: Cohort) -> Cohort:
         "alphaops": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
         "alphaops_research": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
         "alphaops_signal_research": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
+        "algorithm_selected": Cohort.ALPHAOPS_SIGNAL_RESEARCH,
         "backtest": Cohort.HISTORICAL_BACKTEST,
         "historical_backtest": Cohort.HISTORICAL_BACKTEST,
         "shadow": Cohort.SHADOW_CHALLENGER,

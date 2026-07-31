@@ -17,6 +17,19 @@ from intraday_scanner.dashboard.display_text import (
     source_label,
     translate_list,
 )
+from intraday_scanner.dashboard.real_data_guard import (
+    NA,
+    NO_CURRENT_PRICE_SOURCE,
+    display_price,
+    display_return,
+    latest_outcome_price,
+    real_return_pct,
+)
+from intraday_scanner.dashboard.ticker_guard import (
+    dedupe_rows_by_ticker,
+    is_valid_ticker,
+    normalize_ticker,
+)
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.reporting import read_csv_dicts, read_scan_summary
 from intraday_scanner.scoring import score_universe
@@ -113,6 +126,7 @@ def load_sqlite(db_path: str | Path) -> dict[str, Any]:
     latest["historical_signals"] = store.load_historical_signals(limit=500)
     latest["signal_events"] = store.load_signal_events(limit=500)
     latest["signal_outcomes"] = store.load_signal_outcomes(limit=500)
+    latest["price_observations"] = store.load_price_observations()
     latest["signal_return_attribution"] = store.load_signal_return_attribution(limit=500)
     latest["daily_signal_performance"] = store.load_daily_signal_performance(limit=500)
     latest["recent_alerts"] = store.load_recent_alerts()
@@ -143,8 +157,315 @@ def load_sqlite(db_path: str | Path) -> dict[str, Any]:
     )
     latest["shadow_mode"] = bool(config.get("shadow_mode") or summary.get("shadow_mode"))
     latest["live_readiness"] = _live_readiness(latest)
+    operator_today = build_operator_today_model(latest)
+    latest["operator_today"] = operator_today
+    latest["today_watchlist"] = list(operator_today.get("watchlist") or [])
+    latest["top_focus"] = list(operator_today.get("top_focus") or [])
     _attach_display_ready(latest, db_path=db_path)
     return latest
+
+
+def build_operator_today_model(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a display-only watchlist from persisted, sourced observations."""
+
+    signals = _operator_today_signals(payload)
+    market_date = _operator_today_market_date(signals, payload)
+    rows = [
+        _operator_today_row(
+            signal,
+            market_date=market_date,
+            outcomes=list(payload.get("signal_outcomes") or [])
+            + list(payload.get("manual_outcomes") or []),
+            observations=list(payload.get("price_observations") or []),
+        )
+        for signal in signals[:10]
+    ]
+    return {
+        "status": _operator_today_status(rows, payload),
+        "watchlist": rows,
+        "top_focus": rows[:5],
+        "market_date": market_date,
+    }
+
+
+def _operator_today_signals(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    source = list(payload.get("ranked_candidates") or payload.get("top_explosive") or [])
+    if not source:
+        source = list(payload.get("alpha_signals") or [])
+    if not source:
+        historical = [
+            dict(row)
+            for row in list(payload.get("historical_signals") or [])
+            if is_valid_ticker(row.get("ticker"))
+        ]
+        latest_day = _operator_today_market_date(historical, payload)
+        source = [
+            row
+            for row in historical
+            if str(row.get("market_date") or "")[:10] == latest_day
+        ]
+    clean = [
+        {**dict(row), "ticker": normalize_ticker(row.get("ticker") or row.get("Ticker"))}
+        for row in source
+        if is_valid_ticker(row.get("ticker") or row.get("Ticker"))
+    ]
+    return sorted(
+        dedupe_rows_by_ticker(clean),
+        key=lambda row: (_int(row.get("rank"), 999), str(row.get("ticker") or "")),
+    )
+
+
+def _operator_today_market_date(
+    rows: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> str:
+    days = sorted(
+        {
+            str(row.get("market_date") or row.get("date") or "")[:10]
+            for row in rows
+            if str(row.get("market_date") or row.get("date") or "")[:10]
+        }
+    )
+    if days:
+        return days[-1]
+    summary = payload.get("summary")
+    created_at = (
+        str(summary.get("created_at") or "")
+        if isinstance(summary, dict)
+        else ""
+    )
+    return created_at[:10] if len(created_at) >= 10 else date.today().isoformat()
+
+
+def _operator_today_row(
+    signal: dict[str, Any],
+    *,
+    market_date: str,
+    outcomes: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ticker = normalize_ticker(signal.get("ticker"))
+    signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
+    day = str(signal.get("market_date") or market_date)[:10]
+    outcome = next(
+        (
+            dict(row)
+            for row in outcomes
+            if (
+                signal_id
+                and str(row.get("signal_id") or "") == signal_id
+            )
+            or (
+                normalize_ticker(row.get("ticker")) == ticker
+                and str(
+                    row.get("market_date")
+                    or row.get("date")
+                    or row.get("entry_time")
+                    or ""
+                )[:10]
+                == day
+            )
+        ),
+        {},
+    )
+    ticker_observations = [
+        dict(row)
+        for row in observations
+        if normalize_ticker(row.get("ticker")) == ticker
+        and (
+            not str(row.get("market_date") or "")[:10]
+            or str(row.get("market_date") or "")[:10] == day
+        )
+        and (
+            not str(row.get("signal_id") or "")
+            or not signal_id
+            or str(row.get("signal_id") or "") == signal_id
+        )
+    ]
+    current_price, current_source = _operator_latest_price(
+        ticker_observations,
+        outcome,
+    )
+    open_price = _number_or_none(outcome.get("entry_price"))
+    entry_watch = _operator_first_price(
+        signal,
+        "entry_watch_level",
+        "entry_trigger",
+        "breakout_trigger",
+    )
+    target = _operator_first_price(signal, "target_1", "first_target", "target")
+    failure = _operator_first_price(
+        signal,
+        "invalidation_level",
+        "exit_line",
+        "invalidation",
+    )
+    score = _number_or_none(
+        _first_non_empty(
+            signal.get("alpha_score"),
+            signal.get("score"),
+            signal.get("total_score"),
+        )
+    )
+    return {
+        "Rank": _int(signal.get("rank"), 0) or "",
+        "Ticker": ticker,
+        "Status": _operator_today_row_status(
+            signal,
+            outcome,
+            current_price,
+            entry_watch,
+            target,
+        ),
+        "Setup": str(
+            signal.get("primary_setup")
+            or signal.get("setup_key")
+            or signal.get("setup")
+            or "Momentum"
+        ),
+        "Score": NA if score is None else f"{score:.1f}",
+        "Open": display_price(open_price),
+        "Current": display_price(current_price),
+        "Entry Watch": display_price(entry_watch),
+        "Target Exit": display_price(target),
+        "Exit By": str(
+            signal.get("selected_alert_horizon")
+            or signal.get("recommended_exit_policy")
+            or "No exit time set."
+        ),
+        "Failure Line": display_price(failure),
+        "Now Return": display_return(real_return_pct(open_price, current_price)),
+        "Data Quality": (
+            "Limited"
+            if current_source == NO_CURRENT_PRICE_SOURCE
+            else "Sourced observation"
+        ),
+        "Why": str(
+            signal.get("catalyst_summary")
+            or signal.get("catalyst_headline")
+            or "no clear catalyst"
+        ),
+        "_signal_id": signal_id,
+        "_market_date": day,
+        "_current_source": current_source,
+        "_outcome_status": str(outcome.get("outcome_status") or ""),
+    }
+
+
+def _operator_latest_price(
+    observations: list[dict[str, Any]],
+    outcome: dict[str, Any],
+) -> tuple[float | None, str]:
+    ordered = sorted(
+        observations,
+        key=lambda row: str(
+            row.get("observed_at")
+            or row.get("requested_at")
+            or row.get("created_at")
+            or ""
+        ),
+        reverse=True,
+    )
+    if ordered and "is_usable" in ordered[0] and not _operator_truthy(
+        ordered[0].get("is_usable")
+    ):
+        return None, NO_CURRENT_PRICE_SOURCE
+    for row in ordered:
+        if "is_usable" in row and not _operator_truthy(row.get("is_usable")):
+            continue
+        price = _operator_first_price(
+            row,
+            "current_price",
+            "observed_price",
+            "latest_price",
+            "last_price",
+            "price",
+            "close_price",
+        )
+        if price is not None:
+            return price, "price_observations"
+    return latest_outcome_price(outcome)
+
+
+def _operator_today_row_status(
+    signal: dict[str, Any],
+    outcome: dict[str, Any],
+    current_price: float | None,
+    entry_watch: float | None,
+    target: float | None,
+) -> str:
+    if target is not None and current_price is not None and current_price >= target:
+        return "TARGET HIT"
+    if (
+        current_price is not None
+        and entry_watch is not None
+        and current_price >= entry_watch
+    ):
+        return "ENTRY TRIGGERED"
+    if outcome and current_price is None:
+        return "OUTCOME NEEDED"
+    label = str(
+        signal.get("signal_label")
+        or signal.get("label")
+        or signal.get("action")
+        or ""
+    ).upper()
+    if "NO CLEAN EDGE" in label:
+        return "NO CLEAN EDGE"
+    if "WATCH ONLY" in label:
+        return "WATCH ONLY"
+    if entry_watch is not None:
+        return "ENTRY WATCH"
+    return "DATA MISSING"
+
+
+def _operator_today_status(
+    rows: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    if _has_source_problem(payload):
+        return {
+            "kind": "data_problem",
+            "variant": "red",
+            "title": "Data Problem",
+            "explanation": "A source check failed.",
+        }
+    if not rows:
+        return {
+            "kind": "no_clean_edge",
+            "variant": "gray",
+            "title": "No Clean Edge",
+            "explanation": "No persisted watchlist rows are available.",
+        }
+    if any(row["Status"] == "OUTCOME NEEDED" for row in rows):
+        return {
+            "kind": "outcome_needed",
+            "variant": "amber",
+            "title": "Outcome Needed",
+            "explanation": "A sourced outcome or current price is missing.",
+        }
+    return {
+        "kind": "watch_only",
+        "variant": "yellow",
+        "title": "Watchlist",
+        "explanation": "Research-only persisted watchlist.",
+    }
+
+
+def _operator_first_price(row: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _number_or_none(row.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _operator_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _attach_display_ready(payload: dict[str, Any], db_path: str | Path | None = None) -> None:

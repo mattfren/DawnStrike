@@ -205,7 +205,8 @@ def test_historical_outcome_evaluator_persists_classification_results(tmp_path):
     assert evaluation["rows"][0]["ticker"] == "NOVA"
     assert evaluation["rows"][0]["classification"] == ACTION_OPENING_BREAKOUT
     assert evaluation["rows"][0]["breakout_triggered"] is True
-    assert stored_rows[0]["actual_outcome"] in {"target_1_hit", "target_2_hit"}
+    assert result.ranked_candidates[0].first_target > 8.10
+    assert stored_rows[0]["actual_outcome"] == "closed_above_trigger"
     assert stored_summary is not None
     assert paths["rows"].exists()
     assert paths["summary"].exists()

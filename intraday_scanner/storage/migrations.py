@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 13
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -495,6 +495,198 @@ def _migration_010_performance_row_metadata(connection: sqlite3.Connection) -> N
         _add_column_if_missing(connection, "portfolio_performance_rows", column)
 
 
+def _migration_011_v5_paper_account_ledger(connection: sqlite3.Connection) -> None:
+    """Add the prospective AlphaOps v5 simulated-account truth ledger."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS paper_accounts (
+            account_id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            activation_timestamp TEXT NOT NULL,
+            opening_equity_cents INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            account_type TEXT NOT NULL,
+            execution_policy_version TEXT NOT NULL,
+            cost_model_version TEXT NOT NULL,
+            research_only INTEGER NOT NULL,
+            broker_execution_enabled INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS paper_account_daily_ledger (
+            ledger_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            cohort TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            execution_policy_version TEXT NOT NULL,
+            cost_model_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            evidence_state TEXT NOT NULL,
+            beginning_equity_cents INTEGER,
+            external_flow_cents INTEGER,
+            realized_gross_pnl_cents INTEGER,
+            fees_cents INTEGER,
+            slippage_cents INTEGER,
+            realized_net_pnl_cents INTEGER,
+            unrealized_pnl_change_cents INTEGER,
+            cash_cents INTEGER,
+            position_market_value_cents INTEGER,
+            ending_equity_cents INTEGER,
+            market_benchmark_return_pct REAL,
+            cash_benchmark_return_pct REAL,
+            gross_return_pct REAL,
+            net_return_pct REAL,
+            excess_return_pct REAL,
+            accounting_delta_cents INTEGER,
+            trade_count INTEGER NOT NULL,
+            open_position_count INTEGER NOT NULL,
+            source_refs_json TEXT NOT NULL,
+            source_hash_sha256 TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL,
+            calculated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (account_id, market_date),
+            FOREIGN KEY(account_id) REFERENCES paper_accounts(account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_account_daily_ledger_day
+        ON paper_account_daily_ledger(market_date, account_id);
+
+        CREATE TABLE IF NOT EXISTS public_calendar_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            canonical_input_hash_sha256 TEXT NOT NULL,
+            payload_sha256 TEXT,
+            artifact_path TEXT,
+            day_count INTEGER NOT NULL,
+            byte_count INTEGER,
+            failure_reason TEXT,
+            payload_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS public_calendar_versions (
+            manifest_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            canonical_input_hash_sha256 TEXT NOT NULL,
+            payload_sha256 TEXT,
+            artifact_path TEXT,
+            day_count INTEGER NOT NULL,
+            byte_count INTEGER,
+            failure_reason TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_public_calendar_versions_day
+        ON public_calendar_versions(market_date, generated_at);
+        """
+    )
+    for column in (
+        "account_id TEXT",
+        "external_flow_cents INTEGER",
+        "cash_cents INTEGER",
+        "position_market_value_cents INTEGER",
+        "accounting_delta_cents INTEGER",
+        "cash_benchmark_return_pct REAL",
+        "ledger_status TEXT",
+    ):
+        _add_column_if_missing(connection, "portfolio_daily_performance", column)
+
+
+def _migration_012_outcome_capture_truth(connection: sqlite3.Connection) -> None:
+    """Persist every required outcome-capture attempt, including terminal misses."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS outcome_capture_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            status TEXT NOT NULL,
+            terminal INTEGER NOT NULL,
+            learning_eligible INTEGER NOT NULL,
+            provider_chain_json TEXT NOT NULL,
+            source_refs_json TEXT NOT NULL,
+            source_bar_hash_sha256 TEXT,
+            attempted_at TEXT NOT NULL,
+            resolved_at TEXT,
+            error_code TEXT,
+            error_detail TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outcome_capture_attempts_day
+        ON outcome_capture_attempts(market_date, status, ticker);
+        CREATE INDEX IF NOT EXISTS idx_outcome_capture_attempts_signal
+        ON outcome_capture_attempts(signal_id, attempted_at);
+        """
+    )
+
+
+def _migration_013_shared_daily_run_ledger(connection: sqlite3.Connection) -> None:
+    """Add one release-bound DAG ledger shared by every scheduled daily stage."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS daily_runs (
+            run_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            release_sha TEXT NOT NULL,
+            runtime_root TEXT NOT NULL,
+            state_root TEXT NOT NULL,
+            scheduler_version TEXT NOT NULL,
+            strategy_versions_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            current_stage TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            last_attempted_at TEXT NOT NULL,
+            failed_stage TEXT,
+            failure_reason TEXT,
+            source_data_watermark TEXT,
+            publication_timestamp TEXT,
+            deployed_source_sha TEXT,
+            deployed_build_sha TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (market_date, release_sha)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_runs_day_status
+        ON daily_runs(market_date, status, last_attempted_at);
+
+        CREATE TABLE IF NOT EXISTS daily_run_stages (
+            stage_event_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            stage_name TEXT NOT NULL,
+            attempt_no INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            exit_code INTEGER,
+            input_hash_sha256 TEXT,
+            output_hash_sha256 TEXT,
+            source_data_watermark TEXT,
+            error_code TEXT,
+            error_detail TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (run_id, stage_name, attempt_no),
+            FOREIGN KEY(run_id) REFERENCES daily_runs(run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_run_stages_run
+        ON daily_run_stages(run_id, stage_name, attempt_no);
+        CREATE INDEX IF NOT EXISTS idx_daily_run_stages_status
+        ON daily_run_stages(status, completed_at);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -515,4 +707,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (8, _migration_008_equity_and_contract_metadata),
     (9, _migration_009_snapshot_versions),
     (10, _migration_010_performance_row_metadata),
+    (11, _migration_011_v5_paper_account_ledger),
+    (12, _migration_012_outcome_capture_truth),
+    (13, _migration_013_shared_daily_run_ledger),
 )

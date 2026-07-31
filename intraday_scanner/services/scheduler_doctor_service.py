@@ -1,4 +1,4 @@
-"""Read-only proof of the canonical Windows daily-finalize scheduler."""
+"""Read-only proof of Dawnstrike's release-bound Windows task DAG."""
 
 from __future__ import annotations
 
@@ -9,93 +9,193 @@ from pathlib import Path
 from typing import Any
 
 CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
+EXPECTED_TASKS = {
+    "Dawnstrike AlphaOps Morning": "run_alphaops_morning.ps1",
+    "Dawnstrike AlphaOps Monitor 5m": "run_alphaops_monitor.ps1",
+    "Dawnstrike AlphaOps EOD Full Report": "run_alphaops_eod.ps1",
+    CANONICAL_TASK_NAME: "run_daily_finalize.ps1",
+}
 SCHED_S_TASK_RUNNING = 0x00041301
 SCHED_S_TASK_HAS_NOT_RUN = 0x00041303
+ACCEPTABLE_LAST_RESULTS = {
+    None,
+    0,
+    SCHED_S_TASK_RUNNING,
+    SCHED_S_TASK_HAS_NOT_RUN,
+}
+FORBIDDEN_LEGACY_ROOT = r"C:\Users\MattFields\Dawnstrike"
 
 
-def scheduler_doctor(root: str | Path) -> dict[str, Any]:
-    """Check local scheduler artifacts and the real task registration state.
+def scheduler_doctor(
+    root: str | Path,
+    state_root: str | Path = r"C:\r\dawnstrike-state",
+) -> dict[str, Any]:
+    """Verify every enabled Dawnstrike v5 task uses one runtime and state root."""
 
-    Registration is intentionally not performed by this doctor.  A missing
-    task is an external gate, not a local success, so the result remains
-    fail-closed until the operator registers it on the approved checkout.
-    """
-
-    base = Path(root)
+    runtime = Path(root).resolve()
+    state = Path(state_root).resolve()
     required = {
-        "daily_runner": base / "scripts" / "run_daily_finalize.ps1",
-        "task_registration": base / "scripts" / "register_daily_finalize_task.ps1",
-        "restore_previous": base / "scripts" / "restore_previous_publish_task.ps1",
+        "morning_runner": runtime / "scripts" / "run_alphaops_morning.ps1",
+        "monitor_runner": runtime / "scripts" / "run_alphaops_monitor.ps1",
+        "eod_runner": runtime / "scripts" / "run_alphaops_eod.ps1",
+        "daily_runner": runtime / "scripts" / "run_daily_finalize.ps1",
+        "alpha_registration": runtime / "scripts" / "register_alphaops_tasks.ps1",
+        "finalize_registration": (
+            runtime / "scripts" / "register_daily_finalize_task.ps1"
+        ),
+        "rollback": runtime / "scripts" / "restore_dawnstrike_tasks.ps1",
     }
-    present: dict[str, bool] = {name: path.is_file() for name, path in required.items()}
-    task = _query_scheduled_task()
+    present = {name: path.is_file() for name, path in required.items()}
+    queried = _query_scheduled_tasks()
+    task_rows = _normalize_task_rows(queried)
+    by_name = {str(row.get("name") or ""): row for row in task_rows}
+    checks: list[dict[str, Any]] = []
+    for name, script_name in EXPECTED_TASKS.items():
+        task = by_name.get(name) or _missing_task(name)
+        checks.append(
+            _task_check(
+                task,
+                expected_runner=runtime / "scripts" / script_name,
+                runtime_root=runtime,
+                state_root=state,
+            )
+        )
+    failed_checks = [
+        check
+        for check in checks
+        if str(check.get("status") or "") not in {"LOCAL_VERIFIED"}
+    ]
     if not all(present.values()):
         status = "FAILED"
-        next_action = "Restore missing scheduler artifacts."
-    elif task["state"] == "missing":
+        next_action = "Restore the missing v5 scheduler artifacts."
+    elif any(check.get("state") in {"unavailable", "unknown"} for check in checks):
         status = "BLOCKED_EXTERNAL"
         next_action = (
-            "Register exactly one replacement task on the approved checkout, then rerun "
-            "scheduler-doctor."
+            "Run scheduler-doctor on the approved Windows runtime with "
+            "Task Scheduler query access."
         )
-    elif task["state"] in {"unavailable", "unknown"}:
+    elif failed_checks:
         status = "BLOCKED_EXTERNAL"
         next_action = (
-            "Run scheduler-doctor on the approved Windows checkout with task-query access."
+            "Register or repair every Dawnstrike v5 task against the exact runtime "
+            "and state roots, then rerun scheduler-doctor."
         )
-    elif not task.get("enabled", False):
-        status = "BLOCKED_EXTERNAL"
-        next_action = (
-            "Enable the canonical task on the approved checkout, then rerun scheduler-doctor."
-        )
-    elif task.get("state") not in {"Ready", "Running"}:
-        status = "FAILED"
-        next_action = "Repair the canonical task state before relying on daily publication."
-    elif task.get("last_task_result") not in {
-        None,
-        0,
-        SCHED_S_TASK_RUNNING,
-        SCHED_S_TASK_HAS_NOT_RUN,
-    }:
-        status = "FAILED"
-        next_action = "Inspect the last daily-finalize failure before relying on the next run."
     else:
         status = "LOCAL_VERIFIED"
         next_action = (
-            "Run one approved dated finalize rehearsal, then rerun this doctor."
-            if task.get("last_task_result") == SCHED_S_TASK_HAS_NOT_RUN
-            else "Keep the task registered exactly once and rerun this doctor after each release."
+            "Run one dated full-chain rehearsal and preserve its shared run ledger."
         )
+    next_runs = sorted(
+        str(check.get("next_run_time"))
+        for check in checks
+        if check.get("next_run_time")
+    )
+    finalize = next(
+        (check for check in checks if check.get("name") == CANONICAL_TASK_NAME),
+        _missing_task(CANONICAL_TASK_NAME),
+    )
     return {
+        "schema_version": "dawnstrike.scheduler_doctor.v2",
         "status": status,
+        "runtime_root": str(runtime),
+        "state_root": str(state),
         "required_files": present,
-        "scheduled_task": task,
+        "expected_task_names": list(EXPECTED_TASKS),
+        "scheduled_tasks": checks,
+        "scheduled_task": finalize,
         "expected_task_name": CANONICAL_TASK_NAME,
+        "failed_task_count": len(failed_checks),
+        "next_scheduled_run": next_runs[0] if next_runs else None,
+        "forbidden_legacy_root": FORBIDDEN_LEGACY_ROOT,
         "next_action": next_action,
     }
 
 
-def _query_scheduled_task() -> dict[str, Any]:
+def _task_check(
+    task: dict[str, Any],
+    *,
+    expected_runner: Path,
+    runtime_root: Path,
+    state_root: Path,
+) -> dict[str, Any]:
+    state = str(task.get("state") or "unknown")
+    arguments = str(task.get("arguments") or "")
+    working_directory = str(task.get("working_directory") or "")
+    action_text = " ".join(
+        (
+            str(task.get("execute") or ""),
+            arguments,
+            working_directory,
+        )
+    )
+    runner_ok = str(expected_runner).lower() in arguments.lower()
+    runtime_ok = (
+        str(runtime_root).lower() in arguments.lower()
+        and (
+            not working_directory
+            or str(runtime_root).lower() == working_directory.lower()
+        )
+    )
+    state_ok = str(state_root).lower() in arguments.lower()
+    legacy_free = FORBIDDEN_LEGACY_ROOT.lower() not in action_text.lower()
+    enabled = task.get("enabled") is True
+    last_result = task.get("last_task_result")
+    healthy_state = state in {"Ready", "Running"}
+    healthy_result = last_result in ACCEPTABLE_LAST_RESULTS
+    verified = all(
+        (
+            enabled,
+            healthy_state,
+            healthy_result,
+            runner_ok,
+            runtime_ok,
+            state_ok,
+            legacy_free,
+        )
+    )
+    return {
+        **task,
+        "expected_runner": str(expected_runner),
+        "runner_matches": runner_ok,
+        "runtime_root_matches": runtime_ok,
+        "state_root_matches": state_ok,
+        "legacy_root_absent": legacy_free,
+        "status": "LOCAL_VERIFIED" if verified else "FAILED",
+    }
+
+
+def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
     if os.name != "nt":
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "unavailable",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-            "detail": "Windows Task Scheduler is unavailable on this host.",
-        }
+        return [
+            {
+                **_missing_task(name),
+                "state": "unavailable",
+                "detail": "Windows Task Scheduler is unavailable on this host.",
+            }
+            for name in EXPECTED_TASKS
+        ]
+    names_json = json.dumps(list(EXPECTED_TASKS))
     script = (
-        "$task = Get-ScheduledTask -TaskName 'Dawnstrike 10of10 Daily Finalize' "
-        "-ErrorAction SilentlyContinue; "
-        "if ($null -eq $task) { exit 3 }; "
+        f"$names = ConvertFrom-Json '{names_json}'; "
+        "$rows = foreach ($name in $names) { "
+        "$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; "
+        "if ($null -eq $task) { "
+        "[pscustomobject]@{name=$name; state='missing'; enabled=$null; "
+        "last_task_result=$null; last_run_time=$null; next_run_time=$null; "
+        "execute=$null; arguments=$null; working_directory=$null} "
+        "} else { "
         "$info = Get-ScheduledTaskInfo -TaskName $task.TaskName; "
-        "[pscustomobject]@{ name=$task.TaskName; state=$task.State.ToString(); "
-        "enabled=[bool]$task.Settings.Enabled; last_task_result=$info.LastTaskResult; "
-        "last_run_time=if ($info.LastRunTime) {$info.LastRunTime.ToString('o')} else {$null}; "
-        "next_run_time=if ($info.NextRunTime) {$info.NextRunTime.ToString('o')} else {$null} } "
-        "| ConvertTo-Json -Compress"
+        "$action = @($task.Actions)[0]; "
+        "[pscustomobject]@{name=$task.TaskName; state=$task.State.ToString(); "
+        "enabled=[bool]$task.Settings.Enabled; "
+        "last_task_result=$info.LastTaskResult; "
+        "last_run_time=if ($info.LastRunTime) "
+        "{$info.LastRunTime.ToString('o')} else {$null}; "
+        "next_run_time=if ($info.NextRunTime) "
+        "{$info.NextRunTime.ToString('o')} else {$null}; "
+        "execute=$action.Execute; arguments=$action.Arguments; "
+        "working_directory=$action.WorkingDirectory} } }; "
+        "@($rows) | ConvertTo-Json -Compress"
     )
     try:
         completed = subprocess.run(
@@ -103,57 +203,71 @@ def _query_scheduled_task() -> dict[str, Any]:
             capture_output=True,
             check=False,
             text=True,
-            timeout=10,
+            timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "unavailable",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-            "detail": str(exc),
-        }
-    if completed.returncode == 3:
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "missing",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-        }
+        return [
+            {
+                **_missing_task(name),
+                "state": "unavailable",
+                "detail": str(exc),
+            }
+            for name in EXPECTED_TASKS
+        ]
     if completed.returncode != 0:
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "unknown",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-            "detail": completed.stderr.strip() or "Task Scheduler query failed.",
-        }
+        return [
+            {
+                **_missing_task(name),
+                "state": "unknown",
+                "detail": (
+                    completed.stderr.strip() or "Task Scheduler query failed."
+                ),
+            }
+            for name in EXPECTED_TASKS
+        ]
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError:
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "unknown",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-            "detail": "Task Scheduler returned non-JSON output.",
-        }
-    if not isinstance(result, dict):
-        return {
-            "name": CANONICAL_TASK_NAME,
-            "state": "unknown",
-            "enabled": None,
-            "last_task_result": None,
-            "last_run_time": None,
-            "next_run_time": None,
-            "detail": "Task Scheduler returned an invalid task object.",
-        }
+        return [
+            {
+                **_missing_task(name),
+                "state": "unknown",
+                "detail": "Task Scheduler returned non-JSON output.",
+            }
+            for name in EXPECTED_TASKS
+        ]
     return result
+
+
+def _normalize_task_rows(
+    value: list[dict[str, Any]] | dict[str, Any],
+) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _missing_task(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "state": "missing",
+        "enabled": None,
+        "last_task_result": None,
+        "last_run_time": None,
+        "next_run_time": None,
+        "execute": None,
+        "arguments": None,
+        "working_directory": None,
+    }
+
+
+__all__ = [
+    "CANONICAL_TASK_NAME",
+    "EXPECTED_TASKS",
+    "FORBIDDEN_LEGACY_ROOT",
+    "SCHED_S_TASK_HAS_NOT_RUN",
+    "SCHED_S_TASK_RUNNING",
+    "scheduler_doctor",
+]

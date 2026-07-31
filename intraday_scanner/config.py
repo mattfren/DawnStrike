@@ -102,6 +102,10 @@ class ScannerConfig:
     database_url: str = ""
     request_timeout_seconds: float = 15.0
     request_retries: int = 3
+    premarket_enrichment_enabled: bool = True
+    premarket_enrichment_max_candidates: int = 30
+    premarket_enrichment_workers: int = 4
+    premarket_enrichment_max_age_seconds: int = 1_200
     notifier_channels: str = "console"
     alert_score_threshold: float = 82.0
     email_smtp_host: str = ""
@@ -114,9 +118,9 @@ class ScannerConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_message_style: str = "compact"
-    telegram_max_morning_chars: int = 1200
-    telegram_max_alert_chars: int = 600
-    telegram_max_summary_chars: int = 900
+    telegram_max_morning_chars: int = 4096
+    telegram_max_alert_chars: int = 4096
+    telegram_max_summary_chars: int = 4096
     telegram_include_debug_fields: bool = False
     telegram_send_summary_on_no_data: bool = False
     telegram_send_outcome_reminder_on_no_picks: bool = False
@@ -146,6 +150,12 @@ class ScannerConfig:
             raise ConfigError("request_timeout_seconds must be positive")
         if self.request_retries < 1:
             raise ConfigError("request_retries must be at least 1")
+        if self.premarket_enrichment_max_candidates < 1:
+            raise ConfigError("premarket_enrichment_max_candidates must be positive")
+        if self.premarket_enrichment_workers < 1:
+            raise ConfigError("premarket_enrichment_workers must be positive")
+        if self.premarket_enrichment_max_age_seconds < 60:
+            raise ConfigError("premarket_enrichment_max_age_seconds must be at least 60")
         if self.alert_score_threshold < 0:
             raise ConfigError("alert_score_threshold must be non-negative")
         if self.monitor_drop_from_watch_pct < 0:
@@ -325,6 +335,21 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         request_retries=_to_int(
             "INTRADAY_REQUEST_RETRIES", _env("INTRADAY_REQUEST_RETRIES", "3", env_values)
         ),
+        premarket_enrichment_enabled=_to_bool(
+            _env("INTRADAY_PREMARKET_ENRICHMENT_ENABLED", "true", env_values)
+        ),
+        premarket_enrichment_max_candidates=_to_int(
+            "INTRADAY_PREMARKET_ENRICHMENT_MAX_CANDIDATES",
+            _env("INTRADAY_PREMARKET_ENRICHMENT_MAX_CANDIDATES", "30", env_values),
+        ),
+        premarket_enrichment_workers=_to_int(
+            "INTRADAY_PREMARKET_ENRICHMENT_WORKERS",
+            _env("INTRADAY_PREMARKET_ENRICHMENT_WORKERS", "4", env_values),
+        ),
+        premarket_enrichment_max_age_seconds=_to_int(
+            "INTRADAY_PREMARKET_ENRICHMENT_MAX_AGE_SECONDS",
+            _env("INTRADAY_PREMARKET_ENRICHMENT_MAX_AGE_SECONDS", "1200", env_values),
+        ),
         notifier_channels=_env("INTRADAY_NOTIFIER_CHANNELS", "console", env_values),
         alert_score_threshold=_to_float(
             "INTRADAY_ALERT_SCORE_THRESHOLD",
@@ -352,15 +377,15 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         ).lower(),
         telegram_max_morning_chars=_to_int(
             "INTRADAY_TELEGRAM_MAX_MORNING_CHARS",
-            _env("INTRADAY_TELEGRAM_MAX_MORNING_CHARS", "1200", env_values),
+            _env("INTRADAY_TELEGRAM_MAX_MORNING_CHARS", "4096", env_values),
         ),
         telegram_max_alert_chars=_to_int(
             "INTRADAY_TELEGRAM_MAX_ALERT_CHARS",
-            _env("INTRADAY_TELEGRAM_MAX_ALERT_CHARS", "600", env_values),
+            _env("INTRADAY_TELEGRAM_MAX_ALERT_CHARS", "4096", env_values),
         ),
         telegram_max_summary_chars=_to_int(
             "INTRADAY_TELEGRAM_MAX_SUMMARY_CHARS",
-            _env("INTRADAY_TELEGRAM_MAX_SUMMARY_CHARS", "900", env_values),
+            _env("INTRADAY_TELEGRAM_MAX_SUMMARY_CHARS", "4096", env_values),
         ),
         telegram_include_debug_fields=_to_bool(
             _env("INTRADAY_TELEGRAM_INCLUDE_DEBUG_FIELDS", "false", env_values)

@@ -44,6 +44,9 @@ from intraday_scanner.services.alert_service import (
     alerts_from_news_and_filings,
     persist_deduped_alerts,
 )
+from intraday_scanner.services.alpha_attribution_service import (
+    generate_alpha_attribution_report,
+)
 from intraday_scanner.services.alpha_cycle_service import (
     alpha_cycle,
     alpha_doctor,
@@ -53,6 +56,12 @@ from intraday_scanner.services.alpha_cycle_service import (
     alpha_outcomes,
     alpha_report,
     alpha_status,
+)
+from intraday_scanner.services.alpha_outcome_capture_service import (
+    capture_sourced_alpha_outcomes,
+)
+from intraday_scanner.services.alpha_paper_reconciliation_service import (
+    reconcile_alpha_paper_trades,
 )
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.calendar_report_service import calendar_report
@@ -83,6 +92,7 @@ from intraday_scanner.services.mover_discovery_service import (
     require_universe,
     resolve_universe,
 )
+from intraday_scanner.services.outcome_gap_service import outcome_gap_report
 from intraday_scanner.services.performance_service import (
     build_performance_report,
     format_performance_report,
@@ -90,6 +100,9 @@ from intraday_scanner.services.performance_service import (
 from intraday_scanner.services.premarket_intelligence import (
     evaluate_intelligence_outcomes,
     write_intelligence_outcome_outputs,
+)
+from intraday_scanner.services.price_observation_service import (
+    collect_price_observations,
 )
 from intraday_scanner.services.provider_health_service import (
     record_health_check,
@@ -112,6 +125,7 @@ from intraday_scanner.services.screener_automation import (
     watch_screener_inbox,
 )
 from intraday_scanner.services.setup_monitor import run_setup_monitor
+from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
 from intraday_scanner.services.web_collection_service import (
@@ -385,6 +399,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_outcomes_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
 
+    alpha_capture_parser = subparsers.add_parser(
+        "alpha-capture-outcomes",
+        help="Capture sourced regular-session outcomes for saved AlphaOps signals",
+    )
+    alpha_capture_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_capture_parser.add_argument("--market-date", default=None)
+    alpha_capture_parser.add_argument("--at", default=None)
+    alpha_capture_parser.add_argument("--out-dir", default="outputs/alpha_outcomes")
+    alpha_capture_parser.add_argument("--persist", action="store_true")
+    alpha_capture_parser.add_argument("--replace", action="store_true")
+    alpha_capture_parser.add_argument(
+        "--max-close-staleness-seconds",
+        type=int,
+        default=90,
+    )
+
+    alpha_paper_reconcile_parser = subparsers.add_parser(
+        "alpha-paper-reconcile",
+        help="Reconcile exact AlphaOps selections into sourced paper trades",
+    )
+    alpha_paper_reconcile_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_paper_reconcile_parser.add_argument("--market-date", default=None)
+    alpha_paper_reconcile_parser.add_argument(
+        "--out-dir", default="outputs/strategy_reconciliation"
+    )
+    alpha_paper_reconcile_parser.add_argument("--persist", action="store_true")
+    alpha_paper_reconcile_parser.add_argument(
+        "--notional-per-trade", type=float, default=1000.0
+    )
+    alpha_paper_reconcile_parser.add_argument("--fee-bps", type=float, default=1.0)
+
     alpha_learn_parser = subparsers.add_parser(
         "alpha-learn", help="Update AlphaOps setup memory and performance truth"
     )
@@ -406,6 +453,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_report_parser.add_argument("--out-dir", default="outputs/alpha_report")
+
+    alpha_attribution_parser = subparsers.add_parser(
+        "alpha-attribution",
+        help="Write causal AlphaOps daily and cumulative attribution",
+    )
+    alpha_attribution_parser.add_argument(
+        "--db-path",
+        default="data/shadow_real.sqlite",
+    )
+    alpha_attribution_parser.add_argument(
+        "--out-dir",
+        default="outputs/alpha_attribution",
+    )
+    alpha_attribution_parser.add_argument("--start", default=None)
+    alpha_attribution_parser.add_argument("--end", default=None)
+
+    outcome_gap_parser = subparsers.add_parser(
+        "outcome-gap",
+        help="Report unresolved outcome truth without converting gaps to zero",
+    )
+    outcome_gap_parser.add_argument(
+        "--db-path",
+        default="data/shadow_real.sqlite",
+    )
+    outcome_gap_parser.add_argument("--market-date", default=None)
+    outcome_gap_parser.add_argument("--out", default=None)
 
     attribute_parser = subparsers.add_parser(
         "attribute-returns",
@@ -629,6 +702,87 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--date", default=None)
     ingest.add_argument("--format", choices=["csv", "parquet"], default="csv")
 
+    price_observe = subparsers.add_parser(
+        "price-observe",
+        help="Persist auditable time-specific prices for saved picks or supplied tickers",
+    )
+    price_observe.add_argument("--db-path", default="data/shadow_real.sqlite")
+    price_observe.add_argument(
+        "--source",
+        choices=["auto", "csv", "alpaca", "yahoo"],
+        default="auto",
+    )
+    price_observe.add_argument("--minute-bars", default=None)
+    price_observe.add_argument("--tickers", default=None, help="Comma-separated symbols")
+    price_observe.add_argument("--market-date", default=None)
+    price_observe.add_argument(
+        "--at",
+        default=None,
+        help="ISO timestamp or HH:MM with --market-date",
+    )
+    price_observe.add_argument("--max-age-seconds", type=int, default=360)
+    price_observe.add_argument("--no-persist", action="store_true")
+
+    trade_watch = subparsers.add_parser(
+        "trade-watch",
+        help="Evaluate saved selections and simulate governed paper fills",
+    )
+    trade_watch.add_argument("--db-path", default="data/shadow_real.sqlite")
+    trade_watch.add_argument(
+        "--mode",
+        choices=["observe_only", "paper_execute", "live_execute"],
+        default="paper_execute",
+    )
+    trade_watch.add_argument(
+        "--source",
+        choices=["auto", "csv", "alpaca", "yahoo"],
+        default="auto",
+    )
+    trade_watch.add_argument("--minute-bars", default=None)
+    trade_watch.add_argument("--tickers", default=None)
+    trade_watch.add_argument("--market-date", default=None)
+    trade_watch.add_argument("--at", default=None)
+    trade_watch.add_argument("--max-age-seconds", type=int, default=360)
+    trade_watch.add_argument("--notify", default="console")
+    trade_watch.add_argument("--dry-run", action="store_true")
+    trade_watch.add_argument("--notional-per-trade", type=float, default=1000.0)
+    trade_watch.add_argument("--simulated-equity", type=float, default=100_000.0)
+    trade_watch.add_argument("--max-open-positions", type=int, default=3)
+    trade_watch.add_argument("--max-daily-entries", type=int, default=10)
+    trade_watch.add_argument("--min-reward-risk", type=float, default=1.5)
+    trade_watch.add_argument("--notify-blocked", action="store_true")
+
+    trade_watch_loop = subparsers.add_parser(
+        "trade-watch-loop",
+        help="Continuously evaluate governed paper selections",
+    )
+    trade_watch_loop.add_argument("--db-path", default="data/shadow_real.sqlite")
+    trade_watch_loop.add_argument(
+        "--mode",
+        choices=["observe_only", "paper_execute", "live_execute"],
+        default="paper_execute",
+    )
+    trade_watch_loop.add_argument(
+        "--source",
+        choices=["auto", "csv", "alpaca", "yahoo"],
+        default="auto",
+    )
+    trade_watch_loop.add_argument("--minute-bars", default=None)
+    trade_watch_loop.add_argument("--tickers", default=None)
+    trade_watch_loop.add_argument("--market-date", default=None)
+    trade_watch_loop.add_argument("--at", default=None)
+    trade_watch_loop.add_argument("--max-age-seconds", type=int, default=360)
+    trade_watch_loop.add_argument("--notify", default="console")
+    trade_watch_loop.add_argument("--dry-run", action="store_true")
+    trade_watch_loop.add_argument("--notional-per-trade", type=float, default=1000.0)
+    trade_watch_loop.add_argument("--simulated-equity", type=float, default=100_000.0)
+    trade_watch_loop.add_argument("--max-open-positions", type=int, default=3)
+    trade_watch_loop.add_argument("--max-daily-entries", type=int, default=10)
+    trade_watch_loop.add_argument("--min-reward-risk", type=float, default=1.5)
+    trade_watch_loop.add_argument("--notify-blocked", action="store_true")
+    trade_watch_loop.add_argument("--interval-seconds", type=float, default=60.0)
+    trade_watch_loop.add_argument("--max-iterations", type=int, default=0)
+
     backfill_snapshots = subparsers.add_parser(
         "backfill-snapshots", help="Build historical snapshots and optional scan runs"
     )
@@ -660,6 +814,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "scheduler-doctor", help="Check daily publication scheduler artifacts"
     )
     scheduler_doctor_parser.add_argument("--root", default=".")
+    scheduler_doctor_parser.add_argument(
+        "--state-root",
+        default=r"C:\r\dawnstrike-state",
+    )
     scheduler_doctor_parser.add_argument("--print", action="store_true", dest="print_result")
 
     dashboard_doctor_parser = subparsers.add_parser(
@@ -728,6 +886,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_monitor(args)
         if args.command == "alpha-outcomes":
             return _run_alpha_outcomes(args)
+        if args.command == "alpha-capture-outcomes":
+            return _run_alpha_capture_outcomes(args)
+        if args.command == "alpha-paper-reconcile":
+            return _run_alpha_paper_reconcile(args)
         if args.command == "alpha-learn":
             return _run_alpha_learn(args)
         if args.command == "alpha-status":
@@ -736,6 +898,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_doctor(args)
         if args.command == "alpha-report":
             return _run_alpha_report(args)
+        if args.command == "alpha-attribution":
+            return _run_alpha_attribution(args)
+        if args.command == "outcome-gap":
+            return _run_outcome_gap(args)
         if args.command == "attribute-returns":
             return _run_attribute_returns(args)
         if args.command == "historical-report":
@@ -810,6 +976,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_canonical_performance_reconcile(args)
         if args.command == "ingest-minute-bars":
             return _run_ingest_minute_bars(args)
+        if args.command == "price-observe":
+            return _run_price_observe(args)
+        if args.command == "trade-watch":
+            return _run_trade_watch(args)
+        if args.command == "trade-watch-loop":
+            return _run_trade_watch_loop(args)
         if args.command == "backfill-snapshots":
             return _run_backfill_snapshots(args)
         if args.command == "tune-strategy":
@@ -819,7 +991,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "probability-doctor":
             return _run_release_doctor(probability_doctor(args.db_path))
         if args.command == "scheduler-doctor":
-            return _run_release_doctor(scheduler_doctor(args.root))
+            return _run_release_doctor(
+                scheduler_doctor(args.root, state_root=args.state_root)
+            )
         if args.command == "dashboard-doctor":
             return _run_release_doctor(dashboard_doctor(args.db_path, args.root))
         parser.error("Unknown command")
@@ -1194,6 +1368,33 @@ def _run_alpha_outcomes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_alpha_capture_outcomes(args: argparse.Namespace) -> int:
+    result = capture_sourced_alpha_outcomes(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        requested_at=args.at,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        replace=args.replace,
+        max_close_staleness_seconds=args.max_close_staleness_seconds,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") in {"session_incomplete", "partial"} else 0
+
+
+def _run_alpha_paper_reconcile(args: argparse.Namespace) -> int:
+    result = reconcile_alpha_paper_trades(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        out_dir=args.out_dir,
+        persist=args.persist,
+        notional_per_trade=args.notional_per_trade,
+        fee_bps=args.fee_bps,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "complete" else 1
+
+
 def _run_alpha_learn(args: argparse.Namespace) -> int:
     result = alpha_learn(db_path=args.db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -1216,6 +1417,27 @@ def _run_alpha_report(args: argparse.Namespace) -> int:
     result = alpha_report(db_path=args.db_path, out_dir=args.out_dir)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_alpha_attribution(args: argparse.Namespace) -> int:
+    result = generate_alpha_attribution_report(
+        db_path=args.db_path,
+        out_dir=args.out_dir,
+        start=args.start,
+        end=args.end,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") in {"complete", "no_evidence"} else 1
+
+
+def _run_outcome_gap(args: argparse.Namespace) -> int:
+    result = outcome_gap_report(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        out_path=args.out,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") in {"COMPLETE", "NO_ELIGIBLE"} else 2
 
 
 def _run_attribute_returns(args: argparse.Namespace) -> int:
@@ -1661,6 +1883,111 @@ def _run_ingest_minute_bars(args: argparse.Namespace) -> int:
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_price_observe(args: argparse.Namespace) -> int:
+    tickers = [
+        item.strip().upper()
+        for item in str(args.tickers or "").split(",")
+        if item.strip()
+    ]
+    config = load_config(database_path=Path(args.db_path))
+    result = collect_price_observations(
+        db_path=args.db_path,
+        source=args.source,
+        tickers=tickers or None,
+        market_date=args.market_date,
+        requested_at=args.at,
+        minute_bars=args.minute_bars,
+        max_age_seconds=args.max_age_seconds,
+        persist=not args.no_persist,
+        config=config,
+    )
+    printable = dict(result)
+    printable["observations"] = [
+        {
+            "ticker": row.get("ticker"),
+            "price": row.get("price"),
+            "observed_at": row.get("observed_at"),
+            "provider_status": row.get("provider_status"),
+            "freshness_seconds": row.get("freshness_seconds"),
+            "is_usable": row.get("is_usable"),
+        }
+        for row in list(result.get("observations") or [])
+    ]
+    print(json.dumps(printable, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_trade_watch(args: argparse.Namespace) -> int:
+    result = run_trade_watcher(**_trade_watch_kwargs(args))
+    printable = dict(result)
+    printable["states"] = list(result.get("states") or [])[:20]
+    printable["intents"] = list(result.get("intents") or [])[:20]
+    printable["paper_positions"] = list(result.get("paper_positions") or [])[:20]
+    printable["paper_fills"] = list(result.get("paper_fills") or [])[:20]
+    print(json.dumps(printable, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_trade_watch_loop(args: argparse.Namespace) -> int:
+    if args.interval_seconds <= 0:
+        raise SnapshotValidationError("--interval-seconds must be positive.")
+    iteration = 0
+    while True:
+        iteration += 1
+        kwargs = _trade_watch_kwargs(args)
+        if args.at is None:
+            kwargs["requested_at"] = None
+        result = run_trade_watcher(**kwargs)
+        summary = {
+            "iteration": iteration,
+            "status": result.get("status"),
+            "mode": result.get("mode"),
+            "market_date": result.get("market_date"),
+            "requested_at": result.get("requested_at"),
+            "usable_prices": dict(result.get("price_observation") or {}).get(
+                "usable_count"
+            ),
+            "intent_inserted": dict(result.get("intent_stats") or {}).get(
+                "inserted", 0
+            ),
+            "paper_fills": dict(result.get("paper_fill_stats") or {}).get(
+                "inserted", 0
+            ),
+            "notifications": result.get("notification_stats"),
+        }
+        print(json.dumps(summary, sort_keys=True))
+        if args.max_iterations and iteration >= args.max_iterations:
+            break
+        time.sleep(float(args.interval_seconds))
+    return 0
+
+
+def _trade_watch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    tickers = [
+        item.strip().upper()
+        for item in str(args.tickers or "").split(",")
+        if item.strip()
+    ]
+    return {
+        "db_path": args.db_path,
+        "mode": args.mode,
+        "source": args.source,
+        "tickers": tickers or None,
+        "market_date": args.market_date,
+        "requested_at": args.at,
+        "minute_bars": args.minute_bars,
+        "max_age_seconds": args.max_age_seconds,
+        "notify": args.notify,
+        "dry_run": args.dry_run,
+        "notional_per_trade": args.notional_per_trade,
+        "simulated_equity": args.simulated_equity,
+        "max_open_positions": args.max_open_positions,
+        "max_daily_entries": args.max_daily_entries,
+        "min_reward_risk": args.min_reward_risk,
+        "notify_blocked": args.notify_blocked,
+    }
 
 
 def _run_backfill_snapshots(args: argparse.Namespace) -> int:

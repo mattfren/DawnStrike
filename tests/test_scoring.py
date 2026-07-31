@@ -23,6 +23,13 @@ def test_scoring_ranks_expected_ticker_first():
     assert row["confidence_bucket"] in {"LOW", "MEDIUM", "HIGH"}
     assert row["model_version"] == "dawnstrike-signal-engine-v3"
     assert len(row["config_hash"]) == 12
+    assert row["target_basis_kind"] == "premarket_range_extension"
+    assert row["target_derived_from_risk"] is False
+    assert row["target_policy_version"] == "alphaops-v5-premarket-range-extension-v1"
+    expected_target = row["premarket_high"] + (
+        row["premarket_high"] - row["premarket_low"]
+    ) * 1.618
+    assert row["first_target"] == round(expected_target, 4)
 
 
 def test_scoring_edge_cases_are_flagged():
