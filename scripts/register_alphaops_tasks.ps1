@@ -86,9 +86,16 @@ foreach ($definition in $taskDefinitions) {
             [System.Globalization.CultureInfo]::InvariantCulture
         ))
     if ([bool]$definition.Repeat) {
-        $trigger.Repetition.Interval = "PT5M"
-        $trigger.Repetition.Duration = "PT$([int]$definition.DurationHours)H"
-        $trigger.Repetition.StopAtDurationEnd = $true
+        $repetition = New-CimInstance `
+            -Namespace "Root/Microsoft/Windows/TaskScheduler" `
+            -ClassName "MSFT_TaskRepetitionPattern" `
+            -ClientOnly `
+            -Property @{
+                Interval = "PT5M"
+                Duration = "PT$([int]$definition.DurationHours)H"
+                StopAtDurationEnd = $true
+            }
+        $trigger.Repetition = $repetition
     }
     $principal = New-ScheduledTaskPrincipal `
         -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
