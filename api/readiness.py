@@ -40,6 +40,9 @@ SNAPSHOT_MANIFEST_PATH = _artifact_path(
     PUBLIC_ROOT / "data" / "performance.json.manifest.json",
     PUBLIC_ROOT / "data" / "performance-snapshot-manifest.json",
 )
+CALENDAR_PATH = PUBLIC_ROOT / "data" / "calendar.json"
+CALENDAR_MANIFEST_PATH = PUBLIC_ROOT / "data" / "calendar.json.manifest.json"
+PUBLICATION_SET_PATH = PUBLIC_ROOT / "data" / "publication-set.json"
 BUILD_MANIFEST_PATH = PUBLIC_ROOT / "build-manifest.json"
 REQUIRED_HASHED_FILES = {
     "index.html",
@@ -50,6 +53,10 @@ REQUIRED_HASHED_FILES = {
     "assets/dawnstrike.js",
     "data/performance.json",
     "data/performance.json.manifest.json",
+    "data/calendar.json",
+    "data/calendar.json.manifest.json",
+    "data/publication-set.json",
+    "release-manifest.json",
 }
 
 
@@ -130,6 +137,29 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         except (ValueError, TypeError):
             failures.append("snapshot_unreadable")
             payload_bytes = b""
+    calendar_manifest = (
+        PUBLIC_STATE.get("calendar_manifest")
+        if isinstance(PUBLIC_STATE.get("calendar_manifest"), dict)
+        else {}
+    )
+    publication_set = (
+        PUBLIC_STATE.get("publication_set")
+        if isinstance(PUBLIC_STATE.get("publication_set"), dict)
+        else {}
+    )
+    encoded_calendar = PUBLIC_STATE.get("calendar_b64")
+    if not isinstance(encoded_calendar, str):
+        failures.append("calendar_missing")
+        calendar_bytes = b""
+    else:
+        try:
+            calendar_bytes = base64.b64decode(
+                encoded_calendar,
+                validate=True,
+            )
+        except (ValueError, TypeError):
+            failures.append("calendar_unreadable")
+            calendar_bytes = b""
     if not snapshot_manifest:
         failures.append("snapshot_manifest_missing")
     else:
@@ -137,6 +167,34 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
             failures.append("snapshot_hash_mismatch")
         if snapshot_manifest.get("byte_count") != len(payload_bytes):
             failures.append("snapshot_byte_count_mismatch")
+    if not calendar_manifest:
+        failures.append("calendar_manifest_missing")
+    else:
+        if (
+            calendar_manifest.get("payload_sha256")
+            != hashlib.sha256(calendar_bytes).hexdigest()
+        ):
+            failures.append("calendar_hash_mismatch")
+        if (
+            calendar_manifest.get("canonical_input_hash_sha256")
+            != snapshot_manifest.get("input_hash_sha256")
+        ):
+            failures.append("calendar_canonical_hash_mismatch")
+        if (
+            calendar_manifest.get("performance_payload_sha256")
+            != snapshot_manifest.get("payload_sha256")
+        ):
+            failures.append("calendar_performance_hash_mismatch")
+    if (
+        publication_set.get("performance_payload_sha256")
+        != snapshot_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_performance_hash_mismatch")
+    if (
+        publication_set.get("calendar_payload_sha256")
+        != calendar_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_calendar_hash_mismatch")
     if not build_manifest:
         failures.append("build_manifest_missing")
     if not build_manifest.get("source_sha"):
@@ -147,6 +205,11 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("source_not_clean")
     if build_manifest.get("data_hash_sha256") != snapshot_manifest.get("payload_sha256"):
         failures.append("build_data_hash_mismatch")
+    if (
+        build_manifest.get("publication_set_sha256")
+        != publication_set.get("publication_set_sha256")
+    ):
+        failures.append("build_publication_set_hash_mismatch")
     file_hashes = build_manifest.get("file_hashes")
     if not isinstance(file_hashes, dict):
         failures.append("file_hashes_missing")
@@ -183,6 +246,8 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("build_manifest_missing")
     snapshot_manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
+    calendar_manifest: dict[str, object] = {}
+    publication_set: dict[str, object] = {}
     if SNAPSHOT_PATH.is_file() and SNAPSHOT_MANIFEST_PATH.is_file():
         try:
             payload_bytes = SNAPSHOT_PATH.read_bytes()
@@ -203,6 +268,40 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
                 raise json.JSONDecodeError("manifest is not an object", "", 0)
         except (OSError, json.JSONDecodeError):
             failures.append("build_manifest_unreadable")
+    if CALENDAR_PATH.is_file() and CALENDAR_MANIFEST_PATH.is_file():
+        try:
+            calendar_bytes = CALENDAR_PATH.read_bytes()
+            calendar_manifest = _read_object(CALENDAR_MANIFEST_PATH)
+            if (
+                calendar_manifest.get("payload_sha256")
+                != hashlib.sha256(calendar_bytes).hexdigest()
+            ):
+                failures.append("calendar_hash_mismatch")
+            if (
+                calendar_manifest.get("canonical_input_hash_sha256")
+                != snapshot_manifest.get("input_hash_sha256")
+            ):
+                failures.append("calendar_canonical_hash_mismatch")
+            if (
+                calendar_manifest.get("performance_payload_sha256")
+                != snapshot_manifest.get("payload_sha256")
+            ):
+                failures.append("calendar_performance_hash_mismatch")
+        except OSError:
+            failures.append("calendar_unreadable")
+    else:
+        failures.append("calendar_missing")
+    publication_set = _read_object(PUBLICATION_SET_PATH)
+    if (
+        publication_set.get("performance_payload_sha256")
+        != snapshot_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_performance_hash_mismatch")
+    if (
+        publication_set.get("calendar_payload_sha256")
+        != calendar_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_calendar_hash_mismatch")
     if not build_manifest.get("source_sha"):
         failures.append("source_sha_missing")
     if not build_manifest.get("build_id"):
@@ -211,6 +310,11 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("source_not_clean")
     if build_manifest.get("data_hash_sha256") != snapshot_manifest.get("payload_sha256"):
         failures.append("build_data_hash_mismatch")
+    if (
+        build_manifest.get("publication_set_sha256")
+        != publication_set.get("publication_set_sha256")
+    ):
+        failures.append("build_publication_set_hash_mismatch")
     file_hashes = build_manifest.get("file_hashes")
     if not isinstance(file_hashes, dict):
         failures.append("file_hashes_missing")

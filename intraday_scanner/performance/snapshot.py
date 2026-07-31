@@ -23,6 +23,7 @@ def write_public_snapshot(
     market_date: str | None = None,
     days: int = 30,
     row_limit: int = 250,
+    generated_at: str | None = None,
 ) -> dict[str, Any]:
     service = CanonicalPerformanceService(db_path)
     chosen: dict[str, Any] | None = None
@@ -31,6 +32,7 @@ def write_public_snapshot(
             days=days,
             row_limit=limit,
             market_date=market_date,
+            generated_at=generated_at,
         )
         encoded = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -61,7 +63,10 @@ def write_public_snapshot(
     input_hash = _input_hash(payload)
     effective_date = market_date or _latest_date(payload)
     status = _snapshot_status(payload, effective_date)
-    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    generated_at = (
+        generated_at
+        or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    )
     manifest = {
         "schema_version": "dawnstrike.public_snapshot_manifest.v1",
         "manifest_id": hashlib.sha256(

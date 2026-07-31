@@ -1,171 +1,115 @@
+[CmdletBinding()]
 param(
-    [string]$Root = "",
-    [string]$SourceRoot = ""
+    [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
+    [string]$StateRoot = "C:\r\dawnstrike-state",
+    [string]$BackupRoot = "",
+    [switch]$ReplaceExisting
 )
 
 $ErrorActionPreference = "Stop"
-
-# Boundary: this script owns research/watchlist tasks only. Canonical daily
-# performance publication is registered separately by register_daily_finalize_task.ps1.
-# Do not add the daily-finalize task here or create a second publisher.
-
-if ([string]::IsNullOrWhiteSpace($Root)) {
-    $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-} else {
-    $Root = (Resolve-Path $Root).Path
-}
-
-if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
-    throw "SourceRoot is required so the owned task wrapper can identify the legacy AlphaOps source explicitly."
-}
-$SourceRoot = (Resolve-Path $SourceRoot).Path
-if ($SourceRoot -eq $Root) {
-    throw "SourceRoot must differ from the owned runtime root; refusing recursive task registration."
-}
-
-$logsDir = Join-Path $Root "logs"
-New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-
-$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$registrationDate = (Get-Date).ToString("s")
-$startDate = (Get-Date).ToString("yyyy-MM-dd")
-
-function ConvertTo-TaskXmlText {
-    param([Parameter(Mandatory = $true)][string]$Value)
-    return [System.Security.SecurityElement]::Escape($Value)
-}
-
-function New-TaskXml {
-    param(
-        [Parameter(Mandatory = $true)][string]$Description,
-        [Parameter(Mandatory = $true)][string]$Arguments,
-        [Parameter(Mandatory = $true)][string]$StartTime,
-        [bool]$Repeats = $false
+$runtime = (Resolve-Path $RuntimeRoot).Path
+New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+$state = (Resolve-Path $StateRoot).Path
+if (-not $BackupRoot) {
+    $BackupRoot = Join-Path $state (
+        "scheduler-backups\" +
+        (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
     )
+}
+New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 
-    $descriptionText = ConvertTo-TaskXmlText $Description
-    $argumentsText = ConvertTo-TaskXmlText $Arguments
-    $userText = ConvertTo-TaskXmlText $currentUser
-    $startBoundary = "$startDate`T$StartTime"
-    $repetitionXml = ""
-
-    if ($Repeats) {
-        $repetitionXml = @"
-      <Repetition>
-        <Interval>PT5M</Interval>
-        <Duration>PT6H</Duration>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-"@
+$taskDefinitions = @(
+    [ordered]@{
+        Name = "Dawnstrike AlphaOps Morning"
+        Description = "Dawnstrike v5 morning research collection and ranked delivery. Research-only; no broker execution."
+        Script = "run_alphaops_morning.ps1"
+        Start = "08:10"
+        Repeat = $false
+        DurationHours = 0
+    },
+    [ordered]@{
+        Name = "Dawnstrike AlphaOps Monitor 5m"
+        Description = "Dawnstrike v5 intraday paper monitor on a five-minute cadence. Research-only; no broker execution."
+        Script = "run_alphaops_monitor.ps1"
+        Start = "08:35"
+        Repeat = $true
+        DurationHours = 7
+    },
+    [ordered]@{
+        Name = "Dawnstrike AlphaOps EOD Full Report"
+        Description = "Dawnstrike v5 sourced outcomes, reconciliation, learning, attribution, and PaperOps forward evidence. Research-only; no broker execution."
+        Script = "run_alphaops_eod.ps1"
+        Start = "15:15"
+        Repeat = $false
+        DurationHours = 0
     }
+)
 
-    return @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>$registrationDate</Date>
-    <Author>$userText</Author>
-    <Description>$descriptionText</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <CalendarTrigger>
-      <StartBoundary>$startBoundary</StartBoundary>
-      <Enabled>true</Enabled>
-$repetitionXml
-      <ScheduleByWeek>
-        <DaysOfWeek>
-          <Monday />
-          <Tuesday />
-          <Wednesday />
-          <Thursday />
-          <Friday />
-        </DaysOfWeek>
-        <WeeksInterval>1</WeeksInterval>
-      </ScheduleByWeek>
-    </CalendarTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>$userText</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-    <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>true</WakeToRun>
-    <RestartOnFailure>
-      <Interval>PT5M</Interval>
-      <Count>3</Count>
-    </RestartOnFailure>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>cmd.exe</Command>
-      <Arguments>$argumentsText</Arguments>
-      <WorkingDirectory>$(ConvertTo-TaskXmlText $Root)</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
+function Export-ExistingTask {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        return
+    }
+    $safeName = $TaskName -replace "[^A-Za-z0-9._-]", "_"
+    Export-ScheduledTask -TaskName $TaskName |
+        Set-Content -LiteralPath (Join-Path $BackupRoot "$safeName.xml") -Encoding Unicode
 }
 
-function Register-AlphaOpsTask {
-    param(
-        [Parameter(Mandatory = $true)][string]$TaskName,
-        [Parameter(Mandatory = $true)][string]$Description,
-        [Parameter(Mandatory = $true)][string]$CommandLine,
-        [Parameter(Mandatory = $true)][string]$StartTime,
-        [bool]$Repeats = $false
+foreach ($definition in $taskDefinitions) {
+    $taskName = [string]$definition.Name
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existing -and -not $ReplaceExisting) {
+        throw "Scheduled task already exists; rerun with -ReplaceExisting after inspection: $taskName"
+    }
+    Export-ExistingTask -TaskName $taskName
+
+    $runner = Join-Path $runtime ("scripts\" + [string]$definition.Script)
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+        throw "Dawnstrike task runner not found: $runner"
+    }
+    $arguments = (
+        "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" " +
+        "-RuntimeRoot `"$runtime`" -StateRoot `"$state`""
     )
-
-    $arguments = "/c cd /d `"$Root`" && $CommandLine"
-    $xml = New-TaskXml `
-        -Description $Description `
-        -Arguments $arguments `
-        -StartTime $StartTime `
-        -Repeats $Repeats
-
+    $action = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument $arguments `
+        -WorkingDirectory $runtime
+    $trigger = New-ScheduledTaskTrigger `
+        -Weekly `
+        -WeeksInterval 1 `
+        -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
+        -At ([datetime]::ParseExact(
+            [string]$definition.Start,
+            "HH:mm",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        ))
+    if ([bool]$definition.Repeat) {
+        $trigger.Repetition.Interval = "PT5M"
+        $trigger.Repetition.Duration = "PT$([int]$definition.DurationHours)H"
+        $trigger.Repetition.StopAtDurationEnd = $true
+    }
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -WakeToRun `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 5) `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     Register-ScheduledTask `
-        -TaskName $TaskName `
-        -Xml $xml `
+        -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Description ([string]$definition.Description) `
         -Force | Out-Null
-
-    Write-Host "Registered task: $TaskName"
+    Write-Output "Registered $taskName from $runtime against $state."
 }
 
-Register-AlphaOpsTask `
-    -TaskName "Dawnstrike AlphaOps Morning" `
-    -Description "Dawnstrike AlphaOps weekday morning research/watchlist cycle. No orders placed." `
-    -StartTime "08:10:00" `
-    -CommandLine "cd /d `"$SourceRoot`" && py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram >> `"$Root\logs\alpha_morning.log`" 2>&1"
-
-Register-AlphaOpsTask `
-    -TaskName "Dawnstrike AlphaOps Monitor 5m" `
-    -Description "Dawnstrike AlphaOps weekday 5-minute research monitor. No orders placed." `
-    -StartTime "08:35:00" `
-    -Repeats $true `
-    -CommandLine "scripts\run_alphaops_monitor_full.bat `"$SourceRoot`" >> `"$Root\logs\alpha_monitor.log`" 2>&1"
-
-Register-AlphaOpsTask `
-    -TaskName "Dawnstrike AlphaOps EOD Full Report" `
-    -Description "Dawnstrike AlphaOps weekday end-of-day research, attribution, and historical reports. No orders placed." `
-    -StartTime "15:15:00" `
-    -CommandLine "scripts\run_alphaops_eod_full.bat `"$SourceRoot`" >> `"$Root\logs\alpha_report.log`" 2>&1"
-
-Write-Host "AlphaOps scheduled tasks registered for root: $Root"
+Write-Output "Rollback task XML saved under $BackupRoot."

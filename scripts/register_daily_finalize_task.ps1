@@ -1,48 +1,65 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
-    [string]$SourceRoot = "C:\Users\MattFields\Dawnstrike",
+    [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
+    [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$TaskName = "Dawnstrike 10of10 Daily Finalize",
     [datetime]$StartTime = (Get-Date -Hour 17 -Minute 30 -Second 0),
     [ValidateSet("LocalOnly", "Preview", "Production")]
-    [string]$PublicationMode = "LocalOnly",
+    [string]$PublicationMode = "Production",
     [string]$VercelProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
-    [switch]$AllowDegraded,
+    [string]$BackupRoot = "",
     [switch]$ReplaceExisting
 )
 
 $ErrorActionPreference = "Stop"
-$resolvedRoot = (Resolve-Path $ProjectRoot).Path
-$resolvedSourceRoot = (Resolve-Path $SourceRoot).Path
-$runner = Join-Path $resolvedRoot "scripts\run_daily_finalize.ps1"
-
+$runtime = (Resolve-Path $RuntimeRoot).Path
+New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+$state = (Resolve-Path $StateRoot).Path
+$runner = Join-Path $runtime "scripts\run_daily_finalize.ps1"
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "Daily finalize runner not found: $runner"
 }
+if (-not $BackupRoot) {
+    $BackupRoot = Join-Path $state (
+        "scheduler-backups\" +
+        (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    )
+}
+New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing -and -not $ReplaceExisting) {
-    throw "Scheduled task already exists; inspect it before changing it: $TaskName"
+    throw "Scheduled task already exists; inspect it before replacement: $TaskName"
 }
 if ($existing) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    $safeName = $TaskName -replace "[^A-Za-z0-9._-]", "_"
+    Export-ScheduledTask -TaskName $TaskName |
+        Set-Content -LiteralPath (Join-Path $BackupRoot "$safeName.xml") -Encoding Unicode
 }
 
 $arguments = (
     "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" " +
-    "-ProjectRoot `"$resolvedRoot`" " +
-    "-SourceRoot `"$resolvedSourceRoot`" " +
+    "-RuntimeRoot `"$runtime`" " +
+    "-StateRoot `"$state`" " +
     "-PublicationMode $PublicationMode " +
     "-VercelProjectId `"$VercelProjectId`""
 )
-if ($AllowDegraded) {
-    $arguments += " -AllowDegraded"
-}
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument $arguments
+    -Argument $arguments `
+    -WorkingDirectory $runtime
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+$principal = New-ScheduledTaskPrincipal `
+    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive `
+    -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -WakeToRun `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 2 `
+    -RestartInterval (New-TimeSpan -Minutes 15) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 3)
 
 Register-ScheduledTask `
     -TaskName $TaskName `
@@ -50,9 +67,11 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "Dawnstrike canonical performance reconcile, public snapshot, readiness, and stage manifest. Research-only; no broker execution."
+    -Description "Dawnstrike v5 canonical performance, Calendar, readiness, and production publication. Research-only; no broker execution." `
+    -Force | Out-Null
 
 Write-Output (
     "Registered $TaskName for $($StartTime.ToString('HH:mm')) local time " +
-    "with publication mode $PublicationMode."
+    "from $runtime against $state with publication mode $PublicationMode."
 )
+Write-Output "Rollback task XML saved under $BackupRoot."

@@ -44,14 +44,26 @@ def build_truth_report(rows: list[dict[str, Any]], *, real_days_collected: int) 
         "top1": _return_summary(top1),
         "top3": _return_summary(top3),
         "top5": _return_summary(top5),
-        "average_return_pct": round(sum(returns) / len(returns), 4) if returns else 0.0,
-        "median_return_pct": round(float(median(returns)), 4) if returns else 0.0,
+        "observed_return_count": len(returns),
+        "missing_return_count": len(raw_returns) - len(returns),
+        "average_return_pct": (
+            round(sum(returns) / len(returns), 4) if returns else None
+        ),
+        "median_return_pct": (
+            round(float(median(returns)), 4) if returns else None
+        ),
         "win_rate_pct": _win_rate(returns),
-        "worst_day_return_pct": min(returns) if returns else 0.0,
-        "best_day_return_pct": max(returns) if returns else 0.0,
-        "max_drawdown_pct": min(clean_drawdowns) if clean_drawdowns else 0.0,
+        "worst_day_return_pct": min(returns) if returns else None,
+        "best_day_return_pct": max(returns) if returns else None,
+        "max_drawdown_pct": (
+            min(clean_drawdowns) if clean_drawdowns else None
+        ),
         "outlier": outlier_warning(rows),
-        "missing_outcome_rate_pct": round((missing_high / len(rows)) * 100.0, 2) if rows else 0.0,
+        "missing_outcome_rate_pct": (
+            round((missing_high / len(rows)) * 100.0, 2)
+            if rows
+            else None
+        ),
         "score_decile": {key: _return_summary(value) for key, value in by_decile.items()},
         "alpha_bucket_performance": alpha_buckets,
         "setup_bucket_returns": setup_buckets,
@@ -73,12 +85,22 @@ def _return_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     returns = [value for value in raw_returns if value is not None]
     return {
         "sample_size": len(rows),
-        "avg_return_pct": round(sum(returns) / len(returns), 4) if returns else 0.0,
-        "median_return_pct": round(float(median(returns)), 4) if returns else 0.0,
+        "observed_return_count": len(returns),
+        "missing_return_count": len(raw_returns) - len(returns),
+        "avg_return_pct": (
+            round(sum(returns) / len(returns), 4) if returns else None
+        ),
+        "median_return_pct": (
+            round(float(median(returns)), 4) if returns else None
+        ),
         "win_rate_pct": _win_rate(returns),
         "max_drawdown_pct": min(
-            [value for value in (_drawdown(row) for row in rows) if value is not None],
-            default=0.0,
+            [
+                value
+                for value in (_drawdown(row) for row in rows)
+                if value is not None
+            ],
+            default=None,
         ),
     }
 
@@ -131,7 +153,7 @@ def _best_worst(buckets: dict[str, dict[str, Any]]) -> dict[str, Any]:
     eligible = {
         key: value
         for key, value in buckets.items()
-        if int(value.get("sample_size") or 0) > 0
+        if int(value.get("observed_return_count") or 0) > 0
     }
     if not eligible:
         return {"best": None, "worst": None}
@@ -169,9 +191,9 @@ def _non_live_label(row: dict[str, Any]) -> bool:
     return str(row.get("data_source_kind") or "").lower() in {"sample", "fixture", "manual"}
 
 
-def _win_rate(values: list[float]) -> float:
+def _win_rate(values: list[float]) -> float | None:
     if not values:
-        return 0.0
+        return None
     return round((sum(1 for value in values if value > 0) / len(values)) * 100.0, 2)
 
 

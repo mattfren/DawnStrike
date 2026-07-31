@@ -11,9 +11,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.performance.calendar_snapshot import write_public_calendar
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
+from intraday_scanner.services.daily_run_service import (
+    FAILURE_STATUSES,
+    SUCCESS_STATUSES,
+    record_daily_stage,
+    resolve_release_sha,
+    shared_daily_run_id,
+    upstream_readiness,
+)
 from intraday_scanner.storage.migrations import run_migrations
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 DAILY_STAGE_NAMES = (
     "source_collection",
@@ -25,6 +35,7 @@ DAILY_STAGE_NAMES = (
     "paper_reconciliation",
     "canonical_performance",
     "public_snapshot",
+    "public_calendar",
     "preview_deployment",
     "production_promotion",
     "readiness",
@@ -39,10 +50,18 @@ class DailyFinalizeService:
         db_path: str | Path,
         output_root: str | Path = "build/public",
         paper_ops_root: str | Path | None = None,
+        runtime_root: str | Path | None = None,
+        state_root: str | Path | None = None,
+        release_sha: str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.output_root = Path(output_root)
         self.paper_ops_root = Path(paper_ops_root) if paper_ops_root is not None else None
+        self.runtime_root = Path(
+            runtime_root or Path(__file__).resolve().parents[2]
+        ).resolve()
+        self.state_root = Path(state_root or self.db_path.parent).resolve()
+        self.release_sha = release_sha or resolve_release_sha(self.runtime_root)
         self.lock_path = self.output_root / ".daily-finalize.lock"
 
     def run(
@@ -55,9 +74,7 @@ class DailyFinalizeService:
     ) -> dict[str, Any]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         acquired = False
-        run_id = hashlib.sha256(
-            f"dawnstrike:daily-finalize:v1:{market_date}".encode()
-        ).hexdigest()[:20]
+        run_id = shared_daily_run_id(market_date, self.release_sha)
         if self._acquire_lock(run_id):
             acquired = True
         else:
@@ -71,30 +88,156 @@ class DailyFinalizeService:
                     # Rebuild the canonical read model from all raw history.
                     # The run date scopes the publication/readiness record; it
                     # must not delete prior canonical days.
+                    upstream_status, upstream_stages = self._read_upstream_stages(
+                        market_date
+                    )
                     result = CanonicalPerformanceService(
                         self.db_path,
                         paper_ops_root=self.paper_ops_root,
                     ).reconcile(
+                        as_of_market_date=market_date,
                         persist=True,
                         now=now,
                     )
+                    self._record_shared_stage(
+                        market_date=market_date,
+                        stage_name="canonical_performance",
+                        status=_daily_stage_status(result.get("status")),
+                        exit_code=0,
+                        output_hash=str(result.get("output_hash_sha256") or "") or None,
+                        source_data_watermark=market_date,
+                        payload={
+                            "reconciliation_status": result.get("status"),
+                            "issue_count": result.get("issue_count"),
+                            "row_count": result.get("row_count"),
+                        },
+                        observed_at=now,
+                    )
+                    staging_root = self.output_root / f".publish-{run_id}-{attempt}"
+                    staging_root.mkdir(parents=True, exist_ok=True)
                     publication = write_public_snapshot(
                         self.db_path,
-                        self.output_root / "data" / "performance.json",
+                        staging_root / "performance.json",
                         market_date=market_date,
+                        generated_at=now,
                     )
-                    upstream_status, upstream_stages = self._read_upstream_stages(market_date)
+                    calendar_publication = write_public_calendar(
+                        self.db_path,
+                        staging_root / "calendar.json",
+                        market_date=market_date,
+                        canonical_input_hash_sha256=str(
+                            publication["manifest"].get("input_hash_sha256") or ""
+                        ),
+                        performance_payload_sha256=str(
+                            publication["manifest"].get("payload_sha256") or ""
+                        ),
+                        generated_at=now,
+                    )
+                    self._record_shared_stage(
+                        market_date=market_date,
+                        stage_name="calendar_build",
+                        status=_daily_stage_status(
+                            calendar_publication["manifest"].get("status")
+                        ),
+                        exit_code=0,
+                        output_hash=str(
+                            calendar_publication["manifest"].get(
+                                "payload_sha256"
+                            )
+                            or ""
+                        )
+                        or None,
+                        source_data_watermark=market_date,
+                        payload=calendar_publication["manifest"],
+                        observed_at=now,
+                    )
+                    publication_set = self._promote_publication_pair(
+                        staging_root,
+                        publication=publication,
+                        calendar_publication=calendar_publication,
+                        generated_at=now,
+                    )
+                    self._record_shared_stage(
+                        market_date=market_date,
+                        stage_name="publication",
+                        status="COMPLETE",
+                        exit_code=0,
+                        output_hash=str(
+                            publication_set.get("publication_set_sha256") or ""
+                        )
+                        or None,
+                        source_data_watermark=market_date,
+                        payload=publication_set,
+                        observed_at=now,
+                    )
                     readiness = self._write_readiness(
-                        result, publication, market_date, upstream_status
+                        result,
+                        publication,
+                        calendar_publication,
+                        market_date,
+                        upstream_status,
+                        publication_timestamp=now,
+                    )
+                    readiness_stage_status = (
+                        "COMPLETE"
+                        if readiness.get("status") == "ready"
+                        else "DEGRADED"
+                    )
+                    daily_snapshot = self._record_shared_stage(
+                        market_date=market_date,
+                        stage_name="readiness",
+                        status=readiness_stage_status,
+                        exit_code=(
+                            0 if readiness_stage_status == "COMPLETE" else 2
+                        ),
+                        output_hash=str(
+                            readiness.get("publication_set_sha256") or ""
+                        )
+                        or None,
+                        source_data_watermark=market_date,
+                        error_code=(
+                            None
+                            if readiness_stage_status == "COMPLETE"
+                            else "daily_readiness_degraded"
+                        ),
+                        error_detail=(
+                            None
+                            if readiness_stage_status == "COMPLETE"
+                            else str(readiness.get("reason") or "")
+                        ),
+                        payload=readiness,
+                        observed_at=now,
+                    )
+                    readiness["daily_run"] = _public_daily_run(daily_snapshot)
+                    readiness["last_attempted_run"] = (
+                        readiness["daily_run"].get("run")
+                    )
+                    readiness["last_fully_successful_run"] = (
+                        readiness["daily_run"].get(
+                            "last_fully_successful_run"
+                        )
+                    )
+                    readiness["runtime_root"] = str(self.runtime_root)
+                    readiness["state_root"] = str(self.state_root)
+                    readiness["source_data_watermark"] = market_date
+                    _atomic_write_json(
+                        self.output_root / "readiness.json",
+                        readiness,
                     )
                     stage = self._write_stage_manifest(
                         result,
                         publication,
+                        calendar_publication,
                         readiness,
                         attempt,
                         upstream_stages=upstream_stages,
+                        generated_at=now,
                     )
-                    status = str(result.get("status") or "DEGRADED")
+                    status = (
+                        "COMPLETE"
+                        if readiness.get("status") == "ready"
+                        else "DEGRADED"
+                    )
                     self._record_run(
                         run_id,
                         market_date,
@@ -103,7 +246,7 @@ class DailyFinalizeService:
                         now=now,
                         retry_count=attempt,
                         input_hash=result.get("input_hash_sha256"),
-                        output_hash=publication["manifest"].get("payload_sha256"),
+                        output_hash=publication_set.get("publication_set_sha256"),
                     )
                     self._log_event(
                         "run_completed",
@@ -119,6 +262,9 @@ class DailyFinalizeService:
                         "retry_count": attempt,
                         "readiness": readiness,
                         "stage_manifest": stage,
+                        "calendar_publication": calendar_publication["manifest"],
+                        "publication_set": publication_set,
+                        "daily_run": daily_snapshot,
                         "reconciliation": {
                             "row_count": result.get("row_count"),
                             "daily_count": result.get("daily_count"),
@@ -135,6 +281,9 @@ class DailyFinalizeService:
                     Exception
                 ) as exc:  # pragma: no cover - exercised by failure integration tests
                     last_error = f"{type(exc).__name__}: {exc}"
+                    self._cleanup_staging(
+                        self.output_root / f".publish-{run_id}-{attempt}"
+                    )
                     if attempt < retry_limit and retry_delay_seconds > 0:
                         time.sleep(retry_delay_seconds)
             self._record_run(
@@ -193,20 +342,104 @@ class DailyFinalizeService:
         ) as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
+    def _promote_publication_pair(
+        self,
+        staging_root: Path,
+        *,
+        publication: dict[str, Any],
+        calendar_publication: dict[str, Any],
+        generated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote one staged performance/calendar generation as a bound set."""
+
+        performance_manifest = publication["manifest"]
+        calendar_manifest = calendar_publication["manifest"]
+        canonical_hash = str(performance_manifest.get("input_hash_sha256") or "")
+        if (
+            not canonical_hash
+            or calendar_manifest.get("canonical_input_hash_sha256") != canonical_hash
+            or calendar_manifest.get("performance_payload_sha256")
+            != performance_manifest.get("payload_sha256")
+        ):
+            raise ValueError("performance/calendar publication hashes are not bound")
+        staged = {
+            "performance.json": Path(publication["snapshot_path"]),
+            "performance.json.manifest.json": Path(publication["manifest_path"]),
+            "calendar.json": Path(calendar_publication["calendar_path"]),
+            "calendar.json.manifest.json": Path(calendar_publication["manifest_path"]),
+        }
+        if any(not path.is_file() or path.parent != staging_root for path in staged.values()):
+            raise ValueError("publication pair is not fully staged")
+        destination = self.output_root / "data"
+        destination.mkdir(parents=True, exist_ok=True)
+        for name, source in staged.items():
+            source.replace(destination / name)
+        publication["snapshot_path"] = str(destination / "performance.json")
+        publication["manifest_path"] = str(
+            destination / "performance.json.manifest.json"
+        )
+        calendar_publication["calendar_path"] = str(destination / "calendar.json")
+        calendar_publication["manifest_path"] = str(
+            destination / "calendar.json.manifest.json"
+        )
+        publication_set = {
+            "schema_version": "dawnstrike.publication_set.v1",
+            "market_date": performance_manifest.get("market_date"),
+            "canonical_input_hash_sha256": canonical_hash,
+            "performance_payload_sha256": performance_manifest.get("payload_sha256"),
+            "calendar_payload_sha256": calendar_manifest.get("payload_sha256"),
+            "performance_manifest_id": performance_manifest.get("manifest_id"),
+            "calendar_manifest_id": calendar_manifest.get("manifest_id"),
+            "generated_at": generated_at or _utc_now(),
+            "research_only": True,
+            "live_trading_enabled": False,
+        }
+        publication_set["publication_set_sha256"] = _publication_pair_hash(
+            performance_manifest,
+            calendar_manifest,
+        )
+        _atomic_write_json(destination / "publication-set.json", publication_set)
+        staging_root.rmdir()
+        return publication_set
+
+    @staticmethod
+    def _cleanup_staging(staging_root: Path) -> None:
+        if not staging_root.is_dir():
+            return
+        for name in (
+            "performance.json",
+            "performance.json.manifest.json",
+            "calendar.json",
+            "calendar.json.manifest.json",
+        ):
+            path = staging_root / name
+            if path.is_file():
+                path.unlink()
+        try:
+            staging_root.rmdir()
+        except OSError:
+            pass
+
     def _write_readiness(
         self,
         reconciliation: dict[str, Any],
         publication: dict[str, Any],
+        calendar_publication: dict[str, Any],
         market_date: str,
         upstream_status: str = "not_recorded",
+        publication_timestamp: str | None = None,
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
+        calendar_status = str(
+            calendar_publication["manifest"].get("status") or "degraded"
+        )
         safety_evidence = publication["manifest"].get("safety_evidence")
         safety_verified = _safety_is_verified(safety_evidence)
         status = (
             "ready"
             if (
                 snapshot_status in {"complete", "no_trade"}
+                and calendar_status in {"complete", "no_trade"}
                 and upstream_status == "complete"
                 and safety_verified
             )
@@ -218,11 +451,25 @@ class DailyFinalizeService:
             "status": status,
             "http_status": 200 if status == "ready" else 503,
             "snapshot_status": snapshot_status,
+            "calendar_status": calendar_status,
             "upstream_status": upstream_status,
             "safety_status": "verified" if safety_verified else "blocked_or_unknown",
             "reconciliation_status": reconciliation.get("status"),
             "input_hash_sha256": reconciliation.get("input_hash_sha256"),
             "payload_sha256": publication["manifest"].get("payload_sha256"),
+            "calendar_payload_sha256": calendar_publication["manifest"].get(
+                "payload_sha256"
+            ),
+            "publication_set_sha256": _publication_pair_hash(
+                publication["manifest"],
+                calendar_publication["manifest"],
+            ),
+            "source_data_watermark": market_date,
+            "outcome_coverage": _coverage_summary(
+                reconciliation.get("daily"),
+                market_date,
+            ),
+            "publication_timestamp": publication_timestamp or _utc_now(),
             "live_trading_enabled": False,
             "research_only": True,
             "reason": "complete_or_explicit_no_trade_with_upstream_success_and_safety"
@@ -230,8 +477,39 @@ class DailyFinalizeService:
             else "missing_or_degraded_upstream_truth_or_safety",
         }
         path = self.output_root / "readiness.json"
-        path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+        _atomic_write_json(path, payload)
         return payload
+
+    def _record_shared_stage(
+        self,
+        *,
+        market_date: str,
+        stage_name: str,
+        status: str,
+        exit_code: int,
+        output_hash: str | None = None,
+        source_data_watermark: str | None = None,
+        error_code: str | None = None,
+        error_detail: str | None = None,
+        payload: dict[str, Any] | None = None,
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        return record_daily_stage(
+            db_path=self.db_path,
+            market_date=market_date,
+            stage_name=stage_name,
+            status=status,
+            runtime_root=self.runtime_root,
+            state_root=self.state_root,
+            release_sha=self.release_sha,
+            exit_code=exit_code,
+            output_hash_sha256=output_hash,
+            source_data_watermark=source_data_watermark,
+            error_code=error_code,
+            error_detail=error_detail,
+            payload=payload,
+            observed_at=observed_at,
+        )
 
     def _read_upstream_stage(self, market_date: str) -> str:
         """Read the latest local EOD automation result without mutating it."""
@@ -247,6 +525,44 @@ class DailyFinalizeService:
         chain exits.  Absence is intentionally not inferred as success.
         """
 
+        store = SQLiteScanStore(self.db_path)
+        store.initialize()
+        shared_id = shared_daily_run_id(market_date, self.release_sha)
+        shared_rows = store.load_daily_run_stages(
+            run_id=shared_id,
+            limit=10_000,
+        )
+        upstream_names = {
+            "morning_collection",
+            "ranking_delivery",
+            "intraday_monitor",
+            "eod_outcome_capture",
+            "paper_reconciliation",
+        }
+        if any(
+            str(row.get("stage_name") or "") in upstream_names
+            for row in shared_rows
+        ):
+            shared = upstream_readiness(store, run_id=shared_id)
+            latest = _latest_shared_stage_statuses(shared_rows)
+            legacy_map = {
+                "source_collection": "morning_collection",
+                "candidate_normalization": "morning_collection",
+                "selection": "ranking_delivery",
+                "delivery": "ranking_delivery",
+                "paper_fills": "intraday_monitor",
+                "outcome_capture": "eod_outcome_capture",
+            }
+            stage_map = {
+                legacy_name: _legacy_stage_status(
+                    latest.get(shared_name)
+                )
+                for legacy_name, shared_name in legacy_map.items()
+            }
+            return (
+                "complete" if shared.get("ready") is True else "failed",
+                stage_map,
+            )
         try:
             with sqlite3.connect(self.db_path) as connection:
                 exists = connection.execute(
@@ -294,18 +610,30 @@ class DailyFinalizeService:
         self,
         reconciliation: dict[str, Any],
         publication: dict[str, Any],
+        calendar_publication: dict[str, Any],
         readiness: dict[str, Any],
         retry_count: int,
         upstream_stages: dict[str, str] | None = None,
+        generated_at: str | None = None,
     ) -> dict[str, Any]:
         input_hash = reconciliation.get("input_hash_sha256")
         canonical_output_hash = reconciliation.get("output_hash_sha256")
-        output_hash = publication["manifest"].get("payload_sha256")
+        performance_output_hash = publication["manifest"].get("payload_sha256")
+        calendar_output_hash = calendar_publication["manifest"].get(
+            "payload_sha256"
+        )
+        output_hash = _publication_pair_hash(
+            publication["manifest"],
+            calendar_publication["manifest"],
+        )
         upstream_status = str(readiness.get("upstream_status") or "not_recorded")
         reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
+        calendar_status = str(
+            calendar_publication["manifest"].get("status") or "degraded"
+        )
         readiness_status = str(readiness.get("status") or "not_ready")
-        generated_at = _utc_now()
+        generated_at = generated_at or _utc_now()
         upstream_stages = upstream_stages or {}
         upstream_stage_names = {
             "source_collection",
@@ -398,13 +726,27 @@ class DailyFinalizeService:
                 snapshot_status,
                 "dawnstrike-public-snapshot-v1",
                 input_hash=input_hash,
-                output_hash=output_hash,
+                output_hash=performance_output_hash,
                 retry_count=retry_count,
                 generated_at=generated_at,
                 next_action=(
                     "Do not promote until the snapshot is complete or explicit no-trade."
                     if snapshot_status not in {"complete", "no_trade"}
                     else "Run artifact and browser verification."
+                ),
+            ),
+            self._stage_record(
+                "public_calendar",
+                calendar_status,
+                "dawnstrike-public-calendar-v1",
+                input_hash=publication["manifest"].get("input_hash_sha256"),
+                output_hash=calendar_output_hash,
+                retry_count=retry_count,
+                generated_at=generated_at,
+                next_action=(
+                    "Do not promote until Calendar is complete or explicit no-trade."
+                    if calendar_status not in {"complete", "no_trade"}
+                    else "Verify Calendar values match the canonical snapshot."
                 ),
             ),
             self._stage_record(
@@ -454,14 +796,15 @@ class DailyFinalizeService:
             "artifacts": [
                 "data/performance.json",
                 "data/performance.json.manifest.json",
+                "data/calendar.json",
+                "data/calendar.json.manifest.json",
+                "data/publication-set.json",
                 "readiness.json",
             ],
             "research_only": True,
             "live_trading_enabled": False,
         }
-        (self.output_root / "stage-manifest.json").write_text(
-            json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8"
-        )
+        _atomic_write_json(self.output_root / "stage-manifest.json", payload)
         return payload
 
     @staticmethod
@@ -529,7 +872,7 @@ class DailyFinalizeService:
                     status,
                     stage,
                     now or _utc_now(),
-                    _utc_now() if status not in {"IN_PROGRESS"} else None,
+                    (now or _utc_now()) if status not in {"IN_PROGRESS"} else None,
                     str(input_hash) if input_hash else None,
                     str(output_hash) if output_hash else None,
                     retry_count,
@@ -550,10 +893,37 @@ class DailyFinalizeService:
             "reason": reason,
             "readiness": {"status": "not_ready", "http_status": http_status},
         }
-        (self.output_root / "readiness.json").write_text(
-            json.dumps(payload["readiness"], sort_keys=True, indent=2), encoding="utf-8"
-        )
+        _atomic_write_json(self.output_root / "readiness.json", payload["readiness"])
         return payload
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _publication_pair_hash(
+    performance_manifest: dict[str, Any],
+    calendar_manifest: dict[str, Any],
+) -> str:
+    payload = {
+        "market_date": performance_manifest.get("market_date"),
+        "canonical_input_hash_sha256": performance_manifest.get(
+            "input_hash_sha256"
+        ),
+        "performance_payload_sha256": performance_manifest.get("payload_sha256"),
+        "calendar_payload_sha256": calendar_manifest.get("payload_sha256"),
+        "performance_manifest_id": performance_manifest.get("manifest_id"),
+        "calendar_manifest_id": calendar_manifest.get("manifest_id"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _utc_now() -> str:
@@ -571,6 +941,87 @@ def _stage_status(domain_status: str) -> str:
     if normalized in {"not_recorded", "missing", "not_started", "unknown"}:
         return "NOT_STARTED"
     return "IN_PROGRESS"
+
+
+def _daily_stage_status(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {
+        "complete",
+        "completed",
+        "no_trade",
+        "ready",
+        "success",
+    }:
+        return "COMPLETE" if normalized != "no_trade" else "NO_TRADE"
+    return "DEGRADED"
+
+
+def _latest_shared_stage_statuses(
+    rows: list[dict[str, Any]],
+) -> dict[str, str]:
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        stage = str(row.get("stage_name") or "")
+        prior = latest.get(stage)
+        if prior is None or int(row.get("attempt_no") or 0) >= int(
+            prior.get("attempt_no") or 0
+        ):
+            latest[stage] = row
+    return {
+        stage: str(row.get("status") or "")
+        for stage, row in latest.items()
+    }
+
+
+def _legacy_stage_status(value: str | None) -> str:
+    if value in SUCCESS_STATUSES:
+        return "complete"
+    if value in FAILURE_STATUSES:
+        return "failed"
+    return "not_recorded"
+
+
+def _public_daily_run(snapshot: dict[str, Any]) -> dict[str, Any]:
+    run = snapshot.get("run")
+    last_success = snapshot.get("last_fully_successful_run")
+    run_fields = (
+        "run_id",
+        "market_date",
+        "release_sha",
+        "runtime_root",
+        "state_root",
+        "scheduler_version",
+        "status",
+        "current_stage",
+        "started_at",
+        "completed_at",
+        "last_attempted_at",
+        "failed_stage",
+        "failure_reason",
+        "source_data_watermark",
+        "publication_timestamp",
+        "deployed_source_sha",
+        "deployed_build_sha",
+        "research_only",
+        "broker_execution_enabled",
+    )
+
+    def select(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        return {field: value.get(field) for field in run_fields}
+
+    return {
+        "run": select(run),
+        "latest_stage_statuses": snapshot.get(
+            "latest_stage_statuses",
+            {},
+        ),
+        "upstream": snapshot.get("upstream"),
+        "last_fully_successful_run": select(last_success),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
 
 
 def _coverage_summary(value: object, market_date: str | None = None) -> dict[str, object]:

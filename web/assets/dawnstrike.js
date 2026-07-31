@@ -11,7 +11,19 @@ const state = {
   data: null,
   readiness: null,
   manifest: null,
+  calendar: null,
+  calendarManifest: null,
+  publicationSet: null,
   stage: null,
+  calendarMonth: null,
+  calendarSelectedDate: null,
+  calendarFilters: {
+    cohort: "",
+    strategy_id: "",
+    strategy_version: "",
+    execution_policy_version: "",
+    account_id: "",
+  },
   performancePage: 0,
   researchPage: 0,
 };
@@ -24,6 +36,22 @@ document.querySelectorAll("[data-table][data-direction]").forEach((button) => {
   button.addEventListener("click", () => changePage(button.dataset.table, Number(button.dataset.direction)));
 });
 
+document.getElementById("calendar-previous-month")?.addEventListener("click", () => changeCalendarMonth(-1));
+document.getElementById("calendar-next-month")?.addEventListener("click", () => changeCalendarMonth(1));
+[
+  ["calendar-cohort-filter", "cohort"],
+  ["calendar-strategy-filter", "strategy_id"],
+  ["calendar-version-filter", "strategy_version"],
+  ["calendar-policy-filter", "execution_policy_version"],
+  ["calendar-account-filter", "account_id"],
+].forEach(([id, key]) => {
+  document.getElementById(id)?.addEventListener("change", (event) => {
+    state.calendarFilters[key] = event.target.value;
+    state.calendarSelectedDate = null;
+    renderCalendar();
+  });
+});
+
 function showView(name) {
   document.querySelectorAll(".page-view").forEach((view) => {
     view.classList.toggle("is-visible", view.id === `view-${name}`);
@@ -32,6 +60,9 @@ function showView(name) {
     link.classList.toggle("is-active", link.dataset.view === name);
     link.setAttribute("aria-pressed", String(link.dataset.view === name));
   });
+  if (name && window.location.hash !== `#${name}`) {
+    window.history.replaceState(null, "", `#${name}`);
+  }
   document.getElementById(`view-${name}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -54,17 +85,27 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage] = await Promise.all([
+    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/stage-manifest.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/calendar.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/calendar.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
     state.manifest = manifest.payload;
+    state.calendar = calendar.payload;
+    state.calendarManifest = calendarManifest.payload;
+    state.publicationSet = publicationSet.payload;
     state.stage = stage.payload;
+    state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
+    initializeCalendarFilters();
     render();
+    const requestedView = window.location.hash.slice(1);
+    if (["overview", "calendar", "performance", "research", "system"].includes(requestedView)) showView(requestedView);
   } catch (error) {
     document.getElementById("header-status").textContent = "Snapshot unavailable";
     document.getElementById("app-alert").textContent = "The public snapshot could not be loaded. No return is being shown.";
@@ -76,9 +117,11 @@ function render() {
   const data = state.data || { daily: [], rows: [] };
   const daily = Array.isArray(data.daily) ? data.daily : [];
   const rows = Array.isArray(data.rows) ? data.rows : [];
-  const official = daily.filter((item) => item.cohort === "official_forward_paper");
+  const official = daily
+    .filter((item) => item.cohort === "official_forward_paper")
+    .sort((a, b) => String(b.market_date).localeCompare(String(a.market_date)) || Number(Boolean(b.account_id)) - Number(Boolean(a.account_id)));
   const latest = official[0];
-  const missing = numberOrZero(latest?.missing_outcome_count);
+  const missing = numberOrNull(latest?.missing_outcome_count);
   document.getElementById("header-status").textContent = latest ? `Updated ${latest.market_date}` : "No paper result yet";
   document.getElementById("footer-date").textContent = latest ? `Latest record ${latest.market_date}` : "Snapshot date pending";
   document.getElementById("kpi-date").textContent = latest?.market_date || "Not reported";
@@ -93,7 +136,7 @@ function render() {
   document.getElementById("kpi-open").textContent = latest?.unrealized_trade_count == null ? "Not reported" : String(latest.unrealized_trade_count);
   const coverage = latest?.coverage?.coverage_pct;
   document.getElementById("kpi-coverage").innerHTML = coverage == null ? '<span class="value-muted">Not reported</span>' : `${Number(coverage).toFixed(1)}%`;
-  document.getElementById("kpi-coverage-note").textContent = `${missing} unresolved outcome${missing === 1 ? "" : "s"} excluded`;
+  document.getElementById("kpi-coverage-note").textContent = missing == null ? "Unresolved denominator not reported" : `${missing} unresolved outcome${missing === 1 ? "" : "s"} excluded`;
   const readinessStatus = state.readiness?.payload?.status;
   document.getElementById("kpi-system").textContent = readinessStatus === "ready" ? "Ready" : readinessStatus === "not_ready" ? "Not ready" : "Not reported";
   document.getElementById("kpi-system-note").textContent = state.readiness?.payload?.http_status ? `Readiness HTTP ${state.readiness.payload.http_status}` : "Readiness is separate from liveness";
@@ -105,6 +148,7 @@ function render() {
   renderLedger(rows, latest);
   renderCurve(official);
   renderResearchCohorts(daily);
+  renderCalendar();
   renderSystem(state.readiness, state.manifest, state.stage, data);
 }
 
@@ -121,10 +165,10 @@ function renderOverview(official, latest) {
     summary.innerHTML = `The latest official paper day was <strong>${escapeHtml(latest.market_date)}</strong>, with a net after-cost result of <strong>${formatPercent(latest.return_pct)}</strong>.`;
   }
   const bars = document.getElementById("paper-days");
-  const recent = official.slice(0, 5).reverse();
-  const scale = Math.max(...recent.map((item) => Math.abs(numberOrZero(item.gross_return_pct))), 1);
+  const recent = official.filter((item) => numberOrNull(item.gross_return_pct) != null).slice(0, 5).reverse();
+  const scale = Math.max(...recent.map((item) => Math.abs(numberOrNull(item.gross_return_pct))), 1);
   bars.innerHTML = recent.length ? recent.map((item) => {
-    const value = numberOrZero(item.gross_return_pct);
+    const value = numberOrNull(item.gross_return_pct);
     const height = Math.max(5, Math.round(Math.abs(value) / scale * 78));
     const label = `${shortDate(item.market_date)}: ${formatPercentText(item.gross_return_pct)}`;
     return `<div class="mini-bar"><span class="mini-bar-fill ${value < 0 ? "negative" : ""}" style="height:${height}px" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span><span class="mini-bar-label">${escapeHtml(shortDate(item.market_date))}</span></div>`;
@@ -147,10 +191,10 @@ function renderPerformance(daily) {
     <td>${escapeHtml(item.market_date || "Not reported")}</td>
     <td><span class="cohort-label ${item.cohort === "official_forward_paper" ? "official" : ""}">${escapeHtml(COHORTS[item.cohort] || item.cohort || "Not reported")}</span></td>
     <td>${statusChip(item.status)}</td>
-    <td class="${numberOrZero(item.gross_return_pct) < 0 ? "value-bad" : ""}">${formatPercent(item.gross_return_pct)}</td>
-    <td class="${numberOrZero(item.return_pct) < 0 ? "value-bad" : "value-good"}">${formatPercent(item.return_pct)}</td>
+    <td class="${valueClass(item.gross_return_pct)}">${formatPercent(item.gross_return_pct)}</td>
+    <td class="${valueClass(item.return_pct)}">${formatPercent(item.return_pct)}</td>
     <td>${formatPercent(item.excess_return_pct)}</td>
-    <td>${numberOrZero(item.unrealized_trade_count) + numberOrZero(item.missing_outcome_count) + numberOrZero(item.quarantined_count)}</td>
+    <td>${sumReportedCounts(item.unrealized_trade_count, item.missing_outcome_count, item.quarantined_count)}</td>
   </tr>`).join("");
   updatePager("performance", start, visible.length, daily.length);
 }
@@ -224,6 +268,277 @@ function renderResearch(rows) {
   updatePager("research", start, visible.length, research.length);
 }
 
+function initializeCalendarFilters() {
+  const records = calendarRecords();
+  if (!records.length) return;
+  const official = records.filter((record) => record.cohort === "official_forward_paper");
+  const cohortPool = official.length ? official : records;
+  const v5 = cohortPool.filter((record) => record.strategy_id === "alphaops_v5");
+  const preferred = v5.at(-1) || cohortPool.at(-1);
+  state.calendarFilters = {
+    cohort: preferred?.cohort || "",
+    strategy_id: preferred?.strategy_id || "",
+    strategy_version: preferred?.strategy_version || "",
+    execution_policy_version: preferred?.execution_policy_version || "",
+    account_id: preferred?.account_id || "",
+  };
+}
+
+function calendarRecords() {
+  return Array.isArray(state.calendar?.days)
+    ? state.calendar.days.flatMap((day) => Array.isArray(day.records) ? day.records : [])
+    : [];
+}
+
+function populateCalendarFilters() {
+  const records = calendarRecords();
+  const definitions = [
+    ["calendar-cohort-filter", "cohort", records, "All cohorts"],
+    ["calendar-strategy-filter", "strategy_id", records.filter((row) => !state.calendarFilters.cohort || row.cohort === state.calendarFilters.cohort), "All strategies"],
+    ["calendar-version-filter", "strategy_version", records.filter((row) => (!state.calendarFilters.cohort || row.cohort === state.calendarFilters.cohort) && (!state.calendarFilters.strategy_id || row.strategy_id === state.calendarFilters.strategy_id)), "All versions"],
+    ["calendar-policy-filter", "execution_policy_version", records.filter((row) => (!state.calendarFilters.cohort || row.cohort === state.calendarFilters.cohort) && (!state.calendarFilters.strategy_id || row.strategy_id === state.calendarFilters.strategy_id) && (!state.calendarFilters.strategy_version || row.strategy_version === state.calendarFilters.strategy_version)), "All policies"],
+    ["calendar-account-filter", "account_id", records.filter((row) => (!state.calendarFilters.cohort || row.cohort === state.calendarFilters.cohort) && (!state.calendarFilters.strategy_id || row.strategy_id === state.calendarFilters.strategy_id)), "All accounts"],
+  ];
+  definitions.forEach(([id, key, pool, allLabel]) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+    const values = [...new Set(pool.map((row) => String(row[key] || "")).filter(Boolean))].sort();
+    const selected = values.includes(state.calendarFilters[key]) ? state.calendarFilters[key] : "";
+    state.calendarFilters[key] = selected;
+    node.innerHTML = `<option value="">${escapeHtml(allLabel)}</option>${values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(calendarFilterLabel(key, value))}</option>`).join("")}`;
+    node.value = selected;
+  });
+}
+
+function calendarFilterLabel(key, value) {
+  if (key === "cohort") return COHORTS[value] || humanizeIdentifier(value);
+  if (key === "strategy_id") return value === "alphaops_v5" ? "AlphaOps V5" : humanizeIdentifier(value);
+  if (key === "account_id") return value === "alphaops_v5_simulated" ? "V5 · $100k simulated" : humanizeIdentifier(value);
+  return value;
+}
+
+function renderCalendar() {
+  const calendar = state.calendar || {};
+  const allDays = Array.isArray(calendar.days) ? calendar.days : [];
+  populateCalendarFilters();
+  const label = document.getElementById("calendar-month-label");
+  const grid = document.getElementById("calendar-grid");
+  if (!allDays.length || !state.calendarMonth) {
+    label.textContent = "No calendar published";
+    grid.innerHTML = '<div class="calendar-empty">No canonical calendar is available. No return is being inferred.</div>';
+    renderCalendarSummary([]);
+    renderCalendarDetail(null, []);
+    setStatus("calendar-integrity", "Calendar unavailable", "DEGRADED");
+    return;
+  }
+  const integrity = calendarIntegrity();
+  setStatus("calendar-integrity", integrity.label, integrity.ok ? "COMPLETE" : "DEGRADED");
+  label.textContent = monthLabel(state.calendarMonth);
+  const availableMonths = [...new Set(allDays.map((day) => String(day.month || "")))].filter(Boolean).sort();
+  document.getElementById("calendar-previous-month").disabled = state.calendarMonth <= availableMonths[0];
+  document.getElementById("calendar-next-month").disabled = state.calendarMonth >= availableMonths.at(-1);
+  const lookup = new Map(allDays.map((day) => [day.date, day]));
+  const monthDateKeys = datesForMonth(state.calendarMonth);
+  const leading = monthDateKeys.length ? mondayOffset(monthDateKeys[0]) : 0;
+  const cells = Array.from({ length: leading }, () => '<span class="calendar-spacer" aria-hidden="true"></span>');
+  monthDateKeys.forEach((dateKey) => {
+    const day = lookup.get(dateKey);
+    const matches = filteredCalendarRecords(day);
+    const record = matches.length === 1 ? matches[0] : null;
+    const status = matches.length > 1 ? "PARTIAL" : record?.status || day?.status || "UNAVAILABLE";
+    const value = record?.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
+    const selected = dateKey === state.calendarSelectedDate;
+    const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
+    const returnText = value == null ? "—" : formatPercentText(value);
+    const statusText = matches.length > 1 ? "Refine filters" : calendarStatusLabel(status);
+    const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `Net return ${returnText}`}`;
+    cells.push(`<button type="button" role="gridcell" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-selected="${selected}">
+      <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
+      <strong>${escapeHtml(returnText)}</strong>
+      <small>${escapeHtml(statusText)}</small>
+      <i aria-hidden="true"></i>
+    </button>`);
+  });
+  grid.innerHTML = cells.join("");
+  grid.querySelectorAll("[data-calendar-date]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.calendarSelectedDate = button.dataset.calendarDate;
+      renderCalendar();
+    });
+  });
+  const currentDays = allDays.filter((day) => day.month === state.calendarMonth);
+  const currentRecords = currentDays.flatMap((day) => filteredCalendarRecords(day));
+  renderCalendarSummary(currentRecords);
+  if (!state.calendarSelectedDate || !state.calendarSelectedDate.startsWith(state.calendarMonth)) {
+    const preferred = currentDays.slice().reverse().find((day) => filteredCalendarRecords(day).length === 1)
+      || currentDays.at(-1);
+    state.calendarSelectedDate = preferred?.date || null;
+    if (state.calendarSelectedDate) {
+      const selectedButton = grid.querySelector(`[data-calendar-date="${state.calendarSelectedDate}"]`);
+      selectedButton?.classList.add("selected");
+      selectedButton?.setAttribute("aria-selected", "true");
+    }
+  }
+  const selectedDay = lookup.get(state.calendarSelectedDate);
+  renderCalendarDetail(selectedDay, filteredCalendarRecords(selectedDay));
+}
+
+function filteredCalendarRecords(day) {
+  if (!day || !Array.isArray(day.records)) return [];
+  return day.records.filter((record) => Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record[key] || "") === value));
+}
+
+function renderCalendarSummary(records) {
+  const months = Array.isArray(state.calendar?.months) ? state.calendar.months : [];
+  const summaries = months.filter((row) => row.month === state.calendarMonth && Object.entries(state.calendarFilters).every(([key, value]) => !value || String(row[key] || "") === value));
+  const summary = summaries.length === 1 ? summaries[0] : null;
+  document.getElementById("calendar-summary-return").innerHTML = summary ? formatPercent(summary.net_return_pct) : '<span class="value-muted">Not reported</span>';
+  document.getElementById("calendar-summary-excess").innerHTML = summary ? formatPercent(summary.excess_return_pct) : '<span class="value-muted">Not reported</span>';
+  document.getElementById("calendar-summary-benchmark").textContent = summary?.benchmark_return_pct == null ? "Benchmark not reported" : `Benchmark ${formatPercentText(summary.benchmark_return_pct)}`;
+  document.getElementById("calendar-summary-coverage").textContent = summary?.coverage_pct == null ? "Not reported" : `${Number(summary.coverage_pct).toFixed(1)}%`;
+  document.getElementById("calendar-summary-denominator").textContent = summary ? `${summary.eligible_day_count} eligible / ${summary.expected_market_day_count} expected market days` : summaries.length > 1 ? "Refine filters to one exact contract" : "No exact monthly denominator";
+  document.getElementById("calendar-summary-days").textContent = summary ? `${summary.eligible_day_count} / ${summary.expected_market_day_count}` : records.length ? `${records.length} observed rows` : "Not reported";
+  document.getElementById("calendar-summary-no-trades").textContent = summary ? `${summary.no_trade_day_count} explicit no-trade day${summary.no_trade_day_count === 1 ? "" : "s"}` : "No-trade days not reported";
+}
+
+function renderCalendarDetail(day, records) {
+  const title = document.getElementById("calendar-detail-title");
+  const note = document.getElementById("calendar-detail-note");
+  const metrics = document.getElementById("calendar-detail-metrics");
+  const reasons = document.getElementById("calendar-detail-reasons");
+  const trades = document.getElementById("calendar-detail-trades");
+  if (!day) {
+    title.textContent = "Choose a date";
+    note.textContent = "Select a calendar day to inspect its return basis, account equation, selections, and source lineage.";
+    metrics.innerHTML = "";
+    reasons.innerHTML = "";
+    trades.innerHTML = "";
+    setStatus("calendar-detail-status", "Not selected", "");
+    return;
+  }
+  title.textContent = formatCalendarDate(day.date);
+  if (records.length > 1) {
+    setStatus("calendar-detail-status", "Refine filters", "PARTIAL");
+    note.textContent = `${records.length} canonical contracts match. Choose one cohort, strategy, version, policy, and account; Dawnstrike will not blend them.`;
+    metrics.innerHTML = "";
+    reasons.innerHTML = "";
+    trades.innerHTML = "";
+    return;
+  }
+  const record = records[0];
+  if (!record) {
+    const closed = day.market_session_status === "closed";
+    setStatus("calendar-detail-status", closed ? "Market closed" : "Missing", closed ? "" : "PARTIAL");
+    note.textContent = closed ? day.market_session_reason || "The market was closed." : "No canonical observation exists for this market day. It is not a zero-return day.";
+    metrics.innerHTML = detailRows([
+      ["Market session", closed ? "Closed" : day.market_session_status || "Not reported", closed],
+      ["Return", "Not reported", false],
+      ["Observed zero", "No", true],
+    ]);
+    reasons.innerHTML = "";
+    trades.innerHTML = "";
+    return;
+  }
+  setStatus("calendar-detail-status", calendarStatusLabel(record.status), record.status);
+  note.textContent = record.eligible_for_return
+    ? `${record.return_basis === "account_equity_identity_after_external_flows" ? "Account return" : "Canonical return"} is eligible under ${record.execution_policy_version}.`
+    : "The return is withheld until the required outcome, account, and source evidence is complete.";
+  metrics.innerHTML = detailRows([
+    ["Net return", formatPercentText(record.net_return_pct), record.net_return_pct != null],
+    ["Gross observed", formatPercentText(record.gross_return_pct), record.gross_return_pct != null],
+    ["Benchmark", formatPercentText(record.benchmark_return_pct), record.benchmark_return_pct != null],
+    ["Excess", formatPercentText(record.excess_return_pct), record.excess_return_pct != null],
+    ["Beginning equity", formatMoneyText(record.opening_equity_cents), record.opening_equity_cents != null],
+    ["External flow", formatMoneyText(record.external_flow_cents), record.external_flow_cents != null],
+    ["Ending equity", formatMoneyText(record.ending_equity_cents), record.ending_equity_cents != null],
+    ["Accounting delta", formatMoneyText(record.accounting_delta_cents), record.accounting_delta_cents === 0],
+    ["Activity", `${record.entries} entered · ${record.exits} exited · ${record.open_positions} open`, true],
+    ["Coverage", coverageText(record.coverage), record.coverage?.missing_count === 0],
+  ]);
+  reasons.innerHTML = Array.isArray(record.missing_reasons) && record.missing_reasons.length
+    ? `<h4>Why it is not complete</h4><ul>${record.missing_reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
+    : "";
+  const details = Array.isArray(record.details) ? record.details : [];
+  trades.innerHTML = details.length ? `<h4>Selections and outcomes</h4>${details.map((detail) => `<article class="calendar-trade-card">
+    <div><strong>${escapeHtml(detail.ticker || "Account")}</strong><span>${escapeHtml(detail.telegram_selection_tier || detail.record_status || "Not reported")}</span></div>
+    <dl>
+      <dt>Outcome</dt><dd>${escapeHtml(labelForStatus(detail.record_status))}</dd>
+      <dt>Net result</dt><dd>${formatPercentText(detail.net_return_pct)}</dd>
+      <dt>Catalyst</dt><dd>${escapeHtml(detail.catalyst || "Not reported")}</dd>
+      <dt>Source lineage</dt><dd>${Array.isArray(detail.source_lineage) && detail.source_lineage.length ? `${detail.source_lineage.length} reference${detail.source_lineage.length === 1 ? "" : "s"}` : "Not reported"}</dd>
+    </dl>
+    ${detail.block_or_veto_reasons?.length ? `<p>${detail.block_or_veto_reasons.map(escapeHtml).join(" · ")}</p>` : ""}
+  </article>`).join("")}` : '<p class="muted">No ticker-level row is attached to this account day.</p>';
+}
+
+function changeCalendarMonth(direction) {
+  if (!state.calendarMonth || ![-1, 1].includes(direction)) return;
+  const available = [...new Set((state.calendar?.days || []).map((day) => day.month))].filter(Boolean).sort();
+  const index = available.indexOf(state.calendarMonth);
+  const next = available[index + direction];
+  if (!next) return;
+  state.calendarMonth = next;
+  state.calendarSelectedDate = null;
+  renderCalendar();
+}
+
+function calendarIntegrity() {
+  const calendar = state.calendar || {};
+  const manifest = state.calendarManifest || {};
+  const publication = state.publicationSet || {};
+  const ok = Boolean(
+    calendar.canonical_input_hash_sha256
+    && calendar.canonical_input_hash_sha256 === manifest.canonical_input_hash_sha256
+    && calendar.canonical_input_hash_sha256 === publication.canonical_input_hash_sha256
+    && manifest.payload_sha256 === publication.calendar_payload_sha256
+    && calendar.performance_payload_sha256 === publication.performance_payload_sha256
+  );
+  return { ok, label: ok ? "Canonical hashes match" : "Integrity not verified" };
+}
+
+function datesForMonth(month) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  if (!year || !monthNumber) return [];
+  const count = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  return Array.from({ length: count }, (_, index) => `${year}-${String(monthNumber).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`);
+}
+
+function mondayOffset(dateKey) {
+  const day = new Date(`${dateKey}T12:00:00Z`).getUTCDay();
+  return (day + 6) % 7;
+}
+
+function monthLabel(month) {
+  const date = new Date(`${month}-01T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? month : date.toLocaleDateString([], { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+function formatCalendarDate(value) {
+  const date = new Date(`${value}T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+function calendarStatusLabel(status) {
+  return ({
+    COMPLETE: "Complete",
+    NO_TRADE: "No trade",
+    PARTIAL: "Partial",
+    PENDING: "Pending",
+    MISSING: "Missing",
+    UNAVAILABLE: "Unavailable",
+    UNREALIZED: "Unrealized",
+  }[status] || "Not reported");
+}
+
+function coverageText(coverage) {
+  if (!coverage || coverage.eligible_count == null || coverage.observed_count == null) return "Not reported";
+  return `${coverage.observed_count} observed / ${coverage.eligible_count} eligible`;
+}
+
+function humanizeIdentifier(value) {
+  return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function updatePager(table, start, visibleCount, total) {
   const page = Number(state[`${table}Page`] || 0);
   const status = document.getElementById(`${table}-page-status`);
@@ -237,13 +552,33 @@ function updatePager(table, start, visibleCount, total) {
 function renderSystem(readiness, manifest, stage, data) {
   const readinessPayload = readiness?.payload || {};
   const readinessStatus = readinessPayload.status || "not_reported";
+  const dailyRun = readinessPayload.daily_run || {};
+  const run = dailyRun.run || readinessPayload.last_attempted_run || {};
+  const lastSuccess = dailyRun.last_fully_successful_run || readinessPayload.last_fully_successful_run || {};
+  const scheduler = readinessPayload.scheduler || {};
+  const coverage = readinessPayload.outcome_coverage || {};
   setStatus("system-pill", readinessStatus === "ready" ? "Ready" : "Needs attention", readinessStatus === "ready" ? "COMPLETE" : "DEGRADED");
   setStatus("readiness-status", readinessStatus === "ready" ? "Ready" : "Not ready", readinessStatus === "ready" ? "COMPLETE" : "DEGRADED");
   document.getElementById("readiness-details").innerHTML = detailRows([
     ["Publication", readinessStatus === "ready" ? "Complete" : "Not ready", readinessStatus === "ready"],
     ["HTTP readiness", readinessPayload.http_status ?? "Not reported", readinessPayload.http_status === 200],
+    ["Calendar", readinessPayload.calendar_status || "Not reported", ["complete", "no_trade"].includes(readinessPayload.calendar_status)],
     ["Market date", readinessPayload.market_date || "Not reported", true],
+    ["Last attempted run", run.run_id ? `${run.market_date || "date missing"} · ${run.status || "status missing"}` : "Not reported", Boolean(run.run_id)],
+    ["Last full success", lastSuccess.run_id ? `${lastSuccess.market_date || "date missing"} · ${formatTimestamp(lastSuccess.completed_at)}` : "None recorded", Boolean(lastSuccess.run_id)],
+    ["Current stage", run.current_stage || "Not reported", Boolean(run.current_stage)],
+    ["Failed stage", run.failed_stage ? `${run.failed_stage} · ${run.failure_reason || "reason not reported"}` : "None", !run.failed_stage],
+    ["Source watermark", readinessPayload.source_data_watermark || run.source_data_watermark || "Not reported", Boolean(readinessPayload.source_data_watermark || run.source_data_watermark)],
+    ["Outcome coverage", coverage.coverage_pct == null ? `${coverage.observed_count ?? 0}/${coverage.eligible_count ?? 0}; denominator unavailable` : `${Number(coverage.coverage_pct).toFixed(1)}% · ${coverage.observed_count}/${coverage.eligible_count}`, coverage.missing_count === 0],
+    ["Published", formatTimestamp(readinessPayload.publication_timestamp || run.publication_timestamp), Boolean(readinessPayload.publication_timestamp || run.publication_timestamp)],
+    ["Source SHA", shortHash(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha), Boolean(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha)],
+    ["Build SHA", shortHash(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id), Boolean(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id)],
+    ["Scheduler", scheduler.status || "Not reported", scheduler.status === "LOCAL_VERIFIED"],
+    ["Runtime root", scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root || "Not reported", Boolean(scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root)],
+    ["State root", scheduler.state_root || readinessPayload.state_root || run.state_root || "Not reported", Boolean(scheduler.state_root || readinessPayload.state_root || run.state_root)],
+    ["Next scheduled", formatTimestamp(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run), Boolean(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run)],
     ["Input hash", shortHash(readinessPayload.input_hash_sha256), true],
+    ["Bound set", shortHash(readinessPayload.publication_set_sha256), Boolean(readinessPayload.publication_set_sha256)],
     ["Trading", readinessPayload.live_trading_enabled === false ? "Disabled" : "Not reported", readinessPayload.live_trading_enabled === false],
   ]);
   document.getElementById("manifest-details").innerHTML = detailRows([
@@ -252,9 +587,16 @@ function renderSystem(readiness, manifest, stage, data) {
     ["Payload size", manifest.byte_count ? `${Number(manifest.byte_count).toLocaleString()} raw / ${Number(manifest.compressed_byte_count || 0).toLocaleString()} gzip bytes` : "Not reported", Number(manifest.compressed_byte_count || 0) <= 250 * 1024],
     ["Rows", manifest.row_count ?? "Not reported", true],
     ["Payload hash", shortHash(manifest.payload_sha256), true],
+    ["Calendar hash", shortHash(state.calendarManifest?.payload_sha256), Boolean(state.calendarManifest?.payload_sha256)],
+    ["Hash binding", calendarIntegrity().label, calendarIntegrity().ok],
     ["Generated", formatTimestamp(manifest.generated_at), true],
   ]);
-  const stages = Array.isArray(stage?.stages) ? stage.stages : [];
+  const sharedStages = Object.entries(dailyRun.latest_stage_statuses || {}).map(([name, item]) => ({
+    stage: name,
+    status: item?.status || "NOT_STARTED",
+    next_action: item?.error_detail || item?.error_code || `Attempt ${item?.attempt_no ?? "not reported"}`,
+  }));
+  const stages = sharedStages.length ? sharedStages : (Array.isArray(stage?.stages) ? stage.stages : []);
   document.getElementById("stage-details").innerHTML = stages.length ? stages.map((item) => `<div class="stage-row"><span>${escapeHtml(item.stage || "Not reported")}</span><strong class="${stageClass(item.status)}">${escapeHtml(item.status || "NOT_STARTED")}</strong><small>${escapeHtml(item.next_action || "No next action reported")}</small></div>`).join("") : '<span class="muted">Stage manifest not published.</span>';
   const safety = data.safety_evidence || {};
   document.getElementById("safety-details").innerHTML = detailRows([
@@ -268,12 +610,13 @@ function renderSystem(readiness, manifest, stage, data) {
 function stageClass(status) { return ["LOCAL_VERIFIED", "COMPLETE"].includes(String(status)) ? "good" : ["FAILED", "DEGRADED"].includes(String(status)) ? "bad" : "warn"; }
 
 function detailRows(rows) { return rows.map(([label, value, good]) => `<dt>${escapeHtml(label)}</dt><dd class="${good ? "good" : "bad"}">${escapeHtml(String(value))}</dd>`).join(""); }
-function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "FAILED"].includes(String(status))); }
-function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
-function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
-function formatPercent(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
-function formatPercentText(value) { return value == null || value === "" ? "Not reported" : `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`; }
-function formatMoney(value) { return value == null || value === "" ? '<span class="value-muted">Not reported</span>' : `<span>${Number(value) >= 0 ? "+" : "-"}$${Math.abs(Number(value) / 100).toFixed(2)}</span>`; }
+function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE", "realized"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "FAILED", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED"].includes(String(status))); }
+function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
+function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
+function formatPercent(value) { return numberOrNull(value) == null ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
+function formatPercentText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`; }
+function formatMoney(value) { const numeric = numberOrNull(value); return numeric == null ? '<span class="value-muted">Not reported</span>' : `<span>${numeric >= 0 ? "+" : "-"}$${Math.abs(numeric / 100).toFixed(2)}</span>`; }
+function formatMoneyText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric < 0 ? "-" : ""}$${Math.abs(numeric / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 function returnContext(item) {
   const coverage = item.coverage?.coverage_pct == null ? "coverage not reported" : `coverage ${Number(item.coverage.coverage_pct).toFixed(1)}%`;
   const denominator = item.opening_equity_cents == null ? "opening-equity denominator not reported" : `opening-equity denominator ${formatCents(item.opening_equity_cents)}`;
@@ -281,10 +624,12 @@ function returnContext(item) {
   return `Official paper · daily period ending ${item.market_date || "not reported"} · ${returnBasisLabel(item.return_basis)} · ${costStatusLabel(item.cost_status)} · ${denominator} · ${sample} observed/outcome row${sample === 1 ? "" : "s"} · ${coverage} · as of ${formatTimestamp(item.generated_at || item.calculated_at)}`;
 }
 function formatCents(value) { return `$${(Number(value) / 100).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`; }
-function returnBasisLabel(value) { return ({ net_after_costs: "net after fees/slippage", gross_observed_or_missing: "gross observed; complete net result pending", gross_observed: "gross observed" }[value] || "return basis not reported"); }
+function returnBasisLabel(value) { return ({ account_equity_identity_after_external_flows: "account equity change after explicit external flows", net_after_costs: "net after fees/slippage", gross_observed_or_missing: "gross observed; complete net result pending", gross_observed: "gross observed" }[value] || "return basis not reported"); }
 function costStatusLabel(value) { return ({ complete: "fees/slippage complete", missing_cost_component: "fees/slippage incomplete", unknown: "cost treatment unknown" }[value] || "cost treatment not reported"); }
 function safetyLabel(value) { return value?.state === "verified" ? "Verified" : value?.state === "blocked" ? "Blocked" : "Unknown — not reported"; }
-function numberOrZero(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+function numberOrNull(value) { if (value == null || value === "") return null; const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null; }
+function valueClass(value) { const numeric = numberOrNull(value); return numeric == null ? "value-muted" : numeric < 0 ? "value-bad" : "value-good"; }
+function sumReportedCounts(...values) { const numbers = values.map(numberOrNull); return numbers.some((value) => value == null) ? "Not reported" : String(numbers.reduce((total, value) => total + value, 0)); }
 function shortDate(value) { return value ? value.slice(5) : "—"; }
 function shortHash(value) { return value ? `${String(value).slice(0, 10)}…` : "Not reported"; }
 function formatTimestamp(value) { if (!value) return "Not reported"; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }

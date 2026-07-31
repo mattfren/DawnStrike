@@ -43,10 +43,12 @@ def _write_publishable_fixture(
         path.write_bytes(payload)
     snapshot = root / "data" / "performance.json"
     snapshot_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    canonical_hash = hashlib.sha256(b"canonical-fixture").hexdigest()
     (root / "data" / "performance.json.manifest.json").write_text(
         json.dumps(
             {
                 "status": snapshot_status,
+                "input_hash_sha256": canonical_hash,
                 "payload_sha256": snapshot_hash,
                 "byte_count": snapshot.stat().st_size,
                 "compressed_byte_count": len(
@@ -60,6 +62,45 @@ def _write_publishable_fixture(
     required["data/performance.json.manifest.json"] = (
         root / "data" / "performance.json.manifest.json"
     ).read_bytes()
+    calendar = root / "data" / "calendar.json"
+    calendar.write_bytes(b'{"days":[]}')
+    calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
+    calendar_manifest = {
+        "status": snapshot_status,
+        "canonical_input_hash_sha256": canonical_hash,
+        "performance_payload_sha256": snapshot_hash,
+        "payload_sha256": calendar_hash,
+    }
+    (root / "data" / "calendar.json.manifest.json").write_text(
+        json.dumps(calendar_manifest),
+        encoding="utf-8",
+    )
+    publication_set_hash = hashlib.sha256(
+        f"{snapshot_hash}:{calendar_hash}".encode()
+    ).hexdigest()
+    (root / "data" / "publication-set.json").write_text(
+        json.dumps(
+            {
+                "performance_payload_sha256": snapshot_hash,
+                "calendar_payload_sha256": calendar_hash,
+                "publication_set_sha256": publication_set_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "release-manifest.json").write_text("{}", encoding="utf-8")
+    required.update(
+        {
+            "data/calendar.json": calendar.read_bytes(),
+            "data/calendar.json.manifest.json": (
+                root / "data" / "calendar.json.manifest.json"
+            ).read_bytes(),
+            "data/publication-set.json": (
+                root / "data" / "publication-set.json"
+            ).read_bytes(),
+            "release-manifest.json": (root / "release-manifest.json").read_bytes(),
+        }
+    )
     file_hashes = {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in required
     }
@@ -70,6 +111,7 @@ def _write_publishable_fixture(
                 "source_clean": True,
                 "build_id": "fixture-build",
                 "data_hash_sha256": snapshot_hash,
+                "publication_set_sha256": publication_set_hash,
                 "file_hashes": file_hashes,
             }
         ),

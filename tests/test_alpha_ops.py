@@ -304,6 +304,20 @@ def test_performance_truth_reports_alpha_buckets_and_warnings():
     assert report["can_claim_success"] is False
 
 
+def test_truth_report_keeps_missing_returns_null() -> None:
+    report = build_truth_report(
+        [{"rank": 1, "ticker": "MISS", "missing_outcome_high": True}],
+        real_days_collected=0,
+    )
+
+    assert report["average_return_pct"] is None
+    assert report["median_return_pct"] is None
+    assert report["win_rate_pct"] is None
+    assert report["max_drawdown_pct"] is None
+    assert report["observed_return_count"] == 0
+    assert report["missing_return_count"] == 1
+
+
 def test_outcome_labeler_uses_entry_not_future_high_for_winners():
     label = label_outcome(
         _candidate(scan_id="scan-1", breakout_trigger=5.0, first_target=6.0),
@@ -326,6 +340,13 @@ def test_alpha_telegram_messages_are_secret_free():
 
     assert "Dawnstrike Alpha Watch" in text
     assert "No clean edge today" in no_trade
+    for heading in (
+        "OFFICIAL PAPER CANDIDATES",
+        "RESEARCH WATCHLIST",
+        "NO TRADE / BLOCKED REASONS",
+    ):
+        assert heading in text
+        assert heading in no_trade
     assert "insufficient sample" in summary
     assert secret_token not in text + no_trade + summary
 

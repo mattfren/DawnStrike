@@ -44,10 +44,11 @@ def test_alpha_cycle_creates_historical_signal_and_links_notification(tmp_path: 
     events = store.load_signal_events(limit=100)
 
     assert signals
-    assert signals[0]["signal_label"] in {"BREAKOUT WATCH", "ENTRY WATCH", "WATCH ONLY"}
-    assert signals[0]["entry_watch_level"] is not None
+    assert signals[0]["signal_label"] == "NO CLEAN EDGE"
+    assert signals[0]["ticker"] == "NO_TRADE"
+    assert signals[0]["entry_watch_level"] is None
     assert signals[0]["telegram_event_key"]
-    assert any(row["event_type"] == "ENTRY_WATCH_CREATED" for row in events)
+    assert any(row["event_type"] == "NO_CLEAN_EDGE_CREATED" for row in events)
     assert any(row["event_type"] == "TELEGRAM_SENT" for row in events)
 
 

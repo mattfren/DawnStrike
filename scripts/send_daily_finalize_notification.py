@@ -53,11 +53,30 @@ def _message(payload: dict[str, object], deployment_url: str) -> str:
     next_action = ""
     if isinstance(readiness, dict):
         next_action = str(readiness.get("reason") or "")
+    daily_run = (
+        readiness.get("daily_run")
+        if isinstance(readiness, dict)
+        and isinstance(readiness.get("daily_run"), dict)
+        else {}
+    )
+    run = (
+        daily_run.get("run")
+        if isinstance(daily_run.get("run"), dict)
+        else {}
+    )
+    failed_stage = str(run.get("failed_stage") or "")
+    failure_reason = str(run.get("failure_reason") or "")
+    failure_line = (
+        f"\nFailed stage: {failed_stage} · {failure_reason or 'reason not reported'}"
+        if failed_stage
+        else ""
+    )
     suffix = f"\n{deployment_url}" if deployment_url else ""
     return (
         f"Dawnstrike daily finalize · {market_date}\n"
         f"Result: {status} · readiness: {readiness_status}\n"
-        f"Next action: {next_action or 'Review the stage manifest.'}{suffix}"
+        f"Next action: {next_action or 'Review the stage manifest.'}"
+        f"{failure_line}{suffix}"
     )[:3900]
 
 

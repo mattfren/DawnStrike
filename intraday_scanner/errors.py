@@ -23,3 +23,7 @@ class StorageError(IntradayScannerError):
 
 class NotificationError(IntradayScannerError):
     """Raised when a notifier cannot send a requested alert."""
+
+
+class MarketCalendarCoverageError(IntradayScannerError):
+    """Raised when a requested session falls outside the governed calendar."""

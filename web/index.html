@@ -21,6 +21,7 @@
       </div>
       <nav class="primary-nav" aria-label="Primary navigation">
         <button class="nav-link is-active" data-view="overview" aria-controls="view-overview" aria-pressed="true">Overview</button>
+        <button class="nav-link" data-view="calendar" aria-controls="view-calendar" aria-pressed="false">Calendar</button>
         <button class="nav-link" data-view="performance" aria-controls="view-performance" aria-pressed="false">Performance</button>
         <button class="nav-link" data-view="research" aria-controls="view-research" aria-pressed="false">Research</button>
         <button class="nav-link" data-view="system" aria-controls="view-system" aria-pressed="false">System</button>
@@ -38,7 +39,8 @@
             Every number here has a source trail—or says when it does not.
           </p>
           <div class="hero-actions">
-            <button class="button button-primary" data-view="performance">View returns</button>
+            <button class="button button-primary" data-view="calendar">Open Calendar</button>
+            <button class="button button-secondary" data-view="performance">View returns</button>
             <button class="button button-secondary" data-view="system">Check freshness</button>
           </div>
         </div>
@@ -74,6 +76,67 @@
           <article class="panel"><p class="eyebrow">How to read this</p><h3>Three kinds of evidence</h3><div class="legend-list"><div><span class="legend-swatch swatch-paper"></span><div><strong>Official paper</strong><p>Saved research calls carried through the paper workflow.</p></div></div><div><span class="legend-swatch swatch-research"></span><div><strong>Research observations</strong><p>Sourced market observations used for learning, not claims.</p></div></div><div><span class="legend-swatch swatch-missing"></span><div><strong>Not reported</strong><p>The source did not support a complete result yet.</p></div></div></div></article>
         </div>
         <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Today</p><h3>Selections and position changes</h3><p class="muted">This is the dated paper record, not a broker blotter.</p></div><span class="section-pill" id="today-date">Not reported</span></div><div class="activity-grid" id="today-activity"></div></article>
+      </section>
+
+      <section id="view-calendar" class="page-view" aria-labelledby="calendar-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Canonical return record</p>
+            <h2 id="calendar-title">Calendar</h2>
+            <p class="muted">One account, cohort, strategy, version, and policy at a time. Missing days never become zero.</p>
+          </div>
+          <span class="section-pill" id="calendar-integrity">Loading canonical data</span>
+        </div>
+
+        <div class="calendar-controls panel" aria-label="Calendar controls">
+          <div class="month-switcher">
+            <button class="calendar-arrow" id="calendar-previous-month" type="button" aria-label="Previous month">←</button>
+            <div>
+              <span class="eyebrow">Month</span>
+              <strong id="calendar-month-label">Loading</strong>
+            </div>
+            <button class="calendar-arrow" id="calendar-next-month" type="button" aria-label="Next month">→</button>
+          </div>
+          <div class="calendar-filters">
+            <label>Cohort<select id="calendar-cohort-filter"></select></label>
+            <label>Strategy<select id="calendar-strategy-filter"></select></label>
+            <label>Version<select id="calendar-version-filter"></select></label>
+            <label>Policy<select id="calendar-policy-filter"></select></label>
+            <label>Account<select id="calendar-account-filter"></select></label>
+          </div>
+        </div>
+
+        <div class="calendar-summary-grid" aria-label="Selected month summary">
+          <article class="calendar-summary-card"><span>Net return</span><strong id="calendar-summary-return">Not reported</strong><small>Compounded eligible account days</small></article>
+          <article class="calendar-summary-card"><span>Against benchmark</span><strong id="calendar-summary-excess">Not reported</strong><small id="calendar-summary-benchmark">Benchmark not reported</small></article>
+          <article class="calendar-summary-card"><span>Coverage</span><strong id="calendar-summary-coverage">Not reported</strong><small id="calendar-summary-denominator">Eligible / expected market days</small></article>
+          <article class="calendar-summary-card"><span>Paper activity</span><strong id="calendar-summary-days">Not reported</strong><small id="calendar-summary-no-trades">No-trade days not reported</small></article>
+        </div>
+
+        <div class="calendar-legend" aria-label="Calendar status legend">
+          <span><i class="legend-complete"></i>Complete</span>
+          <span><i class="legend-no-trade"></i>No trade</span>
+          <span><i class="legend-pending"></i>Pending / unrealized</span>
+          <span><i class="legend-missing"></i>Missing</span>
+          <span><i class="legend-unavailable"></i>Market closed / unavailable</span>
+        </div>
+
+        <div class="calendar-workspace">
+          <article class="panel calendar-panel">
+            <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+            <div id="calendar-grid" class="calendar-grid" role="grid" aria-label="Monthly performance calendar"></div>
+          </article>
+          <aside class="panel calendar-detail" aria-live="polite" aria-labelledby="calendar-detail-title">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Day evidence</p><h3 id="calendar-detail-title">Choose a date</h3></div>
+              <span class="status-chip" id="calendar-detail-status">Not selected</span>
+            </div>
+            <p id="calendar-detail-note" class="summary-copy">Select a calendar day to inspect its return basis, account equation, selections, and source lineage.</p>
+            <dl class="calendar-detail-metrics" id="calendar-detail-metrics"></dl>
+            <div id="calendar-detail-reasons" class="calendar-reasons"></div>
+            <div id="calendar-detail-trades" class="calendar-trade-list"></div>
+          </aside>
+        </div>
       </section>
 
       <section id="view-performance" class="page-view" aria-labelledby="performance-title">

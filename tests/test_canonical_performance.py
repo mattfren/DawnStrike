@@ -56,43 +56,6 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             """
-            CREATE TABLE paper_positions (
-                position_id TEXT PRIMARY KEY,
-                signal_id TEXT,
-                market_date TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                status TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                entry_price REAL,
-                exit_price REAL,
-                notional REAL,
-                realized_pnl REAL,
-                updated_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE paper_trade_fills (
-                fill_id TEXT PRIMARY KEY,
-                position_id TEXT NOT NULL,
-                intent_id TEXT,
-                signal_id TEXT,
-                market_date TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                side TEXT NOT NULL,
-                fill_time TEXT NOT NULL,
-                fill_price REAL,
-                quantity REAL,
-                gross_notional REAL,
-                slippage_bps REAL,
-                payload_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
             INSERT INTO paper_positions
             (position_id, signal_id, market_date, ticker, status, quantity,
              entry_price, exit_price, notional, realized_pnl, updated_at, payload_json)
@@ -140,7 +103,7 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
                     10.0,
                     100.0,
                     1000.0,
-                    None,
+                    0.0,
                     "{}",
                 ),
                 (
@@ -155,7 +118,7 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
                     11.0,
                     100.0,
                     1100.0,
-                    None,
+                    0.0,
                     "{}",
                 ),
             ),
@@ -314,13 +277,15 @@ def test_full_reconcile_clears_stale_canonical_rows(tmp_path: Path) -> None:
         )
 
 
-def test_daily_finalize_publishes_explicit_no_trade_and_is_idempotent(tmp_path: Path) -> None:
+def test_daily_finalize_degrades_without_a_recorded_upstream_chain(tmp_path: Path) -> None:
     result_root = tmp_path / "public"
     service = DailyFinalizeService(tmp_path / "empty.sqlite", result_root)
     first = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
     second = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
 
-    assert first["status"] == "NO_DATA"
+    assert first["status"] == "DEGRADED"
+    assert first["upstream_status"] == "not_recorded"
+    assert first["reconciliation"]["row_count"] == 0
     assert first["readiness"]["status"] == "not_ready"
     assert first["readiness"]["http_status"] == 503
     assert second["run_id"] == first["run_id"]

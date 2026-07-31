@@ -34,7 +34,7 @@ def test_public_build_records_auditable_finalize_notification(tmp_path: Path, mo
         ]
     )
 
-    assert status == 0
+    assert status == 2
     build_manifest = json.loads((output / "build-manifest.json").read_text(encoding="utf-8"))
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
