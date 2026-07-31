@@ -2079,6 +2079,22 @@ def test_forward_mode_blocks_same_day_before_regular_session_close(
         )
 
 
+def test_paperops_datatruth_roots_follow_the_mutable_output_state(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "state" / "v2_paper_ops_live"
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+
+    assert paper_ops_engine._data_truth_root_for_mode(
+        paths,
+        PaperRunMode.FORWARD,
+    ) == output_root.parent / "v2_data_truth"
+    assert paper_ops_engine._data_truth_root_for_mode(
+        paths,
+        PaperRunMode.REPLAY,
+    ) == output_root / "data_truth_replay"
+
+
 def test_forward_mode_after_close_includes_completed_run_date_bar(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
