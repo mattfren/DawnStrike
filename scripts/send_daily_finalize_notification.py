@@ -6,9 +6,13 @@ import argparse
 import hashlib
 import json
 import os
-import sqlite3
+import sys
 from pathlib import Path
 from urllib import parse, request
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def main() -> int:
@@ -25,6 +29,24 @@ def main() -> int:
     event_key = "dawnstrike:daily-finalize:telegram:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+    store = SQLiteScanStore(Path(args.db_path))
+    existing = store.load_notification(event_key)
+    if existing is not None and (
+        existing.get("sent") is True
+        or existing.get("channel") == "telegram:sent"
+    ):
+        print(
+            json.dumps(
+                {
+                    "deduplicated": True,
+                    "event_key": event_key,
+                    "status": "already_sent",
+                    "sent": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("INTRADAY_TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("INTRADAY_TELEGRAM_CHAT_ID")
     sent = False
@@ -40,8 +62,26 @@ def main() -> int:
             response.read()
         sent = True
         status = "sent"
-    _record(args.db_path, event_key, status, {**payload, "deployment_url": deployment_url})
-    print(json.dumps({"event_key": event_key, "status": status, "sent": sent}, sort_keys=True))
+    store.record_notification_delivery(
+        event_key=event_key,
+        channel=f"telegram:{status}",
+        payload={
+            **payload,
+            "deployment_url": deployment_url,
+            "sent": sent,
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "deduplicated": False,
+                "event_key": event_key,
+                "status": status,
+                "sent": sent,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -78,28 +118,6 @@ def _message(payload: dict[str, object], deployment_url: str) -> str:
         f"Next action: {next_action or 'Review the stage manifest.'}"
         f"{failure_line}{suffix}"
     )[:3900]
-
-
-def _record(db_path: str, event_key: str, status: str, payload: dict[str, object]) -> None:
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS notifications_sent (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_key TEXT NOT NULL UNIQUE,
-                run_id TEXT,
-                ticker TEXT,
-                channel TEXT NOT NULL,
-                sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                payload_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            "INSERT OR IGNORE INTO notifications_sent "
-            "(event_key, channel, payload_json) VALUES (?, ?, ?)",
-            (event_key, f"telegram:{status}", json.dumps(payload, sort_keys=True, default=str)),
-        )
 
 
 if __name__ == "__main__":

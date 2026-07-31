@@ -1238,6 +1238,47 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not record notification: {exc}") from exc
 
+    def record_notification_delivery(
+        self,
+        *,
+        event_key: str,
+        channel: str,
+        payload: dict[str, Any],
+        run_id: str | None = None,
+        ticker: str | None = None,
+    ) -> bool:
+        """Persist an attempt while preserving a completed Telegram delivery."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO notifications_sent
+                    (event_key, run_id, ticker, channel, sent_at, payload_json)
+                    VALUES (?, ?, ?, ?, datetime('now'), ?)
+                    ON CONFLICT(event_key) DO UPDATE SET
+                        run_id = excluded.run_id,
+                        ticker = excluded.ticker,
+                        channel = excluded.channel,
+                        sent_at = excluded.sent_at,
+                        payload_json = excluded.payload_json
+                    WHERE notifications_sent.channel != 'telegram:sent'
+                    """,
+                    (
+                        event_key,
+                        run_id,
+                        ticker,
+                        channel,
+                        json.dumps(payload, sort_keys=True),
+                    ),
+                )
+                return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not record notification delivery: {exc}"
+            ) from exc
+
     def load_recent_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
         self.initialize()
         try:

@@ -25,6 +25,34 @@ SCAN_ID = "scan-exact-membership"
 SELECTED_AT = "2026-07-15T13:10:00+00:00"
 
 
+def test_notification_delivery_retries_unsent_but_preserves_sent(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "notification-delivery.sqlite")
+    event_key = "dawnstrike:test:telegram"
+
+    assert store.record_notification_delivery(
+        event_key=event_key,
+        channel="telegram:not_configured",
+        payload={"sent": False},
+    )
+    assert store.record_notification_delivery(
+        event_key=event_key,
+        channel="telegram:sent",
+        payload={"sent": True},
+    )
+    assert not store.record_notification_delivery(
+        event_key=event_key,
+        channel="telegram:not_configured",
+        payload={"sent": False},
+    )
+
+    notification = store.load_notification(event_key)
+    assert notification is not None
+    assert notification["channel"] == "telegram:sent"
+    assert notification["sent"] is True
+
+
 def test_exact_selected_membership_excludes_blocked_and_survives_dedupe(
     tmp_path: Path,
 ) -> None:

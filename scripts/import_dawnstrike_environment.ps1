@@ -1,0 +1,60 @@
+function Import-DawnstrikeEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateRoot
+    )
+
+    $environmentPath = Join-Path $StateRoot "secrets\runtime.env"
+    if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
+        return
+    }
+
+    $allowedKeys = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($key in @(
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "INTRADAY_TELEGRAM_BOT_TOKEN",
+        "INTRADAY_TELEGRAM_CHAT_ID"
+    )) {
+        [void]$allowedKeys.Add($key)
+    }
+
+    $lineNumber = 0
+    foreach ($rawLine in Get-Content -LiteralPath $environmentPath) {
+        $lineNumber += 1
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) {
+            continue
+        }
+
+        $separator = $line.IndexOf("=")
+        if ($separator -le 0) {
+            throw "Malformed runtime environment entry at line $lineNumber."
+        }
+        $name = $line.Substring(0, $separator).Trim()
+        if (-not $allowedKeys.Contains($name)) {
+            continue
+        }
+        $value = $line.Substring($separator + 1).Trim()
+        if (
+            $value.Length -ge 2 -and
+            (
+                ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                ($value.StartsWith("'") -and $value.EndsWith("'"))
+            )
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Runtime environment key $name is empty."
+        }
+
+        $existing = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ([string]::IsNullOrWhiteSpace($existing)) {
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
