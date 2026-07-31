@@ -37,6 +37,10 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "Set-VercelAlias" in script
     assert '($AliasUrl -replace "^https?://", "").TrimEnd("/")' in script
     assert "$_.meta.originalDeploymentId -eq $deployment.id" in script
+    assert "$stderrPath = [System.IO.Path]::GetTempFileName()" in script
+    assert "2> $stderrPath" in script
+    assert "[System.IO.File]::ReadAllText($stderrPath).Trim()" in script
+    assert "curl progress can otherwise be interleaved" in script
     assert "Promoted deployment does not match the verified preview" in script
     assert "Production does not match the verified preview" in script
     assert "foreach ($alias in $allProductionAliases)" in script
