@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from intraday_scanner.config import load_config
-from intraday_scanner.errors import NotificationError
+from intraday_scanner.errors import ConfigError, NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.base import BaseNotifier
@@ -44,6 +44,7 @@ from intraday_scanner.providers.web_source_base import (
     WebSourceConfig,
     get_source,
     load_web_sources_config,
+    production_contract_status,
     require_enabled,
     write_json,
 )
@@ -77,7 +78,7 @@ SOURCE_PRIORITY = (
 
 def web_build_universe(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_path: str | Path = "data/universe_us_common.csv",
     persist: bool = False,
@@ -100,7 +101,7 @@ def web_build_universe(
 
 def web_collect_halts(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_halts",
     persist: bool = False,
@@ -123,7 +124,7 @@ def web_collect_halts(
 
 def web_collect_sec_risk(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_sec",
     tickers: list[str] | None = None,
@@ -147,7 +148,7 @@ def web_collect_sec_risk(
 def web_ingest_public_table(
     *,
     url: str,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_ingest",
     persist: bool = False,
@@ -172,7 +173,7 @@ def web_ingest_public_table(
 
 def web_auto_collect(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path | None = None,
     persist: bool = False,
@@ -265,6 +266,7 @@ def web_auto_collect(
             [source for source in _candidate_sources(config) if source.enabled]
         ),
         "only_universe_or_enrichment_enabled": _only_universe_or_enrichment_enabled(config),
+        "production_contract": production_contract_status(config),
         "halt_summary": _compact_summary(halt_summary),
         "sec_summary": _compact_summary(sec_summary),
         "snapshot_path": str(snapshot_path),
@@ -322,7 +324,7 @@ def web_auto_collect(
 
 def web_telegram_daemon(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     automation_config_path: str | Path = "config/automation.example.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_root: str | Path = "outputs/web_telegram",
@@ -471,7 +473,24 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
     rows = store.load_normalized_source_rows(limit=50)
     latest_result = fetch_results[0] if fetch_results else {}
     latest_summary = dict(latest_result.get("summary") or {})
-    web_config = load_web_sources_config(None)
+    try:
+        web_config = load_web_sources_config(None)
+        source_operability = source_operability_status(web_config)
+        production_contract = production_contract_status(web_config)
+    except ConfigError as exc:
+        source_operability = {
+            "enabled_candidate_sources": [],
+            "enabled_universe_sources": [],
+            "enabled_enrichment_sources": [],
+            "only_universe_or_enrichment_enabled": False,
+            "candidate_source_required": True,
+        }
+        production_contract = {
+            "status": "BLOCKED_CONFIGURATION",
+            "ready": False,
+            "violations": ["runtime_web_sources_config_missing"],
+            "detail": str(exc),
+        }
     return {
         "latest_fetch_run": fetch_runs[0] if fetch_runs else {},
         "latest_fetch_result": latest_result,
@@ -487,7 +506,8 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
         "ai_research_outputs": store.load_ai_research_outputs(limit=50),
         "ai_data_warnings": store.load_ai_data_warnings(limit=50),
         "telegram_status": _telegram_status(store),
-        "source_operability": source_operability_status(web_config),
+        "source_operability": source_operability,
+        "production_contract": production_contract,
         "browser_extractor": browser_extractor_status(),
         "counts": {
             "latest_candidate_count": latest_summary.get("candidate_count", len(rows)),
@@ -501,7 +521,7 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
 
 def web_source_doctor(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     out_dir: str | Path = "outputs/source_doctor",
     print_rows: bool = False,
 ) -> dict[str, Any]:
@@ -513,13 +533,17 @@ def web_source_doctor(
         rows.append(_doctor_source(source, config, output_dir))
     normalization_debug = _write_source_doctor_debug(output_dir, rows)
     source_operability = source_operability_status(config)
+    production_contract = production_contract_status(config)
     aggregate = _aggregate_doctor_health(rows)
     result = {
-        "status": "complete",
+        "status": (
+            "complete" if production_contract["ready"] else "blocked_configuration"
+        ),
         "created_at": utc_now_iso(),
         "config_path": str(config_path),
         "browser_extractor": browser_extractor_status(),
         "source_operability": source_operability,
+        "production_contract": production_contract,
         "enabled_candidate_sources": source_operability["enabled_candidate_sources"],
         "enabled_enrichment_sources": source_operability["enabled_enrichment_sources"],
         "enabled_universe_sources": source_operability["enabled_universe_sources"],
@@ -530,7 +554,11 @@ def web_source_doctor(
         "source_confidence": aggregate["source_confidence"],
         "stale_data_status": aggregate["stale_data_status"],
         "top_rejection_reasons": aggregate["top_rejection_reasons"],
-        "next_action": aggregate["next_action"],
+        "next_action": (
+            "Resolve production source-contract violations before collection."
+            if not production_contract["ready"]
+            else aggregate["next_action"]
+        ),
         "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "sources": rows,
     }

@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from statistics import mean, pstdev
 from typing import Any
 
+from intraday_scanner.services.benchmark_service import (
+    alphaops_v6_benchmark_policy,
+    benchmark_coverage,
+)
+
 ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
 ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-empirical-v1"
 V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
@@ -135,6 +140,7 @@ def build_v6_shadow_decisions(
     source_summary: dict[str, Any],
     regime: dict[str, Any],
     prior_outcomes: list[dict[str, Any]],
+    universe_membership_by_ticker: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build immutable decision-time V6 records for every ranked candidate."""
 
@@ -142,6 +148,7 @@ def build_v6_shadow_decisions(
         str(row.get("ticker") or "").upper(): row for row in feature_vectors
     }
     model = V6EmpiricalShadowModel(prior_outcomes)
+    memberships = universe_membership_by_ticker or {}
     output: list[dict[str, Any]] = []
     for signal in signals:
         ticker = str(signal.get("ticker") or "").upper()
@@ -152,7 +159,8 @@ def build_v6_shadow_decisions(
         source_signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
         if not source_signal_id:
             continue
-        vetoes = _safety_vetoes(signal, feature, source_summary)
+        membership = _universe_membership(memberships.get(ticker))
+        vetoes = _safety_vetoes(signal, feature, source_summary, membership)
         draft = {
             "scan_id": str(signal.get("scan_id") or feature.get("scan_id") or ""),
             "source_signal_id": source_signal_id,
@@ -164,11 +172,13 @@ def build_v6_shadow_decisions(
             "setup_key": _setup_key(signal, feature),
             "regime_key": str(regime.get("regime") or "UNKNOWN"),
             "feature_vector": feature,
+            "universe_membership": membership,
             "signal_facts": _safe_signal_facts(signal),
             "source_summary": source_summary,
             "safety_vetoes": vetoes,
             "estimated_round_trip_cost_bps": _estimated_cost_bps(feature),
             "cost_model_version": V6_COST_MODEL_VERSION,
+            "benchmark_policy": alphaops_v6_benchmark_policy(),
             "point_in_time": {
                 "all_inputs_observed_at_or_before_decision": True,
                 "decision_timestamp": decision_at,
@@ -289,6 +299,7 @@ def strict_walk_forward_evaluation(
 
 def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     valid = [row for row in outcomes if row.get("learning_eligible") is True]
+    benchmark = benchmark_coverage(valid)
     sessions = {str(row.get("market_date") or "")[:10] for row in valid}
     returns: list[float] = []
     for row in valid:
@@ -301,6 +312,8 @@ def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         "minimum_closed_paper_trades": len(returns) >= MIN_FORWARD_CLOSED_TRADES,
         "positive_mean_net_excess_return": bool(returns and mean(returns) > 0),
         "tail_risk_within_limit": tail is not None and tail > -3.0,
+        "primary_benchmark_coverage_complete": benchmark["primary_complete"],
+        "secondary_benchmark_coverage_complete": benchmark["secondary_complete"],
         "all_sourced_and_point_in_time": all(
             bool(row.get("source_bar_hash_sha256"))
             and row.get("no_lookahead") is True
@@ -315,6 +328,7 @@ def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         "closed_paper_trade_count": len(returns),
         "mean_net_excess_return_pct": _round(mean(returns)) if returns else None,
         "tail_loss_pct": _round(tail),
+        "benchmark_coverage": benchmark,
         "performance_status": "WAITING_FOR_FORWARD_EVIDENCE",
         "research_only": True,
         "broker_execution_enabled": False,
@@ -335,6 +349,9 @@ def _v6_outcome_from_source(
     activated = bool((source or {}).get("entry_opportunity"))
     gross_return = _number((source or {}).get("gross_return_pct"))
     benchmark = _number((source or {}).get("benchmark_return_pct"))
+    secondary_benchmark = _number(
+        (source or {}).get("secondary_benchmark_return_pct")
+    )
     cost_bps = _number(decision.get("estimated_round_trip_cost_bps"))
     net_return = (
         gross_return - (cost_bps / 100.0)
@@ -356,7 +373,14 @@ def _v6_outcome_from_source(
         and source_hash
         and (source or {}).get("validated_against_signal_timestamp") is True
         and (source or {}).get("no_lookahead") is True
-        and (not activated or net_excess is not None)
+        and (
+            not activated
+            or (
+                net_excess is not None
+                and secondary_benchmark is not None
+                and bool((source or {}).get("secondary_benchmark_source_bar_hash_sha256"))
+            )
+        )
     )
     payload = {
         "decision_id": decision["decision_id"],
@@ -373,6 +397,19 @@ def _v6_outcome_from_source(
         "outcome_status": "COMPLETE_SOURCED" if conclusive else "TERMINAL_MISSING",
         "net_return_pct": _round(net_return),
         "benchmark_return_pct": _round(benchmark),
+        "benchmark_symbol": str((source or {}).get("benchmark_symbol") or "SPY"),
+        "benchmark_source_bar_hash_sha256": _text_or_none(
+            (source or {}).get("benchmark_source_bar_hash_sha256")
+        ),
+        "secondary_benchmark_symbol": str(
+            (source or {}).get("secondary_benchmark_symbol") or "IWM"
+        ),
+        "secondary_benchmark_return_pct": _number(
+            (source or {}).get("secondary_benchmark_return_pct")
+        ),
+        "secondary_benchmark_source_bar_hash_sha256": _text_or_none(
+            (source or {}).get("secondary_benchmark_source_bar_hash_sha256")
+        ),
         "net_excess_return_pct": _round(net_excess),
         "source_bar_hash_sha256": source_hash or None,
         "learning_eligible": learning_eligible,
@@ -396,7 +433,10 @@ def _v6_outcome_from_source(
 
 
 def _safety_vetoes(
-    signal: dict[str, Any], feature: dict[str, Any], source_summary: dict[str, Any]
+    signal: dict[str, Any],
+    feature: dict[str, Any],
+    source_summary: dict[str, Any],
+    universe_membership: dict[str, Any],
 ) -> list[str]:
     vetoes: list[str] = []
     if signal.get("can_alert") is not True:
@@ -412,9 +452,21 @@ def _safety_vetoes(
         vetoes.append("candidate_risk_veto")
     if str(source_summary.get("status") or "").lower() not in {"success", "complete"}:
         vetoes.append("source_collection_not_complete")
+    if universe_membership.get("status") != "ACTIVE":
+        vetoes.append("versioned_universe_membership_not_active")
     if not feature.get("config_hash"):
         vetoes.append("feature_lineage_missing")
     return sorted(set(vetoes))
+
+
+def _universe_membership(membership: dict[str, Any] | None) -> dict[str, Any]:
+    if membership is None:
+        return {
+            "status": "UNREGISTERED",
+            "reason": "no_versioned_universe_registered_for_market_date",
+            "missing_truth_is_zero": False,
+        }
+    return dict(membership)
 
 
 def _setup_key(signal: dict[str, Any], feature: dict[str, Any]) -> str:
@@ -476,6 +528,11 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _text_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _round(value: float | None) -> float | None:

@@ -1,0 +1,20 @@
+{
+  "as_of_date": "YYYY-MM-DD",
+  "source_lineage": {
+    "provider": "REQUIRED_LICENSED_OR_CONFIGURED_UNIVERSE_SOURCE",
+    "source_url_or_dataset_id": "REQUIRED_SOURCE_REFERENCE",
+    "retrieved_at": "YYYY-MM-DDTHH:MM:SSZ",
+    "artifact_hash_sha256": "REQUIRED_SHA256"
+  },
+  "members": [
+    {
+      "ticker": "REQUIRED_TICKER",
+      "listing_status": "ACTIVE",
+      "valid_from": "YYYY-MM-DD",
+      "valid_to": null,
+      "previous_ticker": null,
+      "corporate_action_type": null,
+      "source_ref": "REQUIRED_SOURCE_ROW_REFERENCE"
+    }
+  ]
+}

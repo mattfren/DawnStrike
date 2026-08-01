@@ -39,6 +39,10 @@ from intraday_scanner.providers.yahoo_chart_provider import (
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     recover_legacy_alpha_delivery_membership,
 )
+from intraday_scanner.services.benchmark_service import (
+    PRIMARY_BENCHMARK,
+    SECONDARY_BENCHMARK,
+)
 from intraday_scanner.services.price_observation_service import parse_requested_at
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -320,8 +324,9 @@ def capture_sourced_alpha_outcomes(
         str(row.get("ticker") or "").upper() for row in pending
     })
     requested_tickers = [*signal_tickers]
-    if "SPY" not in requested_tickers:
-        requested_tickers.append("SPY")
+    for benchmark in (PRIMARY_BENCHMARK, SECONDARY_BENCHMARK):
+        if benchmark not in requested_tickers:
+            requested_tickers.append(benchmark)
     for ticker in requested_tickers:
         bars, evidence, requests, error = _fetch_outcome_bars(
             ticker,
@@ -388,8 +393,12 @@ def capture_sourced_alpha_outcomes(
             max_close_staleness_seconds=max_close_staleness_seconds,
             strategy_id=str(signal.get("outcome_strategy_id") or strategy_id),
             source_evidence=source_evidence_by_ticker.get(ticker, {}),
-            benchmark_bars=bars_by_ticker.get("SPY", []),
-            benchmark_evidence=source_evidence_by_ticker.get("SPY", {}),
+            benchmark_bars=bars_by_ticker.get(PRIMARY_BENCHMARK, []),
+            benchmark_evidence=source_evidence_by_ticker.get(PRIMARY_BENCHMARK, {}),
+            secondary_benchmark_bars=bars_by_ticker.get(SECONDARY_BENCHMARK, []),
+            secondary_benchmark_evidence=source_evidence_by_ticker.get(
+                SECONDARY_BENCHMARK, {}
+            ),
             entry_intent=entry_intents.get(str(signal.get("signal_id") or "")),
             paper_fills=fills_by_signal.get(str(signal.get("signal_id") or ""), []),
         )
@@ -796,6 +805,8 @@ def _derive_outcome(
     source_evidence: dict[str, Any],
     benchmark_bars: list[OutcomeBar],
     benchmark_evidence: dict[str, Any],
+    secondary_benchmark_bars: list[OutcomeBar],
+    secondary_benchmark_evidence: dict[str, Any],
     entry_intent: dict[str, Any] | None,
     paper_fills: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -923,6 +934,11 @@ def _derive_outcome(
         entry_at=trigger_bar.observed_at,
         exit_at=exit_at,
     )
+    secondary_benchmark_return = _benchmark_return(
+        secondary_benchmark_bars,
+        entry_at=trigger_bar.observed_at,
+        exit_at=exit_at,
+    )
     raw_return = _return_pct(raw_exit_price, entry_price)
     context = _outcome_context(signal)
     execution = _execution_outcome_fields(
@@ -933,8 +949,15 @@ def _derive_outcome(
         entry_intent=entry_intent,
         paper_fills=paper_fills,
     )
-    learning_eligible = bool(
+    benchmark_contract_complete = bool(
         benchmark_return is not None
+        and (
+            strategy_id != ALPHAOPS_V6_STRATEGY_VERSION
+            or secondary_benchmark_return is not None
+        )
+    )
+    learning_eligible = bool(
+        benchmark_contract_complete
         and (
             strategy_id not in {
                 ALPHAOPS_V5_STRATEGY_ID,
@@ -983,7 +1006,7 @@ def _derive_outcome(
             trigger_bar.observed_at, exit_at
         ),
         "gross_return_pct": raw_return,
-        "benchmark_symbol": "SPY",
+        "benchmark_symbol": PRIMARY_BENCHMARK,
         "benchmark_return_pct": benchmark_return,
         "excess_return_pct": (
             round(raw_return - benchmark_return, 4)
@@ -995,7 +1018,17 @@ def _derive_outcome(
         "benchmark_source_bar_hash_sha256": benchmark_evidence.get(
             "source_bar_hash_sha256"
         ),
+        "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
+        "secondary_benchmark_return_pct": secondary_benchmark_return,
+        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
+            "source_url"
+        ),
+        "secondary_benchmark_source_bar_hash_sha256": secondary_benchmark_evidence.get(
+            "source_bar_hash_sha256"
+        ),
         "attribution_complete": benchmark_return is not None,
+        "benchmark_contract_complete": benchmark_contract_complete,
         "first_touch_precision": BAR_INTERVAL,
         "outcome_status": "complete_sourced",
         "learning_eligible": learning_eligible,

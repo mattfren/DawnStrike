@@ -63,3 +63,25 @@ function Invoke-DawnstrikeNativeProcess {
     $receipt["receipt_path"] = $receiptPath
     return [pscustomobject]$receipt
 }
+
+function Resolve-DawnstrikeReleaseSha {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$LogRoot
+    )
+
+    $receipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "git.exe" `
+        -ArgumentList @("-C", $RuntimeRoot, "rev-parse", "HEAD") `
+        -LogRoot $LogRoot `
+        -LogName "resolve_release_sha"
+    if ($receipt.exit_code -ne 0) {
+        throw "Could not resolve the deployed runtime release SHA."
+    }
+    $sha = (Get-Content -LiteralPath $receipt.stdout_path -Raw).Trim()
+    if ($sha -notmatch "^[0-9a-fA-F]{40}$") {
+        throw "Runtime release SHA was not a full Git commit SHA."
+    }
+    return $sha.ToLowerInvariant()
+}

@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+. (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
@@ -32,6 +33,20 @@ if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
 New-Item -ItemType Directory -Path $paperOpsRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $resultPath) -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize"
+if (-not $dailyLock.acquired) {
+    Write-Output "Skipped duplicate daily finalize run: $($dailyLock.reason)"
+    exit 0
+}
+$heartbeat = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "canonical_performance", "--status", "RUNNING") `
+    -LogRoot $logRoot `
+    -LogName "daily_finalize_heartbeat-$MarketDate"
+if ($heartbeat.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Could not persist daily-finalize heartbeat."
+}
 
 Push-Location $runtime
 try {
@@ -119,4 +134,5 @@ try {
 }
 finally {
     Pop-Location
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
 }

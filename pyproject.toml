@@ -21,6 +21,10 @@ dev = [
 browser = [
   "playwright>=1.45",
 ]
+research = [
+  "numpy>=1.26",
+  "scikit-learn>=1.5",
+]
 
 [project.scripts]
 intraday-scan = "intraday_scanner.cli:main"

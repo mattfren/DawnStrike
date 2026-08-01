@@ -16,9 +16,10 @@ from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
-from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
+from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
+from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
     core_session_phase,
@@ -40,6 +41,9 @@ from intraday_scanner.notifiers.telegram_formatter import (
 )
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
 from intraday_scanner.reporting import write_scan_outputs
+from intraday_scanner.services.alpha_v6_universe_service import (
+    active_alpha_v6_membership_by_ticker,
+)
 from intraday_scanner.services.learning_service import (
     load_production_alpha_learning_labels,
     run_alpha_learning,
@@ -61,7 +65,7 @@ from intraday_scanner.services.web_collection_service import web_auto_collect, w
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 DEFAULT_DB_PATH = "data/shadow_real.sqlite"
-DEFAULT_WEB_CONFIG = "config/web_sources.example.yaml"
+DEFAULT_WEB_CONFIG = "config/web_sources.yaml"
 ALPHAOPS_STRATEGY_ID = "alphaops_v4"
 ALPHAOPS_OFFICIAL_COHORT = "official_telegram"
 _LEGACY_PICK_PATTERN = re.compile(
@@ -286,6 +290,7 @@ def alpha_cycle(
     ).run(scanner_config, persist=True)
     scan_paths = write_scan_outputs(scan_result, scanner_config.output_dir)
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
+    all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
     timestamp = scan_result.created_at
     reliability_by_source = {row["source"]: row for row in source_reliability}
     feature_vectors = [
@@ -296,7 +301,7 @@ def alpha_cycle(
             source_summary=source_summary,
             source_reliability=reliability_by_source,
         )
-        for row in ranked
+        for row in all_candidates
     ]
     store.persist_alpha_feature_vectors(feature_vectors)
     historical_labels = load_production_alpha_learning_labels(store)
@@ -315,12 +320,35 @@ def alpha_cycle(
     signals = apply_alert_gates(signals)
     store.persist_alpha_signals(signals)
     regime = detect_regime(signals, source_summary)
-    v6_decisions = build_v6_shadow_decisions(
+    universe_memberships = active_alpha_v6_membership_by_ticker(
+        store,
+        market_date=timestamp[:10],
+        tickers=[str(row.get("ticker") or "") for row in all_candidates],
+    )
+    candidate_tickers = {
+        str(row.get("ticker") or "").upper() for row in all_candidates if row.get("ticker")
+    }
+    missing_v6_universe_memberships = sorted(candidate_tickers - set(universe_memberships))
+    if (
+        isinstance(source_summary.get("production_contract"), dict)
+        and source_summary["production_contract"].get("status") == "READY"
+        and missing_v6_universe_memberships
+    ):
+        raise SnapshotValidationError(
+            "Production V6 universe coverage is incomplete; refusing to create "
+            "shadow decisions without point-in-time membership. Missing: "
+            + ", ".join(missing_v6_universe_memberships[:20])
+        )
+    v6_decisions = build_candidate_decisions(
         signals=signals,
+        candidates=all_candidates,
         feature_vectors=feature_vectors,
         source_summary=source_summary,
         regime=regime,
         prior_outcomes=store.load_alpha_v6_outcomes(),
+        decision_at=timestamp,
+        scan_id=scan_result.run_id,
+        universe_membership_by_ticker=universe_memberships,
     )
     v6_decision_stats = store.persist_alpha_v6_decisions(v6_decisions)
     review = review_alpha_signals(signals, source_summary=source_summary)
@@ -468,6 +496,8 @@ def alpha_cycle(
                 1 for row in v6_decisions if row.get("action") == "SHADOW_TRACK"
             ),
             "persistence": v6_decision_stats,
+            "versioned_universe_membership_count": len(universe_memberships),
+            "missing_versioned_universe_memberships": missing_v6_universe_memberships,
             "research_only": True,
             "broker_execution_enabled": False,
         },

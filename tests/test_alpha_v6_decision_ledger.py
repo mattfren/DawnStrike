@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from intraday_scanner.alpha.v6.decision_ledger import (
+    build_candidate_decisions,
+    validate_decision_batch,
+)
+
+
+def test_v6_ledgers_tracked_and_policy_rejected_candidates() -> None:
+    decisions = build_candidate_decisions(
+        signals=[
+            {
+                "scan_id": "scan-1",
+                "signal_id": "signal-a",
+                "ticker": "ALFA",
+                "timestamp": "2026-08-03T12:00:00+00:00",
+                "can_alert": True,
+                "alert_gate_status": "PASS",
+            }
+        ],
+        candidates=[{"ticker": "ALFA"}, {"ticker": "BETA", "source": "fixture"}],
+        feature_vectors=[
+            _feature("ALFA"),
+            _feature("BETA"),
+        ],
+        source_summary={"status": "success"},
+        regime={"regime": "SELECTIVE"},
+        prior_outcomes=[],
+        decision_at="2026-08-03T12:00:00+00:00",
+        scan_id="scan-1",
+        universe_membership_by_ticker={
+            ticker: {
+                "universe_id": "v6u-fixture",
+                "status": "ACTIVE",
+                "source_lineage_hash_sha256": "u" * 64,
+            }
+            for ticker in ("ALFA", "BETA")
+        },
+    )
+
+    tracked, rejected = decisions
+    assert tracked["action"] == "SHADOW_TRACK"
+    assert rejected["action"] == "SHADOW_REJECTED_POLICY"
+    assert rejected["rejected_sampling"]["inclusion_probability"] == 0.2
+    assert validate_decision_batch(decisions)["valid"] is True
+
+
+def _feature(ticker: str) -> dict[str, object]:
+    return {
+        "ticker": ticker,
+        "timestamp": "2026-08-03T11:59:00+00:00",
+        "config_hash": "c" * 64,
+        "feature_json": {"liquidity_execution": {"spread_pct": 0.1}},
+    }

@@ -13,6 +13,7 @@ New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+. (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
@@ -21,7 +22,22 @@ $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $paperOpsRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
 $overallExit = 0
+$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod"
+if (-not $dailyLock.acquired) {
+    Write-Output "Skipped duplicate AlphaOps EOD run: $($dailyLock.reason)"
+    exit 0
+}
+$heartbeat = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "eod_outcome_capture", "--status", "RUNNING") `
+    -LogRoot $logRoot `
+    -LogName "alpha_eod_heartbeat-$MarketDate"
+if ($heartbeat.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Could not persist EOD heartbeat."
+}
 
 function Write-Stage {
     param(
@@ -172,7 +188,7 @@ try {
 
     $v6Learning = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-learn", "--db-path", $dbPath) `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-learn", "--db-path", $dbPath, "--code-sha", $releaseSha) `
         -LogRoot $logRoot `
         -LogName "alpha_v6_learning-$MarketDate"
     if ($v6Learning.exit_code -ne 0) {
@@ -185,6 +201,14 @@ try {
         -LogName "alpha_v6_attribution-$MarketDate"
     if ($v6Attribution.exit_code -ne 0) {
         $overallExit = $v6Attribution.exit_code
+    }
+    $v6Research = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-research-packet", "--db-path", $dbPath, "--code-sha", $releaseSha, "--out-dir", (Join-Path $outputRoot "alpha_v6_research")) `
+        -LogRoot $logRoot `
+        -LogName "alpha_v6_research-$MarketDate"
+    if ($v6Research.exit_code -ne 0) {
+        $overallExit = $v6Research.exit_code
     }
 
     $attribution = Invoke-DawnstrikeNativeProcess `
@@ -283,4 +307,5 @@ try {
 }
 finally {
     Pop-Location
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
 }

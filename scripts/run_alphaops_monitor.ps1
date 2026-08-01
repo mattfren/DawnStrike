@@ -12,6 +12,7 @@ New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+. (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $logRoot = Join-Path $state "logs"
@@ -19,6 +20,20 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
+$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor"
+if (-not $dailyLock.acquired) {
+    Write-Output "Skipped duplicate AlphaOps monitor run: $($dailyLock.reason)"
+    exit 0
+}
+$heartbeat = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "intraday_monitor", "--status", "RUNNING") `
+    -LogRoot $logRoot `
+    -LogName "alpha_monitor_heartbeat-$MarketDate"
+if ($heartbeat.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Could not persist monitor heartbeat."
+}
 
 Push-Location $runtime
 try {
@@ -85,4 +100,5 @@ try {
 }
 finally {
     Pop-Location
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
 }

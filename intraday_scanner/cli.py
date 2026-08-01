@@ -63,8 +63,23 @@ from intraday_scanner.services.alpha_outcome_capture_service import (
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     reconcile_alpha_paper_trades,
 )
+from intraday_scanner.services.alpha_v6_learning_service import run_alpha_v6_learning
+from intraday_scanner.services.alpha_v6_research_service import (
+    write_alpha_v6_research_packet,
+)
+from intraday_scanner.services.alpha_v6_universe_service import (
+    register_alpha_v6_universe,
+)
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.calendar_report_service import calendar_report
+from intraday_scanner.services.daily_orchestrator_service import (
+    daily_orchestration_status,
+    write_heartbeat,
+)
+from intraday_scanner.services.daily_run_service import (
+    resolve_release_sha,
+    shared_daily_run_id,
+)
 from intraday_scanner.services.e2e_automation_service import (
     automation_daemon,
     automation_monitor_open,
@@ -130,7 +145,6 @@ from intraday_scanner.services.tuning_service import run_strategy_tuning, write_
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
 from intraday_scanner.services.v6_learning_service import (
     build_v6_failure_attribution,
-    synchronize_v6_learning,
 )
 from intraday_scanner.services.web_collection_service import (
     telegram_test,
@@ -296,7 +310,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_build_universe_parser = subparsers.add_parser(
         "web-build-universe", help="Build a filtered free U.S. common-stock universe"
     )
-    web_build_universe_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    web_build_universe_parser.add_argument("--config", default="config/web_sources.yaml")
     web_build_universe_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_build_universe_parser.add_argument("--out", default="data/universe_us_common.csv")
     web_build_universe_parser.add_argument("--persist", action="store_true")
@@ -304,7 +318,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_halts = subparsers.add_parser(
         "web-collect-halts", help="Collect Nasdaq Trader trade halt events"
     )
-    web_halts.add_argument("--config", default="config/web_sources.example.yaml")
+    web_halts.add_argument("--config", default="config/web_sources.yaml")
     web_halts.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_halts.add_argument("--out-dir", default="outputs/web_halts")
     web_halts.add_argument("--persist", action="store_true")
@@ -312,7 +326,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_sec = subparsers.add_parser(
         "web-collect-sec-risk", help="Collect SEC filing risk events for candidates"
     )
-    web_sec.add_argument("--config", default="config/web_sources.example.yaml")
+    web_sec.add_argument("--config", default="config/web_sources.yaml")
     web_sec.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_sec.add_argument("--out-dir", default="outputs/web_sec")
     web_sec.add_argument("--tickers", default=None)
@@ -323,7 +337,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Safely ingest an allowed public table into a canonical snapshot",
     )
     web_table.add_argument("--url", required=True)
-    web_table.add_argument("--config", default="config/web_sources.example.yaml")
+    web_table.add_argument("--config", default="config/web_sources.yaml")
     web_table.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_table.add_argument("--out-dir", required=True)
     web_table.add_argument("--persist", action="store_true")
@@ -333,7 +347,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     web_auto = subparsers.add_parser(
         "web-auto-collect", help="Collect local/web candidates and produce a snapshot"
     )
-    web_auto.add_argument("--config", default="config/web_sources.example.yaml")
+    web_auto.add_argument("--config", default="config/web_sources.yaml")
     web_auto.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_auto.add_argument("--out-dir", default="outputs/web_auto")
     web_auto.add_argument("--persist", action="store_true")
@@ -351,14 +365,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     source_doctor = subparsers.add_parser(
         "web-source-doctor", help="Diagnose configured web candidate sources"
     )
-    source_doctor.add_argument("--config", default="config/web_sources.example.yaml")
+    source_doctor.add_argument("--config", default="config/web_sources.yaml")
     source_doctor.add_argument("--out-dir", default="outputs/source_doctor")
     source_doctor.add_argument("--print", action="store_true", dest="print_rows")
 
     web_daemon = subparsers.add_parser(
         "web-telegram-daemon", help="Run the web auto-pilot notification daemon"
     )
-    web_daemon.add_argument("--config", default="config/web_sources.example.yaml")
+    web_daemon.add_argument("--config", default="config/web_sources.yaml")
     web_daemon.add_argument("--automation-config", default="config/automation.example.yaml")
     web_daemon.add_argument("--db-path", default="data/shadow_real.sqlite")
     web_daemon.add_argument("--out-root", default="outputs/web_telegram")
@@ -376,7 +390,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_morning_parser = subparsers.add_parser(
         "alpha-morning", help="Run the AlphaOps morning research cycle"
     )
-    alpha_morning_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_morning_parser.add_argument("--config", default="config/web_sources.yaml")
     alpha_morning_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_morning_parser.add_argument("--out-dir", default="outputs/alpha_morning")
     alpha_morning_parser.add_argument("--notify", default="console")
@@ -385,7 +399,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_cycle_parser = subparsers.add_parser(
         "alpha-cycle", help="Run one AlphaOps collect-score-notify cycle"
     )
-    alpha_cycle_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_cycle_parser.add_argument("--config", default="config/web_sources.yaml")
     alpha_cycle_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_cycle_parser.add_argument("--out-dir", default="outputs/alpha_cycle")
     alpha_cycle_parser.add_argument("--notify", default="console")
@@ -448,6 +462,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_learn_parser.add_argument(
         "--db-path", default="data/shadow_real.sqlite"
     )
+    alpha_v6_learn_parser.add_argument("--code-sha", default="unresolved-local-sha")
 
     alpha_v6_attribution_parser = subparsers.add_parser(
         "alpha-v6-attribution",
@@ -457,6 +472,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--db-path", default="data/shadow_real.sqlite"
     )
 
+    alpha_v6_packet_parser = subparsers.add_parser(
+        "alpha-v6-research-packet",
+        help="Write V6 failure attribution and experiment registry research artifacts",
+    )
+    alpha_v6_packet_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_v6_packet_parser.add_argument("--code-sha", default="unresolved-local-sha")
+    alpha_v6_packet_parser.add_argument(
+        "--out-dir", default="outputs/alpha_v6_research"
+    )
+
+    alpha_v6_universe_parser = subparsers.add_parser(
+        "alpha-v6-register-universe",
+        help="Append a sourced, versioned AlphaOps V6 universe snapshot",
+    )
+    alpha_v6_universe_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_v6_universe_parser.add_argument("--input", required=True)
+
+    daily_heartbeat_parser = subparsers.add_parser(
+        "daily-heartbeat", help="Write durable daily-DAG heartbeat evidence"
+    )
+    daily_heartbeat_parser.add_argument("--state-root", required=True)
+    daily_heartbeat_parser.add_argument("--runtime-root", default=".")
+    daily_heartbeat_parser.add_argument("--market-date", required=True)
+    daily_heartbeat_parser.add_argument("--stage", required=True)
+    daily_heartbeat_parser.add_argument("--status", default="RUNNING")
+
+    daily_status_parser = subparsers.add_parser(
+        "daily-orchestrator-status",
+        help="Report stale heartbeats and missing/failed daily DAG stages",
+    )
+    daily_status_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    daily_status_parser.add_argument("--state-root", required=True)
+    daily_status_parser.add_argument("--market-date", required=True)
+    daily_status_parser.add_argument("--heartbeat-ttl-minutes", type=int, default=30)
+
     alpha_status_parser = subparsers.add_parser(
         "alpha-status", help="Print AlphaOps persistence and evidence status"
     )
@@ -465,7 +515,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_doctor_parser = subparsers.add_parser(
         "alpha-doctor", help="Diagnose AlphaOps source and safety readiness"
     )
-    alpha_doctor_parser.add_argument("--config", default="config/web_sources.example.yaml")
+    alpha_doctor_parser.add_argument("--config", default="config/web_sources.yaml")
     alpha_doctor_parser.add_argument("--out-dir", default="outputs/alpha_doctor")
 
     alpha_report_parser = subparsers.add_parser(
@@ -916,6 +966,14 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_v6_learn(args)
         if args.command == "alpha-v6-attribution":
             return _run_alpha_v6_attribution(args)
+        if args.command == "alpha-v6-research-packet":
+            return _run_alpha_v6_research_packet(args)
+        if args.command == "alpha-v6-register-universe":
+            return _run_alpha_v6_register_universe(args)
+        if args.command == "daily-heartbeat":
+            return _run_daily_heartbeat(args)
+        if args.command == "daily-orchestrator-status":
+            return _run_daily_orchestrator_status(args)
         if args.command == "alpha-status":
             return _run_alpha_status(args)
         if args.command == "alpha-doctor":
@@ -1423,12 +1481,12 @@ def _run_alpha_paper_reconcile(args: argparse.Namespace) -> int:
 def _run_alpha_learn(args: argparse.Namespace) -> int:
     result = alpha_learn(db_path=args.db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return 0 if result.get("status") == "complete" else 2
 
 
 def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
     store = SQLiteScanStore(args.db_path)
-    result = synchronize_v6_learning(store)
+    result = run_alpha_v6_learning(store, code_sha=args.code_sha)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -1437,6 +1495,58 @@ def _run_alpha_v6_attribution(args: argparse.Namespace) -> int:
     result = build_v6_failure_attribution(SQLiteScanStore(args.db_path))
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_alpha_v6_research_packet(args: argparse.Namespace) -> int:
+    result = write_alpha_v6_research_packet(
+        SQLiteScanStore(args.db_path),
+        code_sha=args.code_sha,
+        out_dir=args.out_dir,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_register_universe(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SnapshotValidationError("V6 universe input must be a JSON object.")
+    members = payload.get("members")
+    if not isinstance(members, list):
+        raise SnapshotValidationError("V6 universe input requires a members list.")
+    source_lineage = payload.get("source_lineage")
+    result = register_alpha_v6_universe(
+        SQLiteScanStore(args.db_path),
+        as_of_date=str(payload.get("as_of_date") or ""),
+        members=[row for row in members if isinstance(row, dict)],
+        source_lineage=source_lineage if isinstance(source_lineage, dict) else {},
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_daily_heartbeat(args: argparse.Namespace) -> int:
+    release_sha = resolve_release_sha(args.runtime_root)
+    result = write_heartbeat(
+        state_root=args.state_root,
+        market_date=args.market_date,
+        stage=args.stage,
+        run_id=shared_daily_run_id(args.market_date, release_sha),
+        status=args.status,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_daily_orchestrator_status(args: argparse.Namespace) -> int:
+    result = daily_orchestration_status(
+        SQLiteScanStore(args.db_path),
+        market_date=args.market_date,
+        state_root=args.state_root,
+        heartbeat_ttl_minutes=args.heartbeat_ttl_minutes,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "HEALTHY" else 2
 
 
 def _run_alpha_status(args: argparse.Namespace) -> int:

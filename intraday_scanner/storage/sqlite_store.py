@@ -6043,6 +6043,324 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist V6 experiments: {exc}") from exc
 
+    def load_alpha_v6_experiments(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_experiments", "created_at", limit=limit
+        )
+
+    def persist_alpha_v6_labels(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Append immutable V6 label-family receipts."""
+
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_labels
+                        (label_id, decision_id, market_date, observed_at, label_family,
+                         label_value, learning_eligible, exclusion_reason,
+                         source_bar_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("label_id") or ""),
+                            str(row.get("decision_id") or ""),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("observed_at") or ""),
+                            str(row.get("label_family") or ""),
+                            _float_or_none(row.get("label_value")),
+                            1 if row.get("learning_eligible") is True else 0,
+                            str(row.get("exclusion_reason") or "") or None,
+                            str(row.get("source_bar_hash_sha256") or "") or None,
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 labels: {exc}") from exc
+
+    def load_alpha_v6_labels(
+        self,
+        *,
+        label_family: str | None = None,
+        limit: int = 100_000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if label_family:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alpha_v6_labels
+                        WHERE label_family = ?
+                        ORDER BY market_date ASC, observed_at ASC, label_id ASC LIMIT ?
+                        """,
+                        (label_family, limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alpha_v6_labels
+                        ORDER BY market_date ASC, observed_at ASC, label_id ASC LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 labels: {exc}") from exc
+
+    def persist_alpha_v6_dataset(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_datasets
+                    (dataset_id, created_at, training_cutoff, row_count,
+                     dataset_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("dataset_id") or ""),
+                        str(row.get("created_at") or ""),
+                        str(row.get("training_cutoff") or "") or None,
+                        int(row.get("row_count") or 0),
+                        str(row.get("dataset_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 dataset: {exc}") from exc
+
+    def load_alpha_v6_datasets(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows("alpha_v6_datasets", "created_at", limit=limit)
+
+    def persist_alpha_v6_model_artifact(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_model_artifacts
+                    (artifact_id, model_run_id, created_at, artifact_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("artifact_id") or ""),
+                        str(row.get("model_run_id") or ""),
+                        str(row.get("created_at") or ""),
+                        str(row.get("artifact_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 model artifact: {exc}") from exc
+
+    def persist_alpha_v6_shadow_predictions(
+        self, rows: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_shadow_predictions
+                        (prediction_id, decision_id, model_run_id, market_date,
+                         generated_at, status, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("prediction_id") or ""),
+                            str(row.get("decision_id") or ""),
+                            str(row.get("model_run_id") or "") or None,
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("generated_at") or ""),
+                            str(row.get("status") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 shadow predictions: {exc}") from exc
+
+    def persist_alpha_v6_drift_report(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_drift_reports",
+            identity_field="drift_report_id",
+            row=row,
+            columns=("created_at", "status"),
+        )
+
+    def persist_alpha_v6_promotion_review(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_promotion_reviews",
+            identity_field="review_id",
+            row=row,
+            columns=("created_at", "status", "approved"),
+        )
+
+    def persist_alpha_v6_universe(
+        self, *, version: dict[str, Any], members: list[dict[str, Any]]
+    ) -> bool:
+        """Persist an immutable source-backed universe version and membership rows."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_universe_versions
+                    (universe_id, as_of_date, created_at, membership_count,
+                     source_lineage_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(version.get("universe_id") or ""),
+                        str(version.get("as_of_date") or "")[:10],
+                        str(version.get("created_at") or ""),
+                        int(version.get("membership_count") or 0),
+                        str(version.get("source_lineage_hash_sha256") or ""),
+                        json.dumps(version, sort_keys=True),
+                    ),
+                )
+                inserted = bool(cursor.rowcount)
+                for member in members:
+                    payload = {
+                        **member,
+                        "universe_id": version.get("universe_id"),
+                        "source_lineage_hash_sha256": version.get(
+                            "source_lineage_hash_sha256"
+                        ),
+                        "research_only": True,
+                        "broker_execution_enabled": False,
+                    }
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_universe_memberships
+                        (universe_id, ticker, listing_status, valid_from, valid_to,
+                         previous_ticker, corporate_action_type,
+                         source_lineage_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(version.get("universe_id") or ""),
+                            str(member.get("ticker") or "").upper(),
+                            str(member.get("listing_status") or ""),
+                            member.get("valid_from"),
+                            member.get("valid_to"),
+                            member.get("previous_ticker"),
+                            member.get("corporate_action_type"),
+                            str(version.get("source_lineage_hash_sha256") or ""),
+                            json.dumps(payload, sort_keys=True),
+                        ),
+                    )
+            return inserted
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 universe: {exc}") from exc
+
+    def load_alpha_v6_universe_memberships(
+        self, *, market_date: str, tickers: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return latest snapshot memberships valid at market_date by ticker."""
+
+        self.initialize()
+        normalized = sorted({str(ticker or "").upper() for ticker in tickers if ticker})
+        if not normalized:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                version = connection.execute(
+                    """
+                    SELECT universe_id, source_lineage_hash_sha256
+                    FROM alpha_v6_universe_versions
+                    WHERE as_of_date <= ?
+                    ORDER BY as_of_date DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (market_date[:10],),
+                ).fetchone()
+                if version is None:
+                    return {}
+                rows = connection.execute(
+                    f"""
+                    SELECT payload_json FROM alpha_v6_universe_memberships
+                    WHERE universe_id = ? AND ticker IN ({placeholders})
+                      AND (valid_from IS NULL OR valid_from <= ?)
+                      AND (valid_to IS NULL OR valid_to >= ?)
+                    """,  # noqa: S608
+                    (str(version["universe_id"]), *normalized, market_date[:10], market_date[:10]),
+                ).fetchall()
+                return {
+                    str(payload.get("ticker") or "").upper(): payload
+                    for row in rows
+                    if isinstance((payload := json.loads(str(row["payload_json"]))), dict)
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe memberships: {exc}") from exc
+
+    def _persist_v6_single_payload(
+        self,
+        *,
+        table: str,
+        identity_field: str,
+        row: dict[str, Any],
+        columns: tuple[str, ...],
+    ) -> bool:
+        self.initialize()
+        names = (identity_field, *columns, "payload_json")
+        placeholders = ", ".join("?" for _ in names)
+        values: list[Any] = [str(row.get(identity_field) or "")]
+        for column in columns:
+            value = row.get(column)
+            values.append(1 if column == "approved" and value is True else value)
+        values.append(json.dumps(row, sort_keys=True))
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    f"INSERT OR IGNORE INTO {table} ({', '.join(names)}) "  # noqa: S608
+                    f"VALUES ({placeholders})",  # noqa: S608
+                    values,
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 payload in {table}: {exc}") from exc
+
+    def _load_v6_payload_rows(
+        self, table: str, order_column: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    f"SELECT payload_json FROM {table} "  # noqa: S608
+                    f"ORDER BY {order_column} DESC LIMIT ?",  # noqa: S608
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 payloads from {table}: {exc}") from exc
+
     def load_daily_runs(
         self,
         *,

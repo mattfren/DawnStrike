@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 16
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -772,6 +772,121 @@ def _migration_014_alphaops_v6_shadow_ledger(
     )
 
 
+def _migration_015_alphaops_v6_research_contracts(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add versioned V6 labels, datasets, predictions, drift, and review receipts."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_labels (
+            label_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            label_family TEXT NOT NULL,
+            label_value REAL,
+            learning_eligible INTEGER NOT NULL,
+            exclusion_reason TEXT,
+            source_bar_hash_sha256 TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (decision_id, label_family, label_id),
+            FOREIGN KEY(decision_id) REFERENCES alpha_v6_decisions(decision_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_labels_family_day
+        ON alpha_v6_labels(label_family, market_date, learning_eligible);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_datasets (
+            dataset_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            training_cutoff TEXT,
+            row_count INTEGER NOT NULL,
+            dataset_hash_sha256 TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_datasets_cutoff
+        ON alpha_v6_datasets(training_cutoff, created_at);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_model_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            model_run_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            artifact_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (model_run_id, artifact_hash_sha256),
+            FOREIGN KEY(model_run_id) REFERENCES alpha_v6_model_runs(model_run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_shadow_predictions (
+            prediction_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            model_run_id TEXT,
+            market_date TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (decision_id, model_run_id),
+            FOREIGN KEY(decision_id) REFERENCES alpha_v6_decisions(decision_id),
+            FOREIGN KEY(model_run_id) REFERENCES alpha_v6_model_runs(model_run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_predictions_day
+        ON alpha_v6_shadow_predictions(market_date, generated_at);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_drift_reports (
+            drift_report_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_promotion_reviews (
+            review_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            approved INTEGER NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        """
+    )
+
+
+def _migration_016_alphaops_v6_universe_registry(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add a source-lineage versioned universe with listing and action history."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_universe_versions (
+            universe_id TEXT PRIMARY KEY,
+            as_of_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            membership_count INTEGER NOT NULL,
+            source_lineage_hash_sha256 TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_universe_versions_date
+        ON alpha_v6_universe_versions(as_of_date, created_at);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_universe_memberships (
+            universe_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            listing_status TEXT NOT NULL,
+            valid_from TEXT,
+            valid_to TEXT,
+            previous_ticker TEXT,
+            corporate_action_type TEXT,
+            source_lineage_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (universe_id, ticker),
+            FOREIGN KEY(universe_id) REFERENCES alpha_v6_universe_versions(universe_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_universe_membership_ticker
+        ON alpha_v6_universe_memberships(ticker, universe_id);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -796,4 +911,6 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (12, _migration_012_outcome_capture_truth),
     (13, _migration_013_shared_daily_run_ledger),
     (14, _migration_014_alphaops_v6_shadow_ledger),
+    (15, _migration_015_alphaops_v6_research_contracts),
+    (16, _migration_016_alphaops_v6_universe_registry),
 )

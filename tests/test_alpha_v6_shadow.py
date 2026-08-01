@@ -43,6 +43,16 @@ def _feature() -> dict[str, object]:
     }
 
 
+def _universe_membership() -> dict[str, dict[str, object]]:
+    return {
+        "NOVA": {
+            "universe_id": "v6u-fixture",
+            "status": "ACTIVE",
+            "source_lineage_hash_sha256": "u" * 64,
+        }
+    }
+
+
 def test_v6_records_point_in_time_shadow_decision_without_promoting() -> None:
     decisions = build_v6_shadow_decisions(
         signals=[_signal()],
@@ -50,6 +60,7 @@ def test_v6_records_point_in_time_shadow_decision_without_promoting() -> None:
         source_summary={"status": "success", "snapshot_sha256": "a" * 64},
         regime={"regime": "SELECTIVE"},
         prior_outcomes=[],
+        universe_membership_by_ticker=_universe_membership(),
     )
 
     decision = decisions[0]
@@ -67,6 +78,7 @@ def test_v6_safety_veto_cannot_be_learned_away() -> None:
         source_summary={"status": "success"},
         regime={"regime": "SELECTIVE"},
         prior_outcomes=[],
+        universe_membership_by_ticker=_universe_membership(),
     )
 
     assert decisions[0]["action"] == "SHADOW_REJECT_VETO"
@@ -80,6 +92,7 @@ def test_v6_outcome_is_sourced_after_cost_and_missing_is_not_zero() -> None:
         source_summary={"status": "success"},
         regime={"regime": "SELECTIVE"},
         prior_outcomes=[],
+        universe_membership_by_ticker=_universe_membership(),
     )[0]
     outcomes = build_v6_outcomes(
         decisions=[decision],
@@ -90,6 +103,9 @@ def test_v6_outcome_is_sourced_after_cost_and_missing_is_not_zero() -> None:
                 "entry_opportunity": True,
                 "gross_return_pct": 3.0,
                 "benchmark_return_pct": 1.0,
+                "benchmark_source_bar_hash_sha256": "p" * 64,
+                "secondary_benchmark_return_pct": 0.5,
+                "secondary_benchmark_source_bar_hash_sha256": "i" * 64,
                 "source_bar_hash_sha256": "b" * 64,
                 "validated_against_signal_timestamp": True,
                 "no_lookahead": True,
@@ -156,6 +172,7 @@ def test_v6_storage_is_additive_and_promotion_stays_manual(tmp_path: Path) -> No
         source_summary={"status": "success"},
         regime={"regime": "SELECTIVE"},
         prior_outcomes=[],
+        universe_membership_by_ticker=_universe_membership(),
     )[0]
     assert store.persist_alpha_v6_decisions([decision]) == {"inserted": 1, "skipped": 0}
     assert store.persist_alpha_v6_decisions([decision]) == {"inserted": 0, "skipped": 1}
@@ -177,6 +194,7 @@ def test_v6_failure_attribution_proposes_no_automatic_policy_change(
         source_summary={"status": "success"},
         regime={"regime": "SELECTIVE"},
         prior_outcomes=[],
+        universe_membership_by_ticker=_universe_membership(),
     )[0]
     outcome = build_v6_outcomes(
         decisions=[decision],
@@ -187,6 +205,9 @@ def test_v6_failure_attribution_proposes_no_automatic_policy_change(
                 "entry_opportunity": True,
                 "gross_return_pct": -4.0,
                 "benchmark_return_pct": 0.0,
+                "benchmark_source_bar_hash_sha256": "p" * 64,
+                "secondary_benchmark_return_pct": 0.0,
+                "secondary_benchmark_source_bar_hash_sha256": "i" * 64,
                 "source_bar_hash_sha256": "b" * 64,
                 "validated_against_signal_timestamp": True,
                 "no_lookahead": True,
