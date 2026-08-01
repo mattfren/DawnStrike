@@ -665,8 +665,9 @@ def _web_telegram_cycle(
         "ai": ai,
     }
     ranked_payload = list(payload["ranked_candidates"])
+    alertable_payload = _alertable_notification_candidates(ranked_payload)
     events.extend(_morning_watchlist_events(payload))
-    if ranked_payload:
+    if alertable_payload:
         events.append(_manual_monitor_event(run_date, payload))
     auto_config = load_automation_config(
         automation_config_path,
@@ -953,7 +954,9 @@ def _maybe_collect_sec(
 def _morning_watchlist_events(payload: dict[str, Any]) -> list[NotificationEvent]:
     summary = dict(payload.get("summary") or {})
     source_summary = dict(payload.get("source_summary") or {})
-    ranked = list(payload.get("ranked_candidates") or [])
+    ranked = _alertable_notification_candidates(
+        list(payload.get("ranked_candidates") or [])
+    )
     body = format_morning_watchlist(
         ranked=ranked,
         avoid=list(payload.get("avoid_list") or []),
@@ -1006,7 +1009,9 @@ def _risk_events(payload: dict[str, Any]) -> list[NotificationEvent]:
 
 
 def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> NotificationEvent:
-    ranked = list(payload.get("ranked_candidates") or [])
+    ranked = _alertable_notification_candidates(
+        list(payload.get("ranked_candidates") or [])
+    )
     tickers = [str(row.get("ticker") or "").upper() for row in ranked[:5] if row.get("ticker")]
     body = format_manual_monitor(tickers)
     return _event(
@@ -1016,6 +1021,25 @@ def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> Notificatio
         channel_hint="monitor_alert",
         payload={"tickers": tickers, "telegram_compact_message": body},
     )
+
+
+def _alertable_notification_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the legacy web route subordinate to the canonical Alpha gate."""
+
+    return [
+        row
+        for row in candidates
+        if row.get("can_alert") is True
+        and not str(row.get("no_trade_reason") or "").strip()
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and row.get("manual_confirmation_required") is False
+        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("confidence_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
+        and _float(row.get("source_confidence")) >= 80.0
+    ]
 
 
 def _outcome_needed_event(run_date: str, outcomes: dict[str, Any]) -> NotificationEvent:

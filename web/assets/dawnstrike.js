@@ -448,7 +448,7 @@ function renderCalendar() {
     const day = lookup.get(dateKey);
     const matches = filteredCalendarRecords(day);
     const record = matches.length === 1 ? matches[0] : null;
-    const status = matches.length > 1 ? "PARTIAL" : record?.status || day?.status || "UNAVAILABLE";
+    const status = calendarCellStatus(day, matches);
     const value = record?.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
     const selected = dateKey === state.calendarSelectedDate;
     const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
@@ -489,6 +489,12 @@ function renderCalendar() {
 function filteredCalendarRecords(day) {
   if (!day || !Array.isArray(day.records)) return [];
   return day.records.filter((record) => Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record[key] || "") === value));
+}
+
+function calendarCellStatus(day, records) {
+  if (records.length > 1) return "PARTIAL";
+  if (records.length === 1) return records[0]?.status || "MISSING";
+  return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
 }
 
 function renderCalendarSummary(records) {

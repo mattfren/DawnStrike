@@ -814,7 +814,7 @@ def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
     assert "📊 Dawnstrike Summary" not in out
 
 
-def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, capsys):
+def test_web_telegram_daemon_quarantines_ungated_scanner_tickers(tmp_path, capsys):
     db_path = tmp_path / "web.sqlite"
 
     assert (
@@ -843,13 +843,14 @@ def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, ca
 
     out = capsys.readouterr().out
     assert "🚀 Dawnstrike Watchlist" in out
-    assert "1) NOVA" in out
-    assert "🎯" in out
-    assert "🛑" in out
+    assert "No saved picks found." in out
+    assert "1) NOVA" not in out
+    assert "🎯" not in out
+    assert "🛑" not in out
     assert "Plan:" not in out
     assert "Targets:" not in out
     assert "Avoid if:" not in out
-    assert "👀 Manual Monitor Needed" in out
+    assert "👀 Manual Monitor Needed" not in out
     assert "📥 Outcome Data Needed" in out
     assert "Research only. No orders placed." in out
     assert SQLiteScanStore(db_path).load_latest_scan()["summary"]["top_ticker"] == "NOVA"

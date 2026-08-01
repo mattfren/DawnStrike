@@ -9,6 +9,26 @@ def test_vercel_config_is_static_and_minimal() -> None:
     assert "routes" not in config
     assert "crons" not in config
 
+    assert len(config["headers"]) == 1
+    assert config["headers"][0]["source"] == "/(.*)"
+    security_headers = {
+        header["key"]: header["value"] for header in config["headers"][0]["headers"]
+    }
+    assert security_headers == {
+        "Content-Security-Policy": (
+            "default-src 'self'; base-uri 'none'; object-src 'none'; "
+            "frame-ancestors 'none'; form-action 'none'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
+            "connect-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+        ),
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+
 
 def test_stage_builder_declares_dependency_free_python_stage() -> None:
     script = Path("scripts/build_vercel_public_stage.ps1").read_text(encoding="utf-8")
@@ -20,6 +40,13 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert 'performance-snapshot-manifest.json' in script
     assert 'static_file_hashes_verified = $true' in script
     assert 'api\\public_state.py' in script
+    assert "StageRoot must resolve inside the project build directory" in script
+    assert "StageRoot must not overlap the source public artifact" in script
+    assert "[System.IO.Path]::GetFullPath($stageCandidate)" in script
+    assert "$securityHeaders = @(" in script
+    assert "Content-Security-Policy" in script
+    assert "frame-ancestors 'none'" in script
+    assert "headers = $securityHeaders" in script
 
 
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:

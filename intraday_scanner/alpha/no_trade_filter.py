@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+ALERT_SOURCE_CONFIDENCE_FLOOR = 80.0
+FALLBACK_ALPHA_SCORE_FLOOR = 58.0
+FALLBACK_RISK_SCORE_FLOOR = 80.0
+ALERTABLE_CONFIDENCE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
+
 
 @dataclass(frozen=True)
 class NoTradeDecision:
@@ -32,11 +37,11 @@ def evaluate_no_trade(
     candidates: list[dict[str, Any]],
     *,
     source_summary: dict[str, Any] | None = None,
-    min_source_confidence: float = 35.0,
+    min_source_confidence: float = ALERT_SOURCE_CONFIDENCE_FLOOR,
     min_alpha_score: float = 45.0,
-    min_fallback_alpha_score: float = 32.0,
-    min_fallback_source_confidence: float = 20.0,
-    min_fallback_risk_score: float = 55.0,
+    min_fallback_alpha_score: float = FALLBACK_ALPHA_SCORE_FLOOR,
+    min_fallback_source_confidence: float = ALERT_SOURCE_CONFIDENCE_FLOOR,
+    min_fallback_risk_score: float = FALLBACK_RISK_SCORE_FLOOR,
 ) -> NoTradeDecision:
     if not candidates:
         return NoTradeDecision(
@@ -63,7 +68,14 @@ def evaluate_no_trade(
         if _bool(row.get("can_alert"))
         and not str(row.get("no_trade_reason") or "").strip()
         and _float(row.get("alpha_score"), 0.0) >= min_alpha_score
+        and _float(row.get("source_confidence"), 0.0) >= min_source_confidence
         and str(row.get("drawdown_risk_bucket") or "").upper() != "HIGH"
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and not _bool(row.get("manual_confirmation_required"))
+        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("confidence_bucket") or "").upper()
+        in ALERTABLE_CONFIDENCE_BUCKETS
+        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
     ]
     blocked = len(candidates) - len(clean)
     fallback = _fallback_candidates(
@@ -161,6 +173,12 @@ def _fallback_candidates(
         and _float(row.get("source_confidence"), 0.0) >= min_source_confidence
         and _float(row.get("risk_score"), 0.0) >= min_risk_score
         and str(row.get("drawdown_risk_bucket") or "").upper() != "HIGH"
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and not _bool(row.get("manual_confirmation_required"))
+        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("confidence_bucket") or "").upper()
+        in ALERTABLE_CONFIDENCE_BUCKETS
+        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
         and (
             _float(row.get("score") or row.get("total_score"), 0.0) >= 40.0
             or _float(row.get("dollar_volume"), 0.0) >= 1_000_000.0

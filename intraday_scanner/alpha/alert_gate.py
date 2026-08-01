@@ -18,10 +18,19 @@ WEAK = "WEAK"
 
 HARD_SOURCE_CONFIDENCE_FLOOR = 18.0
 LOW_SOURCE_CONFIDENCE_FLOOR = 35.0
+ALERT_SOURCE_CONFIDENCE_FLOOR = 80.0
 EXTREME_SPREAD_PCT = 12.0
 MIN_REWARD_RISK_RATIO = 1.5
 MIN_HISTORICAL_FIRST_TOUCH_SAMPLE = 20
 MIN_HISTORICAL_FIRST_TOUCH_WIN_RATE = 52.0
+MAX_ALERT_GAP_PCT = 50.0
+MAX_ALERT_STOP_DISTANCE_PCT = 15.0
+MIN_CATALYST_CONFIDENCE = 0.60
+ALERT_GATE_VERSION = "dawnstrike-alert-gate-v2.0.0"
+PASSING_EVIDENCE_STATUSES = frozenset({"CLEAR", "VERIFIED", "OK", "PASS"})
+ALERTABLE_EDGE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
+ALERTABLE_SETUP_GRADES = frozenset({"A", "B"})
+ALERTABLE_CONFIDENCE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
 
 
 def apply_alert_gates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -43,7 +52,7 @@ def apply_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
     output["official_paper_eligibility_status"] = (
         "PENDING_V5_EXECUTION_POLICY" if gate_passed else "RESEARCH_ONLY"
     )
-    if gate["alert_gate_status"] in {BLOCKED, NO_EDGE}:
+    if not gate_passed:
         output["can_alert"] = False
         output["no_trade_reason"] = ";".join(
             _unique(
@@ -53,7 +62,7 @@ def apply_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
                 ]
             )
         )
-    elif gate["alert_gate_status"] in {WATCH_ONLY, NEEDS_CONFIRMATION}:
+    if gate["alert_gate_status"] in {WATCH_ONLY, NEEDS_CONFIRMATION}:
         output["classification"] = "WATCH ONLY"
         output["review_label"] = "NEEDS CONFIRMATION"
     return output
@@ -89,13 +98,18 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         ("reverse_split_90d", "reverse_split_risk", "reverse split", "reverse_stock_split"),
     ):
         reasons.append("recent reverse split risk")
-    if _has_any(risk_text, ("source_conflict", "gap_conflict")):
+    if _has_any(
+        risk_text,
+        ("source_conflict", "gap_conflict", "price_conflict", "volume_conflict"),
+    ) or str(row.get("score_consensus") or "").lower() == "multi_source_conflict":
         reasons.append("source conflict unresolved")
     stale_status = str(row.get("stale_data_status") or "").lower()
     if _truthy(row.get("stale_data_flag")) or stale_status == "stale":
         reasons.append("stale source")
     if source_confidence < HARD_SOURCE_CONFIDENCE_FLOOR:
         reasons.append("source confidence below hard threshold")
+    elif source_confidence < ALERT_SOURCE_CONFIDENCE_FLOOR:
+        reasons.append("source confidence below alert threshold")
     if _price(row) is None:
         reasons.append("missing price")
     if _volume(row) is None:
@@ -111,27 +125,60 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
     if _source_count(row) <= 1:
         warnings.append("only one source confirmed it")
     if _has_any(risk_text, ("sec_risk_unverified", "sec_unchecked")):
-        warnings.append("SEC risk not checked")
+        reasons.append("SEC risk not checked")
     if _has_any(risk_text, ("halt_status_unverified", "halt_unchecked")):
-        warnings.append("halt status not checked")
+        reasons.append("halt status not checked")
+    if "url_table_unverified" in risk_text:
+        reasons.append("public table identity not verified")
     if _premarket_range_missing(row):
         missing.append("premarket high/low missing")
     if _is_public_url(row):
         warnings.append("free web data - verify manually")
     if _no_catalyst(row):
-        warnings.append("no clear catalyst")
+        edge_reasons.append("no clear catalyst")
+    catalyst_confidence = _optional_float(row.get("catalyst_confidence"))
+    if catalyst_confidence is None:
+        edge_reasons.append("catalyst confidence unavailable")
+    elif catalyst_confidence < MIN_CATALYST_CONFIDENCE:
+        edge_reasons.append("catalyst confidence below alert threshold")
     if source_confidence < LOW_SOURCE_CONFIDENCE_FLOOR:
         warnings.append("low source confidence")
-    if str(row.get("confidence_bucket") or "").upper() == "INSUFFICIENT_SAMPLE":
+    confidence_bucket = str(row.get("confidence_bucket") or "").upper()
+    if confidence_bucket == "INSUFFICIENT_SAMPLE":
         warnings.append("not enough history yet")
+    elif confidence_bucket not in ALERTABLE_CONFIDENCE_BUCKETS:
+        edge_reasons.append("confidence evidence below alert threshold")
 
-    if (
-        "SEC risk not checked" in warnings
-        and _source_count(row) <= 1
-        and _no_catalyst(row)
-        and _is_public_url(row)
+    edge_bucket = str(row.get("edge_bucket") or "").upper()
+    if edge_bucket not in ALERTABLE_EDGE_BUCKETS:
+        edge_reasons.append("edge bucket below alert threshold")
+    setup_grade = str(row.get("setup_grade") or "").upper()
+    if setup_grade not in ALERTABLE_SETUP_GRADES:
+        edge_reasons.append("setup grade below alert threshold")
+    data_quality = _optional_float(row.get("data_quality_score"))
+    if data_quality is None:
+        reasons.append("data quality unavailable")
+    elif data_quality < 75.0:
+        reasons.append("data quality below alert threshold")
+
+    gap_pct = _optional_float(row.get("gap_pct"))
+    if gap_pct is not None and (gap_pct < 0 or gap_pct > MAX_ALERT_GAP_PCT):
+        reasons.append("gap regime outside alert policy")
+    stop_distance = _stop_distance_pct(row)
+    if stop_distance is not None and stop_distance > MAX_ALERT_STOP_DISTANCE_PCT:
+        reasons.append("stop distance exceeds alert policy")
+    if _truthy(row.get("target_derived_from_risk")):
+        edge_reasons.append("target is manufactured from risk multiple")
+
+    for field, label in (
+        ("halt_status", "halt status"),
+        ("sec_risk_status", "SEC risk status"),
+        ("corporate_action_status", "corporate action status"),
+        ("source_quality_status", "source quality status"),
     ):
-        reasons.append("SEC risk unverified on single-source no-catalyst name")
+        status_value = str(row.get(field) or "").upper()
+        if status_value not in PASSING_EVIDENCE_STATUSES:
+            reasons.append(f"{label} is not verified clear")
 
     expected_value = _optional_float(row.get("expected_value_score"))
     expected_drawdown = _optional_float(row.get("expected_max_drawdown"))
@@ -197,6 +244,7 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
 
     manual_required = status not in {PASS, ALERT_OK}
     return {
+        "alert_gate_version": ALERT_GATE_VERSION,
         "alert_gate_status": status,
         "alert_gate_reasons": _unique(reasons + edge_reasons + public_warnings),
         "public_data_reliability_grade": grade,
@@ -276,6 +324,24 @@ def _reward_risk_ratio(row: dict[str, Any]) -> float | None:
     if trigger <= 0 or reward <= 0 or risk <= 0:
         return None
     return round(reward / risk, 4)
+
+
+def _stop_distance_pct(row: dict[str, Any]) -> float | None:
+    trigger = _optional_float(
+        row.get("entry_trigger")
+        or row.get("breakout_trigger")
+        or row.get("entry_watch_level")
+        or row.get("premarket_price")
+        or row.get("price")
+    )
+    invalidation = _optional_float(
+        row.get("invalidation")
+        or row.get("invalidation_level")
+        or row.get("exit_line")
+    )
+    if trigger is None or invalidation is None or trigger <= 0 or invalidation >= trigger:
+        return None
+    return round((trigger - invalidation) / trigger * 100.0, 4)
 
 
 def _is_public_url(row: dict[str, Any]) -> bool:

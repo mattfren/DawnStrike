@@ -7,7 +7,28 @@ param(
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $publicSource = Join-Path $resolvedRoot "build\public"
-$stage = Join-Path $resolvedRoot $StageRoot
+$buildRoot = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot "build"))
+$stageCandidate = if ([System.IO.Path]::IsPathRooted($StageRoot)) {
+    $StageRoot
+} else {
+    Join-Path $resolvedRoot $StageRoot
+}
+$stage = [System.IO.Path]::GetFullPath($stageCandidate)
+$buildPrefix = $buildRoot.TrimEnd("\") + "\"
+$publicSourcePath = [System.IO.Path]::GetFullPath($publicSource)
+$publicSourcePrefix = $publicSourcePath.TrimEnd("\") + "\"
+if (
+    $stage.Equals($buildRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not $stage.StartsWith($buildPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+) {
+    throw "StageRoot must resolve inside the project build directory: $buildRoot"
+}
+if (
+    $stage.Equals($publicSourcePath, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $stage.StartsWith($publicSourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+) {
+    throw "StageRoot must not overlap the source public artifact: $publicSourcePath"
+}
 $stagePublic = Join-Path $stage "public"
 $functionPublic = Join-Path $stage "api\public"
 $functionData = Join-Path $functionPublic "data"
@@ -49,6 +70,18 @@ $stateModule = "import json`n`nPUBLIC_STATE = json.loads($pythonString)`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $stage "api\public_state.py"), $stateModule, $utf8NoBom)
 
+$securityHeaders = @(
+    [ordered]@{
+        key = 'Content-Security-Policy'
+        value = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+    },
+    [ordered]@{ key = 'X-Content-Type-Options'; value = 'nosniff' },
+    [ordered]@{ key = 'Referrer-Policy'; value = 'no-referrer' },
+    [ordered]@{ key = 'Permissions-Policy'; value = 'camera=(), microphone=(), geolocation=(), payment=(), usb=()' },
+    [ordered]@{ key = 'X-Frame-Options'; value = 'DENY' },
+    [ordered]@{ key = 'Cross-Origin-Opener-Policy'; value = 'same-origin' },
+    [ordered]@{ key = 'Cross-Origin-Resource-Policy'; value = 'same-origin' }
+)
 $config = @{
     '$schema' = 'https://openapi.vercel.sh/vercel.json'
     version = 2
@@ -57,7 +90,10 @@ $config = @{
         'api/health.py' = @{ includeFiles = 'api/public/**'; maxDuration = 10 }
         'api/readiness.py' = @{ includeFiles = 'api/public/**'; maxDuration = 10 }
     }
-} | ConvertTo-Json -Depth 6
+    headers = @(
+        [ordered]@{ source = '/(.*)'; headers = $securityHeaders }
+    )
+} | ConvertTo-Json -Depth 10
 [System.IO.File]::WriteAllText((Join-Path $stage "vercel.json"), $config, $utf8NoBom)
 $stagePyproject = @"
 [project]
