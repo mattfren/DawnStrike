@@ -11,6 +11,7 @@ $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
+. (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $logRoot = Join-Path $state "logs"
@@ -21,8 +22,12 @@ $errorCode = ""
 
 Push-Location $runtime
 try {
-    & py.exe -m intraday_scanner.services.market_calendar --date $MarketDate
-    $calendarExit = $LASTEXITCODE
+    $calendar = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.services.market_calendar", "--date", $MarketDate) `
+        -LogRoot $logRoot `
+        -LogName "alpha_monitor_calendar-$MarketDate"
+    $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
         & py.exe scripts\record_daily_stage.py `
             --db-path $dbPath `
@@ -41,29 +46,24 @@ try {
     }
 
     if ($exitCode -eq 0) {
-        & py.exe -m intraday_scanner.cli alpha-monitor `
-            --db-path $dbPath `
-            --notify $Notify 2>&1 |
-            Tee-Object -FilePath (Join-Path $logRoot "alpha_monitor-$MarketDate.log") -Append
-        if ($LASTEXITCODE -ne 0) {
-            $exitCode = $LASTEXITCODE
+        $monitor = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-monitor", "--db-path", $dbPath, "--notify", $Notify) `
+            -LogRoot $logRoot `
+            -LogName "alpha_monitor-$MarketDate"
+        if ($monitor.exit_code -ne 0) {
+            $exitCode = $monitor.exit_code
             $errorCode = "alpha_monitor_failed"
         }
     }
     if ($exitCode -eq 0) {
-        & py.exe -m intraday_scanner.cli trade-watch `
-            --db-path $dbPath `
-            --market-date $MarketDate `
-            --mode paper_execute `
-            --source auto `
-            --notify $Notify `
-            --simulated-equity 100000 `
-            --max-open-positions 3 `
-            --max-daily-entries 10 `
-            --min-reward-risk 1.5 2>&1 |
-            Tee-Object -FilePath (Join-Path $logRoot "trade_watch-$MarketDate.log") -Append
-        if ($LASTEXITCODE -ne 0) {
-            $exitCode = $LASTEXITCODE
+        $watch = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "auto", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") `
+            -LogRoot $logRoot `
+            -LogName "trade_watch-$MarketDate"
+        if ($watch.exit_code -ne 0) {
+            $exitCode = $watch.exit_code
             $errorCode = "trade_watcher_failed"
         }
     }

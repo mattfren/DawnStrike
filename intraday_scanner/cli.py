@@ -128,6 +128,10 @@ from intraday_scanner.services.setup_monitor import run_setup_monitor
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
+from intraday_scanner.services.v6_learning_service import (
+    build_v6_failure_attribution,
+    synchronize_v6_learning,
+)
 from intraday_scanner.services.web_collection_service import (
     telegram_test,
     web_auto_collect,
@@ -436,6 +440,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-learn", help="Update AlphaOps setup memory and performance truth"
     )
     alpha_learn_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    alpha_v6_learn_parser = subparsers.add_parser(
+        "alpha-v6-learn",
+        help="Append sourced V6 shadow labels and strict walk-forward evidence",
+    )
+    alpha_v6_learn_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+
+    alpha_v6_attribution_parser = subparsers.add_parser(
+        "alpha-v6-attribution",
+        help="Explain V6 shadow outcomes and propose holdout-only experiments",
+    )
+    alpha_v6_attribution_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
 
     alpha_status_parser = subparsers.add_parser(
         "alpha-status", help="Print AlphaOps persistence and evidence status"
@@ -892,6 +912,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_paper_reconcile(args)
         if args.command == "alpha-learn":
             return _run_alpha_learn(args)
+        if args.command == "alpha-v6-learn":
+            return _run_alpha_v6_learn(args)
+        if args.command == "alpha-v6-attribution":
+            return _run_alpha_v6_attribution(args)
         if args.command == "alpha-status":
             return _run_alpha_status(args)
         if args.command == "alpha-doctor":
@@ -992,7 +1016,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_release_doctor(probability_doctor(args.db_path))
         if args.command == "scheduler-doctor":
             return _run_release_doctor(
-                scheduler_doctor(args.root, state_root=args.state_root)
+                scheduler_doctor(args.root, state_root=args.state_root),
+                require_local_verification=True,
             )
         if args.command == "dashboard-doctor":
             return _run_release_doctor(dashboard_doctor(args.db_path, args.root))
@@ -1397,6 +1422,19 @@ def _run_alpha_paper_reconcile(args: argparse.Namespace) -> int:
 
 def _run_alpha_learn(args: argparse.Namespace) -> int:
     result = alpha_learn(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
+    store = SQLiteScanStore(args.db_path)
+    result = synchronize_v6_learning(store)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_attribution(args: argparse.Namespace) -> int:
+    result = build_v6_failure_attribution(SQLiteScanStore(args.db_path))
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -2023,8 +2061,12 @@ def _run_canonical_performance_reconcile(args: argparse.Namespace) -> int:
     return performance_reconcile_main(argv)
 
 
-def _run_release_doctor(result: dict[str, Any]) -> int:
+def _run_release_doctor(
+    result: dict[str, Any], *, require_local_verification: bool = False
+) -> int:
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if require_local_verification:
+        return 0 if result.get("status") == "LOCAL_VERIFIED" else 2
     return 0 if result.get("status") not in {"FAILED"} else 2
 
 

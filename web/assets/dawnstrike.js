@@ -14,6 +14,7 @@ const state = {
   calendar: null,
   calendarManifest: null,
   publicationSet: null,
+  v6: null,
   stage: null,
   calendarMonth: null,
   calendarSelectedDate: null,
@@ -85,7 +86,7 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet] = await Promise.all([
+    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
@@ -93,6 +94,7 @@ async function init() {
       loadJson("/data/calendar.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/calendar.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/v6-learning.json").catch(() => ({ payload: {}, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
@@ -100,6 +102,7 @@ async function init() {
     state.calendar = calendar.payload;
     state.calendarManifest = calendarManifest.payload;
     state.publicationSet = publicationSet.payload;
+    state.v6 = v6.payload;
     state.stage = stage.payload;
     state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
     initializeCalendarFilters();
@@ -148,6 +151,7 @@ function render() {
   renderLedger(rows, latest);
   renderCurve(official);
   renderResearchCohorts(daily);
+  renderV6Research();
   renderCalendar();
   renderSystem(state.readiness, state.manifest, state.stage, data);
 }
@@ -246,6 +250,21 @@ function renderResearchCohorts(daily) {
     groups.set(row.cohort, current);
   });
   document.getElementById("research-cohorts").innerHTML = groups.size ? [...groups.entries()].map(([cohort, value]) => `<div class="cohort-row"><strong>${escapeHtml(COHORTS[cohort] || cohort)}</strong><span>${value.days} day${value.days === 1 ? "" : "s"} · ${value.complete} complete</span></div>`).join("") : '<span class="muted">No backtest or challenger rows are published.</span>';
+}
+
+function renderV6Research() {
+  const v6 = state.v6 || {};
+  const promotion = v6.promotion_readiness || {};
+  const stateLabel = promotion.performance_status || "WAITING_FOR_FORWARD_EVIDENCE";
+  const forwardState = document.getElementById("forward-state");
+  if (forwardState) forwardState.textContent = stateLabel;
+  const cohorts = document.getElementById("research-cohorts");
+  if (!cohorts) return;
+  const count = Number(v6.learning_eligible_outcome_count || 0);
+  const sessions = Number(promotion.forward_session_count || 0);
+  const trades = Number(promotion.closed_paper_trade_count || 0);
+  const v6Row = `<div class="cohort-row"><strong>V6 shadow challenger</strong><span>${sessions}/60 sessions · ${trades}/100 after-cost labels · ${count} eligible</span></div>`;
+  cohorts.innerHTML += v6Row;
 }
 
 function renderResearch(rows) {
@@ -574,8 +593,8 @@ function renderSystem(readiness, manifest, stage, data) {
     ["Source SHA", shortHash(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha), Boolean(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha)],
     ["Build SHA", shortHash(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id), Boolean(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id)],
     ["Scheduler", scheduler.status || "Not reported", scheduler.status === "LOCAL_VERIFIED"],
-    ["Runtime root", scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root || "Not reported", Boolean(scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root)],
-    ["State root", scheduler.state_root || readinessPayload.state_root || run.state_root || "Not reported", Boolean(scheduler.state_root || readinessPayload.state_root || run.state_root)],
+    ["Runtime boundary", scheduler.runtime_boundary || "Configured", scheduler.runtime_boundary === "configured"],
+    ["State boundary", scheduler.state_boundary || "Configured", scheduler.state_boundary === "configured"],
     ["Next scheduled", formatTimestamp(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run), Boolean(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run)],
     ["Input hash", shortHash(readinessPayload.input_hash_sha256), true],
     ["Bound set", shortHash(readinessPayload.publication_set_sha256), Boolean(readinessPayload.publication_set_sha256)],

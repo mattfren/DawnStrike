@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -687,6 +687,91 @@ def _migration_013_shared_daily_run_ledger(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_014_alphaops_v6_shadow_ledger(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add immutable point-in-time decision, outcome, model, and experiment ledgers."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_decisions (
+            decision_id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            source_signal_id TEXT NOT NULL,
+            shadow_signal_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            decision_at TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            action TEXT NOT NULL,
+            setup_key TEXT,
+            regime_key TEXT,
+            safety_vetoes_json TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL,
+            source_lineage_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (scan_id, source_signal_id, strategy_version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_decisions_day
+        ON alpha_v6_decisions(market_date, decision_at, action);
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_decisions_signal
+        ON alpha_v6_decisions(source_signal_id, decision_at);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL UNIQUE,
+            shadow_signal_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            activation_status TEXT NOT NULL,
+            outcome_status TEXT NOT NULL,
+            net_return_pct REAL,
+            benchmark_return_pct REAL,
+            net_excess_return_pct REAL,
+            source_bar_hash_sha256 TEXT,
+            learning_eligible INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY(decision_id) REFERENCES alpha_v6_decisions(decision_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_outcomes_day
+        ON alpha_v6_outcomes(market_date, outcome_status, learning_eligible);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_model_runs (
+            model_run_id TEXT PRIMARY KEY,
+            model_version TEXT NOT NULL,
+            trained_at TEXT NOT NULL,
+            training_cutoff TEXT,
+            status TEXT NOT NULL,
+            training_input_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_model_runs_time
+        ON alpha_v6_model_runs(trained_at, model_version);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_evaluations (
+            evaluation_id TEXT PRIMARY KEY,
+            model_run_id TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            evaluation_input_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY(model_run_id) REFERENCES alpha_v6_model_runs(model_run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_evaluations_model
+        ON alpha_v6_evaluations(model_run_id, evaluated_at);
+
+        CREATE TABLE IF NOT EXISTS alpha_v6_experiments (
+            experiment_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -710,4 +795,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (11, _migration_011_v5_paper_account_ledger),
     (12, _migration_012_outcome_capture_truth),
     (13, _migration_013_shared_daily_run_ledger),
+    (14, _migration_014_alphaops_v6_shadow_ledger),
 )

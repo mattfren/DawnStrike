@@ -217,8 +217,6 @@ class DailyFinalizeService:
                             "last_fully_successful_run"
                         )
                     )
-                    readiness["runtime_root"] = str(self.runtime_root)
-                    readiness["state_root"] = str(self.state_root)
                     readiness["source_data_watermark"] = market_date
                     _atomic_write_json(
                         self.output_root / "readiness.json",
@@ -799,6 +797,7 @@ class DailyFinalizeService:
                 "data/calendar.json",
                 "data/calendar.json.manifest.json",
                 "data/publication-set.json",
+                "data/v6-learning.json",
                 "readiness.json",
             ],
             "research_only": True,
@@ -988,8 +987,6 @@ def _public_daily_run(snapshot: dict[str, Any]) -> dict[str, Any]:
         "run_id",
         "market_date",
         "release_sha",
-        "runtime_root",
-        "state_root",
         "scheduler_version",
         "status",
         "current_stage",

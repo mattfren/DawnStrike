@@ -3,6 +3,7 @@ param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$BackupRoot = "",
+    [pscredential]$RunAsCredential,
     [switch]$ReplaceExisting
 )
 
@@ -10,6 +11,18 @@ $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
+if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
+    throw (
+        "RunAsCredential is required. Register AlphaOps with a password-logon " +
+        "Windows identity that can reach the network, encrypted secrets, the " +
+        "Dawnstrike state root, and Telegram. Do not use S4U: Windows prevents " +
+        "S4U tasks from accessing network or encrypted files."
+    )
+}
+$taskPassword = $RunAsCredential.GetNetworkCredential().Password
+if ([string]::IsNullOrWhiteSpace($taskPassword)) {
+    throw "RunAsCredential must contain a non-empty Windows password."
+}
 if (-not $BackupRoot) {
     $BackupRoot = Join-Path $state (
         "scheduler-backups\" +
@@ -21,7 +34,7 @@ New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 $taskDefinitions = @(
     [ordered]@{
         Name = "Dawnstrike AlphaOps Morning"
-        Description = "Dawnstrike v5 morning research collection and ranked delivery. Research-only; no broker execution."
+        Description = "Dawnstrike V6 morning research collection and ranked delivery. Research-only; no broker execution."
         Script = "run_alphaops_morning.ps1"
         Start = "08:10"
         Repeat = $false
@@ -29,7 +42,7 @@ $taskDefinitions = @(
     },
     [ordered]@{
         Name = "Dawnstrike AlphaOps Monitor 5m"
-        Description = "Dawnstrike v5 intraday paper monitor on a five-minute cadence. Research-only; no broker execution."
+        Description = "Dawnstrike V6 intraday paper monitor on a five-minute cadence. Research-only; no broker execution."
         Script = "run_alphaops_monitor.ps1"
         Start = "08:35"
         Repeat = $true
@@ -37,7 +50,7 @@ $taskDefinitions = @(
     },
     [ordered]@{
         Name = "Dawnstrike AlphaOps EOD Full Report"
-        Description = "Dawnstrike v5 sourced outcomes, reconciliation, learning, attribution, and PaperOps forward evidence. Research-only; no broker execution."
+        Description = "Dawnstrike V6 sourced outcomes, reconciliation, learning, attribution, and PaperOps forward evidence. Research-only; no broker execution."
         Script = "run_alphaops_eod.ps1"
         Start = "15:15"
         Repeat = $false
@@ -97,12 +110,10 @@ foreach ($definition in $taskDefinitions) {
             }
         $trigger.Repetition = $repetition
     }
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-        -LogonType Interactive `
-        -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
+        -DisallowStartIfOnBatteries:$false `
+        -StopIfGoingOnBatteries:$false `
         -WakeToRun `
         -MultipleInstances IgnoreNew `
         -RestartCount 3 `
@@ -112,8 +123,10 @@ foreach ($definition in $taskDefinitions) {
         -TaskName $taskName `
         -Action $action `
         -Trigger $trigger `
-        -Principal $principal `
         -Settings $settings `
+        -User $RunAsCredential.UserName `
+        -Password $taskPassword `
+        -RunLevel Limited `
         -Description ([string]$definition.Description) `
         -Force | Out-Null
     Write-Output "Registered $taskName from $runtime against $state."

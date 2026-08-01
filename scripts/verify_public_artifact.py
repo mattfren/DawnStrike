@@ -6,6 +6,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import re
 from pathlib import Path
 
 MAX_SNAPSHOT_BYTES = 250 * 1024
@@ -22,9 +23,14 @@ REQUIRED_FILES = (
     "data/calendar.json",
     "data/calendar.json.manifest.json",
     "data/publication-set.json",
+    "data/v6-learning.json",
     "release-manifest.json",
 )
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
+ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?:[A-Za-z]:(?:\\|\\\\)(?:Users|r)(?:\\|\\\\)|/(?:Users|home|var|opt)/)",
+    flags=re.IGNORECASE,
+)
 
 
 def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
@@ -38,6 +44,20 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
             if path.is_file() and any(part in path.name.lower() for part in FORBIDDEN_FILE_PARTS):
                 forbidden.append(str(path.relative_to(root)).replace("\\", "/"))
     errors.extend(f"forbidden_file:{name}" for name in forbidden)
+    exposed_paths = []
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if ABSOLUTE_PATH_PATTERN.search(text):
+                exposed_paths.append(
+                    str(path.relative_to(root)).replace("\\", "/")
+                )
+    errors.extend(f"forbidden_absolute_path:{name}" for name in exposed_paths)
 
     snapshot_path = root / "data" / "performance.json"
     manifest_path = root / "data" / "performance.json.manifest.json"

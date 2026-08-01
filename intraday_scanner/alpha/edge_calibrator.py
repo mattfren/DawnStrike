@@ -46,10 +46,22 @@ def calibrate_edge(
     raw_bucket_returns = [_return(row) for row in bucket_rows]
     global_returns = [value for value in raw_global_returns if value is not None]
     bucket_returns = [value for value in raw_bucket_returns if value is not None]
-    if not global_returns:
-        global_returns = [0.0]
-    if not bucket_returns:
-        bucket_returns = [0.0]
+    if not global_returns or not bucket_returns:
+        return {
+            "mode": "uncalibrated_missing_returns",
+            "expected_return_pct": None,
+            "expected_return_bucket": "UNCALIBRATED",
+            "drawdown_risk_bucket": "UNKNOWN",
+            "hit_rate_pct": None,
+            "hit_rate_bucket": "UNKNOWN",
+            "outlier_dependency": None,
+            "confidence_bucket": "MISSING_RETURN_TRUTH",
+            "sample_size": len(bucket_returns),
+            "global_sample_size": len(global_returns),
+            "real_shadow_days": real_shadow_days,
+            "insufficient_sample": True,
+            "missing_truth_is_zero": False,
+        }
     bucket_mean = sum(bucket_returns) / len(bucket_returns)
     global_mean = sum(global_returns) / len(global_returns)
     shrunk = shrink_empirical_mean(
@@ -181,7 +193,7 @@ def _confidence_bucket(sample_size: int, dependency: float) -> str:
     return "MEDIUM"
 
 
-def median_return(rows: list[dict[str, Any]]) -> float:
+def median_return(rows: list[dict[str, Any]]) -> float | None:
     raw_values = [_return(row) for row in rows]
     values = [value for value in raw_values if value is not None]
-    return round(float(median(values)), 4) if values else 0.0
+    return round(float(median(values)), 4) if values else None

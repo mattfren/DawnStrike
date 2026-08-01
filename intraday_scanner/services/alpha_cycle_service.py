@@ -16,6 +16,7 @@ from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
+from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
 from intraday_scanner.market_calendar import (
@@ -313,6 +314,15 @@ def alpha_cycle(
     ]
     signals = apply_alert_gates(signals)
     store.persist_alpha_signals(signals)
+    regime = detect_regime(signals, source_summary)
+    v6_decisions = build_v6_shadow_decisions(
+        signals=signals,
+        feature_vectors=feature_vectors,
+        source_summary=source_summary,
+        regime=regime,
+        prior_outcomes=store.load_alpha_v6_outcomes(),
+    )
+    v6_decision_stats = store.persist_alpha_v6_decisions(v6_decisions)
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
     historical_rows = record_alpha_historical_signals(
@@ -441,7 +451,6 @@ def alpha_cycle(
         signal_ids=selected_signal_ids,
         notification_deliveries=notification_deliveries,
     )
-    regime = detect_regime(signals, source_summary)
     result: dict[str, Any] = {
         "status": "complete" if not decision.get("no_trade") else "no_trade",
         "run_type": cycle_name,
@@ -452,6 +461,16 @@ def alpha_cycle(
         "premarket_enrichment": enrichment["summary"],
         "regime": regime,
         "feature_vector_count": len(feature_vectors),
+        "v6_shadow": {
+            "strategy_version": "dawnstrike-alphaops-v6-shadow",
+            "decision_count": len(v6_decisions),
+            "tracked_count": sum(
+                1 for row in v6_decisions if row.get("action") == "SHADOW_TRACK"
+            ),
+            "persistence": v6_decision_stats,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
         "signal_count": len(signals),
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,

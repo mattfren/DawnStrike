@@ -23,6 +23,7 @@ from intraday_scanner.alpha.v5_policy import (
     DEFAULT_V5_POLICY,
     alphaops_strategy_contract,
 )
+from intraday_scanner.alpha.v6_shadow import ALPHAOPS_V6_STRATEGY_VERSION
 from intraday_scanner.config import ScannerConfig, load_config
 from intraday_scanner.dashboard.operator_data_service import signal_requires_outcome
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError
@@ -186,9 +187,19 @@ def capture_sourced_alpha_outcomes(
             "AlphaOps session selection evidence is contradictory: explicit no-trade "
             "and selected signals coexist."
         )
+    historical_signals = store.load_historical_signals(
+        market_date=resolved_date, limit=50_000
+    )
     signals = _outcome_targets(
-        store.load_historical_signals(market_date=resolved_date, limit=50_000),
+        historical_signals,
         selected_signal_ids=selected_ids,
+    )
+    signals.extend(
+        _v6_shadow_outcome_targets(
+            store,
+            market_date=resolved_date,
+            historical_signals=historical_signals,
+        )
     )
     recovered_signal_ids = {str(row.get("signal_id") or "") for row in signals}
     missing_signal_ids = selected_ids - recovered_signal_ids
@@ -375,7 +386,7 @@ def capture_sourced_alpha_outcomes(
             requested_at=at,
             captured_at=captured_at,
             max_close_staleness_seconds=max_close_staleness_seconds,
-            strategy_id=strategy_id,
+            strategy_id=str(signal.get("outcome_strategy_id") or strategy_id),
             source_evidence=source_evidence_by_ticker.get(ticker, {}),
             benchmark_bars=bars_by_ticker.get("SPY", []),
             benchmark_evidence=source_evidence_by_ticker.get("SPY", {}),
@@ -490,6 +501,45 @@ def _outcome_targets(
             str(row.get("signal_id") or ""),
         ),
     )
+
+
+def _v6_shadow_outcome_targets(
+    store: SQLiteScanStore,
+    *,
+    market_date: str,
+    historical_signals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize V6 decisions as independent sourced paper-observation targets."""
+
+    by_signal = {
+        str(row.get("signal_id") or ""): row for row in historical_signals
+    }
+    targets: list[dict[str, Any]] = []
+    for decision in store.load_alpha_v6_decisions(
+        market_date=market_date,
+        action="SHADOW_TRACK",
+    ):
+        source_signal_id = str(decision.get("source_signal_id") or "")
+        source = by_signal.get(source_signal_id)
+        shadow_signal_id = str(decision.get("shadow_signal_id") or "")
+        if source is None or not shadow_signal_id:
+            continue
+        targets.append({
+            **source,
+            "signal_id": shadow_signal_id,
+            "alpha_signal_id": source_signal_id,
+            "generated_at": decision.get("decision_at"),
+            "strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+            "outcome_strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+            "v6_decision_id": decision.get("decision_id"),
+            "v6_cost_model_version": decision.get("cost_model_version"),
+            "v6_estimated_round_trip_cost_bps": decision.get(
+                "estimated_round_trip_cost_bps"
+            ),
+            "research_only": True,
+            "broker_execution_enabled": False,
+        })
+    return targets
 
 
 def _validate_exact_session_selections(
@@ -886,7 +936,10 @@ def _derive_outcome(
     learning_eligible = bool(
         benchmark_return is not None
         and (
-            strategy_id != ALPHAOPS_V5_STRATEGY_ID
+            strategy_id not in {
+                ALPHAOPS_V5_STRATEGY_ID,
+                ALPHAOPS_V6_STRATEGY_VERSION,
+            }
             or entry_intent is not None
         )
     )
@@ -947,7 +1000,9 @@ def _derive_outcome(
         "outcome_status": "complete_sourced",
         "learning_eligible": learning_eligible,
         "learning_contract": (
-            "candidate_outcome_requires_reconciled_trade_label"
+            "v6_shadow_outcome_requires_frozen_cost_label"
+            if strategy_id == ALPHAOPS_V6_STRATEGY_VERSION
+            else "candidate_outcome_requires_reconciled_trade_label"
         ),
         "validated_against_signal_timestamp": True,
         **context,

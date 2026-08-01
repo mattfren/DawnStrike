@@ -1,0 +1,499 @@
+"""Deterministic, research-only AlphaOps V6 shadow learning contracts.
+
+V6 does not replace V5 and it does not send a recommendation or place an
+order.  It records the exact decision-time evidence for a conservative shadow
+cohort, then learns only from sourced, point-in-time, after-cost paper labels.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections import defaultdict
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from statistics import mean, pstdev
+from typing import Any
+
+ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
+ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-empirical-v1"
+V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
+MIN_TRAINING_OUTCOMES = 30
+MIN_GROUP_OUTCOMES = 12
+MIN_FORWARD_SESSIONS = 60
+MIN_FORWARD_CLOSED_TRADES = 100
+_PASSING_GATES = {"PASS", "ALLOWED", "CLEAR"}
+
+
+@dataclass(frozen=True)
+class V6Prediction:
+    status: str
+    activation_probability: float | None
+    conditional_net_excess_return_pct: float | None
+    tail_loss_pct: float | None
+    utility_lcb_pct: float | None
+    sample_size: int
+    group_key: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "activation_probability": _round(self.activation_probability),
+            "conditional_net_excess_return_pct": _round(
+                self.conditional_net_excess_return_pct
+            ),
+            "tail_loss_pct": _round(self.tail_loss_pct),
+            "utility_lcb_pct": _round(self.utility_lcb_pct),
+            "sample_size": self.sample_size,
+            "group_key": self.group_key,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+
+
+class V6EmpiricalShadowModel:
+    """Small-sample-shrunk conditional utility estimator.
+
+    The model is deliberately simple and inspectable.  It is calibrated only
+    on historical labels whose outcome receipt is sourced and whose date is
+    earlier than the candidate's decision date.
+    """
+
+    def __init__(self, rows: Iterable[dict[str, Any]] = ()) -> None:
+        self.rows = [row for row in rows if row.get("learning_eligible") is True]
+        self.by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in self.rows:
+            self.by_group[_group_key(row)].append(row)
+
+    def predict(self, decision: dict[str, Any]) -> V6Prediction:
+        group = _group_key(decision)
+        rows = self.by_group.get(group, [])
+        if len(self.rows) < MIN_TRAINING_OUTCOMES:
+            return V6Prediction(
+                status="UNCALIBRATED_INSUFFICIENT_OUTCOMES",
+                activation_probability=None,
+                conditional_net_excess_return_pct=None,
+                tail_loss_pct=None,
+                utility_lcb_pct=None,
+                sample_size=len(self.rows),
+                group_key=group,
+            )
+        sample = rows if len(rows) >= MIN_GROUP_OUTCOMES else self.rows
+        activated = [row for row in sample if row.get("activation_status") == "ACTIVATED"]
+        returns: list[float] = []
+        for row in activated:
+            value = _number(row.get("net_excess_return_pct"))
+            if value is not None:
+                returns.append(value)
+        if not returns:
+            return V6Prediction(
+                status="UNCALIBRATED_NO_CONDITIONAL_RETURNS",
+                activation_probability=None,
+                conditional_net_excess_return_pct=None,
+                tail_loss_pct=None,
+                utility_lcb_pct=None,
+                sample_size=len(sample),
+                group_key=group,
+            )
+        activation_probability = (len(activated) + 1) / (len(sample) + 2)
+        conditional = mean(returns)
+        standard_error = (
+            pstdev(returns) / math.sqrt(len(returns)) if len(returns) > 1 else None
+        )
+        tail = _tail_mean(returns)
+        # Utility uses the conservative lower confidence bound of expected
+        # activated return and a full tail-loss penalty.  It cannot override a
+        # safety veto and is displayed only as shadow research.
+        lower_conditional = (
+            conditional - 1.96 * standard_error
+            if standard_error is not None
+            else None
+        )
+        utility = (
+            activation_probability * lower_conditional + (1 - activation_probability) * 0.0
+            - max(0.0, -(tail or 0.0))
+            if lower_conditional is not None
+            else None
+        )
+        return V6Prediction(
+            status="CALIBRATED" if utility is not None else "UNCALIBRATED_LOW_VARIANCE_SAMPLE",
+            activation_probability=activation_probability,
+            conditional_net_excess_return_pct=conditional,
+            tail_loss_pct=tail,
+            utility_lcb_pct=utility,
+            sample_size=len(sample),
+            group_key=group,
+        )
+
+
+def build_v6_shadow_decisions(
+    *,
+    signals: list[dict[str, Any]],
+    feature_vectors: list[dict[str, Any]],
+    source_summary: dict[str, Any],
+    regime: dict[str, Any],
+    prior_outcomes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build immutable decision-time V6 records for every ranked candidate."""
+
+    feature_by_ticker = {
+        str(row.get("ticker") or "").upper(): row for row in feature_vectors
+    }
+    model = V6EmpiricalShadowModel(prior_outcomes)
+    output: list[dict[str, Any]] = []
+    for signal in signals:
+        ticker = str(signal.get("ticker") or "").upper()
+        feature = feature_by_ticker.get(ticker, {})
+        decision_at = str(signal.get("timestamp") or signal.get("generated_at") or "")
+        if not ticker or not decision_at:
+            continue
+        source_signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
+        if not source_signal_id:
+            continue
+        vetoes = _safety_vetoes(signal, feature, source_summary)
+        draft = {
+            "scan_id": str(signal.get("scan_id") or feature.get("scan_id") or ""),
+            "source_signal_id": source_signal_id,
+            "market_date": decision_at[:10],
+            "decision_at": decision_at,
+            "ticker": ticker,
+            "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
+            "model_version": ALPHAOPS_V6_MODEL_VERSION,
+            "setup_key": _setup_key(signal, feature),
+            "regime_key": str(regime.get("regime") or "UNKNOWN"),
+            "feature_vector": feature,
+            "signal_facts": _safe_signal_facts(signal),
+            "source_summary": source_summary,
+            "safety_vetoes": vetoes,
+            "estimated_round_trip_cost_bps": _estimated_cost_bps(feature),
+            "cost_model_version": V6_COST_MODEL_VERSION,
+            "point_in_time": {
+                "all_inputs_observed_at_or_before_decision": True,
+                "decision_timestamp": decision_at,
+                "feature_timestamp": feature.get("timestamp"),
+            },
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        draft["input_hash_sha256"] = _hash(draft)
+        draft["source_lineage_hash_sha256"] = _hash(
+            {
+                "source_summary": source_summary,
+                "feature_config_hash": feature.get("config_hash"),
+                "feature_timestamp": feature.get("timestamp"),
+            }
+        )
+        prediction = model.predict(draft).to_dict()
+        # Tracking is a controlled paper-research cohort, not a delivery or a
+        # promotion.  Any V5/v6 safety veto excludes the candidate completely.
+        draft["action"] = "SHADOW_TRACK" if not vetoes else "SHADOW_REJECT_VETO"
+        draft["prediction"] = prediction
+        draft["decision_id"] = "v6d-" + _hash(
+            {
+                "scan_id": draft["scan_id"],
+                "source_signal_id": source_signal_id,
+                "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
+            }
+        )[:28]
+        draft["shadow_signal_id"] = "v6s-" + _hash(
+            {"decision_id": draft["decision_id"]}
+        )[:28]
+        output.append(draft)
+    return output
+
+
+def build_v6_outcomes(
+    *,
+    decisions: list[dict[str, Any]],
+    sourced_outcomes: list[dict[str, Any]],
+    capture_attempts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn one sourced V6 shadow receipt into one immutable learning label."""
+
+    outcome_by_signal = {
+        str(row.get("signal_id") or ""): row for row in sourced_outcomes
+    }
+    attempt_by_signal = {
+        str(row.get("signal_id") or ""): row for row in capture_attempts
+    }
+    output: list[dict[str, Any]] = []
+    for decision in decisions:
+        shadow_signal_id = str(decision.get("shadow_signal_id") or "")
+        if not shadow_signal_id:
+            continue
+        source = outcome_by_signal.get(shadow_signal_id)
+        attempt = attempt_by_signal.get(shadow_signal_id)
+        if source is None and attempt is None:
+            continue
+        outcome = _v6_outcome_from_source(decision, source, attempt)
+        output.append(outcome)
+    return output
+
+
+def strict_walk_forward_evaluation(
+    *, decisions: list[dict[str, Any]], outcomes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate only against future dates; no random or same-date leakage."""
+
+    decision_by_id = {str(row.get("decision_id") or ""): row for row in decisions}
+    rows = [
+        {**outcome, "decision": decision_by_id.get(str(outcome.get("decision_id") or ""))}
+        for outcome in outcomes
+        if outcome.get("learning_eligible") is True
+        and decision_by_id.get(str(outcome.get("decision_id") or "")) is not None
+    ]
+    dates = sorted({str(row.get("market_date") or "")[:10] for row in rows})
+    predictions: list[dict[str, Any]] = []
+    for date in dates:
+        train = [row for row in rows if str(row.get("market_date") or "")[:10] < date]
+        test = [row for row in rows if str(row.get("market_date") or "")[:10] == date]
+        model = V6EmpiricalShadowModel(train)
+        for row in test:
+            prediction = model.predict(dict(row["decision"])).to_dict()
+            predictions.append({
+                "market_date": date,
+                "decision_id": row.get("decision_id"),
+                "prediction": prediction,
+                "realized_net_excess_return_pct": row.get("net_excess_return_pct"),
+                "training_max_market_date": max(
+                    (str(item.get("market_date") or "")[:10] for item in train),
+                    default=None,
+                ),
+            })
+    eligible = [
+        row for row in predictions
+        if row["prediction"].get("status") == "CALIBRATED"
+        and _number(row.get("realized_net_excess_return_pct")) is not None
+    ]
+    return {
+        "schema_version": "dawnstrike.alphaops_v6.walk_forward.v1",
+        "status": "EVALUABLE" if eligible else "NOT_EVALUABLE",
+        "evaluation_method": "strict_expanding_window_by_market_date",
+        "leakage_check": all(
+            row["training_max_market_date"] is None
+            or row["training_max_market_date"] < row["market_date"]
+            for row in predictions
+        ),
+        "evaluated_prediction_count": len(eligible),
+        "total_label_count": len(rows),
+        "realized_net_excess_return_pct": _round(mean([
+            float(row["realized_net_excess_return_pct"]) for row in eligible
+        ])) if eligible else None,
+        "predictions": predictions,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    valid = [row for row in outcomes if row.get("learning_eligible") is True]
+    sessions = {str(row.get("market_date") or "")[:10] for row in valid}
+    returns: list[float] = []
+    for row in valid:
+        value = _number(row.get("net_excess_return_pct"))
+        if value is not None:
+            returns.append(value)
+    tail = _tail_mean(returns) if returns else None
+    criteria = {
+        "minimum_forward_sessions": len(sessions) >= MIN_FORWARD_SESSIONS,
+        "minimum_closed_paper_trades": len(returns) >= MIN_FORWARD_CLOSED_TRADES,
+        "positive_mean_net_excess_return": bool(returns and mean(returns) > 0),
+        "tail_risk_within_limit": tail is not None and tail > -3.0,
+        "all_sourced_and_point_in_time": all(
+            bool(row.get("source_bar_hash_sha256"))
+            and row.get("no_lookahead") is True
+            for row in valid
+        ),
+    }
+    return {
+        "status": "NOT_ELIGIBLE_FOR_PROMOTION",
+        "automatic_promotion": False,
+        "criteria": criteria,
+        "forward_session_count": len(sessions),
+        "closed_paper_trade_count": len(returns),
+        "mean_net_excess_return_pct": _round(mean(returns)) if returns else None,
+        "tail_loss_pct": _round(tail),
+        "performance_status": "WAITING_FOR_FORWARD_EVIDENCE",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _v6_outcome_from_source(
+    decision: dict[str, Any],
+    source: dict[str, Any] | None,
+    attempt: dict[str, Any] | None,
+) -> dict[str, Any]:
+    source_or_attempt = source or attempt or {}
+    observed_at = str(
+        (source or attempt or {}).get("captured_at")
+        or (source or attempt or {}).get("attempted_at")
+        or _utc_now()
+    )
+    activated = bool((source or {}).get("entry_opportunity"))
+    gross_return = _number((source or {}).get("gross_return_pct"))
+    benchmark = _number((source or {}).get("benchmark_return_pct"))
+    cost_bps = _number(decision.get("estimated_round_trip_cost_bps"))
+    net_return = (
+        gross_return - (cost_bps / 100.0)
+        if gross_return is not None and cost_bps is not None
+        else None
+    )
+    net_excess = (
+        net_return - benchmark
+        if net_return is not None and benchmark is not None
+        else None
+    )
+    source_hash = str((source or attempt or {}).get("source_bar_hash_sha256") or "")
+    conclusive = source is not None and str(source.get("outcome_status") or "") in {
+        "complete_sourced",
+        "not_triggered",
+    }
+    learning_eligible = bool(
+        conclusive
+        and source_hash
+        and (source or {}).get("validated_against_signal_timestamp") is True
+        and (source or {}).get("no_lookahead") is True
+        and (not activated or net_excess is not None)
+    )
+    payload = {
+        "decision_id": decision["decision_id"],
+        "shadow_signal_id": decision["shadow_signal_id"],
+        "market_date": decision["market_date"],
+        "observed_at": observed_at,
+        "activation_status": (
+            "ACTIVATED"
+            if activated
+            else "NOT_TRIGGERED"
+            if conclusive
+            else "MISSING"
+        ),
+        "outcome_status": "COMPLETE_SOURCED" if conclusive else "TERMINAL_MISSING",
+        "net_return_pct": _round(net_return),
+        "benchmark_return_pct": _round(benchmark),
+        "net_excess_return_pct": _round(net_excess),
+        "source_bar_hash_sha256": source_hash or None,
+        "learning_eligible": learning_eligible,
+        "no_lookahead": bool((source or {}).get("no_lookahead")),
+        "cost_model_version": decision.get("cost_model_version"),
+        "estimated_round_trip_cost_bps": cost_bps,
+        "source_outcome_status": (
+            source_or_attempt.get("outcome_status")
+            or (attempt or {}).get("status")
+        ),
+        "missing_truth_is_zero": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    payload["outcome_id"] = "v6o-" + _hash({
+        "decision_id": payload["decision_id"],
+        "source_bar_hash_sha256": source_hash,
+        "outcome_status": payload["outcome_status"],
+    })[:28]
+    return payload
+
+
+def _safety_vetoes(
+    signal: dict[str, Any], feature: dict[str, Any], source_summary: dict[str, Any]
+) -> list[str]:
+    vetoes: list[str] = []
+    if signal.get("can_alert") is not True:
+        vetoes.append("legacy_alert_gate_not_passed")
+    gate = str(signal.get("alert_gate_status") or "").upper()
+    if gate and gate not in _PASSING_GATES:
+        vetoes.append("alert_gate_not_passed")
+    if str(signal.get("no_trade_reason") or "").strip():
+        vetoes.append("signal_no_trade_reason")
+    raw = signal.get("raw_payload_json")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    if raw_payload.get("avoid_reasons") or signal.get("avoid_reasons"):
+        vetoes.append("candidate_risk_veto")
+    if str(source_summary.get("status") or "").lower() not in {"success", "complete"}:
+        vetoes.append("source_collection_not_complete")
+    if not feature.get("config_hash"):
+        vetoes.append("feature_lineage_missing")
+    return sorted(set(vetoes))
+
+
+def _setup_key(signal: dict[str, Any], feature: dict[str, Any]) -> str:
+    raw = feature.get("feature_json") if isinstance(feature.get("feature_json"), dict) else {}
+    setup = raw.get("playbook_setup") if isinstance(raw, dict) else {}
+    return str(
+        signal.get("setup_key")
+        or signal.get("primary_setup")
+        or (setup or {}).get("setup_key")
+        or "unknown"
+    )
+
+
+def _safe_signal_facts(signal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: signal.get(key)
+        for key in (
+            "ticker", "rank", "alpha_score", "entry_watch_level",
+            "target_1", "invalidation_level", "can_alert", "alert_gate_status",
+            "no_trade_reason", "source_confidence", "source", "source_url",
+        )
+    }
+
+
+def _estimated_cost_bps(feature: dict[str, Any]) -> float | None:
+    raw = feature.get("feature_json") if isinstance(feature.get("feature_json"), dict) else {}
+    liquidity = raw.get("liquidity_execution") if isinstance(raw, dict) else {}
+    spread_pct = _number((liquidity or {}).get("spread_pct"))
+    if spread_pct is None:
+        return None
+    return round(max(15.0, spread_pct * 125.0 + 10.0), 4)
+
+
+def _group_key(row: dict[str, Any]) -> str:
+    return "|".join((
+        str(row.get("setup_key") or "unknown"),
+        str(row.get("regime_key") or "UNKNOWN"),
+    ))
+
+
+def _tail_mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    count = max(1, math.ceil(len(values) * 0.1))
+    return mean(sorted(values)[:count])
+
+
+def _hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _number(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _round(value: float | None) -> float | None:
+    return round(value, 6) if value is not None else None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+__all__ = [
+    "ALPHAOPS_V6_MODEL_VERSION",
+    "ALPHAOPS_V6_STRATEGY_VERSION",
+    "MIN_FORWARD_CLOSED_TRADES",
+    "MIN_FORWARD_SESSIONS",
+    "V6EmpiricalShadowModel",
+    "build_v6_outcomes",
+    "build_v6_shadow_decisions",
+    "promotion_readiness",
+    "strict_walk_forward_evaluation",
+]

@@ -36,6 +36,7 @@ def _write_publishable_fixture(
         "assets/dawnstrike.css": b"body {}",
         "assets/dawnstrike.js": b"console.log('fixture')",
         "data/performance.json": b'{"rows":[]}',
+        "data/v6-learning.json": b'{"performance_status":"WAITING_FOR_FORWARD_EVIDENCE"}',
     }
     for name, payload in required.items():
         path = root / name
@@ -155,3 +156,20 @@ def test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture(
     assert approved["status"] == "PASS"
     assert approved["snapshot_status"] == "degraded"
     assert approved["readiness_http_status"] == 503
+
+
+def test_artifact_gate_rejects_host_path_disclosure(tmp_path: Path) -> None:
+    root = _write_publishable_fixture(
+        tmp_path,
+        snapshot_status="no_trade",
+        readiness_status="ready",
+        readiness_http_status=200,
+    )
+    (root / "readiness.json").write_text(
+        json.dumps({"runtime_root": r"C:\r\dawnstrike-runtime"}),
+        encoding="utf-8",
+    )
+
+    result = verify(root)
+
+    assert "forbidden_absolute_path:readiness.json" in result["errors"]

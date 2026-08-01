@@ -11,6 +11,7 @@ $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
+. (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $outputRoot = Join-Path $state "outputs\alpha_cycle\$MarketDate"
@@ -21,8 +22,12 @@ $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 
 Push-Location $runtime
 try {
-    & py.exe -m intraday_scanner.services.market_calendar --date $MarketDate
-    $calendarExit = $LASTEXITCODE
+    $calendar = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.services.market_calendar", "--date", $MarketDate) `
+        -LogRoot $logRoot `
+        -LogName "alpha_morning_calendar-$MarketDate"
+    $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
         foreach ($stage in @("morning_collection", "ranking_delivery")) {
             & py.exe scripts\record_daily_stage.py `
@@ -43,17 +48,18 @@ try {
 
     $configPath = Join-Path $runtime "config\web_sources.yaml"
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-        $configPath = Join-Path $runtime "config\web_sources.example.yaml"
+        $stageExit = 2
+        $errorCode = "source_config_missing"
+    } else {
+        $alphaCycle = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify) `
+            -LogRoot $logRoot `
+            -LogName "alpha_morning-$MarketDate"
+        $stageExit = $alphaCycle.exit_code
+        $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
     }
-    & py.exe -m intraday_scanner.cli alpha-cycle `
-        --config $configPath `
-        --db-path $dbPath `
-        --out-dir $outputRoot `
-        --notify $Notify 2>&1 |
-        Tee-Object -FilePath (Join-Path $logRoot "alpha_morning-$MarketDate.log")
-    $stageExit = $LASTEXITCODE
     $status = if ($stageExit -eq 0) { "COMPLETE" } else { "FAILED" }
-    $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
     foreach ($stage in @("morning_collection", "ranking_delivery")) {
         & py.exe scripts\record_daily_stage.py `
             --db-path $dbPath `

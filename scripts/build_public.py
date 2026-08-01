@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
 from intraday_scanner.services.daily_run_service import release_manifest_payload
 from intraday_scanner.services.scheduler_doctor_service import scheduler_doctor
+from intraday_scanner.services.v6_learning_service import v6_public_status
 from intraday_scanner.storage.migrations import get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -34,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None)
     parser.add_argument("--retry-limit", type=int, default=2)
     parser.add_argument("--retry-delay-seconds", type=int, default=0)
+    parser.add_argument(
+        "--result-out",
+        default=None,
+        help="Private daily-finalize receipt path; it is never written into the public artifact.",
+    )
     parser.add_argument("--deployment-url", default=None)
     parser.add_argument(
         "--allow-dirty",
@@ -126,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     ).hexdigest()
     build_id = build_sha[:20]
     scheduler = scheduler_doctor(root, state_root=state_root)
-    readiness["scheduler"] = scheduler
+    readiness["scheduler"] = _public_scheduler_status(scheduler)
     readiness["next_scheduled_run"] = scheduler.get("next_scheduled_run")
     readiness["deployed_source_sha"] = source.get("source_sha")
     readiness["deployed_build_sha"] = build_sha
@@ -134,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
     result["readiness"] = readiness
     (output_root / "readiness.json").write_text(
         json.dumps(readiness, sort_keys=True, indent=2, default=str),
+        encoding="utf-8",
+    )
+    v6_path = output_root / "data" / "v6-learning.json"
+    v6_path.parent.mkdir(parents=True, exist_ok=True)
+    v6_path.write_text(
+        json.dumps(v6_public_status(SQLiteScanStore(db_path)), sort_keys=True, indent=2),
         encoding="utf-8",
     )
     notification = _record_build_notification(
@@ -146,10 +158,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     result["notification"] = notification
     result["deployment_url"] = args.deployment_url
-    (output_root / "daily-finalize-result.json").write_text(
-        json.dumps(result, sort_keys=True, indent=2, default=str),
-        encoding="utf-8",
-    )
+    if args.result_out:
+        result_out = Path(args.result_out).resolve()
+        result_out.parent.mkdir(parents=True, exist_ok=True)
+        result_out.write_text(
+            json.dumps(result, sort_keys=True, indent=2, default=str),
+            encoding="utf-8",
+        )
     artifact_hashes = _file_hashes(
         output_root,
         exclude={"build-manifest.json", "release-manifest.json"},
@@ -269,6 +284,40 @@ def _record_build_notification(
         run_id=str(result.get("run_id") or "") or None,
     )
     return notification
+
+
+def _public_scheduler_status(value: dict[str, object]) -> dict[str, object]:
+    """Project the scheduler proof into the public artifact without host paths."""
+
+    rows = value.get("scheduled_tasks")
+    tasks = rows if isinstance(rows, list) else []
+    return {
+        "schema_version": "dawnstrike.scheduler_public.v1",
+        "status": value.get("status"),
+        "failed_task_count": value.get("failed_task_count"),
+        "next_scheduled_run": value.get("next_scheduled_run"),
+        "runtime_boundary": "configured",
+        "state_boundary": "configured",
+        "scheduled_tasks": [
+            {
+                key: row.get(key)
+                for key in (
+                    "name",
+                    "state",
+                    "status",
+                    "enabled",
+                    "last_task_result",
+                    "last_run_time",
+                    "next_run_time",
+                    "noninteractive",
+                    "start_when_available",
+                    "battery_safe",
+                )
+            }
+            for row in tasks
+            if isinstance(row, dict)
+        ],
+    }
 
 
 def _source_metadata(root: Path) -> dict[str, object]:
