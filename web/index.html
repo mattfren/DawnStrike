@@ -88,7 +88,7 @@
           <span class="section-pill" id="calendar-integrity">Loading canonical data</span>
         </div>
 
-        <div class="calendar-controls panel" aria-label="Calendar controls">
+        <div class="calendar-controls panel" role="group" aria-label="Calendar controls">
           <div class="month-switcher">
             <button class="calendar-arrow" id="calendar-previous-month" type="button" aria-label="Previous month">←</button>
             <div>
@@ -106,14 +106,14 @@
           </div>
         </div>
 
-        <div class="calendar-summary-grid" aria-label="Selected month summary">
+        <div class="calendar-summary-grid" role="group" aria-label="Selected month summary">
           <article class="calendar-summary-card"><span>Net return</span><strong id="calendar-summary-return">Not reported</strong><small>Compounded eligible account days</small></article>
           <article class="calendar-summary-card"><span>Against benchmark</span><strong id="calendar-summary-excess">Not reported</strong><small id="calendar-summary-benchmark">Benchmark not reported</small></article>
           <article class="calendar-summary-card"><span>Coverage</span><strong id="calendar-summary-coverage">Not reported</strong><small id="calendar-summary-denominator">Eligible / expected market days</small></article>
           <article class="calendar-summary-card"><span>Paper activity</span><strong id="calendar-summary-days">Not reported</strong><small id="calendar-summary-no-trades">No-trade days not reported</small></article>
         </div>
 
-        <div class="calendar-legend" aria-label="Calendar status legend">
+        <div class="calendar-legend" role="group" aria-label="Calendar status legend">
           <span><i class="legend-complete"></i>Complete</span>
           <span><i class="legend-no-trade"></i>No trade</span>
           <span><i class="legend-pending"></i>Pending / unrealized</span>
@@ -124,7 +124,7 @@
         <div class="calendar-workspace">
           <article class="panel calendar-panel">
             <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
-            <div id="calendar-grid" class="calendar-grid" role="grid" aria-label="Monthly performance calendar"></div>
+            <div id="calendar-grid" class="calendar-grid" role="group" aria-label="Monthly performance calendar"></div>
           </article>
           <aside class="panel calendar-detail" aria-live="polite" aria-labelledby="calendar-detail-title">
             <div class="panel-heading">
@@ -141,14 +141,28 @@
 
       <section id="view-performance" class="page-view" aria-labelledby="performance-title">
         <div class="section-heading"><div><p class="eyebrow">Returns</p><h2 id="performance-title">Performance with the missing pieces visible.</h2></div><span class="section-pill">Cohorts stay separate</span></div>
-        <article class="panel"><div class="panel-heading"><div><h3>Daily record</h3><p class="muted">Net return is shown only when the cost inputs support it.</p></div><span class="muted" id="performance-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Daily Dawnstrike performance by evidence cohort</caption><thead><tr><th scope="col">Date</th><th scope="col">Evidence</th><th scope="col">Status</th><th scope="col">Gross observed</th><th scope="col">Net after costs</th><th scope="col">Against benchmark</th><th scope="col">Open / missing</th></tr></thead><tbody id="performance-table"><tr><td colspan="7">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" aria-label="Daily record pagination"><p id="performance-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="performance" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="performance" data-direction="1" disabled>Next</button></div></div></article>
+        <article class="panel"><div class="panel-heading"><div><h3>Daily record</h3><p class="muted">Net return is shown only when the cost inputs support it.</p></div><span class="muted" id="performance-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Daily Dawnstrike performance by evidence cohort</caption><thead><tr><th scope="col">Date</th><th scope="col">Evidence</th><th scope="col">Status</th><th scope="col">Gross observed</th><th scope="col">Net after costs</th><th scope="col">Against benchmark</th><th scope="col">Open / missing</th></tr></thead><tbody id="performance-table"><tr><td colspan="7">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" role="group" aria-label="Daily record pagination"><p id="performance-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="performance" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="performance" data-direction="1" disabled>Next</button></div></div></article>
         <div class="performance-grid"><article class="panel"><div class="panel-heading"><div><h3>Equity and benchmark path</h3><p class="muted">Only sourced daily observations are plotted; gaps remain visible.</p></div></div><div id="return-curve" class="return-curve" role="img" aria-label="Cumulative official paper and benchmark returns"></div></article><article class="panel"><div class="panel-heading"><div><h3>Trade ledger</h3><p class="muted">Realized, open, missing, and quarantined rows stay distinct.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Official paper trade ledger</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Net P&amp;L</th><th scope="col">Source</th></tr></thead><tbody id="ledger-table"><tr><td colspan="5">Loading evidence…</td></tr></tbody></table></div></article></div>
         <article class="panel methodology"><p class="eyebrow">Methodology</p><h3>What is allowed to become a return</h3><div class="methodology-grid"><span>Price basis</span><strong>Source-bar or verified equity observation</strong><span>Costs</span><strong>Fees and slippage must be sourced or the net result is withheld</strong><span>Benchmark</span><strong>Same market date and registered benchmark policy</strong><span>Missing truth</span><strong>Excluded from realized totals, never converted to zero</strong></div></article>
       </section>
 
       <section id="view-research" class="page-view" aria-labelledby="research-title">
         <div class="section-heading"><div><p class="eyebrow">Research</p><h2 id="research-title">The learning set is not the paper scorecard.</h2></div><span class="section-pill">No personalized advice</span></div>
-        <div class="research-grid"><article class="panel panel-large"><div class="panel-heading"><div><h3>Research observations</h3><p class="muted">Sourced observations remain labeled as research and keep unresolved rows visible.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Research observations</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Observed return</th><th scope="col">Net result</th><th scope="col">Source trail</th></tr></thead><tbody id="research-table"><tr><td colspan="6">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" aria-label="Research observation pagination"><p id="research-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="research" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="research" data-direction="1" disabled>Next</button></div></div></article><div class="research-stack"><article class="panel"><p class="eyebrow">Forward calibration</p><h3 id="forward-state">WAITING_FOR_FORWARD_EVIDENCE</h3><p class="summary-copy">No challenger or forward sample is promoted from a short backtest. The evidence gate stays explicit until the required sourced outcomes exist.</p></article><article class="panel"><p class="eyebrow">Backtest and challengers</p><div id="research-cohorts" class="cohort-summary"></div></article></div></div>
+        <div class="research-grid"><article class="panel panel-large"><div class="panel-heading"><div><h3>Research observations</h3><p class="muted">Sourced observations remain labeled as research and keep unresolved rows visible.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Research observations</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Observed return</th><th scope="col">Net result</th><th scope="col">Source trail</th></tr></thead><tbody id="research-table"><tr><td colspan="6">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" role="group" aria-label="Research observation pagination"><p id="research-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="research" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="research" data-direction="1" disabled>Next</button></div></div></article><div class="research-stack"><article class="panel"><p class="eyebrow">Forward calibration</p><h3 id="forward-state">WAITING_FOR_FORWARD_EVIDENCE</h3><p class="summary-copy">No challenger or forward sample is promoted from a short backtest. The evidence gate stays explicit until the required sourced outcomes exist.</p></article><article class="panel"><p class="eyebrow">Backtest and challengers</p><div id="research-cohorts" class="cohort-summary"></div></article></div></div>
+        <div class="v6-evidence-grid">
+          <article class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Promotion truth</p><h3>Every gate, including the failures</h3></div><span id="v6-promotion-chip" class="status-chip">Loading</span></div>
+            <div id="v6-promotion-gates" class="gate-grid"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Model evidence</p><h3>Cutoff, validation, calibration</h3></div></div>
+            <dl id="v6-model-evidence" class="detail-list"></dl>
+          </article>
+        </div>
+        <article class="panel v6-replay-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Decision Replay</p><h3>What the system knew—and why it acted</h3><p class="muted">Probabilities and expected returns stay hidden until calibration, interval, and no-lookahead gates pass.</p></div></div>
+          <div id="v6-replay-list" class="decision-replay-list"><span class="muted">Loading immutable decisions…</span></div>
+        </article>
       </section>
 
       <section id="view-system" class="page-view" aria-labelledby="system-title">

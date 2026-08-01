@@ -7,6 +7,7 @@ from typing import Any
 from intraday_scanner.alpha.v6.contracts import (
     ALPHAOPS_V6_MODEL_VERSION,
     ALPHAOPS_V6_STRATEGY_VERSION,
+    FEATURE_SCHEMA_VERSION,
     V6_COST_MODEL_VERSION,
     canonical_hash,
     decision_contract_violations,
@@ -63,6 +64,7 @@ def build_candidate_decisions(
     source_summary: dict[str, Any],
     regime: dict[str, Any],
     prior_outcomes: list[dict[str, Any]],
+    frozen_model_run: dict[str, Any] | None = None,
     decision_at: str,
     scan_id: str,
     universe_membership_by_ticker: dict[str, dict[str, Any]] | None = None,
@@ -82,6 +84,7 @@ def build_candidate_decisions(
         source_summary=source_summary,
         regime=regime,
         prior_outcomes=prior_outcomes,
+        frozen_model_run=frozen_model_run,
         universe_membership_by_ticker=universe_membership_by_ticker,
     )
     tracked_tickers = {str(row.get("ticker") or "").upper() for row in tracked}
@@ -106,6 +109,8 @@ def build_candidate_decisions(
             "ticker": ticker,
             "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
             "model_version": ALPHAOPS_V6_MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_hash_sha256": canonical_hash(feature),
             "action": "SHADOW_REJECTED_POLICY",
             "decision_state": "REJECTED",
             "policy_rejection_reason": "not_ranked_by_frozen_v5_candidate_policy",
@@ -118,6 +123,13 @@ def build_candidate_decisions(
             "safety_vetoes": [],
             "estimated_round_trip_cost_bps": _cost_from_feature(feature),
             "cost_model_version": V6_COST_MODEL_VERSION,
+            "execution_assumptions": {
+                "policy": "sampled_rejected_open_to_close_counterfactual_v1",
+                "entry": "first_eligible_regular_session_bar_open",
+                "exit": "regular_session_close",
+                "bar_interval": "1m",
+                "round_trip_cost_bps": _cost_from_feature(feature),
+            },
             "point_in_time": {
                 "all_inputs_observed_at_or_before_decision": True,
                 "decision_timestamp": decision_at,
@@ -128,6 +140,18 @@ def build_candidate_decisions(
                 "utility_lcb_pct": None,
                 "research_only": True,
                 "broker_execution_enabled": False,
+            },
+            "score_components": {
+                "activation_probability": None,
+                "conditional_net_excess_return_pct": None,
+                "tail_loss_pct": None,
+                "conservative_utility_lcb_pct": None,
+            },
+            "uncertainty": {
+                "status": "NOT_SCORED_POLICY_REJECTED",
+                "sample_size": 0,
+                "interval_lower_pct": None,
+                "interval_upper_pct": None,
             },
             "research_only": True,
             "broker_execution_enabled": False,
@@ -151,7 +175,118 @@ def build_candidate_decisions(
             {"decision_id": row["decision_id"]}
         )[:28]
         rejected.append(row)
-    return attach_rejected_candidate_sampling([*tracked, *rejected])
+    rows = attach_rejected_candidate_sampling([*tracked, *rejected])
+    if not any(row.get("action") == "SHADOW_TRACK" for row in rows):
+        rows.append(
+            _no_trade_decision(
+                scan_id=scan_id,
+                decision_at=decision_at,
+                source_summary=source_summary,
+                regime=regime,
+                memberships=memberships,
+                reasons=sorted(
+                    {
+                        reason
+                        for row in rows
+                        for reason in list(row.get("safety_vetoes") or [])
+                    }
+                )
+                or ["no_candidate_admitted_by_frozen_shadow_policy"],
+            )
+        )
+    return rows
+
+
+def _no_trade_decision(
+    *,
+    scan_id: str,
+    decision_at: str,
+    source_summary: dict[str, Any],
+    regime: dict[str, Any],
+    memberships: dict[str, dict[str, Any]],
+    reasons: list[str],
+) -> dict[str, Any]:
+    universe_identity = sorted(
+        {
+            str(row.get("universe_id") or "")
+            for row in memberships.values()
+            if row.get("universe_id")
+        }
+    )
+    universe_lineage = canonical_hash(
+        sorted(
+            str(row.get("source_lineage_hash_sha256") or "")
+            for row in memberships.values()
+        )
+    )
+    feature: dict[str, Any] = {}
+    row: dict[str, Any] = {
+        "scan_id": scan_id,
+        "source_signal_id": "no-trade-" + canonical_hash(scan_id)[:24],
+        "shadow_signal_id": "v6n-" + canonical_hash(
+            {"scan_id": scan_id, "market_date": decision_at[:10]}
+        )[:28],
+        "market_date": decision_at[:10],
+        "decision_at": decision_at,
+        "ticker": "NO_TRADE",
+        "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
+        "model_version": ALPHAOPS_V6_MODEL_VERSION,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_hash_sha256": canonical_hash(feature),
+        "action": "SHADOW_NO_TRADE",
+        "decision_state": "NO_TRADE",
+        "setup_key": "no_trade",
+        "regime_key": str(regime.get("regime") or "UNKNOWN"),
+        "feature_vector": feature,
+        "universe_membership": {
+            "status": "SESSION_UNIVERSE",
+            "universe_id": "+".join(universe_identity) or "unregistered-session-universe",
+            "source_lineage_hash_sha256": universe_lineage,
+        },
+        "source_summary": source_summary,
+        "safety_vetoes": reasons,
+        "no_trade_reasons": reasons,
+        "estimated_round_trip_cost_bps": None,
+        "cost_model_version": V6_COST_MODEL_VERSION,
+        "execution_assumptions": {"policy": "no_execution", "round_trip_cost_bps": None},
+        "point_in_time": {
+            "all_inputs_observed_at_or_before_decision": True,
+            "decision_timestamp": decision_at,
+            "feature_timestamp": decision_at,
+        },
+        "prediction": {
+            "status": "NO_TRADE_SAFETY_FALLBACK",
+            "utility_lcb_pct": None,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
+        "score_components": {
+            "activation_probability": None,
+            "conditional_net_excess_return_pct": None,
+            "tail_loss_pct": None,
+            "conservative_utility_lcb_pct": None,
+        },
+        "uncertainty": {
+            "status": "NO_TRADE_SAFETY_FALLBACK",
+            "sample_size": 0,
+            "interval_lower_pct": None,
+            "interval_upper_pct": None,
+        },
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    row["source_lineage_hash_sha256"] = canonical_hash(
+        {"source_summary": source_summary, "universe_lineage": universe_lineage}
+    )
+    row["input_hash_sha256"] = canonical_hash(row)
+    row["decision_id"] = "v6d-" + canonical_hash(
+        {
+            "scan_id": scan_id,
+            "action": "SHADOW_NO_TRADE",
+            "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
+        }
+    )[:28]
+    return row
 
 
 def _candidate_facts(candidate: dict[str, Any]) -> dict[str, Any]:

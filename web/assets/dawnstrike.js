@@ -6,6 +6,28 @@ const COHORTS = {
   shadow_challenger: "Shadow challenger",
 };
 
+const V6_GATE_LABELS = {
+  all_sourced_and_point_in_time: "All inputs sourced and point-in-time",
+  bootstrap_95_lower_bound_above_zero: "95% bootstrap lower bound above zero",
+  challenger_beats_frozen_v5_objective: "Beats the frozen V5 objective",
+  eligible_outcome_coverage_at_least_98_pct: "Eligible outcome coverage at least 98%",
+  gain_loss_concentration_no_more_than_25_pct: "Gain/loss concentration no more than 25%",
+  included_benchmark_coverage_100_pct: "Included benchmark coverage is 100%",
+  manual_operator_approval_recorded: "Manual operator approval recorded",
+  maximum_drawdown_no_worse_than_minus_8_pct: "Maximum drawdown no worse than -8%",
+  minimum_closed_paper_trades: "At least 100 closed paper trades",
+  minimum_forward_sessions: "At least 60 forward sessions",
+  no_lookahead_and_reconciliation_pass: "No-lookahead and reconciliation pass",
+  positive_excess_vs_primary_and_cash: "Positive excess versus benchmark and cash",
+  positive_mean_net_excess_return: "Positive mean net excess return",
+  positive_purged_walk_forward: "Positive purged walk-forward result",
+  positive_under_1_5x_slippage: "Positive under 1.5× slippage",
+  positive_untouched_holdout: "Positive untouched holdout",
+  primary_benchmark_coverage_complete: "SPY benchmark coverage complete",
+  profit_factor_at_least_1_20: "Profit factor at least 1.20",
+  secondary_benchmark_coverage_complete: "IWM benchmark coverage complete",
+};
+
 const PAGE_SIZE = 10;
 const state = {
   data: null,
@@ -28,6 +50,13 @@ const state = {
   performancePage: 0,
   researchPage: 0,
 };
+
+document.querySelectorAll(".table-wrap").forEach((region) => {
+  const caption = region.querySelector("caption")?.textContent?.trim();
+  region.setAttribute("role", "region");
+  region.setAttribute("aria-label", caption || "Scrollable data table");
+  region.setAttribute("tabindex", "0");
+});
 
 document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
@@ -265,6 +294,61 @@ function renderV6Research() {
   const trades = Number(promotion.closed_paper_trade_count || 0);
   const v6Row = `<div class="cohort-row"><strong>V6 shadow challenger</strong><span>${sessions}/60 sessions · ${trades}/100 after-cost labels · ${count} eligible</span></div>`;
   cohorts.innerHTML += v6Row;
+
+  const chip = document.getElementById("v6-promotion-chip");
+  if (chip) {
+    chip.textContent = formatGateLabel(promotion.status || "NOT_ELIGIBLE_FOR_PROMOTION");
+    chip.className = `status-chip ${promotion.status === "ELIGIBLE_FOR_MANUAL_REVIEW" ? "warn" : promotion.status === "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION" ? "good" : "bad"}`;
+  }
+  const criteria = promotion.criteria || {};
+  const gateNode = document.getElementById("v6-promotion-gates");
+  if (gateNode) {
+    const gates = Object.entries(criteria);
+    gateNode.innerHTML = gates.length ? gates.map(([key, passed]) => `<div class="gate-row"><span class="gate-dot ${passed ? "good" : "bad"}" aria-hidden="true"></span><span>${escapeHtml(V6_GATE_LABELS[key] || formatGateLabel(key))}</span><strong class="${passed ? "good" : "bad"}">${passed ? "PASS" : "BLOCKED"}</strong></div>`).join("") : '<span class="muted">No promotion gate evidence is published.</span>';
+  }
+
+  const model = v6.latest_model_run || {};
+  const evaluation = v6.latest_evaluation || {};
+  const calibration = evaluation.calibration || {};
+  const intervals = evaluation.interval_coverage || {};
+  const drift = v6.latest_drift || {};
+  const evidenceGate = v6.prediction_evidence_gate || {};
+  const modelNode = document.getElementById("v6-model-evidence");
+  if (modelNode) {
+    const details = [
+      ["Model", model.model_version || "Not trained"],
+      ["Training cutoff", model.training_cutoff || "Not available"],
+      ["Training status", model.status || "Not trained"],
+      ["Purged folds", evaluation.fold_count == null ? "Not evaluated" : String(evaluation.fold_count)],
+      ["No-lookahead", evaluation.no_lookahead === true ? "Passed" : "Not proven"],
+      ["Calibration", calibration.status || "Not evaluated"],
+      ["Interval coverage", intervals.coverage_pct == null ? (intervals.status || "Not evaluated") : `${Number(intervals.coverage_pct).toFixed(1)}%`],
+      ["Drift", drift.status || "Not evaluated"],
+      ["Prediction display", evidenceGate.passed ? "Evidence gate passed" : "Hidden—evidence incomplete"],
+      ["Artifact", shortHash(model.model_artifact_hash_sha256) || "Not available"],
+    ];
+    modelNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const replayNode = document.getElementById("v6-replay-list");
+  const decisions = Array.isArray(v6.decision_replay) ? v6.decision_replay : [];
+  if (replayNode) {
+    replayNode.innerHTML = decisions.length ? decisions.map((decision) => {
+      const reasons = Array.isArray(decision.reasons) && decision.reasons.length ? decision.reasons.join(" · ") : "No veto or rejection reason recorded";
+      const prediction = decision.prediction_visible
+        ? `Activation ${formatProbability(decision.activation_probability)} · expected excess ${formatPercentText(decision.conditional_net_excess_return_pct)} · utility LCB ${formatPercentText(decision.utility_lcb_pct)}`
+        : "Prediction hidden until the evidence gate passes";
+      return `<details class="decision-replay-card"><summary><span><strong>${escapeHtml(decision.ticker || "NO_TRADE")}</strong><small>${escapeHtml(decision.market_date || "Date unavailable")} · ${escapeHtml(formatGateLabel(decision.decision_state || decision.action || "UNKNOWN"))}</small></span><span class="status-chip">${escapeHtml(decision.setup_key || "no setup")}</span></summary><div class="decision-replay-body"><dl><dt>Why</dt><dd>${escapeHtml(reasons)}</dd><dt>Regime</dt><dd>${escapeHtml(decision.regime_key || "Unknown")}</dd><dt>Model</dt><dd>${escapeHtml(decision.model_version || "Not available")}</dd><dt>Evidence</dt><dd>${escapeHtml(prediction)}</dd><dt>Feature snapshot</dt><dd>${escapeHtml(shortHash(decision.feature_hash_sha256) || "Missing")}</dd><dt>Source lineage</dt><dd>${escapeHtml(shortHash(decision.source_lineage_hash_sha256) || "Missing")}</dd><dt>Decision ID</dt><dd>${escapeHtml(decision.decision_id || "Missing")}</dd></dl></div></details>`;
+    }).join("") : '<span class="muted">No V6 decisions are available for replay yet.</span>';
+  }
+}
+
+function formatGateLabel(value) {
+  return String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatProbability(value) {
+  return Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "Not reported";
 }
 
 function renderResearch(rows) {
@@ -371,7 +455,7 @@ function renderCalendar() {
     const returnText = value == null ? "—" : formatPercentText(value);
     const statusText = matches.length > 1 ? "Refine filters" : calendarStatusLabel(status);
     const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `Net return ${returnText}`}`;
-    cells.push(`<button type="button" role="gridcell" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-selected="${selected}">
+    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
       <strong>${escapeHtml(returnText)}</strong>
       <small>${escapeHtml(statusText)}</small>
@@ -395,7 +479,7 @@ function renderCalendar() {
     if (state.calendarSelectedDate) {
       const selectedButton = grid.querySelector(`[data-calendar-date="${state.calendarSelectedDate}"]`);
       selectedButton?.classList.add("selected");
-      selectedButton?.setAttribute("aria-selected", "true");
+      selectedButton?.setAttribute("aria-pressed", "true");
     }
   }
   const selectedDay = lookup.get(state.calendarSelectedDate);

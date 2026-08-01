@@ -17,12 +17,14 @@ from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
 from intraday_scanner.alpha.v6.drift import build_drift_report
 from intraday_scanner.alpha.v6.label_builder import build_label_families
 from intraday_scanner.alpha.v6.registry import promotion_review_packet
-from intraday_scanner.alpha.v6.training import train_shadow_challengers
+from intraday_scanner.alpha.v6.training import (
+    train_shadow_challengers,
+    walk_forward_challenger_predictions,
+)
 from intraday_scanner.alpha.v6.validation import (
     evaluate_return_predictions,
     expanding_purged_splits,
 )
-from intraday_scanner.alpha.v6_shadow import V6EmpiricalShadowModel
 from intraday_scanner.services.v6_learning_service import synchronize_v6_learning
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -34,7 +36,7 @@ def run_alpha_v6_learning(
 ) -> dict[str, Any]:
     """Run the V6 daily learning chain idempotently against durable ledgers."""
 
-    raw_learning = synchronize_v6_learning(store)
+    raw_learning = synchronize_v6_learning(store, persist_baseline_evaluation=False)
     decisions = store.load_alpha_v6_decisions()
     outcomes = store.load_alpha_v6_outcomes()
     by_decision = {str(row.get("decision_id") or ""): row for row in decisions}
@@ -65,9 +67,8 @@ def run_alpha_v6_learning(
             "broker_execution_enabled": False,
         }
         artifact_inserted = store.persist_alpha_v6_model_artifact(artifact_row)
-    predictions = _shadow_predictions(
-        decisions=decisions,
-        outcomes=outcomes,
+    predictions = walk_forward_challenger_predictions(
+        dataset,
         model_run_id=str(training["model_run_id"]),
     )
     prediction_stats = (
@@ -76,10 +77,40 @@ def run_alpha_v6_learning(
         else {"inserted": 0, "skipped": 0}
     )
     folds = expanding_purged_splits(dataset["rows"])
-    evaluation_rows = _evaluation_rows(predictions, outcomes)
+    evaluation_rows = _evaluation_rows(predictions, outcomes, dataset)
     return_metrics = evaluate_return_predictions(evaluation_rows)
     calibration = calibration_report(evaluation_rows)
     intervals = interval_coverage(evaluation_rows)
+    evaluation = {
+        "model_run_id": training["model_run_id"],
+        "evaluated_at": utc_now(),
+        "status": return_metrics["status"],
+        "evaluation_method": "date_grouped_purged_embargoed_expanding_walk_forward",
+        "fold_count": len(folds),
+        "prediction_count": len(predictions),
+        "return_metrics": return_metrics,
+        "calibration": calibration,
+        "interval_coverage": intervals,
+        "no_lookahead": bool(
+            predictions and all(row.get("no_lookahead") is True for row in predictions)
+        ),
+        "untouched_holdout": {
+            "status": "NOT_EVALUATED_NO_REGISTERED_FROZEN_HOLDOUT",
+            "evaluated_once": False,
+        },
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    evaluation["evaluation_input_hash_sha256"] = canonical_hash(
+        {key: value for key, value in evaluation.items() if key != "evaluated_at"}
+    )
+    evaluation["evaluation_id"] = "v6e-" + canonical_hash(
+        {
+            "model_run_id": training["model_run_id"],
+            "input_hash": evaluation["evaluation_input_hash_sha256"],
+        }
+    )[:28]
+    evaluation_inserted = store.persist_alpha_v6_evaluation(evaluation)
     drift = _drift(decisions)
     drift_inserted = store.persist_alpha_v6_drift_report(drift)
     review = promotion_review_packet(
@@ -91,6 +122,7 @@ def run_alpha_v6_learning(
             "interval_coverage": intervals,
             "drift": drift,
             "walk_forward_fold_count": len(folds),
+            "evaluation": evaluation,
         }
     )
     review_inserted = store.persist_alpha_v6_promotion_review(review)
@@ -114,6 +146,7 @@ def run_alpha_v6_learning(
             "return_metrics": return_metrics,
             "calibration": calibration,
             "interval_coverage": intervals,
+            "persisted_evaluation": {**evaluation, "inserted": evaluation_inserted},
         },
         "drift": {**drift, "inserted": drift_inserted},
         "promotion_review": {**review, "inserted": review_inserted},
@@ -125,49 +158,42 @@ def run_alpha_v6_learning(
     }
 
 
-def _shadow_predictions(
-    *,
-    decisions: list[dict[str, Any]],
-    outcomes: list[dict[str, Any]],
-    model_run_id: str,
-) -> list[dict[str, Any]]:
-    model = V6EmpiricalShadowModel(outcomes)
-    generated_at = utc_now()
-    rows: list[dict[str, Any]] = []
-    for decision in decisions:
-        prediction = model.predict(decision).to_dict()
-        row = {
-            "decision_id": decision.get("decision_id"),
-            "model_run_id": model_run_id,
-            "market_date": decision.get("market_date"),
-            "generated_at": generated_at,
-            "status": prediction["status"],
-            "prediction": prediction,
-            "research_only": True,
-            "broker_execution_enabled": False,
-        }
-        row["prediction_id"] = "v6p-" + canonical_hash(
-            {"decision_id": row["decision_id"], "model_run_id": model_run_id}
-        )[:28]
-        rows.append(row)
-    return rows
-
-
 def _evaluation_rows(
-    predictions: list[dict[str, Any]], outcomes: list[dict[str, Any]]
+    predictions: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    dataset: dict[str, Any],
 ) -> list[dict[str, Any]]:
     outcome_by_decision = {str(row.get("decision_id") or ""): row for row in outcomes}
+    dataset_by_decision = {
+        str(row.get("decision_id") or ""): row for row in list(dataset.get("rows") or [])
+    }
     rows: list[dict[str, Any]] = []
     for row in predictions:
         outcome = outcome_by_decision.get(str(row.get("decision_id") or ""))
         prediction = row.get("prediction")
         if outcome is None or not isinstance(prediction, dict):
             continue
+        source = dataset_by_decision.get(str(row.get("decision_id") or ""), {})
         rows.append(
             {
+                "market_date": row.get("market_date"),
+                "training_max_market_date": row.get("training_max_market_date"),
+                "no_lookahead": row.get("no_lookahead") is True,
                 "utility_lcb_pct": prediction.get("utility_lcb_pct"),
                 "realized_net_excess_return_pct": outcome.get("net_excess_return_pct"),
+                "realized_return_pct": outcome.get("net_excess_return_pct"),
                 "activation_probability": prediction.get("activation_probability"),
+                "interval_lower_pct": prediction.get("interval_lower_pct"),
+                "interval_upper_pct": prediction.get("interval_upper_pct"),
+                "estimated_round_trip_cost_bps": source.get(
+                    "estimated_round_trip_cost_bps"
+                ),
+                "inverse_probability_weight": source.get("inverse_probability_weight"),
+                "setup_key": source.get("setup_key"),
+                "regime_key": source.get("regime_key"),
+                "source_key": source.get("source_key"),
+                "liquidity_bucket": source.get("liquidity_bucket"),
+                "catalyst_bucket": source.get("catalyst_bucket"),
                 "activation_label": (
                     1
                     if outcome.get("activation_status") == "ACTIVATED"
@@ -199,6 +225,7 @@ def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
             "dataset_hash_sha256",
             "training_cutoff",
             "row_count",
+            "activation_row_count",
             "exclusion_counts",
             "feature_schema_version",
         )

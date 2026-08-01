@@ -20,6 +20,26 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
+function Write-MonitorStage {
+    param([string]$Status, [int]$ExitCode, [string]$ErrorCode = "")
+    $arguments = @(
+        "scripts\record_daily_stage.py",
+        "--db-path", $dbPath,
+        "--market-date", $MarketDate,
+        "--stage", "intraday_monitor",
+        "--status", $Status,
+        "--runtime-root", $runtime,
+        "--state-root", $state,
+        "--exit-code", "$ExitCode",
+        "--started-at", $startedAt
+    )
+    if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    return Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList $arguments `
+        -LogRoot $logRoot `
+        -LogName "record_stage-intraday_monitor-$MarketDate"
+}
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor"
 if (-not $dailyLock.acquired) {
     Write-Output "Skipped duplicate AlphaOps monitor run: $($dailyLock.reason)"
@@ -44,16 +64,8 @@ try {
         -LogName "alpha_monitor_calendar-$MarketDate"
     $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
-        & py.exe scripts\record_daily_stage.py `
-            --db-path $dbPath `
-            --market-date $MarketDate `
-            --stage intraday_monitor `
-            --status SKIPPED_NOT_APPLICABLE `
-            --runtime-root $runtime `
-            --state-root $state `
-            --exit-code 0 `
-            --started-at $startedAt
-        exit $LASTEXITCODE
+        $record = Write-MonitorStage -Status SKIPPED_NOT_APPLICABLE -ExitCode 0
+        exit $record.exit_code
     }
     if ($calendarExit -ne 0) {
         $exitCode = $calendarExit
@@ -83,17 +95,11 @@ try {
         }
     }
     $status = if ($exitCode -eq 0) { "COMPLETE" } else { "FAILED" }
-    & py.exe scripts\record_daily_stage.py `
-        --db-path $dbPath `
-        --market-date $MarketDate `
-        --stage intraday_monitor `
-        --status $status `
-        --runtime-root $runtime `
-        --state-root $state `
-        --exit-code $exitCode `
-        --started-at $startedAt `
-        --error-code $errorCode
-    if ($LASTEXITCODE -ne 0) {
+    $record = Write-MonitorStage `
+        -Status $status `
+        -ExitCode $exitCode `
+        -ErrorCode $errorCode
+    if ($record.exit_code -ne 0) {
         $exitCode = 2
     }
     exit $exitCode

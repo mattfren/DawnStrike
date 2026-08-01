@@ -1,7 +1,10 @@
 # Terra AlphaOps V6 implementation evidence
 
-Status: **implementation complete on the isolated V6 release commit; production release deliberately gated**
+Status: **superseded by the post-audit; Terra's implementation-complete claim was not supported**
 Date: 2026-08-01
+
+See `docs/audit/terra_alphaops_v6_post_audit.md`. This file records Terra's
+original evidence but is no longer the current completion verdict.
 
 ## Delivered controls
 

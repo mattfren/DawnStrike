@@ -24,6 +24,12 @@ New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
 $overallExit = 0
+function Set-OverallFailure {
+    param([int]$ExitCode)
+    if ($ExitCode -ne 0 -and $script:overallExit -eq 0) {
+        $script:overallExit = $ExitCode
+    }
+}
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod"
 if (-not $dailyLock.acquired) {
     Write-Output "Skipped duplicate AlphaOps EOD run: $($dailyLock.reason)"
@@ -119,7 +125,7 @@ try {
             -ResultFile $captureResult `
             -OutputFile $captureResult
     } else {
-        $overallExit = $captureExit
+        Set-OverallFailure -ExitCode $captureExit
         Write-Stage `
             -Name eod_outcome_capture `
             -Status TERMINAL_MISSING `
@@ -153,7 +159,7 @@ try {
             -ResultFile $reconcileResult `
             -OutputFile $reconcileResult
     } else {
-        $overallExit = $reconcileExit
+        Set-OverallFailure -ExitCode $reconcileExit
         Write-Stage `
             -Name paper_reconciliation `
             -Status FAILED `
@@ -174,17 +180,7 @@ try {
     } else {
         $learnExit = 2
     }
-    if ($learnExit -eq 0) {
-        Write-Stage -Name alpha_learning -Status COMPLETE -ExitCode 0 -StartedAt $learnStarted
-    } else {
-        $overallExit = $learnExit
-        Write-Stage `
-            -Name alpha_learning `
-            -Status FAILED `
-            -ExitCode $learnExit `
-            -StartedAt $learnStarted `
-            -ErrorCode alpha_learning_failed
-    }
+    Set-OverallFailure -ExitCode $learnExit
 
     $v6Learning = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -192,7 +188,7 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_v6_learning-$MarketDate"
     if ($v6Learning.exit_code -ne 0) {
-        $overallExit = $v6Learning.exit_code
+        Set-OverallFailure -ExitCode $v6Learning.exit_code
     }
     $v6Attribution = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -200,7 +196,7 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_v6_attribution-$MarketDate"
     if ($v6Attribution.exit_code -ne 0) {
-        $overallExit = $v6Attribution.exit_code
+        Set-OverallFailure -ExitCode $v6Attribution.exit_code
     }
     $v6Research = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -208,7 +204,29 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_v6_research-$MarketDate"
     if ($v6Research.exit_code -ne 0) {
-        $overallExit = $v6Research.exit_code
+        Set-OverallFailure -ExitCode $v6Research.exit_code
+    }
+    $learningStageExit = $learnExit
+    $learningErrorCode = if ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
+    foreach ($v6Result in @(
+        @{ Result = $v6Learning; Code = "alpha_v6_learning_failed" },
+        @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
+        @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" }
+    )) {
+        if ($learningStageExit -eq 0 -and $v6Result.Result.exit_code -ne 0) {
+            $learningStageExit = $v6Result.Result.exit_code
+            $learningErrorCode = $v6Result.Code
+        }
+    }
+    if ($learningStageExit -eq 0) {
+        Write-Stage -Name alpha_learning -Status COMPLETE -ExitCode 0 -StartedAt $learnStarted
+    } else {
+        Write-Stage `
+            -Name alpha_learning `
+            -Status FAILED `
+            -ExitCode $learningStageExit `
+            -StartedAt $learnStarted `
+            -ErrorCode $learningErrorCode
     }
 
     $attribution = Invoke-DawnstrikeNativeProcess `
@@ -217,7 +235,7 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_attribution-$MarketDate"
     if ($attribution.exit_code -ne 0) {
-        $overallExit = $attribution.exit_code
+        Set-OverallFailure -ExitCode $attribution.exit_code
     }
     $outcomeGap = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -225,7 +243,7 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_outcome_gap-$MarketDate"
     if ($outcomeGap.exit_code -ne 0) {
-        $overallExit = $outcomeGap.exit_code
+        Set-OverallFailure -ExitCode $outcomeGap.exit_code
     }
 
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")
@@ -285,7 +303,7 @@ try {
             -ExitCode 0 `
             -StartedAt $paperStarted
     } else {
-        $overallExit = $paperExit
+        Set-OverallFailure -ExitCode $paperExit
         Write-Stage `
             -Name paperops_forward `
             -Status FAILED `

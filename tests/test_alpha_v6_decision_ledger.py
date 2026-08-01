@@ -52,3 +52,22 @@ def _feature(ticker: str) -> dict[str, object]:
         "config_hash": "c" * 64,
         "feature_json": {"liquidity_execution": {"spread_pct": 0.1}},
     }
+
+
+def test_v6_records_explicit_no_trade_when_nothing_is_admitted() -> None:
+    decisions = build_candidate_decisions(
+        signals=[],
+        candidates=[],
+        feature_vectors=[],
+        source_summary={"status": "complete", "source": "fixture"},
+        regime={"regime": "UNKNOWN"},
+        prior_outcomes=[],
+        decision_at="2026-08-04T12:00:00+00:00",
+        scan_id="scan-no-trade",
+        universe_membership_by_ticker={},
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0]["action"] == "SHADOW_NO_TRADE"
+    assert decisions[0]["decision_state"] == "NO_TRADE"
+    assert validate_decision_batch(decisions)["valid"] is True

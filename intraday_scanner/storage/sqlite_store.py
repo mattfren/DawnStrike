@@ -6049,6 +6049,40 @@ class SQLiteScanStore:
             "alpha_v6_experiments", "created_at", limit=limit
         )
 
+    def persist_alpha_v6_holdout_evaluation(self, row: dict[str, Any]) -> bool:
+        """Persist once per experiment; a second evaluation is rejected by UNIQUE."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_holdout_evaluations
+                    (holdout_evaluation_id, experiment_id, evaluated_at, status,
+                     evidence_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("holdout_evaluation_id") or ""),
+                        str(row.get("experiment_id") or ""),
+                        str(row.get("evaluated_at") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("evidence_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 holdout evaluation: {exc}") from exc
+
+    def load_alpha_v6_holdout_evaluations(
+        self, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_holdout_evaluations", "evaluated_at", limit=limit
+        )
+
     def persist_alpha_v6_labels(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Append immutable V6 label-family receipts."""
 
@@ -6202,6 +6236,14 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist V6 shadow predictions: {exc}") from exc
 
+    def load_alpha_v6_shadow_predictions(
+        self, *, limit: int = 1_000
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_shadow_predictions", "generated_at", limit=limit
+        )
+
     def persist_alpha_v6_drift_report(self, row: dict[str, Any]) -> bool:
         return self._persist_v6_single_payload(
             table="alpha_v6_drift_reports",
@@ -6210,12 +6252,26 @@ class SQLiteScanStore:
             columns=("created_at", "status"),
         )
 
+    def load_alpha_v6_drift_reports(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_drift_reports", "created_at", limit=limit
+        )
+
     def persist_alpha_v6_promotion_review(self, row: dict[str, Any]) -> bool:
         return self._persist_v6_single_payload(
             table="alpha_v6_promotion_reviews",
             identity_field="review_id",
             row=row,
             columns=("created_at", "status", "approved"),
+        )
+
+    def load_alpha_v6_promotion_reviews(
+        self, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_promotion_reviews", "created_at", limit=limit
         )
 
     def persist_alpha_v6_universe(

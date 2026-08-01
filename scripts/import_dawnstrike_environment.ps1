@@ -17,7 +17,18 @@ function Import-DawnstrikeEnvironment {
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
         "INTRADAY_TELEGRAM_BOT_TOKEN",
-        "INTRADAY_TELEGRAM_CHAT_ID"
+        "INTRADAY_TELEGRAM_CHAT_ID",
+        "ALPACA_API_KEY_ID",
+        "ALPACA_API_SECRET_KEY",
+        "ALPACA_DATA_FEED",
+        "POLYGON_API_KEY",
+        "DATABENTO_API_KEY",
+        "NEWS_API_KEY",
+        "BENZINGA_API_KEY",
+        "FINNHUB_API_KEY",
+        "VERCEL_TOKEN",
+        "VERCEL_ORG_ID",
+        "VERCEL_PROJECT_ID"
     )) {
         [void]$allowedKeys.Add($key)
     }

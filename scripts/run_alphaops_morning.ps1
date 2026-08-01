@@ -20,6 +20,33 @@ $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
+$recordStageFailed = $false
+function Write-MorningStage {
+    param(
+        [string]$Name,
+        [string]$Status,
+        [int]$ExitCode,
+        [string]$ErrorCode = ""
+    )
+    $arguments = @(
+        "scripts\record_daily_stage.py",
+        "--db-path", $dbPath,
+        "--market-date", $MarketDate,
+        "--stage", $Name,
+        "--status", $Status,
+        "--runtime-root", $runtime,
+        "--state-root", $state,
+        "--exit-code", "$ExitCode",
+        "--started-at", $startedAt
+    )
+    if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    $receipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList $arguments `
+        -LogRoot $logRoot `
+        -LogName "record_stage-$Name-$MarketDate"
+    if ($receipt.exit_code -ne 0) { $script:recordStageFailed = $true }
+}
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning"
 if (-not $dailyLock.acquired) {
     Write-Output "Skipped duplicate AlphaOps morning run: $($dailyLock.reason)"
@@ -45,17 +72,12 @@ try {
     $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
         foreach ($stage in @("morning_collection", "ranking_delivery")) {
-            & py.exe scripts\record_daily_stage.py `
-                --db-path $dbPath `
-                --market-date $MarketDate `
-                --stage $stage `
-                --status SKIPPED_NOT_APPLICABLE `
-                --runtime-root $runtime `
-                --state-root $state `
-                --exit-code 0 `
-                --started-at $startedAt
+            Write-MorningStage `
+                -Name $stage `
+                -Status SKIPPED_NOT_APPLICABLE `
+                -ExitCode 0
         }
-        exit 0
+        exit $(if ($recordStageFailed) { 2 } else { 0 })
     }
     if ($calendarExit -ne 0) {
         throw "Market calendar failed with exit code $calendarExit"
@@ -76,20 +98,13 @@ try {
     }
     $status = if ($stageExit -eq 0) { "COMPLETE" } else { "FAILED" }
     foreach ($stage in @("morning_collection", "ranking_delivery")) {
-        & py.exe scripts\record_daily_stage.py `
-            --db-path $dbPath `
-            --market-date $MarketDate `
-            --stage $stage `
-            --status $status `
-            --runtime-root $runtime `
-            --state-root $state `
-            --exit-code $stageExit `
-            --started-at $startedAt `
-            --error-code $errorCode
-        if ($LASTEXITCODE -ne 0) {
-            $stageExit = 2
-        }
+        Write-MorningStage `
+            -Name $stage `
+            -Status $status `
+            -ExitCode $stageExit `
+            -ErrorCode $errorCode
     }
+    if ($recordStageFailed) { $stageExit = 2 }
     exit $stageExit
 }
 finally {

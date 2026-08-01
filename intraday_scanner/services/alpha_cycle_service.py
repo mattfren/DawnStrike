@@ -339,6 +339,7 @@ def alpha_cycle(
             "shadow decisions without point-in-time membership. Missing: "
             + ", ".join(missing_v6_universe_memberships[:20])
         )
+    v6_model_runs = store.load_alpha_v6_model_runs(limit=1)
     v6_decisions = build_candidate_decisions(
         signals=signals,
         candidates=all_candidates,
@@ -346,6 +347,7 @@ def alpha_cycle(
         source_summary=source_summary,
         regime=regime,
         prior_outcomes=store.load_alpha_v6_outcomes(),
+        frozen_model_run=v6_model_runs[0] if v6_model_runs else None,
         decision_at=timestamp,
         scan_id=scan_result.run_id,
         universe_membership_by_ticker=universe_memberships,

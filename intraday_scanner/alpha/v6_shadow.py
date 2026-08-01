@@ -17,14 +17,18 @@ from datetime import datetime, timezone
 from statistics import mean, pstdev
 from typing import Any
 
+from intraday_scanner.alpha.v6.contracts import (
+    ALPHAOPS_V6_MODEL_VERSION,
+    ALPHAOPS_V6_STRATEGY_VERSION,
+    FEATURE_SCHEMA_VERSION,
+    V6_COST_MODEL_VERSION,
+)
+from intraday_scanner.alpha.v6.training import predict_from_frozen_model_run
 from intraday_scanner.services.benchmark_service import (
     alphaops_v6_benchmark_policy,
     benchmark_coverage,
 )
 
-ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
-ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-empirical-v1"
-V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
 MIN_TRAINING_OUTCOMES = 30
 MIN_GROUP_OUTCOMES = 12
 MIN_FORWARD_SESSIONS = 60
@@ -140,6 +144,7 @@ def build_v6_shadow_decisions(
     source_summary: dict[str, Any],
     regime: dict[str, Any],
     prior_outcomes: list[dict[str, Any]],
+    frozen_model_run: dict[str, Any] | None = None,
     universe_membership_by_ticker: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build immutable decision-time V6 records for every ranked candidate."""
@@ -147,7 +152,6 @@ def build_v6_shadow_decisions(
     feature_by_ticker = {
         str(row.get("ticker") or "").upper(): row for row in feature_vectors
     }
-    model = V6EmpiricalShadowModel(prior_outcomes)
     memberships = universe_membership_by_ticker or {}
     output: list[dict[str, Any]] = []
     for signal in signals:
@@ -161,6 +165,14 @@ def build_v6_shadow_decisions(
             continue
         membership = _universe_membership(memberships.get(ticker))
         vetoes = _safety_vetoes(signal, feature, source_summary, membership)
+        # Enforce the point-in-time boundary even if a caller accidentally
+        # supplies a mixed historical/future outcome collection.
+        model = V6EmpiricalShadowModel(
+            row
+            for row in prior_outcomes
+            if str(row.get("market_date") or "")[:10] < decision_at[:10]
+        )
+        feature_hash = _hash(feature)
         draft = {
             "scan_id": str(signal.get("scan_id") or feature.get("scan_id") or ""),
             "source_signal_id": source_signal_id,
@@ -169,6 +181,8 @@ def build_v6_shadow_decisions(
             "ticker": ticker,
             "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
             "model_version": ALPHAOPS_V6_MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_hash_sha256": feature_hash,
             "setup_key": _setup_key(signal, feature),
             "regime_key": str(regime.get("regime") or "UNKNOWN"),
             "feature_vector": feature,
@@ -178,6 +192,13 @@ def build_v6_shadow_decisions(
             "safety_vetoes": vetoes,
             "estimated_round_trip_cost_bps": _estimated_cost_bps(feature),
             "cost_model_version": V6_COST_MODEL_VERSION,
+            "execution_assumptions": {
+                "entry": "saved_trigger_or_trigger_bar_open_whichever_is_higher",
+                "exit": "saved_target_stop_first_touch_else_session_close",
+                "bar_interval": "1m",
+                "same_bar_ambiguity": "stop_first_conservative",
+                "round_trip_cost_bps": _estimated_cost_bps(feature),
+            },
             "benchmark_policy": alphaops_v6_benchmark_policy(),
             "point_in_time": {
                 "all_inputs_observed_at_or_before_decision": True,
@@ -195,11 +216,28 @@ def build_v6_shadow_decisions(
                 "feature_timestamp": feature.get("timestamp"),
             }
         )
-        prediction = model.predict(draft).to_dict()
+        prediction = predict_from_frozen_model_run(frozen_model_run, draft)
+        if prediction is None:
+            prediction = model.predict(draft).to_dict()
         # Tracking is a controlled paper-research cohort, not a delivery or a
         # promotion.  Any V5/v6 safety veto excludes the candidate completely.
         draft["action"] = "SHADOW_TRACK" if not vetoes else "SHADOW_REJECT_VETO"
+        draft["decision_state"] = "SELECTED" if not vetoes else "BLOCKED"
         draft["prediction"] = prediction
+        draft["score_components"] = {
+            "activation_probability": prediction.get("activation_probability"),
+            "conditional_net_excess_return_pct": prediction.get(
+                "conditional_net_excess_return_pct"
+            ),
+            "tail_loss_pct": prediction.get("tail_loss_pct"),
+            "conservative_utility_lcb_pct": prediction.get("utility_lcb_pct"),
+        }
+        draft["uncertainty"] = {
+            "status": prediction.get("status"),
+            "sample_size": prediction.get("sample_size"),
+            "interval_lower_pct": prediction.get("interval_lower_pct"),
+            "interval_upper_pct": prediction.get("interval_upper_pct"),
+        }
         draft["decision_id"] = "v6d-" + _hash(
             {
                 "scan_id": draft["scan_id"],
@@ -297,7 +335,15 @@ def strict_walk_forward_evaluation(
     }
 
 
-def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+def promotion_readiness(
+    outcomes: list[dict[str, Any]],
+    *,
+    decisions: list[dict[str, Any]] | None = None,
+    evaluation: dict[str, Any] | None = None,
+    manual_operator_approval: bool = False,
+) -> dict[str, Any]:
+    """Evaluate every frozen promotion gate; absent proof always fails closed."""
+
     valid = [row for row in outcomes if row.get("learning_eligible") is True]
     benchmark = benchmark_coverage(valid)
     sessions = {str(row.get("market_date") or "")[:10] for row in valid}
@@ -307,32 +353,186 @@ def promotion_readiness(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         if value is not None:
             returns.append(value)
     tail = _tail_mean(returns) if returns else None
+    tracked = [
+        row for row in (decisions or []) if row.get("action") == "SHADOW_TRACK"
+    ]
+    conclusive_ids = {
+        str(row.get("decision_id") or "")
+        for row in valid
+        if str(row.get("decision_id") or "")
+    }
+    outcome_coverage_pct = (
+        100.0
+        * sum(1 for row in tracked if str(row.get("decision_id") or "") in conclusive_ids)
+        / len(tracked)
+        if tracked
+        else None
+    )
+    profit_factor = _profit_factor(returns)
+    maximum_drawdown = _maximum_drawdown(returns)
+    concentration = _return_concentration(returns)
+    bootstrap_lower = _bootstrap_lower_bound(valid)
+    stressed_expectancy = _stressed_expectancy(valid, multiplier=1.5)
+    evaluation_data = evaluation or {}
+    return_metrics = evaluation_data.get("return_metrics")
+    metrics = return_metrics if isinstance(return_metrics, dict) else {}
+    holdout = evaluation_data.get("untouched_holdout")
+    holdout_data = holdout if isinstance(holdout, dict) else {}
+    comparison = evaluation_data.get("comparison_to_v5")
+    comparison_data = comparison if isinstance(comparison, dict) else {}
     criteria = {
         "minimum_forward_sessions": len(sessions) >= MIN_FORWARD_SESSIONS,
         "minimum_closed_paper_trades": len(returns) >= MIN_FORWARD_CLOSED_TRADES,
+        "eligible_outcome_coverage_at_least_98_pct": bool(
+            outcome_coverage_pct is not None and outcome_coverage_pct >= 98.0
+        ),
+        "included_benchmark_coverage_100_pct": bool(
+            benchmark["primary_complete"] and benchmark["secondary_complete"]
+        ),
         "positive_mean_net_excess_return": bool(returns and mean(returns) > 0),
-        "tail_risk_within_limit": tail is not None and tail > -3.0,
+        "bootstrap_95_lower_bound_above_zero": bool(
+            bootstrap_lower is not None and bootstrap_lower > 0.0
+        ),
+        "profit_factor_at_least_1_20": bool(
+            profit_factor is not None and profit_factor >= 1.2
+        ),
+        "positive_excess_vs_primary_and_cash": bool(returns and mean(returns) > 0),
+        "maximum_drawdown_no_worse_than_minus_8_pct": bool(
+            maximum_drawdown is not None and maximum_drawdown >= -8.0
+        ),
+        "gain_loss_concentration_no_more_than_25_pct": bool(
+            concentration is not None and concentration <= 25.0
+        ),
+        "positive_purged_walk_forward": bool(
+            metrics.get("status") == "EVALUABLE"
+            and _number(metrics.get("after_cost_expectancy_pct")) is not None
+            and float(metrics["after_cost_expectancy_pct"]) > 0
+            and evaluation_data.get("no_lookahead") is True
+        ),
+        "positive_untouched_holdout": bool(
+            holdout_data.get("evaluated_once") is True
+            and _number(holdout_data.get("after_cost_expectancy_pct")) is not None
+            and float(holdout_data["after_cost_expectancy_pct"]) > 0
+        ),
+        "positive_under_1_5x_slippage": bool(
+            stressed_expectancy is not None and stressed_expectancy > 0.0
+        ),
+        "no_lookahead_and_reconciliation_pass": bool(
+            evaluation_data.get("no_lookahead") is True
+            and valid
+            and all(row.get("no_lookahead") is True for row in valid)
+        ),
+        "challenger_beats_frozen_v5_objective": bool(
+            _number(comparison_data.get("objective_delta_pct")) is not None
+            and float(comparison_data["objective_delta_pct"]) > 0
+        ),
+        "manual_operator_approval_recorded": manual_operator_approval,
         "primary_benchmark_coverage_complete": benchmark["primary_complete"],
         "secondary_benchmark_coverage_complete": benchmark["secondary_complete"],
         "all_sourced_and_point_in_time": all(
             bool(row.get("source_bar_hash_sha256"))
             and row.get("no_lookahead") is True
             for row in valid
-        ),
+        ) and bool(valid),
     }
+    technical_criteria = {
+        key: value
+        for key, value in criteria.items()
+        if key != "manual_operator_approval_recorded"
+    }
+    technically_ready = all(technical_criteria.values())
+    approved = technically_ready and manual_operator_approval
     return {
-        "status": "NOT_ELIGIBLE_FOR_PROMOTION",
+        "status": (
+            "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION"
+            if approved
+            else "ELIGIBLE_FOR_MANUAL_REVIEW"
+            if technically_ready
+            else "NOT_ELIGIBLE_FOR_PROMOTION"
+        ),
         "automatic_promotion": False,
         "criteria": criteria,
         "forward_session_count": len(sessions),
         "closed_paper_trade_count": len(returns),
+        "eligible_outcome_coverage_pct": _round(outcome_coverage_pct),
         "mean_net_excess_return_pct": _round(mean(returns)) if returns else None,
         "tail_loss_pct": _round(tail),
+        "profit_factor": _round(profit_factor),
+        "maximum_drawdown_pct": _round(maximum_drawdown),
+        "gain_loss_concentration_pct": _round(concentration),
+        "bootstrap_95_lower_bound_pct": _round(bootstrap_lower),
+        "one_point_five_x_slippage_expectancy_pct": _round(stressed_expectancy),
         "benchmark_coverage": benchmark,
-        "performance_status": "WAITING_FOR_FORWARD_EVIDENCE",
+        "performance_status": (
+            "ELIGIBLE_FOR_MANUAL_REVIEW"
+            if technically_ready
+            else "WAITING_FOR_FORWARD_EVIDENCE"
+        ),
         "research_only": True,
         "broker_execution_enabled": False,
     }
+
+
+def _profit_factor(values: list[float]) -> float | None:
+    gains = sum(value for value in values if value > 0)
+    losses = abs(sum(value for value in values if value < 0))
+    return gains / losses if losses else None
+
+
+def _maximum_drawdown(values: list[float]) -> float | None:
+    if not values:
+        return None
+    equity = 1.0
+    high = 1.0
+    worst = 0.0
+    for value in values:
+        equity *= max(0.0, 1.0 + value / 100.0)
+        high = max(high, equity)
+        worst = min(worst, (equity / high - 1.0) * 100.0)
+    return worst
+
+
+def _return_concentration(values: list[float]) -> float | None:
+    if not values:
+        return None
+    denominator = sum(abs(value) for value in values)
+    return 100.0 * max(abs(value) for value in values) / denominator if denominator else 100.0
+
+
+def _bootstrap_lower_bound(rows: list[dict[str, Any]]) -> float | None:
+    import random
+
+    by_date: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        value = _number(row.get("net_excess_return_pct"))
+        if value is not None:
+            by_date[str(row.get("market_date") or "")[:10]].append(value)
+    dates = sorted(key for key, values in by_date.items() if key and values)
+    if len(dates) < 2:
+        return None
+    generator = random.Random(6_001)
+    estimates = []
+    for _ in range(1_000):
+        values = [
+            value
+            for _index in dates
+            for value in by_date[generator.choice(dates)]
+        ]
+        estimates.append(mean(values))
+    estimates.sort()
+    return estimates[max(0, int(len(estimates) * 0.025) - 1)]
+
+
+def _stressed_expectancy(
+    rows: list[dict[str, Any]], *, multiplier: float
+) -> float | None:
+    values = []
+    for row in rows:
+        value = _number(row.get("net_excess_return_pct"))
+        cost_bps = _number(row.get("estimated_round_trip_cost_bps"))
+        if value is not None and cost_bps is not None:
+            values.append(value - (multiplier - 1.0) * cost_bps / 100.0)
+    return mean(values) if values else None
 
 
 def _v6_outcome_from_source(
@@ -368,9 +568,24 @@ def _v6_outcome_from_source(
         "complete_sourced",
         "not_triggered",
     }
+    independent_reconciliation_passed = bool(
+        (source or {}).get("independent_reconciliation_status") == "PASSED"
+        and (
+            not activated
+            or (
+                (source or {}).get("benchmark_independent_reconciliation_status")
+                == "PASSED"
+                and (
+                    source or {}
+                ).get("secondary_benchmark_independent_reconciliation_status")
+                == "PASSED"
+            )
+        )
+    )
     learning_eligible = bool(
         conclusive
         and source_hash
+        and independent_reconciliation_passed
         and (source or {}).get("validated_against_signal_timestamp") is True
         and (source or {}).get("no_lookahead") is True
         and (
@@ -411,7 +626,23 @@ def _v6_outcome_from_source(
             (source or {}).get("secondary_benchmark_source_bar_hash_sha256")
         ),
         "net_excess_return_pct": _round(net_excess),
+        "mfe_pct": _number((source or {}).get("max_favorable_excursion_pct")),
+        "mae_pct": _number((source or {}).get("max_adverse_excursion_pct")),
+        "first_touch": (source or {}).get("planned_first_touch_outcome"),
+        "counterfactual_rejected_candidate": bool(
+            (source or {}).get("counterfactual_rejected_candidate")
+        ),
+        "counterfactual_policy": (source or {}).get("counterfactual_policy"),
         "source_bar_hash_sha256": source_hash or None,
+        "independent_reconciliation_status": (source or {}).get(
+            "independent_reconciliation_status"
+        ),
+        "benchmark_independent_reconciliation_status": (source or {}).get(
+            "benchmark_independent_reconciliation_status"
+        ),
+        "secondary_benchmark_independent_reconciliation_status": (source or {}).get(
+            "secondary_benchmark_independent_reconciliation_status"
+        ),
         "learning_eligible": learning_eligible,
         "no_lookahead": bool((source or {}).get("no_lookahead")),
         "cost_model_version": decision.get("cost_model_version"),

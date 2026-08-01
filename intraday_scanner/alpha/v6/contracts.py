@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
-ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-empirical-v1"
+ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-research-suite-v2"
 V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
 FEATURE_SCHEMA_VERSION = "dawnstrike-alphaops-v6-feature-schema-v1"
 LABEL_SCHEMA_VERSION = "dawnstrike-alphaops-v6-label-schema-v1"
 DATASET_SCHEMA_VERSION = "dawnstrike-alphaops-v6-dataset-v1"
 ALLOWED_DECISION_ACTIONS = frozenset(
-    {"SHADOW_TRACK", "SHADOW_REJECT_VETO", "SHADOW_REJECTED_POLICY"}
+    {"SHADOW_TRACK", "SHADOW_REJECT_VETO", "SHADOW_REJECTED_POLICY", "SHADOW_NO_TRADE"}
 )
 
 
@@ -60,6 +60,8 @@ def decision_contract_violations(decision: dict[str, Any]) -> list[str]:
         "ticker",
         "strategy_version",
         "model_version",
+        "feature_schema_version",
+        "feature_hash_sha256",
         "input_hash_sha256",
         "source_lineage_hash_sha256",
     ):
@@ -75,6 +77,19 @@ def decision_contract_violations(decision: dict[str, Any]) -> list[str]:
         violations.append("point_in_time_lineage_invalid")
     if not isinstance(decision.get("safety_vetoes"), list):
         violations.append("safety_vetoes_missing")
+    if not isinstance(decision.get("score_components"), dict):
+        violations.append("score_components_missing")
+    if not isinstance(decision.get("uncertainty"), dict):
+        violations.append("uncertainty_missing")
+    if not isinstance(decision.get("execution_assumptions"), dict):
+        violations.append("execution_assumptions_missing")
+    if str(decision.get("decision_state") or "") not in {
+        "SELECTED",
+        "BLOCKED",
+        "REJECTED",
+        "NO_TRADE",
+    }:
+        violations.append("invalid_decision_state")
     universe_membership = decision.get("universe_membership")
     if not isinstance(universe_membership, dict):
         violations.append("universe_membership_missing")

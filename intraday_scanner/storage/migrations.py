@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -887,6 +887,28 @@ def _migration_016_alphaops_v6_universe_registry(
     )
 
 
+def _migration_017_alphaops_v6_one_time_holdout(
+    connection: sqlite3.Connection,
+) -> None:
+    """Enforce one immutable untouched-holdout evaluation per experiment."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_holdout_evaluations (
+            holdout_evaluation_id TEXT PRIMARY KEY,
+            experiment_id TEXT NOT NULL UNIQUE,
+            evaluated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            evidence_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES alpha_v6_experiments(experiment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_holdout_evaluations_time
+        ON alpha_v6_holdout_evaluations(evaluated_at, status);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -913,4 +935,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (14, _migration_014_alphaops_v6_shadow_ledger),
     (15, _migration_015_alphaops_v6_research_contracts),
     (16, _migration_016_alphaops_v6_universe_registry),
+    (17, _migration_017_alphaops_v6_one_time_holdout),
 )
