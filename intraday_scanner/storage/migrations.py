@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -931,6 +931,26 @@ def _migration_018_alphaops_v6_operational_receipts(
     )
 
 
+def _migration_019_account_comparison_contract(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist only fail-closed account-comparison receipts and their input hash."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS account_performance_comparisons (
+            comparison_id TEXT PRIMARY KEY,
+            calculated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_account_comparisons_time
+        ON account_performance_comparisons(calculated_at, comparison_id);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -959,4 +979,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (16, _migration_016_alphaops_v6_universe_registry),
     (17, _migration_017_alphaops_v6_one_time_holdout),
     (18, _migration_018_alphaops_v6_operational_receipts),
+    (19, _migration_019_account_comparison_contract),
 )

@@ -316,6 +316,7 @@ function renderV6Research() {
   const dailyMonitor = operational.latest_daily_monitor || {};
   const weeklyTraining = operational.latest_weekly_training || {};
   const evidenceGate = v6.prediction_evidence_gate || {};
+  const accountComparison = v6.account_comparison || {};
   const modelNode = document.getElementById("v6-model-evidence");
   if (modelNode) {
     const details = [
@@ -333,6 +334,23 @@ function renderV6Research() {
       ["Artifact", shortHash(model.model_artifact_hash_sha256) || "Not available"],
     ];
     modelNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const accountComparisonNode = document.getElementById("v6-account-comparison");
+  if (accountComparisonNode) {
+    const alignment = accountComparison.alignment || {};
+    const metrics = accountComparison.series_metrics || {};
+    const blockers = Array.isArray(accountComparison.promotion_blockers) ? accountComparison.promotion_blockers : [];
+    const details = [
+      ["Comparison state", accountComparison.status || "Not recorded"],
+      ["Aligned sessions", alignment.aligned_session_count == null ? "Not reported" : `${alignment.aligned_session_count}/${alignment.eligible_session_count ?? "?"}`],
+      ["Coverage", alignment.coverage_pct == null ? "Not reported" : `${Number(alignment.coverage_pct).toFixed(1)}%`],
+      ["V5 compounded", formatPercent(metrics.v5?.compounded_net_return_pct)],
+      ["V6 compounded", formatPercent(metrics.v6?.compounded_net_return_pct)],
+      ["Cash / SPY / IWM", [metrics.cash?.compounded_net_return_pct, metrics.SPY?.compounded_net_return_pct, metrics.IWM?.compounded_net_return_pct].map(formatPercent).join(" / ")],
+      ["Why withheld", blockers.length ? blockers.map(formatGateLabel).join(" · ") : "No blockers recorded"],
+    ];
+    accountComparisonNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
   }
 
   const attribution = v6.failure_attribution || {};

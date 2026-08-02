@@ -17,11 +17,7 @@ def expanding_purged_splits(
     if embargo_dates < 0 or minimum_train_dates < 1:
         raise ValueError("embargo_dates must be >= 0 and minimum_train_dates must be >= 1")
     dates = sorted(
-        {
-            str(row.get("market_date") or "")[:10]
-            for row in rows
-            if row.get("market_date")
-        }
+        {str(row.get("market_date") or "")[:10] for row in rows if row.get("market_date")}
     )
     folds: list[dict[str, Any]] = []
     for test_index in range(minimum_train_dates + embargo_dates, len(dates)):
@@ -67,13 +63,12 @@ def evaluate_return_predictions(
     weights = [_weight(row) for row in usable]
     weighted_expectancy = _weighted_mean(realized, weights)
     wins = [(value, weight) for value, weight in zip(realized, weights, strict=True) if value > 0]
-    losses = [
-        (value, weight) for value, weight in zip(realized, weights, strict=True) if value < 0
-    ]
+    losses = [(value, weight) for value, weight in zip(realized, weights, strict=True) if value < 0]
     gross_win = sum(value * weight for value, weight in wins)
     gross_loss = abs(sum(value * weight for value, weight in losses))
     drawdowns = _drawdowns(realized)
     concentration = _concentration(realized, weights)
+    conditional_value_at_risk = _conditional_value_at_risk(realized, weights)
     top_count = max(1, len(pairs) // 10)
     top_indices = sorted(range(len(pairs)), key=lambda index: pairs[index][0], reverse=True)[
         :top_count
@@ -84,9 +79,7 @@ def evaluate_return_predictions(
     )
     stress_15 = _slippage_stress(usable, multiplier=1.5)
     stress_20 = _slippage_stress(usable, multiplier=2.0)
-    bootstrap = _cluster_bootstrap_expectancy(
-        usable, sample_count=bootstrap_samples, seed=6_001
-    )
+    bootstrap = _cluster_bootstrap_expectancy(usable, sample_count=bootstrap_samples, seed=6_001)
     sharpe = _annualized_observation_sharpe(realized)
     adjusted_sharpe = _multiple_testing_adjusted_sharpe(
         sharpe,
@@ -109,11 +102,11 @@ def evaluate_return_predictions(
         "benchmark_excess_return_pct": round(weighted_expectancy, 6),
         "profit_factor": round(gross_win / gross_loss, 6) if gross_loss else None,
         "maximum_drawdown_pct": round(min(drawdowns), 6),
+        "conditional_value_at_risk_95_pct": conditional_value_at_risk,
         "downside_deviation_pct": _downside_deviation(realized, weights),
         "gain_loss_concentration_pct": round(concentration, 6),
         "turnover_observations_per_session": round(
-            len(usable)
-            / max(1, len({str(row.get("market_date") or "") for row in usable})),
+            len(usable) / max(1, len({str(row.get("market_date") or "") for row in usable})),
             6,
         ),
         "capacity": _capacity_report(usable),
@@ -151,6 +144,7 @@ def _empty() -> dict[str, Any]:
         "benchmark_excess_return_pct": None,
         "profit_factor": None,
         "maximum_drawdown_pct": None,
+        "conditional_value_at_risk_95_pct": None,
         "downside_deviation_pct": None,
         "gain_loss_concentration_pct": None,
         "turnover_observations_per_session": None,
@@ -200,6 +194,23 @@ def _concentration(values: list[float], weights: list[float]) -> float:
     contributions = [abs(value * weight) for value, weight in zip(values, weights, strict=True)]
     denominator = sum(contributions)
     return 100.0 * max(contributions) / denominator if denominator else 100.0
+
+
+def _conditional_value_at_risk(values: list[float], weights: list[float]) -> float | None:
+    """Return the inverse-probability weighted expected shortfall of the worst 5%.
+
+    This is an observation-level research diagnostic, never a paper-account
+    CVaR.  The return is null when the input is incomplete rather than silently
+    assigning a zero tail loss.
+    """
+
+    if not values or len(values) != len(weights):
+        return None
+    tail_count = max(1, math.ceil(len(values) * 0.05))
+    tail_indexes = sorted(range(len(values)), key=lambda index: values[index])[:tail_count]
+    tail_values = [values[index] for index in tail_indexes]
+    tail_weights = [weights[index] for index in tail_indexes]
+    return round(_weighted_mean(tail_values, tail_weights), 6)
 
 
 def _rank_correlation(pairs: list[tuple[float, float]]) -> float | None:

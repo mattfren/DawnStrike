@@ -82,6 +82,7 @@ def test_v6_public_status_exposes_only_aggregate_failure_attribution(tmp_path) -
     assert attribution["status"] == "WAITING_FOR_OUTCOMES"
     assert attribution["categories"]["by_setup_regime"] == []
     assert attribution["missing_truth_is_zero"] is False
+    assert status["account_comparison"] is None
 
 
 def test_v6_safety_veto_cannot_be_learned_away() -> None:
@@ -242,10 +243,12 @@ def test_v6_failure_attribution_proposes_no_automatic_policy_change(
     assert report["status"] == "COMPLETE"
     assert report["breakdown"][0]["mean_net_excess_return_pct"] < 0
     assert report["causal_attribution"]["by_source_quality"]
-    assert report["causal_attribution"]["failure_modes"]["data_quality"][
-        "missing_truth_is_zero"
-    ] is False
-    assert report["causal_attribution"]["failure_modes"]["execution_cost"][
-        "observed_slippage_status"
-    ] == "MISSING_NOT_IMPUTED"
+    assert (
+        report["causal_attribution"]["failure_modes"]["data_quality"]["missing_truth_is_zero"]
+        is False
+    )
+    assert (
+        report["causal_attribution"]["failure_modes"]["execution_cost"]["observed_slippage_status"]
+        == "MISSING_NOT_IMPUTED"
+    )
     assert report["automatic_policy_change"] is False

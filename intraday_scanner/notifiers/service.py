@@ -6,6 +6,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
+from intraday_scanner.alpha.alert_gate import is_alertable_notification_candidate
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import NotificationError
 from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
@@ -47,8 +48,16 @@ def scan_events_from_payload(
 ) -> list[NotificationEvent]:
     summary = dict(scan.get("summary") or {})
     run_id = str(summary.get("run_id") or "unknown-run")
-    top_rows = list(scan.get("top_explosive") or [])
-    ranked_rows = list(scan.get("ranked_candidates") or [])
+    top_rows = [
+        row
+        for row in list(scan.get("top_explosive") or [])
+        if is_alertable_notification_candidate(row)
+    ]
+    ranked_rows = [
+        row
+        for row in list(scan.get("ranked_candidates") or [])
+        if is_alertable_notification_candidate(row)
+    ]
     avoid_rows = list(scan.get("avoid_list") or [])
     events: list[NotificationEvent] = []
 

@@ -37,6 +37,14 @@ PERFORMANCE_STATUS=WAITING_FOR_FORWARD_EVIDENCE
 
 ## Daily command path
 
-The EOD task calls, in order, source outcome capture, V5 reconciliation/learning, `alpha-v6-learn`, and `alpha-v6-attribution`. Every Python process uses `dawnstrike_process_runner.ps1`, which persists separate stdout/stderr logs, SHA-256 hashes, a timing receipt, and the native exit code.
+The daily EOD task calls, in order, source outcome capture, V5
+reconciliation/learning, `alpha-v6-daily-monitor`, and
+`alpha-v6-attribution`. The daily monitor only scores with a previously frozen
+artifact and records calibration, interval, drift, and coverage evidence; it
+cannot refit a model, select a family, or promote a policy. A distinct weekly
+task calls `alpha-v6-train-weekly`, which freezes its cutoff/dataset hash and
+may emit a research-only competition receipt. Every Python process uses
+`dawnstrike_process_runner.ps1`, which persists separate stdout/stderr logs,
+SHA-256 hashes, a timing receipt, and the native exit code.
 
 The public Research surface receives a bounded `data/v6-learning.json` projection. It displays the evidence count and promotion threshold but never exposes database paths, runtime roots, raw input paths, or secrets.

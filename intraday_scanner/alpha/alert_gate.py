@@ -37,6 +37,31 @@ def apply_alert_gates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [apply_alert_gate(row) for row in rows]
 
 
+def is_alertable_notification_candidate(row: dict[str, Any]) -> bool:
+    """Return whether a ticker may appear in a research-alert notification.
+
+    This is the shared final predicate for any notifier/watchlist path that
+    renders a candidate ticker.  It re-evaluates the canonical gate instead of
+    trusting a caller-supplied score or stale ``can_alert`` bit.  The predicate
+    does not authorize an official paper entry; V5 execution policy remains a
+    separate, stricter boundary.
+    """
+
+    gate = evaluate_alert_gate(row)
+    reported_status = str(row.get("alert_gate_status") or "").upper()
+    reported_version = str(row.get("alert_gate_version") or "")
+    reported_manual = row.get("manual_confirmation_required")
+    return bool(
+        row.get("can_alert") is True
+        and not str(row.get("no_trade_reason") or "").strip()
+        and gate["alert_gate_status"] in {PASS, ALERT_OK}
+        and gate["manual_confirmation_required"] is False
+        and (not reported_status or reported_status == gate["alert_gate_status"])
+        and (not reported_version or reported_version == ALERT_GATE_VERSION)
+        and (reported_manual is None or reported_manual is False)
+    )
+
+
 def apply_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
     gate = evaluate_alert_gate(row)
     output = dict(row)
@@ -98,10 +123,13 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         ("reverse_split_90d", "reverse_split_risk", "reverse split", "reverse_stock_split"),
     ):
         reasons.append("recent reverse split risk")
-    if _has_any(
-        risk_text,
-        ("source_conflict", "gap_conflict", "price_conflict", "volume_conflict"),
-    ) or str(row.get("score_consensus") or "").lower() == "multi_source_conflict":
+    if (
+        _has_any(
+            risk_text,
+            ("source_conflict", "gap_conflict", "price_conflict", "volume_conflict"),
+        )
+        or str(row.get("score_consensus") or "").lower() == "multi_source_conflict"
+    ):
         reasons.append("source conflict unresolved")
     stale_status = str(row.get("stale_data_status") or "").lower()
     if _truthy(row.get("stale_data_flag")) or stale_status == "stale":
@@ -228,10 +256,7 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
     elif len(public_warnings) >= 5 or (
         "previous close missing" in missing
         and "float unknown" in missing
-        and (
-            "SEC risk not checked" in warnings
-            or "halt status not checked" in warnings
-        )
+        and ("SEC risk not checked" in warnings or "halt status not checked" in warnings)
     ):
         status = NEEDS_CONFIRMATION
         grade = WEAK
@@ -313,9 +338,7 @@ def _reward_risk_ratio(row: dict[str, Any]) -> float | None:
     )
     target = _optional_float(row.get("target_1") or row.get("first_target"))
     invalidation = _optional_float(
-        row.get("invalidation")
-        or row.get("invalidation_level")
-        or row.get("exit_line")
+        row.get("invalidation") or row.get("invalidation_level") or row.get("exit_line")
     )
     if trigger is None or target is None or invalidation is None:
         return None
@@ -335,9 +358,7 @@ def _stop_distance_pct(row: dict[str, Any]) -> float | None:
         or row.get("price")
     )
     invalidation = _optional_float(
-        row.get("invalidation")
-        or row.get("invalidation_level")
-        or row.get("exit_line")
+        row.get("invalidation") or row.get("invalidation_level") or row.get("exit_line")
     )
     if trigger is None or invalidation is None or trigger <= 0 or invalidation >= trigger:
         return None
@@ -374,9 +395,7 @@ def _tokens(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [
-        token.strip()
-        for token in str(value or "").replace(",", ";").split(";")
-        if token.strip()
+        token.strip() for token in str(value or "").replace(",", ";").split(";") if token.strip()
     ]
 
 

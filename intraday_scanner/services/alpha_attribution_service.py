@@ -291,12 +291,21 @@ def _cross_version_attribution(
     dimensions = (
         "evidence_stream",
         "source_data_quality",
+        "universe_identity_corporate_action",
         "selection_quality",
+        "sampled_reject_regret",
         "catalyst_quality",
+        "regime_quality",
         "liquidity_quality",
+        "liquidity_capacity",
         "entry_timing",
+        "stop_invalidation_geometry",
+        "target_exit_logic",
         "exit_path",
+        "sizing_concentration",
         "concentration_key",
+        "tail_loss",
+        "outcome_reconciliation_quality",
     )
     breakdowns = {field: _cross_bucket_summaries(observations, field) for field in dimensions}
     source_failures = [
@@ -309,7 +318,9 @@ def _cross_version_attribution(
         for row in breakdowns["selection_quality"]
         if row["bucket"].startswith(("rejected", "veto", "blocked", "no_"))
     ]
-    eligible = [row for row in observations if _number(row.get("net_return_pct")) is not None]
+    eligible = [
+        row for row in observations if _number(row.get("after_cost_return_pct")) is not None
+    ]
     return {
         "schema_version": CROSS_VERSION_ATTRIBUTION_VERSION,
         "status": "COMPLETE" if observations else "WAITING_FOR_EVIDENCE",
@@ -327,6 +338,11 @@ def _cross_version_attribution(
         "category_breakdowns": breakdowns,
         "source_data_failures": source_failures,
         "selection_failures": selection_failures,
+        "unattributed_insufficient_evidence_count": sum(
+            1
+            for row in observations
+            if row.get("outcome_reconciliation_quality") == "unattributed_insufficient_evidence"
+        ),
         "paper_ops_issue_count": len(paper_ops_issues),
         "research_only": True,
         "broker_execution_enabled": False,
@@ -348,20 +364,39 @@ def _historical_cross_observation(
         "market_date": _row_date(trade),
         "evidence_stream": _historical_stream(trade),
         "source_data_quality": "source_recorded" if source_value else "missing_source",
+        "universe_identity_corporate_action": _universe_identity_category(merged),
         "selection_quality": _selection_bucket(selection, trade),
+        "sampled_reject_regret": "not_applicable_not_sampled_reject",
         "catalyst_quality": _category(
             merged.get("catalyst_category") or merged.get("catalyst_class"),
             missing="missing_catalyst",
         ),
+        "regime_quality": _regime_category(merged),
         "liquidity_quality": _liquidity_bucket(
             _first_number(merged, "dollar_volume", "premarket_dollar_volume")
         ),
+        "liquidity_capacity": _liquidity_capacity_category(merged),
         "entry_timing": _category(
             merged.get("entry_time") or merged.get("entry_trigger_type"),
             missing="missing_entry_timing",
         ),
+        "stop_invalidation_geometry": _stop_geometry_category(merged),
+        "target_exit_logic": _target_exit_category(merged, trade),
         "exit_path": _category(trade.get("exit_reason"), missing="missing_exit_path"),
+        "sizing_concentration": _sizing_category(merged),
         "concentration_key": str(trade.get("ticker") or "UNKNOWN").upper(),
+        "tail_loss": _tail_loss_category(_number(trade.get("net_return_pct"))),
+        "outcome_reconciliation_quality": _historical_outcome_quality(trade),
+        "after_cost_return_pct": _number(trade.get("net_return_pct")),
+        "benchmark_excess_return_pct": _number(trade.get("excess_return_pct")),
+        "mfe_pct": _first_number(merged, "mfe_pct", "high_return_pct"),
+        "mae_pct": _first_number(merged, "mae_pct", "low_drawdown_pct"),
+        "uncertainty_pct": _first_number(merged, "uncertainty_pct", "prediction_uncertainty_pct"),
+        "activation_status": _category(merged.get("activation_status"), missing="not_recorded"),
+        "outcome_path": _category(trade.get("exit_reason"), missing="missing_exit_path"),
+        "source_lineage_present": bool(
+            merged.get("source_lineage_hash_sha256") or merged.get("source_ref") or source_value
+        ),
         "net_return_pct": _number(trade.get("net_return_pct")),
         "net_pnl": _number(trade.get("net_pnl")),
         "coverage_status": "SOURCED_COMPLETE",
@@ -397,14 +432,26 @@ def _v6_cross_observation(
     liquidity_data = dict(liquidity) if isinstance(liquidity, dict) else {}
     catalyst = feature_values.get("catalyst")
     catalyst_data = dict(catalyst) if isinstance(catalyst, dict) else {}
+    universe = decision.get("universe_membership")
+    universe_data = dict(universe) if isinstance(universe, dict) else {}
+    uncertainty = decision.get("uncertainty")
+    uncertainty_data = dict(uncertainty) if isinstance(uncertainty, dict) else {}
     vetoes = list(decision.get("safety_vetoes") or [])
     return {
         "observation_id": str(decision.get("decision_id") or "unknown"),
         "market_date": str(decision.get("market_date") or "")[:10],
         "evidence_stream": ("ALPHAOPS_V6_SAMPLED_REJECT" if sampled_reject else "ALPHAOPS_V6"),
         "source_data_quality": source_quality,
+        "universe_identity_corporate_action": _v6_universe_identity_category(
+            universe_data,
+            facts,
+        ),
         "selection_quality": (
             "veto_" + _category(vetoes[0]) if vetoes else _category(decision.get("action"))
+        ),
+        "sampled_reject_regret": _sampled_reject_regret(
+            sampled_reject,
+            outcome_data,
         ),
         "catalyst_quality": _category(
             catalyst_data.get("category")
@@ -412,17 +459,62 @@ def _v6_cross_observation(
             or facts.get("catalyst_category"),
             missing="missing_catalyst",
         ),
+        "regime_quality": _regime_category({"market_regime": decision.get("regime_key"), **facts}),
         "liquidity_quality": _liquidity_bucket(
             _number(liquidity_data.get("premarket_dollar_volume"))
         ),
+        "liquidity_capacity": _liquidity_capacity_category({**feature_values, **facts}),
         "entry_timing": _category(
             outcome_data.get("activation_status"), missing="missing_entry_timing"
+        ),
+        "stop_invalidation_geometry": _stop_geometry_category(
+            {**facts, **decision, **outcome_data}
+        ),
+        "target_exit_logic": _target_exit_category(
+            {**facts, **decision, **outcome_data},
+            outcome_data,
         ),
         "exit_path": _category(
             outcome_data.get("first_touch") or outcome_data.get("exit_reason"),
             missing="missing_exit_path",
         ),
+        "sizing_concentration": _sizing_category({**facts, **decision}),
         "concentration_key": str(decision.get("ticker") or "UNKNOWN").upper(),
+        "tail_loss": _tail_loss_category(_number(outcome_data.get("net_excess_return_pct"))),
+        "outcome_reconciliation_quality": _v6_outcome_quality(outcome_data),
+        "after_cost_return_pct": (
+            _first_number(
+                outcome_data,
+                "net_return_pct",
+                "after_cost_return_pct",
+                "net_excess_return_pct",
+            )
+            if outcome_data.get("learning_eligible") is True
+            else None
+        ),
+        "benchmark_excess_return_pct": (
+            _number(outcome_data.get("net_excess_return_pct"))
+            if outcome_data.get("learning_eligible") is True
+            else None
+        ),
+        "mfe_pct": _number(outcome_data.get("mfe_pct")),
+        "mae_pct": _number(outcome_data.get("mae_pct")),
+        "uncertainty_pct": _first_number(
+            uncertainty_data,
+            "uncertainty_pct",
+            "interval_width_pct",
+        ),
+        "activation_status": _category(
+            outcome_data.get("activation_status"), missing="not_recorded"
+        ),
+        "outcome_path": _category(
+            outcome_data.get("first_touch") or outcome_data.get("exit_reason"),
+            missing="missing_exit_path",
+        ),
+        "source_lineage_present": bool(
+            decision.get("source_lineage_hash_sha256")
+            or universe_data.get("source_lineage_hash_sha256")
+        ),
         "net_return_pct": (
             _number(outcome_data.get("net_excess_return_pct"))
             if outcome_data.get("learning_eligible") is True
@@ -444,12 +536,33 @@ def _paper_ops_cross_observation(row: dict[str, Any]) -> dict[str, Any]:
             if record_status in {"accepted", "realized", "no_trade"}
             else "quarantined_paperops_source"
         ),
+        "universe_identity_corporate_action": "not_recorded_aggregate",
         "selection_quality": "aggregate_daily_record",
+        "sampled_reject_regret": "not_applicable_aggregate",
         "catalyst_quality": "not_recorded_aggregate",
+        "regime_quality": "not_recorded_aggregate",
         "liquidity_quality": "not_recorded_aggregate",
+        "liquidity_capacity": "not_recorded_aggregate",
         "entry_timing": "not_recorded_aggregate",
+        "stop_invalidation_geometry": "not_recorded_aggregate",
+        "target_exit_logic": "not_recorded_aggregate",
         "exit_path": "not_recorded_aggregate",
+        "sizing_concentration": "not_recorded_aggregate",
         "concentration_key": str(row.get("strategy_id") or "UNKNOWN").upper(),
+        "tail_loss": "not_recorded_aggregate",
+        "outcome_reconciliation_quality": (
+            "paperops_reconciled"
+            if record_status in {"accepted", "realized", "no_trade"}
+            else "unattributed_insufficient_evidence"
+        ),
+        "after_cost_return_pct": _number(row.get("return_pct")),
+        "benchmark_excess_return_pct": _number(row.get("excess_return_pct")),
+        "mfe_pct": None,
+        "mae_pct": None,
+        "uncertainty_pct": None,
+        "activation_status": "not_recorded_aggregate",
+        "outcome_path": "not_recorded_aggregate",
+        "source_lineage_present": bool(row.get("source_hash_sha256")),
         "net_return_pct": _number(row.get("return_pct")),
         # PaperOps reports cents while AlphaOps paper trades report their own
         # notional semantics. Do not pool non-comparable P&L units.
@@ -467,16 +580,200 @@ def _cross_bucket_summaries(rows: list[dict[str, Any]], field: str) -> list[dict
 
 
 def _cross_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    returns = _numbers(rows, "net_return_pct")
+    returns = _numbers(rows, "after_cost_return_pct")
+    benchmark_excess = _numbers(rows, "benchmark_excess_return_pct")
     pnl = _numbers(rows, "net_pnl")
+    mfe = _numbers(rows, "mfe_pct")
+    mae = _numbers(rows, "mae_pct")
+    uncertainty = _numbers(rows, "uncertainty_pct")
+    excluded = [row for row in rows if _cross_row_is_excluded(row)]
+    missing = [
+        row
+        for row in rows
+        if _number(row.get("after_cost_return_pct")) is None and row not in excluded
+    ]
+    activation = Counter(str(row.get("activation_status") or "not_recorded") for row in rows)
+    paths = Counter(str(row.get("outcome_path") or "missing") for row in rows)
+    lineage_count = sum(row.get("source_lineage_present") is True for row in rows)
+    coverage_denominator = len(rows) - len(excluded)
     return {
         "observation_count": len(rows),
         "return_eligible_count": len(returns),
-        "return_missing_count": len(rows) - len(returns),
-        "mean_net_return_pct": round(mean(returns), 4) if returns else None,
+        "return_missing_count": len(missing),
+        "return_excluded_count": len(excluded),
+        "coverage_pct": (
+            round((len(returns) / coverage_denominator) * 100.0, 4)
+            if coverage_denominator
+            else None
+        ),
+        "mean_after_cost_return_pct": round(mean(returns), 4) if returns else None,
+        "mean_benchmark_excess_return_pct": (
+            round(mean(benchmark_excess), 4) if benchmark_excess else None
+        ),
+        "mean_mfe_pct": round(mean(mfe), 4) if mfe else None,
+        "mean_mae_pct": round(mean(mae), 4) if mae else None,
+        "mean_uncertainty_pct": round(mean(uncertainty), 4) if uncertainty else None,
+        "activation_counts": dict(sorted(activation.items())),
+        "stop_target_close_path_counts": dict(sorted(paths.items())),
+        "source_lineage_coverage_pct": (
+            round((lineage_count / len(rows)) * 100.0, 4) if rows else None
+        ),
         "net_pnl": round(sum(pnl), 4) if pnl else None,
         "missing_truth_is_zero": False,
     }
+
+
+def _cross_row_is_excluded(row: dict[str, Any]) -> bool:
+    status = str(row.get("coverage_status") or "").upper()
+    return status in {
+        "NOT_TRIGGERED",
+        "NO_TRADE",
+        "RESEARCH_ONLY_POLICY_BLOCKED",
+        "QUARANTINED",
+    }
+
+
+def _universe_identity_category(row: dict[str, Any]) -> str:
+    identity = _category(
+        row.get("identity_status") or row.get("ticker_identity_status"),
+        missing="missing_identity",
+    )
+    listing = _category(row.get("listing_status"), missing="missing_listing")
+    corporate = _category(
+        row.get("corporate_action_status") or row.get("corporate_action_type"),
+        missing="missing_corporate_action",
+    )
+    if {identity, listing, corporate} == {
+        "missing_identity",
+        "missing_listing",
+        "missing_corporate_action",
+    }:
+        return "unattributed_insufficient_evidence"
+    return f"identity_{identity}|listing_{listing}|corporate_action_{corporate}"
+
+
+def _v6_universe_identity_category(universe: dict[str, Any], facts: dict[str, Any]) -> str:
+    merged = {**facts, **universe}
+    membership = _category(merged.get("status"), missing="missing_membership")
+    base = _universe_identity_category(merged)
+    return f"membership_{membership}|{base}"
+
+
+def _regime_category(row: dict[str, Any]) -> str:
+    market = _category(
+        row.get("market_regime") or row.get("regime_key") or row.get("regime"),
+        missing="missing_market_regime",
+    )
+    sector = _category(row.get("sector_regime"), missing="missing_sector_regime")
+    if market == "missing_market_regime" and sector == "missing_sector_regime":
+        return "unattributed_insufficient_evidence"
+    return f"market_{market}|sector_{sector}"
+
+
+def _liquidity_capacity_category(row: dict[str, Any]) -> str:
+    liquidity = _liquidity_bucket(
+        _first_number(
+            row,
+            "dollar_volume",
+            "premarket_dollar_volume",
+            "avg_dollar_volume_20d",
+        )
+    )
+    capacity = _first_number(
+        row,
+        "estimated_capacity_dollars",
+        "capacity_dollars",
+        "capacity",
+    )
+    capacity_bucket = (
+        "missing_capacity"
+        if capacity is None
+        else "under_10k"
+        if capacity < 10_000
+        else "10k_to_100k"
+        if capacity < 100_000
+        else "over_100k"
+    )
+    return f"{liquidity}|{capacity_bucket}"
+
+
+def _stop_geometry_category(row: dict[str, Any]) -> str:
+    entry = _first_number(
+        row,
+        "entry_price",
+        "entry_trigger",
+        "breakout_trigger",
+        "entry_watch_level",
+    )
+    stop = _first_number(row, "invalidation_level", "invalidation", "stop_price")
+    if entry is None or stop is None or entry <= 0:
+        return "unattributed_insufficient_evidence"
+    distance = abs(entry - stop) / entry * 100.0
+    return (
+        "tight_under_3pct"
+        if distance < 3.0
+        else "moderate_3_to_8pct"
+        if distance <= 8.0
+        else "wide_over_8pct"
+    )
+
+
+def _target_exit_category(row: dict[str, Any], outcome: dict[str, Any]) -> str:
+    target = _first_number(row, "target_1", "first_target", "target_price")
+    exit_path = _category(
+        outcome.get("first_touch") or outcome.get("exit_reason"),
+        missing="missing_exit_path",
+    )
+    if target is None:
+        return f"missing_target|{exit_path}"
+    return f"target_recorded|{exit_path}"
+
+
+def _sizing_category(row: dict[str, Any]) -> str:
+    notional = _first_number(row, "notional", "notional_dollars", "position_notional")
+    quantity = _first_number(row, "quantity", "shares")
+    account = _category(row.get("account_id"), missing="missing_account")
+    if notional is None and quantity is None:
+        return f"{account}|unattributed_insufficient_evidence"
+    return f"{account}|sizing_recorded"
+
+
+def _tail_loss_category(value: float | None) -> str:
+    if value is None:
+        return "unattributed_insufficient_evidence"
+    if value <= -5.0:
+        return "tail_loss_at_or_below_minus_5pct"
+    if value < 0:
+        return "loss_above_tail_threshold"
+    return "non_loss"
+
+
+def _historical_outcome_quality(trade: dict[str, Any]) -> str:
+    status = _category(
+        trade.get("reconciliation_status") or trade.get("record_status"),
+        missing="missing_reconciliation_status",
+    )
+    if status.startswith(("missing", "quarantined", "failed")):
+        return "unattributed_insufficient_evidence"
+    return f"reconciled_{status}"
+
+
+def _v6_outcome_quality(outcome: dict[str, Any]) -> str:
+    status = _category(outcome.get("outcome_status"), missing="missing_outcome")
+    if status in {"terminal_missing", "missing_outcome"}:
+        return "unattributed_insufficient_evidence"
+    return f"reconciled_{status}"
+
+
+def _sampled_reject_regret(sampled_reject: bool, outcome: dict[str, Any]) -> str:
+    if not sampled_reject:
+        return "not_applicable_not_sampled_reject"
+    if str(outcome.get("outcome_status") or "").upper() == "TERMINAL_MISSING":
+        return "unattributed_insufficient_evidence"
+    value = _number(outcome.get("net_excess_return_pct"))
+    if value is None:
+        return "unattributed_insufficient_evidence"
+    return "sampled_reject_positive_regret" if value > 0 else "sampled_reject_avoided_loss"
 
 
 def _historical_stream(trade: dict[str, Any]) -> str:

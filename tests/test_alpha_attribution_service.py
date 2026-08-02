@@ -296,6 +296,28 @@ def test_cross_version_attribution_keeps_streams_and_missing_truth_distinct() ->
     assert cross["return_missing_count"] == 2
     assert cross["missing_truth_is_zero"] is False
     assert cross["paper_ops_issue_count"] == 1
+    assert {
+        "universe_identity_corporate_action",
+        "sampled_reject_regret",
+        "regime_quality",
+        "liquidity_capacity",
+        "stop_invalidation_geometry",
+        "target_exit_logic",
+        "sizing_concentration",
+        "tail_loss",
+        "outcome_reconciliation_quality",
+    } <= set(cross["category_breakdowns"])
+    selected_tail = next(
+        row
+        for row in cross["category_breakdowns"]["tail_loss"]
+        if row["bucket"] == "loss_above_tail_threshold"
+    )
+    assert selected_tail["mean_after_cost_return_pct"] == -2.0
+    assert selected_tail["mean_benchmark_excess_return_pct"] == -2.0
+    assert selected_tail["coverage_pct"] == 100.0
+    assert "activation_counts" in selected_tail
+    assert "stop_target_close_path_counts" in selected_tail
+    assert "source_lineage_coverage_pct" in selected_tail
     source_failures = {row["bucket"] for row in cross["source_data_failures"]}
     assert "terminal_missing_source_outcome" in source_failures
     assert "quarantined_paperops_source" in source_failures

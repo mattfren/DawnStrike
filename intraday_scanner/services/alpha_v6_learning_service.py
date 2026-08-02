@@ -7,6 +7,7 @@ never alters V5, creates orders, or changes a production policy.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Any
 
@@ -27,6 +28,35 @@ from intraday_scanner.alpha.v6.validation import (
 )
 from intraday_scanner.services.v6_learning_service import synchronize_v6_outcomes
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+_MIN_EXACT_COMMON_FOLD_PREDICTIONS = 30
+_MIN_MATERIAL_OBJECTIVE_IMPROVEMENT_PCT = 0.25
+
+MODEL_COMPETITION_CONTRACT = {
+    "primary_objective": "bootstrap_lower_95_after_cost_benchmark_excess_expectancy_pct",
+    "tie_breaker": "out_of_fold_rank_correlation",
+    "minimum_exact_common_fold_predictions": _MIN_EXACT_COMMON_FOLD_PREDICTIONS,
+    "minimum_material_objective_improvement_pct": _MIN_MATERIAL_OBJECTIVE_IMPROVEMENT_PCT,
+    "required_constraints": (
+        "purged_no_lookahead",
+        "positive_two_x_slippage_expectancy",
+        "positive_one_point_five_x_slippage_expectancy",
+        "non_worsening_maximum_drawdown",
+        "non_worsening_conditional_value_at_risk",
+        "non_worsening_profit_factor",
+        "non_worsening_turnover",
+        "non_worsening_gain_loss_concentration",
+        "non_worsening_capacity",
+        "non_worsening_calibration_and_interval_coverage",
+        "non_worsening_top_decile_lift",
+        "non_worsening_rank_correlation",
+        "regime_source_liquidity_catalyst_stability",
+        "multiple_testing_adjusted_sharpe_not_worse_and_positive",
+    ),
+    "automatic_policy_change": False,
+    "research_only": True,
+    "broker_execution_enabled": False,
+}
 
 
 def run_alpha_v6_daily_monitor(
@@ -104,9 +134,8 @@ def run_alpha_v6_weekly_training(
     artifact_inserted = False
     if isinstance(artifact, dict) and training.get("model_artifact_hash_sha256"):
         artifact_row = {
-            "artifact_id": "v6a-" + canonical_hash(
-                {"model_run_id": training["model_run_id"], "artifact": artifact}
-            )[:28],
+            "artifact_id": "v6a-"
+            + canonical_hash({"model_run_id": training["model_run_id"], "artifact": artifact})[:28],
             "model_run_id": training["model_run_id"],
             "created_at": training["trained_at"],
             "artifact_hash_sha256": training["model_artifact_hash_sha256"],
@@ -127,6 +156,7 @@ def run_alpha_v6_weekly_training(
     folds = expanding_purged_splits(dataset["rows"])
     evaluation_rows = _evaluation_rows(predictions, outcomes, dataset)
     family_metrics = _family_evaluation_metrics(evaluation_rows)
+    model_competition = select_research_model_family(family_metrics)
     return_metrics = dict(
         family_metrics.get("regularized_baselines", {}).get("full_oof")
         or evaluate_return_predictions([])
@@ -145,6 +175,7 @@ def run_alpha_v6_weekly_training(
         "prediction_count": len(predictions),
         "return_metrics": return_metrics,
         "all_family_oof_comparison": family_metrics,
+        "model_competition": model_competition,
         "calibration": calibration,
         "interval_coverage": intervals,
         "no_lookahead": bool(
@@ -160,12 +191,15 @@ def run_alpha_v6_weekly_training(
     evaluation["evaluation_input_hash_sha256"] = canonical_hash(
         {key: value for key, value in evaluation.items() if key != "evaluated_at"}
     )
-    evaluation["evaluation_id"] = "v6e-" + canonical_hash(
-        {
-            "model_run_id": training["model_run_id"],
-            "input_hash": evaluation["evaluation_input_hash_sha256"],
-        }
-    )[:28]
+    evaluation["evaluation_id"] = (
+        "v6e-"
+        + canonical_hash(
+            {
+                "model_run_id": training["model_run_id"],
+                "input_hash": evaluation["evaluation_input_hash_sha256"],
+            }
+        )[:28]
+    )
     evaluation_inserted = store.persist_alpha_v6_evaluation(evaluation)
     drift = dict(daily_monitor["drift"])
     review = promotion_review_packet(
@@ -186,16 +220,12 @@ def run_alpha_v6_weekly_training(
         market_date=market_date,
         dataset=dataset,
         outcome_count=len(outcomes),
-        label_generation={
-            "generated_count": daily_monitor["label_generation"]["generated_count"]
-        },
+        label_generation={"generated_count": daily_monitor["label_generation"]["generated_count"]},
         drift=drift,
         model_run_id=str(training["model_run_id"]),
         evaluation_id=str(evaluation["evaluation_id"]),
     )
-    weekly_receipt_inserted = store.persist_alpha_v6_operational_receipt(
-        weekly_receipt
-    )
+    weekly_receipt_inserted = store.persist_alpha_v6_operational_receipt(weekly_receipt)
     return {
         "schema_version": "dawnstrike.alphaops_v6.weekly_training.v1",
         "status": training["status"],
@@ -215,6 +245,7 @@ def run_alpha_v6_weekly_training(
             "folds": folds,
             "return_metrics": return_metrics,
             "all_family_oof_comparison": family_metrics,
+            "model_competition": model_competition,
             "calibration": calibration,
             "interval_coverage": intervals,
             "persisted_evaluation": {**evaluation, "inserted": evaluation_inserted},
@@ -287,9 +318,7 @@ def _evaluation_rows(
                     "activation_probability": family_prediction.get("activation_probability"),
                     "interval_lower_pct": family_prediction.get("interval_lower_pct"),
                     "interval_upper_pct": family_prediction.get("interval_upper_pct"),
-                    "estimated_round_trip_cost_bps": source.get(
-                        "estimated_round_trip_cost_bps"
-                    ),
+                    "estimated_round_trip_cost_bps": source.get("estimated_round_trip_cost_bps"),
                     "inverse_probability_weight": source.get("inverse_probability_weight"),
                     "setup_key": source.get("setup_key"),
                     "regime_key": source.get("regime_key"),
@@ -341,16 +370,332 @@ def _family_evaluation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         exact_rows = [
             row
             for row in family_rows
-            if (str(row.get("decision_id") or ""), str(row.get("fold_id") or ""))
-            in common_keys
+            if (str(row.get("decision_id") or ""), str(row.get("fold_id") or "")) in common_keys
         ]
         output[family] = {
             "full_oof": evaluate_return_predictions(family_rows),
             "exact_common_fold_oof": evaluate_return_predictions(exact_rows),
+            "exact_common_fold_calibration": calibration_report(exact_rows),
+            "exact_common_fold_interval_coverage": interval_coverage(exact_rows),
             "full_oof_prediction_count": len(family_rows),
             "exact_common_fold_prediction_count": len(exact_rows),
         }
     return output
+
+
+def select_research_model_family(family_metrics: dict[str, Any]) -> dict[str, Any]:
+    """Apply the frozen research winner rule without altering serving policy.
+
+    The result is a persisted evidence receipt, not a policy change: V5 remains
+    frozen and V6's visible score remains the regularized baseline until the
+    separate forward/holdout/manual-promotion gates pass.
+    """
+
+    baseline_name = "regularized_baselines"
+    baseline = _exact_family_metrics(family_metrics, baseline_name)
+    candidates = {
+        family: _competition_candidate(
+            family,
+            _exact_family_metrics(family_metrics, family),
+            baseline,
+        )
+        for family in sorted(family_metrics.get("families_evaluated") or [])
+    }
+    challenger_rows = [
+        candidate
+        for family, candidate in candidates.items()
+        if family != baseline_name and candidate["eligible_for_research_win"] is True
+    ]
+    winner = max(
+        challenger_rows,
+        key=lambda row: (
+            float(row["objective_lower_bound_pct"]),
+            float(row["rank_correlation"]),
+            str(row["family"]),
+        ),
+        default=None,
+    )
+    selected = str(winner["family"]) if winner is not None else baseline_name
+    baseline_is_evaluable = bool(candidates.get(baseline_name, {}).get("evaluable"))
+    rejected = [
+        {
+            "family": family,
+            "reasons": list(candidate["rejection_reasons"]),
+        }
+        for family, candidate in candidates.items()
+        if family != selected
+    ]
+    return {
+        "schema_version": "dawnstrike.alphaops_v6.model_competition.v1",
+        "comparison_status": family_metrics.get("comparison_status"),
+        "contract": MODEL_COMPETITION_CONTRACT,
+        "selected_research_family": selected,
+        "selection_status": (
+            "CHALLENGER_RESEARCH_WINNER_NOT_PROMOTED"
+            if winner is not None
+            else "BASELINE_RETAINED_RESEARCH_ONLY"
+            if baseline_is_evaluable
+            else "WAITING_FOR_FORWARD_EVIDENCE"
+        ),
+        "candidates": candidates,
+        "rejected_alternatives": rejected,
+        "automatic_policy_change": False,
+        "automatic_model_serving_change": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _exact_family_metrics(family_metrics: dict[str, Any], family: str) -> dict[str, Any]:
+    value = family_metrics.get(family)
+    data = value if isinstance(value, dict) else {}
+    exact = data.get("exact_common_fold_oof")
+    if not isinstance(exact, dict):
+        return {}
+    output = dict(exact)
+    calibration = data.get("exact_common_fold_calibration")
+    interval = data.get("exact_common_fold_interval_coverage")
+    output["calibration"] = calibration if isinstance(calibration, dict) else {}
+    output["interval_coverage"] = interval if isinstance(interval, dict) else {}
+    return output
+
+
+def _competition_candidate(
+    family: str,
+    metrics: dict[str, Any],
+    baseline: dict[str, Any],
+) -> dict[str, Any]:
+    interval = metrics.get("bootstrap_expectancy_95_ci_pct")
+    interval_data = interval if isinstance(interval, dict) else {}
+    baseline_interval = baseline.get("bootstrap_expectancy_95_ci_pct")
+    baseline_interval_data = baseline_interval if isinstance(baseline_interval, dict) else {}
+    objective = _number(interval_data.get("lower"))
+    baseline_objective = _number(baseline_interval_data.get("lower"))
+    sample_size = _number(metrics.get("sample_size"))
+    reasons: list[str] = []
+    if metrics.get("status") != "EVALUABLE":
+        reasons.append("not_evaluable")
+    if sample_size is None or sample_size < _MIN_EXACT_COMMON_FOLD_PREDICTIONS:
+        reasons.append("insufficient_exact_common_fold_predictions")
+    if metrics.get("no_lookahead_audit_passed") is not True:
+        reasons.append("no_lookahead_not_proven")
+    if objective is None:
+        reasons.append("primary_objective_unavailable")
+    if family != "regularized_baselines":
+        if baseline_objective is None:
+            reasons.append("baseline_primary_objective_unavailable")
+        elif objective is not None and (
+            objective < baseline_objective + _MIN_MATERIAL_OBJECTIVE_IMPROVEMENT_PCT
+        ):
+            reasons.append("primary_objective_not_materially_better")
+        if objective is None or objective <= 0.0:
+            reasons.append("primary_objective_not_positive")
+        if _not_positive(_slippage_metric(metrics, "one_point_five_x_expectancy_pct")):
+            reasons.append("one_point_five_x_slippage_expectancy_not_positive")
+        if _not_positive(_slippage_metric(metrics, "two_x_expectancy_pct")):
+            reasons.append("two_x_slippage_expectancy_not_positive")
+        if _worsened_negative_metric(
+            metrics,
+            baseline,
+            "maximum_drawdown_pct",
+        ):
+            reasons.append("maximum_drawdown_worsened")
+        if _worsened_negative_metric(
+            metrics,
+            baseline,
+            "conditional_value_at_risk_95_pct",
+        ):
+            reasons.append("conditional_value_at_risk_worsened")
+        if _worsened_positive_metric(metrics, baseline, "profit_factor", higher_is_better=True):
+            reasons.append("profit_factor_worsened")
+        if _worsened_positive_metric(
+            metrics,
+            baseline,
+            "turnover_observations_per_session",
+        ):
+            reasons.append("turnover_worsened")
+        if _worsened_positive_metric(
+            metrics,
+            baseline,
+            "gain_loss_concentration_pct",
+        ):
+            reasons.append("gain_loss_concentration_worsened")
+        if _worsened_capacity(metrics, baseline):
+            reasons.append("capacity_worsened_or_missing")
+        if _worsened_calibration_or_interval(family_metrics=metrics, baseline=baseline):
+            reasons.append("calibration_or_interval_coverage_worsened_or_missing")
+        if _worsened_positive_metric(
+            metrics, baseline, "top_decile_lift_pct", higher_is_better=True
+        ):
+            reasons.append("top_decile_lift_worsened")
+        if _worsened_positive_metric(metrics, baseline, "rank_correlation", higher_is_better=True):
+            reasons.append("rank_correlation_worsened")
+        if _segmented_stability_worsened(metrics, baseline):
+            reasons.append("segmented_stability_worsened_or_missing")
+        if _multiple_testing_metric_worsened(metrics, baseline):
+            reasons.append("multiple_testing_adjusted_sharpe_worsened_or_not_positive")
+    return {
+        "family": family,
+        "objective_lower_bound_pct": objective,
+        "baseline_objective_lower_bound_pct": baseline_objective,
+        "rank_correlation": _number(metrics.get("rank_correlation")),
+        "exact_common_fold_prediction_count": metrics.get("sample_size"),
+        "evaluable": not {
+            "not_evaluable",
+            "insufficient_exact_common_fold_predictions",
+            "no_lookahead_not_proven",
+            "primary_objective_unavailable",
+        }.intersection(reasons),
+        "eligible_for_research_win": not reasons,
+        "rejection_reasons": reasons,
+    }
+
+
+def _slippage_metric(metrics: dict[str, Any], field: str) -> Any:
+    stress = metrics.get("slippage_stress")
+    data = stress if isinstance(stress, dict) else {}
+    return data.get(field)
+
+
+def _not_positive(value: Any) -> bool:
+    number = _number(value)
+    return number is None or number <= 0.0
+
+
+def _number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _worsened_negative_metric(
+    candidate: dict[str, Any], baseline: dict[str, Any], field: str
+) -> bool:
+    candidate_value = _number(candidate.get(field))
+    baseline_value = _number(baseline.get(field))
+    return candidate_value is None or baseline_value is None or candidate_value < baseline_value
+
+
+def _worsened_positive_metric(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+    field: str,
+    *,
+    higher_is_better: bool = False,
+) -> bool:
+    candidate_value = _number(candidate.get(field))
+    baseline_value = _number(baseline.get(field))
+    return (
+        candidate_value is None
+        or baseline_value is None
+        or (
+            candidate_value < baseline_value
+            if higher_is_better
+            else candidate_value > baseline_value
+        )
+    )
+
+
+def _worsened_capacity(candidate: dict[str, Any], baseline: dict[str, Any]) -> bool:
+    candidate_capacity = candidate.get("capacity")
+    baseline_capacity = baseline.get("capacity")
+    candidate_data = candidate_capacity if isinstance(candidate_capacity, dict) else {}
+    baseline_data = baseline_capacity if isinstance(baseline_capacity, dict) else {}
+    candidate_value = _number(candidate_data.get("median_capacity_dollars"))
+    baseline_value = _number(baseline_data.get("median_capacity_dollars"))
+    return (
+        candidate_data.get("status") != "EVALUABLE"
+        or baseline_data.get("status") != "EVALUABLE"
+        or candidate_value is None
+        or baseline_value is None
+        or candidate_value < baseline_value
+    )
+
+
+def _worsened_calibration_or_interval(
+    *, family_metrics: dict[str, Any], baseline: dict[str, Any]
+) -> bool:
+    candidate_calibration = family_metrics.get("calibration")
+    baseline_calibration = baseline.get("calibration")
+    candidate_interval = family_metrics.get("interval_coverage")
+    baseline_interval = baseline.get("interval_coverage")
+    candidate_calibration_data = (
+        candidate_calibration if isinstance(candidate_calibration, dict) else {}
+    )
+    baseline_calibration_data = (
+        baseline_calibration if isinstance(baseline_calibration, dict) else {}
+    )
+    candidate_interval_data = candidate_interval if isinstance(candidate_interval, dict) else {}
+    baseline_interval_data = baseline_interval if isinstance(baseline_interval, dict) else {}
+    candidate_brier = _number(candidate_calibration_data.get("brier_score"))
+    baseline_brier = _number(baseline_calibration_data.get("brier_score"))
+    candidate_ece = _number(candidate_calibration_data.get("expected_calibration_error"))
+    baseline_ece = _number(baseline_calibration_data.get("expected_calibration_error"))
+    candidate_coverage = _number(candidate_interval_data.get("coverage_pct"))
+    baseline_coverage = _number(baseline_interval_data.get("coverage_pct"))
+    return (
+        candidate_calibration_data.get("status") != "EVALUABLE"
+        or baseline_calibration_data.get("status") != "EVALUABLE"
+        or candidate_interval_data.get("status") != "EVALUABLE"
+        or baseline_interval_data.get("status") != "EVALUABLE"
+        or candidate_brier is None
+        or baseline_brier is None
+        or candidate_ece is None
+        or baseline_ece is None
+        or candidate_coverage is None
+        or baseline_coverage is None
+        or candidate_brier > baseline_brier
+        or candidate_ece > baseline_ece
+        or abs(candidate_coverage - 90.0) > abs(baseline_coverage - 90.0)
+    )
+
+
+def _segmented_stability_worsened(candidate: dict[str, Any], baseline: dict[str, Any]) -> bool:
+    candidate_segments = candidate.get("segmented_performance")
+    baseline_segments = baseline.get("segmented_performance")
+    candidate_data = candidate_segments if isinstance(candidate_segments, dict) else {}
+    baseline_data = baseline_segments if isinstance(baseline_segments, dict) else {}
+    required = ("regime_key", "source_key", "liquidity_bucket", "catalyst_bucket")
+    for dimension in required:
+        candidate_rows = candidate_data.get(dimension)
+        baseline_rows = baseline_data.get(dimension)
+        if not isinstance(candidate_rows, list) or not isinstance(baseline_rows, list):
+            return True
+        candidate_values = {
+            str(row.get("segment")): _number(row.get("after_cost_expectancy_pct"))
+            for row in candidate_rows
+            if isinstance(row, dict)
+        }
+        baseline_values = {
+            str(row.get("segment")): _number(row.get("after_cost_expectancy_pct"))
+            for row in baseline_rows
+            if isinstance(row, dict)
+        }
+        if not candidate_values or set(candidate_values) != set(baseline_values):
+            return True
+        for key in sorted(baseline_values):
+            candidate_value = candidate_values[key]
+            baseline_value = baseline_values[key]
+            if (
+                candidate_value is None
+                or baseline_value is None
+                or candidate_value < baseline_value
+            ):
+                return True
+    return False
+
+
+def _multiple_testing_metric_worsened(candidate: dict[str, Any], baseline: dict[str, Any]) -> bool:
+    candidate_value = _number(candidate.get("multiple_testing_adjusted_sharpe"))
+    baseline_value = _number(baseline.get("multiple_testing_adjusted_sharpe"))
+    return (
+        candidate_value is None
+        or baseline_value is None
+        or candidate_value <= 0.0
+        or candidate_value < baseline_value
+    )
 
 
 def _drift(decisions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -415,7 +760,9 @@ def _operational_receipt(
 
 
 __all__ = [
+    "MODEL_COMPETITION_CONTRACT",
     "run_alpha_v6_daily_monitor",
     "run_alpha_v6_learning",
     "run_alpha_v6_weekly_training",
+    "select_research_model_family",
 ]

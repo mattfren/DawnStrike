@@ -12,6 +12,8 @@ def test_calendar_and_v6_research_assets_keep_truth_boundary() -> None:
     assert "v6-learning.json" in javascript
     assert "Decision Replay" in html
     assert "v6-promotion-gates" in html
+    assert "v6-account-comparison" in html
+    assert "Account comparison" in html
     assert "prediction_visible" in javascript
     assert "Prediction hidden until the evidence gate passes" in javascript
     assert 'role="grid"' not in html

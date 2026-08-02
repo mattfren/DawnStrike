@@ -28,6 +28,19 @@ folds, and an untouched holdout. Preprocessing is fit within each training fold.
 No rank, post-decision high, later catalyst state, or random row split is an
 eligible feature path.
 
+## Frozen family-comparison rule
+
+`dawnstrike.alphaops-v6.model-competition.v1` compares every permitted model
+family on the same exact date-grouped, purged, embargoed out-of-fold decisions
+and the same cost, benchmark, eligibility, and sampled-reject weighting rules.
+The primary objective is the bootstrap lower 95% confidence bound of after-cost
+benchmark-excess return; the tie-breaker is rank correlation. A challenger can
+become a research winner only when it has a material positive primary-objective
+improvement and is non-inferior on drawdown, CVaR, profit factor, turnover,
+concentration, capacity, calibration, interval coverage, rank lift, 1.5x/2x
+slippage, and segmented stability. Missing or failed evidence rejects the
+challenger. A research winner never changes serving policy or V5.
+
 ## Output and safeguards
 
 The conservative utility is expected net excess minus tail, uncertainty, and

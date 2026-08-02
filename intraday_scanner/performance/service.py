@@ -14,6 +14,10 @@ from urllib.parse import quote
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
 )
+from intraday_scanner.performance.account_comparison import (
+    build_account_comparison,
+    public_account_comparison,
+)
 from intraday_scanner.performance.account_ledger import (
     build_v5_account_ledger,
     ledger_equity_observations,
@@ -90,6 +94,12 @@ class CanonicalPerformanceService:
                 calculated_at=calculated_at,
                 as_of_market_date=market_date or as_of_market_date,
             )
+            account_comparison = build_account_comparison(
+                v5_ledger=ledger,
+                v6_ledger=_load_v6_account_ledger(connection),
+                benchmark_rows=inputs["benchmark_rows"],
+                calculated_at=calculated_at,
+            )
             canonical_positions = _without_canonical_trade_duplicates(
                 inputs["positions"], inputs["strategy_trades"]
             )
@@ -138,6 +148,7 @@ class CanonicalPerformanceService:
                     ledger,
                     calculated_at=calculated_at,
                 )
+                _persist_account_comparison(connection, account_comparison)
                 self._persist(connection, rows, daily, issues, market_date=market_date)
             row_payload = [row.to_dict() for row in rows]
             output_hash = stable_hash({"rows": row_payload, "daily": daily, "issues": issues})
@@ -154,6 +165,7 @@ class CanonicalPerformanceService:
                 "daily": daily,
                 "issues": issues,
                 "account_ledger": ledger,
+                "account_comparison": account_comparison,
                 "paper_ops_reconciliation": inputs["paper_ops"],
             }
 
@@ -252,6 +264,12 @@ class CanonicalPerformanceService:
                     (*date_params, max(1, days) * 4),
                 )
             ]
+            comparison_row = connection.execute(
+                """
+                SELECT payload_json FROM account_performance_comparisons
+                ORDER BY calculated_at DESC, comparison_id DESC LIMIT 1
+                """
+            ).fetchone()
             safety_evidence = _public_safety_evidence(
                 connection,
                 as_of=as_of,
@@ -268,6 +286,9 @@ class CanonicalPerformanceService:
             "rows": [_public_row(row) for row in performance_rows],
             "accounts": account_rows,
             "account_ledger": [_public_ledger(row) for row in ledger_rows],
+            "account_comparison": public_account_comparison(
+                _json_object(comparison_row["payload_json"]) if comparison_row else None
+            ),
             "limits": {"days": days, "row_limit": row_limit},
         }
 
@@ -302,6 +323,7 @@ class CanonicalPerformanceService:
                 "equity": paper_ops["equity"],
             },
             "benchmark": benchmark,
+            "benchmark_rows": benchmark_rows,
             "hash_inputs": {
                 "signals": signals,
                 "outcomes": outcomes,
@@ -1039,6 +1061,43 @@ def _open_database(path: Path, *, read_only: bool) -> sqlite3.Connection:
         raise FileNotFoundError(f"Read-only reconciliation database not found: {path}")
     uri = f"file:{quote(path.resolve().as_posix(), safe='/:')}?mode=ro"
     return sqlite3.connect(uri, uri=True)
+
+
+def _load_v6_account_ledger(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Read only an explicitly registered V6 account ledger.
+
+    A V6 decision/outcome row deliberately does not qualify: it lacks the
+    account's opening equity, flows, fill/cost reconciliation, and position
+    marks needed for an account return.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT ledger.*
+        FROM paper_account_daily_ledger AS ledger
+        JOIN paper_accounts AS account ON account.account_id = ledger.account_id
+        WHERE account.strategy_version LIKE 'dawnstrike-alphaops-v6%'
+        ORDER BY ledger.market_date ASC, ledger.account_id ASC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _persist_account_comparison(connection: sqlite3.Connection, comparison: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO account_performance_comparisons
+        (comparison_id, calculated_at, status, input_hash_sha256, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            str(comparison.get("comparison_id") or ""),
+            str(comparison.get("calculated_at") or ""),
+            str(comparison.get("status") or ""),
+            str(comparison.get("input_hash_sha256") or ""),
+            json.dumps(comparison, sort_keys=True),
+        ),
+    )
 
 
 def _optional_money(payload: dict[str, Any], *keys: str) -> int | None:

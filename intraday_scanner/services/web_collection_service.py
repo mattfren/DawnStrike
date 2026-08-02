@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from intraday_scanner.alpha.alert_gate import is_alertable_notification_candidate
 from intraday_scanner.config import load_config
 from intraday_scanner.errors import ConfigError, NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
@@ -536,9 +537,7 @@ def web_source_doctor(
     production_contract = production_contract_status(config)
     aggregate = _aggregate_doctor_health(rows)
     result = {
-        "status": (
-            "complete" if production_contract["ready"] else "blocked_configuration"
-        ),
+        "status": ("complete" if production_contract["ready"] else "blocked_configuration"),
         "created_at": utc_now_iso(),
         "config_path": str(config_path),
         "browser_extractor": browser_extractor_status(),
@@ -765,11 +764,15 @@ def _doctor_source(
         return base
     if source.type == "local_inbox":
         inbox = Path(source.path or "data/inbox/screener")
-        files = [
-            path
-            for path in inbox.iterdir()
-            if inbox.exists() and path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
-        ] if inbox.exists() else []
+        files = (
+            [
+                path
+                for path in inbox.iterdir()
+                if inbox.exists() and path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
+            ]
+            if inbox.exists()
+            else []
+        )
         return {
             **base,
             "attempted": True,
@@ -818,20 +821,22 @@ def _doctor_source(
 
 def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     reason = str(result.get("failure_reason") or result.get("reason") or "")
-    return _annotate_source_attempt({
-        **base,
-        "attempted": True,
-        "status": str(result.get("status") or "unknown"),
-        "rows_extracted": int(result.get("rows_extracted") or 0),
-        "rows_normalized": int(result.get("rows_normalized") or 0),
-        "rows_rejected": int(result.get("rows_rejected") or 0),
-        "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
-        "paths": dict(result.get("paths") or {}),
-        "started_at": str(result.get("started_at") or ""),
-        "completed_at": str(result.get("completed_at") or ""),
-        "failure_reason": reason,
-        "next_action": _next_action_for_result(base, result, reason),
-    })
+    return _annotate_source_attempt(
+        {
+            **base,
+            "attempted": True,
+            "status": str(result.get("status") or "unknown"),
+            "rows_extracted": int(result.get("rows_extracted") or 0),
+            "rows_normalized": int(result.get("rows_normalized") or 0),
+            "rows_rejected": int(result.get("rows_rejected") or 0),
+            "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
+            "paths": dict(result.get("paths") or {}),
+            "started_at": str(result.get("started_at") or ""),
+            "completed_at": str(result.get("completed_at") or ""),
+            "failure_reason": reason,
+            "next_action": _next_action_for_result(base, result, reason),
+        }
+    )
 
 
 def _write_source_doctor_debug(
@@ -954,9 +959,7 @@ def _maybe_collect_sec(
 def _morning_watchlist_events(payload: dict[str, Any]) -> list[NotificationEvent]:
     summary = dict(payload.get("summary") or {})
     source_summary = dict(payload.get("source_summary") or {})
-    ranked = _alertable_notification_candidates(
-        list(payload.get("ranked_candidates") or [])
-    )
+    ranked = _alertable_notification_candidates(list(payload.get("ranked_candidates") or []))
     body = format_morning_watchlist(
         ranked=ranked,
         avoid=list(payload.get("avoid_list") or []),
@@ -1009,9 +1012,7 @@ def _risk_events(payload: dict[str, Any]) -> list[NotificationEvent]:
 
 
 def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> NotificationEvent:
-    ranked = _alertable_notification_candidates(
-        list(payload.get("ranked_candidates") or [])
-    )
+    ranked = _alertable_notification_candidates(list(payload.get("ranked_candidates") or []))
     tickers = [str(row.get("ticker") or "").upper() for row in ranked[:5] if row.get("ticker")]
     body = format_manual_monitor(tickers)
     return _event(
@@ -1028,18 +1029,7 @@ def _alertable_notification_candidates(
 ) -> list[dict[str, Any]]:
     """Keep the legacy web route subordinate to the canonical Alpha gate."""
 
-    return [
-        row
-        for row in candidates
-        if row.get("can_alert") is True
-        and not str(row.get("no_trade_reason") or "").strip()
-        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
-        and row.get("manual_confirmation_required") is False
-        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
-        and str(row.get("confidence_bucket") or "").upper() in {"MEDIUM", "HIGH"}
-        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
-        and _float(row.get("source_confidence")) >= 80.0
-    ]
+    return [row for row in candidates if is_alertable_notification_candidate(row)]
 
 
 def _outcome_needed_event(run_date: str, outcomes: dict[str, Any]) -> NotificationEvent:
@@ -1335,9 +1325,7 @@ def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:
         return []
     flags: list[str] = []
     prices = [
-        _float(row.get("premarket_price"))
-        for row in rows
-        if _float(row.get("premarket_price"))
+        _float(row.get("premarket_price")) for row in rows if _float(row.get("premarket_price"))
     ]
     gaps = [_float(row.get("gap_pct")) for row in rows if row.get("gap_pct") not in {None, ""}]
     volumes = [
@@ -1358,9 +1346,7 @@ def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:
 
 def _dedupe_rank(row: dict[str, Any]) -> tuple[int, int, str]:
     quality = sum(
-        1
-        for key in ("premarket_price", "gap_pct", "premarket_volume")
-        if _float(row.get(key)) > 0
+        1 for key in ("premarket_price", "gap_pct", "premarket_volume") if _float(row.get(key)) > 0
     )
     source_score = len(SOURCE_PRIORITY) - _source_priority(str(row.get("source") or ""))
     timestamp = str(row.get("as_of_timestamp") or row.get("imported_at") or "")
@@ -1423,10 +1409,7 @@ def _stale_status_for_attempt(summary: dict[str, Any]) -> str:
     if str(summary.get("status") or "") in {"disabled", "empty"}:
         return "no_data"
     timestamp = str(
-        summary.get("completed_at")
-        or summary.get("created_at")
-        or summary.get("started_at")
-        or ""
+        summary.get("completed_at") or summary.get("created_at") or summary.get("started_at") or ""
     )
     if not timestamp:
         return "unknown"
@@ -1478,9 +1461,7 @@ def _aggregate_doctor_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     confidence = round(sum(successful) / len(successful), 2) if successful else 0.0
     normalized = sum(int(row.get("rows_normalized") or 0) for row in candidate_rows)
-    top_reasons = dict(
-        sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:5]
-    )
+    top_reasons = dict(sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:5])
     return {
         "rows_extracted": sum(int(row.get("rows_extracted") or 0) for row in candidate_rows),
         "rows_normalized": normalized,
@@ -1556,10 +1537,7 @@ def _top_failure_reason(
         return sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
     for failure in failures:
         reason = str(
-            failure.get("failure_reason")
-            or failure.get("reason")
-            or failure.get("status")
-            or ""
+            failure.get("failure_reason") or failure.get("reason") or failure.get("status") or ""
         ).strip()
         if reason:
             return reason
@@ -1568,9 +1546,7 @@ def _top_failure_reason(
 
 def _compact_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in summary.items()
-        if key not in {"events", "fetches", "items"}
+        key: value for key, value in summary.items() if key not in {"events", "fetches", "items"}
     }
 
 

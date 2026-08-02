@@ -6038,6 +6038,22 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 evaluations: {exc}") from exc
 
+    def load_latest_account_performance_comparison(self) -> dict[str, Any] | None:
+        """Load the latest persisted, fail-closed account comparison receipt."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT payload_json FROM account_performance_comparisons
+                    ORDER BY calculated_at DESC, comparison_id DESC LIMIT 1
+                    """
+                ).fetchone()
+                return json.loads(str(row[0])) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load account comparison: {exc}") from exc
+
     def persist_alpha_v6_experiments(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         self.initialize()
         inserted = 0

@@ -14,6 +14,7 @@ from intraday_scanner.alpha.v6_shadow import (
     promotion_readiness,
     strict_walk_forward_evaluation,
 )
+from intraday_scanner.performance.account_comparison import public_account_comparison
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -31,21 +32,21 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
             and row["rejected_sampling"].get("included") is True
         )
     ]
-    existing = {
-        str(row.get("decision_id") or "") for row in store.load_alpha_v6_outcomes()
-    }
-    pending = [
-        row for row in decisions if str(row.get("decision_id") or "") not in existing
-    ]
+    existing = {str(row.get("decision_id") or "") for row in store.load_alpha_v6_outcomes()}
+    pending = [row for row in decisions if str(row.get("decision_id") or "") not in existing]
     generated = build_v6_outcomes(
         decisions=pending,
         sourced_outcomes=store.load_signal_outcomes(limit=50_000),
         capture_attempts=store.load_outcome_capture_attempts(limit=50_000),
     )
-    outcome_stats = store.persist_alpha_v6_outcomes(generated) if generated else {
-        "inserted": 0,
-        "skipped": 0,
-    }
+    outcome_stats = (
+        store.persist_alpha_v6_outcomes(generated)
+        if generated
+        else {
+            "inserted": 0,
+            "skipped": 0,
+        }
+    )
     outcomes = store.load_alpha_v6_outcomes()
     return {
         "schema_version": "dawnstrike.alphaops_v6.outcome_sync.v1",
@@ -82,9 +83,7 @@ def synchronize_v6_learning(
         )
     ]
     outcomes = store.load_alpha_v6_outcomes()
-    evaluation = strict_walk_forward_evaluation(
-        decisions=all_decisions, outcomes=outcomes
-    )
+    evaluation = strict_walk_forward_evaluation(decisions=all_decisions, outcomes=outcomes)
     training_hash = _hash({"decisions": decisions, "outcomes": outcomes})
     now = _utc_now()
     model_run_id = "v6m-" + training_hash[:28]
@@ -107,9 +106,8 @@ def synchronize_v6_learning(
         store.persist_alpha_v6_model_run(model_run) if persist_baseline_evaluation else False
     )
     evaluation_payload = {
-        "evaluation_id": "v6e-" + _hash(
-            {"model_run_id": model_run_id, "evaluation": evaluation}
-        )[:28],
+        "evaluation_id": "v6e-"
+        + _hash({"model_run_id": model_run_id, "evaluation": evaluation})[:28],
         "model_run_id": model_run_id,
         "evaluated_at": now,
         "status": evaluation["status"],
@@ -149,30 +147,25 @@ def v6_public_status(store: SQLiteScanStore) -> dict[str, Any]:
     evaluations = store.load_alpha_v6_evaluations(limit=1)
     drift_reports = store.load_alpha_v6_drift_reports(limit=1)
     reviews = store.load_alpha_v6_promotion_reviews(limit=1)
-    daily_receipts = store.load_alpha_v6_operational_receipts(
-        receipt_kind="daily_monitor", limit=1
-    )
+    daily_receipts = store.load_alpha_v6_operational_receipts(receipt_kind="daily_monitor", limit=1)
     weekly_receipts = store.load_alpha_v6_operational_receipts(
         receipt_kind="weekly_training", limit=1
     )
     latest_evaluation = evaluations[0] if evaluations else None
     failure_attribution = build_v6_failure_attribution(store, persist=False)
+    account_comparison = store.load_latest_account_performance_comparison()
     evidence_gate = _public_prediction_evidence_gate(latest_evaluation)
     return {
         "schema_version": "dawnstrike.alphaops_v6.public_status.v1",
         "strategy_version": "dawnstrike-alphaops-v6-shadow",
         "decision_count": len(decisions),
-        "tracked_count": sum(
-            1 for row in decisions if row.get("action") == "SHADOW_TRACK"
-        ),
+        "tracked_count": sum(1 for row in decisions if row.get("action") == "SHADOW_TRACK"),
         "outcome_count": len(outcomes),
         "learning_eligible_outcome_count": sum(
             1 for row in outcomes if row.get("learning_eligible") is True
         ),
         "latest_model_run": _public_model_run(model_runs[0]) if model_runs else None,
-        "latest_evaluation": (
-            _public_evaluation(latest_evaluation) if latest_evaluation else None
-        ),
+        "latest_evaluation": (_public_evaluation(latest_evaluation) if latest_evaluation else None),
         "latest_drift": drift_reports[0] if drift_reports else None,
         "operational_freshness": {
             "latest_daily_monitor": _public_operational_receipt(
@@ -194,6 +187,7 @@ def v6_public_status(store: SQLiteScanStore) -> dict[str, Any]:
         ),
         "prediction_evidence_gate": evidence_gate,
         "failure_attribution": _public_failure_attribution(failure_attribution),
+        "account_comparison": public_account_comparison(account_comparison),
         "decision_replay": [
             _public_decision(row, prediction_visible=evidence_gate["passed"])
             for row in reversed(decisions[-50:])
@@ -339,9 +333,7 @@ def _public_operational_receipt(
     }
 
 
-def _public_decision(
-    row: dict[str, Any], *, prediction_visible: bool
-) -> dict[str, Any]:
+def _public_decision(row: dict[str, Any], *, prediction_visible: bool) -> dict[str, Any]:
     prediction = row.get("prediction")
     prediction_data = prediction if isinstance(prediction, dict) else {}
     source_summary = row.get("source_summary")
@@ -371,22 +363,16 @@ def _public_decision(
             prediction_data.get("activation_probability") if prediction_visible else None
         ),
         "conditional_net_excess_return_pct": (
-            prediction_data.get("conditional_net_excess_return_pct")
-            if prediction_visible
-            else None
+            prediction_data.get("conditional_net_excess_return_pct") if prediction_visible else None
         ),
-        "utility_lcb_pct": (
-            prediction_data.get("utility_lcb_pct") if prediction_visible else None
-        ),
+        "utility_lcb_pct": (prediction_data.get("utility_lcb_pct") if prediction_visible else None),
         "sample_size": prediction_data.get("sample_size"),
         "research_only": True,
         "broker_execution_enabled": False,
     }
 
 
-def build_v6_failure_attribution(
-    store: SQLiteScanStore, *, persist: bool = True
-) -> dict[str, Any]:
+def build_v6_failure_attribution(store: SQLiteScanStore, *, persist: bool = True) -> dict[str, Any]:
     """Explain V6 outcomes by setup/regime without silently changing policy."""
 
     decisions = store.load_alpha_v6_decisions()
@@ -400,10 +386,12 @@ def build_v6_failure_attribution(
             continue
         record = {**outcome, "decision": decision}
         records.append(record)
-        key = "|".join((
-            str(decision.get("setup_key") or "unknown"),
-            str(decision.get("regime_key") or "UNKNOWN"),
-        ))
+        key = "|".join(
+            (
+                str(decision.get("setup_key") or "unknown"),
+                str(decision.get("regime_key") or "UNKNOWN"),
+            )
+        )
         groups.setdefault(key, []).append(record)
     breakdown = []
     experiments = []
@@ -458,15 +446,12 @@ def build_v6_failure_attribution(
     }
 
 
-def _cohort_breakdown(
-    records: list[dict[str, Any]], key_fn: Any
-) -> list[dict[str, Any]]:
+def _cohort_breakdown(records: list[dict[str, Any]], key_fn: Any) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         groups.setdefault(str(key_fn(record)), []).append(record)
     return [
-        _public_cohort_summary(_cohort_summary(key, rows))
-        for key, rows in sorted(groups.items())
+        _public_cohort_summary(_cohort_summary(key, rows)) for key, rows in sorted(groups.items())
     ]
 
 
@@ -484,15 +469,11 @@ def _cohort_summary(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "terminal_missing_count": sum(
             1 for row in rows if row.get("outcome_status") == "TERMINAL_MISSING"
         ),
-        "activation_count": sum(
-            1 for row in rows if row.get("activation_status") == "ACTIVATED"
-        ),
+        "activation_count": sum(1 for row in rows if row.get("activation_status") == "ACTIVATED"),
         "not_triggered_count": sum(
             1 for row in rows if row.get("activation_status") == "NOT_TRIGGERED"
         ),
-        "mean_net_excess_return_pct": (
-            round(sum(values) / len(values), 6) if values else None
-        ),
+        "mean_net_excess_return_pct": (round(sum(values) / len(values), 6) if values else None),
         "worst_net_excess_return_pct": min(values) if values else None,
         "eligible_returns": values,
         "missing_truth_is_zero": False,
@@ -500,11 +481,7 @@ def _cohort_summary(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _public_cohort_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in summary.items()
-        if key != "eligible_returns"
-    }
+    return {key: value for key, value in summary.items() if key != "eligible_returns"}
 
 
 def _source_quality_key(record: dict[str, Any]) -> str:
@@ -578,16 +555,8 @@ def _failure_modes(records: list[dict[str, Any]]) -> dict[str, Any]:
         )
         is not None
     ]
-    mfes = [
-        value
-        for record in records
-        if (value := _number(record.get("mfe_pct"))) is not None
-    ]
-    maes = [
-        value
-        for record in records
-        if (value := _number(record.get("mae_pct"))) is not None
-    ]
+    mfes = [value for record in records if (value := _number(record.get("mfe_pct"))) is not None]
+    maes = [value for record in records if (value := _number(record.get("mae_pct"))) is not None]
     first_touch: dict[str, int] = {}
     for record in records:
         key = str(record.get("first_touch") or "missing").lower()
@@ -603,9 +572,7 @@ def _failure_modes(records: list[dict[str, Any]]) -> dict[str, Any]:
                 1 for row in records if row.get("activation_status") == "ACTIVATED"
             ),
             "not_triggered_count": sum(
-                1
-                for row in records
-                if row.get("activation_status") == "NOT_TRIGGERED"
+                1 for row in records if row.get("activation_status") == "NOT_TRIGGERED"
             ),
         },
         "execution_cost": {
