@@ -42,6 +42,24 @@ Bandit reported 51 low-severity findings and 14 existing `#nosec` annotations;
 none were medium/high. They remain visible for periodic review and are not
 evidence of a live release.
 
+## Hosted evidence on draft PR #8
+
+- GitHub Actions passed the Python/public-contract, dependency/static/SBOM, and
+  Windows schedule/secret lanes on the current candidate. The first hosted run
+  found the cross-platform paths and stale mypy runtime declaration; the next
+  run proved the corrections.
+- The Git-linked Vercel preview deployment
+  `dpl_9AXqVzm29wxKEGkR1ACRVgvsrGp1` is `Ready`; `api/health` and
+  `api/readiness` each package at 5.85 MB, down from the failed 552.72 MB
+  build.
+- The preview URL is protected by Vercel SSO. Anonymous HTTP and the available
+  browser session both redirect to Vercel login, so no claim is made about
+  preview health/readiness payloads, Dawnstrike response headers, Calendar,
+  visual behavior, or five-viewport accessibility. Preserve protection; verify
+  with an authorized Vercel session or an approved protected-preview method.
+- PR #8 remains a draft. It was not merged, deployed to production, or used to
+  migrate durable state.
+
 ## Live-state facts observed before this candidate is released
 
 - Production health was HTTP 200 but readiness was HTTP 503. Health is not
