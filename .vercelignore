@@ -12,6 +12,8 @@ __pycache__/
 API keys.txt
 README.md
 pyproject.toml
+requirements.in
+requirements.lock
 app.py
 *.sqlite
 *.db

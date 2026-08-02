@@ -1,8 +1,8 @@
 timezone: America/Chicago
 market_timezone: America/New_York
-db_path: data\shadow_real.sqlite
-out_root: outputs\automation
-web_sources_config: config\web_sources.example.yaml
+db_path: data/shadow_real.sqlite
+out_root: outputs/automation
+web_sources_config: config/web_sources.example.yaml
 notification_channels:
   - console
   - discord
@@ -11,7 +11,7 @@ notification_channels:
 screener_sources:
   - name: local_inbox
     type: inbox
-    path: data\inbox\screener
+    path: data/inbox/screener
     enabled: true
   - name: url_barchart
     type: url
@@ -39,7 +39,7 @@ monitor:
   volume_collapse_ratio: 0.35
 outcomes:
   mode: manual_file_or_reminder
-  inbox: data\inbox\outcomes
+  inbox: data/inbox/outcomes
   reminder_if_missing: true
   reminder_top_n: 3
 notifications:

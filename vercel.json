@@ -5,10 +5,12 @@
   "functions": {
     "api/health.py": {
       "includeFiles": "build/public/**",
+      "excludeFiles": "{requirements.in,requirements.lock,**/__pycache__/**,**/*.pyc}",
       "maxDuration": 10
     },
     "api/readiness.py": {
       "includeFiles": "build/public/**",
+      "excludeFiles": "{requirements.in,requirements.lock,**/__pycache__/**,**/*.pyc}",
       "maxDuration": 10
     }
   },

@@ -51,6 +51,23 @@ def test_web_config_loading():
     assert config.rate_limit_seconds == 0
     assert "allowed.test" in config.allowed_domains
     assert any(source.type == "public_table_url" for source in config.sources)
+    fixture = next(source for source in config.sources if source.name == "fixture_public_table")
+    assert fixture.fixture_path == "tests/fixtures/public_table_fixture.html"
+
+
+def test_web_config_normalizes_windows_style_fixture_paths(tmp_path):
+    config_path = tmp_path / "sources.yaml"
+    config_path.write_text(
+        "sources:\n"
+        "  - name: fixture\n"
+        "    type: public_table_url\n"
+        "    fixture_path: tests\\fixtures\\public_table_fixture.html\n",
+        encoding="utf-8",
+    )
+
+    config = load_web_sources_config(config_path)
+
+    assert config.sources[0].fixture_path == "tests/fixtures/public_table_fixture.html"
 
 
 def test_example_web_config_uses_practical_source_hierarchy():
@@ -432,7 +449,7 @@ def test_browser_dependency_missing_gives_install_hint(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert result["reason"] == "browser_extractor_not_available"
-    assert "py -m pip install -e \".[browser]\"" in result["failure_reason"]
+    assert 'py -m pip install -e ".[browser]"' in result["failure_reason"]
 
 
 def test_web_ingest_public_table_outputs_and_persistence(tmp_path):

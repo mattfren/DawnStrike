@@ -82,7 +82,7 @@ class FetchResult:
 
 
 def load_web_sources_config(config_path: str | Path | None = None) -> WebCollectionConfig:
-    path = Path(config_path) if config_path else DEFAULT_WEB_CONFIG_PATH
+    path = Path(_portable_config_path(config_path)) if config_path else DEFAULT_WEB_CONFIG_PATH
     if not path.is_file():
         raise ConfigError(
             "Web source configuration is required and was not found: "
@@ -112,8 +112,8 @@ def load_web_sources_config(config_path: str | Path | None = None) -> WebCollect
                 type=str(row.get("type") or ""),
                 enabled=_bool(row.get("enabled", True)),
                 url=str(row.get("url") or ""),
-                path=str(row.get("path") or ""),
-                fixture_path=str(row.get("fixture_path") or ""),
+                path=_portable_config_path(row.get("path")),
+                fixture_path=_portable_config_path(row.get("fixture_path")),
                 allowed_domains=tuple(str(item) for item in source_allowed),
                 params={key: value for key, value in row.items() if key not in known},
             )
@@ -509,6 +509,12 @@ def _bool(value: Any) -> bool:
 
 def _default_if_missing(value: Any, default: Any) -> Any:
     return default if value in {None, ""} else value
+
+
+def _portable_config_path(value: str | Path | None) -> str:
+    """Normalize file paths from hand-edited YAML before any OS sees them."""
+
+    return str(value or "").replace("\\", "/")
 
 
 def require_enabled(config: WebCollectionConfig) -> None:

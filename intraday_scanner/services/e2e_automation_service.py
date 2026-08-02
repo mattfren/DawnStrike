@@ -113,7 +113,7 @@ def load_automation_config(
     db_path: str | Path | None = None,
     out_root: str | Path | None = None,
 ) -> AutomationConfig:
-    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    path = Path(_portable_config_path(config_path)) if config_path else DEFAULT_CONFIG_PATH
     if not path.exists() and path != DEFAULT_CONFIG_PATH:
         path = DEFAULT_CONFIG_PATH
     if not path.exists():
@@ -124,7 +124,7 @@ def load_automation_config(
         ScreenerSourceConfig(
             name=str(row.get("name") or ""),
             type=str(row.get("type") or ""),
-            path=str(row.get("path") or ""),
+            path=_portable_config_path(row.get("path")),
             url=str(row.get("url") or ""),
             enabled=_bool(row.get("enabled")),
             allowed_domains=tuple(str(item) for item in row.get("allowed_domains", []) or []),
@@ -132,11 +132,18 @@ def load_automation_config(
         for row in list(data.get("screener_sources") or [])
     )
     normalizer = dict(data.get("normalizer") or {})
+    outcomes = dict(data.get("outcomes") or {})
+    if "inbox" in outcomes:
+        outcomes["inbox"] = _portable_config_path(outcomes["inbox"])
     return AutomationConfig(
         timezone=str(data.get("timezone") or "America/Chicago"),
         market_timezone=str(data.get("market_timezone") or "America/New_York"),
-        db_path=Path(db_path or data.get("db_path") or "data/shadow_real.sqlite"),
-        out_root=Path(out_root or data.get("out_root") or "outputs/automation"),
+        db_path=Path(
+            _portable_config_path(db_path or data.get("db_path") or "data/shadow_real.sqlite")
+        ),
+        out_root=Path(
+            _portable_config_path(out_root or data.get("out_root") or "outputs/automation")
+        ),
         notification_channels=tuple(
             str(channel).lower()
             for channel in list(data.get("notification_channels") or ["console"])
@@ -146,7 +153,7 @@ def load_automation_config(
         normalizer_fallback=str(normalizer.get("fallback") or "none"),
         schedule=dict(data.get("schedule") or {}),
         monitor=dict(data.get("monitor") or {}),
-        outcomes=dict(data.get("outcomes") or {}),
+        outcomes=outcomes,
         notifications=dict(data.get("notifications") or {}),
     )
 
@@ -1444,6 +1451,12 @@ def _bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _portable_config_path(value: str | Path | None) -> str:
+    """Return a file-system-neutral path from a hand-edited config value."""
+
+    return str(value or "").replace("\\", "/")
 
 
 class _TableParser(HTMLParser):

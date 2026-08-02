@@ -18,6 +18,8 @@ state.
 | Performance truth | `dawnstrike.account-comparison.v1` persists V5/V6/cash/SPY/IWM only from authoritative account ledgers and same-session sourced benchmarks. A V6 signal/outcome is never converted into a synthetic equity curve. Missing V6 account truth returns `WAITING_FOR_AUTHORITATIVE_V6_ACCOUNT_LEDGER` and null metrics. |
 | Product | The bounded Research UI includes the account-comparison status/card without inventing metrics. Existing Calendar behavior remains in place. |
 | Code safety | Migration 19 adds an immutable, input-hashed comparison receipt. Full regression includes account, alert, attribution, model-competition, canonical-performance, V6-shadow, and rendered-dashboard coverage. |
+| Cross-platform release safety | YAML file paths are normalized at the configuration boundary; shipped examples use slash-neutral paths. This prevents Linux CI from treating Windows separators as literal filename characters. |
+| Vercel package boundary | The static public API uses only the Python standard library. Vercel excludes the research/dev lock and cache files and pins Python 3.13, avoiding the prior 552.72 MB function bundle. |
 
 ## Local proof completed on this candidate
 
@@ -51,6 +53,10 @@ evidence of a live release.
 - The current candidate advances the application schema to 19. No durable DB,
   runtime, scheduler, source configuration, Vercel deployment, or Telegram
   path was changed by this hardening pass.
+- The first hosted candidate exposed two release defects: Linux CI could not
+  resolve Windows-style fixture/config paths, and Vercel rejected a 552.72 MB
+  Python function bundle. Both have a local code/config remediation and need a
+  new Git-linked hosted run for authoritative confirmation.
 - The existing completed-loss sample is five gross signal-level research
   closes, not an account-return cohort: SLND -1.3438%, VIVK -20.2778%, VRRM
   -10.8696%, NUWE -24.8305%, XRX -0.2173%; mean -11.5078%. It is far too small
