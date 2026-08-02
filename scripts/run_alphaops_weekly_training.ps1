@@ -11,6 +11,7 @@ New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+. (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 
 $dbPath = Join-Path $state "shadow_real.sqlite"
@@ -19,6 +20,14 @@ $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+$dailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot $state `
+    -MarketDate $MarketDate `
+    -Owner "alphaops_v6_weekly_training"
+if (-not $dailyLock.acquired) {
+    Write-Error "V6 weekly training could not acquire the daily state lock: $($dailyLock.reason)"
+    exit 2
+}
 
 Push-Location $runtime
 try {
@@ -52,4 +61,5 @@ try {
     exit $packet.exit_code
 } finally {
     Pop-Location
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
 }

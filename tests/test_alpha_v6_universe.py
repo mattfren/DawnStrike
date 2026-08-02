@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.cli import main
+from intraday_scanner.services.alpha_v6_universe_adapter_service import (
+    RAW_ARTIFACT_SCHEMA,
+    SOURCE_CONTRACT_SCHEMA,
+    build_alpha_v6_universe_candidate,
+)
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
     preview_alpha_v6_universe,
@@ -16,6 +22,16 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 def _lineage(source_id: str = "fixture") -> dict[str, str]:
     return {
         "source_id": source_id,
+        "provider_id": "fixture_provider",
+        "dataset_id": "fixture_dataset",
+        "dataset_version": "v1",
+        "terms_reference": "fixture://terms",
+        "entitlement_reference": "fixture://entitlement",
+        "accountable_contact": "operator@example.test",
+        "approval_status": "APPROVED",
+        "critical_truth_complete": True,
+        "registration_allowed": True,
+        "source_contract_hash_sha256": "c" * 64,
         "retrieved_at": "2026-08-03T12:00:00+00:00",
         "raw_artifact_sha256": "a" * 64,
         "configuration_hash_sha256": "b" * 64,
@@ -81,24 +97,63 @@ def test_missing_versioned_universe_vetoes_shadow_tracking() -> None:
     assert "versioned_universe_membership_not_active" in decisions[0]["safety_vetoes"]
 
 
-def test_cli_registers_source_backed_universe(tmp_path) -> None:
-    source_path = tmp_path / "universe.json"
-    source_path.write_text(
+def test_cli_registers_only_reproducible_adapter_candidate(tmp_path) -> None:
+    raw_artifact = tmp_path / "recorded-universe.json"
+    raw_artifact.write_text(
         json.dumps(
             {
+                "schema_version": RAW_ARTIFACT_SCHEMA,
                 "as_of_date": "2026-08-03",
-                "source_lineage": _lineage(),
-                "members": [{"ticker": "ALFA", "listing_status": "ACTIVE"}],
+                "retrieved_at": "2026-08-03T12:00:00+00:00",
+                "records": [
+                    {
+                        "ticker": "ALFA",
+                        "listing_status": "ACTIVE",
+                        "identity_status": "RESOLVED",
+                        "instrument_type": "COMMON_STOCK",
+                        "is_otc": False,
+                        "country": "US",
+                        "corporate_action_status": "CLEAR",
+                        "market_cap_usd": 100000000,
+                        "avg_dollar_volume_20d": 1000000,
+                        "source_ref": "fixture:ALFA",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
     )
+    source_contract = tmp_path / "source-contract.json"
+    source_contract.write_text(
+        json.dumps(
+            {
+                "schema_version": SOURCE_CONTRACT_SCHEMA,
+                "provider_id": "fixture_provider",
+                "dataset_id": "fixture_dataset",
+                "dataset_version": "v1",
+                "terms_reference": "fixture://terms",
+                "entitlement_reference": "fixture://entitlement",
+                "accountable_contact": "operator@example.test",
+                "approval_status": "APPROVED",
+                "expected_raw_artifact_sha256": hashlib.sha256(
+                    raw_artifact.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate = build_alpha_v6_universe_candidate(
+        source_contract_path=source_contract,
+        raw_artifact_path=raw_artifact,
+    )
+    source_path = tmp_path / "candidate.json"
+    source_path.write_text(json.dumps(candidate), encoding="utf-8")
 
     preview = preview_alpha_v6_universe(
         SQLiteScanStore(tmp_path / "cli.sqlite"),
-        as_of_date="2026-08-03",
-        source_lineage=_lineage(),
-        members=[{"ticker": "ALFA", "listing_status": "ACTIVE"}],
+        as_of_date=str(candidate["as_of_date"]),
+        source_lineage=dict(candidate["source_lineage"]),
+        members=list(candidate["members"]),
     )
     code = main(
         [
@@ -107,6 +162,10 @@ def test_cli_registers_source_backed_universe(tmp_path) -> None:
             str(tmp_path / "cli.sqlite"),
             "--input",
             str(source_path),
+            "--source-contract",
+            str(source_contract),
+            "--raw-artifact",
+            str(raw_artifact),
             "--confirm-preview-hash",
             str(preview["preview_hash_sha256"]),
         ]

@@ -171,9 +171,7 @@ def test_causal_attribution_separates_expectation_observation_and_missing_truth(
     assert report["loss_concentration"]["largest_loss_share_pct"] == 100.0
     assert report["outcome_coverage"]["coverage_pct"] == 66.6667
     assert report["outcome_coverage"]["missing_is_zero"] is False
-    no_trade = next(
-        row for row in report["daily"] if row["market_date"] == "2026-08-04"
-    )
+    no_trade = next(row for row in report["daily"] if row["market_date"] == "2026-08-04")
     assert no_trade["status"] == "NO_TRADE"
     assert no_trade["net_pnl"] is None
     assert no_trade["average_net_return_pct"] is None
@@ -196,3 +194,108 @@ def test_empty_attribution_uses_null_not_zero() -> None:
     assert report["official"]["net_pnl"] is None
     assert report["official"]["observed_hit_rate_pct"] is None
     assert report["outcome_coverage"]["coverage_pct"] is None
+
+
+def test_cross_version_attribution_keeps_streams_and_missing_truth_distinct() -> None:
+    report = build_alpha_attribution_report(
+        signals=[
+            {
+                "signal_id": "v5-signal",
+                "ticker": "V5A",
+                "source": "sourced_fixture",
+                "raw_payload_json": {"catalyst_category": "earnings"},
+            }
+        ],
+        selections=[{"signal_id": "v5-signal", "decision": "clean_edge"}],
+        evaluations=[],
+        trades=[
+            {
+                "trade_id": "v5-trade",
+                "signal_id": "v5-signal",
+                "market_date": "2026-08-03",
+                "ticker": "V5A",
+                "strategy_id": "alphaops_v5",
+                "cohort": "official_telegram",
+                "net_pnl": 10.0,
+                "net_return_pct": 1.0,
+                "exit_reason": "target_1",
+            }
+        ],
+        attempts=[],
+        intents=[],
+        v6_decisions=[
+            {
+                "decision_id": "v6-selected",
+                "market_date": "2026-08-03",
+                "ticker": "V6A",
+                "action": "SHADOW_WATCH",
+                "source_summary": {"status": "complete"},
+                "feature_vector": {
+                    "feature_json": {
+                        "liquidity_execution": {"premarket_dollar_volume": 6_000_000},
+                        "catalyst": {"sourced": True},
+                    }
+                },
+            },
+            {
+                "decision_id": "v6-reject",
+                "market_date": "2026-08-03",
+                "ticker": "V6R",
+                "action": "SHADOW_REJECTED_POLICY",
+                "safety_vetoes": ["spread_too_wide"],
+                "source_summary": {"status": "complete"},
+                "rejected_sampling": {"included": True, "inclusion_probability": 0.2},
+            },
+        ],
+        v6_outcomes=[
+            {
+                "decision_id": "v6-selected",
+                "outcome_status": "COMPLETE_SOURCED",
+                "learning_eligible": True,
+                "net_excess_return_pct": -2.0,
+                "activation_status": "ACTIVATED",
+                "first_touch": "stop",
+            },
+            {
+                "decision_id": "v6-reject",
+                "outcome_status": "TERMINAL_MISSING",
+                "learning_eligible": False,
+            },
+        ],
+        paper_ops_rows=[
+            {
+                "record_id": "paper-good",
+                "date": "2026-08-03",
+                "record_status": "accepted",
+                "strategy_id": "paper_v1",
+                "return_pct": 0.5,
+                "net_pnl": 5.0,
+            },
+            {
+                "record_id": "paper-bad",
+                "date": "2026-08-03",
+                "record_status": "quarantined",
+                "strategy_id": "paper_v1",
+                "return_pct": None,
+                "net_pnl": None,
+            },
+        ],
+        paper_ops_issues=[{"code": "missing_paper_ops_cost_component"}],
+        generated_at="2026-08-04T21:00:00+00:00",
+    )
+
+    cross = report["cross_version_attribution"]
+    streams = {row["bucket"] for row in cross["category_breakdowns"]["evidence_stream"]}
+    assert streams == {
+        "ALPHAOPS_V5",
+        "ALPHAOPS_V6",
+        "ALPHAOPS_V6_SAMPLED_REJECT",
+        "PAPEROPS",
+    }
+    assert cross["return_eligible_count"] == 3
+    assert cross["return_missing_count"] == 2
+    assert cross["missing_truth_is_zero"] is False
+    assert cross["paper_ops_issue_count"] == 1
+    source_failures = {row["bucket"] for row in cross["source_data_failures"]}
+    assert "terminal_missing_source_outcome" in source_failures
+    assert "quarantined_paperops_source" in source_failures

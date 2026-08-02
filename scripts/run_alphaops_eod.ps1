@@ -231,7 +231,7 @@ try {
 
     $attribution = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-attribution", "--db-path", $dbPath, "--out-dir", (Join-Path $outputRoot "alpha_attribution"), "--end", $MarketDate) `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-attribution", "--db-path", $dbPath, "--out-dir", (Join-Path $outputRoot "alpha_attribution"), "--end", $MarketDate, "--paper-ops-root", $paperOpsRoot) `
         -LogRoot $logRoot `
         -LogName "alpha_attribution-$MarketDate"
     if ($attribution.exit_code -ne 0) {

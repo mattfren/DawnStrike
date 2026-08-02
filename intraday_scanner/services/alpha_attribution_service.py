@@ -15,11 +15,13 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
+from intraday_scanner.performance.paper_ops import load_paper_ops
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 ALPHA_STRATEGIES = frozenset({"alphaops_v4", "alphaops_v5"})
 OFFICIAL_COHORT = "official_telegram"
 ATTRIBUTION_VERSION = "alphaops-causal-attribution-v1"
+CROSS_VERSION_ATTRIBUTION_VERSION = "alphaops-cross-version-attribution-v1"
 
 
 def generate_alpha_attribution_report(
@@ -28,6 +30,7 @@ def generate_alpha_attribution_report(
     out_dir: str | Path = "outputs/alpha_attribution",
     start: str | None = None,
     end: str | None = None,
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
     store = SQLiteScanStore(db_path)
     store.initialize()
@@ -66,6 +69,17 @@ def generate_alpha_attribution_report(
         for row in store.load_trade_intents(limit=50_000)
         if _within(str(row.get("market_date") or "")[:10], start, end)
     ]
+    v6_decisions = [
+        row
+        for row in store.load_alpha_v6_decisions(limit=50_000)
+        if _within(str(row.get("market_date") or "")[:10], start, end)
+    ]
+    v6_outcomes = [
+        row
+        for row in store.load_alpha_v6_outcomes(limit=50_000)
+        if _within(str(row.get("market_date") or "")[:10], start, end)
+    ]
+    paper_ops = load_paper_ops(paper_ops_root, market_date=end)
     report = build_alpha_attribution_report(
         signals=signals,
         selections=selections,
@@ -73,6 +87,10 @@ def generate_alpha_attribution_report(
         trades=trades,
         attempts=attempts,
         intents=intents,
+        v6_decisions=v6_decisions,
+        v6_outcomes=v6_outcomes,
+        paper_ops_rows=list(paper_ops.get("rows") or []),
+        paper_ops_issues=list(paper_ops.get("issues") or []),
         generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     )
     output = Path(out_dir)
@@ -97,29 +115,28 @@ def build_alpha_attribution_report(
     attempts: list[dict[str, Any]],
     intents: list[dict[str, Any]],
     generated_at: str,
+    v6_decisions: list[dict[str, Any]] | None = None,
+    v6_outcomes: list[dict[str, Any]] | None = None,
+    paper_ops_rows: list[dict[str, Any]] | None = None,
+    paper_ops_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     signal_by_id = {
-        str(row.get("signal_id") or ""): row
-        for row in signals
-        if str(row.get("signal_id") or "")
+        str(row.get("signal_id") or ""): row for row in signals if str(row.get("signal_id") or "")
     }
     selection_by_signal = {
         str(row.get("signal_id") or ""): row
         for row in selections
         if str(row.get("signal_id") or "")
     }
-    enriched = [
-        _enriched_trade(row, signal_by_id, selection_by_signal)
-        for row in trades
-    ]
-    official = [
-        row for row in enriched if str(row.get("cohort") or "") == OFFICIAL_COHORT
-    ]
-    dates = sorted({
-        _row_date(row)
-        for row in [*selections, *evaluations, *trades, *attempts]
-        if _row_date(row)
-    })
+    enriched = [_enriched_trade(row, signal_by_id, selection_by_signal) for row in trades]
+    official = [row for row in enriched if str(row.get("cohort") or "") == OFFICIAL_COHORT]
+    dates = sorted(
+        {
+            _row_date(row)
+            for row in [*selections, *evaluations, *trades, *attempts]
+            if _row_date(row)
+        }
+    )
     daily = [
         _daily_row(
             day,
@@ -168,6 +185,15 @@ def build_alpha_attribution_report(
         ),
         "entry_failure_modes": _entry_failure_modes(evaluations, intents),
         "exit_modes": _exit_modes(official),
+        "cross_version_attribution": _cross_version_attribution(
+            signals=signals,
+            selections=selections,
+            trades=enriched,
+            v6_decisions=list(v6_decisions or []),
+            v6_outcomes=list(v6_outcomes or []),
+            paper_ops_rows=list(paper_ops_rows or []),
+            paper_ops_issues=list(paper_ops_issues or []),
+        ),
         "outcome_coverage": {
             "attempt_count": len(attempts),
             "resolved_count": len(attempts) - len(terminal_missing),
@@ -183,9 +209,7 @@ def build_alpha_attribution_report(
             "missing_is_zero": False,
         },
         "sample_warning": (
-            "insufficient_forward_sample"
-            if len(official) < 100
-            else "forward_sample_size_gate_met"
+            "insufficient_forward_sample" if len(official) < 100 else "forward_sample_size_gate_met"
         ),
         "promotion_status": "operator_review_required_not_promoted",
         "research_only": True,
@@ -198,16 +222,276 @@ def build_alpha_attribution_report(
             "Promotion still requires the separately versioned strict forward-evidence gate.",
         ],
     }
-    report["input_hash_sha256"] = _hash({
-        "signals": signals,
-        "selections": selections,
-        "evaluations": evaluations,
-        "trades": trades,
-        "attempts": attempts,
-        "intents": intents,
-    })
+    report["input_hash_sha256"] = _hash(
+        {
+            "signals": signals,
+            "selections": selections,
+            "evaluations": evaluations,
+            "trades": trades,
+            "attempts": attempts,
+            "intents": intents,
+            "v6_decisions": v6_decisions or [],
+            "v6_outcomes": v6_outcomes or [],
+            "paper_ops_rows": paper_ops_rows or [],
+            "paper_ops_issues": paper_ops_issues or [],
+        }
+    )
     report["payload_hash_sha256"] = _hash(report)
     return report
+
+
+def _cross_version_attribution(
+    *,
+    signals: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    v6_decisions: list[dict[str, Any]],
+    v6_outcomes: list[dict[str, Any]],
+    paper_ops_rows: list[dict[str, Any]],
+    paper_ops_issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare real evidence streams without treating their semantics as equal.
+
+    V4/V5 observations are per reconciled paper trade, V6 observations are
+    decision/outcome pairs (including sampled policy rejects), and PaperOps is
+    a daily aggregate.  The report labels that difference rather than pooling
+    the values into one synthetic return series.
+    """
+
+    signal_by_id = {
+        str(row.get("signal_id") or ""): row for row in signals if str(row.get("signal_id") or "")
+    }
+    selection_by_signal = {
+        str(row.get("signal_id") or ""): row
+        for row in selections
+        if str(row.get("signal_id") or "")
+    }
+    observations = [
+        _historical_cross_observation(
+            trade,
+            signal=signal_by_id.get(str(trade.get("signal_id") or ""), {}),
+            selection=selection_by_signal.get(str(trade.get("signal_id") or ""), {}),
+        )
+        for trade in trades
+        if str(trade.get("strategy_id") or "") in ALPHA_STRATEGIES
+    ]
+    outcome_by_decision = {
+        str(row.get("decision_id") or ""): row
+        for row in v6_outcomes
+        if str(row.get("decision_id") or "")
+    }
+    observations.extend(
+        _v6_cross_observation(
+            decision,
+            outcome=outcome_by_decision.get(str(decision.get("decision_id") or "")),
+        )
+        for decision in v6_decisions
+    )
+    observations.extend(_paper_ops_cross_observation(row) for row in paper_ops_rows)
+    dimensions = (
+        "evidence_stream",
+        "source_data_quality",
+        "selection_quality",
+        "catalyst_quality",
+        "liquidity_quality",
+        "entry_timing",
+        "exit_path",
+        "concentration_key",
+    )
+    breakdowns = {field: _cross_bucket_summaries(observations, field) for field in dimensions}
+    source_failures = [
+        row
+        for row in breakdowns["source_data_quality"]
+        if row["bucket"].startswith(("missing", "terminal", "quarantined", "failed"))
+    ]
+    selection_failures = [
+        row
+        for row in breakdowns["selection_quality"]
+        if row["bucket"].startswith(("rejected", "veto", "blocked", "no_"))
+    ]
+    eligible = [row for row in observations if _number(row.get("net_return_pct")) is not None]
+    return {
+        "schema_version": CROSS_VERSION_ATTRIBUTION_VERSION,
+        "status": "COMPLETE" if observations else "WAITING_FOR_EVIDENCE",
+        "observation_count": len(observations),
+        "return_eligible_count": len(eligible),
+        "return_missing_count": len(observations) - len(eligible),
+        "missing_truth_is_zero": False,
+        "semantic_boundaries": {
+            "ALPHAOPS_V4": "reconciled paper trades",
+            "ALPHAOPS_V5": "reconciled paper trades",
+            "ALPHAOPS_V6": "sourced forward shadow decision/outcome pairs",
+            "ALPHAOPS_V6_SAMPLED_REJECT": "sampled policy-reject counterfactuals",
+            "PAPEROPS": "daily aggregate source rows; not trade-level evidence",
+        },
+        "category_breakdowns": breakdowns,
+        "source_data_failures": source_failures,
+        "selection_failures": selection_failures,
+        "paper_ops_issue_count": len(paper_ops_issues),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _historical_cross_observation(
+    trade: dict[str, Any],
+    *,
+    signal: dict[str, Any],
+    selection: dict[str, Any],
+) -> dict[str, Any]:
+    raw = signal.get("raw_payload_json")
+    facts = dict(raw) if isinstance(raw, dict) else {}
+    merged = {**facts, **signal, **trade}
+    source_value = str(merged.get("outcome_source") or merged.get("source") or "").strip()
+    return {
+        "observation_id": str(trade.get("trade_id") or trade.get("signal_id") or "unknown"),
+        "market_date": _row_date(trade),
+        "evidence_stream": _historical_stream(trade),
+        "source_data_quality": "source_recorded" if source_value else "missing_source",
+        "selection_quality": _selection_bucket(selection, trade),
+        "catalyst_quality": _category(
+            merged.get("catalyst_category") or merged.get("catalyst_class"),
+            missing="missing_catalyst",
+        ),
+        "liquidity_quality": _liquidity_bucket(
+            _first_number(merged, "dollar_volume", "premarket_dollar_volume")
+        ),
+        "entry_timing": _category(
+            merged.get("entry_time") or merged.get("entry_trigger_type"),
+            missing="missing_entry_timing",
+        ),
+        "exit_path": _category(trade.get("exit_reason"), missing="missing_exit_path"),
+        "concentration_key": str(trade.get("ticker") or "UNKNOWN").upper(),
+        "net_return_pct": _number(trade.get("net_return_pct")),
+        "net_pnl": _number(trade.get("net_pnl")),
+        "coverage_status": "SOURCED_COMPLETE",
+    }
+
+
+def _v6_cross_observation(
+    decision: dict[str, Any], *, outcome: dict[str, Any] | None
+) -> dict[str, Any]:
+    raw_facts = decision.get("raw_facts")
+    facts = dict(raw_facts) if isinstance(raw_facts, dict) else {}
+    features = decision.get("feature_vector")
+    feature_data = dict(features) if isinstance(features, dict) else {}
+    feature_json = feature_data.get("feature_json")
+    feature_values = dict(feature_json) if isinstance(feature_json, dict) else {}
+    source_summary = decision.get("source_summary")
+    source = dict(source_summary) if isinstance(source_summary, dict) else {}
+    rejection = decision.get("rejected_sampling")
+    sampled_reject = (
+        str(decision.get("action") or "") == "SHADOW_REJECTED_POLICY"
+        and isinstance(rejection, dict)
+        and rejection.get("included") is True
+    )
+    outcome_data = dict(outcome or {})
+    outcome_status = str(outcome_data.get("outcome_status") or "").upper()
+    if outcome_status == "TERMINAL_MISSING":
+        source_quality = "terminal_missing_source_outcome"
+    elif str(source.get("status") or "").lower() in {"success", "complete"}:
+        source_quality = "source_complete"
+    else:
+        source_quality = _category(source.get("status"), missing="missing_source")
+    liquidity = feature_values.get("liquidity_execution")
+    liquidity_data = dict(liquidity) if isinstance(liquidity, dict) else {}
+    catalyst = feature_values.get("catalyst")
+    catalyst_data = dict(catalyst) if isinstance(catalyst, dict) else {}
+    vetoes = list(decision.get("safety_vetoes") or [])
+    return {
+        "observation_id": str(decision.get("decision_id") or "unknown"),
+        "market_date": str(decision.get("market_date") or "")[:10],
+        "evidence_stream": ("ALPHAOPS_V6_SAMPLED_REJECT" if sampled_reject else "ALPHAOPS_V6"),
+        "source_data_quality": source_quality,
+        "selection_quality": (
+            "veto_" + _category(vetoes[0]) if vetoes else _category(decision.get("action"))
+        ),
+        "catalyst_quality": _category(
+            catalyst_data.get("category")
+            or catalyst_data.get("status")
+            or facts.get("catalyst_category"),
+            missing="missing_catalyst",
+        ),
+        "liquidity_quality": _liquidity_bucket(
+            _number(liquidity_data.get("premarket_dollar_volume"))
+        ),
+        "entry_timing": _category(
+            outcome_data.get("activation_status"), missing="missing_entry_timing"
+        ),
+        "exit_path": _category(
+            outcome_data.get("first_touch") or outcome_data.get("exit_reason"),
+            missing="missing_exit_path",
+        ),
+        "concentration_key": str(decision.get("ticker") or "UNKNOWN").upper(),
+        "net_return_pct": (
+            _number(outcome_data.get("net_excess_return_pct"))
+            if outcome_data.get("learning_eligible") is True
+            else None
+        ),
+        "net_pnl": None,
+        "coverage_status": outcome_status or "MISSING_OUTCOME",
+    }
+
+
+def _paper_ops_cross_observation(row: dict[str, Any]) -> dict[str, Any]:
+    record_status = str(row.get("record_status") or "").lower()
+    return {
+        "observation_id": str(row.get("record_id") or "unknown"),
+        "market_date": str(row.get("market_date") or row.get("date") or "")[:10],
+        "evidence_stream": "PAPEROPS",
+        "source_data_quality": (
+            "paperops_source_complete"
+            if record_status in {"accepted", "realized", "no_trade"}
+            else "quarantined_paperops_source"
+        ),
+        "selection_quality": "aggregate_daily_record",
+        "catalyst_quality": "not_recorded_aggregate",
+        "liquidity_quality": "not_recorded_aggregate",
+        "entry_timing": "not_recorded_aggregate",
+        "exit_path": "not_recorded_aggregate",
+        "concentration_key": str(row.get("strategy_id") or "UNKNOWN").upper(),
+        "net_return_pct": _number(row.get("return_pct")),
+        # PaperOps reports cents while AlphaOps paper trades report their own
+        # notional semantics. Do not pool non-comparable P&L units.
+        "net_pnl": None,
+        "native_net_pnl_cents": _number(row.get("net_pnl_cents")),
+        "coverage_status": record_status.upper() or "MISSING_RECORD_STATUS",
+    }
+
+
+def _cross_bucket_summaries(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get(field) or "unknown"), []).append(row)
+    return [{"bucket": key, **_cross_summary(groups[key])} for key in sorted(groups)]
+
+
+def _cross_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = _numbers(rows, "net_return_pct")
+    pnl = _numbers(rows, "net_pnl")
+    return {
+        "observation_count": len(rows),
+        "return_eligible_count": len(returns),
+        "return_missing_count": len(rows) - len(returns),
+        "mean_net_return_pct": round(mean(returns), 4) if returns else None,
+        "net_pnl": round(sum(pnl), 4) if pnl else None,
+        "missing_truth_is_zero": False,
+    }
+
+
+def _historical_stream(trade: dict[str, Any]) -> str:
+    strategy = str(trade.get("strategy_id") or "").upper()
+    return "ALPHAOPS_V4" if strategy == "ALPHAOPS_V4" else "ALPHAOPS_V5"
+
+
+def _selection_bucket(selection: dict[str, Any], trade: dict[str, Any]) -> str:
+    value = selection.get("decision") or trade.get("selection_decision") or "entered"
+    return _category(value)
+
+
+def _category(value: Any, *, missing: str = "missing") -> str:
+    text = str(value or "").strip().lower().replace(" ", "_")
+    return text or missing
 
 
 def _daily_row(
@@ -218,26 +502,16 @@ def _daily_row(
     trades: list[dict[str, Any]],
     attempts: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    day_selections = [
-        row for row in selections if str(row.get("selected_at") or "")[:10] == day
-    ]
-    day_evaluations = [
-        row for row in evaluations if str(row.get("market_date") or "")[:10] == day
-    ]
-    day_trades = [
-        row for row in trades if str(row.get("market_date") or "")[:10] == day
-    ]
-    day_attempts = [
-        row for row in attempts if str(row.get("market_date") or "")[:10] == day
-    ]
+    day_selections = [row for row in selections if str(row.get("selected_at") or "")[:10] == day]
+    day_evaluations = [row for row in evaluations if str(row.get("market_date") or "")[:10] == day]
+    day_trades = [row for row in trades if str(row.get("market_date") or "")[:10] == day]
+    day_attempts = [row for row in attempts if str(row.get("market_date") or "")[:10] == day]
     explicit_no_trade = any(
         str(row.get("decision") or "").lower() == "no_trade"
         or str(row.get("ticker") or "").upper() == "NO_TRADE"
         for row in day_selections
     )
-    missing = sum(
-        1 for row in day_attempts if str(row.get("status") or "") == "terminal_missing"
-    )
+    missing = sum(1 for row in day_attempts if str(row.get("status") or "") == "terminal_missing")
     if missing:
         status = "MISSING"
     elif day_trades:
@@ -297,23 +571,15 @@ def _enriched_trade(
             "probability",
         )
         expected_hit = (
-            probability * 100.0
-            if probability is not None and probability <= 1
-            else probability
+            probability * 100.0 if probability is not None and probability <= 1 else probability
         )
     return {
         **trade,
         "selection_decision": selection.get("decision") or "unlinked",
-        "setup_key": (
-            merged.get("setup_key")
-            or merged.get("primary_setup")
-            or "unknown"
-        ),
+        "setup_key": (merged.get("setup_key") or merged.get("primary_setup") or "unknown"),
         "gap_bucket": _gap_bucket(gap),
         "catalyst_class": (
-            merged.get("catalyst_category")
-            or merged.get("catalyst_class")
-            or "unknown"
+            merged.get("catalyst_category") or merged.get("catalyst_class") or "unknown"
         ),
         "float_bucket": _float_bucket(float_shares),
         "liquidity_bucket": _liquidity_bucket(liquidity),
@@ -378,10 +644,7 @@ def _bucket_summaries(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(str(row.get(field) or "unknown"), []).append(row)
-    return [
-        {"bucket": key, **_trade_summary(grouped[key])}
-        for key in sorted(grouped)
-    ]
+    return [{"bucket": key, **_trade_summary(grouped[key])} for key in sorted(grouped)]
 
 
 def _concentration(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -394,12 +657,8 @@ def _concentration(rows: list[dict[str, Any]]) -> dict[str, Any]:
         reverse=True,
     )
     return {
-        "largest_gain_share_pct": (
-            round((gains[0] / sum(gains)) * 100.0, 4) if gains else None
-        ),
-        "largest_loss_share_pct": (
-            round((losses[0] / sum(losses)) * 100.0, 4) if losses else None
-        ),
+        "largest_gain_share_pct": (round((gains[0] / sum(gains)) * 100.0, 4) if gains else None),
+        "largest_loss_share_pct": (round((losses[0] / sum(losses)) * 100.0, 4) if losses else None),
         "gain_count": len(gains),
         "loss_count": len(losses),
     }
@@ -416,9 +675,7 @@ def _symbol_concentration(rows: list[dict[str, Any]]) -> dict[str, Any]:
         count_by_symbol[symbol] += 1
     total_abs = sum(abs(value) for value in pnl_by_symbol.values())
     dominant = (
-        max(pnl_by_symbol, key=lambda key: abs(pnl_by_symbol[key]))
-        if pnl_by_symbol
-        else None
+        max(pnl_by_symbol, key=lambda key: abs(pnl_by_symbol[key])) if pnl_by_symbol else None
     )
     most_frequent = count_by_symbol.most_common(1)[0] if count_by_symbol else None
     return {
@@ -430,9 +687,7 @@ def _symbol_concentration(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "most_frequent_symbol": most_frequent[0] if most_frequent else None,
         "most_frequent_trade_share_pct": (
-            round((most_frequent[1] / len(rows)) * 100.0, 4)
-            if most_frequent and rows
-            else None
+            round((most_frequent[1] / len(rows)) * 100.0, 4) if most_frequent and rows else None
         ),
     }
 
@@ -443,9 +698,7 @@ def _gate_effectiveness(
     trades: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     trade_by_signal = {
-        str(row.get("signal_id") or ""): row
-        for row in trades
-        if str(row.get("signal_id") or "")
+        str(row.get("signal_id") or ""): row for row in trades if str(row.get("signal_id") or "")
     }
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in evaluations:
@@ -459,25 +712,27 @@ def _gate_effectiveness(
             for row in group
             if str(row.get("signal_id") or "") in trade_by_signal
         ]
-        output.append({
-            "gate_outcome": key,
-            "evaluation_count": len(group),
-            "closed_trade_count": len(linked),
-            "conversion_pct": round((len(linked) / len(group)) * 100.0, 4),
-            "closed_trade_performance": _trade_summary(linked),
-        })
+        output.append(
+            {
+                "gate_outcome": key,
+                "evaluation_count": len(group),
+                "closed_trade_count": len(linked),
+                "conversion_pct": round((len(linked) / len(group)) * 100.0, 4),
+                "closed_trade_performance": _trade_summary(linked),
+            }
+        )
     actions = Counter(str(row.get("action") or "unknown") for row in intents)
-    output.append({
-        "gate_outcome": "intent_actions",
-        "evaluation_count": len(intents),
-        "closed_trade_count": actions.get("ENTER_LONG", 0),
-        "conversion_pct": (
-            round((actions.get("ENTER_LONG", 0) / len(intents)) * 100.0, 4)
-            if intents
-            else None
-        ),
-        "action_counts": dict(sorted(actions.items())),
-    })
+    output.append(
+        {
+            "gate_outcome": "intent_actions",
+            "evaluation_count": len(intents),
+            "closed_trade_count": actions.get("ENTER_LONG", 0),
+            "conversion_pct": (
+                round((actions.get("ENTER_LONG", 0) / len(intents)) * 100.0, 4) if intents else None
+            ),
+            "action_counts": dict(sorted(actions.items())),
+        }
+    )
     return output
 
 
@@ -491,9 +746,7 @@ def _entry_failure_modes(
             counts[str(row.get("terminal_state") or "evaluation_not_filled")] += 1
     for row in intents:
         if str(row.get("action") or "").upper() != "ENTER_LONG":
-            counts[
-                str(row.get("blocked_reason") or row.get("reason") or "intent_blocked")
-            ] += 1
+            counts[str(row.get("blocked_reason") or row.get("reason") or "intent_blocked")] += 1
     total = sum(counts.values())
     return [
         {
@@ -509,18 +762,11 @@ def _exit_modes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(str(row.get("exit_reason") or "unknown"), []).append(row)
-    return [
-        {"exit_reason": key, **_trade_summary(grouped[key])}
-        for key in sorted(grouped)
-    ]
+    return [{"exit_reason": key, **_trade_summary(grouped[key])} for key in sorted(grouped)]
 
 
 def _numbers(rows: list[dict[str, Any]], field: str) -> list[float]:
-    return [
-        value
-        for row in rows
-        if (value := _number(row.get(field))) is not None
-    ]
+    return [value for row in rows if (value := _number(row.get(field))) is not None]
 
 
 def _first_number(row: dict[str, Any], *fields: str) -> float | None:
@@ -586,18 +832,13 @@ def _confidence_bucket(value: float | None) -> str:
 def _within(value: str, start: str | None, end: str | None) -> bool:
     if not value:
         return False
-    return (start is None or value >= start[:10]) and (
-        end is None or value <= end[:10]
-    )
+    return (start is None or value >= start[:10]) and (end is None or value <= end[:10])
 
 
 def _row_date(row: dict[str, Any]) -> str:
-    return str(
-        row.get("market_date")
-        or row.get("selected_at")
-        or row.get("decision_time")
-        or ""
-    )[:10]
+    return str(row.get("market_date") or row.get("selected_at") or row.get("decision_time") or "")[
+        :10
+    ]
 
 
 def _hash(value: Any) -> str:

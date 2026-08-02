@@ -10,6 +10,7 @@ def _write_required_scripts(root: Path) -> None:
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
         "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
         "run_daily_finalize.ps1",
         "register_alphaops_tasks.ps1",
         "register_daily_finalize_task.ps1",

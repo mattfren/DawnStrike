@@ -13,6 +13,7 @@ EXPECTED_TASKS = {
     "Dawnstrike AlphaOps Morning": "run_alphaops_morning.ps1",
     "Dawnstrike AlphaOps Monitor 5m": "run_alphaops_monitor.ps1",
     "Dawnstrike AlphaOps EOD Full Report": "run_alphaops_eod.ps1",
+    "Dawnstrike AlphaOps V6 Weekly Training": "run_alphaops_weekly_training.ps1",
     CANONICAL_TASK_NAME: "run_daily_finalize.ps1",
 }
 SCHED_S_TASK_RUNNING = 0x00041301

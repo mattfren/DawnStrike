@@ -8,7 +8,7 @@ Do not promote a static build when any of these checks fail:
 2. The durable SQLite backup checksum is recorded.
 3. `config/web_sources.yaml` exists in the runtime, has a real accountable contact in its user agent, and passes `web-source-doctor`.
 4. The source configuration is not the example file and no required source is merely a placeholder.
-5. A dated, source-backed small-cap universe snapshot has been registered before the market session. Its source lineage, membership status, ticker history, and corporate-action fields must be complete; the JSON template is `config/alpha_v6_universe.production.template.json` and must never be used unchanged.
+5. A dated, source-backed small-cap universe snapshot has been registered before the market session. Build its review candidate from the approved source contract and exact recorded raw artifact; hand-written universe JSON is not accepted. Its source lineage, membership status, ticker history, and corporate-action fields must be complete.
 6. The production scheduler uses a dedicated password-logon Windows identity that can access the network, encrypted secrets, the runtime and durable state roots, starts when available, and does not stop/refuse runs on battery. S4U is prohibited: it has no network or encrypted-file access.
 
 ## First rehearsal
@@ -21,9 +21,11 @@ Register the tasks only from the approved runtime, supplying the approved Window
 $credential = Get-Credential
 .\scripts\register_alphaops_tasks.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -RunAsCredential $credential -ReplaceExisting
 .\scripts\register_daily_finalize_task.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -RunAsCredential $credential -ReplaceExisting
-py -m intraday_scanner.cli alpha-v6-preview-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_universe-YYYY-MM-DD.json
+py -m intraday_scanner.cli alpha-v6-build-universe --source-contract C:\r\dawnstrike-state\source-universe\alpha_v6_source-contract.json --raw-artifact C:\r\dawnstrike-state\source-universe\alpha_v6_raw-YYYY-MM-DD.json --out C:\r\dawnstrike-state\source-universe\alpha_v6_candidate-YYYY-MM-DD.json
+
+py -m intraday_scanner.cli alpha-v6-preview-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_candidate-YYYY-MM-DD.json
 # Review the added, removed, and changed tickers. Copy preview_hash_sha256 exactly.
-py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_universe-YYYY-MM-DD.json --confirm-preview-hash <preview_hash_sha256>
+py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_candidate-YYYY-MM-DD.json --source-contract C:\r\dawnstrike-state\source-universe\alpha_v6_source-contract.json --raw-artifact C:\r\dawnstrike-state\source-universe\alpha_v6_raw-YYYY-MM-DD.json --confirm-preview-hash <preview_hash_sha256>
 py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --state-root C:\r\dawnstrike-state
 ```
 

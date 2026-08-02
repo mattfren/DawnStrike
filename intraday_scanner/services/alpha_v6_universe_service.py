@@ -11,7 +11,22 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 _ALLOWED_LISTING_STATUSES = frozenset({"ACTIVE", "HALTED", "DELISTED", "INACTIVE"})
 _REQUIRED_LINEAGE_FIELDS = frozenset(
-    {"source_id", "retrieved_at", "raw_artifact_sha256", "configuration_hash_sha256"}
+    {
+        "source_id",
+        "provider_id",
+        "dataset_id",
+        "dataset_version",
+        "terms_reference",
+        "entitlement_reference",
+        "accountable_contact",
+        "approval_status",
+        "critical_truth_complete",
+        "registration_allowed",
+        "source_contract_hash_sha256",
+        "retrieved_at",
+        "raw_artifact_sha256",
+        "configuration_hash_sha256",
+    }
 )
 
 
@@ -28,6 +43,7 @@ def register_alpha_v6_universe(
         as_of_date=as_of_date,
         members=members,
         source_lineage=source_lineage,
+        require_registration_approval=True,
     )
     persisted = store.persist_alpha_v6_universe(version=version, members=normalized)
     return {**version, "persisted": persisted, "members": normalized}
@@ -46,13 +62,12 @@ def preview_alpha_v6_universe(
         as_of_date=as_of_date,
         members=members,
         source_lineage=source_lineage,
+        require_registration_approval=False,
     )
     prior_versions = store.load_alpha_v6_universe_versions(limit=1)
     prior = prior_versions[0] if prior_versions else None
     prior_members = (
-        store.load_alpha_v6_universe_members(universe_id=str(prior["universe_id"]))
-        if prior
-        else []
+        store.load_alpha_v6_universe_members(universe_id=str(prior["universe_id"])) if prior else []
     )
     before = {str(row["ticker"]): row for row in prior_members}
     after = {str(row["ticker"]): row for row in normalized}
@@ -84,9 +99,7 @@ def preview_alpha_v6_universe(
     return {
         "schema_version": "dawnstrike.alphaops_v6.universe_preview.v1",
         "status": (
-            "NO_CHANGE"
-            if not (added or removed or changed)
-            else "REQUIRES_EXPLICIT_CONFIRMATION"
+            "NO_CHANGE" if not (added or removed or changed) else "REQUIRES_EXPLICIT_CONFIRMATION"
         ),
         **preview_content,
         "preview_hash_sha256": canonical_hash(preview_content),
@@ -134,6 +147,18 @@ def restore_alpha_v6_universe(
         # Keep the original source identity/retrieval time. A restore reuses an
         # immutable source snapshot; it does not pretend to have fetched it now.
         "source_id": str(original_lineage.get("source_id") or ""),
+        "provider_id": str(original_lineage.get("provider_id") or ""),
+        "dataset_id": str(original_lineage.get("dataset_id") or ""),
+        "dataset_version": str(original_lineage.get("dataset_version") or ""),
+        "terms_reference": str(original_lineage.get("terms_reference") or ""),
+        "entitlement_reference": str(original_lineage.get("entitlement_reference") or ""),
+        "accountable_contact": str(original_lineage.get("accountable_contact") or ""),
+        "approval_status": str(original_lineage.get("approval_status") or ""),
+        "critical_truth_complete": original_lineage.get("critical_truth_complete"),
+        "registration_allowed": True,
+        "source_contract_hash_sha256": str(
+            original_lineage.get("source_contract_hash_sha256") or ""
+        ),
         "retrieved_at": str(original_lineage.get("retrieved_at") or ""),
         "raw_artifact_sha256": raw_artifact_hash,
         "configuration_hash_sha256": canonical_hash(
@@ -163,13 +188,17 @@ def prepare_alpha_v6_universe(
     as_of_date: str,
     members: list[dict[str, Any]],
     source_lineage: dict[str, Any],
+    require_registration_approval: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Validate and normalize an immutable source snapshot before any write."""
 
     _parse_date(as_of_date, "as_of_date")
     if not members:
         raise SnapshotValidationError("V6 universe registration requires at least one member.")
-    _validate_source_lineage(source_lineage)
+    _validate_source_lineage(
+        source_lineage,
+        require_registration_approval=require_registration_approval,
+    )
     normalized = [_normalize_member(member, as_of_date) for member in members]
     tickers = [str(member["ticker"]) for member in normalized]
     if len(tickers) != len(set(tickers)):
@@ -206,10 +235,7 @@ def active_alpha_v6_membership_by_ticker(
         market_date=market_date,
         tickers=tickers,
     )
-    return {
-        ticker: {**row, "status": row.get("listing_status")}
-        for ticker, row in rows.items()
-    }
+    return {ticker: {**row, "status": row.get("listing_status")} for ticker, row in rows.items()}
 
 
 def _normalize_member(member: dict[str, Any], as_of_date: str) -> dict[str, Any]:
@@ -229,6 +255,9 @@ def _normalize_member(member: dict[str, Any], as_of_date: str) -> dict[str, Any]
         _parse_date(valid_to, f"valid_to for {ticker}")
         if valid_to < valid_from:
             raise SnapshotValidationError(f"V6 universe member {ticker} ends before it starts.")
+    eligibility = member.get("eligibility")
+    if eligibility is not None and not isinstance(eligibility, dict):
+        raise SnapshotValidationError(f"V6 universe member {ticker} eligibility must be an object.")
     return {
         "ticker": ticker,
         "listing_status": listing_status,
@@ -237,6 +266,7 @@ def _normalize_member(member: dict[str, Any], as_of_date: str) -> dict[str, Any]
         "previous_ticker": str(member.get("previous_ticker") or "").upper() or None,
         "corporate_action_type": str(member.get("corporate_action_type") or "") or None,
         "source_ref": str(member.get("source_ref") or "") or None,
+        "eligibility": dict(eligibility) if isinstance(eligibility, dict) else None,
         "missing_truth_is_zero": False,
     }
 
@@ -248,17 +278,29 @@ def _parse_date(value: str, field: str) -> None:
         raise SnapshotValidationError(f"V6 universe {field} must be ISO date.") from exc
 
 
-def _validate_source_lineage(source_lineage: dict[str, Any]) -> None:
+def _validate_source_lineage(
+    source_lineage: dict[str, Any], *, require_registration_approval: bool
+) -> None:
     if not isinstance(source_lineage, dict):
         raise SnapshotValidationError("V6 universe registration requires source lineage.")
     missing = sorted(
-        field for field in _REQUIRED_LINEAGE_FIELDS if not str(source_lineage.get(field) or "")
+        field
+        for field in _REQUIRED_LINEAGE_FIELDS
+        if source_lineage.get(field) is None
+        or (
+            isinstance(source_lineage.get(field), str)
+            and not str(source_lineage.get(field)).strip()
+        )
     )
     if missing:
         raise SnapshotValidationError(
             "V6 universe lineage is missing required fields: " + ", ".join(missing)
         )
-    for field in ("raw_artifact_sha256", "configuration_hash_sha256"):
+    for field in (
+        "raw_artifact_sha256",
+        "configuration_hash_sha256",
+        "source_contract_hash_sha256",
+    ):
         value = str(source_lineage.get(field) or "")
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.lower()):
             raise SnapshotValidationError(f"V6 universe {field} must be a SHA-256 hex digest.")
@@ -266,6 +308,26 @@ def _validate_source_lineage(source_lineage: dict[str, Any]) -> None:
         datetime.fromisoformat(str(source_lineage["retrieved_at"]).replace("Z", "+00:00"))
     except ValueError as exc:
         raise SnapshotValidationError("V6 universe retrieved_at must be ISO-8601.") from exc
+    if "@" not in str(source_lineage["accountable_contact"]):
+        raise SnapshotValidationError("V6 universe accountable_contact is invalid.")
+    if str(source_lineage["approval_status"]).upper() not in {
+        "APPROVED",
+        "PENDING_EXTERNAL_APPROVAL",
+    }:
+        raise SnapshotValidationError("V6 universe approval_status is unsupported.")
+    if not isinstance(source_lineage["critical_truth_complete"], bool):
+        raise SnapshotValidationError("V6 universe critical_truth_complete must be boolean.")
+    if not isinstance(source_lineage["registration_allowed"], bool):
+        raise SnapshotValidationError("V6 universe registration_allowed must be boolean.")
+    if require_registration_approval and (
+        source_lineage["approval_status"] != "APPROVED"
+        or source_lineage["critical_truth_complete"] is not True
+        or source_lineage["registration_allowed"] is not True
+    ):
+        raise SnapshotValidationError(
+            "V6 universe registration is blocked until source approval and complete "
+            "critical truth are recorded."
+        )
 
 
 def _member_truth(member: dict[str, Any]) -> dict[str, Any]:

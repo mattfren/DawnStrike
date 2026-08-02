@@ -78,6 +78,11 @@ from intraday_scanner.services.alpha_v6_learning_service import (
 from intraday_scanner.services.alpha_v6_research_service import (
     write_alpha_v6_research_packet,
 )
+from intraday_scanner.services.alpha_v6_universe_adapter_service import (
+    build_alpha_v6_universe_candidate,
+    validate_alpha_v6_universe_candidate,
+    write_alpha_v6_universe_candidate,
+)
 from intraday_scanner.services.alpha_v6_universe_service import (
     preview_alpha_v6_universe,
     register_alpha_v6_universe,
@@ -434,9 +439,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-alert-replay",
         help="Read-only replay of historical AlphaOps alert-gate decisions",
     )
-    alpha_alert_replay_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_alert_replay_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_alert_replay_parser.add_argument("--out", required=True)
 
     alpha_capture_parser = subparsers.add_parser(
@@ -459,17 +462,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-paper-reconcile",
         help="Reconcile exact AlphaOps selections into sourced paper trades",
     )
-    alpha_paper_reconcile_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_paper_reconcile_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_paper_reconcile_parser.add_argument("--market-date", default=None)
     alpha_paper_reconcile_parser.add_argument(
         "--out-dir", default="outputs/strategy_reconciliation"
     )
     alpha_paper_reconcile_parser.add_argument("--persist", action="store_true")
-    alpha_paper_reconcile_parser.add_argument(
-        "--notional-per-trade", type=float, default=1000.0
-    )
+    alpha_paper_reconcile_parser.add_argument("--notional-per-trade", type=float, default=1000.0)
     alpha_paper_reconcile_parser.add_argument("--fee-bps", type=float, default=1.0)
 
     alpha_learn_parser = subparsers.add_parser(
@@ -481,39 +480,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-v6-learn",
         help="Append sourced V6 shadow labels and strict walk-forward evidence",
     )
-    alpha_v6_learn_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_learn_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_learn_parser.add_argument("--code-sha", default="unresolved-local-sha")
 
     alpha_v6_daily_monitor_parser = subparsers.add_parser(
         "alpha-v6-daily-monitor",
         help="Append V6 outcomes, labels, dataset and drift evidence without refitting",
     )
-    alpha_v6_daily_monitor_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_daily_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_daily_monitor_parser.add_argument("--market-date", default=None)
 
     alpha_v6_train_weekly_parser = subparsers.add_parser(
         "alpha-v6-train-weekly",
         help="Run the separately scheduled V6 refit and all-family OOF evaluation",
     )
-    alpha_v6_train_weekly_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
-    alpha_v6_train_weekly_parser.add_argument(
-        "--code-sha", default="unresolved-local-sha"
-    )
+    alpha_v6_train_weekly_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_v6_train_weekly_parser.add_argument("--code-sha", default="unresolved-local-sha")
     alpha_v6_train_weekly_parser.add_argument("--market-date", default=None)
 
     alpha_v6_register_experiment_parser = subparsers.add_parser(
         "alpha-v6-register-experiment",
         help="Register one forward-only V6 experiment from an operator JSON contract",
     )
-    alpha_v6_register_experiment_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_register_experiment_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_register_experiment_parser.add_argument("--input", required=True)
 
     alpha_v6_holdout_parser = subparsers.add_parser(
@@ -528,9 +517,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-v6-attribution",
         help="Explain V6 shadow outcomes and propose holdout-only experiments",
     )
-    alpha_v6_attribution_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_attribution_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
 
     alpha_v6_packet_parser = subparsers.add_parser(
         "alpha-v6-research-packet",
@@ -538,9 +525,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_packet_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_packet_parser.add_argument("--code-sha", default="unresolved-local-sha")
-    alpha_v6_packet_parser.add_argument(
-        "--out-dir", default="outputs/alpha_v6_research"
-    )
+    alpha_v6_packet_parser.add_argument("--out-dir", default="outputs/alpha_v6_research")
 
     alpha_v6_universe_parser = subparsers.add_parser(
         "alpha-v6-register-universe",
@@ -548,6 +533,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_universe_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_universe_parser.add_argument("--input", required=True)
+    alpha_v6_universe_parser.add_argument(
+        "--source-contract",
+        required=True,
+        help="The exact approved source contract used to build --input.",
+    )
+    alpha_v6_universe_parser.add_argument(
+        "--raw-artifact",
+        required=True,
+        help="The exact raw source artifact used to build --input.",
+    )
     alpha_v6_universe_parser.add_argument(
         "--confirm-preview-hash",
         required=True,
@@ -558,18 +553,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-v6-preview-universe",
         help="Diff a sourced AlphaOps V6 universe without mutating durable state",
     )
-    alpha_v6_universe_preview_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_universe_preview_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_universe_preview_parser.add_argument("--input", required=True)
+
+    alpha_v6_universe_build_parser = subparsers.add_parser(
+        "alpha-v6-build-universe",
+        help="Validate a recorded point-in-time source artifact into a V6 preview candidate",
+    )
+    alpha_v6_universe_build_parser.add_argument("--source-contract", required=True)
+    alpha_v6_universe_build_parser.add_argument("--raw-artifact", required=True)
+    alpha_v6_universe_build_parser.add_argument("--out", required=True)
 
     alpha_v6_universe_restore_parser = subparsers.add_parser(
         "alpha-v6-restore-universe",
         help="Append an audited forward restore from an immutable V6 universe version",
     )
-    alpha_v6_universe_restore_parser.add_argument(
-        "--db-path", default="data/shadow_real.sqlite"
-    )
+    alpha_v6_universe_restore_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_universe_restore_parser.add_argument("--universe-id", required=True)
     alpha_v6_universe_restore_parser.add_argument("--as-of", required=True)
     alpha_v6_universe_restore_parser.add_argument("--operator", required=True)
@@ -624,6 +623,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_attribution_parser.add_argument("--start", default=None)
     alpha_attribution_parser.add_argument("--end", default=None)
+    alpha_attribution_parser.add_argument(
+        "--paper-ops-root",
+        default=None,
+        help="Optional bounded PaperOps root for cross-version attribution.",
+    )
 
     outcome_gap_parser = subparsers.add_parser(
         "outcome-gap",
@@ -1064,6 +1068,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_v6_attribution(args)
         if args.command == "alpha-v6-research-packet":
             return _run_alpha_v6_research_packet(args)
+        if args.command == "alpha-v6-build-universe":
+            return _run_alpha_v6_build_universe(args)
         if args.command == "alpha-v6-register-universe":
             return _run_alpha_v6_register_universe(args)
         if args.command == "alpha-v6-preview-universe":
@@ -1592,9 +1598,7 @@ def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
-    result = run_alpha_v6_daily_monitor(
-        SQLiteScanStore(args.db_path), market_date=args.market_date
-    )
+    result = run_alpha_v6_daily_monitor(SQLiteScanStore(args.db_path), market_date=args.market_date)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -1623,9 +1627,7 @@ def _run_alpha_v6_register_experiment(args: argparse.Namespace) -> int:
     )
     missing = [field for field in required if field not in payload]
     if missing:
-        raise SnapshotValidationError(
-            "V6 experiment input is missing: " + ", ".join(missing)
-        )
+        raise SnapshotValidationError("V6 experiment input is missing: " + ", ".join(missing))
     experiment = register_experiment(
         hypothesis=str(payload["hypothesis"]),
         training_cutoff=str(payload["training_cutoff"]),
@@ -1673,7 +1675,15 @@ def _run_alpha_v6_research_packet(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_register_universe(args: argparse.Namespace) -> int:
-    payload = _read_alpha_v6_universe_input(args.input)
+    reviewed = _read_alpha_v6_universe_candidate(args.input)
+    payload = build_alpha_v6_universe_candidate(
+        source_contract_path=args.source_contract,
+        raw_artifact_path=args.raw_artifact,
+    )
+    if reviewed["candidate_hash_sha256"] != payload["candidate_hash_sha256"]:
+        raise SnapshotValidationError(
+            "V6 universe registration source inputs do not reproduce the reviewed candidate."
+        )
     members = payload["members"]
     source_lineage = payload["source_lineage"]
     store = SQLiteScanStore(args.db_path)
@@ -1697,8 +1707,18 @@ def _run_alpha_v6_register_universe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_alpha_v6_build_universe(args: argparse.Namespace) -> int:
+    result = build_alpha_v6_universe_candidate(
+        source_contract_path=args.source_contract,
+        raw_artifact_path=args.raw_artifact,
+    )
+    output_path = write_alpha_v6_universe_candidate(result, output_path=args.out)
+    print(json.dumps({**result, "output_path": str(output_path)}, indent=2, sort_keys=True))
+    return 0 if result["registration_allowed"] is True else 2
+
+
 def _run_alpha_v6_preview_universe(args: argparse.Namespace) -> int:
-    payload = _read_alpha_v6_universe_input(args.input)
+    payload = _read_alpha_v6_universe_candidate(args.input)
     result = preview_alpha_v6_universe(
         SQLiteScanStore(args.db_path),
         as_of_date=str(payload.get("as_of_date") or ""),
@@ -1721,17 +1741,11 @@ def _run_alpha_v6_restore_universe(args: argparse.Namespace) -> int:
     return 0
 
 
-def _read_alpha_v6_universe_input(path: str) -> dict[str, Any]:
+def _read_alpha_v6_universe_candidate(path: str) -> dict[str, Any]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise SnapshotValidationError("V6 universe input must be a JSON object.")
-    members = payload.get("members")
-    if not isinstance(members, list) or not all(isinstance(row, dict) for row in members):
-        raise SnapshotValidationError("V6 universe input requires an object members list.")
-    source_lineage = payload.get("source_lineage")
-    if not isinstance(source_lineage, dict):
-        raise SnapshotValidationError("V6 universe input requires source_lineage object.")
-    return {**payload, "members": members, "source_lineage": source_lineage}
+        raise SnapshotValidationError("V6 universe candidate input must be a JSON object.")
+    return validate_alpha_v6_universe_candidate(payload)
 
 
 def _run_daily_heartbeat(args: argparse.Namespace) -> int:
@@ -1782,6 +1796,7 @@ def _run_alpha_attribution(args: argparse.Namespace) -> int:
         out_dir=args.out_dir,
         start=args.start,
         end=args.end,
+        paper_ops_root=args.paper_ops_root,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") in {"complete", "no_evidence"} else 1
@@ -2249,11 +2264,7 @@ def _run_ingest_minute_bars(args: argparse.Namespace) -> int:
 
 
 def _run_price_observe(args: argparse.Namespace) -> int:
-    tickers = [
-        item.strip().upper()
-        for item in str(args.tickers or "").split(",")
-        if item.strip()
-    ]
+    tickers = [item.strip().upper() for item in str(args.tickers or "").split(",") if item.strip()]
     config = load_config(database_path=Path(args.db_path))
     result = collect_price_observations(
         db_path=args.db_path,
@@ -2309,15 +2320,9 @@ def _run_trade_watch_loop(args: argparse.Namespace) -> int:
             "mode": result.get("mode"),
             "market_date": result.get("market_date"),
             "requested_at": result.get("requested_at"),
-            "usable_prices": dict(result.get("price_observation") or {}).get(
-                "usable_count"
-            ),
-            "intent_inserted": dict(result.get("intent_stats") or {}).get(
-                "inserted", 0
-            ),
-            "paper_fills": dict(result.get("paper_fill_stats") or {}).get(
-                "inserted", 0
-            ),
+            "usable_prices": dict(result.get("price_observation") or {}).get("usable_count"),
+            "intent_inserted": dict(result.get("intent_stats") or {}).get("inserted", 0),
+            "paper_fills": dict(result.get("paper_fill_stats") or {}).get("inserted", 0),
             "notifications": result.get("notification_stats"),
         }
         print(json.dumps(summary, sort_keys=True))
@@ -2328,11 +2333,7 @@ def _run_trade_watch_loop(args: argparse.Namespace) -> int:
 
 
 def _trade_watch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    tickers = [
-        item.strip().upper()
-        for item in str(args.tickers or "").split(",")
-        if item.strip()
-    ]
+    tickers = [item.strip().upper() for item in str(args.tickers or "").split(",") if item.strip()]
     return {
         "db_path": args.db_path,
         "mode": args.mode,
@@ -2386,9 +2387,7 @@ def _run_canonical_performance_reconcile(args: argparse.Namespace) -> int:
     return performance_reconcile_main(argv)
 
 
-def _run_release_doctor(
-    result: dict[str, Any], *, require_local_verification: bool = False
-) -> int:
+def _run_release_doctor(result: dict[str, Any], *, require_local_verification: bool = False) -> int:
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     if require_local_verification:
         return 0 if result.get("status") == "LOCAL_VERIFIED" else 2

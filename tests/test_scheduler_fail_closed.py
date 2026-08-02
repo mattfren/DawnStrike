@@ -15,6 +15,7 @@ def test_scheduler_doctor_rejects_interactive_and_s4u_tasks(tmp_path: Path, monk
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
         "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
         "run_daily_finalize.ps1",
         "register_alphaops_tasks.ps1",
         "register_daily_finalize_task.ps1",
@@ -46,4 +47,4 @@ def test_scheduler_doctor_rejects_interactive_and_s4u_tasks(tmp_path: Path, monk
     result = scheduler.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == 4
+    assert result["failed_task_count"] == len(scheduler.EXPECTED_TASKS)
