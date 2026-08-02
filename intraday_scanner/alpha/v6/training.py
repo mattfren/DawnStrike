@@ -120,7 +120,8 @@ def walk_forward_challenger_predictions(
         training_dates = set(fold["training_dates"])
         test_dates = set(fold["test_dates"])
         training_rows = [row for row in rows if row.get("market_date") in training_dates]
-        if model_eligibility(training_rows).status == "NOT_TRAINED_INSUFFICIENT_LABELS":
+        eligibility = model_eligibility(training_rows)
+        if eligibility.status == "NOT_TRAINED_INSUFFICIENT_LABELS":
             continue
         training_activation = [
             row for row in activation_rows if row.get("market_date") in training_dates
@@ -128,7 +129,13 @@ def walk_forward_challenger_predictions(
         suite = _fit_model_suite(
             training_rows,
             activation_rows=training_activation,
-            allow_gradient_boosting=False,
+            # This eligibility decision is intentionally made inside every
+            # expanding fold.  A complex challenger may only see labels that
+            # predate the held-out session; it must never inherit the final
+            # dataset's complexity permission.
+            allow_gradient_boosting=(
+                "controlled_gradient_boosting" in eligibility.allowed_families
+            ),
         )
         training_max_date = max(training_dates)
         generated_at = utc_now()
@@ -148,6 +155,7 @@ def walk_forward_challenger_predictions(
                 "embargoed_dates": fold["embargoed_dates"],
                 "no_lookahead": training_max_date < str(row.get("market_date") or ""),
                 "prediction": prediction,
+                "permitted_families": list(eligibility.allowed_families),
                 "research_only": True,
                 "broker_execution_enabled": False,
             }
@@ -317,7 +325,6 @@ def _fit_model_suite(
     allow_gradient_boosting: bool,
 ) -> dict[str, Any]:
     import numpy as np  # type: ignore[import-not-found]
-    from sklearn.ensemble import HistGradientBoostingRegressor  # type: ignore[import-not-found]
 
     feature_rows = [_feature_mapping(row) for row in [*rows, *activation_rows]]
     feature_names = sorted({name for item in feature_rows for name in item})
@@ -362,15 +369,11 @@ def _fit_model_suite(
 
     conformal = _conformal_receipt(rows, feature_names)
     gradient_model = None
+    gradient_conformal: dict[str, Any] | None = None
     if allow_gradient_boosting:
-        gradient_model = HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_iter=150,
-            max_leaf_nodes=15,
-            l2_regularization=1.0,
-            random_state=0,
-        )
+        gradient_model = _new_gradient_model()
         gradient_model.fit(return_x, return_y, sample_weight=return_weights)
+        gradient_conformal = _gradient_conformal_receipt(rows, feature_names)
 
     artifact_models = {
         "activation_classifier": (
@@ -399,6 +402,7 @@ def _fit_model_suite(
                 "training_prediction_hash_sha256": canonical_hash(
                     [round(float(value), 10) for value in gradient_model.predict(return_x)]
                 ),
+                "conformal": gradient_conformal,
                 "promotion_selected": False,
             }
             if gradient_model is not None
@@ -414,6 +418,8 @@ def _fit_model_suite(
         "tail_constant": tail_constant,
         "tail_severity_pct": tail_severity,
         "conformal": conformal,
+        "gradient_model": gradient_model,
+        "gradient_conformal": gradient_conformal,
         "artifact_models": artifact_models,
         "gradient_boosting_fitted": gradient_model is not None,
     }
@@ -453,7 +459,7 @@ def _predict_suite(suite: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]
         uncertainty_pct=float(residual_quantile) if residual_quantile is not None else None,
         capacity_penalty_pct=capacity_penalty,
     )
-    return {
+    baseline = {
         "status": (
             "FROZEN_OOF_RESEARCH_SCORE"
             if score.get("utility_lcb_pct") is not None
@@ -472,6 +478,94 @@ def _predict_suite(suite: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    family_predictions = {"regularized_baselines": baseline}
+    gradient_model = suite.get("gradient_model")
+    if gradient_model is not None:
+        family_predictions["controlled_gradient_boosting"] = _gradient_prediction(
+            model=gradient_model,
+            matrix=matrix,
+            activation=activation,
+            tail_probability=tail_probability,
+            tail_severity=tail_severity,
+            capacity_penalty=capacity_penalty,
+            conformal=suite.get("gradient_conformal"),
+        )
+    # The baseline remains the visible score.  Family scores are persisted
+    # solely for exact-fold research comparison and cannot change policy.
+    return {
+        **baseline,
+        "selected_family": "regularized_baselines",
+        "family_predictions": family_predictions,
+        "automatic_family_selection": False,
+    }
+
+
+def _gradient_prediction(
+    *,
+    model: Any,
+    matrix: Any,
+    activation: float | None,
+    tail_probability: float | None,
+    tail_severity: float | None,
+    capacity_penalty: float | None,
+    conformal: Any,
+) -> dict[str, Any]:
+    """Score the controlled challenger without electing it as policy."""
+
+    conditional_return = float(model.predict(matrix)[0])
+    conformal_data = conformal if isinstance(conformal, dict) else {}
+    residual_quantile = _finite(conformal_data.get("absolute_residual_quantile_pct"))
+    expected_tail = (
+        float(tail_probability) * float(tail_severity)
+        if tail_probability is not None and tail_severity is not None
+        else None
+    )
+    score = conservative_utility(
+        activation_probability=activation,
+        conditional_net_excess_return_pct=conditional_return,
+        tail_loss_pct=expected_tail,
+        uncertainty_pct=residual_quantile,
+        capacity_penalty_pct=capacity_penalty,
+    )
+    return {
+        "status": (
+            "FROZEN_OOF_RESEARCH_SCORE"
+            if score.get("utility_lcb_pct") is not None
+            else "UNCALIBRATED_INCOMPLETE_EVIDENCE"
+        ),
+        "activation_probability": _round(activation),
+        "conditional_net_excess_return_pct": _round(conditional_return),
+        "tail_loss_probability": _round(tail_probability),
+        "tail_loss_severity_pct": _round(tail_severity),
+        "tail_loss_pct": _round(expected_tail),
+        "uncertainty_pct": _round(residual_quantile),
+        "interval_lower_pct": _round(
+            conditional_return - residual_quantile
+            if residual_quantile is not None
+            else None
+        ),
+        "interval_upper_pct": _round(
+            conditional_return + residual_quantile
+            if residual_quantile is not None
+            else None
+        ),
+        "capacity_penalty_pct": _round(capacity_penalty),
+        "utility_lcb_pct": score.get("utility_lcb_pct"),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _new_gradient_model() -> Any:
+    from sklearn.ensemble import HistGradientBoostingRegressor  # type: ignore[import-not-found]
+
+    return HistGradientBoostingRegressor(
+        learning_rate=0.05,
+        max_iter=150,
+        max_leaf_nodes=15,
+        l2_regularization=1.0,
+        random_state=0,
+    )
 
 
 def _fit_linear(x: Any, y: Any, weights: Any) -> Any:
@@ -531,6 +625,53 @@ def _conformal_receipt(rows: list[dict[str, Any]], feature_names: list[str]) -> 
         _matrix(fit_rows, feature_names),
         _targets(fit_rows),
         _weights(fit_rows),
+    )
+    predicted = model.predict(_matrix(calibration_rows, feature_names))
+    residuals = sorted(
+        abs(float(actual) - float(prediction))
+        for actual, prediction in zip(_targets(calibration_rows), predicted, strict=True)
+    )
+    rank = min(len(residuals) - 1, math.ceil(0.9 * (len(residuals) + 1)) - 1)
+    return {
+        "status": "FROZEN_CHRONOLOGICAL_CONFORMAL",
+        "coverage_target_pct": 90.0,
+        "fit_max_market_date": max(fit_dates),
+        "calibration_min_market_date": min(calibration_dates),
+        "calibration_row_count": len(calibration_rows),
+        "absolute_residual_quantile_pct": _round(residuals[rank]),
+    }
+
+
+def _gradient_conformal_receipt(
+    rows: list[dict[str, Any]], feature_names: list[str]
+) -> dict[str, Any]:
+    """Build a chronological interval receipt for the gradient challenger.
+
+    It intentionally repeats the baseline's predeclared chronological split.
+    The challenger never receives later calibration rows, and the receipt is
+    separate so an optimistic linear-model interval cannot be borrowed.
+    """
+
+    dates = sorted({str(row.get("market_date") or "") for row in rows})
+    calibration_date_count = max(1, math.ceil(len(dates) * 0.2))
+    fit_dates = set(dates[:-calibration_date_count])
+    calibration_dates = set(dates[-calibration_date_count:])
+    fit_rows = [row for row in rows if row.get("market_date") in fit_dates]
+    calibration_rows = [
+        row for row in rows if row.get("market_date") in calibration_dates
+    ]
+    if len(fit_rows) < 50 or len(calibration_rows) < _MIN_CONFORMAL_RESIDUALS:
+        return {
+            "status": "INSUFFICIENT_CHRONOLOGICAL_CALIBRATION_ROWS",
+            "coverage_target_pct": 90.0,
+            "calibration_row_count": len(calibration_rows),
+            "absolute_residual_quantile_pct": None,
+        }
+    model = _new_gradient_model()
+    model.fit(
+        _matrix(fit_rows, feature_names),
+        _targets(fit_rows),
+        sample_weight=_weights(fit_rows),
     )
     predicted = model.predict(_matrix(calibration_rows, feature_names))
     residuals = sorted(

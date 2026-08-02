@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
+
+from defusedxml import ElementTree
 
 from intraday_scanner.models import utc_now_iso
 from intraday_scanner.providers.web_source_base import (

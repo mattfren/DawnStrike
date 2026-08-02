@@ -182,13 +182,13 @@ try {
     }
     Set-OverallFailure -ExitCode $learnExit
 
-    $v6Learning = Invoke-DawnstrikeNativeProcess `
+    $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-learn", "--db-path", $dbPath, "--code-sha", $releaseSha) `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate) `
         -LogRoot $logRoot `
-        -LogName "alpha_v6_learning-$MarketDate"
-    if ($v6Learning.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $v6Learning.exit_code
+        -LogName "alpha_v6_daily_monitor-$MarketDate"
+    if ($v6DailyMonitor.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $v6DailyMonitor.exit_code
     }
     $v6Attribution = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -209,7 +209,7 @@ try {
     $learningStageExit = $learnExit
     $learningErrorCode = if ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
     foreach ($v6Result in @(
-        @{ Result = $v6Learning; Code = "alpha_v6_learning_failed" },
+        @{ Result = $v6DailyMonitor; Code = "alpha_v6_daily_monitor_failed" },
         @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
         @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" }
     )) {

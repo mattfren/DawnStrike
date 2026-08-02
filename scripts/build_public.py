@@ -20,6 +20,7 @@ from intraday_scanner.services.scheduler_doctor_service import scheduler_doctor
 from intraday_scanner.services.v6_learning_service import v6_public_status
 from intraday_scanner.storage.migrations import get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.verify_public_artifact_security import scan_public_artifact
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -214,6 +215,31 @@ def main(argv: list[str] | None = None) -> int:
         ),
         encoding="utf-8",
     )
+    violations = scan_public_artifact(output_root)
+    if violations:
+        print(
+            json.dumps(
+                {
+                    "status": "FAILED",
+                    "reason": "public_artifact_security_violation",
+                    "violation_count": len(violations),
+                    "violations": [
+                        {
+                            "file": str(item.path.relative_to(output_root)).replace("\\", "/"),
+                            "rule": item.rule,
+                        }
+                        for item in violations
+                    ],
+                    "next_action": (
+                        "Rebuild from an explicit safe public DTO; do not redact "
+                        "at deploy time."
+                    ),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return 2
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
     return (
         0

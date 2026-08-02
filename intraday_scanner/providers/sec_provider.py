@@ -5,7 +5,8 @@ from __future__ import annotations
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
-from xml.etree import ElementTree
+
+from defusedxml import ElementTree
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError

@@ -9,6 +9,7 @@ description = "Provider-agnostic aggressive intraday scanner and paper-audit pla
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "defusedxml>=0.7",
   "streamlit>=1.32",
 ]
 

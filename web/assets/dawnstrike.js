@@ -312,6 +312,9 @@ function renderV6Research() {
   const calibration = evaluation.calibration || {};
   const intervals = evaluation.interval_coverage || {};
   const drift = v6.latest_drift || {};
+  const operational = v6.operational_freshness || {};
+  const dailyMonitor = operational.latest_daily_monitor || {};
+  const weeklyTraining = operational.latest_weekly_training || {};
   const evidenceGate = v6.prediction_evidence_gate || {};
   const modelNode = document.getElementById("v6-model-evidence");
   if (modelNode) {
@@ -324,10 +327,32 @@ function renderV6Research() {
       ["Calibration", calibration.status || "Not evaluated"],
       ["Interval coverage", intervals.coverage_pct == null ? (intervals.status || "Not evaluated") : `${Number(intervals.coverage_pct).toFixed(1)}%`],
       ["Drift", drift.status || "Not evaluated"],
+      ["Daily monitor", dailyMonitor.created_at ? `${formatTimestamp(dailyMonitor.created_at)} · ${dailyMonitor.status || "Unknown"}` : "Not recorded"],
+      ["Weekly training", weeklyTraining.created_at ? `${formatTimestamp(weeklyTraining.created_at)} · ${weeklyTraining.status || "Unknown"}` : "Not recorded"],
       ["Prediction display", evidenceGate.passed ? "Evidence gate passed" : "Hidden—evidence incomplete"],
       ["Artifact", shortHash(model.model_artifact_hash_sha256) || "Not available"],
     ];
     modelNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const attribution = v6.failure_attribution || {};
+  const categories = attribution.categories || {};
+  const failureModes = attribution.failure_modes || {};
+  const executionCost = failureModes.execution_cost || {};
+  const dataQuality = failureModes.data_quality || {};
+  const failureNode = document.getElementById("v6-failure-attribution");
+  if (failureNode) {
+    const details = [
+      ["Attribution status", attribution.status || "Waiting for sourced outcomes"],
+      ["Setup × regime", summarizeFailureCohorts(categories.by_setup_regime)],
+      ["Source quality", summarizeFailureCohorts(categories.by_source_quality)],
+      ["Liquidity", summarizeFailureCohorts(categories.by_liquidity)],
+      ["Catalyst", summarizeFailureCohorts(categories.by_catalyst)],
+      ["Volatility", summarizeFailureCohorts(categories.by_volatility)],
+      ["Observed slippage", executionCost.observed_slippage_status || "Not reported"],
+      ["Outcome completeness", `${dataQuality.sourced_complete_count ?? 0} sourced · ${dataQuality.terminal_missing_count ?? 0} terminal missing`],
+    ];
+    failureNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
   }
 
   const replayNode = document.getElementById("v6-replay-list");
@@ -341,6 +366,15 @@ function renderV6Research() {
       return `<details class="decision-replay-card"><summary><span><strong>${escapeHtml(decision.ticker || "NO_TRADE")}</strong><small>${escapeHtml(decision.market_date || "Date unavailable")} · ${escapeHtml(formatGateLabel(decision.decision_state || decision.action || "UNKNOWN"))}</small></span><span class="status-chip">${escapeHtml(decision.setup_key || "no setup")}</span></summary><div class="decision-replay-body"><dl><dt>Why</dt><dd>${escapeHtml(reasons)}</dd><dt>Regime</dt><dd>${escapeHtml(decision.regime_key || "Unknown")}</dd><dt>Model</dt><dd>${escapeHtml(decision.model_version || "Not available")}</dd><dt>Evidence</dt><dd>${escapeHtml(prediction)}</dd><dt>Feature snapshot</dt><dd>${escapeHtml(shortHash(decision.feature_hash_sha256) || "Missing")}</dd><dt>Source lineage</dt><dd>${escapeHtml(shortHash(decision.source_lineage_hash_sha256) || "Missing")}</dd><dt>Decision ID</dt><dd>${escapeHtml(decision.decision_id || "Missing")}</dd></dl></div></details>`;
     }).join("") : '<span class="muted">No V6 decisions are available for replay yet.</span>';
   }
+}
+
+function summarizeFailureCohorts(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "No sourced outcomes yet";
+  return rows.slice(0, 3).map((row) => {
+    const eligible = Number(row.eligible_return_count || 0);
+    const mean = formatPercentText(row.mean_net_excess_return_pct);
+    return `${row.group || "unknown"}: ${eligible} eligible · mean ${mean}`;
+  }).join(" | ");
 }
 
 function formatGateLabel(value) {

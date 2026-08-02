@@ -26,8 +26,7 @@ def build_drift_report(
             6,
         )
         status = "QUARANTINE_DRIFT" if score >= 0.25 else "STABLE"
-    payload = {
-        "created_at": utc_now(),
+    identity = {
         "status": status,
         "composition_shift_score": score,
         "baseline_count": len(baseline_rows),
@@ -38,7 +37,13 @@ def build_drift_report(
         "research_only": True,
         "broker_execution_enabled": False,
     }
-    payload["drift_report_id"] = "v6dr-" + canonical_hash(payload)[:28]
+    # This is an evidence snapshot, not an event log. Timestamping the identity
+    # would manufacture a new drift receipt on every identical daily retry.
+    payload = {
+        **identity,
+        "created_at": utc_now(),
+        "drift_report_id": "v6dr-" + canonical_hash(identity)[:28],
+    }
     return payload
 
 

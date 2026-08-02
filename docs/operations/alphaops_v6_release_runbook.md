@@ -21,7 +21,9 @@ Register the tasks only from the approved runtime, supplying the approved Window
 $credential = Get-Credential
 .\scripts\register_alphaops_tasks.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -RunAsCredential $credential -ReplaceExisting
 .\scripts\register_daily_finalize_task.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -RunAsCredential $credential -ReplaceExisting
-py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_universe-YYYY-MM-DD.json
+py -m intraday_scanner.cli alpha-v6-preview-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_universe-YYYY-MM-DD.json
+# Review the added, removed, and changed tickers. Copy preview_hash_sha256 exactly.
+py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-state\shadow_real.sqlite --input C:\r\dawnstrike-state\source-universe\alpha_v6_universe-YYYY-MM-DD.json --confirm-preview-hash <preview_hash_sha256>
 py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --state-root C:\r\dawnstrike-state
 ```
 
@@ -37,3 +39,18 @@ py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --sta
 ## Current blocked condition
 
 The runtime currently has no `config/web_sources.yaml` or dated registered V6 universe snapshot. It is unsafe to copy either template because its source identity fields are placeholders. A production-contract scan now fails closed when any candidate lacks point-in-time universe membership. This is the only acceptable behavior; synthetic, placeholder, or changing-universe source truth must not start the learning loop.
+
+The input's `source_lineage` must include a non-placeholder `source_id`,
+ISO-8601 `retrieved_at`, `raw_artifact_sha256`, and
+`configuration_hash_sha256`. Registration refuses a stale or altered preview;
+the operator must review the exact diff first. If a source version is proven
+bad, do not edit it: append an audited forward restore instead:
+
+```powershell
+py -m intraday_scanner.cli alpha-v6-restore-universe `
+  --db-path C:\r\dawnstrike-state\shadow_real.sqlite `
+  --universe-id <prior_universe_id> `
+  --as-of YYYY-MM-DD `
+  --operator operator@example.com `
+  --reason "verified upstream constituent error"
+```

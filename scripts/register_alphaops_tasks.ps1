@@ -37,6 +37,7 @@ $taskDefinitions = @(
         Description = "Dawnstrike V6 morning research collection and ranked delivery. Research-only; no broker execution."
         Script = "run_alphaops_morning.ps1"
         Start = "08:10"
+        Days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
         Repeat = $false
         DurationHours = 0
     },
@@ -45,6 +46,7 @@ $taskDefinitions = @(
         Description = "Dawnstrike V6 intraday paper monitor on a five-minute cadence. Research-only; no broker execution."
         Script = "run_alphaops_monitor.ps1"
         Start = "08:35"
+        Days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
         Repeat = $true
         DurationHours = 7
     },
@@ -53,6 +55,16 @@ $taskDefinitions = @(
         Description = "Dawnstrike V6 sourced outcomes, reconciliation, learning, attribution, and PaperOps forward evidence. Research-only; no broker execution."
         Script = "run_alphaops_eod.ps1"
         Start = "15:15"
+        Days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+        Repeat = $false
+        DurationHours = 0
+    },
+    [ordered]@{
+        Name = "Dawnstrike AlphaOps V6 Weekly Training"
+        Description = "Dawnstrike V6 weekly-only model refit and all-family purged OOF research evaluation. Research-only; no broker execution."
+        Script = "run_alphaops_weekly_training.ps1"
+        Start = "17:30"
+        Days = @("Monday")
         Repeat = $false
         DurationHours = 0
     }
@@ -92,7 +104,7 @@ foreach ($definition in $taskDefinitions) {
     $trigger = New-ScheduledTaskTrigger `
         -Weekly `
         -WeeksInterval 1 `
-        -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
+        -DaysOfWeek $definition.Days `
         -At ([datetime]::ParseExact(
             [string]$definition.Start,
             "HH:mm",

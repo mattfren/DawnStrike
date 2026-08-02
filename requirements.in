@@ -1,0 +1,13 @@
+# Direct development, research, and runtime inputs. Generate requirements.lock
+# with: py -m piptools compile --generate-hashes --output-file requirements.lock requirements.in
+streamlit>=1.32
+mypy>=1.8
+pytest>=8.0
+ruff>=0.4
+numpy>=1.26
+scikit-learn>=1.5
+pip-audit>=2.10
+cyclonedx-bom>=7.0
+bandit>=1.9
+detect-secrets>=1.5
+defusedxml>=0.7

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -909,6 +909,28 @@ def _migration_017_alphaops_v6_one_time_holdout(
     )
 
 
+def _migration_018_alphaops_v6_operational_receipts(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist daily and weekly V6 operating receipts without mutable summaries."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_operational_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            receipt_kind TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_operational_receipts_kind_time
+        ON alpha_v6_operational_receipts(receipt_kind, as_of_date, created_at);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -936,4 +958,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (15, _migration_015_alphaops_v6_research_contracts),
     (16, _migration_016_alphaops_v6_universe_registry),
     (17, _migration_017_alphaops_v6_one_time_holdout),
+    (18, _migration_018_alphaops_v6_operational_receipts),
 )

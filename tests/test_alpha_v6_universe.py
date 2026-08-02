@@ -6,9 +6,20 @@ from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.cli import main
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
+    preview_alpha_v6_universe,
     register_alpha_v6_universe,
+    restore_alpha_v6_universe,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+
+def _lineage(source_id: str = "fixture") -> dict[str, str]:
+    return {
+        "source_id": source_id,
+        "retrieved_at": "2026-08-03T12:00:00+00:00",
+        "raw_artifact_sha256": "a" * 64,
+        "configuration_hash_sha256": "b" * 64,
+    }
 
 
 def test_versioned_universe_is_immutable_and_resolves_at_decision_date(tmp_path) -> None:
@@ -16,7 +27,7 @@ def test_versioned_universe_is_immutable_and_resolves_at_decision_date(tmp_path)
     registered = register_alpha_v6_universe(
         store,
         as_of_date="2026-08-03",
-        source_lineage={"source": "fixture", "artifact_hash_sha256": "a" * 64},
+        source_lineage=_lineage(),
         members=[
             {"ticker": "ALFA", "listing_status": "ACTIVE", "source_ref": "fixture"},
             {
@@ -76,13 +87,19 @@ def test_cli_registers_source_backed_universe(tmp_path) -> None:
         json.dumps(
             {
                 "as_of_date": "2026-08-03",
-                "source_lineage": {"source": "fixture", "artifact": "fixture-1"},
+                "source_lineage": _lineage(),
                 "members": [{"ticker": "ALFA", "listing_status": "ACTIVE"}],
             }
         ),
         encoding="utf-8",
     )
 
+    preview = preview_alpha_v6_universe(
+        SQLiteScanStore(tmp_path / "cli.sqlite"),
+        as_of_date="2026-08-03",
+        source_lineage=_lineage(),
+        members=[{"ticker": "ALFA", "listing_status": "ACTIVE"}],
+    )
     code = main(
         [
             "alpha-v6-register-universe",
@@ -90,7 +107,53 @@ def test_cli_registers_source_backed_universe(tmp_path) -> None:
             str(tmp_path / "cli.sqlite"),
             "--input",
             str(source_path),
+            "--confirm-preview-hash",
+            str(preview["preview_hash_sha256"]),
         ]
     )
 
     assert code == 0
+
+
+def test_universe_preview_is_nonmutating_and_restore_is_forward_only(tmp_path) -> None:
+    store = SQLiteScanStore(tmp_path / "v6.sqlite")
+    first = register_alpha_v6_universe(
+        store,
+        as_of_date="2026-08-03",
+        source_lineage=_lineage("primary"),
+        members=[{"ticker": "ALFA", "listing_status": "ACTIVE"}],
+    )
+    preview = preview_alpha_v6_universe(
+        store,
+        as_of_date="2026-08-04",
+        source_lineage=_lineage("secondary"),
+        members=[{"ticker": "BETA", "listing_status": "ACTIVE"}],
+    )
+
+    assert preview["status"] == "REQUIRES_EXPLICIT_CONFIRMATION"
+    assert preview["diff"]["added_tickers"] == ["BETA"]
+    assert preview["diff"]["removed_tickers"] == ["ALFA"]
+    assert len(store.load_alpha_v6_universe_versions()) == 1
+
+    restored = restore_alpha_v6_universe(
+        store,
+        universe_id=first["universe_id"],
+        as_of_date="2026-08-05",
+        operator="operator@example.com",
+        reason="verified bad upstream constituent file",
+    )
+    repeated = restore_alpha_v6_universe(
+        store,
+        universe_id=first["universe_id"],
+        as_of_date="2026-08-05",
+        operator="operator@example.com",
+        reason="verified bad upstream constituent file",
+    )
+    resolved = active_alpha_v6_membership_by_ticker(
+        store, market_date="2026-08-05", tickers=["ALFA"]
+    )
+
+    assert restored["restored_from_universe_id"] == first["universe_id"]
+    assert resolved["ALFA"]["universe_id"] == restored["universe_id"]
+    assert repeated["universe_id"] == restored["universe_id"]
+    assert repeated["persisted"] is False

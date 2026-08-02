@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from intraday_scanner.alpha.v6 import training as training_module
 from intraday_scanner.alpha.v6.training import (
     predict_from_frozen_model_run,
     train_shadow_challengers,
@@ -84,6 +85,80 @@ def test_walk_forward_predictions_never_see_same_or_future_date() -> None:
         row["training_max_market_date"] < row["market_date"] for row in predictions
     )
     assert all(row["embargoed_dates"] for row in predictions)
+
+
+def test_walk_forward_evaluates_permitted_gradient_on_its_own_exact_fold(
+    monkeypatch,
+) -> None:
+    rows = []
+    activation_rows = []
+    start = date(2026, 1, 2)
+    for day_index in range(61):
+        market_date = (start + timedelta(days=day_index)).isoformat()
+        for row_index in range(9):
+            signal = float(day_index + row_index)
+            common = {
+                "decision_id": f"g-{day_index:02d}-{row_index}",
+                "market_date": market_date,
+                "setup_key": "breakout",
+                "regime_key": "RISK_ON",
+                "source_key": "licensed-primary",
+                "liquidity_bucket": "5m_to_20m",
+                "catalyst_bucket": "sourced",
+                "feature_vector": {
+                    "feature_json": {"signal_strength": signal, "spread_pct": 0.4}
+                },
+                "estimated_round_trip_cost_bps": 25.0,
+                "inverse_probability_weight": 1.0,
+            }
+            activation = float((day_index + row_index) % 2)
+            realized = 0.03 * signal - (3.5 if row_index == 0 else 0.4)
+            activation_rows.append({**common, "activation_label": activation})
+            rows.append(
+                {
+                    **common,
+                    "target_net_excess_return_pct": realized,
+                    "activation_label": activation,
+                    "tail_loss_label": float(realized <= -3.0),
+                }
+            )
+    training_dates = sorted({str(row["market_date"]) for row in rows})[:60]
+    test_date = (start + timedelta(days=60)).isoformat()
+    monkeypatch.setattr(
+        training_module,
+        "expanding_purged_splits",
+        lambda _: [
+            {
+                "fold_id": "gradient-fold",
+                "training_dates": training_dates,
+                "test_dates": [test_date],
+                "embargoed_dates": [test_date],
+                "no_lookahead": True,
+            }
+        ],
+    )
+
+    predictions = walk_forward_challenger_predictions(
+        {
+            "rows": rows,
+            "activation_rows": activation_rows,
+        },
+        model_run_id="v6m-gradient-test",
+    )
+
+    assert predictions
+    assert all(
+        "controlled_gradient_boosting" in row["permitted_families"]
+        for row in predictions
+    )
+    assert all(
+        row["prediction"]["selected_family"] == "regularized_baselines"
+        for row in predictions
+    )
+    assert all(
+        "controlled_gradient_boosting" in row["prediction"]["family_predictions"]
+        for row in predictions
+    )
 
 
 def test_frozen_artifact_scores_only_later_matching_schema_decisions() -> None:

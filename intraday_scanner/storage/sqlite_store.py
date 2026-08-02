@@ -6274,6 +6274,43 @@ class SQLiteScanStore:
             "alpha_v6_promotion_reviews", "created_at", limit=limit
         )
 
+    def persist_alpha_v6_operational_receipt(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_operational_receipts",
+            identity_field="receipt_id",
+            row=row,
+            columns=(
+                "receipt_kind",
+                "as_of_date",
+                "created_at",
+                "status",
+                "input_hash_sha256",
+            ),
+        )
+
+    def load_alpha_v6_operational_receipts(
+        self, *, receipt_kind: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        if receipt_kind is None:
+            return self._load_v6_payload_rows(
+                "alpha_v6_operational_receipts", "created_at", limit=limit
+            )
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_operational_receipts
+                    WHERE receipt_kind = ?
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (receipt_kind, limit),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 operational receipts: {exc}") from exc
+
     def persist_alpha_v6_universe(
         self, *, version: dict[str, Any], members: list[dict[str, Any]]
     ) -> bool:
@@ -6374,6 +6411,42 @@ class SQLiteScanStore:
                 }
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 universe memberships: {exc}") from exc
+
+    def load_alpha_v6_universe_versions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return immutable universe versions newest first for preview and recovery."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_universe_versions
+                    ORDER BY as_of_date DESC, created_at DESC LIMIT ?
+                    """,
+                    (max(1, limit),),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe versions: {exc}") from exc
+
+    def load_alpha_v6_universe_members(self, *, universe_id: str) -> list[dict[str, Any]]:
+        """Return one immutable universe's members for audited comparison or restore."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_universe_memberships
+                    WHERE universe_id = ? ORDER BY ticker ASC
+                    """,
+                    (universe_id,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe members: {exc}") from exc
 
     def _persist_v6_single_payload(
         self,

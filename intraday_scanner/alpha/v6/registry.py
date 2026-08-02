@@ -38,6 +38,7 @@ def register_experiment(
         "candidate_config": candidate_config,
         "changed_field": changed[0],
         "unchanged_controls": sorted(key for key in baseline_config if key != changed[0]),
+        "baseline_configuration_hash_sha256": canonical_hash(baseline_config),
         "validation_start": validation_start,
         "untouched_holdout_start": holdout_start,
         "holdout_evaluated_at": None,

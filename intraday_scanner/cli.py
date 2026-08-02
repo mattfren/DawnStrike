@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from intraday_scanner.ai.headline_classifier import RuleBasedHeadlineClassifier
+from intraday_scanner.alpha.v6.registry import register_experiment
 from intraday_scanner.config import ConfigError, load_config
 from intraday_scanner.errors import (
     DataProviderError,
@@ -63,12 +64,21 @@ from intraday_scanner.services.alpha_outcome_capture_service import (
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     reconcile_alpha_paper_trades,
 )
-from intraday_scanner.services.alpha_v6_learning_service import run_alpha_v6_learning
+from intraday_scanner.services.alpha_v6_holdout_service import (
+    evaluate_registered_holdout,
+)
+from intraday_scanner.services.alpha_v6_learning_service import (
+    run_alpha_v6_daily_monitor,
+    run_alpha_v6_learning,
+    run_alpha_v6_weekly_training,
+)
 from intraday_scanner.services.alpha_v6_research_service import (
     write_alpha_v6_research_packet,
 )
 from intraday_scanner.services.alpha_v6_universe_service import (
+    preview_alpha_v6_universe,
     register_alpha_v6_universe,
+    restore_alpha_v6_universe,
 )
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.calendar_report_service import calendar_report
@@ -464,6 +474,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_learn_parser.add_argument("--code-sha", default="unresolved-local-sha")
 
+    alpha_v6_daily_monitor_parser = subparsers.add_parser(
+        "alpha-v6-daily-monitor",
+        help="Append V6 outcomes, labels, dataset and drift evidence without refitting",
+    )
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_v6_daily_monitor_parser.add_argument("--market-date", default=None)
+
+    alpha_v6_train_weekly_parser = subparsers.add_parser(
+        "alpha-v6-train-weekly",
+        help="Run the separately scheduled V6 refit and all-family OOF evaluation",
+    )
+    alpha_v6_train_weekly_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_v6_train_weekly_parser.add_argument(
+        "--code-sha", default="unresolved-local-sha"
+    )
+    alpha_v6_train_weekly_parser.add_argument("--market-date", default=None)
+
+    alpha_v6_register_experiment_parser = subparsers.add_parser(
+        "alpha-v6-register-experiment",
+        help="Register one forward-only V6 experiment from an operator JSON contract",
+    )
+    alpha_v6_register_experiment_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_v6_register_experiment_parser.add_argument("--input", required=True)
+
+    alpha_v6_holdout_parser = subparsers.add_parser(
+        "alpha-v6-evaluate-holdout",
+        help="Evaluate one immutable, tagged V6 holdout only after its frozen start",
+    )
+    alpha_v6_holdout_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_v6_holdout_parser.add_argument("--experiment-id", required=True)
+    alpha_v6_holdout_parser.add_argument("--as-of", required=True)
+
     alpha_v6_attribution_parser = subparsers.add_parser(
         "alpha-v6-attribution",
         help="Explain V6 shadow outcomes and propose holdout-only experiments",
@@ -488,6 +536,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_universe_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_universe_parser.add_argument("--input", required=True)
+    alpha_v6_universe_parser.add_argument(
+        "--confirm-preview-hash",
+        required=True,
+        help="Exact preview_hash_sha256 from alpha-v6-preview-universe.",
+    )
+
+    alpha_v6_universe_preview_parser = subparsers.add_parser(
+        "alpha-v6-preview-universe",
+        help="Diff a sourced AlphaOps V6 universe without mutating durable state",
+    )
+    alpha_v6_universe_preview_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_v6_universe_preview_parser.add_argument("--input", required=True)
+
+    alpha_v6_universe_restore_parser = subparsers.add_parser(
+        "alpha-v6-restore-universe",
+        help="Append an audited forward restore from an immutable V6 universe version",
+    )
+    alpha_v6_universe_restore_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_v6_universe_restore_parser.add_argument("--universe-id", required=True)
+    alpha_v6_universe_restore_parser.add_argument("--as-of", required=True)
+    alpha_v6_universe_restore_parser.add_argument("--operator", required=True)
+    alpha_v6_universe_restore_parser.add_argument("--reason", required=True)
 
     daily_heartbeat_parser = subparsers.add_parser(
         "daily-heartbeat", help="Write durable daily-DAG heartbeat evidence"
@@ -964,12 +1038,24 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_learn(args)
         if args.command == "alpha-v6-learn":
             return _run_alpha_v6_learn(args)
+        if args.command == "alpha-v6-daily-monitor":
+            return _run_alpha_v6_daily_monitor(args)
+        if args.command == "alpha-v6-train-weekly":
+            return _run_alpha_v6_train_weekly(args)
+        if args.command == "alpha-v6-register-experiment":
+            return _run_alpha_v6_register_experiment(args)
+        if args.command == "alpha-v6-evaluate-holdout":
+            return _run_alpha_v6_evaluate_holdout(args)
         if args.command == "alpha-v6-attribution":
             return _run_alpha_v6_attribution(args)
         if args.command == "alpha-v6-research-packet":
             return _run_alpha_v6_research_packet(args)
         if args.command == "alpha-v6-register-universe":
             return _run_alpha_v6_register_universe(args)
+        if args.command == "alpha-v6-preview-universe":
+            return _run_alpha_v6_preview_universe(args)
+        if args.command == "alpha-v6-restore-universe":
+            return _run_alpha_v6_restore_universe(args)
         if args.command == "daily-heartbeat":
             return _run_daily_heartbeat(args)
         if args.command == "daily-orchestrator-status":
@@ -1491,6 +1577,71 @@ def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
+    result = run_alpha_v6_daily_monitor(
+        SQLiteScanStore(args.db_path), market_date=args.market_date
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
+    result = run_alpha_v6_weekly_training(
+        SQLiteScanStore(args.db_path), code_sha=args.code_sha, market_date=args.market_date
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_register_experiment(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SnapshotValidationError("V6 experiment input must be a JSON object.")
+    required = (
+        "hypothesis",
+        "training_cutoff",
+        "baseline_config",
+        "candidate_config",
+        "validation_start",
+        "holdout_start",
+        "stop_condition",
+        "promotion_requirements",
+    )
+    missing = [field for field in required if field not in payload]
+    if missing:
+        raise SnapshotValidationError(
+            "V6 experiment input is missing: " + ", ".join(missing)
+        )
+    experiment = register_experiment(
+        hypothesis=str(payload["hypothesis"]),
+        training_cutoff=str(payload["training_cutoff"]),
+        baseline_config=dict(payload["baseline_config"]),
+        candidate_config=dict(payload["candidate_config"]),
+        validation_start=str(payload["validation_start"]),
+        holdout_start=str(payload["holdout_start"]),
+        stop_condition=str(payload["stop_condition"]),
+        promotion_requirements=list(payload["promotion_requirements"]),
+    )
+    persisted = SQLiteScanStore(args.db_path).persist_alpha_v6_experiments([experiment])
+    result = {
+        "status": "REGISTERED_NOT_APPLIED" if persisted["inserted"] else "ALREADY_REGISTERED",
+        "persisted": persisted,
+        "experiment": experiment,
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_evaluate_holdout(args: argparse.Namespace) -> int:
+    result = evaluate_registered_holdout(
+        SQLiteScanStore(args.db_path),
+        experiment_id=args.experiment_id,
+        as_of_date=args.as_of,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") in {"HOLDOUT_RECORDED", "ALREADY_EVALUATED_IMMUTABLE"} else 2
+
+
 def _run_alpha_v6_attribution(args: argparse.Namespace) -> int:
     result = build_v6_failure_attribution(SQLiteScanStore(args.db_path))
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -1508,21 +1659,65 @@ def _run_alpha_v6_research_packet(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_register_universe(args: argparse.Namespace) -> int:
-    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise SnapshotValidationError("V6 universe input must be a JSON object.")
-    members = payload.get("members")
-    if not isinstance(members, list):
-        raise SnapshotValidationError("V6 universe input requires a members list.")
-    source_lineage = payload.get("source_lineage")
-    result = register_alpha_v6_universe(
-        SQLiteScanStore(args.db_path),
+    payload = _read_alpha_v6_universe_input(args.input)
+    members = payload["members"]
+    source_lineage = payload["source_lineage"]
+    store = SQLiteScanStore(args.db_path)
+    preview = preview_alpha_v6_universe(
+        store,
         as_of_date=str(payload.get("as_of_date") or ""),
-        members=[row for row in members if isinstance(row, dict)],
-        source_lineage=source_lineage if isinstance(source_lineage, dict) else {},
+        members=members,
+        source_lineage=source_lineage,
+    )
+    if args.confirm_preview_hash != preview["preview_hash_sha256"]:
+        raise SnapshotValidationError(
+            "V6 universe registration requires the exact current preview_hash_sha256."
+        )
+    result = register_alpha_v6_universe(
+        store,
+        as_of_date=str(payload.get("as_of_date") or ""),
+        members=members,
+        source_lineage=source_lineage,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_alpha_v6_preview_universe(args: argparse.Namespace) -> int:
+    payload = _read_alpha_v6_universe_input(args.input)
+    result = preview_alpha_v6_universe(
+        SQLiteScanStore(args.db_path),
+        as_of_date=str(payload.get("as_of_date") or ""),
+        members=payload["members"],
+        source_lineage=payload["source_lineage"],
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_alpha_v6_restore_universe(args: argparse.Namespace) -> int:
+    result = restore_alpha_v6_universe(
+        SQLiteScanStore(args.db_path),
+        universe_id=args.universe_id,
+        as_of_date=args.as_of,
+        operator=args.operator,
+        reason=args.reason,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _read_alpha_v6_universe_input(path: str) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SnapshotValidationError("V6 universe input must be a JSON object.")
+    members = payload.get("members")
+    if not isinstance(members, list) or not all(isinstance(row, dict) for row in members):
+        raise SnapshotValidationError("V6 universe input requires an object members list.")
+    source_lineage = payload.get("source_lineage")
+    if not isinstance(source_lineage, dict):
+        raise SnapshotValidationError("V6 universe input requires source_lineage object.")
+    return {**payload, "members": members, "source_lineage": source_lineage}
 
 
 def _run_daily_heartbeat(args: argparse.Namespace) -> int:

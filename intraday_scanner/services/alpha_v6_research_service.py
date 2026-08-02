@@ -5,17 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from intraday_scanner.services.alpha_v6_learning_service import run_alpha_v6_learning
 from intraday_scanner.services.v6_learning_service import build_v6_failure_attribution
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def build_alpha_v6_research_packet(store: SQLiteScanStore, *, code_sha: str) -> dict[str, Any]:
-    learning = run_alpha_v6_learning(store, code_sha=code_sha)
-    attribution = build_v6_failure_attribution(store)
+    """Build a read-only operator packet from already persisted V6 evidence."""
+
+    model_runs = store.load_alpha_v6_model_runs(limit=1)
+    evaluations = store.load_alpha_v6_evaluations(limit=1)
+    drift_reports = store.load_alpha_v6_drift_reports(limit=1)
+    reviews = store.load_alpha_v6_promotion_reviews(limit=1)
+    attribution = build_v6_failure_attribution(store, persist=False)
     return {
         "schema_version": "dawnstrike.alphaops_v6.research_packet.v1",
-        "learning": learning,
+        "packet_code_sha": code_sha,
+        "latest_training": model_runs[0] if model_runs else None,
+        "latest_evaluation": evaluations[0] if evaluations else None,
+        "latest_drift": drift_reports[0] if drift_reports else None,
+        "latest_promotion_review": reviews[0] if reviews else None,
         "failure_attribution": attribution,
         "performance_status": "WAITING_FOR_FORWARD_EVIDENCE",
         "research_only": True,

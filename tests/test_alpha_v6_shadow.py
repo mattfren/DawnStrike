@@ -10,7 +10,10 @@ from intraday_scanner.alpha.v6_shadow import (
     promotion_readiness,
     strict_walk_forward_evaluation,
 )
-from intraday_scanner.services.v6_learning_service import build_v6_failure_attribution
+from intraday_scanner.services.v6_learning_service import (
+    build_v6_failure_attribution,
+    v6_public_status,
+)
 from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -69,6 +72,16 @@ def test_v6_records_point_in_time_shadow_decision_without_promoting() -> None:
     assert decision["point_in_time"]["all_inputs_observed_at_or_before_decision"] is True
     assert decision["research_only"] is True
     assert decision["broker_execution_enabled"] is False
+
+
+def test_v6_public_status_exposes_only_aggregate_failure_attribution(tmp_path) -> None:
+    status = v6_public_status(SQLiteScanStore(tmp_path / "v6.sqlite"))
+
+    attribution = status["failure_attribution"]
+
+    assert attribution["status"] == "WAITING_FOR_OUTCOMES"
+    assert attribution["categories"]["by_setup_regime"] == []
+    assert attribution["missing_truth_is_zero"] is False
 
 
 def test_v6_safety_veto_cannot_be_learned_away() -> None:
@@ -228,4 +241,11 @@ def test_v6_failure_attribution_proposes_no_automatic_policy_change(
 
     assert report["status"] == "COMPLETE"
     assert report["breakdown"][0]["mean_net_excess_return_pct"] < 0
+    assert report["causal_attribution"]["by_source_quality"]
+    assert report["causal_attribution"]["failure_modes"]["data_quality"][
+        "missing_truth_is_zero"
+    ] is False
+    assert report["causal_attribution"]["failure_modes"]["execution_cost"][
+        "observed_slippage_status"
+    ] == "MISSING_NOT_IMPUTED"
     assert report["automatic_policy_change"] is False
