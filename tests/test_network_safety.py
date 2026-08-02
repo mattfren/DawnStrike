@@ -16,7 +16,7 @@ def test_network_url_requires_https_allowlist_and_default_port() -> None:
     "url",
     (
         "file:///C:/secret.txt",
-        "https://user:pass@example.com/data",
+        "https://user:pass@example.com/data",  # pragma: allowlist secret - rejection fixture
         "https://evil-example.com/data",
         "https://example.com:444/data",
         "http://example.com/data",
