@@ -45,6 +45,9 @@ from intraday_scanner.services.alert_service import (
     alerts_from_news_and_filings,
     persist_deduped_alerts,
 )
+from intraday_scanner.services.alpha_alert_replay_service import (
+    write_alpha_alert_replay_report,
+)
 from intraday_scanner.services.alpha_attribution_service import (
     generate_alpha_attribution_report,
 )
@@ -426,6 +429,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "alpha-outcomes", help="Label saved AlphaOps signals from manual outcomes"
     )
     alpha_outcomes_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    alpha_alert_replay_parser = subparsers.add_parser(
+        "alpha-alert-replay",
+        help="Read-only replay of historical AlphaOps alert-gate decisions",
+    )
+    alpha_alert_replay_parser.add_argument(
+        "--db-path", default="data/shadow_real.sqlite"
+    )
+    alpha_alert_replay_parser.add_argument("--out", required=True)
 
     alpha_capture_parser = subparsers.add_parser(
         "alpha-capture-outcomes",
@@ -1030,6 +1042,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_monitor(args)
         if args.command == "alpha-outcomes":
             return _run_alpha_outcomes(args)
+        if args.command == "alpha-alert-replay":
+            return _run_alpha_alert_replay(args)
         if args.command == "alpha-capture-outcomes":
             return _run_alpha_capture_outcomes(args)
         if args.command == "alpha-paper-reconcile":
@@ -1771,6 +1785,12 @@ def _run_alpha_attribution(args: argparse.Namespace) -> int:
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") in {"complete", "no_evidence"} else 1
+
+
+def _run_alpha_alert_replay(args: argparse.Namespace) -> int:
+    result = write_alpha_alert_replay_report(db_path=args.db_path, out_path=args.out)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "PASS" else 2
 
 
 def _run_outcome_gap(args: argparse.Namespace) -> int:
