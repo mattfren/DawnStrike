@@ -10,6 +10,7 @@ from defusedxml import ElementTree
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.base import FilingItem, SECProvider
 
 
@@ -52,7 +53,11 @@ class SECRSSProvider(SECProvider):
             headers={"User-Agent": "Dawnstrike research scanner contact@example.com"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+            with open_allowlisted_url(
+                request,
+                timeout=self.timeout,
+                allowed_hosts=("sec.gov",),
+            ) as response:
                 raw = response.read()
             root = ElementTree.fromstring(raw)
         except (OSError, ElementTree.ParseError) as exc:

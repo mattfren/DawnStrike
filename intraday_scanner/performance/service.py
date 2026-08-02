@@ -31,6 +31,7 @@ from intraday_scanner.performance.contracts import (
     stable_hash,
 )
 from intraday_scanner.performance.paper_ops import load_paper_ops
+from intraday_scanner.sql_safety import quote_sql_identifier
 from intraday_scanner.storage.migrations import run_migrations
 
 
@@ -76,11 +77,7 @@ class CanonicalPerformanceService:
                 run_migrations(connection)
             inputs = self._read_inputs(connection, market_date=market_date)
             input_hash = stable_hash(inputs["hash_inputs"])
-            calculated_at = (
-                now
-                or _existing_calculated_at(connection, input_hash)
-                or _utc_now()
-            )
+            calculated_at = now or _existing_calculated_at(connection, input_hash) or _utc_now()
             benchmark = inputs["benchmark"]
             ledger = build_v5_account_ledger(
                 trades=inputs["strategy_trades"],
@@ -179,14 +176,13 @@ class CanonicalPerformanceService:
                     "SELECT MAX(market_date) FROM portfolio_daily_performance"
                 ).fetchone()
                 as_of = str(latest[0]) if latest and latest[0] else None
-            date_clause = " AND market_date <= ?" if as_of else ""
-            date_params: tuple[object, ...] = (as_of,) if as_of else ()
+            date_params: tuple[object | None, ...] = (as_of, as_of)
             daily_rows = [
                 dict(row)
                 for row in connection.execute(
-                    f"""
+                    """
                     SELECT * FROM portfolio_daily_performance
-                    WHERE 1 = 1 {date_clause}
+                    WHERE (? IS NULL OR market_date <= ?)
                     ORDER BY CASE cohort
                                WHEN 'official_forward_paper' THEN 0
                                WHEN 'alphaops_signal_research' THEN 1
@@ -203,7 +199,7 @@ class CanonicalPerformanceService:
             performance_rows = [
                 dict(row)
                 for row in connection.execute(
-                    f"""
+                    """
                     SELECT record_id, market_date, ticker, cohort, strategy_id,
                            strategy_version, signal_id, rank, record_status,
                            entry_price, exit_price, quantity, notional_cents,
@@ -215,7 +211,7 @@ class CanonicalPerformanceService:
                            trade_count, open_position_count, unrealized_pnl_cents,
                            record_type
                     FROM portfolio_performance_rows
-                    WHERE 1 = 1 {date_clause}
+                    WHERE (? IS NULL OR market_date <= ?)
                     ORDER BY CASE cohort
                                WHEN 'official_forward_paper' THEN 0
                                WHEN 'alphaops_signal_research' THEN 1
@@ -246,10 +242,10 @@ class CanonicalPerformanceService:
             ledger_rows = [
                 dict(row)
                 for row in connection.execute(
-                    f"""
+                    """
                     SELECT *
                     FROM paper_account_daily_ledger
-                    WHERE 1 = 1 {date_clause}
+                    WHERE (? IS NULL OR market_date <= ?)
                     ORDER BY market_date DESC, account_id ASC
                     LIMIT ?
                     """,
@@ -377,9 +373,10 @@ class CanonicalPerformanceService:
             if status in {"CLOSED", "REALIZED", "COMPLETE"}:
                 if fill_gross_pnl_cents is None:
                     quarantine_reason = quarantine_reason or "missing_fill_pnl_reconciliation"
-                elif source_net_cents is not None and abs(
-                    source_net_cents - fill_gross_pnl_cents
-                ) > 1:
+                elif (
+                    source_net_cents is not None
+                    and abs(source_net_cents - fill_gross_pnl_cents) > 1
+                ):
                     quarantine_reason = quarantine_reason or (
                         "position_fill_pnl_mismatch:"
                         f"position={source_net_cents}:fills={fill_gross_pnl_cents}"
@@ -867,12 +864,8 @@ def _without_canonical_trade_duplicates(
             or row.get("strategy_id")
             or CanonicalPerformanceService.DEFAULT_STRATEGY_ID
         )
-        if (
-            signal_id
-            and (market_date, signal_id, strategy_id) in signal_keys
-        ) or (
-            selection_id
-            and (market_date, selection_id, strategy_id) in selection_keys
+        if (signal_id and (market_date, signal_id, strategy_id) in signal_keys) or (
+            selection_id and (market_date, selection_id, strategy_id) in selection_keys
         ):
             continue
         output.append(row)
@@ -936,9 +929,7 @@ def _account_observation_rows(
                 execution_policy_version=str(raw["execution_policy_version"]),
                 trade_count=0,
                 open_position_count=int(raw.get("open_position_count") or 0),
-                unrealized_pnl_cents=_int_or_none(
-                    raw.get("unrealized_pnl_change_cents")
-                ),
+                unrealized_pnl_cents=_int_or_none(raw.get("unrealized_pnl_change_cents")),
                 record_type="account_observation",
             )
         )
@@ -953,16 +944,23 @@ def _select_rows(
     ).fetchone()
     if not exists:
         return []
+    table_sql = quote_sql_identifier(table)
     if market_date:
         try:
+            # The table name is a validated SQLite identifier.
             rows = connection.execute(
-                f"SELECT * FROM {table} WHERE market_date <= ? ORDER BY market_date ASC, rowid ASC",
+                f"SELECT * FROM {table_sql} WHERE market_date <= ? "
+                f"ORDER BY market_date ASC, rowid ASC",  # nosec B608
                 (market_date,),
             ).fetchall()
         except sqlite3.OperationalError:
-            rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid ASC").fetchall()
+            rows = connection.execute(
+                f"SELECT * FROM {table_sql} ORDER BY rowid ASC"  # nosec B608
+            ).fetchall()
     else:
-        rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid ASC").fetchall()
+        rows = connection.execute(
+            f"SELECT * FROM {table_sql} ORDER BY rowid ASC"  # nosec B608
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -1131,12 +1129,8 @@ def _aggregate_daily(
         ledger_status = str(equity_observation.get("ledger_status") or "") or None
         external_flow = _int_or_none(equity_observation.get("external_flow_cents"))
         cash = _int_or_none(equity_observation.get("cash_cents"))
-        position_market_value = _int_or_none(
-            equity_observation.get("position_market_value_cents")
-        )
-        accounting_delta = _int_or_none(
-            equity_observation.get("accounting_delta_cents")
-        )
+        position_market_value = _int_or_none(equity_observation.get("position_market_value_cents"))
+        accounting_delta = _int_or_none(equity_observation.get("accounting_delta_cents"))
         if account_id:
             net_return = safe_float(equity_observation.get("net_return_pct"))
             gross_return = safe_float(equity_observation.get("gross_return_pct"))
@@ -1146,9 +1140,7 @@ def _aggregate_daily(
         benchmark_values = [
             row.benchmark_return_pct for row in realized if row.benchmark_return_pct is not None
         ]
-        ledger_benchmark = safe_float(
-            equity_observation.get("market_benchmark_return_pct")
-        )
+        ledger_benchmark = safe_float(equity_observation.get("market_benchmark_return_pct"))
         benchmark = (
             ledger_benchmark
             if ledger_benchmark is not None
@@ -1158,9 +1150,7 @@ def _aggregate_daily(
                 else None
             )
         )
-        cash_benchmark = safe_float(
-            equity_observation.get("cash_benchmark_return_pct")
-        )
+        cash_benchmark = safe_float(equity_observation.get("cash_benchmark_return_pct"))
         status = "NO_TRADE" if explicit_no_trade and not quarantined else "COMPLETE"
         if (
             missing
@@ -1207,12 +1197,10 @@ def _aggregate_daily(
         policies = sorted({row.execution_policy_version for row in group})
         execution_policy_version = policies[0] if len(policies) == 1 else "mixed"
         has_portfolio_observation = any(
-            row.record_type in {"portfolio_observation", "account_observation"}
-            for row in group
+            row.record_type in {"portfolio_observation", "account_observation"} for row in group
         )
         realized_trade_count = sum(
-            row.trade_count if row.record_type == "portfolio_observation" else 1
-            for row in realized
+            row.trade_count if row.record_type == "portfolio_observation" else 1 for row in realized
         )
         unrealized_trade_count = sum(
             row.open_position_count
@@ -1285,9 +1273,7 @@ def _aggregate_daily(
                     else "observed_equity_change"
                     if has_portfolio_observation and net_return is not None
                     else (
-                        "net_after_costs"
-                        if net_return is not None
-                        else "gross_observed_or_missing"
+                        "net_after_costs" if net_return is not None else "gross_observed_or_missing"
                     )
                 ),
             }
@@ -1570,9 +1556,8 @@ def _public_safety_evidence(
     if account_day is None:
         return _unknown_safety_evidence()
     account_payload = _json_object(account_day.get("payload_json", "{}"))
-    source_refs = (
-        _json_list(account_day.get("source_refs_json", "[]"))
-        or list(account_payload.get("source_refs") or [])
+    source_refs = _json_list(account_day.get("source_refs_json", "[]")) or list(
+        account_payload.get("source_refs") or []
     )
     if str(account_day.get("status") or "").upper() == "NO_TRADE":
         return {
@@ -1640,9 +1625,7 @@ def _public_safety_evidence(
                     str(trace.get("policy_version") or ""),
                 ]
             )
-        passed = len(checks) == len(traces) and all(
-            item.get("passed") is True for item in checks
-        )
+        passed = len(checks) == len(traces) and all(item.get("passed") is True for item in checks)
         output[public_key] = {
             "state": "verified" if passed else "blocked",
             "value": [item.get("observed") for item in checks] if checks else None,

@@ -16,6 +16,7 @@ from typing import Any
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.network_safety import open_allowlisted_url
 
 YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_SOURCE_NAME = "yahoo_finance_chart"
@@ -65,9 +66,10 @@ def fetch_yahoo_chart(
     last_error: Exception | None = None
     for attempt in range(1, config.request_retries + 1):
         try:
-            with urllib.request.urlopen(  # noqa: S310 - fixed Yahoo Finance host.
+            with open_allowlisted_url(
                 request,
                 timeout=config.request_timeout_seconds,
+                allowed_hosts=("query1.finance.yahoo.com",),
             ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
                 if not isinstance(payload, dict):

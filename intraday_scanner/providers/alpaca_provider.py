@@ -19,6 +19,7 @@ from typing import Any
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.base import MarketDataProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -63,8 +64,10 @@ class AlpacaProvider(MarketDataProvider):
         last_error: Exception | None = None
         for attempt in range(1, config.request_retries + 1):
             try:
-                with urllib.request.urlopen(  # noqa: S310 - URL is fixed to Alpaca base URL.
-                    request, timeout=config.request_timeout_seconds
+                with open_allowlisted_url(
+                    request,
+                    timeout=config.request_timeout_seconds,
+                    allowed_hosts=("data.alpaca.markets",),
                 ) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:

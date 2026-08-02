@@ -372,7 +372,7 @@ def test_url_ingestion_disabled_by_default_no_network(tmp_path, monkeypatch):
     config = load_automation_config(config_path)
     monkeypatch.setattr(
         e2e_automation_service,
-        "urlopen",
+        "open_allowlisted_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network called")),
     )
 

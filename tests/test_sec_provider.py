@@ -23,12 +23,13 @@ class _FakeResponse:
 
 
 def test_sec_rss_provider_parses_filings_without_network(monkeypatch):
-    def fake_urlopen(request, timeout):
+    def fake_open_allowlisted_url(request, *, timeout, allowed_hosts):
+        assert allowed_hosts == ("sec.gov",)
         return _FakeResponse()
 
     monkeypatch.setattr(
-        "intraday_scanner.providers.sec_provider.urllib.request.urlopen",
-        fake_urlopen,
+        "intraday_scanner.providers.sec_provider.open_allowlisted_url",
+        fake_open_allowlisted_url,
     )
 
     provider = SECRSSProvider(ScannerConfig())

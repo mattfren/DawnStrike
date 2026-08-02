@@ -22,7 +22,8 @@ successful Telegram delivery without the named evidence.
 
 ## Current verified baseline
 
-- Candidate HEAD: `cd1acded13c223a82655939103963ebbbc4d966d`.
+- Committed replay-control baseline: `97d7a3d8d02bfb0fff9b736b91d6a81b58153951`.
+  Record the final security-hardening commit SHA before any cutover.
 - Runtime and public production currently serve old SHA
   `692e785cf8304a8045e88ab221dc644d4eb2e9e7`.
 - Production is alive but `/api/readiness` is HTTP 503 with
@@ -44,7 +45,9 @@ successful Telegram delivery without the named evidence.
 - Scheduler registration code is correct but live tasks are interactive,
   battery-unsafe, and three latest runs failed. A password-logon identity is
   required before changing them.
-- Bandit has 0 high and 30 medium baseline findings: 13 B310 and 17 B608.
+- Raw Bandit after the current security hardening has 0 findings. The boundary
+  is covered by `network_safety` and `sql_safety` tests; do not remove those
+  controls or widen a baseline to bypass them.
 
 ## Phase 0 — freeze and verify before every mutation
 
@@ -76,22 +79,18 @@ git diff --check
 Also parse every PowerShell script, execute the tracked-file secret scan,
 generate the SBOM, and save all receipts/hashes.
 
-## Phase 1 — remove known legacy security exposure
+## Phase 1 — preserve the hardened security boundary
 
-1. Replace every B310 call with a tested HTTPS URL validator that rejects
-   non-HTTPS schemes, credentials in URLs, unapproved hosts, redirects to
-   unapproved hosts, and uncontrolled user-agent/header construction. Permit
-   only explicit domains for Alpaca, SEC, Nasdaq, Yahoo, configured approved
-   providers, and Telegram. Apply the same rule to the two notification scripts.
-2. Replace every B608 dynamic identifier interpolation with a narrow,
-   centralized identifier allowlist. Keep values parameterized. For `IN` lists,
-   generate placeholders from a bounded list and test empty, malformed, and
-   hostile values. Never accept a table/order/column identifier from a request,
+1. Preserve `network_safety.open_allowlisted_url` for every network call.
+   Maintain HTTPS-by-default, reject URL credentials/non-default ports, and
+   revalidate every redirect. A new source needs an explicit approved host and
+   a test for its rejection path before it can be enabled.
+2. Preserve `sql_safety` for every dynamic SQLite identifier and ORDER BY.
+   Values stay parameterized. `IN` lists may contain only generated `?`
+   placeholders. Never accept a table/order/column identifier from a request,
    config, database payload, or CLI argument without allowlist resolution.
-3. Add regression tests for every rejection path. Shrink the Bandit baseline;
-   never add a new ignore merely to make a scan green.
-4. Re-run Bandit. Report the exact residual count and reason if any legitimate
-   finding cannot be eliminated safely in this pass.
+3. Re-run raw Bandit and require zero findings. Do not expand the baseline or
+   add an ignore merely to make a scan green.
 
 ## Phase 2 — source and universe truth
 

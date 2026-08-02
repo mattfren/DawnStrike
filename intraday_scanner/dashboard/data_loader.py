@@ -36,6 +36,11 @@ from intraday_scanner.scoring import score_universe
 from intraday_scanner.services.e2e_automation_service import automation_status
 from intraday_scanner.services.screener_automation import screener_automation_status
 from intraday_scanner.services.web_collection_service import web_automation_status
+from intraday_scanner.sql_safety import (
+    quote_sql_identifier,
+    quote_sql_identifiers,
+    quote_sql_order_by,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 CALENDAR_RETURN_POLICIES = {
@@ -199,11 +204,7 @@ def _operator_today_signals(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if is_valid_ticker(row.get("ticker"))
         ]
         latest_day = _operator_today_market_date(historical, payload)
-        source = [
-            row
-            for row in historical
-            if str(row.get("market_date") or "")[:10] == latest_day
-        ]
+        source = [row for row in historical if str(row.get("market_date") or "")[:10] == latest_day]
     clean = [
         {**dict(row), "ticker": normalize_ticker(row.get("ticker") or row.get("Ticker"))}
         for row in source
@@ -229,11 +230,7 @@ def _operator_today_market_date(
     if days:
         return days[-1]
     summary = payload.get("summary")
-    created_at = (
-        str(summary.get("created_at") or "")
-        if isinstance(summary, dict)
-        else ""
-    )
+    created_at = str(summary.get("created_at") or "") if isinstance(summary, dict) else ""
     return created_at[:10] if len(created_at) >= 10 else date.today().isoformat()
 
 
@@ -251,18 +248,12 @@ def _operator_today_row(
         (
             dict(row)
             for row in outcomes
-            if (
-                signal_id
-                and str(row.get("signal_id") or "") == signal_id
-            )
+            if (signal_id and str(row.get("signal_id") or "") == signal_id)
             or (
                 normalize_ticker(row.get("ticker")) == ticker
-                and str(
-                    row.get("market_date")
-                    or row.get("date")
-                    or row.get("entry_time")
-                    or ""
-                )[:10]
+                and str(row.get("market_date") or row.get("date") or row.get("entry_time") or "")[
+                    :10
+                ]
                 == day
             )
         ),
@@ -336,14 +327,10 @@ def _operator_today_row(
         "Failure Line": display_price(failure),
         "Now Return": display_return(real_return_pct(open_price, current_price)),
         "Data Quality": (
-            "Limited"
-            if current_source == NO_CURRENT_PRICE_SOURCE
-            else "Sourced observation"
+            "Limited" if current_source == NO_CURRENT_PRICE_SOURCE else "Sourced observation"
         ),
         "Why": str(
-            signal.get("catalyst_summary")
-            or signal.get("catalyst_headline")
-            or "no clear catalyst"
+            signal.get("catalyst_summary") or signal.get("catalyst_headline") or "no clear catalyst"
         ),
         "_signal_id": signal_id,
         "_market_date": day,
@@ -359,16 +346,11 @@ def _operator_latest_price(
     ordered = sorted(
         observations,
         key=lambda row: str(
-            row.get("observed_at")
-            or row.get("requested_at")
-            or row.get("created_at")
-            or ""
+            row.get("observed_at") or row.get("requested_at") or row.get("created_at") or ""
         ),
         reverse=True,
     )
-    if ordered and "is_usable" in ordered[0] and not _operator_truthy(
-        ordered[0].get("is_usable")
-    ):
+    if ordered and "is_usable" in ordered[0] and not _operator_truthy(ordered[0].get("is_usable")):
         return None, NO_CURRENT_PRICE_SOURCE
     for row in ordered:
         if "is_usable" in row and not _operator_truthy(row.get("is_usable")):
@@ -396,19 +378,12 @@ def _operator_today_row_status(
 ) -> str:
     if target is not None and current_price is not None and current_price >= target:
         return "TARGET HIT"
-    if (
-        current_price is not None
-        and entry_watch is not None
-        and current_price >= entry_watch
-    ):
+    if current_price is not None and entry_watch is not None and current_price >= entry_watch:
         return "ENTRY TRIGGERED"
     if outcome and current_price is None:
         return "OUTCOME NEEDED"
     label = str(
-        signal.get("signal_label")
-        or signal.get("label")
-        or signal.get("action")
-        or ""
+        signal.get("signal_label") or signal.get("label") or signal.get("action") or ""
     ).upper()
     if "NO CLEAN EDGE" in label:
         return "NO CLEAN EDGE"
@@ -2239,7 +2214,8 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()  # noqa: S608
+    table_sql = quote_sql_identifier(table)
+    rows = connection.execute(f"PRAGMA table_info({table_sql})").fetchall()
     return {str(row[1]) for row in rows}
 
 
@@ -2254,9 +2230,14 @@ def _select_rows(
     selected = [column for column in columns if column in existing]
     if not selected:
         return []
-    query = f"SELECT {', '.join(selected)} FROM {table}"  # noqa: S608
+    table_sql = quote_sql_identifier(table)
+    columns_sql = quote_sql_identifiers(selected, allowed=existing)
+    # SQL identifiers are individually validated against the live table schema.
+    query = f"SELECT {columns_sql} FROM {table_sql}"  # nosec B608
     if order_by:
-        query += f" ORDER BY {order_by}"
+        order_sql = quote_sql_order_by(order_by, allowed_columns=existing)
+        # The ORDER BY grammar permits only schema columns and fixed directions.
+        query += f" ORDER BY {order_sql}"  # nosec B608
     rows = connection.execute(query).fetchall()
     return [
         {column: row[column] if column in row.keys() else None for column in selected}

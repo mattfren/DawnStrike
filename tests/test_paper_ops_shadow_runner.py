@@ -584,6 +584,20 @@ def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
     _seed_root(root, parent)
     manifest_path = root / "candidate_registration.json"
     write_json(manifest_path, _registration_manifest())
+
+    class RegistrationDayDateTime(datetime):
+        """Freeze public registration before the first forward evidence day."""
+
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            assert tz is timezone.utc
+            return datetime.combine(
+                day_one - timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+
+    monkeypatch.setattr(shadow_runner, "datetime", RegistrationDayDateTime)
     registered = shadow_runner.register_shadow_challenger(
         manifest_path=manifest_path,
         output_root=root,

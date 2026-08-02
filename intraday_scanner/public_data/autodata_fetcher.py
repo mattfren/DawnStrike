@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from intraday_scanner.network_safety import open_allowlisted_url
 
 
 class ProviderHttpError(Exception):
@@ -30,6 +32,7 @@ def fetch_json_url(
     headers: dict[str, str] | None = None,
     timeout_seconds: float = 20.0,
     user_agent: str = "Dawnstrike-v2-AutoData/1.0 research-only",
+    allowed_hosts: tuple[str, ...],
 ) -> dict[str, object]:
     request = Request(
         url,
@@ -40,7 +43,11 @@ def fetch_json_url(
         },
     )
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+        with open_allowlisted_url(
+            request,
+            timeout=timeout_seconds,
+            allowed_hosts=allowed_hosts,
+        ) as response:
             text = response.read().decode("utf-8")
         payload = json.loads(text)
     except HTTPError as exc:

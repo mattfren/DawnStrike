@@ -16,7 +16,7 @@ cohort, before costs, not an account return or live-trading result.
 
 | Surface | Current evidence | Verdict |
 | --- | --- | --- |
-| Terra worktree | `codex/terra-alphaops-v6`, clean before this audit; candidate HEAD `cd1acded13c223a82655939103963ebbbc4d966d`, five commits ahead of `origin/main` | Isolated candidate exists; not deployed. |
+| Terra worktree | `codex/terra-alphaops-v6`; committed replay-control baseline `97d7a3d8d02bfb0fff9b736b91d6a81b58153951`, plus the uncommitted security hardening described below | Isolated candidate exists; not deployed. |
 | Runtime and public site | Runtime and production health both serve `692e785cf8304a8045e88ab221dc644d4eb2e9e7`; public build is `f42ac827fe55324ae491` | Hardened candidate is not in runtime or production. |
 | Production readiness | `/api/health` is HTTP 200, `/api/readiness` is HTTP 503 with `safety_evidence_unverified`, `snapshot_not_publishable`, and `pipeline_not_ready` | Honest degraded publication; do not promote. |
 | Durable DB | `shadow_real.sqlite` SHA-256 `5B65C7DC823806F1570015F6F4922E4B1FA73D2B2A84BE2097A14F611D3FFF3F`; `PRAGMA quick_check=ok`; schema version 13; 10 outcomes, 254 Alpha signals, 109 notifications, 16 fills | Intact legacy state, but no current V6/source/benchmark truth. |
@@ -26,7 +26,7 @@ cohort, before costs, not an account return or live-trading result.
 | Active forward alert path | Alpha cycle gates before persistence; review selects only `PASS`/`ALERT_OK`; legacy Web Telegram candidates require the same strict fields; V5 watcher requires exact selected membership and independently rejects watch-only rows | Forward routes fail closed in source and regression tests. |
 | Scheduler | Morning, monitor, EOD, and daily-finalize tasks point to the intended runtime/state roots, but all use `Interactive` logon and unsafe battery settings. Last results are `1`, `1`, `1`, and `0`, respectively. | Not unattended. Re-registration requires the approved password-logon identity. |
 | Source truth | No `config/web_sources.yaml` exists in the runtime or candidate. Only contract templates exist. Alpaca credentials pass presence validation, but that is not an entitlement or historical-data validation. No dated V6 universe is registered. | Source collection and return labeling remain blocked. |
-| Security | Bandit reports 0 high, 30 medium findings: 13 URL-open and 17 dynamic-SQL findings. Existing baselines prevent regression but do not remove the legacy surface. | Do not refresh the baseline; harden the named surfaces. |
+| Security | Raw Bandit scan after this hardening reports **0 findings**. `network_safety` validates schemes, credentials, ports, hosts, and redirects; `sql_safety` validates identifiers and ORDER BY grammar before composition. | Local static surface is hardened; preserve tests and do not expand the baseline. |
 
 ## What was hardened in this pass
 
@@ -44,6 +44,15 @@ cohort, before costs, not an account return or live-trading result.
 - Created a fresh, checksummed durable-state backup and performed an
   idempotent copy-on-write migration rehearsal. Neither operation changed the
   live durable DB.
+- Added one redirect-aware, approved-host HTTP transport and moved all prior
+  URL-open callers (providers, web collection, notification scripts, and URL
+  ingestion) behind it. HTTPS is the default; legacy web collection must name
+  allowed hosts explicitly to permit HTTP.
+- Added centralized SQLite identifier and ORDER BY validation. Dynamic values
+  remain bound parameters; hostile identifiers and ordering expressions are
+  regression-tested and rejected before SQLite executes them.
+- Repaired the PaperOps shadow lifecycle test so its registration timestamp is
+  deterministic and still proves the required next-session activation rule.
 
 ## Why returns were bad
 
@@ -64,23 +73,19 @@ cohort, before costs, not an account return or live-trading result.
 
 1. **Do not deploy or claim performance.** Keep `/api/readiness` degraded until
    source, run, and public-artifact gates are objectively complete.
-2. **Burn down legacy risk.** Replace the 13 B310 URL-open findings with tested
-   HTTPS host allowlists, and the 17 B608 findings with identifier allowlists
-   and parameterized query construction. Remove findings rather than expanding
-   the Bandit baseline.
-3. **Make source truth real.** Obtain an approved primary and independent
+2. **Make source truth real.** Obtain an approved primary and independent
    price/outcome source, accountable user-agent contact, secure configuration,
    and terms-compliant point-in-time universe source. Build/validate the dated
    universe artifact, preview it, and register it by exact preview hash.
-4. **Cut over safely.** After all local gates pass, copy the exact candidate SHA
+3. **Cut over safely.** After all local gates pass, copy the exact candidate SHA
    to `C:\r\dawnstrike-runtime`; make another protected backup; migrate only
    after a fresh copy-on-write rehearsal; re-register tasks with the supplied
    password-logon identity; run the scheduler doctor and a dated dry-run chain.
-5. **Prove the product.** Build a clean Vercel preview bound to the exact
+4. **Prove the product.** Build a clean Vercel preview bound to the exact
    source/data/build hashes; verify Calendar, Research, System, headers,
    artifact scan, health, readiness, and rollback; only then request a
    production promotion.
-6. **Learn prospectively.** Keep V6 daily work label-only and refits weekly.
+5. **Learn prospectively.** Keep V6 daily work label-only and refits weekly.
    Run one immutable, tagged experiment at a time. Do not claim improved returns
    before 60 forward sessions, 100 closed after-cost labels, complete
    source/benchmark coverage, positive purged OOF, calibration/interval proof,
@@ -107,4 +112,19 @@ py -m pytest tests/test_alpha_alert_replay_service.py tests/test_alpha_v5_policy
 
 py -m ruff check intraday_scanner/services/alpha_alert_replay_service.py intraday_scanner/cli.py tests/test_alpha_alert_replay_service.py
 All checks passed
+
+py -m pytest tests/test_network_safety.py tests/test_sql_safety.py tests/test_sec_provider.py tests/test_e2e_automation.py tests/test_web_autopilot.py tests/test_yahoo_chart_fetcher.py tests/test_paper_ops_shadow_runner.py -q
+83 passed
+
+py -m pytest -q
+Captured full-suite log reached [100%] with no FAILED, ERROR, or Traceback marker
+
+py -m ruff check .
+All checks passed
+
+py -m mypy intraday_scanner
+Success: no issues found in 208 source files
+
+py -m bandit -r intraday_scanner scripts -ll -f json -o build\bandit-after-network.json
+0 findings
 ```

@@ -10,6 +10,7 @@ from typing import Any
 from intraday_scanner.services.scheduler_doctor_service import (
     scheduler_doctor as _scheduler_doctor,
 )
+from intraday_scanner.sql_safety import quote_sql_identifier
 
 
 def scheduler_doctor(
@@ -84,4 +85,9 @@ def _table_names(db_path: str | Path) -> set[str]:
 
 def _count(db_path: str | Path, table: str) -> int:
     with sqlite3.connect(db_path) as connection:
-        return int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+        table_sql = quote_sql_identifier(table)
+        return int(
+            connection.execute(
+                f"SELECT count(*) FROM {table_sql}"  # nosec B608
+            ).fetchone()[0]
+        )

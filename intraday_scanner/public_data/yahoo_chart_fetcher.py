@@ -7,8 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.v2.data.market import MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data.yahoo_chart import (
     DEFAULT_YAHOO_CHART_SYMBOLS,
@@ -61,9 +62,7 @@ def fetch_yahoo_chart_daily_dataset(
             except (OSError, TimeoutError, TypeError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt < max_attempts and retry_backoff_seconds:
-                    time.sleep(
-                        min(retry_backoff_seconds * (2 ** (attempt - 1)), 4.0)
-                    )
+                    time.sleep(min(retry_backoff_seconds * (2 ** (attempt - 1)), 4.0))
         if payload is None:
             warnings.append(
                 f"{normalized}: public chart fetch failed after {max_attempts} attempts "
@@ -150,7 +149,11 @@ def _fetch_json(url: str, *, timeout_seconds: float) -> dict[str, Any]:
             "User-Agent": "Dawnstrike-v2-AlphaLab/1.0 research-only",
         },
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
+    with open_allowlisted_url(
+        request,
+        timeout=timeout_seconds,
+        allowed_hosts=("query1.finance.yahoo.com",),
+    ) as response:
         payload = response.read().decode("utf-8")
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):

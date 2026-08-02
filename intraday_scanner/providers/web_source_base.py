@@ -15,6 +15,7 @@ from typing import Any
 
 from intraday_scanner.errors import ConfigError, DataProviderError
 from intraday_scanner.models import utc_now_iso
+from intraday_scanner.network_safety import open_allowlisted_url
 
 DEFAULT_WEB_CONFIG_PATH = Path("config/web_sources.yaml")
 
@@ -260,12 +261,16 @@ def fetch_text(
             headers={
                 "User-Agent": config.user_agent,
                 "Accept": (
-                    "text/html,application/xhtml+xml,application/xml,"
-                    "application/json,text/plain"
+                    "text/html,application/xhtml+xml,application/xml,application/json,text/plain"
                 ),
             },
         )
-        with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:  # noqa: S310
+        with open_allowlisted_url(
+            request,
+            timeout=config.timeout_seconds,
+            allowed_hosts=allowed_domains,
+            allow_http=True,
+        ) as response:
             raw = response.read()
             content_type = response.headers.get("Content-Type", "")
             status_code = int(getattr(response, "status", 200) or 200)

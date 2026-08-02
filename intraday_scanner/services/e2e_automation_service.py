@@ -13,11 +13,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from intraday_scanner.config import load_config
 from intraday_scanner.errors import DataProviderError, NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
+from intraday_scanner.network_safety import open_allowlisted_url, require_allowed_network_url
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.email import EmailNotifier
 from intraday_scanner.notifiers.telegram_formatter import (
@@ -844,15 +845,21 @@ def safe_url_ingest_screener(
     allowed_domains: tuple[str, ...],
     timeout_seconds: float = 10.0,
 ) -> Path:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise DataProviderError("URL screener ingestion only allows http/https URLs.")
-    host = parsed.hostname or ""
-    allowed = set(allowed_domains) or {host}
-    if host not in allowed:
-        raise DataProviderError(f"URL host {host} is not in configured allowed_domains.")
+    try:
+        require_allowed_network_url(
+            url,
+            allowed_hosts=allowed_domains,
+            allow_http=True,
+        )
+    except ValueError as exc:
+        raise DataProviderError(f"URL screener ingestion blocked: {exc}") from exc
     request = Request(url, headers={"User-Agent": "DawnstrikeResearchBot/1.0"})
-    with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+    with open_allowlisted_url(
+        request,
+        timeout=timeout_seconds,
+        allowed_hosts=allowed_domains,
+        allow_http=True,
+    ) as response:
         html = response.read().decode("utf-8", errors="replace")
     parser = _TableParser()
     parser.feed(html)
@@ -1179,11 +1186,7 @@ def _latest_file(paths: list[Path]) -> Path | None:
 
 
 def _latest_outcome_file(path: Path) -> Path | None:
-    files = [
-        item
-        for item in _pending_files(path)
-        if _csv_has_completed_outcome_rows(item)
-    ]
+    files = [item for item in _pending_files(path) if _csv_has_completed_outcome_rows(item)]
     return _latest_file(files)
 
 
@@ -1264,8 +1267,7 @@ def _missing_outcome_tickers(store: SQLiteScanStore, *, limit: int | None = None
         if ticker and ticker not in ordered:
             ordered.append(ticker)
     outcomes = {
-        str(row.get("ticker", "")).upper()
-        for row in store.load_manual_outcomes(limit=5000)
+        str(row.get("ticker", "")).upper() for row in store.load_manual_outcomes(limit=5000)
     }
     missing = [ticker for ticker in ordered if ticker and ticker not in outcomes]
     return missing[:limit] if limit else missing
