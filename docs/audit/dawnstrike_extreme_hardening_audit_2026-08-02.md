@@ -16,7 +16,7 @@ cohort, before costs, not an account return or live-trading result.
 
 | Surface | Current evidence | Verdict |
 | --- | --- | --- |
-| Terra worktree | `codex/terra-alphaops-v6`; committed replay-control baseline `97d7a3d8d02bfb0fff9b736b91d6a81b58153951`, plus the uncommitted security hardening described below | Isolated candidate exists; not deployed. |
+| Terra worktree | `codex/terra-alphaops-v6`; replay-control baseline `97d7a3d8d02bfb0fff9b736b91d6a81b58153951` and security hardening `ab6ef9a4` | Isolated candidate exists; not deployed. |
 | Runtime and public site | Runtime and production health both serve `692e785cf8304a8045e88ab221dc644d4eb2e9e7`; public build is `f42ac827fe55324ae491` | Hardened candidate is not in runtime or production. |
 | Production readiness | `/api/health` is HTTP 200, `/api/readiness` is HTTP 503 with `safety_evidence_unverified`, `snapshot_not_publishable`, and `pipeline_not_ready` | Honest degraded publication; do not promote. |
 | Durable DB | `shadow_real.sqlite` SHA-256 `5B65C7DC823806F1570015F6F4922E4B1FA73D2B2A84BE2097A14F611D3FFF3F`; `PRAGMA quick_check=ok`; schema version 13; 10 outcomes, 254 Alpha signals, 109 notifications, 16 fills | Intact legacy state, but no current V6/source/benchmark truth. |
