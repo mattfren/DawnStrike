@@ -63,3 +63,14 @@ def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:
         runner = Path("scripts", filename).read_text(encoding="utf-8")
         assert 'import_dawnstrike_environment.ps1"' in runner
         assert "Import-DawnstrikeEnvironment -StateRoot $state" in runner
+
+
+def test_native_process_runner_preserves_real_exit_code_when_stderr_is_used() -> None:
+    runner = Path("scripts/dawnstrike_process_runner.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert '$previousErrorActionPreference = $ErrorActionPreference' in runner
+    assert '$ErrorActionPreference = "Continue"' in runner
+    assert '$ErrorActionPreference = $previousErrorActionPreference' in runner
+    assert "$exitCode = if ($null -eq $LASTEXITCODE)" in runner

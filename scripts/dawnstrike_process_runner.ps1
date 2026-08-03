@@ -17,8 +17,17 @@ function Invoke-DawnstrikeNativeProcess {
     $receiptPath = Join-Path $LogRoot "$safeName.receipt.json"
     $exitCode = 127
     $startError = $null
+    $previousErrorActionPreference = $ErrorActionPreference
 
     try {
+        # Windows PowerShell promotes native stderr records to PowerShell error
+        # records.  With the scheduled runners' ErrorActionPreference=Stop,
+        # ordinary Python logging on stderr otherwise jumps into this catch and
+        # is falsely recorded as a process-start failure with exit code 127.
+        # Resolve the executable while errors still terminate, then allow the
+        # native process to complete and trust its real exit code.
+        $null = Get-Command $FilePath -ErrorAction Stop
+        $ErrorActionPreference = "Continue"
         # Direct redirection preserves the native process exit code.  Do not put
         # this invocation in a PowerShell pipeline: `$LASTEXITCODE` would then
         # describe Tee-Object rather than the Python process on Windows PS 5.1.
@@ -28,6 +37,9 @@ function Invoke-DawnstrikeNativeProcess {
     catch {
         $startError = $_.Exception.Message
         Set-Content -LiteralPath $stderrPath -Value $startError -Encoding UTF8
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 
     $completedAt = (Get-Date).ToUniversalTime()
