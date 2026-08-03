@@ -2,6 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "outputDirectory": "build/public",
+  "git": {
+    "deploymentEnabled": false
+  },
   "functions": {
     "api/health.py": {
       "includeFiles": "build/public/**",
