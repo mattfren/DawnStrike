@@ -1,7 +1,8 @@
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 def test_minimal_health_and_readiness_modules_import_without_scanner_runtime() -> None:
@@ -31,6 +32,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
 ) -> None:
     from api import readiness
 
+    current_market_date = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
     public_root = tmp_path / "public"
     data_root = public_root / "data"
     data_root.mkdir(parents=True)
@@ -103,7 +105,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         "status": "ready",
         "http_status": 200,
         "snapshot_status": "no_trade",
-        "market_date": "2026-07-29",
+        "market_date": current_market_date,
         "live_trading_enabled": False,
         "research_only": True,
         "safety_status": "verified",
