@@ -352,7 +352,7 @@ def test_alpaca_first_mode_preserves_yahoo_as_secondary_reconciliation(
         out_dir=tmp_path / "capture",
         config=ScannerConfig(
             alpaca_api_key_id="test-key-id",
-            alpaca_api_secret_key="test-secret",
+            alpaca_api_secret_key="fixture-value",  # pragma: allowlist secret
             outcome_capture_provider_order="alpaca,yahoo",
         ),
         fetcher=unavailable_yahoo,
