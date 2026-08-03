@@ -11,6 +11,19 @@ def test_public_dashboard_has_five_section_information_architecture() -> None:
     assert "Market safety evidence" in html
 
 
+def test_public_dashboard_uses_command_center_visual_system() -> None:
+    html = Path("web/index.html").read_text(encoding="utf-8")
+    stylesheet = Path("web/assets/dawnstrike.css").read_text(encoding="utf-8")
+
+    assert "Evidence-grade alpha operations" in html
+    assert "Signal, <span>without the noise.</span>" in html
+    assert 'class="desk-status"' in html
+    assert 'class="hero-note"' in html
+    assert "--signal:#b9ff66;" in stylesheet
+    assert "position:sticky;" in stylesheet
+    assert "@media (prefers-reduced-motion:reduce)" in stylesheet
+
+
 def test_public_dashboard_overview_exposes_required_portfolio_metrics() -> None:
     html = Path("web/index.html").read_text(encoding="utf-8")
     for metric_id in (
