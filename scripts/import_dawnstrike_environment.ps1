@@ -21,6 +21,7 @@ function Import-DawnstrikeEnvironment {
         "ALPACA_API_KEY_ID",
         "ALPACA_API_SECRET_KEY",
         "ALPACA_DATA_FEED",
+        "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER",
         "POLYGON_API_KEY",
         "DATABENTO_API_KEY",
         "NEWS_API_KEY",

@@ -94,6 +94,7 @@ class ScannerConfig:
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
+    outcome_capture_provider_order: str = "yahoo,alpaca"
     polygon_api_key: str = ""
     databento_api_key: str = ""
     news_api_key: str = ""
@@ -150,6 +151,16 @@ class ScannerConfig:
             raise ConfigError("request_timeout_seconds must be positive")
         if self.request_retries < 1:
             raise ConfigError("request_retries must be at least 1")
+        outcome_providers = [
+            item.strip().lower()
+            for item in self.outcome_capture_provider_order.split(",")
+            if item.strip()
+        ]
+        if outcome_providers not in (["yahoo", "alpaca"], ["alpaca", "yahoo"]):
+            raise ConfigError(
+                "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER must be either "
+                "yahoo,alpaca or alpaca,yahoo"
+            )
         if self.premarket_enrichment_max_candidates < 1:
             raise ConfigError("premarket_enrichment_max_candidates must be positive")
         if self.premarket_enrichment_workers < 1:
@@ -322,6 +333,9 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),
         alpaca_data_feed=_env("ALPACA_DATA_FEED", "iex", env_values),
+        outcome_capture_provider_order=_env(
+            "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER", "yahoo,alpaca", env_values
+        ).lower(),
         polygon_api_key=_env("POLYGON_API_KEY", "", env_values),
         databento_api_key=_env("DATABENTO_API_KEY", "", env_values),
         news_api_key=_env("NEWS_API_KEY", "", env_values),

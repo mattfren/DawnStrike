@@ -11,6 +11,24 @@ Do not promote a static build when any of these checks fail:
 5. A dated, source-backed small-cap universe snapshot has been registered before the market session. Build its review candidate from the approved source contract and exact recorded raw artifact; hand-written universe JSON is not accepted. Its source lineage, membership status, ticker history, and corporate-action fields must be complete.
 6. The production scheduler uses a dedicated password-logon Windows identity that can access the network, encrypted secrets, the runtime and durable state roots, starts when available, and does not stop/refuse runs on battery. S4U is prohibited: it has no network or encrypted-file access.
 
+## Alpaca forward-only mode
+
+When no licensed point-in-time universe is available, prospective paper
+learning may start without pretending to validate historical strategy edge:
+
+1. Copy `config\web_sources.forward_alpaca.template.yaml` to the ignored local
+   `config\web_sources.yaml`; replace `REQUIRED_ACCOUNTABLE_EMAIL` with the
+   operator contact.
+2. Add `INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER=alpaca,yahoo` to the private
+   runtime environment. Alpaca is the read-only primary outcome source; Yahoo
+   is retained solely for bounded independent reconciliation.
+3. Keep `production_contract: false`. This configuration must not register a
+   V6 point-in-time universe, backfill historical performance, or claim model
+   superiority. Missing or conflicting source evidence remains ineligible.
+
+The daily ledger produced in this mode is a prospective research record only;
+it does not loosen any no-order-execution boundary.
+
 ## First rehearsal
 
 Run a dated, copy-on-write rehearsal with `--notify console`. Preserve every process receipt, source artifact, daily-run stage row, V6 decision, V6 outcome/terminal-missing receipt, and public artifact verifier result. A weekend or market-closed date may prove scheduler mechanics but does not prove live source collection.
