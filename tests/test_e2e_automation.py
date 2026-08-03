@@ -24,7 +24,15 @@ def test_automation_config_loading_and_missing_config_fallback(tmp_path):
 
     assert config.db_path == Path("data/shadow_real.sqlite")
     assert config.screener_sources[0].name == "local_inbox"
+    assert config.screener_sources[0].path == "data/inbox/screener"
+    assert config.outcomes["inbox"] == "data/inbox/outcomes"
     assert "console" in config.notification_channels
+
+
+def test_automation_config_path_normalizer_accepts_windows_style_values():
+    assert e2e_automation_service._portable_config_path("data\\inbox\\screener") == (
+        "data/inbox/screener"
+    )
 
 
 def test_source_priority_uses_local_inbox_before_url(tmp_path, monkeypatch):
@@ -174,8 +182,7 @@ def test_monitor_open_without_live_source_sends_manual_monitor_required(tmp_path
     store = SQLiteScanStore(db_path)
     assert store.load_recent_monitor_events()[0]["event_type"] == "manual_monitor_required"
     assert any(
-        row["channel_hint"] == "monitor_alert"
-        for row in store.load_recent_notifications(limit=20)
+        row["channel_hint"] == "monitor_alert" for row in store.load_recent_notifications(limit=20)
     )
 
 
@@ -310,9 +317,12 @@ def test_daemon_dry_run_max_cycles_and_scripts_exist(tmp_path):
         )
         == 0
     )
-    assert Path("scripts/run_automation_once.bat").read_text(encoding="utf-8").find(
-        "py -m intraday_scanner.cli"
-    ) >= 0
+    assert (
+        Path("scripts/run_automation_once.bat")
+        .read_text(encoding="utf-8")
+        .find("py -m intraday_scanner.cli")
+        >= 0
+    )
     assert Path("scripts/run_automation_daemon.bat").exists()
     assert Path("scripts/register_dawnstrike_automation.ps1").exists()
 
@@ -372,7 +382,7 @@ def test_url_ingestion_disabled_by_default_no_network(tmp_path, monkeypatch):
     config = load_automation_config(config_path)
     monkeypatch.setattr(
         e2e_automation_service,
-        "urlopen",
+        "open_allowlisted_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network called")),
     )
 
@@ -507,7 +517,7 @@ def _write_config(
                 "  preferred: deterministic",
                 "  fallback: none",
                 "schedule:",
-                "  morning_scan_time_ct: \"08:10\"",
+                '  morning_scan_time_ct: "08:10"',
                 "monitor:",
                 "  enabled: true",
                 "  interval_seconds: 60",

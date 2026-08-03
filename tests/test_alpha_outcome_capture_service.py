@@ -307,7 +307,7 @@ def test_bounded_secondary_provider_fallback_captures_full_attribution(
     )
 
     assert result["status"] == "complete"
-    assert primary_calls == 4  # two bounded attempts for NOVA and benchmark SPY
+    assert primary_calls == 6  # two bounded attempts for NOVA, SPY, and IWM
     outcome = result["outcomes"][0]
     assert outcome["outcome_source"] == "alpaca_market_data_iex"
     assert outcome["source_lineage"][0]["status"] == "provider_error"
@@ -321,6 +321,7 @@ def test_bounded_secondary_provider_fallback_captures_full_attribution(
     assert outcome["time_to_mfe_minutes"] == 388
     assert outcome["time_to_mae_minutes"] == 0
     assert outcome["benchmark_return_pct"] is not None
+    assert outcome["secondary_benchmark_return_pct"] is not None
     assert outcome["excess_return_pct"] is not None
     assert outcome["attribution_complete"] is True
     assert result["required_stage_failed"] is False

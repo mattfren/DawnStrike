@@ -8,6 +8,7 @@ param(
     [string]$PublicationMode = "Production",
     [string]$VercelProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
     [string]$BackupRoot = "",
+    [pscredential]$RunAsCredential,
     [switch]$ReplaceExisting
 )
 
@@ -15,6 +16,17 @@ $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
+if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
+    throw (
+        "RunAsCredential is required. Register finalization with a password-logon " +
+        "Windows identity that can reach the network, encrypted Vercel credentials, " +
+        "the Dawnstrike state root, and Telegram. Do not use S4U."
+    )
+}
+$taskPassword = $RunAsCredential.GetNetworkCredential().Password
+if ([string]::IsNullOrWhiteSpace($taskPassword)) {
+    throw "RunAsCredential must contain a non-empty Windows password."
+}
 $runner = Join-Path $runtime "scripts\run_daily_finalize.ps1"
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "Daily finalize runner not found: $runner"
@@ -49,12 +61,10 @@ $action = New-ScheduledTaskAction `
     -Argument $arguments `
     -WorkingDirectory $runtime
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
-$principal = New-ScheduledTaskPrincipal `
-    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-    -LogonType Interactive `
-    -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
+    -DisallowStartIfOnBatteries:$false `
+    -StopIfGoingOnBatteries:$false `
     -WakeToRun `
     -MultipleInstances IgnoreNew `
     -RestartCount 2 `
@@ -65,9 +75,11 @@ Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
-    -Principal $principal `
     -Settings $settings `
-    -Description "Dawnstrike v5 canonical performance, Calendar, readiness, and production publication. Research-only; no broker execution." `
+    -User $RunAsCredential.UserName `
+    -Password $taskPassword `
+    -RunLevel Limited `
+    -Description "Dawnstrike V6 canonical performance, Calendar, readiness, and publication. Research-only; no broker execution." `
     -Force | Out-Null
 
 Write-Output (

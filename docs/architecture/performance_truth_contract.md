@@ -41,3 +41,21 @@ no valid return. The source's own `daily_return_pct` field is diagnostic only
 when it disagrees with the derived equity return. PaperOps cost fields remain
 `reported_not_reconciled` unless the source proves that they are included in
 the observed equity delta.
+
+## Frozen V5 / V6 comparison
+
+`dawnstrike.account-comparison.v1` is the only V5/V6/cash/SPY/IWM comparison
+contract. Canonical reconciliation persists it with an exact input hash before
+the public projection receives bounded aggregates.
+
+- V5 and V6 each require one immutable paper-account ledger row per market
+  date, with sourced opening/ending equity, flows, positions, fees, spread,
+  slippage, P&L, a source hash, and an explicit `COMPLETE` or `NO_TRADE`
+  state.
+- Cash is the named `cash_zero_interest_v1` reference; its return is never a
+  default for missing data.
+- SPY and IWM each require one same-session sourced close return with lineage.
+- A V6 decision, outcome, signal return, or equal-weight basket is never a V6
+  account return. Missing V6 ledger evidence yields
+  `WAITING_FOR_AUTHORITATIVE_V6_ACCOUNT_LEDGER` with null metrics.
+- Promotion remains false until all five aligned series are complete.

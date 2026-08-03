@@ -51,6 +51,23 @@ def test_web_config_loading():
     assert config.rate_limit_seconds == 0
     assert "allowed.test" in config.allowed_domains
     assert any(source.type == "public_table_url" for source in config.sources)
+    fixture = next(source for source in config.sources if source.name == "fixture_public_table")
+    assert fixture.fixture_path == "tests/fixtures/public_table_fixture.html"
+
+
+def test_web_config_normalizes_windows_style_fixture_paths(tmp_path):
+    config_path = tmp_path / "sources.yaml"
+    config_path.write_text(
+        "sources:\n"
+        "  - name: fixture\n"
+        "    type: public_table_url\n"
+        "    fixture_path: tests\\fixtures\\public_table_fixture.html\n",
+        encoding="utf-8",
+    )
+
+    config = load_web_sources_config(config_path)
+
+    assert config.sources[0].fixture_path == "tests/fixtures/public_table_fixture.html"
 
 
 def test_example_web_config_uses_practical_source_hierarchy():
@@ -432,7 +449,7 @@ def test_browser_dependency_missing_gives_install_hint(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert result["reason"] == "browser_extractor_not_available"
-    assert "py -m pip install -e \".[browser]\"" in result["failure_reason"]
+    assert 'py -m pip install -e ".[browser]"' in result["failure_reason"]
 
 
 def test_web_ingest_public_table_outputs_and_persistence(tmp_path):
@@ -814,7 +831,7 @@ def test_web_telegram_daemon_dry_run_and_no_source_failure(tmp_path, capsys):
     assert "📊 Dawnstrike Summary" not in out
 
 
-def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, capsys):
+def test_web_telegram_daemon_quarantines_ungated_scanner_tickers(tmp_path, capsys):
     db_path = tmp_path / "web.sqlite"
 
     assert (
@@ -843,13 +860,14 @@ def test_web_telegram_daemon_dry_run_with_fixture_formats_watchlist(tmp_path, ca
 
     out = capsys.readouterr().out
     assert "🚀 Dawnstrike Watchlist" in out
-    assert "1) NOVA" in out
-    assert "🎯" in out
-    assert "🛑" in out
+    assert "No saved picks found." in out
+    assert "1) NOVA" not in out
+    assert "🎯" not in out
+    assert "🛑" not in out
     assert "Plan:" not in out
     assert "Targets:" not in out
     assert "Avoid if:" not in out
-    assert "👀 Manual Monitor Needed" in out
+    assert "👀 Manual Monitor Needed" not in out
     assert "📥 Outcome Data Needed" in out
     assert "Research only. No orders placed." in out
     assert SQLiteScanStore(db_path).load_latest_scan()["summary"]["top_ticker"] == "NOVA"

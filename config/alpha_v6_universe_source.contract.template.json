@@ -1,0 +1,11 @@
+{
+  "schema_version": "dawnstrike.alphaops_v6.universe_source_contract.v1",
+  "provider_id": "REQUIRED_LICENSED_PROVIDER_ID",
+  "dataset_id": "REQUIRED_POINT_IN_TIME_DATASET_ID",
+  "dataset_version": "REQUIRED_DATASET_VERSION",
+  "terms_reference": "REQUIRED_TERMS_ACCEPTANCE_REFERENCE",
+  "entitlement_reference": "REQUIRED_ENTITLEMENT_REFERENCE",
+  "accountable_contact": "REQUIRED_ACCOUNTABLE_EMAIL",
+  "approval_status": "PENDING_EXTERNAL_APPROVAL",
+  "expected_raw_artifact_sha256": "REQUIRED_RAW_ARTIFACT_SHA256"
+}

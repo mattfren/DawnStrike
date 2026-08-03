@@ -16,6 +16,7 @@ from typing import Any
 from intraday_scanner.market_calendar import MarketSessionStatus, market_session
 from intraday_scanner.performance.contracts import safe_float, stable_hash
 from intraday_scanner.performance.service import CanonicalPerformanceService
+from intraday_scanner.sql_safety import quote_sql_identifier
 from intraday_scanner.storage.migrations import run_migrations
 
 MAX_CALENDAR_BYTES = 500 * 1024
@@ -76,9 +77,7 @@ def write_public_calendar(
     ).encode("utf-8")
     compressed_bytes = len(gzip.compress(encoded, compresslevel=9, mtime=0))
     if compressed_bytes > MAX_CALENDAR_BYTES:
-        raise ValueError(
-            f"Public calendar exceeds {MAX_CALENDAR_BYTES} compressed bytes"
-        )
+        raise ValueError(f"Public calendar exceeds {MAX_CALENDAR_BYTES} compressed bytes")
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,9 +98,7 @@ def write_public_calendar(
         "payload_sha256": payload_sha,
         "artifact_path": path.name,
         "day_count": len(payload.get("days") or []),
-        "record_count": sum(
-            len(day.get("records") or []) for day in payload.get("days") or []
-        ),
+        "record_count": sum(len(day.get("records") or []) for day in payload.get("days") or []),
         "byte_count": len(encoded),
         "compressed_byte_count": compressed_bytes,
         "compression": "gzip",
@@ -175,14 +172,8 @@ def build_calendar_payload(
     """Map canonical daily rows into filterable day and month records."""
 
     daily = [dict(row) for row in performance.get("daily") or [] if isinstance(row, dict)]
-    detail_rows = [
-        dict(row) for row in performance.get("rows") or [] if isinstance(row, dict)
-    ]
-    ledger = [
-        dict(row)
-        for row in performance.get("account_ledger") or []
-        if isinstance(row, dict)
-    ]
+    detail_rows = [dict(row) for row in performance.get("rows") or [] if isinstance(row, dict)]
+    ledger = [dict(row) for row in performance.get("account_ledger") or [] if isinstance(row, dict)]
     contexts = selection_context or {}
     as_of = _parse_date(
         as_of_market_date
@@ -194,8 +185,7 @@ def build_calendar_payload(
     observed_dates = [
         parsed
         for row in daily
-        if (parsed := _parse_date(row.get("market_date"))) is not None
-        and parsed <= as_of
+        if (parsed := _parse_date(row.get("market_date"))) is not None and parsed <= as_of
     ]
     earliest = min(observed_dates, default=as_of.replace(day=1))
     start = max(earliest, as_of - timedelta(days=399)).replace(day=1)
@@ -203,8 +193,7 @@ def build_calendar_payload(
     for row in detail_rows:
         rows_by_identity[_identity(row)].append(row)
     ledger_by_account_day = {
-        (str(row.get("account_id") or ""), str(row.get("market_date") or "")): row
-        for row in ledger
+        (str(row.get("account_id") or ""), str(row.get("market_date") or "")): row for row in ledger
     }
     daily_by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in daily:
@@ -222,9 +211,7 @@ def build_calendar_payload(
                 row,
                 detail_rows=rows_by_identity.get(_identity(row), []),
                 selection_context=contexts,
-                ledger_row=ledger_by_account_day.get(
-                    (str(row.get("account_id") or ""), day)
-                ),
+                ledger_row=ledger_by_account_day.get((str(row.get("account_id") or ""), day)),
             )
             for row in sorted(
                 daily_by_day.get(day, []),
@@ -259,9 +246,7 @@ def build_calendar_payload(
                 "calendar_id": session.calendar_id,
                 "status": day_status,
                 "observed": bool(records),
-                "observed_zero": any(
-                    bool(record.get("observed_zero")) for record in records
-                ),
+                "observed_zero": any(bool(record.get("observed_zero")) for record in records),
                 "records": records,
             }
         )
@@ -309,9 +294,7 @@ def build_calendar_payload(
         "filters": {
             "cohorts": sorted({str(item["cohort"]) for item in identities}),
             "strategy_ids": sorted({str(item["strategy_id"]) for item in identities}),
-            "strategy_versions": sorted(
-                {str(item["strategy_version"]) for item in identities}
-            ),
+            "strategy_versions": sorted({str(item["strategy_version"]) for item in identities}),
             "execution_policy_versions": sorted(
                 {str(item["execution_policy_version"]) for item in identities}
             ),
@@ -341,9 +324,7 @@ def _calendar_record(
     benchmark = safe_float(row.get("benchmark_return_pct"))
     excess = safe_float(row.get("excess_return_pct"))
     explicit_observed_zero = bool(
-        ledger_row
-        and ledger_row.get("observed_zero") is True
-        and numeric_return == 0.0
+        ledger_row and ledger_row.get("observed_zero") is True and numeric_return == 0.0
     )
     if status == "NO_TRADE" and numeric_return == 0.0:
         explicit_observed_zero = True
@@ -442,17 +423,14 @@ def _monthly_aggregates(
         for row in accounts
         if isinstance(row, dict)
     }
-    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = (
-        defaultdict(list)
-    )
+    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     session_days: dict[str, list[date]] = defaultdict(list)
     for day in days:
         parsed = _parse_date(day.get("date"))
-        if (
-            parsed is not None
-            and day.get("market_session_status")
-            in {MarketSessionStatus.OPEN.value, MarketSessionStatus.EARLY_CLOSE.value}
-        ):
+        if parsed is not None and day.get("market_session_status") in {
+            MarketSessionStatus.OPEN.value,
+            MarketSessionStatus.EARLY_CLOSE.value,
+        }:
             session_days[str(day.get("month") or "")].append(parsed)
         for record in day.get("records") or []:
             key = (
@@ -468,15 +446,11 @@ def _monthly_aggregates(
     for key, records in sorted(grouped.items()):
         month, cohort, strategy_id, strategy_version, policy, account_id = key
         record_dates = [
-            parsed
-            for record in records
-            if (parsed := _parse_date(record.get("date"))) is not None
+            parsed for record in records if (parsed := _parse_date(record.get("date"))) is not None
         ]
         inception = account_activation.get(account_id) or min(record_dates, default=as_of)
         expected_dates = [
-            day
-            for day in session_days.get(month, [])
-            if day >= inception and day <= as_of
+            day for day in session_days.get(month, []) if day >= inception and day <= as_of
         ]
         eligible = [
             record
@@ -484,12 +458,8 @@ def _monthly_aggregates(
             if record.get("eligible_for_return") is True
             and safe_float(record.get("net_return_pct")) is not None
         ]
-        net_return = _compound(
-            safe_float(record.get("net_return_pct")) for record in eligible
-        )
-        gross_return = _compound(
-            safe_float(record.get("gross_return_pct")) for record in eligible
-        )
+        net_return = _compound(safe_float(record.get("net_return_pct")) for record in eligible)
+        gross_return = _compound(safe_float(record.get("gross_return_pct")) for record in eligible)
         benchmark_return = _compound_complete(
             safe_float(record.get("benchmark_return_pct")) for record in eligible
         )
@@ -513,9 +483,7 @@ def _monthly_aggregates(
                 "expected_market_day_count": expected_count,
                 "missing_or_ineligible_day_count": max(expected_count - eligible_count, 0),
                 "coverage_pct": (
-                    round(eligible_count / expected_count * 100.0, 4)
-                    if expected_count
-                    else None
+                    round(eligible_count / expected_count * 100.0, 4) if expected_count else None
                 ),
                 "no_trade_day_count": sum(
                     1 for record in eligible if record.get("status") == "NO_TRADE"
@@ -528,9 +496,7 @@ def _monthly_aggregates(
                     if net_return is not None and benchmark_return is not None
                     else None
                 ),
-                "net_pnl_cents": _sum_complete(
-                    record.get("net_pnl_cents") for record in eligible
-                ),
+                "net_pnl_cents": _sum_complete(record.get("net_pnl_cents") for record in eligible),
                 "return_method": "compounded_eligible_daily_account_returns",
             }
         )
@@ -545,17 +511,13 @@ def _load_selection_context(
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         selections = _select_optional(connection, "signal_selections", market_date)
-        deliveries = _select_optional(
-            connection, "notification_delivery_memberships", market_date
-        )
+        deliveries = _select_optional(connection, "notification_delivery_memberships", market_date)
         signals = _select_optional(connection, "historical_signals", market_date)
     deliveries_by_signal = {
         str(row.get("signal_id") or ""): row
         for row in sorted(
             deliveries,
-            key=lambda item: str(
-                item.get("delivered_at") or item.get("attempted_at") or ""
-            ),
+            key=lambda item: str(item.get("delivered_at") or item.get("attempted_at") or ""),
         )
     }
     signals_by_id = {str(row.get("signal_id") or ""): row for row in signals}
@@ -564,9 +526,7 @@ def _load_selection_context(
         signal_id = str(selection.get("signal_id") or "")
         selection_payload = _json_object(selection.get("payload_json"))
         signal = signals_by_id.get(signal_id, {})
-        signal_payload = _json_object(
-            signal.get("raw_payload_json") or signal.get("payload_json")
-        )
+        signal_payload = _json_object(signal.get("raw_payload_json") or signal.get("payload_json"))
         delivery = deliveries_by_signal.get(signal_id, {})
         delivery_payload = _json_object(delivery.get("payload_json"))
         combined = {**signal_payload, **selection_payload, **delivery_payload}
@@ -613,16 +573,22 @@ def _select_optional(
     ).fetchone()
     if not exists:
         return []
+    table_sql = quote_sql_identifier(table)
     if market_date:
         try:
+            # The table name is a validated SQLite identifier.
             rows = connection.execute(
-                f"SELECT * FROM {table} WHERE market_date <= ? ORDER BY rowid ASC",
+                f"SELECT * FROM {table_sql} WHERE market_date <= ? ORDER BY rowid ASC",  # nosec B608
                 (market_date,),
             ).fetchall()
         except sqlite3.OperationalError:
-            rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid ASC").fetchall()
+            rows = connection.execute(
+                f"SELECT * FROM {table_sql} ORDER BY rowid ASC"  # nosec B608
+            ).fetchall()
     else:
-        rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid ASC").fetchall()
+        rows = connection.execute(
+            f"SELECT * FROM {table_sql} ORDER BY rowid ASC"  # nosec B608
+        ).fetchall()
     return [dict(row) for row in rows]
 
 

@@ -6,6 +6,28 @@ const COHORTS = {
   shadow_challenger: "Shadow challenger",
 };
 
+const V6_GATE_LABELS = {
+  all_sourced_and_point_in_time: "All inputs sourced and point-in-time",
+  bootstrap_95_lower_bound_above_zero: "95% bootstrap lower bound above zero",
+  challenger_beats_frozen_v5_objective: "Beats the frozen V5 objective",
+  eligible_outcome_coverage_at_least_98_pct: "Eligible outcome coverage at least 98%",
+  gain_loss_concentration_no_more_than_25_pct: "Gain/loss concentration no more than 25%",
+  included_benchmark_coverage_100_pct: "Included benchmark coverage is 100%",
+  manual_operator_approval_recorded: "Manual operator approval recorded",
+  maximum_drawdown_no_worse_than_minus_8_pct: "Maximum drawdown no worse than -8%",
+  minimum_closed_paper_trades: "At least 100 closed paper trades",
+  minimum_forward_sessions: "At least 60 forward sessions",
+  no_lookahead_and_reconciliation_pass: "No-lookahead and reconciliation pass",
+  positive_excess_vs_primary_and_cash: "Positive excess versus benchmark and cash",
+  positive_mean_net_excess_return: "Positive mean net excess return",
+  positive_purged_walk_forward: "Positive purged walk-forward result",
+  positive_under_1_5x_slippage: "Positive under 1.5× slippage",
+  positive_untouched_holdout: "Positive untouched holdout",
+  primary_benchmark_coverage_complete: "SPY benchmark coverage complete",
+  profit_factor_at_least_1_20: "Profit factor at least 1.20",
+  secondary_benchmark_coverage_complete: "IWM benchmark coverage complete",
+};
+
 const PAGE_SIZE = 10;
 const state = {
   data: null,
@@ -14,6 +36,7 @@ const state = {
   calendar: null,
   calendarManifest: null,
   publicationSet: null,
+  v6: null,
   stage: null,
   calendarMonth: null,
   calendarSelectedDate: null,
@@ -27,6 +50,13 @@ const state = {
   performancePage: 0,
   researchPage: 0,
 };
+
+document.querySelectorAll(".table-wrap").forEach((region) => {
+  const caption = region.querySelector("caption")?.textContent?.trim();
+  region.setAttribute("role", "region");
+  region.setAttribute("aria-label", caption || "Scrollable data table");
+  region.setAttribute("tabindex", "0");
+});
 
 document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
@@ -85,7 +115,7 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet] = await Promise.all([
+    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
@@ -93,6 +123,7 @@ async function init() {
       loadJson("/data/calendar.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/calendar.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/v6-learning.json").catch(() => ({ payload: {}, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
@@ -100,6 +131,7 @@ async function init() {
     state.calendar = calendar.payload;
     state.calendarManifest = calendarManifest.payload;
     state.publicationSet = publicationSet.payload;
+    state.v6 = v6.payload;
     state.stage = stage.payload;
     state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
     initializeCalendarFilters();
@@ -148,6 +180,7 @@ function render() {
   renderLedger(rows, latest);
   renderCurve(official);
   renderResearchCohorts(daily);
+  renderV6Research();
   renderCalendar();
   renderSystem(state.readiness, state.manifest, state.stage, data);
 }
@@ -248,6 +281,128 @@ function renderResearchCohorts(daily) {
   document.getElementById("research-cohorts").innerHTML = groups.size ? [...groups.entries()].map(([cohort, value]) => `<div class="cohort-row"><strong>${escapeHtml(COHORTS[cohort] || cohort)}</strong><span>${value.days} day${value.days === 1 ? "" : "s"} · ${value.complete} complete</span></div>`).join("") : '<span class="muted">No backtest or challenger rows are published.</span>';
 }
 
+function renderV6Research() {
+  const v6 = state.v6 || {};
+  const promotion = v6.promotion_readiness || {};
+  const stateLabel = promotion.performance_status || "WAITING_FOR_FORWARD_EVIDENCE";
+  const forwardState = document.getElementById("forward-state");
+  if (forwardState) forwardState.textContent = stateLabel;
+  const cohorts = document.getElementById("research-cohorts");
+  if (!cohorts) return;
+  const count = Number(v6.learning_eligible_outcome_count || 0);
+  const sessions = Number(promotion.forward_session_count || 0);
+  const trades = Number(promotion.closed_paper_trade_count || 0);
+  const v6Row = `<div class="cohort-row"><strong>V6 shadow challenger</strong><span>${sessions}/60 sessions · ${trades}/100 after-cost labels · ${count} eligible</span></div>`;
+  cohorts.innerHTML += v6Row;
+
+  const chip = document.getElementById("v6-promotion-chip");
+  if (chip) {
+    chip.textContent = formatGateLabel(promotion.status || "NOT_ELIGIBLE_FOR_PROMOTION");
+    chip.className = `status-chip ${promotion.status === "ELIGIBLE_FOR_MANUAL_REVIEW" ? "warn" : promotion.status === "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION" ? "good" : "bad"}`;
+  }
+  const criteria = promotion.criteria || {};
+  const gateNode = document.getElementById("v6-promotion-gates");
+  if (gateNode) {
+    const gates = Object.entries(criteria);
+    gateNode.innerHTML = gates.length ? gates.map(([key, passed]) => `<div class="gate-row"><span class="gate-dot ${passed ? "good" : "bad"}" aria-hidden="true"></span><span>${escapeHtml(V6_GATE_LABELS[key] || formatGateLabel(key))}</span><strong class="${passed ? "good" : "bad"}">${passed ? "PASS" : "BLOCKED"}</strong></div>`).join("") : '<span class="muted">No promotion gate evidence is published.</span>';
+  }
+
+  const model = v6.latest_model_run || {};
+  const evaluation = v6.latest_evaluation || {};
+  const calibration = evaluation.calibration || {};
+  const intervals = evaluation.interval_coverage || {};
+  const drift = v6.latest_drift || {};
+  const operational = v6.operational_freshness || {};
+  const dailyMonitor = operational.latest_daily_monitor || {};
+  const weeklyTraining = operational.latest_weekly_training || {};
+  const evidenceGate = v6.prediction_evidence_gate || {};
+  const accountComparison = v6.account_comparison || {};
+  const modelNode = document.getElementById("v6-model-evidence");
+  if (modelNode) {
+    const details = [
+      ["Model", model.model_version || "Not trained"],
+      ["Training cutoff", model.training_cutoff || "Not available"],
+      ["Training status", model.status || "Not trained"],
+      ["Purged folds", evaluation.fold_count == null ? "Not evaluated" : String(evaluation.fold_count)],
+      ["No-lookahead", evaluation.no_lookahead === true ? "Passed" : "Not proven"],
+      ["Calibration", calibration.status || "Not evaluated"],
+      ["Interval coverage", intervals.coverage_pct == null ? (intervals.status || "Not evaluated") : `${Number(intervals.coverage_pct).toFixed(1)}%`],
+      ["Drift", drift.status || "Not evaluated"],
+      ["Daily monitor", dailyMonitor.created_at ? `${formatTimestamp(dailyMonitor.created_at)} · ${dailyMonitor.status || "Unknown"}` : "Not recorded"],
+      ["Weekly training", weeklyTraining.created_at ? `${formatTimestamp(weeklyTraining.created_at)} · ${weeklyTraining.status || "Unknown"}` : "Not recorded"],
+      ["Prediction display", evidenceGate.passed ? "Evidence gate passed" : "Hidden—evidence incomplete"],
+      ["Artifact", shortHash(model.model_artifact_hash_sha256) || "Not available"],
+    ];
+    modelNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const accountComparisonNode = document.getElementById("v6-account-comparison");
+  if (accountComparisonNode) {
+    const alignment = accountComparison.alignment || {};
+    const metrics = accountComparison.series_metrics || {};
+    const blockers = Array.isArray(accountComparison.promotion_blockers) ? accountComparison.promotion_blockers : [];
+    const details = [
+      ["Comparison state", accountComparison.status || "Not recorded"],
+      ["Aligned sessions", alignment.aligned_session_count == null ? "Not reported" : `${alignment.aligned_session_count}/${alignment.eligible_session_count ?? "?"}`],
+      ["Coverage", alignment.coverage_pct == null ? "Not reported" : `${Number(alignment.coverage_pct).toFixed(1)}%`],
+      ["V5 compounded", formatPercent(metrics.v5?.compounded_net_return_pct)],
+      ["V6 compounded", formatPercent(metrics.v6?.compounded_net_return_pct)],
+      ["Cash / SPY / IWM", [metrics.cash?.compounded_net_return_pct, metrics.SPY?.compounded_net_return_pct, metrics.IWM?.compounded_net_return_pct].map(formatPercent).join(" / ")],
+      ["Why withheld", blockers.length ? blockers.map(formatGateLabel).join(" · ") : "No blockers recorded"],
+    ];
+    accountComparisonNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const attribution = v6.failure_attribution || {};
+  const categories = attribution.categories || {};
+  const failureModes = attribution.failure_modes || {};
+  const executionCost = failureModes.execution_cost || {};
+  const dataQuality = failureModes.data_quality || {};
+  const failureNode = document.getElementById("v6-failure-attribution");
+  if (failureNode) {
+    const details = [
+      ["Attribution status", attribution.status || "Waiting for sourced outcomes"],
+      ["Setup × regime", summarizeFailureCohorts(categories.by_setup_regime)],
+      ["Source quality", summarizeFailureCohorts(categories.by_source_quality)],
+      ["Liquidity", summarizeFailureCohorts(categories.by_liquidity)],
+      ["Catalyst", summarizeFailureCohorts(categories.by_catalyst)],
+      ["Volatility", summarizeFailureCohorts(categories.by_volatility)],
+      ["Observed slippage", executionCost.observed_slippage_status || "Not reported"],
+      ["Outcome completeness", `${dataQuality.sourced_complete_count ?? 0} sourced · ${dataQuality.terminal_missing_count ?? 0} terminal missing`],
+    ];
+    failureNode.innerHTML = details.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  }
+
+  const replayNode = document.getElementById("v6-replay-list");
+  const decisions = Array.isArray(v6.decision_replay) ? v6.decision_replay : [];
+  if (replayNode) {
+    replayNode.innerHTML = decisions.length ? decisions.map((decision) => {
+      const reasons = Array.isArray(decision.reasons) && decision.reasons.length ? decision.reasons.join(" · ") : "No veto or rejection reason recorded";
+      const prediction = decision.prediction_visible
+        ? `Activation ${formatProbability(decision.activation_probability)} · expected excess ${formatPercentText(decision.conditional_net_excess_return_pct)} · utility LCB ${formatPercentText(decision.utility_lcb_pct)}`
+        : "Prediction hidden until the evidence gate passes";
+      return `<details class="decision-replay-card"><summary><span><strong>${escapeHtml(decision.ticker || "NO_TRADE")}</strong><small>${escapeHtml(decision.market_date || "Date unavailable")} · ${escapeHtml(formatGateLabel(decision.decision_state || decision.action || "UNKNOWN"))}</small></span><span class="status-chip">${escapeHtml(decision.setup_key || "no setup")}</span></summary><div class="decision-replay-body"><dl><dt>Why</dt><dd>${escapeHtml(reasons)}</dd><dt>Regime</dt><dd>${escapeHtml(decision.regime_key || "Unknown")}</dd><dt>Model</dt><dd>${escapeHtml(decision.model_version || "Not available")}</dd><dt>Evidence</dt><dd>${escapeHtml(prediction)}</dd><dt>Feature snapshot</dt><dd>${escapeHtml(shortHash(decision.feature_hash_sha256) || "Missing")}</dd><dt>Source lineage</dt><dd>${escapeHtml(shortHash(decision.source_lineage_hash_sha256) || "Missing")}</dd><dt>Decision ID</dt><dd>${escapeHtml(decision.decision_id || "Missing")}</dd></dl></div></details>`;
+    }).join("") : '<span class="muted">No V6 decisions are available for replay yet.</span>';
+  }
+}
+
+function summarizeFailureCohorts(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "No sourced outcomes yet";
+  return rows.slice(0, 3).map((row) => {
+    const eligible = Number(row.eligible_return_count || 0);
+    const mean = formatPercentText(row.mean_net_excess_return_pct);
+    return `${row.group || "unknown"}: ${eligible} eligible · mean ${mean}`;
+  }).join(" | ");
+}
+
+function formatGateLabel(value) {
+  return String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatProbability(value) {
+  return Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "Not reported";
+}
+
 function renderResearch(rows) {
   const body = document.getElementById("research-table");
   const research = rows.filter((row) => ["alphaops_signal_research", "alphaops_research"].includes(row.cohort));
@@ -345,14 +500,14 @@ function renderCalendar() {
     const day = lookup.get(dateKey);
     const matches = filteredCalendarRecords(day);
     const record = matches.length === 1 ? matches[0] : null;
-    const status = matches.length > 1 ? "PARTIAL" : record?.status || day?.status || "UNAVAILABLE";
+    const status = calendarCellStatus(day, matches);
     const value = record?.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
     const selected = dateKey === state.calendarSelectedDate;
     const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
     const returnText = value == null ? "—" : formatPercentText(value);
     const statusText = matches.length > 1 ? "Refine filters" : calendarStatusLabel(status);
     const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `Net return ${returnText}`}`;
-    cells.push(`<button type="button" role="gridcell" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-selected="${selected}">
+    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
       <strong>${escapeHtml(returnText)}</strong>
       <small>${escapeHtml(statusText)}</small>
@@ -376,7 +531,7 @@ function renderCalendar() {
     if (state.calendarSelectedDate) {
       const selectedButton = grid.querySelector(`[data-calendar-date="${state.calendarSelectedDate}"]`);
       selectedButton?.classList.add("selected");
-      selectedButton?.setAttribute("aria-selected", "true");
+      selectedButton?.setAttribute("aria-pressed", "true");
     }
   }
   const selectedDay = lookup.get(state.calendarSelectedDate);
@@ -386,6 +541,12 @@ function renderCalendar() {
 function filteredCalendarRecords(day) {
   if (!day || !Array.isArray(day.records)) return [];
   return day.records.filter((record) => Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record[key] || "") === value));
+}
+
+function calendarCellStatus(day, records) {
+  if (records.length > 1) return "PARTIAL";
+  if (records.length === 1) return records[0]?.status || "MISSING";
+  return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
 }
 
 function renderCalendarSummary(records) {
@@ -574,8 +735,8 @@ function renderSystem(readiness, manifest, stage, data) {
     ["Source SHA", shortHash(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha), Boolean(readinessPayload.deployed_source_sha || run.deployed_source_sha || manifest.source_sha)],
     ["Build SHA", shortHash(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id), Boolean(readinessPayload.deployed_build_sha || run.deployed_build_sha || manifest.build_sha || manifest.build_id)],
     ["Scheduler", scheduler.status || "Not reported", scheduler.status === "LOCAL_VERIFIED"],
-    ["Runtime root", scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root || "Not reported", Boolean(scheduler.runtime_root || readinessPayload.runtime_root || run.runtime_root)],
-    ["State root", scheduler.state_root || readinessPayload.state_root || run.state_root || "Not reported", Boolean(scheduler.state_root || readinessPayload.state_root || run.state_root)],
+    ["Runtime boundary", scheduler.runtime_boundary || "Configured", scheduler.runtime_boundary === "configured"],
+    ["State boundary", scheduler.state_boundary || "Configured", scheduler.state_boundary === "configured"],
     ["Next scheduled", formatTimestamp(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run), Boolean(readinessPayload.next_scheduled_run || scheduler.next_scheduled_run)],
     ["Input hash", shortHash(readinessPayload.input_hash_sha256), true],
     ["Bound set", shortHash(readinessPayload.publication_set_sha256), Boolean(readinessPayload.publication_set_sha256)],

@@ -1,0 +1,32 @@
+# Copy to config\web_sources.yaml only after replacing every REQUIRED value.
+# This file is a contract template, not an executable fallback.
+enabled: true
+respect_robots: true
+user_agent: "DawnstrikeResearchBot/1.0 contact: REQUIRED_ACCOUNTABLE_EMAIL"
+timeout_seconds: 15
+rate_limit_seconds: 5
+save_raw: true
+production_contract: true
+primary_quote_source: "REQUIRED_CONFIGURED_PROVIDER"
+secondary_quote_source: "REQUIRED_INDEPENDENT_PROVIDER"
+primary_benchmark: "SPY"
+secondary_benchmark: "IWM"
+universe_version: "REQUIRED_VERSIONED_SMALL_CAP_UNIVERSE"
+allowed_domains:
+  - nasdaqtrader.com
+  - sec.gov
+sources:
+  - name: local_inbox
+    type: local_inbox
+    enabled: true
+    path: data\inbox\screener
+  - name: nasdaq_symbols
+    type: nasdaq_symbol_directory
+    enabled: true
+    role: universe_only
+  - name: nasdaq_halts
+    type: nasdaq_trade_halts_rss
+    enabled: true
+  - name: sec_edgar
+    type: sec_edgar
+    enabled: true

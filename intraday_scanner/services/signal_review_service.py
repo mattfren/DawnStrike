@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from intraday_scanner.alpha.no_trade_filter import NoTradeDecision, evaluate_no_trade
+from intraday_scanner.alpha.no_trade_filter import (
+    ALERT_SOURCE_CONFIDENCE_FLOOR,
+    ALERTABLE_CONFIDENCE_BUCKETS,
+    FALLBACK_ALPHA_SCORE_FLOOR,
+    FALLBACK_RISK_SCORE_FLOOR,
+    NoTradeDecision,
+    evaluate_no_trade,
+)
 
 
 def review_alpha_signals(
@@ -108,6 +115,14 @@ def _clean_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
         and not row.get("no_trade_reason")
         and _float(row.get("alpha_score")) is not None
         and (_float(row.get("alpha_score")) or 0.0) >= 45.0
+        and (_float(row.get("source_confidence")) or 0.0)
+        >= ALERT_SOURCE_CONFIDENCE_FLOOR
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and not row.get("manual_confirmation_required")
+        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("confidence_bucket") or "").upper()
+        in ALERTABLE_CONFIDENCE_BUCKETS
+        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
     ]
 
 
@@ -117,10 +132,17 @@ def _fallback_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for row in signals
         if row.get("can_alert")
         and not row.get("no_trade_reason")
-        and (_float(row.get("alpha_score")) or 0.0) >= 32.0
-        and (_float(row.get("source_confidence")) or 0.0) >= 20.0
-        and (_float(row.get("risk_score")) or 0.0) >= 55.0
+        and (_float(row.get("alpha_score")) or 0.0) >= FALLBACK_ALPHA_SCORE_FLOOR
+        and (_float(row.get("source_confidence")) or 0.0)
+        >= ALERT_SOURCE_CONFIDENCE_FLOOR
+        and (_float(row.get("risk_score")) or 0.0) >= FALLBACK_RISK_SCORE_FLOOR
         and str(row.get("drawdown_risk_bucket") or "").upper() != "HIGH"
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and not row.get("manual_confirmation_required")
+        and str(row.get("edge_bucket") or "").upper() in {"MEDIUM", "HIGH"}
+        and str(row.get("confidence_bucket") or "").upper()
+        in ALERTABLE_CONFIDENCE_BUCKETS
+        and str(row.get("setup_grade") or "").upper() in {"A", "B"}
         and (
             (_float(row.get("score") or row.get("total_score")) or 0.0) >= 40.0
             or (_float(row.get("dollar_volume")) or 0.0) >= 1_000_000.0

@@ -15,8 +15,9 @@ from typing import Any
 
 from intraday_scanner.errors import ConfigError, DataProviderError
 from intraday_scanner.models import utc_now_iso
+from intraday_scanner.network_safety import open_allowlisted_url
 
-DEFAULT_WEB_CONFIG_PATH = Path("config/web_sources.example.yaml")
+DEFAULT_WEB_CONFIG_PATH = Path("config/web_sources.yaml")
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,12 @@ class WebCollectionConfig:
     save_raw: bool
     allowed_domains: tuple[str, ...]
     sources: tuple[WebSourceConfig, ...]
+    production_contract: bool = False
+    primary_quote_source: str = ""
+    secondary_quote_source: str = ""
+    primary_benchmark: str = ""
+    secondary_benchmark: str = ""
+    universe_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,10 +82,14 @@ class FetchResult:
 
 
 def load_web_sources_config(config_path: str | Path | None = None) -> WebCollectionConfig:
-    path = Path(config_path) if config_path else DEFAULT_WEB_CONFIG_PATH
-    if not path.exists() and path != DEFAULT_WEB_CONFIG_PATH:
-        path = DEFAULT_WEB_CONFIG_PATH
-    data = _default_web_config_data() if not path.exists() else _load_simple_yaml(path)
+    path = Path(_portable_config_path(config_path)) if config_path else DEFAULT_WEB_CONFIG_PATH
+    if not path.is_file():
+        raise ConfigError(
+            "Web source configuration is required and was not found: "
+            f"{path}. The example configuration is development-only and is never "
+            "a production fallback."
+        )
+    data = _load_simple_yaml(path)
     sources = []
     for row in list(data.get("sources") or []):
         if not isinstance(row, dict):
@@ -101,8 +112,8 @@ def load_web_sources_config(config_path: str | Path | None = None) -> WebCollect
                 type=str(row.get("type") or ""),
                 enabled=_bool(row.get("enabled", True)),
                 url=str(row.get("url") or ""),
-                path=str(row.get("path") or ""),
-                fixture_path=str(row.get("fixture_path") or ""),
+                path=_portable_config_path(row.get("path")),
+                fixture_path=_portable_config_path(row.get("fixture_path")),
                 allowed_domains=tuple(str(item) for item in source_allowed),
                 params={key: value for key, value in row.items() if key not in known},
             )
@@ -119,7 +130,55 @@ def load_web_sources_config(config_path: str | Path | None = None) -> WebCollect
         save_raw=_bool(data.get("save_raw", True)),
         allowed_domains=tuple(str(item) for item in allowed),
         sources=tuple(sources),
+        production_contract=_bool(data.get("production_contract", False)),
+        primary_quote_source=str(data.get("primary_quote_source") or ""),
+        secondary_quote_source=str(data.get("secondary_quote_source") or ""),
+        primary_benchmark=str(data.get("primary_benchmark") or ""),
+        secondary_benchmark=str(data.get("secondary_benchmark") or ""),
+        universe_version=str(data.get("universe_version") or ""),
     )
+
+
+def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
+    """Validate a declared production source contract without weakening fixtures."""
+
+    if not config.production_contract:
+        return {
+            "status": "DEVELOPMENT_OR_FIXTURE_CONFIG",
+            "ready": True,
+            "violations": [],
+        }
+    violations: list[str] = []
+    values = {
+        "primary_quote_source": config.primary_quote_source,
+        "secondary_quote_source": config.secondary_quote_source,
+        "primary_benchmark": config.primary_benchmark,
+        "secondary_benchmark": config.secondary_benchmark,
+        "universe_version": config.universe_version,
+    }
+    for name, value in values.items():
+        normalized = value.strip().upper()
+        if not normalized or "REQUIRED" in normalized or "PLACEHOLDER" in normalized:
+            violations.append(f"missing_{name}")
+    user_agent = config.user_agent.upper()
+    if "YOUR_EMAIL_HERE" in user_agent or "REQUIRED_ACCOUNTABLE_EMAIL" in user_agent:
+        violations.append("placeholder_user_agent_contact")
+    enabled_names = {source.name for source in config.sources if source.enabled}
+    for source_name in ("nasdaq_halts", "sec_edgar"):
+        if source_name not in enabled_names:
+            violations.append(f"required_safety_source_disabled:{source_name}")
+    if config.primary_benchmark not in {"SPY", "IWM"}:
+        violations.append("primary_benchmark_must_be_spy_or_iwm")
+    return {
+        "status": "READY" if not violations else "BLOCKED_CONFIGURATION",
+        "ready": not violations,
+        "violations": violations,
+        "primary_quote_source": config.primary_quote_source or None,
+        "secondary_quote_source": config.secondary_quote_source or None,
+        "primary_benchmark": config.primary_benchmark or None,
+        "secondary_benchmark": config.secondary_benchmark or None,
+        "universe_version": config.universe_version or None,
+    }
 
 
 def get_source(config: WebCollectionConfig, source_type: str) -> WebSourceConfig | None:
@@ -202,12 +261,16 @@ def fetch_text(
             headers={
                 "User-Agent": config.user_agent,
                 "Accept": (
-                    "text/html,application/xhtml+xml,application/xml,"
-                    "application/json,text/plain"
+                    "text/html,application/xhtml+xml,application/xml,application/json,text/plain"
                 ),
             },
         )
-        with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:  # noqa: S310
+        with open_allowlisted_url(
+            request,
+            timeout=config.timeout_seconds,
+            allowed_hosts=allowed_domains,
+            allow_http=True,
+        ) as response:
             raw = response.read()
             content_type = response.headers.get("Content-Type", "")
             status_code = int(getattr(response, "status", 200) or 200)
@@ -446,6 +509,12 @@ def _bool(value: Any) -> bool:
 
 def _default_if_missing(value: Any, default: Any) -> Any:
     return default if value in {None, ""} else value
+
+
+def _portable_config_path(value: str | Path | None) -> str:
+    """Normalize file paths from hand-edited YAML before any OS sees them."""
+
+    return str(value or "").replace("\\", "/")
 
 
 def require_enabled(config: WebCollectionConfig) -> None:

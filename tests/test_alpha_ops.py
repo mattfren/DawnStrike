@@ -125,7 +125,7 @@ def test_no_trade_filter_allows_no_clean_edge():
     assert "Do not force" in decision.next_action
 
 
-def test_no_trade_filter_surfaces_probability_fallback_watchlist():
+def test_no_trade_filter_quarantines_low_confidence_uncalibrated_fallback():
     signal = _candidate(
         alpha_score=40.4,
         edge_bucket="LOW",
@@ -140,12 +140,34 @@ def test_no_trade_filter_surfaces_probability_fallback_watchlist():
     decision = evaluate_no_trade([signal], source_summary={"status": "success"})
     review = review_alpha_signals([signal], source_summary={"status": "success"})
 
-    assert decision.no_trade is False
-    assert decision.decision_tier == "probability_fallback"
-    assert decision.fallback_count == 1
-    assert review["watchlist"][0]["ticker"] == "NOVA"
-    assert review["watchlist"][0]["review_label"] == "PROBABILITY WATCH"
-    assert "best probability watch" in review["plain_read"]
+    assert decision.no_trade is True
+    assert decision.decision_tier == "no_trade"
+    assert decision.fallback_count == 0
+    assert review["watchlist"] == []
+    assert review["blocked"][0]["ticker"] == "NOVA"
+    assert review["plain_read"].startswith("No clean edge today")
+
+
+def test_review_does_not_reintroduce_a_candidate_below_the_fallback_floor():
+    signal = _candidate(
+        alpha_score=40.0,
+        edge_bucket="MEDIUM",
+        confidence_bucket="MEDIUM",
+        source_confidence=90.0,
+        risk_score=90.0,
+        can_alert=True,
+        no_trade_reason="",
+        alert_gate_status="PASS",
+        manual_confirmation_required=False,
+    )
+
+    decision = evaluate_no_trade([signal], source_summary={"status": "success"})
+    review = review_alpha_signals([signal], source_summary={"status": "success"})
+
+    assert decision.no_trade is True
+    assert decision.fallback_count == 0
+    assert review["watchlist"] == []
+    assert review["blocked"][0]["ticker"] == "NOVA"
 
 
 def test_alpha_model_uses_insufficient_sample_fallback_under_20_days():

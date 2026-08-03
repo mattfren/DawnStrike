@@ -1557,6 +1557,16 @@ def _theme() -> None:
                 margin-top: 0.7rem;
             }
         }
+        @media (max-width: 480px) {
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 0;
+                overflow-x: hidden;
+            }
+            .stTabs [data-baseweb="tab"] {
+                font-size: 0.84rem;
+                padding: 0.6rem 0.48rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,

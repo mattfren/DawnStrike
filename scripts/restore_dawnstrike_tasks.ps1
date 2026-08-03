@@ -11,6 +11,7 @@ $expectedNames = @(
     "Dawnstrike AlphaOps Morning",
     "Dawnstrike AlphaOps Monitor 5m",
     "Dawnstrike AlphaOps EOD Full Report",
+    "Dawnstrike AlphaOps V6 Weekly Training",
     "Dawnstrike 10of10 Daily Finalize"
 )
 $restored = @()

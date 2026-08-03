@@ -40,9 +40,92 @@ def test_watch_only_alert_gate_is_explicitly_research_only() -> None:
     gated = apply_alert_gate(row)
 
     assert gated["alert_gate_status"] == "WATCH_ONLY"
+    assert gated["can_alert"] is False
+    assert gated["no_trade_reason"] == "only one source confirmed it"
     assert gated["official_paper_gate_passed"] is False
     assert gated["official_paper_eligible"] is False
     assert gated["official_paper_eligibility_status"] == "RESEARCH_ONLY"
+
+
+def test_alert_gate_quarantines_the_failed_legacy_signal_profile() -> None:
+    row = _clean_signal(ticker="LOSS", gap_pct=86.5, invalidation_level=6.45)
+    row.update(
+        {
+            "can_alert": True,
+            "edge_bucket": "LOW",
+            "confidence_bucket": "INSUFFICIENT_SAMPLE",
+            "setup_grade": "C",
+            "source_confidence": 34.5,
+            "source_count": 2,
+            "data_quality_score": 25.0,
+            "catalyst_summary": "No clear catalyst",
+            "catalyst_category": "no_clear_catalyst",
+            "catalyst_confidence": 0.2,
+            "conflict_flags": "volume_conflict",
+            "coverage_warning": (
+                "url_table_unverified;halt_status_unverified;sec_risk_unverified;"
+                "unknown_float"
+            ),
+            "float_shares": None,
+            "data_source_kind": "web_url",
+        }
+    )
+
+    gated = apply_alert_gate(row)
+
+    assert gated["alert_gate_version"] == "dawnstrike-alert-gate-v2.0.0"
+    assert gated["alert_gate_status"] == "BLOCKED"
+    assert gated["can_alert"] is False
+    assert gated["official_paper_gate_passed"] is False
+    reasons = gated["alert_gate_reasons"]
+    assert "source conflict unresolved" in reasons
+    assert "source confidence below alert threshold" in reasons
+    assert "public table identity not verified" in reasons
+    assert "gap regime outside alert policy" in reasons
+    assert "stop distance exceeds alert policy" in reasons
+
+
+def test_insufficient_sample_is_research_only_even_with_clean_inputs() -> None:
+    row = _clean_signal()
+    row["can_alert"] = True
+    row["confidence_bucket"] = "INSUFFICIENT_SAMPLE"
+
+    gated = apply_alert_gate(row)
+
+    assert gated["alert_gate_status"] == "WATCH_ONLY"
+    assert gated["can_alert"] is False
+    assert gated["manual_confirmation_required"] is True
+    assert "not enough history yet" in gated["alert_gate_reasons"]
+
+
+def test_uncalibrated_or_unstable_confidence_cannot_alert() -> None:
+    for confidence_bucket in ("", "LOW_SAMPLE", "MISSING_RETURN_TRUTH", "OUTLIER_DEPENDENT"):
+        row = _clean_signal()
+        row["can_alert"] = True
+        row["confidence_bucket"] = confidence_bucket
+
+        gated = apply_alert_gate(row)
+
+        assert gated["alert_gate_status"] == "NO_EDGE"
+        assert gated["can_alert"] is False
+        assert "confidence evidence below alert threshold" in gated["alert_gate_reasons"]
+
+
+def test_missing_critical_alert_evidence_fails_closed() -> None:
+    for field, reason in (
+        ("source_quality_status", "source quality status is not verified clear"),
+        ("data_quality_score", "data quality unavailable"),
+        ("catalyst_confidence", "catalyst confidence unavailable"),
+        ("setup_grade", "setup grade below alert threshold"),
+    ):
+        row = _clean_signal()
+        row["can_alert"] = True
+        row.pop(field)
+
+        gated = apply_alert_gate(row)
+
+        assert gated["can_alert"] is False
+        assert reason in gated["alert_gate_reasons"]
 
 
 def test_v5_clean_candidate_is_risk_sized_from_simulated_equity() -> None:
@@ -213,6 +296,7 @@ def _clean_signal(
         "source_confidence": 92.0,
         "source_count": 3,
         "source_quality_status": "verified",
+        "data_quality_score": 90.0,
         "stale_data_flag": False,
         "previous_close": 8.0,
         "premarket_price": 10.0,
@@ -230,9 +314,13 @@ def _clean_signal(
         "catalyst_url": "https://example.test/catalyst",
         "catalyst_status": "verified",
         "catalyst_tier": "A",
+        "catalyst_confidence": 0.9,
         "halt_status": "clear",
         "sec_risk_status": "clear",
         "corporate_action_status": "clear",
+        "edge_bucket": "MEDIUM",
+        "confidence_bucket": "MEDIUM",
+        "setup_grade": "A",
         "entry_watch_level": entry_watch_level,
         "invalidation_level": invalidation_level,
         "target_1": target_1,

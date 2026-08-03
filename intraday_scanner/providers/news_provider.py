@@ -10,6 +10,7 @@ from typing import Any
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.base import NewsItem, NewsProvider
 
 
@@ -68,7 +69,11 @@ class NewsAPIProvider(NewsProvider):
             params["from"] = since
         url = f"{self.endpoint}?{urllib.parse.urlencode(params)}"
         try:
-            with urllib.request.urlopen(url, timeout=self.timeout) as response:  # noqa: S310
+            with open_allowlisted_url(
+                url,
+                timeout=self.timeout,
+                allowed_hosts=("newsapi.org",),
+            ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise DataProviderError(f"NewsAPI request failed for {symbol}: {exc}") from exc
@@ -106,14 +111,16 @@ class FinnhubNewsProvider(NewsProvider):
             params = {"symbol": symbol, "from": start, "to": end, "token": self.api_key}
             url = f"{self.endpoint}?{urllib.parse.urlencode(params)}"
             try:
-                with urllib.request.urlopen(url, timeout=self.timeout) as response:  # noqa: S310
+                with open_allowlisted_url(
+                    url,
+                    timeout=self.timeout,
+                    allowed_hosts=("finnhub.io",),
+                ) as response:
                     payload = json.loads(response.read().decode("utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise DataProviderError(f"Finnhub news request failed for {symbol}: {exc}") from exc
             rows.extend(
-                _news_item_from_finnhub(symbol, item)
-                for item in payload
-                if isinstance(item, dict)
+                _news_item_from_finnhub(symbol, item) for item in payload if isinstance(item, dict)
             )
         return rows
 

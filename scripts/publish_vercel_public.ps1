@@ -18,6 +18,10 @@ $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
+$vercelAuth = @()
+if (-not [string]::IsNullOrWhiteSpace($env:VERCEL_TOKEN)) {
+    $vercelAuth = @("--token", $env:VERCEL_TOKEN)
+}
 $promoted = $false
 $priorProduction = $null
 $promotedDeployment = $null
@@ -72,7 +76,7 @@ function Invoke-VercelJson {
     $exitCode = $null
     try {
         $ErrorActionPreference = "Continue"
-        $output = & npx @vercel @Arguments 2> $stderrPath
+        $output = & npx @vercel @Arguments @vercelAuth 2> $stderrPath
         $exitCode = $LASTEXITCODE
         if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
             $stderrText = [System.IO.File]::ReadAllText($stderrPath).Trim()
@@ -100,7 +104,7 @@ function Set-VercelAlias {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $null = & npx @vercel alias set $deploymentHost $aliasHost 2>&1
+        $null = & npx @vercel alias set $deploymentHost $aliasHost @vercelAuth 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
@@ -159,7 +163,7 @@ function Assert-PublicationState {
 
 Push-Location $stage
 try {
-    & npx @vercel build --yes --project $ProjectId
+& npx @vercel build --yes --project $ProjectId @vercelAuth
     if ($LASTEXITCODE -ne 0) {
         throw "Vercel prebuild failed with exit code $LASTEXITCODE."
     }
@@ -206,7 +210,7 @@ if ($Promote) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $null = & npx @vercel promote $previewUrl --yes 2>&1
+        $null = & npx @vercel promote $previewUrl --yes @vercelAuth 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {

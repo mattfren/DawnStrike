@@ -36,6 +36,8 @@ data/failed/outcomes/*
 !data/failed/outcomes/.gitkeep
 data/*.sqlite
 data/*.sqlite3
+.tmp-*.sqlite
+upgrade.sqlite
 data/universe_*.csv
 data/universe_*.json
 .vercel

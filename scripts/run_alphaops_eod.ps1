@@ -12,6 +12,8 @@ $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
+. (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+. (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
@@ -20,7 +22,28 @@ $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $paperOpsRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
 $overallExit = 0
+function Set-OverallFailure {
+    param([int]$ExitCode)
+    if ($ExitCode -ne 0 -and $script:overallExit -eq 0) {
+        $script:overallExit = $ExitCode
+    }
+}
+$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod"
+if (-not $dailyLock.acquired) {
+    Write-Output "Skipped duplicate AlphaOps EOD run: $($dailyLock.reason)"
+    exit 0
+}
+$heartbeat = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "eod_outcome_capture", "--status", "RUNNING") `
+    -LogRoot $logRoot `
+    -LogName "alpha_eod_heartbeat-$MarketDate"
+if ($heartbeat.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Could not persist EOD heartbeat."
+}
 
 function Write-Stage {
     param(
@@ -46,16 +69,24 @@ function Write-Stage {
     if ($ResultFile) { $arguments += @("--result-file", $ResultFile) }
     if ($OutputFile) { $arguments += @("--output-file", $OutputFile) }
     if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
-    & py.exe @arguments
-    if ($LASTEXITCODE -ne 0) {
+    $receipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList $arguments `
+        -LogRoot $logRoot `
+        -LogName "record_stage-$Name-$MarketDate"
+    if ($receipt.exit_code -ne 0) {
         $script:overallExit = 2
     }
 }
 
 Push-Location $runtime
 try {
-    & py.exe -m intraday_scanner.services.market_calendar --date $MarketDate
-    $calendarExit = $LASTEXITCODE
+    $calendar = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.services.market_calendar", "--date", $MarketDate) `
+        -LogRoot $logRoot `
+        -LogName "alpha_eod_calendar-$MarketDate"
+    $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
         foreach ($stage in @(
             "eod_outcome_capture",
@@ -79,13 +110,12 @@ try {
     New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
     $captureResult = Join-Path $captureRoot "alpha_outcome_capture.json"
     $captureStarted = (Get-Date).ToUniversalTime().ToString("o")
-    & py.exe -m intraday_scanner.cli alpha-capture-outcomes `
-        --db-path $dbPath `
-        --market-date $MarketDate `
-        --out-dir $captureRoot `
-        --persist 2>&1 |
-        Tee-Object -FilePath (Join-Path $logRoot "alpha_outcomes-$MarketDate.log")
-    $captureExit = $LASTEXITCODE
+    $capture = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-capture-outcomes", "--db-path", $dbPath, "--market-date", $MarketDate, "--out-dir", $captureRoot, "--persist") `
+        -LogRoot $logRoot `
+        -LogName "alpha_outcomes-$MarketDate"
+    $captureExit = $capture.exit_code
     if ($captureExit -eq 0) {
         Write-Stage `
             -Name eod_outcome_capture `
@@ -95,7 +125,7 @@ try {
             -ResultFile $captureResult `
             -OutputFile $captureResult
     } else {
-        $overallExit = $captureExit
+        Set-OverallFailure -ExitCode $captureExit
         Write-Stage `
             -Name eod_outcome_capture `
             -Status TERMINAL_MISSING `
@@ -111,13 +141,12 @@ try {
     $reconcileResult = Join-Path $reconcileRoot "reconciliation.json"
     $reconcileStarted = (Get-Date).ToUniversalTime().ToString("o")
     if ($captureExit -eq 0) {
-        & py.exe -m intraday_scanner.cli alpha-paper-reconcile `
-            --db-path $dbPath `
-            --market-date $MarketDate `
-            --out-dir $reconcileRoot `
-            --persist 2>&1 |
-            Tee-Object -FilePath (Join-Path $logRoot "alpha_reconcile-$MarketDate.log")
-        $reconcileExit = $LASTEXITCODE
+        $reconcile = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-paper-reconcile", "--db-path", $dbPath, "--market-date", $MarketDate, "--out-dir", $reconcileRoot, "--persist") `
+            -LogRoot $logRoot `
+            -LogName "alpha_reconcile-$MarketDate"
+        $reconcileExit = $reconcile.exit_code
     } else {
         $reconcileExit = 2
     }
@@ -130,7 +159,7 @@ try {
             -ResultFile $reconcileResult `
             -OutputFile $reconcileResult
     } else {
-        $overallExit = $reconcileExit
+        Set-OverallFailure -ExitCode $reconcileExit
         Write-Stage `
             -Name paper_reconciliation `
             -Status FAILED `
@@ -142,50 +171,96 @@ try {
 
     $learnStarted = (Get-Date).ToUniversalTime().ToString("o")
     if ($reconcileExit -eq 0) {
-        & py.exe -m intraday_scanner.cli alpha-learn --db-path $dbPath 2>&1 |
-            Tee-Object -FilePath (Join-Path $logRoot "alpha_learning-$MarketDate.log")
-        $learnExit = $LASTEXITCODE
+        $learning = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-learn", "--db-path", $dbPath) `
+            -LogRoot $logRoot `
+            -LogName "alpha_learning-$MarketDate"
+        $learnExit = $learning.exit_code
     } else {
         $learnExit = 2
     }
-    if ($learnExit -eq 0) {
+    Set-OverallFailure -ExitCode $learnExit
+
+    $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate) `
+        -LogRoot $logRoot `
+        -LogName "alpha_v6_daily_monitor-$MarketDate"
+    if ($v6DailyMonitor.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $v6DailyMonitor.exit_code
+    }
+    $v6Attribution = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-attribution", "--db-path", $dbPath) `
+        -LogRoot $logRoot `
+        -LogName "alpha_v6_attribution-$MarketDate"
+    if ($v6Attribution.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $v6Attribution.exit_code
+    }
+    $v6Research = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-research-packet", "--db-path", $dbPath, "--code-sha", $releaseSha, "--out-dir", (Join-Path $outputRoot "alpha_v6_research")) `
+        -LogRoot $logRoot `
+        -LogName "alpha_v6_research-$MarketDate"
+    if ($v6Research.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $v6Research.exit_code
+    }
+    $learningStageExit = $learnExit
+    $learningErrorCode = if ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
+    foreach ($v6Result in @(
+        @{ Result = $v6DailyMonitor; Code = "alpha_v6_daily_monitor_failed" },
+        @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
+        @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" }
+    )) {
+        if ($learningStageExit -eq 0 -and $v6Result.Result.exit_code -ne 0) {
+            $learningStageExit = $v6Result.Result.exit_code
+            $learningErrorCode = $v6Result.Code
+        }
+    }
+    if ($learningStageExit -eq 0) {
         Write-Stage -Name alpha_learning -Status COMPLETE -ExitCode 0 -StartedAt $learnStarted
     } else {
-        $overallExit = $learnExit
         Write-Stage `
             -Name alpha_learning `
             -Status FAILED `
-            -ExitCode $learnExit `
+            -ExitCode $learningStageExit `
             -StartedAt $learnStarted `
-            -ErrorCode alpha_learning_failed
+            -ErrorCode $learningErrorCode
     }
 
-    & py.exe -m intraday_scanner.cli alpha-attribution `
-        --db-path $dbPath `
-        --out-dir (Join-Path $outputRoot "alpha_attribution") `
-        --end $MarketDate
-    if ($LASTEXITCODE -ne 0) {
-        $overallExit = $LASTEXITCODE
+    $attribution = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-attribution", "--db-path", $dbPath, "--out-dir", (Join-Path $outputRoot "alpha_attribution"), "--end", $MarketDate, "--paper-ops-root", $paperOpsRoot) `
+        -LogRoot $logRoot `
+        -LogName "alpha_attribution-$MarketDate"
+    if ($attribution.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $attribution.exit_code
     }
-    & py.exe -m intraday_scanner.cli outcome-gap `
-        --db-path $dbPath `
-        --market-date $MarketDate `
-        --out (Join-Path $captureRoot "outcome-gap.json")
-    if ($LASTEXITCODE -ne 0) {
-        $overallExit = $LASTEXITCODE
+    $outcomeGap = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "outcome-gap", "--db-path", $dbPath, "--market-date", $MarketDate, "--out", (Join-Path $captureRoot "outcome-gap.json")) `
+        -LogRoot $logRoot `
+        -LogName "alpha_outcome_gap-$MarketDate"
+    if ($outcomeGap.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $outcomeGap.exit_code
     }
 
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")
-    & py.exe -m intraday_scanner.v2.paper_ops init --output-root $paperOpsRoot
-    $paperExit = $LASTEXITCODE
+    $paperInit = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.v2.paper_ops", "init", "--output-root", $paperOpsRoot) `
+        -LogRoot $logRoot `
+        -LogName "paperops_init-$MarketDate"
+    $paperExit = $paperInit.exit_code
     if ($paperExit -eq 0) {
         for ($attempt = 1; $attempt -le $PaperOpsRetryLimit; $attempt++) {
-            & py.exe -m intraday_scanner.v2.paper_ops run-day `
-                --date $MarketDate `
-                --mode forward `
-                --output-root $paperOpsRoot 2>&1 |
-                Tee-Object -FilePath (Join-Path $logRoot "paperops-$MarketDate.log") -Append
-            $paperExit = $LASTEXITCODE
+            $paperDay = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @("-m", "intraday_scanner.v2.paper_ops", "run-day", "--date", $MarketDate, "--mode", "forward", "--output-root", $paperOpsRoot) `
+                -LogRoot $logRoot `
+                -LogName "paperops-$MarketDate-attempt-$attempt"
+            $paperExit = $paperDay.exit_code
             if ($paperExit -eq 0) { break }
             if ($attempt -lt $PaperOpsRetryLimit) {
                 Start-Sleep -Seconds $PaperOpsRetryDelaySeconds
@@ -210,10 +285,13 @@ try {
             if ($command -eq "blotter") {
                 $extra += @("--date", $MarketDate)
             }
-            & py.exe -m intraday_scanner.v2.paper_ops $command `
-                --output-root $paperOpsRoot @extra
-            if ($LASTEXITCODE -ne 0) {
-                $paperExit = $LASTEXITCODE
+            $paperCheck = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList (@("-m", "intraday_scanner.v2.paper_ops", $command, "--output-root", $paperOpsRoot) + $extra) `
+                -LogRoot $logRoot `
+                -LogName "paperops-$command-$MarketDate"
+            if ($paperCheck.exit_code -ne 0) {
+                $paperExit = $paperCheck.exit_code
                 break
             }
         }
@@ -225,7 +303,7 @@ try {
             -ExitCode 0 `
             -StartedAt $paperStarted
     } else {
-        $overallExit = $paperExit
+        Set-OverallFailure -ExitCode $paperExit
         Write-Stage `
             -Name paperops_forward `
             -Status FAILED `
@@ -234,10 +312,12 @@ try {
             -ErrorCode paperops_forward_truth_failed
     }
     if ($overallExit -ne 0) {
-        & py.exe scripts\send_stage_failure_notification.py `
-            --db-path $dbPath `
-            --market-date $MarketDate
-        if ($LASTEXITCODE -ne 0) {
+        $failureNotification = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("scripts\send_stage_failure_notification.py", "--db-path", $dbPath, "--market-date", $MarketDate) `
+            -LogRoot $logRoot `
+            -LogName "stage_failure_notification-$MarketDate"
+        if ($failureNotification.exit_code -ne 0) {
             Write-Warning "Required-stage failure alert could not be recorded or sent."
         }
     }
@@ -245,4 +325,5 @@ try {
 }
 finally {
     Pop-Location
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
 }

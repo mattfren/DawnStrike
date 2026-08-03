@@ -10,6 +10,36 @@ from typing import Any
 
 from intraday_scanner.errors import StorageError
 from intraday_scanner.models import ScanResult
+from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
+
+_V6_PAYLOAD_TABLE_ORDERS = {
+    "alpha_v6_experiments": "created_at",
+    "alpha_v6_holdout_evaluations": "evaluated_at",
+    "alpha_v6_datasets": "created_at",
+    "alpha_v6_shadow_predictions": "generated_at",
+    "alpha_v6_drift_reports": "created_at",
+    "alpha_v6_promotion_reviews": "created_at",
+    "alpha_v6_operational_receipts": "created_at",
+}
+_V6_SINGLE_PAYLOAD_COLUMNS = {
+    "alpha_v6_drift_reports": {"drift_report_id", "created_at", "status", "payload_json"},
+    "alpha_v6_promotion_reviews": {
+        "review_id",
+        "created_at",
+        "status",
+        "approved",
+        "payload_json",
+    },
+    "alpha_v6_operational_receipts": {
+        "receipt_id",
+        "receipt_kind",
+        "as_of_date",
+        "created_at",
+        "status",
+        "input_hash_sha256",
+        "payload_json",
+    },
+}
 
 
 class SQLiteScanStore:
@@ -1091,9 +1121,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load scan history: {exc}") from exc
 
-    def persist_monitor_checks(
-        self, rows: list[dict[str, Any]], run_id: str | None = None
-    ) -> None:
+    def persist_monitor_checks(self, rows: list[dict[str, Any]], run_id: str | None = None) -> None:
         self.initialize()
         try:
             with self._connect() as connection:
@@ -1115,9 +1143,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist setup monitor checks: {exc}") from exc
 
-    def persist_monitor_events(
-        self, rows: list[dict[str, Any]], run_id: str | None = None
-    ) -> None:
+    def persist_monitor_events(self, rows: list[dict[str, Any]], run_id: str | None = None) -> None:
         self.initialize()
         try:
             with self._connect() as connection:
@@ -1275,9 +1301,7 @@ class SQLiteScanStore:
                 )
                 return cursor.rowcount > 0
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not record notification delivery: {exc}"
-            ) from exc
+            raise StorageError(f"Could not record notification delivery: {exc}") from exc
 
     def load_recent_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
         self.initialize()
@@ -1578,8 +1602,7 @@ class SQLiteScanStore:
                     "membership_sha256",
                 )
                 if any(
-                    str(official[field]) != str(cohort_row[field])
-                    for field in immutable_fields
+                    str(official[field]) != str(cohort_row[field]) for field in immutable_fields
                 ):
                     raise StorageError(
                         "Official strategy cohort is already frozen for this market date "
@@ -1914,17 +1937,17 @@ class SQLiteScanStore:
                     selection_id = str(row.get("selection_id") or "")
                     trade_id = str(row.get("trade_id") or "")
                     if selection_id and trade_id:
-                        expected_trade_ids_by_selection.setdefault(
-                            selection_id, set()
-                        ).add(trade_id)
+                        expected_trade_ids_by_selection.setdefault(selection_id, set()).add(
+                            trade_id
+                        )
                 expected_label_ids_by_evaluation: dict[str, set[str]] = {}
                 for row in learning_labels:
                     evaluation_id = str(row.get("evaluation_id") or "")
                     label_id = str(row.get("label_id") or "")
                     if evaluation_id and label_id:
-                        expected_label_ids_by_evaluation.setdefault(
-                            evaluation_id, set()
-                        ).add(label_id)
+                        expected_label_ids_by_evaluation.setdefault(evaluation_id, set()).add(
+                            label_id
+                        )
                 for evaluation in evaluations if not immutable else []:
                     evaluation_id = str(evaluation.get("evaluation_id") or "")
                     selection_id = str(evaluation.get("selection_id") or "")
@@ -1935,8 +1958,7 @@ class SQLiteScanStore:
                         existing_trade_ids = {
                             str(row[0])
                             for row in connection.execute(
-                                "SELECT trade_id FROM strategy_paper_trades "
-                                "WHERE selection_id = ?",
+                                "SELECT trade_id FROM strategy_paper_trades WHERE selection_id = ?",
                                 (selection_id,),
                             ).fetchall()
                         }
@@ -1970,10 +1992,13 @@ class SQLiteScanStore:
                     evaluation_id = str(row.get("evaluation_id") or "")
                     if not evaluation_id:
                         continue
-                    existed = connection.execute(
-                        "SELECT 1 FROM strategy_evaluations WHERE evaluation_id = ?",
-                        (evaluation_id,),
-                    ).fetchone() is not None
+                    existed = (
+                        connection.execute(
+                            "SELECT 1 FROM strategy_evaluations WHERE evaluation_id = ?",
+                            (evaluation_id,),
+                        ).fetchone()
+                        is not None
+                    )
                     connection.execute(
                         """
                         INSERT INTO strategy_evaluations
@@ -2020,10 +2045,13 @@ class SQLiteScanStore:
                     trade_id = str(row.get("trade_id") or "")
                     if not trade_id:
                         continue
-                    existed = connection.execute(
-                        "SELECT 1 FROM strategy_paper_trades WHERE trade_id = ?",
-                        (trade_id,),
-                    ).fetchone() is not None
+                    existed = (
+                        connection.execute(
+                            "SELECT 1 FROM strategy_paper_trades WHERE trade_id = ?",
+                            (trade_id,),
+                        ).fetchone()
+                        is not None
+                    )
                     connection.execute(
                         """
                         INSERT INTO strategy_paper_trades
@@ -2085,10 +2113,13 @@ class SQLiteScanStore:
                     label_id = str(row.get("label_id") or "")
                     if not label_id:
                         continue
-                    existed = connection.execute(
-                        "SELECT 1 FROM strategy_learning_labels WHERE label_id = ?",
-                        (label_id,),
-                    ).fetchone() is not None
+                    existed = (
+                        connection.execute(
+                            "SELECT 1 FROM strategy_learning_labels WHERE label_id = ?",
+                            (label_id,),
+                        ).fetchone()
+                        is not None
+                    )
                     connection.execute(
                         """
                         INSERT INTO strategy_learning_labels
@@ -2129,10 +2160,13 @@ class SQLiteScanStore:
                     scorecard_id = str(row.get("scorecard_id") or "")
                     if not scorecard_id:
                         continue
-                    existed = connection.execute(
-                        "SELECT 1 FROM daily_strategy_scorecards WHERE scorecard_id = ?",
-                        (scorecard_id,),
-                    ).fetchone() is not None
+                    existed = (
+                        connection.execute(
+                            "SELECT 1 FROM daily_strategy_scorecards WHERE scorecard_id = ?",
+                            (scorecard_id,),
+                        ).fetchone()
+                        is not None
+                    )
                     connection.execute(
                         """
                         INSERT INTO daily_strategy_scorecards
@@ -2320,7 +2354,9 @@ class SQLiteScanStore:
         if cohort:
             clauses.append("cohort = ?")
             params.append(cohort)
-        query = f"SELECT * FROM {table}"  # noqa: S608
+        table_sql = quote_sql_identifier(table, allowed=allowed)
+        # This public method composes only a fixed table allowlist.
+        query = f"SELECT * FROM {table_sql}"  # nosec B608
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY market_date DESC, strategy_id ASC LIMIT ?"
@@ -3105,9 +3141,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load manual outcomes: {exc}") from exc
 
-    def persist_manual_audit(
-        self, summary: dict[str, Any], trades: list[dict[str, Any]]
-    ) -> None:
+    def persist_manual_audit(self, summary: dict[str, Any], trades: list[dict[str, Any]]) -> None:
         self.initialize()
         try:
             with self._connect() as connection:
@@ -3244,9 +3278,7 @@ class SQLiteScanStore:
                 ).fetchone()
                 return json.loads(str(row["payload_json"])) if row else None
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not load intelligence outcome summary: {exc}"
-            ) from exc
+            raise StorageError(f"Could not load intelligence outcome summary: {exc}") from exc
 
     def persist_shadow_report(self, report: dict[str, Any]) -> None:
         self.initialize()
@@ -3460,7 +3492,7 @@ class SQLiteScanStore:
                          edge_bucket, confidence_bucket, can_alert, no_trade_reason,
                          payload_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,  # noqa: S608
+                        """,
                         (
                             signal_key,
                             str(row.get("scan_id", "")),
@@ -3680,9 +3712,7 @@ class SQLiteScanStore:
                     ORDER BY source ASC
                     """
                 ).fetchall()
-                return {
-                    str(row["source"]): json.loads(str(row["summary_json"])) for row in rows
-                }
+                return {str(row["source"]): json.loads(str(row["summary_json"])) for row in rows}
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load AlphaOps source reliability: {exc}") from exc
 
@@ -3762,9 +3792,7 @@ class SQLiteScanStore:
                     ORDER BY setup_key ASC
                     """
                 ).fetchall()
-                return {
-                    str(row["setup_key"]): json.loads(str(row["summary_json"])) for row in rows
-                }
+                return {str(row["setup_key"]): json.loads(str(row["summary_json"])) for row in rows}
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load AlphaOps setup memory: {exc}") from exc
 
@@ -3797,7 +3825,7 @@ class SQLiteScanStore:
                          was_alerted, no_trade_reason, raw_payload_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,  # noqa: S608
+                        """,
                         (
                             signal_id,
                             str(row.get("scan_id") or ""),
@@ -3915,7 +3943,7 @@ class SQLiteScanStore:
                         UPDATE historical_signals
                         SET telegram_event_key = ?, was_alerted = ?
                         WHERE scan_id = ? AND signal_id IN ({placeholders})
-                        """,  # noqa: S608
+                        """,  # nosec B608
                         (
                             telegram_event_key,
                             1 if was_alerted else 0,
@@ -4251,9 +4279,7 @@ class SQLiteScanStore:
                         skipped += 1
             return {"inserted": inserted, "skipped": skipped, "row_count": len(rows)}
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not persist outcome capture attempts: {exc}"
-            ) from exc
+            raise StorageError(f"Could not persist outcome capture attempts: {exc}") from exc
 
     def load_outcome_capture_attempts(
         self,
@@ -4286,9 +4312,7 @@ class SQLiteScanStore:
                 rows = connection.execute(query, params).fetchall()
                 return [_json_row(row) for row in rows]
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not load outcome capture attempts: {exc}"
-            ) from exc
+            raise StorageError(f"Could not load outcome capture attempts: {exc}") from exc
 
     def persist_price_observations(
         self,
@@ -5798,6 +5822,707 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist daily run stage: {exc}") from exc
 
+    def persist_alpha_v6_decisions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Append point-in-time V6 decisions; a decision is never rewritten."""
+
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_decisions
+                        (decision_id, scan_id, source_signal_id, shadow_signal_id,
+                         market_date, decision_at, ticker, strategy_version,
+                         model_version, action, setup_key, regime_key,
+                         safety_vetoes_json, input_hash_sha256,
+                         source_lineage_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("decision_id") or ""),
+                            str(row.get("scan_id") or ""),
+                            str(row.get("source_signal_id") or ""),
+                            str(row.get("shadow_signal_id") or ""),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("decision_at") or ""),
+                            str(row.get("ticker") or "").upper(),
+                            str(row.get("strategy_version") or ""),
+                            str(row.get("model_version") or ""),
+                            str(row.get("action") or ""),
+                            str(row.get("setup_key") or ""),
+                            str(row.get("regime_key") or ""),
+                            json.dumps(row.get("safety_vetoes") or [], sort_keys=True),
+                            str(row.get("input_hash_sha256") or ""),
+                            str(row.get("source_lineage_hash_sha256") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 decisions: {exc}") from exc
+
+    def load_alpha_v6_decisions(
+        self,
+        *,
+        market_date: str | None = None,
+        action: str | None = None,
+        limit: int = 50_000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if market_date:
+            clauses.append("market_date = ?")
+            params.append(market_date[:10])
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        query = "SELECT payload_json FROM alpha_v6_decisions"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY decision_at ASC, decision_id ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 decisions: {exc}") from exc
+
+    def persist_alpha_v6_outcomes(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Append one immutable outcome receipt per V6 decision."""
+
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_outcomes
+                        (outcome_id, decision_id, shadow_signal_id, market_date,
+                         observed_at, activation_status, outcome_status,
+                         net_return_pct, benchmark_return_pct,
+                         net_excess_return_pct, source_bar_hash_sha256,
+                         learning_eligible, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("outcome_id") or ""),
+                            str(row.get("decision_id") or ""),
+                            str(row.get("shadow_signal_id") or ""),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("observed_at") or ""),
+                            str(row.get("activation_status") or ""),
+                            str(row.get("outcome_status") or ""),
+                            _float_or_none(row.get("net_return_pct")),
+                            _float_or_none(row.get("benchmark_return_pct")),
+                            _float_or_none(row.get("net_excess_return_pct")),
+                            str(row.get("source_bar_hash_sha256") or ""),
+                            1 if row.get("learning_eligible") else 0,
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 outcomes: {exc}") from exc
+
+    def load_alpha_v6_outcomes(self, limit: int = 50_000) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_outcomes
+                    ORDER BY market_date ASC, observed_at ASC, outcome_id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 outcomes: {exc}") from exc
+
+    def persist_alpha_v6_model_run(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_model_runs
+                    (model_run_id, model_version, trained_at, training_cutoff,
+                     status, training_input_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("model_run_id") or ""),
+                        str(row.get("model_version") or ""),
+                        str(row.get("trained_at") or ""),
+                        str(row.get("training_cutoff") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("training_input_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 model run: {exc}") from exc
+
+    def load_alpha_v6_model_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_model_runs
+                    ORDER BY trained_at DESC, model_run_id DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 model runs: {exc}") from exc
+
+    def persist_alpha_v6_evaluation(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_evaluations
+                    (evaluation_id, model_run_id, evaluated_at, status,
+                     evaluation_input_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("evaluation_id") or ""),
+                        str(row.get("model_run_id") or ""),
+                        str(row.get("evaluated_at") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("evaluation_input_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 evaluation: {exc}") from exc
+
+    def load_alpha_v6_evaluations(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_evaluations
+                    ORDER BY evaluated_at DESC, evaluation_id DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 evaluations: {exc}") from exc
+
+    def load_latest_account_performance_comparison(self) -> dict[str, Any] | None:
+        """Load the latest persisted, fail-closed account comparison receipt."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT payload_json FROM account_performance_comparisons
+                    ORDER BY calculated_at DESC, comparison_id DESC LIMIT 1
+                    """
+                ).fetchone()
+                return json.loads(str(row[0])) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load account comparison: {exc}") from exc
+
+    def persist_alpha_v6_experiments(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_experiments
+                        (experiment_id, created_at, status, hypothesis, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("experiment_id") or ""),
+                            str(row.get("created_at") or ""),
+                            str(row.get("status") or ""),
+                            str(row.get("hypothesis") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 experiments: {exc}") from exc
+
+    def load_alpha_v6_experiments(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows("alpha_v6_experiments", "created_at", limit=limit)
+
+    def persist_alpha_v6_holdout_evaluation(self, row: dict[str, Any]) -> bool:
+        """Persist once per experiment; a second evaluation is rejected by UNIQUE."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_holdout_evaluations
+                    (holdout_evaluation_id, experiment_id, evaluated_at, status,
+                     evidence_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("holdout_evaluation_id") or ""),
+                        str(row.get("experiment_id") or ""),
+                        str(row.get("evaluated_at") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("evidence_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 holdout evaluation: {exc}") from exc
+
+    def load_alpha_v6_holdout_evaluations(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_holdout_evaluations", "evaluated_at", limit=limit
+        )
+
+    def persist_alpha_v6_labels(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Append immutable V6 label-family receipts."""
+
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_labels
+                        (label_id, decision_id, market_date, observed_at, label_family,
+                         label_value, learning_eligible, exclusion_reason,
+                         source_bar_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("label_id") or ""),
+                            str(row.get("decision_id") or ""),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("observed_at") or ""),
+                            str(row.get("label_family") or ""),
+                            _float_or_none(row.get("label_value")),
+                            1 if row.get("learning_eligible") is True else 0,
+                            str(row.get("exclusion_reason") or "") or None,
+                            str(row.get("source_bar_hash_sha256") or "") or None,
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 labels: {exc}") from exc
+
+    def load_alpha_v6_labels(
+        self,
+        *,
+        label_family: str | None = None,
+        limit: int = 100_000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if label_family:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alpha_v6_labels
+                        WHERE label_family = ?
+                        ORDER BY market_date ASC, observed_at ASC, label_id ASC LIMIT ?
+                        """,
+                        (label_family, limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alpha_v6_labels
+                        ORDER BY market_date ASC, observed_at ASC, label_id ASC LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 labels: {exc}") from exc
+
+    def persist_alpha_v6_dataset(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_datasets
+                    (dataset_id, created_at, training_cutoff, row_count,
+                     dataset_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("dataset_id") or ""),
+                        str(row.get("created_at") or ""),
+                        str(row.get("training_cutoff") or "") or None,
+                        int(row.get("row_count") or 0),
+                        str(row.get("dataset_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 dataset: {exc}") from exc
+
+    def load_alpha_v6_datasets(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows("alpha_v6_datasets", "created_at", limit=limit)
+
+    def persist_alpha_v6_model_artifact(self, row: dict[str, Any]) -> bool:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_model_artifacts
+                    (artifact_id, model_run_id, created_at, artifact_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("artifact_id") or ""),
+                        str(row.get("model_run_id") or ""),
+                        str(row.get("created_at") or ""),
+                        str(row.get("artifact_hash_sha256") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 model artifact: {exc}") from exc
+
+    def persist_alpha_v6_shadow_predictions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        skipped = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_shadow_predictions
+                        (prediction_id, decision_id, model_run_id, market_date,
+                         generated_at, status, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("prediction_id") or ""),
+                            str(row.get("decision_id") or ""),
+                            str(row.get("model_run_id") or "") or None,
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("generated_at") or ""),
+                            str(row.get("status") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
+            return {"inserted": inserted, "skipped": skipped}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 shadow predictions: {exc}") from exc
+
+    def load_alpha_v6_shadow_predictions(self, *, limit: int = 1_000) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows(
+            "alpha_v6_shadow_predictions", "generated_at", limit=limit
+        )
+
+    def persist_alpha_v6_drift_report(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_drift_reports",
+            identity_field="drift_report_id",
+            row=row,
+            columns=("created_at", "status"),
+        )
+
+    def load_alpha_v6_drift_reports(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows("alpha_v6_drift_reports", "created_at", limit=limit)
+
+    def persist_alpha_v6_promotion_review(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_promotion_reviews",
+            identity_field="review_id",
+            row=row,
+            columns=("created_at", "status", "approved"),
+        )
+
+    def load_alpha_v6_promotion_reviews(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialize()
+        return self._load_v6_payload_rows("alpha_v6_promotion_reviews", "created_at", limit=limit)
+
+    def persist_alpha_v6_operational_receipt(self, row: dict[str, Any]) -> bool:
+        return self._persist_v6_single_payload(
+            table="alpha_v6_operational_receipts",
+            identity_field="receipt_id",
+            row=row,
+            columns=(
+                "receipt_kind",
+                "as_of_date",
+                "created_at",
+                "status",
+                "input_hash_sha256",
+            ),
+        )
+
+    def load_alpha_v6_operational_receipts(
+        self, *, receipt_kind: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        if receipt_kind is None:
+            return self._load_v6_payload_rows(
+                "alpha_v6_operational_receipts", "created_at", limit=limit
+            )
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_operational_receipts
+                    WHERE receipt_kind = ?
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (receipt_kind, limit),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 operational receipts: {exc}") from exc
+
+    def persist_alpha_v6_universe(
+        self, *, version: dict[str, Any], members: list[dict[str, Any]]
+    ) -> bool:
+        """Persist an immutable source-backed universe version and membership rows."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO alpha_v6_universe_versions
+                    (universe_id, as_of_date, created_at, membership_count,
+                     source_lineage_hash_sha256, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(version.get("universe_id") or ""),
+                        str(version.get("as_of_date") or "")[:10],
+                        str(version.get("created_at") or ""),
+                        int(version.get("membership_count") or 0),
+                        str(version.get("source_lineage_hash_sha256") or ""),
+                        json.dumps(version, sort_keys=True),
+                    ),
+                )
+                inserted = bool(cursor.rowcount)
+                for member in members:
+                    payload = {
+                        **member,
+                        "universe_id": version.get("universe_id"),
+                        "source_lineage_hash_sha256": version.get("source_lineage_hash_sha256"),
+                        "research_only": True,
+                        "broker_execution_enabled": False,
+                    }
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO alpha_v6_universe_memberships
+                        (universe_id, ticker, listing_status, valid_from, valid_to,
+                         previous_ticker, corporate_action_type,
+                         source_lineage_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(version.get("universe_id") or ""),
+                            str(member.get("ticker") or "").upper(),
+                            str(member.get("listing_status") or ""),
+                            member.get("valid_from"),
+                            member.get("valid_to"),
+                            member.get("previous_ticker"),
+                            member.get("corporate_action_type"),
+                            str(version.get("source_lineage_hash_sha256") or ""),
+                            json.dumps(payload, sort_keys=True),
+                        ),
+                    )
+            return inserted
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 universe: {exc}") from exc
+
+    def load_alpha_v6_universe_memberships(
+        self, *, market_date: str, tickers: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return latest snapshot memberships valid at market_date by ticker."""
+
+        self.initialize()
+        normalized = sorted({str(ticker or "").upper() for ticker in tickers if ticker})
+        if not normalized:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                version = connection.execute(
+                    """
+                    SELECT universe_id, source_lineage_hash_sha256
+                    FROM alpha_v6_universe_versions
+                    WHERE as_of_date <= ?
+                    ORDER BY as_of_date DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (market_date[:10],),
+                ).fetchone()
+                if version is None:
+                    return {}
+                rows = connection.execute(
+                    f"""
+                    SELECT payload_json FROM alpha_v6_universe_memberships
+                    WHERE universe_id = ? AND ticker IN ({placeholders})
+                    AND (valid_from IS NULL OR valid_from <= ?)
+                    AND (valid_to IS NULL OR valid_to >= ?)
+                    """,  # nosec B608
+                    (str(version["universe_id"]), *normalized, market_date[:10], market_date[:10]),
+                ).fetchall()
+                return {
+                    str(payload.get("ticker") or "").upper(): payload
+                    for row in rows
+                    if isinstance((payload := json.loads(str(row["payload_json"]))), dict)
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe memberships: {exc}") from exc
+
+    def load_alpha_v6_universe_versions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return immutable universe versions newest first for preview and recovery."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_universe_versions
+                    ORDER BY as_of_date DESC, created_at DESC LIMIT ?
+                    """,
+                    (max(1, limit),),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe versions: {exc}") from exc
+
+    def load_alpha_v6_universe_members(self, *, universe_id: str) -> list[dict[str, Any]]:
+        """Return one immutable universe's members for audited comparison or restore."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM alpha_v6_universe_memberships
+                    WHERE universe_id = ? ORDER BY ticker ASC
+                    """,
+                    (universe_id,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 universe members: {exc}") from exc
+
+    def _persist_v6_single_payload(
+        self,
+        *,
+        table: str,
+        identity_field: str,
+        row: dict[str, Any],
+        columns: tuple[str, ...],
+    ) -> bool:
+        self.initialize()
+        allowed_columns = _V6_SINGLE_PAYLOAD_COLUMNS.get(table)
+        if allowed_columns is None:
+            raise StorageError(f"Unsupported V6 payload table: {table}")
+        names = (identity_field, *columns, "payload_json")
+        table_sql = quote_sql_identifier(table, allowed=_V6_SINGLE_PAYLOAD_COLUMNS)
+        names_sql = quote_sql_identifiers(names, allowed=allowed_columns)
+        placeholders = ", ".join("?" for _ in names)
+        values: list[Any] = [str(row.get(identity_field) or "")]
+        for column in columns:
+            value = row.get(column)
+            values.append(1 if column == "approved" and value is True else value)
+        values.append(json.dumps(row, sort_keys=True))
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    # Table and columns are allowlisted; placeholders contain only question marks.
+                    f"INSERT OR IGNORE INTO {table_sql} ({names_sql}) VALUES ({placeholders})",
+                    values,
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 payload in {table}: {exc}") from exc
+
+    def _load_v6_payload_rows(
+        self, table: str, order_column: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        expected_order_column = _V6_PAYLOAD_TABLE_ORDERS.get(table)
+        if expected_order_column != order_column:
+            raise StorageError(f"Unsupported V6 payload table/order: {table}/{order_column}")
+        table_sql = quote_sql_identifier(table, allowed=_V6_PAYLOAD_TABLE_ORDERS)
+        order_sql = quote_sql_identifier(order_column, allowed={expected_order_column})
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    f"SELECT payload_json FROM {table_sql} ORDER BY {order_sql} DESC LIMIT ?",  # nosec B608
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 payloads from {table}: {exc}") from exc
+
     def load_daily_runs(
         self,
         *,
@@ -5847,10 +6572,7 @@ class SQLiteScanStore:
         if stage_name:
             clauses.append("s.stage_name = ?")
             params.append(stage_name)
-        query = (
-            "SELECT s.* FROM daily_run_stages s "
-            "JOIN daily_runs r ON r.run_id = s.run_id"
-        )
+        query = "SELECT s.* FROM daily_run_stages s JOIN daily_runs r ON r.run_id = s.run_id"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY s.started_at ASC, s.stage_name ASC LIMIT ?"
@@ -5866,8 +6588,10 @@ class SQLiteScanStore:
     def _load_payloads(
         self, connection: sqlite3.Connection, table: str, run_id: str
     ) -> list[dict[str, Any]]:
+        allowed = {"ranked_candidates", "top_explosive", "avoid_list"}
+        table_sql = quote_sql_identifier(table, allowed=allowed)
         rows = connection.execute(
-            f"SELECT payload_json FROM {table} WHERE run_id = ? ORDER BY rank ASC",  # noqa: S608
+            f"SELECT payload_json FROM {table_sql} WHERE run_id = ? ORDER BY rank ASC",  # nosec B608
             (run_id,),
         ).fetchall()
         return [json.loads(str(row["payload_json"])) for row in rows]
@@ -5886,9 +6610,7 @@ def _assert_applied_backfeed_allowed(
     if not any(event.get("applied") is True for event in events):
         return
     if quarantine_manifest_path is None:
-        raise StorageError(
-            "Applied learning backfeed requires a current quarantine audit receipt."
-        )
+        raise StorageError("Applied learning backfeed requires a current quarantine audit receipt.")
     from intraday_scanner.mover_pattern_audit import (  # local to avoid cycles
         assert_backfeed_not_quarantined,
     )
@@ -6012,13 +6734,18 @@ def _immutable_new_rows(
     }
     if (table, identity_column) not in allowed:
         raise StorageError(f"Unsupported immutable strategy table: {table}")
+    table_sql = quote_sql_identifier(table, allowed={pair[0] for pair in allowed})
+    identity_sql = quote_sql_identifier(
+        identity_column,
+        allowed={pair[1] for pair in allowed if pair[0] == table},
+    )
     pending: list[dict[str, Any]] = []
     for row in rows:
         identity = str(row.get(identity_column) or "").strip()
         if not identity:
             continue
         existing = connection.execute(
-            f"SELECT payload_json FROM {table} WHERE {identity_column} = ? LIMIT 1",  # noqa: S608
+            f"SELECT payload_json FROM {table_sql} WHERE {identity_sql} = ? LIMIT 1",  # nosec B608
             (identity,),
         ).fetchone()
         if existing is None:
@@ -6028,9 +6755,7 @@ def _immutable_new_rows(
         if not isinstance(payload, dict) or _immutable_semantics(payload) != _immutable_semantics(
             row
         ):
-            raise StorageError(
-                f"Immutable {table} identity conflicts with prior truth: {identity}"
-            )
+            raise StorageError(f"Immutable {table} identity conflicts with prior truth: {identity}")
     return pending
 
 
@@ -6081,11 +6806,7 @@ def _prediction_run_row(row: sqlite3.Row) -> dict[str, Any]:
 def _calibration_row(row: sqlite3.Row) -> dict[str, Any]:
     payload = _json_value(row["payload_json"])
     bucket = _json_value(row["bucket_json"])
-    merged = {
-        key: row[key]
-        for key in row.keys()
-        if key not in {"payload_json", "bucket_json"}
-    }
+    merged = {key: row[key] for key in row.keys() if key not in {"payload_json", "bucket_json"}}
     merged["bucket_json"] = bucket
     if isinstance(payload, dict):
         merged.update(payload)

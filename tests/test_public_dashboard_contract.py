@@ -61,6 +61,10 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
         assert f'id="{element_id}"' in html
     assert 'loadJson("/data/calendar.json")' in script
     assert "record?.eligible_for_return" in script
+    assert "calendarCellStatus(day, matches)" in script
+    assert 'records.length === 1' in script
+    assert 'market_session_status === "closed" ? "UNAVAILABLE" : "MISSING"' in script
+    assert "record?.status || day?.status" not in script
     assert "numberOrZero" not in script
     assert "No canonical observation exists for this market day" in script
     assert ".calendar-workspace > * { min-width:0; }" in stylesheet

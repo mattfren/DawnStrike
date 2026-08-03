@@ -6,20 +6,55 @@ def test_vercel_config_is_static_and_minimal() -> None:
     config = json.loads(Path("vercel.json").read_text(encoding="utf-8"))
     assert config["outputDirectory"] == "build/public"
     assert sorted(config["functions"]) == ["api/health.py", "api/readiness.py"]
+    expected_excludes = "{requirements.in,requirements.lock,**/__pycache__/**,**/*.pyc}"
+    assert all(
+        function["excludeFiles"] == expected_excludes for function in config["functions"].values()
+    )
     assert "routes" not in config
     assert "crons" not in config
+
+    ignored = Path(".vercelignore").read_text(encoding="utf-8").splitlines()
+    assert {"pyproject.toml", "requirements.in", "requirements.lock"} <= set(ignored)
+    assert Path(".python-version").read_text(encoding="utf-8").strip() == "3.13"
+
+    assert len(config["headers"]) == 1
+    assert config["headers"][0]["source"] == "/(.*)"
+    security_headers = {
+        header["key"]: header["value"] for header in config["headers"][0]["headers"]
+    }
+    assert security_headers == {
+        "Content-Security-Policy": (
+            "default-src 'self'; base-uri 'none'; object-src 'none'; "
+            "frame-ancestors 'none'; form-action 'none'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
+            "connect-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+        ),
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
 
 
 def test_stage_builder_declares_dependency_free_python_stage() -> None:
     script = Path("scripts/build_vercel_public_stage.ps1").read_text(encoding="utf-8")
     assert "dawnstrike-public-stage" in script
     assert "dependencies = []" in script
-    assert 'api/public/**' in script
+    assert "api/public/**" in script
     assert '$functionPublic = Join-Path $stage "api\\public"' in script
-    assert 'performance-snapshot.json' in script
-    assert 'performance-snapshot-manifest.json' in script
-    assert 'static_file_hashes_verified = $true' in script
-    assert 'api\\public_state.py' in script
+    assert "performance-snapshot.json" in script
+    assert "performance-snapshot-manifest.json" in script
+    assert "static_file_hashes_verified = $true" in script
+    assert "api\\public_state.py" in script
+    assert "StageRoot must resolve inside the project build directory" in script
+    assert "StageRoot must not overlap the source public artifact" in script
+    assert "[System.IO.Path]::GetFullPath($stageCandidate)" in script
+    assert "$securityHeaders = @(" in script
+    assert "Content-Security-Policy" in script
+    assert "frame-ancestors 'none'" in script
+    assert "headers = $securityHeaders" in script
 
 
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:

@@ -12,6 +12,7 @@ from urllib import parse, request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -26,14 +27,16 @@ def main() -> int:
         raise ValueError("daily finalize result must be an object")
     deployment_url = args.deployment_url or str(payload.get("deployment_url") or "")
     message = _message(payload, deployment_url)
-    event_key = "dawnstrike:daily-finalize:telegram:" + hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    event_key = (
+        "dawnstrike:daily-finalize:telegram:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    )
     store = SQLiteScanStore(Path(args.db_path))
     existing = store.load_notification(event_key)
     if existing is not None and (
-        existing.get("sent") is True
-        or existing.get("channel") == "telegram:sent"
+        existing.get("sent") is True or existing.get("channel") == "telegram:sent"
     ):
         print(
             json.dumps(
@@ -55,9 +58,10 @@ def main() -> int:
         body = parse.urlencode(
             {"chat_id": chat_id, "text": message, "disable_web_page_preview": "true"}
         ).encode()
-        with request.urlopen(
+        with open_allowlisted_url(
             request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=body),
             timeout=20,
+            allowed_hosts=("api.telegram.org",),
         ) as response:
             response.read()
         sent = True
@@ -95,15 +99,10 @@ def _message(payload: dict[str, object], deployment_url: str) -> str:
         next_action = str(readiness.get("reason") or "")
     daily_run = (
         readiness.get("daily_run")
-        if isinstance(readiness, dict)
-        and isinstance(readiness.get("daily_run"), dict)
+        if isinstance(readiness, dict) and isinstance(readiness.get("daily_run"), dict)
         else {}
     )
-    run = (
-        daily_run.get("run")
-        if isinstance(daily_run.get("run"), dict)
-        else {}
-    )
+    run = daily_run.get("run") if isinstance(daily_run.get("run"), dict) else {}
     failed_stage = str(run.get("failed_stage") or "")
     failure_reason = str(run.get("failure_reason") or "")
     failure_line = (

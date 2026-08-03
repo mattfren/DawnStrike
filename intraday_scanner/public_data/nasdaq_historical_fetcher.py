@@ -8,8 +8,9 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.v2.data.market import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data.yahoo_chart import DEFAULT_YAHOO_CHART_SYMBOLS
 
@@ -114,7 +115,11 @@ def _fetch_json(url: str, *, timeout_seconds: float) -> dict[str, Any]:
             "User-Agent": "Dawnstrike-v2-DataTruth/1.0 research-only",
         },
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
+    with open_allowlisted_url(
+        request,
+        timeout=timeout_seconds,
+        allowed_hosts=("api.nasdaq.com",),
+    ) as response:
         payload = response.read().decode("utf-8")
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
@@ -128,9 +133,7 @@ def _bars_from_payload(
 ) -> tuple[tuple[MarketBar, ...], list[str]]:
     warnings: list[str] = []
     rows = (
-        payload.get("data", {})
-        .get("tradesTable", {})
-        .get("rows", [])
+        payload.get("data", {}).get("tradesTable", {}).get("rows", [])
         if isinstance(payload.get("data"), dict)
         else []
     )
@@ -146,8 +149,7 @@ def _bars_from_payload(
             volume = int(_parse_money(row["volume"]))
             if volume == 9_999_999:
                 warnings.append(
-                    f"{symbol}: skipped Nasdaq placeholder volume row "
-                    f"{market_date.isoformat()}"
+                    f"{symbol}: skipped Nasdaq placeholder volume row {market_date.isoformat()}"
                 )
                 continue
             bars.append(

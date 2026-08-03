@@ -13,10 +13,11 @@ from typing import Any
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
+from intraday_scanner.alpha.v6_shadow import ALPHAOPS_V6_STRATEGY_VERSION
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 DAILY_RUN_SCHEMA = "dawnstrike.daily_run.v1"
-SCHEDULER_VERSION = "dawnstrike-scheduler-v5"
+SCHEDULER_VERSION = "dawnstrike-scheduler-v6"
 DAILY_STAGE_ORDER = (
     "morning_collection",
     "ranking_delivery",
@@ -53,7 +54,9 @@ FAILURE_STATUSES = frozenset({"FAILED", "DEGRADED", "TERMINAL_MISSING"})
 
 
 def shared_daily_run_id(market_date: str, release_sha: str) -> str:
-    value = f"dawnstrike:daily:v5:{market_date[:10]}:{release_sha}"
+    # A V6 release starts a new release-bound ledger.  V4/V5 rows retain their
+    # original identities and remain immutable historical evidence.
+    value = f"dawnstrike:daily:v6:{market_date[:10]}:{release_sha}"
     return "daily-" + hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
@@ -128,6 +131,7 @@ def record_daily_stage(
             "strategy_versions": {
                 "alphaops_v4": "dawnstrike-alphaops-v4",
                 "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
+                "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
                 "paperops": "registered-strategy-manifest",
             },
             "status": "IN_PROGRESS",
@@ -193,6 +197,7 @@ def record_daily_stage(
         "strategy_versions": {
             "alphaops_v4": "dawnstrike-alphaops-v4",
             "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
+            "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
             "paperops": "registered-strategy-manifest",
         },
         "status": run_status,
@@ -406,17 +411,25 @@ def release_manifest_payload(
     data_watermark: str | None,
     artifact_hashes: dict[str, str],
 ) -> dict[str, Any]:
+    # This manifest is published with the static site.  The runtime and state
+    # paths remain in the private daily ledger, but publishing those absolute
+    # paths creates needless host topology disclosure.
+    runtime = Path(runtime_root).resolve()
+    durable_state = Path(state_root).resolve()
     payload: dict[str, Any] = {
         "schema_version": "dawnstrike.release_manifest.v1",
         "source_sha": source_sha,
         "build_sha": build_sha,
-        "runtime_root": str(Path(runtime_root).resolve()),
-        "state_root": str(Path(state_root).resolve()),
+        "deployment_boundary": "configured_runtime_and_durable_state",
+        "deployment_boundary_sha256": hashlib.sha256(
+            f"{runtime}\n{durable_state}".encode()
+        ).hexdigest(),
         "database_schema_version": schema_version,
         "data_watermark": data_watermark,
         "strategy_versions": {
             "alphaops_v4": "dawnstrike-alphaops-v4",
             "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
+            "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
             "paperops": "immutable-strategy-semantics-manifest",
         },
         "scheduler_version": SCHEDULER_VERSION,

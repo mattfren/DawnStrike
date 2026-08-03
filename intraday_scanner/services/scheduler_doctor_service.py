@@ -13,6 +13,7 @@ EXPECTED_TASKS = {
     "Dawnstrike AlphaOps Morning": "run_alphaops_morning.ps1",
     "Dawnstrike AlphaOps Monitor 5m": "run_alphaops_monitor.ps1",
     "Dawnstrike AlphaOps EOD Full Report": "run_alphaops_eod.ps1",
+    "Dawnstrike AlphaOps V6 Weekly Training": "run_alphaops_weekly_training.ps1",
     CANONICAL_TASK_NAME: "run_daily_finalize.ps1",
 }
 SCHED_S_TASK_RUNNING = 0x00041301
@@ -24,13 +25,17 @@ ACCEPTABLE_LAST_RESULTS = {
     SCHED_S_TASK_HAS_NOT_RUN,
 }
 FORBIDDEN_LEGACY_ROOT = r"C:\Users\MattFields\Dawnstrike"
+# AlphaOps needs network and encrypted-file access for real sources, the
+# durable state store, and Telegram.  Windows S4U expressly has neither, so
+# it is not an acceptable unattended identity for this DAG.
+NONINTERACTIVE_LOGON_TYPES = frozenset({"Password", "ServiceAccount"})
 
 
 def scheduler_doctor(
     root: str | Path,
     state_root: str | Path = r"C:\r\dawnstrike-state",
 ) -> dict[str, Any]:
-    """Verify every enabled Dawnstrike v5 task uses one runtime and state root."""
+    """Verify every enabled Dawnstrike V6 task uses one runtime and state root."""
 
     runtime = Path(root).resolve()
     state = Path(state_root).resolve()
@@ -67,7 +72,7 @@ def scheduler_doctor(
     ]
     if not all(present.values()):
         status = "FAILED"
-        next_action = "Restore the missing v5 scheduler artifacts."
+        next_action = "Restore the missing V6 scheduler artifacts."
     elif any(check.get("state") in {"unavailable", "unknown"} for check in checks):
         status = "BLOCKED_EXTERNAL"
         next_action = (
@@ -77,7 +82,7 @@ def scheduler_doctor(
     elif failed_checks:
         status = "BLOCKED_EXTERNAL"
         next_action = (
-            "Register or repair every Dawnstrike v5 task against the exact runtime "
+            "Register or repair every Dawnstrike V6 task against the exact runtime "
             "and state roots, then rerun scheduler-doctor."
         )
     else:
@@ -95,7 +100,7 @@ def scheduler_doctor(
         _missing_task(CANONICAL_TASK_NAME),
     )
     return {
-        "schema_version": "dawnstrike.scheduler_doctor.v2",
+        "schema_version": "dawnstrike.scheduler_doctor.v3",
         "status": status,
         "runtime_root": str(runtime),
         "state_root": str(state),
@@ -142,6 +147,13 @@ def _task_check(
     last_result = task.get("last_task_result")
     healthy_state = state in {"Ready", "Running"}
     healthy_result = last_result in ACCEPTABLE_LAST_RESULTS
+    logon_type = str(task.get("logon_type") or "")
+    noninteractive = logon_type in NONINTERACTIVE_LOGON_TYPES
+    start_when_available = task.get("start_when_available") is True
+    battery_safe = (
+        task.get("stop_if_going_on_batteries") is False
+        and task.get("disallow_start_if_on_batteries") is False
+    )
     verified = all(
         (
             enabled,
@@ -151,6 +163,9 @@ def _task_check(
             runtime_ok,
             state_ok,
             legacy_free,
+            noninteractive,
+            start_when_available,
+            battery_safe,
         )
     )
     return {
@@ -160,6 +175,9 @@ def _task_check(
         "runtime_root_matches": runtime_ok,
         "state_root_matches": state_ok,
         "legacy_root_absent": legacy_free,
+        "noninteractive": noninteractive,
+        "start_when_available": start_when_available,
+        "battery_safe": battery_safe,
         "status": "LOCAL_VERIFIED" if verified else "FAILED",
     }
 
@@ -188,6 +206,10 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
         "$action = @($task.Actions)[0]; "
         "[pscustomobject]@{name=$task.TaskName; state=$task.State.ToString(); "
         "enabled=[bool]$task.Settings.Enabled; "
+        "logon_type=$task.Principal.LogonType.ToString(); "
+        "start_when_available=[bool]$task.Settings.StartWhenAvailable; "
+        "stop_if_going_on_batteries=[bool]$task.Settings.StopIfGoingOnBatteries; "
+        "disallow_start_if_on_batteries=[bool]$task.Settings.DisallowStartIfOnBatteries; "
         "last_task_result=$info.LastTaskResult; "
         "last_run_time=if ($info.LastRunTime) "
         "{$info.LastRunTime.ToString('o')} else {$null}; "
@@ -254,6 +276,10 @@ def _missing_task(name: str) -> dict[str, Any]:
         "name": name,
         "state": "missing",
         "enabled": None,
+        "logon_type": None,
+        "start_when_available": None,
+        "stop_if_going_on_batteries": None,
+        "disallow_start_if_on_batteries": None,
         "last_task_result": None,
         "last_run_time": None,
         "next_run_time": None,
@@ -267,6 +293,7 @@ __all__ = [
     "CANONICAL_TASK_NAME",
     "EXPECTED_TASKS",
     "FORBIDDEN_LEGACY_ROOT",
+    "NONINTERACTIVE_LOGON_TYPES",
     "SCHED_S_TASK_HAS_NOT_RUN",
     "SCHED_S_TASK_RUNNING",
     "scheduler_doctor",

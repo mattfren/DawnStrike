@@ -167,9 +167,7 @@ def test_closed_position_reconciles_costs_in_cents(tmp_path: Path) -> None:
             "UPDATE paper_positions SET realized_pnl = ? WHERE position_id = ?",
             (999.0, "position-1"),
         )
-    mismatched = CanonicalPerformanceService(db_path).reconcile(
-        now="2026-07-29T21:05:00+00:00"
-    )
+    mismatched = CanonicalPerformanceService(db_path).reconcile(now="2026-07-29T21:05:00+00:00")
     mismatched_row = mismatched["rows"][0]
     assert mismatched_row["record_status"] == "quarantined"
     assert "position_fill_pnl_mismatch" in str(mismatched_row["quarantine_reason"])
@@ -190,6 +188,25 @@ def test_reconciliation_and_snapshot_are_idempotent_and_bounded(tmp_path: Path) 
     assert output["manifest"]["compressed_byte_count"] <= 250 * 1024
     assert output["manifest"]["compression"] == "gzip"
     assert (tmp_path / "public" / "performance.json.manifest.json").exists()
+
+
+def test_reconciliation_persists_a_fail_closed_v5_v6_account_comparison(tmp_path: Path) -> None:
+    db_path = tmp_path / "comparison.sqlite"
+    _raw_db(db_path)
+    service = CanonicalPerformanceService(db_path)
+
+    result = service.reconcile(now="2026-08-03T21:00:00+00:00")
+    public = service.load_public_data()
+
+    comparison = result["account_comparison"]
+    assert comparison["status"] == "WAITING_FOR_AUTHORITATIVE_V6_ACCOUNT_LEDGER"
+    assert comparison["series_metrics"]["v6"]["compounded_net_return_pct"] is None
+    assert public["account_comparison"]["status"] == "WAITING_FOR_AUTHORITATIVE_V6_ACCOUNT_LEDGER"
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute("SELECT count(*) FROM account_performance_comparisons").fetchone()[0]
+            == 1
+        )
 
 
 def test_reconciliation_reuses_timestamp_for_unchanged_inputs(tmp_path: Path) -> None:

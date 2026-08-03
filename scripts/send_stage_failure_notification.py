@@ -12,6 +12,7 @@ from urllib import parse, request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.services.daily_run_service import (
     latest_daily_run_snapshot,
 )
@@ -27,9 +28,7 @@ def main() -> int:
     run = snapshot.get("run")
     run_payload = run if isinstance(run, dict) else {}
     failed_stage = str(run_payload.get("failed_stage") or "unknown_stage")
-    reason = str(
-        run_payload.get("failure_reason") or "No failure reason was recorded."
-    )
+    reason = str(run_payload.get("failure_reason") or "No failure reason was recorded.")
     status = str(run_payload.get("status") or "DEGRADED")
     message = (
         f"Dawnstrike required stage failed · {args.market_date}\n"
@@ -38,14 +37,14 @@ def main() -> int:
         f"Reason: {reason}\n"
         "Readiness remains degraded; missing truth was not converted to zero."
     )[:3900]
-    event_key = "dawnstrike:stage-failure:telegram:" + hashlib.sha256(
-        f"{args.market_date}:{failed_stage}:{reason}".encode()
-    ).hexdigest()
+    event_key = (
+        "dawnstrike:stage-failure:telegram:"
+        + hashlib.sha256(f"{args.market_date}:{failed_stage}:{reason}".encode()).hexdigest()
+    )
     store = SQLiteScanStore(Path(args.db_path))
     existing = store.load_notification(event_key)
     if existing is not None and (
-        existing.get("sent") is True
-        or existing.get("channel") == "telegram:sent"
+        existing.get("sent") is True or existing.get("channel") == "telegram:sent"
     ):
         print(
             json.dumps(
@@ -59,12 +58,8 @@ def main() -> int:
             )
         )
         return 0
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
-        "INTRADAY_TELEGRAM_BOT_TOKEN"
-    )
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get(
-        "INTRADAY_TELEGRAM_CHAT_ID"
-    )
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("INTRADAY_TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("INTRADAY_TELEGRAM_CHAT_ID")
     delivery_status = "not_configured"
     sent = False
     if token and chat_id:
@@ -75,12 +70,13 @@ def main() -> int:
                 "disable_web_page_preview": "true",
             }
         ).encode()
-        with request.urlopen(
+        with open_allowlisted_url(
             request.Request(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=body,
             ),
             timeout=20,
+            allowed_hosts=("api.telegram.org",),
         ) as response:
             response.read()
         delivery_status = "sent"

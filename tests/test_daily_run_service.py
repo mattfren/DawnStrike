@@ -146,9 +146,13 @@ def test_release_manifest_binds_runtime_state_schema_and_artifacts(
         artifact_hashes={"data/calendar.json": "f" * 64},
     )
 
-    assert manifest["runtime_root"] == str(runtime.resolve())
-    assert manifest["state_root"] == str(state.resolve())
+    assert manifest["deployment_boundary"] == "configured_runtime_and_durable_state"
+    assert "runtime_root" not in manifest
+    assert "state_root" not in manifest
     assert manifest["database_schema_version"] == 13
-    assert manifest["scheduler_version"] == "dawnstrike-scheduler-v5"
+    assert manifest["scheduler_version"] == "dawnstrike-scheduler-v6"
+    assert manifest["strategy_versions"]["alphaops_v6_shadow"] == (
+        "dawnstrike-alphaops-v6-shadow"
+    )
     assert len(manifest["release_manifest_sha256"]) == 64
     assert manifest["broker_execution_enabled"] is False

@@ -8,6 +8,7 @@ import urllib.request
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import NotificationError
+from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
 from intraday_scanner.notifiers.telegram_formatter import format_telegram_event
 
@@ -28,6 +29,7 @@ class DiscordWebhookNotifier(BaseNotifier):
             self.webhook_url,
             {"content": f"**{event.title}**\n{event.body}"},
             timeout_seconds=self.timeout_seconds,
+            allowed_hosts=("discord.com", "discordapp.com"),
         )
 
 
@@ -61,10 +63,17 @@ class TelegramNotifier(BaseNotifier):
             url,
             {"chat_id": self.chat_id, "text": text},
             timeout_seconds=self.timeout_seconds,
+            allowed_hosts=("api.telegram.org",),
         )
 
 
-def _post_json(url: str, payload: dict[str, object], *, timeout_seconds: float) -> None:
+def _post_json(
+    url: str,
+    payload: dict[str, object],
+    *,
+    timeout_seconds: float,
+    allowed_hosts: tuple[str, ...],
+) -> None:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -72,7 +81,11 @@ def _post_json(url: str, payload: dict[str, object], *, timeout_seconds: float) 
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+        with open_allowlisted_url(
+            request,
+            timeout=timeout_seconds,
+            allowed_hosts=allowed_hosts,
+        ) as response:
             if response.status >= 400:
                 raise NotificationError(f"Webhook request failed with HTTP {response.status}")
     except (urllib.error.URLError, TimeoutError) as exc:

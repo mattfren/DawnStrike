@@ -23,6 +23,7 @@ from intraday_scanner.alpha.v5_policy import (
     DEFAULT_V5_POLICY,
     alphaops_strategy_contract,
 )
+from intraday_scanner.alpha.v6_shadow import ALPHAOPS_V6_STRATEGY_VERSION
 from intraday_scanner.config import ScannerConfig, load_config
 from intraday_scanner.dashboard.operator_data_service import signal_requires_outcome
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError
@@ -37,6 +38,10 @@ from intraday_scanner.providers.yahoo_chart_provider import (
 )
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     recover_legacy_alpha_delivery_membership,
+)
+from intraday_scanner.services.benchmark_service import (
+    PRIMARY_BENCHMARK,
+    SECONDARY_BENCHMARK,
 )
 from intraday_scanner.services.price_observation_service import parse_requested_at
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -186,9 +191,19 @@ def capture_sourced_alpha_outcomes(
             "AlphaOps session selection evidence is contradictory: explicit no-trade "
             "and selected signals coexist."
         )
+    historical_signals = store.load_historical_signals(
+        market_date=resolved_date, limit=50_000
+    )
     signals = _outcome_targets(
-        store.load_historical_signals(market_date=resolved_date, limit=50_000),
+        historical_signals,
         selected_signal_ids=selected_ids,
+    )
+    signals.extend(
+        _v6_shadow_outcome_targets(
+            store,
+            market_date=resolved_date,
+            historical_signals=historical_signals,
+        )
     )
     recovered_signal_ids = {str(row.get("signal_id") or "") for row in signals}
     missing_signal_ids = selected_ids - recovered_signal_ids
@@ -309,8 +324,9 @@ def capture_sourced_alpha_outcomes(
         str(row.get("ticker") or "").upper() for row in pending
     })
     requested_tickers = [*signal_tickers]
-    if "SPY" not in requested_tickers:
-        requested_tickers.append("SPY")
+    for benchmark in (PRIMARY_BENCHMARK, SECONDARY_BENCHMARK):
+        if benchmark not in requested_tickers:
+            requested_tickers.append(benchmark)
     for ticker in requested_tickers:
         bars, evidence, requests, error = _fetch_outcome_bars(
             ticker,
@@ -368,20 +384,42 @@ def capture_sourced_alpha_outcomes(
                 )
             )
             continue
-        outcome = _derive_outcome(
-            signal,
-            bars_by_ticker.get(ticker, []),
-            session=session,
-            requested_at=at,
-            captured_at=captured_at,
-            max_close_staleness_seconds=max_close_staleness_seconds,
-            strategy_id=strategy_id,
-            source_evidence=source_evidence_by_ticker.get(ticker, {}),
-            benchmark_bars=bars_by_ticker.get("SPY", []),
-            benchmark_evidence=source_evidence_by_ticker.get("SPY", {}),
-            entry_intent=entry_intents.get(str(signal.get("signal_id") or "")),
-            paper_fills=fills_by_signal.get(str(signal.get("signal_id") or ""), []),
-        )
+        if signal.get("v6_counterfactual_policy") == "OPEN_TO_CLOSE_V1":
+            outcome = _derive_rejected_counterfactual_outcome(
+                signal,
+                bars_by_ticker.get(ticker, []),
+                session=session,
+                requested_at=at,
+                captured_at=captured_at,
+                max_close_staleness_seconds=max_close_staleness_seconds,
+                strategy_id=str(signal.get("outcome_strategy_id") or strategy_id),
+                source_evidence=source_evidence_by_ticker.get(ticker, {}),
+                benchmark_bars=bars_by_ticker.get(PRIMARY_BENCHMARK, []),
+                benchmark_evidence=source_evidence_by_ticker.get(PRIMARY_BENCHMARK, {}),
+                secondary_benchmark_bars=bars_by_ticker.get(SECONDARY_BENCHMARK, []),
+                secondary_benchmark_evidence=source_evidence_by_ticker.get(
+                    SECONDARY_BENCHMARK, {}
+                ),
+            )
+        else:
+            outcome = _derive_outcome(
+                signal,
+                bars_by_ticker.get(ticker, []),
+                session=session,
+                requested_at=at,
+                captured_at=captured_at,
+                max_close_staleness_seconds=max_close_staleness_seconds,
+                strategy_id=str(signal.get("outcome_strategy_id") or strategy_id),
+                source_evidence=source_evidence_by_ticker.get(ticker, {}),
+                benchmark_bars=bars_by_ticker.get(PRIMARY_BENCHMARK, []),
+                benchmark_evidence=source_evidence_by_ticker.get(PRIMARY_BENCHMARK, {}),
+                secondary_benchmark_bars=bars_by_ticker.get(SECONDARY_BENCHMARK, []),
+                secondary_benchmark_evidence=source_evidence_by_ticker.get(
+                    SECONDARY_BENCHMARK, {}
+                ),
+                entry_intent=entry_intents.get(str(signal.get("signal_id") or "")),
+                paper_fills=fills_by_signal.get(str(signal.get("signal_id") or ""), []),
+            )
         diagnostic = _diagnostic_from_outcome(outcome)
         diagnostics.append(diagnostic)
         capture_attempts.append(
@@ -492,6 +530,65 @@ def _outcome_targets(
     )
 
 
+def _v6_shadow_outcome_targets(
+    store: SQLiteScanStore,
+    *,
+    market_date: str,
+    historical_signals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize V6 decisions as independent sourced paper-observation targets."""
+
+    by_signal = {
+        str(row.get("signal_id") or ""): row for row in historical_signals
+    }
+    targets: list[dict[str, Any]] = []
+    for decision in store.load_alpha_v6_decisions(market_date=market_date):
+        source_signal_id = str(decision.get("source_signal_id") or "")
+        source = by_signal.get(source_signal_id)
+        shadow_signal_id = str(decision.get("shadow_signal_id") or "")
+        if not shadow_signal_id:
+            continue
+        action = str(decision.get("action") or "")
+        sampling = decision.get("rejected_sampling")
+        sampling_data = sampling if isinstance(sampling, dict) else {}
+        sampled_reject = bool(
+            action == "SHADOW_REJECTED_POLICY"
+            and sampling_data.get("included") is True
+        )
+        if action == "SHADOW_TRACK" and source is not None:
+            target = dict(source)
+        elif sampled_reject:
+            raw = decision.get("raw_facts")
+            facts = raw if isinstance(raw, dict) else {}
+            target = {
+                "scan_id": decision.get("scan_id"),
+                "ticker": decision.get("ticker"),
+                "generated_at": decision.get("decision_at"),
+                "source": facts.get("source"),
+                "source_url": facts.get("source_url"),
+                "v6_counterfactual_policy": "OPEN_TO_CLOSE_V1",
+                "v6_sampling_probability": sampling_data.get("inclusion_probability"),
+            }
+        else:
+            continue
+        targets.append({
+            **target,
+            "signal_id": shadow_signal_id,
+            "alpha_signal_id": source_signal_id,
+            "generated_at": decision.get("decision_at"),
+            "strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+            "outcome_strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+            "v6_decision_id": decision.get("decision_id"),
+            "v6_cost_model_version": decision.get("cost_model_version"),
+            "v6_estimated_round_trip_cost_bps": decision.get(
+                "estimated_round_trip_cost_bps"
+            ),
+            "research_only": True,
+            "broker_execution_enabled": False,
+        })
+    return targets
+
+
 def _validate_exact_session_selections(
     rows: list[dict[str, Any]],
     *,
@@ -539,6 +636,9 @@ def _fetch_outcome_bars(
     requests: list[dict[str, Any]] = []
     candidates: list[tuple[list[OutcomeBar], dict[str, Any]]] = []
     errors: list[str] = []
+    configured_fallback = fallback_fetcher
+    if configured_fallback is None and config.alpaca_api_key_id and config.alpaca_api_secret_key:
+        configured_fallback = _fetch_alpaca_rows
     yahoo_url = yahoo_chart_url(
         ticker,
         range_name=YAHOO_RANGE,
@@ -572,7 +672,14 @@ def _fetch_outcome_bars(
             requests.append(request)
             candidates.append((bars, request))
             if request["source_coverage_complete"] is True:
-                return bars, _selected_source_evidence(request, requests), requests, ""
+                if configured_fallback is None:
+                    return (
+                        bars,
+                        _selected_source_evidence(request, requests, candidates),
+                        requests,
+                        "",
+                    )
+                break
         except (DataProviderError, ValueError, TypeError) as exc:
             detail = f"{YAHOO_SOURCE_NAME} attempt {attempt}: {exc}"
             errors.append(detail)
@@ -588,9 +695,6 @@ def _fetch_outcome_bars(
                 "error": str(exc),
             })
 
-    configured_fallback = fallback_fetcher
-    if configured_fallback is None and config.alpaca_api_key_id and config.alpaca_api_secret_key:
-        configured_fallback = _fetch_alpaca_rows
     alpaca_source = f"alpaca_market_data_{config.alpaca_data_feed}"
     alpaca_url = "https://data.alpaca.markets/v2/stocks/bars"
     if configured_fallback is None:
@@ -632,7 +736,12 @@ def _fetch_outcome_bars(
                 requests.append(request)
                 candidates.append((bars, request))
                 if request["source_coverage_complete"] is True:
-                    return bars, _selected_source_evidence(request, requests), requests, ""
+                    return (
+                        bars,
+                        _selected_source_evidence(request, requests, candidates),
+                        requests,
+                        "",
+                    )
             except (DataProviderError, ValueError, TypeError) as exc:
                 detail = f"{alpaca_source} attempt {attempt}: {exc}"
                 errors.append(detail)
@@ -652,7 +761,7 @@ def _fetch_outcome_bars(
         bars, request = max(candidates, key=lambda item: _source_choice_key(item[0]))
         return (
             bars,
-            _selected_source_evidence(request, requests),
+            _selected_source_evidence(request, requests, candidates),
             requests,
             "; ".join(errors),
         )
@@ -714,7 +823,9 @@ def _provider_request(
 def _selected_source_evidence(
     selected: dict[str, Any],
     requests: list[dict[str, Any]],
+    candidates: list[tuple[list[OutcomeBar], dict[str, Any]]],
 ) -> dict[str, Any]:
+    reconciliation = _independent_source_reconciliation(candidates)
     return {
         "source": selected.get("source"),
         "source_url": selected.get("source_url"),
@@ -723,6 +834,82 @@ def _selected_source_evidence(
         "source_coverage_complete": selected.get("source_coverage_complete"),
         "source_lineage": [dict(row) for row in requests],
         "provider_chain_exhausted": selected.get("source_coverage_complete") is not True,
+        "independent_reconciliation": reconciliation,
+        "independent_reconciliation_status": reconciliation["status"],
+    }
+
+
+def _independent_source_reconciliation(
+    candidates: list[tuple[list[OutcomeBar], dict[str, Any]]],
+) -> dict[str, Any]:
+    complete = [
+        (bars, row)
+        for bars, row in candidates
+        if row.get("source_coverage_complete") is True and bars
+    ]
+    by_source: dict[str, tuple[list[OutcomeBar], dict[str, Any]]] = {}
+    for bars, row in complete:
+        by_source.setdefault(str(row.get("source") or ""), (bars, row))
+    sources = set(by_source)
+    if len(sources) < 2:
+        return {
+            "status": "NOT_AVAILABLE",
+            "independent_source_count": len(sources),
+            "agreement": None,
+            "reason": "Two independently sourced complete bar sets are required.",
+        }
+    first_source, second_source = sorted(sources)[:2]
+    first_bars, first_request = by_source[first_source]
+    second_bars, second_request = by_source[second_source]
+    first_close = {
+        bar.observed_at: float(bar.close)
+        for bar in first_bars
+        if bar.close is not None and float(bar.close) > 0
+    }
+    second_close = {
+        bar.observed_at: float(bar.close)
+        for bar in second_bars
+        if bar.close is not None and float(bar.close) > 0
+    }
+    overlap = sorted(set(first_close) & set(second_close))
+    overlap_pct = 100.0 * len(overlap) / max(1, min(len(first_close), len(second_close)))
+    maximum_close_difference_pct = max(
+        (
+            abs(first_close[timestamp] - second_close[timestamp])
+            / max(first_close[timestamp], second_close[timestamp])
+            * 100.0
+            for timestamp in overlap
+        ),
+        default=None,
+    )
+    passed = bool(
+        overlap_pct >= 98.0
+        and maximum_close_difference_pct is not None
+        and maximum_close_difference_pct <= 0.5
+    )
+    return {
+        "status": "PASSED" if passed else "DISAGREEMENT",
+        "independent_source_count": len(sources),
+        "source_names": sorted(sources),
+        "source_bar_hashes": sorted(
+            {
+                str(first_request.get("source_bar_hash_sha256") or ""),
+                str(second_request.get("source_bar_hash_sha256") or ""),
+            }
+        ),
+        "overlap_pct": round(overlap_pct, 6),
+        "maximum_close_difference_pct": (
+            round(maximum_close_difference_pct, 6)
+            if maximum_close_difference_pct is not None
+            else None
+        ),
+        "agreement": passed,
+        "thresholds": {"minimum_overlap_pct": 98.0, "maximum_close_difference_pct": 0.5},
+        "reason": (
+            "Normalized one-minute close bars agree within the frozen threshold."
+            if passed
+            else "Independent bars do not satisfy the frozen overlap and price thresholds."
+        ),
     }
 
 
@@ -746,6 +933,8 @@ def _derive_outcome(
     source_evidence: dict[str, Any],
     benchmark_bars: list[OutcomeBar],
     benchmark_evidence: dict[str, Any],
+    secondary_benchmark_bars: list[OutcomeBar],
+    secondary_benchmark_evidence: dict[str, Any],
     entry_intent: dict[str, Any] | None,
     paper_fills: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -873,6 +1062,11 @@ def _derive_outcome(
         entry_at=trigger_bar.observed_at,
         exit_at=exit_at,
     )
+    secondary_benchmark_return = _benchmark_return(
+        secondary_benchmark_bars,
+        entry_at=trigger_bar.observed_at,
+        exit_at=exit_at,
+    )
     raw_return = _return_pct(raw_exit_price, entry_price)
     context = _outcome_context(signal)
     execution = _execution_outcome_fields(
@@ -883,10 +1077,28 @@ def _derive_outcome(
         entry_intent=entry_intent,
         paper_fills=paper_fills,
     )
-    learning_eligible = bool(
+    benchmark_contract_complete = bool(
         benchmark_return is not None
         and (
-            strategy_id != ALPHAOPS_V5_STRATEGY_ID
+            strategy_id != ALPHAOPS_V6_STRATEGY_VERSION
+            or (
+                secondary_benchmark_return is not None
+                and source_evidence.get("independent_reconciliation_status") == "PASSED"
+                and benchmark_evidence.get("independent_reconciliation_status") == "PASSED"
+                and secondary_benchmark_evidence.get(
+                    "independent_reconciliation_status"
+                )
+                == "PASSED"
+            )
+        )
+    )
+    learning_eligible = bool(
+        benchmark_contract_complete
+        and (
+            strategy_id not in {
+                ALPHAOPS_V5_STRATEGY_ID,
+                ALPHAOPS_V6_STRATEGY_VERSION,
+            }
             or entry_intent is not None
         )
     )
@@ -930,7 +1142,7 @@ def _derive_outcome(
             trigger_bar.observed_at, exit_at
         ),
         "gross_return_pct": raw_return,
-        "benchmark_symbol": "SPY",
+        "benchmark_symbol": PRIMARY_BENCHMARK,
         "benchmark_return_pct": benchmark_return,
         "excess_return_pct": (
             round(raw_return - benchmark_return, 4)
@@ -942,12 +1154,30 @@ def _derive_outcome(
         "benchmark_source_bar_hash_sha256": benchmark_evidence.get(
             "source_bar_hash_sha256"
         ),
+        "benchmark_independent_reconciliation_status": benchmark_evidence.get(
+            "independent_reconciliation_status"
+        ),
+        "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
+        "secondary_benchmark_return_pct": secondary_benchmark_return,
+        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
+            "source_url"
+        ),
+        "secondary_benchmark_source_bar_hash_sha256": secondary_benchmark_evidence.get(
+            "source_bar_hash_sha256"
+        ),
+        "secondary_benchmark_independent_reconciliation_status": (
+            secondary_benchmark_evidence.get("independent_reconciliation_status")
+        ),
         "attribution_complete": benchmark_return is not None,
+        "benchmark_contract_complete": benchmark_contract_complete,
         "first_touch_precision": BAR_INTERVAL,
         "outcome_status": "complete_sourced",
         "learning_eligible": learning_eligible,
         "learning_contract": (
-            "candidate_outcome_requires_reconciled_trade_label"
+            "v6_shadow_outcome_requires_frozen_cost_label"
+            if strategy_id == ALPHAOPS_V6_STRATEGY_VERSION
+            else "candidate_outcome_requires_reconciled_trade_label"
         ),
         "validated_against_signal_timestamp": True,
         **context,
@@ -956,6 +1186,155 @@ def _derive_outcome(
             "Automatic read-only multi-provider EOD observation; one-minute bars; "
             "same-bar target/stop ambiguity is counted conservatively as invalidation. "
             "Production return learning still requires an exact reconciled trade label."
+        ),
+    })
+    base["payload_json"] = dict(base)
+    return base
+
+
+def _derive_rejected_counterfactual_outcome(
+    signal: dict[str, Any],
+    bars: list[OutcomeBar],
+    *,
+    session: SessionWindow,
+    requested_at: datetime,
+    captured_at: str,
+    max_close_staleness_seconds: int,
+    strategy_id: str,
+    source_evidence: dict[str, Any],
+    benchmark_bars: list[OutcomeBar],
+    benchmark_evidence: dict[str, Any],
+    secondary_benchmark_bars: list[OutcomeBar],
+    secondary_benchmark_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Observe a predeclared sampled-reject policy without inventing a V5 plan."""
+
+    base = _outcome_base(
+        signal,
+        bars,
+        session=session,
+        requested_at=requested_at,
+        captured_at=captured_at,
+        strategy_id=strategy_id,
+        source_evidence=source_evidence,
+    )
+    if not bars:
+        return _ineligible(base, "ineligible_no_regular_session_bars")
+    recommendation_at = _parse_datetime(str(signal.get("generated_at") or ""))
+    if recommendation_at is None:
+        return _ineligible(base, "ineligible_missing_recommendation_timestamp")
+    first_eligible_at = max(session.opened_at, _ceil_minute(recommendation_at))
+    eligible_bars = [bar for bar in bars if bar.observed_at >= first_eligible_at]
+    if not eligible_bars:
+        return _ineligible(base, "ineligible_no_post_recommendation_bars")
+    coverage = _validate_bar_coverage(
+        eligible_bars,
+        expected_start_at=first_eligible_at,
+        expected_end_at=session.closed_at - timedelta(minutes=1),
+    )
+    base.update(coverage.to_dict())
+    if not coverage.is_complete:
+        return _ineligible(base, coverage.status, coverage.detail)
+    if any(
+        bar.open is None or bar.high is None or bar.low is None or bar.close is None
+        for bar in eligible_bars
+    ):
+        return _ineligible(base, "ineligible_incomplete_source_bars")
+    malformed_ohlc = _malformed_ohlc_detail(eligible_bars)
+    if malformed_ohlc:
+        return _ineligible(base, "ineligible_malformed_ohlc", malformed_ohlc)
+    close_age = max(
+        0,
+        int((session.closed_at - eligible_bars[-1].observed_at).total_seconds()),
+    )
+    base["close_observation_age_seconds"] = close_age
+    if close_age > max_close_staleness_seconds:
+        return _ineligible(
+            base,
+            "ineligible_stale_close",
+            f"last regular bar was {close_age} seconds before the session close",
+        )
+    entry_bar = eligible_bars[0]
+    exit_bar = eligible_bars[-1]
+    entry_price = float(entry_bar.open or 0.0)
+    exit_price = float(exit_bar.close or 0.0)
+    if entry_price <= 0 or exit_price <= 0:
+        return _ineligible(base, "ineligible_invalid_open_close_price")
+    benchmark_return = _benchmark_return(
+        benchmark_bars,
+        entry_at=entry_bar.observed_at,
+        exit_at=exit_bar.observed_at,
+    )
+    secondary_benchmark_return = _benchmark_return(
+        secondary_benchmark_bars,
+        entry_at=entry_bar.observed_at,
+        exit_at=exit_bar.observed_at,
+    )
+    gross_return = _return_pct(exit_price, entry_price)
+    high_bar = max(eligible_bars, key=lambda bar: float(bar.high or 0.0))
+    low_bar = min(eligible_bars, key=lambda bar: float(bar.low or math.inf))
+    benchmark_complete = bool(
+        benchmark_return is not None
+        and secondary_benchmark_return is not None
+        and source_evidence.get("independent_reconciliation_status") == "PASSED"
+        and benchmark_evidence.get("independent_reconciliation_status") == "PASSED"
+        and secondary_benchmark_evidence.get("independent_reconciliation_status")
+        == "PASSED"
+    )
+    base.update({
+        "entry_opportunity": True,
+        "entry_time": _iso_utc(entry_bar.observed_at),
+        "entry_price": entry_price,
+        "entry_price_policy": "sampled_reject_first_eligible_bar_open_v1",
+        "close_price": exit_price,
+        "close_price_observed_at": _iso_utc(exit_bar.observed_at),
+        "high_after_entry": high_bar.high,
+        "low_after_entry": low_bar.low,
+        "max_favorable_excursion_pct": _return_pct(high_bar.high, entry_price),
+        "max_adverse_excursion_pct": _return_pct(low_bar.low, entry_price),
+        "planned_first_touch_outcome": None,
+        "exit_reason": "sampled_reject_regular_session_close_v1",
+        "exit_time": _iso_utc(exit_bar.observed_at),
+        "exit_price": exit_price,
+        "holding_duration_minutes": _elapsed_minutes(
+            entry_bar.observed_at, exit_bar.observed_at
+        ),
+        "gross_return_pct": gross_return,
+        "benchmark_symbol": PRIMARY_BENCHMARK,
+        "benchmark_return_pct": benchmark_return,
+        "benchmark_source": benchmark_evidence.get("source"),
+        "benchmark_source_url": benchmark_evidence.get("source_url"),
+        "benchmark_source_bar_hash_sha256": benchmark_evidence.get(
+            "source_bar_hash_sha256"
+        ),
+        "benchmark_independent_reconciliation_status": benchmark_evidence.get(
+            "independent_reconciliation_status"
+        ),
+        "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
+        "secondary_benchmark_return_pct": secondary_benchmark_return,
+        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
+            "source_url"
+        ),
+        "secondary_benchmark_source_bar_hash_sha256": (
+            secondary_benchmark_evidence.get("source_bar_hash_sha256")
+        ),
+        "secondary_benchmark_independent_reconciliation_status": (
+            secondary_benchmark_evidence.get("independent_reconciliation_status")
+        ),
+        "attribution_complete": benchmark_complete,
+        "benchmark_contract_complete": benchmark_complete,
+        "outcome_status": (
+            "complete_sourced" if benchmark_complete else "ineligible_missing_benchmark"
+        ),
+        "learning_eligible": benchmark_complete,
+        "learning_contract": "sampled_rejected_open_to_close_regret_v1",
+        "validated_against_signal_timestamp": True,
+        "counterfactual_rejected_candidate": True,
+        "counterfactual_policy": "OPEN_TO_CLOSE_V1",
+        "notes": (
+            "Research-only sampled rejected-candidate counterfactual. This is not a "
+            "simulated V5 trade and cannot enter the official paper scorecard."
         ),
     })
     base["payload_json"] = dict(base)
@@ -1008,6 +1387,12 @@ def _outcome_base(
         "source_lineage": source_evidence.get("source_lineage") or [],
         "provider_chain_exhausted": bool(
             source_evidence.get("provider_chain_exhausted")
+        ),
+        "independent_source_reconciliation": source_evidence.get(
+            "independent_reconciliation"
+        ),
+        "independent_reconciliation_status": source_evidence.get(
+            "independent_reconciliation_status"
         ),
         "requested_at": _iso_utc(requested_at),
         "imported_at": captured_at,

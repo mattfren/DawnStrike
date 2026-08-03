@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from intraday_scanner.alpha.alert_gate import is_alertable_notification_candidate
 from intraday_scanner.config import load_config
-from intraday_scanner.errors import NotificationError
+from intraday_scanner.errors import ConfigError, NotificationError
 from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.base import BaseNotifier
@@ -44,6 +45,7 @@ from intraday_scanner.providers.web_source_base import (
     WebSourceConfig,
     get_source,
     load_web_sources_config,
+    production_contract_status,
     require_enabled,
     write_json,
 )
@@ -77,7 +79,7 @@ SOURCE_PRIORITY = (
 
 def web_build_universe(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_path: str | Path = "data/universe_us_common.csv",
     persist: bool = False,
@@ -100,7 +102,7 @@ def web_build_universe(
 
 def web_collect_halts(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_halts",
     persist: bool = False,
@@ -123,7 +125,7 @@ def web_collect_halts(
 
 def web_collect_sec_risk(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_sec",
     tickers: list[str] | None = None,
@@ -147,7 +149,7 @@ def web_collect_sec_risk(
 def web_ingest_public_table(
     *,
     url: str,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path = "outputs/web_ingest",
     persist: bool = False,
@@ -172,7 +174,7 @@ def web_ingest_public_table(
 
 def web_auto_collect(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_dir: str | Path | None = None,
     persist: bool = False,
@@ -265,6 +267,7 @@ def web_auto_collect(
             [source for source in _candidate_sources(config) if source.enabled]
         ),
         "only_universe_or_enrichment_enabled": _only_universe_or_enrichment_enabled(config),
+        "production_contract": production_contract_status(config),
         "halt_summary": _compact_summary(halt_summary),
         "sec_summary": _compact_summary(sec_summary),
         "snapshot_path": str(snapshot_path),
@@ -322,7 +325,7 @@ def web_auto_collect(
 
 def web_telegram_daemon(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     automation_config_path: str | Path = "config/automation.example.yaml",
     db_path: str | Path = "data/shadow_real.sqlite",
     out_root: str | Path = "outputs/web_telegram",
@@ -471,7 +474,24 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
     rows = store.load_normalized_source_rows(limit=50)
     latest_result = fetch_results[0] if fetch_results else {}
     latest_summary = dict(latest_result.get("summary") or {})
-    web_config = load_web_sources_config(None)
+    try:
+        web_config = load_web_sources_config(None)
+        source_operability = source_operability_status(web_config)
+        production_contract = production_contract_status(web_config)
+    except ConfigError as exc:
+        source_operability = {
+            "enabled_candidate_sources": [],
+            "enabled_universe_sources": [],
+            "enabled_enrichment_sources": [],
+            "only_universe_or_enrichment_enabled": False,
+            "candidate_source_required": True,
+        }
+        production_contract = {
+            "status": "BLOCKED_CONFIGURATION",
+            "ready": False,
+            "violations": ["runtime_web_sources_config_missing"],
+            "detail": str(exc),
+        }
     return {
         "latest_fetch_run": fetch_runs[0] if fetch_runs else {},
         "latest_fetch_result": latest_result,
@@ -487,7 +507,8 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
         "ai_research_outputs": store.load_ai_research_outputs(limit=50),
         "ai_data_warnings": store.load_ai_data_warnings(limit=50),
         "telegram_status": _telegram_status(store),
-        "source_operability": source_operability_status(web_config),
+        "source_operability": source_operability,
+        "production_contract": production_contract,
         "browser_extractor": browser_extractor_status(),
         "counts": {
             "latest_candidate_count": latest_summary.get("candidate_count", len(rows)),
@@ -501,7 +522,7 @@ def web_automation_status(store: SQLiteScanStore) -> dict[str, Any]:
 
 def web_source_doctor(
     *,
-    config_path: str | Path = "config/web_sources.example.yaml",
+    config_path: str | Path = "config/web_sources.yaml",
     out_dir: str | Path = "outputs/source_doctor",
     print_rows: bool = False,
 ) -> dict[str, Any]:
@@ -513,13 +534,15 @@ def web_source_doctor(
         rows.append(_doctor_source(source, config, output_dir))
     normalization_debug = _write_source_doctor_debug(output_dir, rows)
     source_operability = source_operability_status(config)
+    production_contract = production_contract_status(config)
     aggregate = _aggregate_doctor_health(rows)
     result = {
-        "status": "complete",
+        "status": ("complete" if production_contract["ready"] else "blocked_configuration"),
         "created_at": utc_now_iso(),
         "config_path": str(config_path),
         "browser_extractor": browser_extractor_status(),
         "source_operability": source_operability,
+        "production_contract": production_contract,
         "enabled_candidate_sources": source_operability["enabled_candidate_sources"],
         "enabled_enrichment_sources": source_operability["enabled_enrichment_sources"],
         "enabled_universe_sources": source_operability["enabled_universe_sources"],
@@ -530,7 +553,11 @@ def web_source_doctor(
         "source_confidence": aggregate["source_confidence"],
         "stale_data_status": aggregate["stale_data_status"],
         "top_rejection_reasons": aggregate["top_rejection_reasons"],
-        "next_action": aggregate["next_action"],
+        "next_action": (
+            "Resolve production source-contract violations before collection."
+            if not production_contract["ready"]
+            else aggregate["next_action"]
+        ),
         "rejection_reason_counts": normalization_debug["rejection_reason_counts"],
         "sources": rows,
     }
@@ -637,8 +664,9 @@ def _web_telegram_cycle(
         "ai": ai,
     }
     ranked_payload = list(payload["ranked_candidates"])
+    alertable_payload = _alertable_notification_candidates(ranked_payload)
     events.extend(_morning_watchlist_events(payload))
-    if ranked_payload:
+    if alertable_payload:
         events.append(_manual_monitor_event(run_date, payload))
     auto_config = load_automation_config(
         automation_config_path,
@@ -736,11 +764,15 @@ def _doctor_source(
         return base
     if source.type == "local_inbox":
         inbox = Path(source.path or "data/inbox/screener")
-        files = [
-            path
-            for path in inbox.iterdir()
-            if inbox.exists() and path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
-        ] if inbox.exists() else []
+        files = (
+            [
+                path
+                for path in inbox.iterdir()
+                if inbox.exists() and path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
+            ]
+            if inbox.exists()
+            else []
+        )
         return {
             **base,
             "attempted": True,
@@ -789,20 +821,22 @@ def _doctor_source(
 
 def _doctor_from_result(base: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     reason = str(result.get("failure_reason") or result.get("reason") or "")
-    return _annotate_source_attempt({
-        **base,
-        "attempted": True,
-        "status": str(result.get("status") or "unknown"),
-        "rows_extracted": int(result.get("rows_extracted") or 0),
-        "rows_normalized": int(result.get("rows_normalized") or 0),
-        "rows_rejected": int(result.get("rows_rejected") or 0),
-        "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
-        "paths": dict(result.get("paths") or {}),
-        "started_at": str(result.get("started_at") or ""),
-        "completed_at": str(result.get("completed_at") or ""),
-        "failure_reason": reason,
-        "next_action": _next_action_for_result(base, result, reason),
-    })
+    return _annotate_source_attempt(
+        {
+            **base,
+            "attempted": True,
+            "status": str(result.get("status") or "unknown"),
+            "rows_extracted": int(result.get("rows_extracted") or 0),
+            "rows_normalized": int(result.get("rows_normalized") or 0),
+            "rows_rejected": int(result.get("rows_rejected") or 0),
+            "rejection_reason_counts": dict(result.get("rejection_reason_counts") or {}),
+            "paths": dict(result.get("paths") or {}),
+            "started_at": str(result.get("started_at") or ""),
+            "completed_at": str(result.get("completed_at") or ""),
+            "failure_reason": reason,
+            "next_action": _next_action_for_result(base, result, reason),
+        }
+    )
 
 
 def _write_source_doctor_debug(
@@ -925,7 +959,7 @@ def _maybe_collect_sec(
 def _morning_watchlist_events(payload: dict[str, Any]) -> list[NotificationEvent]:
     summary = dict(payload.get("summary") or {})
     source_summary = dict(payload.get("source_summary") or {})
-    ranked = list(payload.get("ranked_candidates") or [])
+    ranked = _alertable_notification_candidates(list(payload.get("ranked_candidates") or []))
     body = format_morning_watchlist(
         ranked=ranked,
         avoid=list(payload.get("avoid_list") or []),
@@ -978,7 +1012,7 @@ def _risk_events(payload: dict[str, Any]) -> list[NotificationEvent]:
 
 
 def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> NotificationEvent:
-    ranked = list(payload.get("ranked_candidates") or [])
+    ranked = _alertable_notification_candidates(list(payload.get("ranked_candidates") or []))
     tickers = [str(row.get("ticker") or "").upper() for row in ranked[:5] if row.get("ticker")]
     body = format_manual_monitor(tickers)
     return _event(
@@ -988,6 +1022,14 @@ def _manual_monitor_event(run_date: str, payload: dict[str, Any]) -> Notificatio
         channel_hint="monitor_alert",
         payload={"tickers": tickers, "telegram_compact_message": body},
     )
+
+
+def _alertable_notification_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the legacy web route subordinate to the canonical Alpha gate."""
+
+    return [row for row in candidates if is_alertable_notification_candidate(row)]
 
 
 def _outcome_needed_event(run_date: str, outcomes: dict[str, Any]) -> NotificationEvent:
@@ -1283,9 +1325,7 @@ def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:
         return []
     flags: list[str] = []
     prices = [
-        _float(row.get("premarket_price"))
-        for row in rows
-        if _float(row.get("premarket_price"))
+        _float(row.get("premarket_price")) for row in rows if _float(row.get("premarket_price"))
     ]
     gaps = [_float(row.get("gap_pct")) for row in rows if row.get("gap_pct") not in {None, ""}]
     volumes = [
@@ -1306,9 +1346,7 @@ def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:
 
 def _dedupe_rank(row: dict[str, Any]) -> tuple[int, int, str]:
     quality = sum(
-        1
-        for key in ("premarket_price", "gap_pct", "premarket_volume")
-        if _float(row.get(key)) > 0
+        1 for key in ("premarket_price", "gap_pct", "premarket_volume") if _float(row.get(key)) > 0
     )
     source_score = len(SOURCE_PRIORITY) - _source_priority(str(row.get("source") or ""))
     timestamp = str(row.get("as_of_timestamp") or row.get("imported_at") or "")
@@ -1371,10 +1409,7 @@ def _stale_status_for_attempt(summary: dict[str, Any]) -> str:
     if str(summary.get("status") or "") in {"disabled", "empty"}:
         return "no_data"
     timestamp = str(
-        summary.get("completed_at")
-        or summary.get("created_at")
-        or summary.get("started_at")
-        or ""
+        summary.get("completed_at") or summary.get("created_at") or summary.get("started_at") or ""
     )
     if not timestamp:
         return "unknown"
@@ -1426,9 +1461,7 @@ def _aggregate_doctor_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     confidence = round(sum(successful) / len(successful), 2) if successful else 0.0
     normalized = sum(int(row.get("rows_normalized") or 0) for row in candidate_rows)
-    top_reasons = dict(
-        sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:5]
-    )
+    top_reasons = dict(sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:5])
     return {
         "rows_extracted": sum(int(row.get("rows_extracted") or 0) for row in candidate_rows),
         "rows_normalized": normalized,
@@ -1504,10 +1537,7 @@ def _top_failure_reason(
         return sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
     for failure in failures:
         reason = str(
-            failure.get("failure_reason")
-            or failure.get("reason")
-            or failure.get("status")
-            or ""
+            failure.get("failure_reason") or failure.get("reason") or failure.get("status") or ""
         ).strip()
         if reason:
             return reason
@@ -1516,9 +1546,7 @@ def _top_failure_reason(
 
 def _compact_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in summary.items()
-        if key not in {"events", "fetches", "items"}
+        key: value for key, value in summary.items() if key not in {"events", "fetches", "items"}
     }
 
 

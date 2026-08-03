@@ -10,6 +10,7 @@ def _write_required_scripts(root: Path) -> None:
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
         "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
         "run_daily_finalize.ps1",
         "register_alphaops_tasks.ps1",
         "register_daily_finalize_task.ps1",
@@ -24,6 +25,10 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
             "name": name,
             "state": "Ready",
             "enabled": True,
+            "logon_type": "Password",
+            "start_when_available": True,
+            "stop_if_going_on_batteries": False,
+            "disallow_start_if_on_batteries": False,
             "last_task_result": last_result,
             "last_run_time": "2026-07-30T17:30:00-05:00",
             "next_run_time": "2026-07-31T08:10:00-05:00",
@@ -113,3 +118,27 @@ def test_scheduler_doctor_rejects_legacy_source_root(
         if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
     )
     assert monitor["legacy_root_absent"] is False
+
+
+def test_scheduler_doctor_rejects_s4u_for_networked_alphaops(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    rows[0]["logon_type"] = "S4U"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    morning = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Morning"
+    )
+    assert morning["noninteractive"] is False

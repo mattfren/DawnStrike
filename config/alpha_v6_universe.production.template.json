@@ -1,0 +1,15 @@
+{
+  "schema_version": "dawnstrike.alphaops_v6.universe_candidate.v1",
+  "status": "BLOCKED_EXTERNAL_APPROVAL",
+  "registration_allowed": false,
+  "required_external_inputs": [
+    "An approved source contract generated from config/alpha_v6_universe_source.contract.template.json.",
+    "A complete, hashed, point-in-time raw artifact from that approved provider.",
+    "A candidate generated only by alpha-v6-build-universe."
+  ],
+  "as_of_date": "YYYY-MM-DD",
+  "source_lineage": {},
+  "members": [],
+  "rejected_members": [],
+  "candidate_hash_sha256": "GENERATED_BY_ALPHA_V6_BUILD_UNIVERSE"
+}
