@@ -90,6 +90,31 @@ def test_scheduler_doctor_accepts_one_release_and_state_boundary(
     assert all(row["legacy_root_absent"] for row in result["scheduled_tasks"])
 
 
+def test_scheduler_doctor_keeps_stale_run_history_separate_from_schedule_health(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_query_scheduled_tasks",
+        lambda: _healthy_tasks(runtime, state, last_result=1),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    assert result["failed_task_count"] == 0
+    assert all(
+        row["last_run_status"] == "STALE_OR_FAILED"
+        for row in result["scheduled_tasks"]
+    )
+
+
 def test_scheduler_doctor_rejects_legacy_source_root(
     tmp_path: Path,
     monkeypatch,
