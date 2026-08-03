@@ -631,14 +631,110 @@ def _fetch_outcome_bars(
     list[dict[str, Any]],
     str,
 ]:
-    """Resolve one complete source, retaining every bounded provider attempt."""
+    """Resolve outcome bars through the configured, auditable provider order."""
 
     requests: list[dict[str, Any]] = []
     candidates: list[tuple[list[OutcomeBar], dict[str, Any]]] = []
     errors: list[str] = []
-    configured_fallback = fallback_fetcher
-    if configured_fallback is None and config.alpaca_api_key_id and config.alpaca_api_secret_key:
-        configured_fallback = _fetch_alpaca_rows
+    alpaca_fetcher = fallback_fetcher
+    if alpaca_fetcher is None and config.alpaca_api_key_id and config.alpaca_api_secret_key:
+        alpaca_fetcher = _fetch_alpaca_rows
+
+    for provider_name in _outcome_provider_order(config):
+        if provider_name == "alpaca":
+            _collect_alpaca_candidates(
+                ticker=ticker,
+                config=config,
+                session=session,
+                requested_at=requested_at,
+                captured_at=captured_at,
+                attempt_limit=attempt_limit,
+                fetcher=alpaca_fetcher,
+                requests=requests,
+                candidates=candidates,
+                errors=errors,
+            )
+        else:
+            _collect_yahoo_candidates(
+                ticker=ticker,
+                config=config,
+                session=session,
+                requested_at=requested_at,
+                captured_at=captured_at,
+                attempt_limit=attempt_limit,
+                fetcher=chart_fetcher,
+                requests=requests,
+                candidates=candidates,
+                errors=errors,
+            )
+
+    for provider_name in _outcome_provider_order(config):
+        source = (
+            f"alpaca_market_data_{config.alpaca_data_feed}"
+            if provider_name == "alpaca"
+            else YAHOO_SOURCE_NAME
+        )
+        preferred = next(
+            (
+                (bars, request)
+                for bars, request in candidates
+                if request.get("source") == source
+                and request.get("source_coverage_complete") is True
+            ),
+            None,
+        )
+        if preferred is not None:
+            bars, request = preferred
+            return (
+                bars,
+                _selected_source_evidence(request, requests, candidates),
+                requests,
+                "; ".join(errors),
+            )
+
+    if candidates:
+        bars, request = max(candidates, key=lambda item: _source_choice_key(item[0]))
+        return (
+            bars,
+            _selected_source_evidence(request, requests, candidates),
+            requests,
+            "; ".join(errors),
+        )
+    evidence = {
+        "source": "",
+        "source_url": "",
+        "source_fetched_at": captured_at,
+        "source_bar_hash_sha256": _bars_hash([]),
+        "source_lineage": requests,
+        "provider_chain_exhausted": True,
+    }
+    return [], evidence, requests, "; ".join(errors) or "No provider returned bars."
+
+
+def _outcome_provider_order(config: ScannerConfig) -> tuple[str, str]:
+    providers = tuple(
+        item.strip().lower()
+        for item in config.outcome_capture_provider_order.split(",")
+        if item.strip()
+    )
+    if providers not in {("yahoo", "alpaca"), ("alpaca", "yahoo")}:
+        raise SnapshotValidationError("Outcome provider order is invalid.")
+    return providers
+
+
+def _collect_yahoo_candidates(
+    *,
+    ticker: str,
+    config: ScannerConfig,
+    session: SessionWindow,
+    requested_at: datetime,
+    captured_at: str,
+    attempt_limit: int,
+    fetcher: FetchChart,
+    requests: list[dict[str, Any]],
+    candidates: list[tuple[list[OutcomeBar], dict[str, Any]]],
+    errors: list[str],
+) -> None:
     yahoo_url = yahoo_chart_url(
         ticker,
         range_name=YAHOO_RANGE,
@@ -647,7 +743,7 @@ def _fetch_outcome_bars(
     )
     for attempt in range(1, attempt_limit + 1):
         try:
-            payload = chart_fetcher(
+            payload = fetcher(
                 ticker,
                 config,
                 range_name=YAHOO_RANGE,
@@ -672,14 +768,7 @@ def _fetch_outcome_bars(
             requests.append(request)
             candidates.append((bars, request))
             if request["source_coverage_complete"] is True:
-                if configured_fallback is None:
-                    return (
-                        bars,
-                        _selected_source_evidence(request, requests, candidates),
-                        requests,
-                        "",
-                    )
-                break
+                return
         except (DataProviderError, ValueError, TypeError) as exc:
             detail = f"{YAHOO_SOURCE_NAME} attempt {attempt}: {exc}"
             errors.append(detail)
@@ -695,9 +784,23 @@ def _fetch_outcome_bars(
                 "error": str(exc),
             })
 
+
+def _collect_alpaca_candidates(
+    *,
+    ticker: str,
+    config: ScannerConfig,
+    session: SessionWindow,
+    requested_at: datetime,
+    captured_at: str,
+    attempt_limit: int,
+    fetcher: FetchNormalizedBars | None,
+    requests: list[dict[str, Any]],
+    candidates: list[tuple[list[OutcomeBar], dict[str, Any]]],
+    errors: list[str],
+) -> None:
     alpaca_source = f"alpaca_market_data_{config.alpaca_data_feed}"
     alpaca_url = "https://data.alpaca.markets/v2/stocks/bars"
-    if configured_fallback is None:
+    if fetcher is None:
         requests.append({
             "ticker": ticker,
             "status": "not_configured",
@@ -709,71 +812,48 @@ def _fetch_outcome_bars(
             "bar_count": 0,
             "error": "Read-only Alpaca market-data credentials are not configured.",
         })
-    else:
-        for attempt in range(1, attempt_limit + 1):
-            try:
-                rows = configured_fallback(
-                    ticker,
-                    config,
-                    start=_iso_utc(session.opened_at),
-                    end=_iso_utc(session.closed_at),
-                )
-                bars = _regular_session_bars_from_rows(
-                    ticker,
-                    rows,
-                    session=session,
-                    requested_at=requested_at,
-                )
-                request = _provider_request(
-                    ticker=ticker,
-                    source=alpaca_source,
-                    source_url=alpaca_url,
-                    bars=bars,
-                    session=session,
-                    fetched_at=captured_at,
-                    attempt=attempt,
-                )
-                requests.append(request)
-                candidates.append((bars, request))
-                if request["source_coverage_complete"] is True:
-                    return (
-                        bars,
-                        _selected_source_evidence(request, requests, candidates),
-                        requests,
-                        "",
-                    )
-            except (DataProviderError, ValueError, TypeError) as exc:
-                detail = f"{alpaca_source} attempt {attempt}: {exc}"
-                errors.append(detail)
-                requests.append({
-                    "ticker": ticker,
-                    "status": "provider_error",
-                    "source": alpaca_source,
-                    "source_url": alpaca_url,
-                    "attempt": attempt,
-                    "attempt_limit": attempt_limit,
-                    "fetched_at": captured_at,
-                    "bar_count": 0,
-                    "error": str(exc),
-                })
-
-    if candidates:
-        bars, request = max(candidates, key=lambda item: _source_choice_key(item[0]))
-        return (
-            bars,
-            _selected_source_evidence(request, requests, candidates),
-            requests,
-            "; ".join(errors),
-        )
-    evidence = {
-        "source": "",
-        "source_url": "",
-        "source_fetched_at": captured_at,
-        "source_bar_hash_sha256": _bars_hash([]),
-        "source_lineage": requests,
-        "provider_chain_exhausted": True,
-    }
-    return [], evidence, requests, "; ".join(errors) or "No provider returned bars."
+        return
+    for attempt in range(1, attempt_limit + 1):
+        try:
+            rows = fetcher(
+                ticker,
+                config,
+                start=_iso_utc(session.opened_at),
+                end=_iso_utc(session.closed_at),
+            )
+            bars = _regular_session_bars_from_rows(
+                ticker,
+                rows,
+                session=session,
+                requested_at=requested_at,
+            )
+            request = _provider_request(
+                ticker=ticker,
+                source=alpaca_source,
+                source_url=alpaca_url,
+                bars=bars,
+                session=session,
+                fetched_at=captured_at,
+                attempt=attempt,
+            )
+            requests.append(request)
+            candidates.append((bars, request))
+            if request["source_coverage_complete"] is True:
+                return
+        except (DataProviderError, ValueError, TypeError) as exc:
+            detail = f"{alpaca_source} attempt {attempt}: {exc}"
+            errors.append(detail)
+            requests.append({
+                "ticker": ticker,
+                "status": "provider_error",
+                "source": alpaca_source,
+                "source_url": alpaca_url,
+                "attempt": attempt,
+                "attempt_limit": attempt_limit,
+                "fetched_at": captured_at,
+                "bar_count": 0,
+                "error": str(exc),
+            })
 
 
 def _fetch_alpaca_rows(

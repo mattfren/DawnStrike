@@ -327,6 +327,49 @@ def test_bounded_secondary_provider_fallback_captures_full_attribution(
     assert result["required_stage_failed"] is False
 
 
+def test_alpaca_first_mode_preserves_yahoo_as_secondary_reconciliation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "alpaca-first.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_selected_signals(store, [_signal()])
+    rows = _contiguous_bars(overrides={
+        "09:30": (9.80, 9.95, 9.75, 9.90),
+        "09:31": (9.90, 10.15, 9.88, 10.10),
+        "15:59": (10.20, 10.40, 10.15, 10.30),
+    })
+    yahoo_calls = 0
+
+    def unavailable_yahoo(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal yahoo_calls
+        yahoo_calls += 1
+        raise DataProviderError("secondary unavailable")
+
+    result = capture_sourced_alpha_outcomes(
+        db_path=db_path,
+        market_date=DAY,
+        requested_at=f"{DAY}T16:05:00-04:00",
+        out_dir=tmp_path / "capture",
+        config=ScannerConfig(
+            alpaca_api_key_id="test-key-id",
+            alpaca_api_secret_key="test-secret",
+            outcome_capture_provider_order="alpaca,yahoo",
+        ),
+        fetcher=unavailable_yahoo,
+        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        provider_attempt_limit=2,
+    )
+
+    assert result["status"] == "complete"
+    assert yahoo_calls == 6  # Two bounded reconciliation attempts for NOVA, SPY, and IWM.
+    outcome = result["outcomes"][0]
+    assert outcome["outcome_source"] == "alpaca_market_data_iex"
+    assert outcome["source_lineage"][0]["source"] == "alpaca_market_data_iex"
+    assert outcome["source_lineage"][-1]["source"] == "yahoo_finance_chart"
+    assert outcome["source_lineage"][-1]["status"] == "provider_error"
+    assert outcome["source_lineage"][0]["source_coverage_complete"] is True
+
+
 def test_v5_complete_candidate_without_allowed_entry_is_recorded_as_non_fill(
     tmp_path: Path,
 ) -> None:

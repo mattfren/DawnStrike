@@ -1,4 +1,7 @@
+import pytest
+
 from intraday_scanner.config import load_config
+from intraday_scanner.errors import ConfigError
 
 
 def test_config_accepts_requested_secret_aliases(tmp_path, monkeypatch):
@@ -42,3 +45,20 @@ def test_config_accepts_requested_secret_aliases(tmp_path, monkeypatch):
     public = config.public_dict()
     assert "openai_api_key" not in public
     assert "discord_webhook_url" not in public
+
+
+def test_config_accepts_only_explicit_outcome_provider_orders(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER=alpaca,yahoo\n",
+        encoding="utf-8",
+    )
+
+    assert load_config(env_file).outcome_capture_provider_order == "alpaca,yahoo"
+
+    env_file.write_text(
+        "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER=alpaca\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="OUTCOME_CAPTURE_PROVIDER_ORDER"):
+        load_config(env_file)
