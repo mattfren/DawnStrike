@@ -63,8 +63,8 @@ $action = New-ScheduledTaskAction `
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
-    -DisallowStartIfOnBatteries:$false `
-    -StopIfGoingOnBatteries:$false `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
     -WakeToRun `
     -MultipleInstances IgnoreNew `
     -RestartCount 2 `

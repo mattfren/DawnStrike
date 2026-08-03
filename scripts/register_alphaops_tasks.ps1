@@ -124,8 +124,8 @@ foreach ($definition in $taskDefinitions) {
     }
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
-        -DisallowStartIfOnBatteries:$false `
-        -StopIfGoingOnBatteries:$false `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
         -WakeToRun `
         -MultipleInstances IgnoreNew `
         -RestartCount 3 `
