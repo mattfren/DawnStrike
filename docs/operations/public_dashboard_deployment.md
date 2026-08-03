@@ -4,6 +4,11 @@ The production surface is a read-only Vercel publication of `build/public`.
 The local database, scanner, outcome capture, and Telegram delivery remain
 outside Vercel.
 
+Git deployments are disabled in `vercel.json`. A Git clone cannot produce the
+durable-state-backed `build/public` artifact, and must never fall back to the
+repository-root static files. Only the verified prebuilt flow below may update
+the Dawnstrike deployment or production aliases.
+
 ## Candidate flow
 
 ```powershell
