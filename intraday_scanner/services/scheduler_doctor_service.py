@@ -146,7 +146,7 @@ def _task_check(
     enabled = task.get("enabled") is True
     last_result = task.get("last_task_result")
     healthy_state = state in {"Ready", "Running"}
-    healthy_result = last_result in ACCEPTABLE_LAST_RESULTS
+    last_run_result_acceptable = last_result in ACCEPTABLE_LAST_RESULTS
     logon_type = str(task.get("logon_type") or "")
     noninteractive = logon_type in NONINTERACTIVE_LOGON_TYPES
     start_when_available = task.get("start_when_available") is True
@@ -158,7 +158,6 @@ def _task_check(
         (
             enabled,
             healthy_state,
-            healthy_result,
             runner_ok,
             runtime_ok,
             state_ok,
@@ -178,6 +177,10 @@ def _task_check(
         "noninteractive": noninteractive,
         "start_when_available": start_when_available,
         "battery_safe": battery_safe,
+        "last_run_result_acceptable": last_run_result_acceptable,
+        "last_run_status": (
+            "ACCEPTABLE" if last_run_result_acceptable else "STALE_OR_FAILED"
+        ),
         "status": "LOCAL_VERIFIED" if verified else "FAILED",
     }
 
