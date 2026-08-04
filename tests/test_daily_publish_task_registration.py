@@ -138,3 +138,13 @@ def test_native_process_runner_preserves_real_exit_code_when_stderr_is_used() ->
     assert '$ErrorActionPreference = "Continue"' in runner
     assert '$ErrorActionPreference = $previousErrorActionPreference' in runner
     assert "$exitCode = if ($null -eq $LASTEXITCODE)" in runner
+
+
+def test_eod_retry_reuses_only_a_reconciled_existing_paperops_day() -> None:
+    runner = Path("scripts/run_alphaops_eod.ps1").read_text(encoding="utf-8")
+
+    assert '"reports\\daily\\forward_$MarketDate.json"' in runner
+    assert '"paperops-resume-reconcile-$MarketDate"' in runner
+    assert "$reuseExistingDailyReport = ($paperExit -eq 0)" in runner
+    assert "-not $reuseExistingDailyReport" in runner
+    assert "all truth checks below still run" in runner
