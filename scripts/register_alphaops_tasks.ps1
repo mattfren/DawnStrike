@@ -138,9 +138,18 @@ foreach ($definition in $taskDefinitions) {
     }
     if (
         $ReuseExistingPrincipal -and
-        $existing.Principal.LogonType.ToString() -notin @("Password", "ServiceAccount")
+        $existing.Principal.LogonType.ToString() -eq "Password"
     ) {
-        throw "Existing task principal is not password/service backed: $taskName"
+        throw (
+            "Existing Password tasks require RunAsCredential because Windows " +
+            "will not modify them without revalidating the account password: $taskName"
+        )
+    }
+    if (
+        $ReuseExistingPrincipal -and
+        $existing.Principal.LogonType.ToString() -ne "ServiceAccount"
+    ) {
+        throw "Existing task principal is not a reusable service account: $taskName"
     }
     if ($ReuseExistingPrincipal) {
         $principal = [string]$existing.Principal.UserId
@@ -215,7 +224,8 @@ foreach ($definition in $taskDefinitions) {
             -TaskName $taskName `
             -Action $action `
             -Trigger $trigger `
-            -Settings $settings | Out-Null
+            -Settings $settings `
+            -ErrorAction Stop | Out-Null
         Write-Output "Updated $taskName while preserving its approved stored principal."
     }
     else {
