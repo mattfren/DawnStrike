@@ -252,9 +252,7 @@ function renderScenarios() {
     const afterCost = lifecycle.realized_return_pct == null || lifecycle.modeled_cost_pct == null
       ? null
       : Number(lifecycle.realized_return_pct) - Number(lifecycle.modeled_cost_pct);
-    const eventTrail = Array.isArray(lifecycle.events) && lifecycle.events.length
-      ? lifecycle.events.map((event) => `${humanizeIdentifier(event.event_type)} · ${formatTimestamp(event.event_timestamp)}`).join("<br>")
-      : "No triggered lifecycle event";
+    const eventTrail = scenarioEventTrailHtml(lifecycle.events);
     return `<tr>
       <td><strong>${escapeHtml(record.ticker || "Not reported")}</strong></td>
       <td>${escapeHtml(humanizeIdentifier(record.action || "not_reported"))}<br><span class="value-muted">${escapeHtml(shortHash(record.decision_id) || "Missing")}</span></td>
@@ -287,9 +285,11 @@ function renderScenarios() {
     const levels = record.entry_trigger == null
       ? "Not eligible"
       : `Entry ${formatPrice(record.entry_trigger)} · Stop ${formatPrice(record.invalidation_level)} · Target ${formatPrice(record.target_1)}`;
-    const source = record.source_url
-      ? `<a class="source-link" href="${escapeHtml(record.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(record.source_tier || "Source")}</a>`
-      : escapeHtml(record.source_tier || "Not reported");
+    const safeSourceUrl = safeHttpsSourceUrl(record.source_url);
+    const sourceLabel = record.source_tier || (record.source_url ? "Source link unavailable" : "Not reported");
+    const source = safeSourceUrl
+      ? `<a class="source-link" href="${escapeHtml(safeSourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceLabel)}</a>`
+      : escapeHtml(sourceLabel);
     const evidence = [record.headline, ...(Array.isArray(record.reason_codes) ? record.reason_codes : [])]
       .filter(Boolean)
       .join(" · ");
@@ -916,5 +916,29 @@ function shortDate(value) { return value ? value.slice(5) : "—"; }
 function shortHash(value) { return value ? `${String(value).slice(0, 10)}…` : "Not reported"; }
 function formatTimestamp(value) { if (!value) return "Not reported"; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;" }[char])); }
+
+function scenarioEventTrailHtml(events) {
+  if (!Array.isArray(events) || !events.length) return "No triggered lifecycle event";
+  return events.map((event) => {
+    const eventType = escapeHtml(humanizeIdentifier(event?.event_type || "not_reported"));
+    const eventTimestamp = escapeHtml(formatTimestamp(event?.event_timestamp));
+    return `${eventType} · ${eventTimestamp}`;
+  }).join("<br>");
+}
+
+function safeHttpsSourceUrl(value) {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim();
+  if (!candidate || candidate.length > 2048 || !/^https:\/\/[^/?#\\]+(?:[/?#]|$)/i.test(candidate) || /[\u0000-\u001f\u007f]/.test(candidate)) return null;
+  const authority = candidate.slice("https://".length).split(/[/?#]/, 1)[0];
+  if (authority.includes("@")) return null;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
 
 init();
