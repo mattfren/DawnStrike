@@ -125,6 +125,7 @@ def build_v5_account_ledger(
         explicit_no_trade = _is_explicit_account_no_trade(
             scorecards=day_scorecards,
             intents=day_intents,
+            selections=day_selections,
             trades=day_trades,
             open_positions=open_positions,
         )
@@ -162,15 +163,11 @@ def build_v5_account_ledger(
                 unrealized_change = 0
                 ending = beginning + net
         elif explicit_no_trade:
-            if beginning is None:
-                status = "PENDING"
-                evidence_state = "pending"
-            else:
-                status = "NO_TRADE"
-                evidence_state = "no_trade"
-                observed_zero = True
-                gross = fees = slippage = net = unrealized_change = 0
-                ending = beginning
+            status = "NO_TRADE"
+            evidence_state = "no_trade"
+            observed_zero = True
+            gross = fees = slippage = net = unrealized_change = 0
+            ending = beginning
         elif has_session_evidence:
             status = "PENDING"
             evidence_state = "pending"
@@ -187,8 +184,16 @@ def build_v5_account_ledger(
             status = "DEGRADED"
             evidence_state = "degraded"
             ending = None
-        net_return = _return_pct(net, beginning) if ending is not None else None
-        gross_return = _return_pct(gross, beginning) if ending is not None else None
+        net_return = (
+            0.0
+            if observed_zero
+            else _return_pct(net, beginning) if ending is not None else None
+        )
+        gross_return = (
+            0.0
+            if observed_zero
+            else _return_pct(gross, beginning) if ending is not None else None
+        )
         market_benchmark = benchmark.get(day)
         excess_return = (
             round(net_return - market_benchmark, 4)
@@ -474,6 +479,7 @@ def _is_explicit_account_no_trade(
     *,
     scorecards: list[dict[str, Any]],
     intents: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     open_positions: list[dict[str, Any]],
 ) -> bool:
@@ -493,7 +499,37 @@ def _is_explicit_account_no_trade(
         and _payload(row).get("official_paper_eligible") is False
         for row in intents
     )
-    return complete_scorecard or blocked_intents
+    canonical_no_trade_selection = (
+        len(selections) == 1
+        and _selection_is_canonical_no_trade(selections[0])
+    )
+    return complete_scorecard or blocked_intents or canonical_no_trade_selection
+
+
+def _selection_is_canonical_no_trade(row: dict[str, Any]) -> bool:
+    payload = _payload(row)
+    decision_payload = payload.get("decision_payload")
+    rank = row.get("rank") if row.get("rank") is not None else payload.get("rank")
+    if rank is None:
+        return False
+    try:
+        normalized_rank = int(rank)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        str(row.get("decision") or payload.get("decision") or "").lower()
+        == "no_trade"
+        and str(row.get("ticker") or payload.get("ticker") or "").upper()
+        == "NO_TRADE"
+        and normalized_rank == 0
+        and str(row.get("signal_id") or payload.get("signal_id") or "").startswith(
+            "no_trade:"
+        )
+        and isinstance(decision_payload, dict)
+        and decision_payload.get("no_trade") is True
+        and payload.get("research_only") is True
+        and payload.get("broker_execution_enabled") is False
+    )
 
 
 def _sum_trade_money(rows: list[dict[str, Any]], key: str) -> int | None:

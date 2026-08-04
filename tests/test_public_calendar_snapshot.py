@@ -12,6 +12,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
 from intraday_scanner.performance.calendar_snapshot import (
+    _calendar_status,
     build_calendar_payload,
     write_public_calendar,
 )
@@ -114,6 +115,24 @@ def test_calendar_writer_binds_manifest_to_canonical_input(tmp_path: Path) -> No
     assert manifest["performance_payload_sha256"] == "performance-hash"
     assert manifest["status"] == "degraded"
     assert Path(publication["manifest_path"]).exists()
+
+
+def test_calendar_readiness_is_scoped_to_official_forward_paper() -> None:
+    payload = {
+        "days": [
+            {
+                "date": "2026-08-04",
+                "records": [
+                    {"cohort": "official_forward_paper", "status": "NO_TRADE"},
+                    {"cohort": "shadow_challenger", "status": "UNREALIZED"},
+                ],
+            }
+        ]
+    }
+
+    assert _calendar_status(payload, "2026-08-04") == "no_trade"
+    payload["days"][0]["records"][0]["status"] = "PENDING"
+    assert _calendar_status(payload, "2026-08-04") == "degraded"
 
 
 def _performance(

@@ -1318,21 +1318,33 @@ def _aggregate_daily(
                 },
                 "source_refs": list(source_refs),
                 "cost_status": (
-                    "reported_not_reconciled"
-                    if has_portfolio_observation and fees is not None and slippage is not None
+                    "complete"
+                    if explicit_no_trade and fees is not None and slippage is not None
                     else (
-                        "complete"
-                        if fees is not None and slippage is not None
-                        else "missing_cost_component"
+                        "reported_not_reconciled"
+                        if has_portfolio_observation
+                        and fees is not None
+                        and slippage is not None
+                        else (
+                            "complete"
+                            if fees is not None and slippage is not None
+                            else "missing_cost_component"
+                        )
                     )
                 ),
                 "return_basis": (
-                    "account_equity_identity_after_external_flows"
-                    if account_id and net_return is not None
+                    "explicit_no_trade_observed_zero"
+                    if explicit_no_trade
                     else "observed_equity_change"
                     if has_portfolio_observation and net_return is not None
                     else (
-                        "net_after_costs" if net_return is not None else "gross_observed_or_missing"
+                        "account_equity_identity_after_external_flows"
+                        if account_id and net_return is not None
+                        else (
+                            "net_after_costs"
+                            if net_return is not None
+                            else "gross_observed_or_missing"
+                        )
                     )
                 ),
             }

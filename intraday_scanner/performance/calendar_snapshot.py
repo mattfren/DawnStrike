@@ -655,7 +655,13 @@ def _calendar_status(payload: dict[str, Any], effective_date: str) -> str:
     )
     if not day or not day.get("records"):
         return "no_data"
-    statuses = {str(record.get("status") or "") for record in day["records"]}
+    official = [
+        record
+        for record in day["records"]
+        if str(record.get("cohort") or "") == "official_forward_paper"
+    ]
+    readiness_records = official or day["records"]
+    statuses = {str(record.get("status") or "") for record in readiness_records}
     if statuses == {"NO_TRADE"}:
         return "no_trade"
     if statuses <= {"COMPLETE", "NO_TRADE"}:

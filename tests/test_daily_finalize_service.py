@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
-from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
+from intraday_scanner.services.daily_finalize_service import (
+    DailyFinalizeService,
+    _reconciliation_gate,
+)
 from intraday_scanner.services.daily_run_service import record_daily_stage
 
 
@@ -120,3 +123,87 @@ def test_finalize_exposes_failed_shared_upstream_stage(
     run = result["readiness"]["daily_run"]["run"]
     assert run["failed_stage"] == "eod_outcome_capture"
     assert run["failure_reason"] == "No sourced close."
+
+
+def test_reconciliation_gate_allows_only_declared_historical_warnings() -> None:
+    result = {
+        "issue_count": 2,
+        "issues": [
+            {
+                "issue_code": "missing_outcome",
+                "severity": "warning",
+                "market_date": "2026-07-31",
+            },
+            {
+                "issue_code": "paper_ops_equity_pnl_component_mismatch",
+                "severity": "warning",
+                "market_date": "2026-08-04",
+            },
+        ],
+        "paper_ops_reconciliation": {
+            "state": "partial",
+            "quarantined_count": 0,
+            "source_return_field_mismatch_count": 0,
+        },
+        "daily": [
+            {
+                "market_date": "2026-08-04",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "status": "NO_TRADE",
+                "return_pct": 0.0,
+                "no_trade_count": 1,
+                "missing_outcome_count": 0,
+                "quarantined_count": 0,
+                "coverage": {"missing_count": 0},
+            }
+        ],
+    }
+
+    gate = _reconciliation_gate(result, market_date="2026-08-04")
+
+    assert gate["ready"] is True
+    assert gate["status"] == "ready_with_warnings"
+    assert gate["warning_count"] == 2
+    assert gate["blocking"] == []
+
+
+def test_reconciliation_gate_blocks_current_missing_or_unknown_warning() -> None:
+    result = {
+        "issue_count": 1,
+        "issues": [
+            {
+                "issue_code": "missing_outcome",
+                "severity": "warning",
+                "market_date": "2026-08-04",
+            }
+        ],
+        "paper_ops_reconciliation": {
+            "state": "complete",
+            "quarantined_count": 0,
+            "source_return_field_mismatch_count": 0,
+        },
+        "daily": [
+            {
+                "market_date": "2026-08-04",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "status": "NO_TRADE",
+                "return_pct": 0.0,
+                "no_trade_count": 1,
+                "missing_outcome_count": 0,
+                "quarantined_count": 0,
+                "coverage": {"missing_count": 0},
+            }
+        ],
+    }
+
+    gate = _reconciliation_gate(result, market_date="2026-08-04")
+    assert gate["ready"] is False
+    assert any("missing_outcome" in item for item in gate["blocking"])
+
+    result["issues"][0]["issue_code"] = "unknown_warning"
+    result["issues"][0]["market_date"] = "2026-07-31"
+    unknown_gate = _reconciliation_gate(result, market_date="2026-08-04")
+    assert unknown_gate["ready"] is False
+    assert any("unknown_warning" in item for item in unknown_gate["blocking"])
