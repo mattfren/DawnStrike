@@ -303,9 +303,9 @@ try {
     if ($attribution.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $attribution.exit_code
     }
-    if ($outcomeGap.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $outcomeGap.exit_code
-    }
+    # The aggregate outcome-gap artifact remains diagnostic.  The exact EOD
+    # gate above binds the frozen official cohort and each official signal_id;
+    # unrelated shadow candidates must not fail the official outcome stages.
 
     # Scenario Intelligence is an independent paper challenger.  Its terminal
     # lifecycle and return reconciliation must finish before the canonical

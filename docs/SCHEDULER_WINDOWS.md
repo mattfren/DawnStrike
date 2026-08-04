@@ -73,11 +73,14 @@ market-open monitoring.
 ## AlphaOps EOD Truth Rules
 
 The EOD runner always captures shadow research outcomes, but official
-reconciliation and canonical learning run only when the exact
-`official_telegram` selection cohort contains real signals. An explicit
-`NO_TRADE` selection plus a `NO_ELIGIBLE` outcome-gap receipt records those
-stages as `SKIPPED_NOT_APPLICABLE`. Missing selection evidence still fails
-closed, and missing shadow outcomes remain missing and learning-ineligible.
+reconciliation and canonical learning run only when the frozen
+`official_telegram` cohort contains real signals and every exact `signal_id`
+has a conclusive sourced outcome. An explicit `NO_TRADE` member with matching
+Telegram delivery proof records those stages as `SKIPPED_NOT_APPLICABLE`.
+Aggregate shadow outcome gaps remain diagnostic: they cannot authorize or
+block the official cohort. Missing cohort, delivery, or exact outcome evidence
+still fails closed, and missing shadow outcomes remain missing and
+learning-ineligible.
 
 If a historical PaperOps forward session never ran, do not synthesize a zero
 return or replay it as forward evidence. After confirming that the session has
@@ -90,6 +93,8 @@ py -m intraday_scanner.v2.paper_ops record-forward-gap `
   --output-root C:\r\dawnstrike-state\v2_paper_ops_live
 ```
 
-The record is append-only and integrity-hashed. Calendar truth then reports
+The strict-schema record is sequence-chained and bound to a separately chained
+anchor journal containing the exact ledger digest. Calendar truth then reports
 `passed_with_warnings`, the rendered calendar labels the session
-`Missing - not zero`, and any conflicting later forward evidence fails closed.
+`Missing - not zero`, and any tampering or conflicting later forward evidence
+fails closed.

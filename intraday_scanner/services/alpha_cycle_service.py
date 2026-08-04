@@ -42,6 +42,9 @@ from intraday_scanner.notifiers.telegram_formatter import (
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
 from intraday_scanner.providers.web_source_base import load_web_sources_config
 from intraday_scanner.reporting import write_scan_outputs
+from intraday_scanner.services.alpha_official_cohort_service import (
+    build_official_cohort_row,
+)
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
 )
@@ -1044,9 +1047,24 @@ def _persist_official_selections(
             "broker_execution_enabled": False,
         }
         rows.append(row)
-    selection_stats = store.persist_signal_selections(rows)
+    cohort_row = build_official_cohort_row(
+        market_date=selected_at[:10],
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        scan_id=scan_id,
+        event_key=event.event_key,
+        body_sha256=body_sha256,
+        claimed_at=selected_at,
+        selections=rows,
+    )
+    cohort_stats = store.persist_official_signal_cohort(cohort_row, rows)
+    inserted = int(cohort_stats["inserted_members"])
     return rows, {
-        **selection_stats,
+        "inserted": inserted,
+        "skipped": len(rows) - inserted,
+        "official_cohort_claimed": bool(cohort_stats["claimed"]),
+        "official_cohort_id": cohort_row["official_cohort_id"],
+        "official_membership_sha256": cohort_row["membership_sha256"],
         "strategy_versions_inserted": strategy_stats["inserted"],
         "strategy_versions_skipped": strategy_stats["skipped"],
         "strategy_id": strategy_id,

@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
+from intraday_scanner.services.alpha_official_cohort_service import (
+    validate_or_recover_official_cohort,
+)
+from intraday_scanner.services.alpha_outcome_capture_service import CONCLUSIVE_STATUSES
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -21,94 +25,93 @@ def evaluate_alpha_eod_gate(
     outcome_gap_path: str | Path,
     out_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Decide whether official paper reconciliation and learning are required.
-
-    Explicit official no-trade evidence is the only path that can make the
-    outcome-dependent stages not applicable. Shadow candidates never turn a
-    no-trade day into an official selection, and their missing outcomes remain
-    persisted by the capture/V6 services rather than being converted to zero.
-    """
+    """Authorize official EOD stages from exact immutable identities only."""
 
     selected_date = market_date[:10]
     store = SQLiteScanStore(db_path)
     store.initialize()
-    strategy_id = alphaops_strategy_contract(
+    strategy_id, strategy_version = alphaops_strategy_contract(
         f"{selected_date}T12:00:00-04:00"
-    )[0]
-    selections = [
-        row
-        for row in store.load_signal_selections(
-            strategy_id=strategy_id,
-            cohort="official_telegram",
-            limit=50_000,
-        )
-        if str(row.get("selected_at") or "")[:10] == selected_date
-    ]
-    no_trade = [
-        row
-        for row in selections
-        if str(row.get("decision") or "").lower() == "no_trade"
-        or str(row.get("ticker") or "").upper() == "NO_TRADE"
-    ]
-    official = [
-        row
-        for row in selections
-        if str(row.get("decision") or "").lower() != "no_trade"
-        and str(row.get("ticker") or "").upper() != "NO_TRADE"
-    ]
+    )
+    validation = validate_or_recover_official_cohort(
+        store,
+        market_date=selected_date,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+    )
+    selections = list(validation.selections)
+    no_trade = [row for row in selections if _is_no_trade(row)]
+    official = [row for row in selections if not _is_no_trade(row)]
+
     capture, capture_error = _load_json_object(capture_result_path)
     outcome_gap, gap_error = _load_json_object(outcome_gap_path)
-    errors: list[str] = []
-    if not selections:
-        errors.append("exact official session selection evidence is absent")
+    errors = list(validation.errors)
     if no_trade and official:
-        errors.append("official selection evidence mixes no-trade and selected signals")
-    if capture_error:
-        errors.append(f"capture result invalid: {capture_error}")
-    if gap_error:
-        errors.append(f"outcome-gap result invalid: {gap_error}")
-    if capture and str(capture.get("market_date") or "")[:10] != selected_date:
-        errors.append("capture result market_date does not match the requested session")
-    if capture and capture.get("missing_values_are_zero") is not False:
-        errors.append("capture result does not preserve missing truth")
-    if capture and capture.get("broker_execution_enabled") is not False:
-        errors.append("capture result does not preserve the no-broker boundary")
-    if outcome_gap and str(outcome_gap.get("market_date") or "")[:10] != selected_date:
-        errors.append("outcome-gap market_date does not match the requested session")
-    if outcome_gap and outcome_gap.get("missing_truth_is_zero") is not False:
-        errors.append("outcome-gap result does not preserve missing truth")
-    if outcome_gap and outcome_gap.get("broker_execution_enabled") is not False:
-        errors.append("outcome-gap result does not preserve the no-broker boundary")
+        errors.append("official cohort mixes no-trade and selected signals")
+    if len(no_trade) > 1:
+        errors.append("official cohort contains multiple no-trade sentinels")
+    errors.extend(
+        _artifact_errors(
+            capture,
+            label="capture result",
+            market_date=selected_date,
+            missing_field="missing_values_are_zero",
+            load_error=capture_error,
+        )
+    )
+    errors.extend(
+        _artifact_errors(
+            outcome_gap,
+            label="outcome-gap result",
+            market_date=selected_date,
+            missing_field="missing_truth_is_zero",
+            load_error=gap_error,
+        )
+    )
 
-    gap_status = str(outcome_gap.get("status") or "").upper()
-    eligible_count = _nonnegative_int(outcome_gap.get("eligible_candidate_count"))
-    missing_count = _nonnegative_int(outcome_gap.get("missing_outcome_count"))
+    exact_outcome_ids: list[str] = []
+    if official:
+        outcome_errors, exact_outcome_ids = _exact_outcome_errors(
+            store,
+            selections=official,
+            market_date=selected_date,
+        )
+        errors.extend(outcome_errors)
+
     official_outcomes_required = bool(official)
     if no_trade and not official:
-        if gap_status != "NO_ELIGIBLE" or eligible_count != 0:
-            errors.append(
-                "official no-trade evidence requires a NO_ELIGIBLE outcome-gap result"
-            )
         status = "NO_ELIGIBLE"
         reason_code = "official_no_trade"
     elif official:
-        if gap_status != "COMPLETE" or missing_count != 0:
-            errors.append("required official outcomes are not complete")
         status = "COMPLETE"
         reason_code = "official_outcomes_complete"
     else:
         status = "BLOCKED"
-        reason_code = "official_selection_missing"
-
+        reason_code = "official_cohort_missing"
     if errors:
         status = "BLOCKED"
         reason_code = "eod_outcome_gate_failed"
+
+    cohort = validation.cohort or {}
+    gap_status = str(outcome_gap.get("status") or "").upper()
     payload: dict[str, Any] = {
-        "schema_version": "dawnstrike.alpha_eod_gate.v1",
+        "schema_version": "dawnstrike.alpha_eod_gate.v2",
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "market_date": selected_date,
         "status": status,
         "reason_code": reason_code,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "official_cohort_id": str(cohort.get("official_cohort_id") or ""),
+        "official_membership_sha256": str(cohort.get("membership_sha256") or ""),
+        "official_cohort_recovered": validation.recovered,
+        "official_selection_ids": sorted(
+            str(row.get("selection_id") or "") for row in selections
+        ),
+        "official_signal_ids": sorted(
+            str(row.get("signal_id") or "") for row in official
+        ),
+        "exact_outcome_signal_ids": sorted(exact_outcome_ids),
         "official_outcomes_required": official_outcomes_required,
         "selection_count": len(selections),
         "official_signal_count": len(official),
@@ -116,15 +119,19 @@ def evaluate_alpha_eod_gate(
         "capture_exit_code": int(capture_exit_code),
         "capture_status": str(capture.get("status") or ""),
         "outcome_gap_status": gap_status,
-        "eligible_candidate_count": eligible_count,
-        "missing_outcome_count": missing_count,
-        "errors": errors,
+        "eligible_candidate_count": _nonnegative_int(
+            outcome_gap.get("eligible_candidate_count")
+        ),
+        "missing_outcome_count": _nonnegative_int(
+            outcome_gap.get("missing_outcome_count")
+        ),
+        "errors": list(dict.fromkeys(errors)),
         "warnings": (
             [
-                "raw capture returned nonzero because non-official research targets "
-                "were incomplete; exact official outcome truth is complete"
+                "aggregate capture is incomplete only for non-official research targets; "
+                "the frozen official cohort has exact terminal truth"
             ]
-            if official and capture_exit_code != 0 and not errors
+            if capture_exit_code != 0 and not errors
             else []
         ),
         "missing_truth_is_zero": False,
@@ -137,6 +144,82 @@ def evaluate_alpha_eod_gate(
     if out_path is not None:
         _atomic_write(Path(out_path), payload)
     return payload
+
+
+def _exact_outcome_errors(
+    store: SQLiteScanStore,
+    *,
+    selections: list[dict[str, Any]],
+    market_date: str,
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    accepted: list[str] = []
+    for selection in selections:
+        signal_id = str(selection.get("signal_id") or "")
+        ticker = str(selection.get("ticker") or "").upper()
+        rows = store.load_signal_outcomes(signal_id=signal_id, limit=10)
+        matches = [
+            row
+            for row in rows
+            if str(row.get("market_date") or "")[:10] == market_date
+            and str(row.get("ticker") or "").upper() == ticker
+        ]
+        if len(matches) != 1:
+            errors.append(
+                f"official signal {signal_id} requires one exact sourced outcome"
+            )
+            continue
+        outcome = matches[0]
+        status = str(outcome.get("outcome_status") or "")
+        requirements = {
+            "conclusive outcome_status": status in CONCLUSIVE_STATUSES,
+            "timestamp validation": outcome.get("validated_against_signal_timestamp") is True,
+            "automatic sourced data": outcome.get("automatic_sourced_data") is True,
+            "complete source coverage": outcome.get("source_coverage_complete") is True,
+            "no-lookahead proof": outcome.get("no_lookahead") is True,
+            "research-only scope": outcome.get("research_only") is True,
+            "no-broker boundary": outcome.get("broker_execution_enabled") is False,
+            "source bar hash": bool(
+                str(outcome.get("source_bar_hash_sha256") or "").strip()
+            ),
+        }
+        failed = [name for name, passed in requirements.items() if not passed]
+        if failed:
+            errors.append(
+                f"official signal {signal_id} outcome lacks " + ", ".join(failed)
+            )
+            continue
+        accepted.append(signal_id)
+    return errors, accepted
+
+
+def _artifact_errors(
+    payload: dict[str, Any],
+    *,
+    label: str,
+    market_date: str,
+    missing_field: str,
+    load_error: str | None,
+) -> list[str]:
+    if load_error:
+        return [f"{label} invalid: {load_error}"]
+    errors: list[str] = []
+    if str(payload.get("market_date") or "")[:10] != market_date:
+        errors.append(f"{label} market_date does not match the requested session")
+    if payload.get(missing_field) is not False:
+        errors.append(f"{label} does not preserve missing truth")
+    if payload.get("research_only") is not True:
+        errors.append(f"{label} does not preserve research-only scope")
+    if payload.get("broker_execution_enabled") is not False:
+        errors.append(f"{label} does not preserve the no-broker boundary")
+    return errors
+
+
+def _is_no_trade(selection: dict[str, Any]) -> bool:
+    return (
+        str(selection.get("decision") or "").lower() == "no_trade"
+        or str(selection.get("ticker") or "").upper() == "NO_TRADE"
+    )
 
 
 def _load_json_object(path: str | Path) -> tuple[dict[str, Any], str | None]:
