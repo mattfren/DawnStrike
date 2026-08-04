@@ -51,3 +51,23 @@ def test_scenario_eod_closes_then_finalizes_the_paper_challenger() -> None:
     assert close_at < finalize_at < paperops_at
     assert 'Write-Stage -Name scenario_finalization -Status COMPLETE' in script
     assert 'scenario_finalization_failed' in script
+
+
+def test_morning_skips_optional_scenario_when_no_candidates_exist() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_alphaops_morning.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "Test-DawnstrikeAlphaCycleArtifact" in script
+    assert "$scenarioCandidateCount = [int64]$alphaArtifact.signal_count" in script
+    assert 'if ($scenarioCandidateCount -le 0)' in script
+    assert '-Status "SKIPPED_NOT_APPLICABLE"' in script
+    assert '$coreStageExit = $stageExit' in script
+    assert "Resolve-DawnstrikeMorningOutcome" in script
+    assert '-ExitCode $coreStageExit' in script
+    assert 'exit $outcome.final_exit_code' in script
+    assert script.rindex('foreach ($stage in @("morning_collection", "ranking_delivery"))') < (
+        script.index("$outcome = Resolve-DawnstrikeMorningOutcome")
+    )

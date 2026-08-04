@@ -13,6 +13,7 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
+. (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $sourceConfigPath = Join-Path $state "config\web_sources.yaml"
@@ -102,6 +103,10 @@ try {
         $stageExit = 2
         $errorCode = "source_config_missing"
     } else {
+        $alphaCyclePath = Join-Path $outputRoot "alpha_cycle.json"
+        Move-DawnstrikePriorAlphaCycleArtifact `
+            -ArtifactPath $alphaCyclePath `
+            -ArchiveRoot (Join-Path $outputRoot "attempt_archive") | Out-Null
         $alphaCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
             -ArgumentList @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify) `
@@ -110,26 +115,54 @@ try {
         $stageExit = $alphaCycle.exit_code
         $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
     }
+    $coreStageExit = $stageExit
+    $coreErrorCode = $errorCode
+    $scenarioCandidateCount = 0
+    $scenarioExitCode = $null
+    if ($coreStageExit -eq 0) {
+        try {
+            $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
+                -ArtifactPath $alphaCyclePath `
+                -ProcessReceipt $alphaCycle `
+                -MarketDate $MarketDate
+            $scenarioCandidateCount = [int64]$alphaArtifact.signal_count
+        }
+        catch {
+            $coreStageExit = 2
+            $coreErrorCode = "alpha_cycle_artifact_invalid"
+        }
+    }
     if (
-        $stageExit -eq 0 -and
+        $coreStageExit -eq 0 -and
         $env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$'
     ) {
-        $scenarioSince = (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
-        $scenarioCycle = Invoke-DawnstrikeNativeProcess `
-            -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
-            -LogRoot $logRoot `
-            -LogName "scenario_morning-$MarketDate"
-        if ($scenarioCycle.exit_code -ne 0) {
-            $stageExit = $scenarioCycle.exit_code
-            $errorCode = "scenario_cycle_failed"
+        if ($scenarioCandidateCount -le 0) {
+            Write-MorningStage `
+                -Name "scenario_intelligence" `
+                -Status "SKIPPED_NOT_APPLICABLE" `
+                -ExitCode 0 `
+                -NotRequired
         }
-        Write-MorningStage `
-            -Name "scenario_intelligence" `
-            -Status $(if ($scenarioCycle.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
-            -ExitCode $scenarioCycle.exit_code `
-            -ErrorCode $(if ($scenarioCycle.exit_code -eq 0) { "" } else { "scenario_cycle_failed" }) `
-            -NotRequired
+        else {
+            $scenarioSince = (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
+            $scenarioCycle = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
+                -LogRoot $logRoot `
+                -LogName "scenario_morning-$MarketDate"
+            if ($scenarioCycle.exit_code -ne 0) {
+                $scenarioExitCode = [int]$scenarioCycle.exit_code
+            }
+            else {
+                $scenarioExitCode = 0
+            }
+            Write-MorningStage `
+                -Name "scenario_intelligence" `
+                -Status $(if ($scenarioCycle.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
+                -ExitCode $scenarioCycle.exit_code `
+                -ErrorCode $(if ($scenarioCycle.exit_code -eq 0) { "" } else { "scenario_cycle_failed" }) `
+                -NotRequired
+        }
     }
     elseif ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -notmatch '^(?i:true|1|yes|y)$') {
         Write-MorningStage `
@@ -138,16 +171,19 @@ try {
             -ExitCode 0 `
             -NotRequired
     }
-    $status = if ($stageExit -eq 0) { "COMPLETE" } else { "FAILED" }
+    $status = if ($coreStageExit -eq 0) { "COMPLETE" } else { "FAILED" }
     foreach ($stage in @("morning_collection", "ranking_delivery")) {
         Write-MorningStage `
             -Name $stage `
             -Status $status `
-            -ExitCode $stageExit `
-            -ErrorCode $errorCode
+            -ExitCode $coreStageExit `
+            -ErrorCode $coreErrorCode
     }
-    if ($recordStageFailed) { $stageExit = 2 }
-    exit $stageExit
+    $outcome = Resolve-DawnstrikeMorningOutcome `
+        -CoreExitCode $coreStageExit `
+        -ScenarioExitCode $scenarioExitCode `
+        -RecordStageFailed $recordStageFailed
+    exit $outcome.final_exit_code
 }
 finally {
     Pop-Location
