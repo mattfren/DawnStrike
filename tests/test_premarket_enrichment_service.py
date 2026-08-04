@@ -1,16 +1,22 @@
+import csv
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.models import SnapshotRow
+from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services.premarket_enrichment_service import (
     PremarketObservation,
     enrich_premarket_rows,
     observation_from_alpaca_bars,
     observation_from_chart_payload,
 )
+from intraday_scanner.services.premarket_intelligence import field_sources
 
 UTC = timezone.utc
 
@@ -380,7 +386,7 @@ def test_alpaca_primary_uses_explicit_provenance_labeled_yahoo_fallback():
     assert rows["ALFA"]["enrichment_fallback_status"] == "not_needed"
 
 
-def test_alpaca_100_percent_symbol_fallback_aborts_without_calling_yahoo():
+def test_alpaca_100_percent_symbol_fallback_finishes_data_ineligible_without_yahoo():
     class EmptyAlpacaProvider:
         def validate_credentials(self):
             return None
@@ -398,22 +404,207 @@ def test_alpaca_100_percent_symbol_fallback_aborts_without_calling_yahoo():
         yahoo_called = True
         return {}
 
-    with pytest.raises(DataProviderError, match="cycle was aborted"):
-        enrich_premarket_rows(
-            [_row()],
-            config=ScannerConfig(
-                alpaca_data_feed="iex",
-                premarket_enrichment_max_candidates=5,
-                premarket_enrichment_max_age_seconds=1200,
-            ),
-            requested_at=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
-            source="alpaca",
-            alpaca_provider=EmptyAlpacaProvider(),
-            allow_yahoo_fallback=True,
-            fetcher=fetcher,
-        )
+    result = enrich_premarket_rows(
+        [_row()],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_candidates=5,
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
+        source="alpaca",
+        alpaca_provider=EmptyAlpacaProvider(),
+        allow_yahoo_fallback=True,
+        fetcher=fetcher,
+    )
 
     assert yahoo_called is False
+    assert result["summary"]["status"] == "unavailable"
+    assert result["summary"]["secondary_fallback_status"] == (
+        "ceiling_exceeded_not_applied"
+    )
+    assert result["summary"]["ranking_eligible_count"] == 0
+    assert result["summary"]["ranking_excluded_count"] == 1
+    assert result["ranking_rows"] == []
+
+
+def test_ranking_snapshot_contains_only_verified_selected_rows(tmp_path: Path):
+    requested_at = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
+
+    class SparseAlpacaProvider:
+        def validate_credentials(self):
+            return None
+
+        def get_minute_bars(self, symbols, start, end, config):
+            return [
+                {
+                    "ticker": "ALFA",
+                    "timestamp": "2026-07-13T12:55:00Z",
+                    "high": 8.2,
+                    "low": 7.8,
+                    "close": 8.0,
+                    "volume": 1000,
+                }
+            ]
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [SimpleNamespace(ticker=ticker, previous_close=5.0) for ticker in symbols]
+
+    result = enrich_premarket_rows(
+        [_row(ticker="ALFA"), _row(ticker="NOVA")],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_candidates=5,
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=requested_at,
+        source="alpaca",
+        alpaca_provider=SparseAlpacaProvider(),
+        allow_yahoo_fallback=True,
+        out_dir=tmp_path,
+    )
+
+    with Path(result["paths"]["snapshot"]).open(encoding="utf-8", newline="") as handle:
+        ranking_rows = list(csv.DictReader(handle))
+    with Path(result["paths"]["all_rows_snapshot"]).open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        audit_rows = list(csv.DictReader(handle))
+
+    assert [row["ticker"] for row in ranking_rows] == ["ALFA"]
+    assert {row["ticker"] for row in audit_rows} == {"ALFA", "NOVA"}
+    source_alfa = next(row for row in audit_rows if row["ticker"] == "ALFA")
+    assert source_alfa["premarket_high"] == str(_row(ticker="ALFA")["premarket_high"])
+    assert source_alfa["premarket_volume"] == str(
+        _row(ticker="ALFA")["premarket_volume"]
+    )
+    assert source_alfa["premarket_range_source"] == ""
+
+    ranked = SnapshotRow.from_mapping(ranking_rows[0])
+    assert ranked.premarket_range_source == "alpaca_market_data_iex"
+    assert ranked.premarket_range_source_url.endswith("/v2/stocks/bars")
+    assert ranked.enrichment_status == "verified"
+    assert ranked.enrichment_is_complete is True
+    assert ranked.enrichment_bar_completed_at == "2026-07-13T12:56:00+00:00"
+    assert len(ranked.enrichment_observation_sha256) == 64
+    sources = field_sources(ranked)
+    assert sources["premarket_high"] == "alpaca_market_data_iex"
+    assert sources["premarket_low"] == "alpaca_market_data_iex"
+    assert sources["premarket_volume"] == "alpaca_market_data_iex"
+    assert sources["catalyst_headline"] == "missing"
+    candidate = score_snapshot(ranked, ScannerConfig()).to_dict()
+    lineage = candidate["source_lineage"]
+    assert candidate["target_basis_source"].endswith("/v2/stocks/bars")
+    assert json.loads(candidate["field_sources"])["premarket_high"] == (
+        "alpaca_market_data_iex"
+    )
+    assert lineage["premarket_observation"]["source"] == (
+        "alpaca_market_data_iex"
+    )
+    assert lineage["premarket_observation"]["bar_completed_at"] == (
+        "2026-07-13T12:56:00+00:00"
+    )
+    assert lineage["premarket_observation"]["observation_sha256"] == (
+        ranked.enrichment_observation_sha256
+    )
+
+
+def test_rehearsal_mode_never_fetches_market_data_and_stays_fixture_only():
+    fetched = False
+
+    def fetcher(_ticker, _config):
+        nonlocal fetched
+        fetched = True
+        return {}
+
+    rows = [_row(ticker="NOVA"), _row(ticker="ALFA")]
+    for row in rows:
+        row["fixture_only"] = True
+        row["data_source_kind"] = "fixture"
+
+    result = enrich_premarket_rows(
+        rows,
+        config=ScannerConfig(),
+        requested_at=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
+        source="yahoo",
+        fetcher=fetcher,
+        rehearsal_mode=True,
+    )
+
+    assert fetched is False
+    assert result["summary"]["status"] == "rehearsal_only"
+    assert result["summary"]["ranking_policy"] == (
+        "fixture_rehearsal_only_non_learning"
+    )
+    assert len(result["ranking_rows"]) == 2
+    assert all(row["fixture_only"] is True for row in result["ranking_rows"])
+
+
+def test_partial_alpaca_observation_preserves_exact_per_field_sources(tmp_path: Path):
+    class PartialAlpacaProvider:
+        def validate_credentials(self):
+            return None
+
+        def get_minute_bars(self, symbols, start, end, config):
+            return [
+                {
+                    "ticker": "NOVA",
+                    "timestamp": "2026-07-13T12:55:00Z",
+                    "high": 9.4,
+                    "low": 8.8,
+                    "volume": 1000,
+                }
+            ]
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [SimpleNamespace(ticker="NOVA", previous_close=0.0)]
+
+    source_row = _row(
+        ticker="NOVA",
+        source="stockanalysis_premarket",
+        preferred_source="stockanalysis_premarket",
+        premarket_price=9.1,
+        previous_close=7.0,
+        premarket_high=9.1,
+        premarket_low=9.1,
+        premarket_volume=500_000,
+        gap_pct=30.0,
+        dollar_volume=4_550_000,
+    )
+    result = enrich_premarket_rows(
+        [source_row],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
+        source="alpaca",
+        alpaca_provider=PartialAlpacaProvider(),
+        out_dir=tmp_path,
+    )
+
+    with Path(result["paths"]["snapshot"]).open(encoding="utf-8", newline="") as handle:
+        persisted = list(csv.DictReader(handle))
+    assert len(persisted) == 1
+    row = SnapshotRow.from_mapping(persisted[0])
+    sources = field_sources(row)
+
+    assert row.premarket_price == 9.1
+    assert row.previous_close == 7.0
+    assert row.gap_pct == 30.0
+    assert row.premarket_high == 9.4
+    assert row.premarket_low == 8.8
+    assert row.premarket_volume == 1000
+    assert row.dollar_volume == 9100.0
+    assert sources["premarket_price"] == "stockanalysis_premarket"
+    assert sources["previous_close"] == "stockanalysis_premarket"
+    assert sources["gap_pct"] == "stockanalysis_premarket"
+    assert sources["premarket_high"] == "alpaca_market_data_iex"
+    assert sources["premarket_low"] == "alpaca_market_data_iex"
+    assert sources["premarket_volume"] == "alpaca_market_data_iex"
+    assert sources["dollar_volume"] == (
+        "derived:stockanalysis_premarket+alpaca_market_data_iex"
+    )
 
 
 def test_alpaca_credential_failure_fails_closed_without_calling_yahoo():

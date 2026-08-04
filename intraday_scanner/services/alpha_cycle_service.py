@@ -286,6 +286,7 @@ def alpha_cycle(
         config=scanner_config,
         source=("yahoo" if fixture_mode else "alpaca"),
         allow_yahoo_fallback=not fixture_mode,
+        rehearsal_mode=fixture_mode,
         out_dir=output_dir / "premarket_enrichment",
     )
     source_summary["premarket_enrichment"] = enrichment["summary"]

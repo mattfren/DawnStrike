@@ -9,6 +9,7 @@ ineligible; they are never converted to zero or synthetic executable levels.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable
@@ -78,6 +79,7 @@ def enrich_premarket_rows(
     source: str = "yahoo",
     alpaca_provider: AlpacaProvider | None = None,
     allow_yahoo_fallback: bool = False,
+    rehearsal_mode: bool = False,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return rows plus auditable, point-in-time enrichment observations."""
@@ -100,7 +102,12 @@ def enrich_premarket_rows(
         else YAHOO_SOURCE_NAME
     )
 
-    if config.premarket_enrichment_enabled and selected_tickers:
+    if rehearsal_mode:
+        fallback_status = "rehearsal_not_applicable"
+        fallback_status_by_ticker = {
+            ticker: "rehearsal_not_applicable" for ticker in selected_tickers
+        }
+    elif config.premarket_enrichment_enabled and selected_tickers:
         if normalized_source == "alpaca":
             observations = _observe_alpaca_tickers(
                 selected_tickers,
@@ -134,13 +141,14 @@ def enrich_premarket_rows(
             elif not fallback_tickers:
                 fallback_status = "not_needed"
             elif fallback_candidate_ratio > MAX_YAHOO_FALLBACK_RATIO:
-                raise DataProviderError(
-                    "Alpaca premarket coverage failed the Yahoo fallback ceiling: "
-                    f"{fallback_candidate_count}/{len(selected_tickers)} symbols "
-                    f"({fallback_candidate_ratio:.3f}) require fallback, above "
-                    f"{MAX_YAHOO_FALLBACK_RATIO:.3f}. The cycle was aborted before "
-                    "public-page price facts could reach ranking."
-                )
+                # Sparse free-feed coverage is a symbol-level data-quality event,
+                # not a systemic provider outage.  Keep Yahoo out of the ranking
+                # path when the ceiling is exceeded, and let the cycle finish with
+                # only the independently verified Alpaca rows (or an honest
+                # DATA_INELIGIBLE/no-trade result when none remain).
+                fallback_status = "ceiling_exceeded_not_applied"
+                for ticker in fallback_tickers:
+                    fallback_status_by_ticker[ticker] = fallback_status
             else:
                 fallback_observations = _observe_yahoo_tickers(
                     fallback_tickers,
@@ -186,13 +194,28 @@ def enrich_premarket_rows(
         )
         for row in copied
     ]
+    if rehearsal_mode:
+        ranking_rows = enriched_rows
+    else:
+        ranking_eligible_tickers = {
+            ticker for ticker, observation in observations.items() if observation.is_usable
+        }
+        ranking_rows = [
+            row
+            for row in enriched_rows
+            if str(row.get("ticker") or "").upper() in ranking_eligible_tickers
+        ]
     status_counts = Counter(observation.status for observation in observations.values())
     summary = {
         "schema_version": "alphaops.premarket_enrichment.v1",
-        "status": _summary_status(
-            enabled=config.premarket_enrichment_enabled,
-            selected_count=len(selected_tickers),
-            verified_count=sum(1 for item in observations.values() if item.is_usable),
+        "status": (
+            "rehearsal_only"
+            if rehearsal_mode
+            else _summary_status(
+                enabled=config.premarket_enrichment_enabled,
+                selected_count=len(selected_tickers),
+                verified_count=sum(1 for item in observations.values() if item.is_usable),
+            )
         ),
         "requested_at": at.isoformat(),
         "source": source_name,
@@ -221,6 +244,14 @@ def enrich_premarket_rows(
         "selected_count": len(selected_tickers),
         "verified_count": sum(1 for item in observations.values() if item.is_usable),
         "failed_count": sum(1 for item in observations.values() if not item.is_usable),
+        "ranking_eligible_count": len(ranking_rows),
+        "ranking_excluded_count": len(enriched_rows) - len(ranking_rows),
+        "ranking_policy": (
+            "fixture_rehearsal_only_non_learning"
+            if rehearsal_mode
+            else "verified_selected_premarket_observations_only"
+        ),
+        "rehearsal_mode": rehearsal_mode,
         "status_counts": dict(sorted(status_counts.items())),
         "max_candidates": config.premarket_enrichment_max_candidates,
         "max_age_seconds": config.premarket_enrichment_max_age_seconds,
@@ -228,7 +259,9 @@ def enrich_premarket_rows(
         "broker_execution": "disabled",
     }
     result = {
+        "input_rows": copied,
         "rows": enriched_rows,
+        "ranking_rows": ranking_rows,
         "summary": summary,
         "observations": [asdict(observations[ticker]) for ticker in sorted(observations)],
     }
@@ -525,12 +558,38 @@ def _apply_observation(
     fallback_status: str,
 ) -> dict[str, Any]:
     output = dict(row)
+    discovery_source = str(
+        row.get("preferred_source") or row.get("source") or "unknown"
+    ).strip()
+    output["premarket_price_source"] = _source_if_present(
+        row.get("premarket_price"), discovery_source
+    )
+    output["previous_close_source"] = _source_if_present(
+        row.get("previous_close"), discovery_source
+    )
+    output["premarket_high_source"] = _source_if_present(
+        row.get("premarket_high"), discovery_source
+    )
+    output["premarket_low_source"] = _source_if_present(
+        row.get("premarket_low"), discovery_source
+    )
+    output["premarket_volume_source"] = _source_if_present(
+        row.get("premarket_volume"), discovery_source
+    )
+    output["gap_pct_source"] = _source_if_present(row.get("gap_pct"), discovery_source)
+    output["dollar_volume_source"] = _source_if_present(
+        row.get("dollar_volume"), discovery_source
+    )
     output["enrichment_primary_source"] = primary_source
     output["enrichment_fallback_status"] = fallback_status
     output["enrichment_fallback_source"] = ""
     output["enrichment_was_fallback"] = False
+    output["enrichment_observed_at"] = ""
     output["enrichment_bar_completed_at"] = ""
     output["enrichment_is_complete"] = False
+    output["enrichment_observation_sha256"] = ""
+    output["premarket_range_source"] = ""
+    output["premarket_range_source_url"] = ""
     if not enabled:
         output["enrichment_status"] = "disabled"
         return output
@@ -545,6 +604,7 @@ def _apply_observation(
     output["enrichment_observed_at"] = observation.observed_at
     output["enrichment_bar_completed_at"] = observation.bar_completed_at
     output["enrichment_is_complete"] = observation.is_complete
+    output["enrichment_observation_sha256"] = _observation_sha256(observation)
     if fallback_status == "applied" and observation.source != primary_source:
         output["enrichment_fallback_source"] = observation.source
         output["enrichment_was_fallback"] = True
@@ -552,14 +612,23 @@ def _apply_observation(
         return output
     output["premarket_high"] = observation.premarket_high
     output["premarket_low"] = observation.premarket_low
+    output["premarket_high_source"] = observation.source
+    output["premarket_low_source"] = observation.source
     output["premarket_range_source"] = observation.source
+    output["premarket_range_source_url"] = observation.source_url
     if observation.latest_price is not None and observation.latest_price > 0:
         output["premarket_price"] = observation.latest_price
+        output["premarket_price_source"] = observation.source
     if observation.premarket_volume is not None:
         output["premarket_volume"] = observation.premarket_volume
+        output["premarket_volume_source"] = observation.source
         price = _float(output.get("premarket_price"))
         if price is not None:
             output["dollar_volume"] = round(price * observation.premarket_volume, 2)
+            output["dollar_volume_source"] = _derived_source(
+                str(output.get("premarket_price_source") or "missing"),
+                observation.source,
+            )
     if observation.previous_close is not None and observation.previous_close > 0:
         output["previous_close"] = observation.previous_close
         output["previous_close_source"] = observation.source
@@ -568,6 +637,10 @@ def _apply_observation(
             output["gap_pct"] = round(
                 ((price - observation.previous_close) / observation.previous_close) * 100,
                 4,
+            )
+            output["gap_pct_source"] = _derived_source(
+                str(output.get("premarket_price_source") or "missing"),
+                observation.source,
             )
     warnings = _warning_tokens(output.get("coverage_warning"))
     warnings.discard("premarket_range_unavailable_price_used")
@@ -707,6 +780,16 @@ def _write_artifacts(output_dir: Path, result: dict[str, Any]) -> dict[str, str]
     with snapshot_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_COLUMNS, extrasaction="ignore")
         writer.writeheader()
+        writer.writerows(result["ranking_rows"])
+    source_rows_snapshot_path = output_dir / "premarket_snapshot_source_rows_audit.csv"
+    with source_rows_snapshot_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(result["input_rows"])
+    enriched_rows_snapshot_path = output_dir / "premarket_snapshot_enriched_rows_audit.csv"
+    with enriched_rows_snapshot_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
         writer.writerows(result["rows"])
     observations_path = output_dir / "observations.json"
     observations_path.write_text(
@@ -720,6 +803,9 @@ def _write_artifacts(output_dir: Path, result: dict[str, Any]) -> dict[str, str]
     )
     return {
         "snapshot": str(snapshot_path),
+        "source_rows_snapshot": str(source_rows_snapshot_path),
+        "all_rows_snapshot": str(source_rows_snapshot_path),
+        "enriched_rows_snapshot": str(enriched_rows_snapshot_path),
         "observations": str(observations_path),
         "summary": str(summary_path),
     }
@@ -731,6 +817,26 @@ def _warning_tokens(value: Any) -> set[str]:
         for token in str(value or "").replace(",", ";").split(";")
         if token.strip()
     }
+
+
+def _observation_sha256(observation: PremarketObservation) -> str:
+    payload = json.dumps(
+        asdict(observation),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _source_if_present(value: Any, source: str) -> str:
+    return source if value not in {None, ""} else "missing"
+
+
+def _derived_source(*sources: str) -> str:
+    normalized = [source.strip() or "missing" for source in sources]
+    unique = list(dict.fromkeys(normalized))
+    return unique[0] if len(unique) == 1 else "derived:" + "+".join(unique)
 
 
 def _as_utc(value: datetime) -> datetime:

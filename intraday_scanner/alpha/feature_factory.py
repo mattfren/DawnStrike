@@ -162,6 +162,12 @@ def _source_quality(
         "conflicting_source_flag": bool(conflict_flags),
         "coverage_warning": coverage_warning,
         "data_source_kind": data_kind,
+        "premarket_range_source": _text(row.get("premarket_range_source")),
+        "premarket_range_source_url": _text(row.get("premarket_range_source_url")),
+        "premarket_enrichment_status": _text(row.get("enrichment_status")),
+        "premarket_observation_sha256": _text(
+            row.get("enrichment_observation_sha256")
+        ),
         "public_url_unverified_flag": (
             data_kind in {"web_url", "browser_url"} or "url_table_unverified" in coverage_warning
         ),

@@ -50,6 +50,24 @@ SNAPSHOT_COLUMNS = [
     "data_quality_score",
     "coverage_warning",
     "missing_enrichment_count",
+    "premarket_range_source",
+    "premarket_range_source_url",
+    "premarket_price_source",
+    "previous_close_source",
+    "premarket_high_source",
+    "premarket_low_source",
+    "premarket_volume_source",
+    "gap_pct_source",
+    "dollar_volume_source",
+    "enrichment_status",
+    "enrichment_primary_source",
+    "enrichment_fallback_status",
+    "enrichment_fallback_source",
+    "enrichment_was_fallback",
+    "enrichment_observed_at",
+    "enrichment_bar_completed_at",
+    "enrichment_is_complete",
+    "enrichment_observation_sha256",
     "raw_file_path",
     "imported_at",
 ]
@@ -178,6 +196,24 @@ CANDIDATE_COLUMNS = [
     "manual_uploaded_data",
     "coverage_warning",
     "missing_enrichment_count",
+    "premarket_range_source",
+    "premarket_range_source_url",
+    "premarket_price_source",
+    "previous_close_source",
+    "premarket_high_source",
+    "premarket_low_source",
+    "premarket_volume_source",
+    "gap_pct_source",
+    "dollar_volume_source",
+    "enrichment_status",
+    "enrichment_primary_source",
+    "enrichment_fallback_status",
+    "enrichment_fallback_source",
+    "enrichment_was_fallback",
+    "enrichment_observed_at",
+    "enrichment_bar_completed_at",
+    "enrichment_is_complete",
+    "enrichment_observation_sha256",
     "raw_file_path",
     "imported_at",
 ]
@@ -281,6 +317,24 @@ class SnapshotRow:
     missing_enrichment_count: int = 0
     raw_file_path: str = ""
     imported_at: str = ""
+    premarket_range_source: str = ""
+    premarket_range_source_url: str = ""
+    premarket_price_source: str = ""
+    previous_close_source: str = ""
+    premarket_high_source: str = ""
+    premarket_low_source: str = ""
+    premarket_volume_source: str = ""
+    gap_pct_source: str = ""
+    dollar_volume_source: str = ""
+    enrichment_status: str = ""
+    enrichment_primary_source: str = ""
+    enrichment_fallback_status: str = ""
+    enrichment_fallback_source: str = ""
+    enrichment_was_fallback: bool = False
+    enrichment_observed_at: str = ""
+    enrichment_bar_completed_at: str = ""
+    enrichment_is_complete: bool = False
+    enrichment_observation_sha256: str = ""
 
     @classmethod
     def from_mapping(cls, row: dict[str, Any], source: str = "snapshot") -> SnapshotRow:
@@ -363,6 +417,40 @@ class SnapshotRow:
             ),
             raw_file_path=str(row.get("raw_file_path") or "").strip(),
             imported_at=str(row.get("imported_at") or "").strip(),
+            premarket_range_source=str(row.get("premarket_range_source") or "").strip(),
+            premarket_range_source_url=str(
+                row.get("premarket_range_source_url") or ""
+            ).strip(),
+            premarket_price_source=str(row.get("premarket_price_source") or "").strip(),
+            previous_close_source=str(row.get("previous_close_source") or "").strip(),
+            premarket_high_source=str(row.get("premarket_high_source") or "").strip(),
+            premarket_low_source=str(row.get("premarket_low_source") or "").strip(),
+            premarket_volume_source=str(
+                row.get("premarket_volume_source") or ""
+            ).strip(),
+            gap_pct_source=str(row.get("gap_pct_source") or "").strip(),
+            dollar_volume_source=str(row.get("dollar_volume_source") or "").strip(),
+            enrichment_status=str(row.get("enrichment_status") or "").strip(),
+            enrichment_primary_source=str(
+                row.get("enrichment_primary_source") or ""
+            ).strip(),
+            enrichment_fallback_status=str(
+                row.get("enrichment_fallback_status") or ""
+            ).strip(),
+            enrichment_fallback_source=str(
+                row.get("enrichment_fallback_source") or ""
+            ).strip(),
+            enrichment_was_fallback=parse_bool(row.get("enrichment_was_fallback")),
+            enrichment_observed_at=str(
+                row.get("enrichment_observed_at") or ""
+            ).strip(),
+            enrichment_bar_completed_at=str(
+                row.get("enrichment_bar_completed_at") or ""
+            ).strip(),
+            enrichment_is_complete=parse_bool(row.get("enrichment_is_complete")),
+            enrichment_observation_sha256=str(
+                row.get("enrichment_observation_sha256") or ""
+            ).strip(),
         )
         snapshot.validate()
         return snapshot
@@ -426,6 +514,24 @@ class SnapshotRow:
             "missing_enrichment_count": self.missing_enrichment_count,
             "raw_file_path": self.raw_file_path,
             "imported_at": self.imported_at,
+            "premarket_range_source": self.premarket_range_source,
+            "premarket_range_source_url": self.premarket_range_source_url,
+            "premarket_price_source": self.premarket_price_source,
+            "previous_close_source": self.previous_close_source,
+            "premarket_high_source": self.premarket_high_source,
+            "premarket_low_source": self.premarket_low_source,
+            "premarket_volume_source": self.premarket_volume_source,
+            "gap_pct_source": self.gap_pct_source,
+            "dollar_volume_source": self.dollar_volume_source,
+            "enrichment_status": self.enrichment_status,
+            "enrichment_primary_source": self.enrichment_primary_source,
+            "enrichment_fallback_status": self.enrichment_fallback_status,
+            "enrichment_fallback_source": self.enrichment_fallback_source,
+            "enrichment_was_fallback": self.enrichment_was_fallback,
+            "enrichment_observed_at": self.enrichment_observed_at,
+            "enrichment_bar_completed_at": self.enrichment_bar_completed_at,
+            "enrichment_is_complete": self.enrichment_is_complete,
+            "enrichment_observation_sha256": self.enrichment_observation_sha256,
         }
 
 
@@ -471,6 +577,19 @@ class ScoredCandidate:
             "source_count": self.snapshot.source_count,
             "preferred_source": self.snapshot.preferred_source or self.snapshot.source,
             "conflict_flags": self.snapshot.conflict_flags,
+        }
+        source_lineage = dict(source_lineage)
+        source_lineage["premarket_observation"] = {
+            "source": self.snapshot.premarket_range_source,
+            "source_url": self.snapshot.premarket_range_source_url,
+            "status": self.snapshot.enrichment_status,
+            "observed_at": self.snapshot.enrichment_observed_at,
+            "bar_completed_at": self.snapshot.enrichment_bar_completed_at,
+            "is_complete": self.snapshot.enrichment_is_complete,
+            "fallback_status": self.snapshot.enrichment_fallback_status,
+            "fallback_source": self.snapshot.enrichment_fallback_source,
+            "was_fallback": self.snapshot.enrichment_was_fallback,
+            "observation_sha256": self.snapshot.enrichment_observation_sha256,
         }
         payload = {
             "rank": self.rank,
@@ -539,6 +658,24 @@ class ScoredCandidate:
             "missing_enrichment_count": self.snapshot.missing_enrichment_count,
             "raw_file_path": self.snapshot.raw_file_path,
             "imported_at": self.snapshot.imported_at,
+            "premarket_range_source": self.snapshot.premarket_range_source,
+            "premarket_range_source_url": self.snapshot.premarket_range_source_url,
+            "premarket_price_source": self.snapshot.premarket_price_source,
+            "previous_close_source": self.snapshot.previous_close_source,
+            "premarket_high_source": self.snapshot.premarket_high_source,
+            "premarket_low_source": self.snapshot.premarket_low_source,
+            "premarket_volume_source": self.snapshot.premarket_volume_source,
+            "gap_pct_source": self.snapshot.gap_pct_source,
+            "dollar_volume_source": self.snapshot.dollar_volume_source,
+            "enrichment_status": self.snapshot.enrichment_status,
+            "enrichment_primary_source": self.snapshot.enrichment_primary_source,
+            "enrichment_fallback_status": self.snapshot.enrichment_fallback_status,
+            "enrichment_fallback_source": self.snapshot.enrichment_fallback_source,
+            "enrichment_was_fallback": self.snapshot.enrichment_was_fallback,
+            "enrichment_observed_at": self.snapshot.enrichment_observed_at,
+            "enrichment_bar_completed_at": self.snapshot.enrichment_bar_completed_at,
+            "enrichment_is_complete": self.snapshot.enrichment_is_complete,
+            "enrichment_observation_sha256": self.snapshot.enrichment_observation_sha256,
         }
         payload.update(self.intelligence)
         return payload

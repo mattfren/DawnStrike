@@ -27,7 +27,16 @@ learning may start without pretending to validate historical strategy edge:
    AlphaOps premarket enrichment follows the same order: Alpaca IEX is queried
    first. A systemic Alpaca/auth/network failure blocks the cycle. Yahoo is used
    only for bounded symbol-specific missing/stale IEX bars after successful
-   Alpaca requests, and the cycle fails when the fallback ceiling is exceeded.
+   Alpaca requests. If symbol-level fallback demand exceeds the 25% ceiling,
+   Yahoo is not called; only verified Alpaca rows can rank, and zero verified
+   rows produce an auditable DATA_INELIGIBLE/no-trade cycle. Systemic Alpaca
+   authentication, network, or HTTP failures still fail the cycle closed.
+   The ranking snapshot contains only verified rows and carries the market-data
+   provider, source URL, completion timestamp, fallback state, and immutable
+   observation hash into candidates and field-level lineage. The separate
+   source-row audit snapshot preserves the pre-enrichment values unchanged.
+   Fixture configurations use an explicit rehearsal-only, non-learning ranking
+   policy and never fetch live market data.
    Every row records the provider that supplied its range; the run summary
    reports fallback count and ratio. Intraday monitoring remains Alpaca and
    fails closed when no fresh, complete IEX bar exists.
