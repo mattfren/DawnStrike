@@ -62,6 +62,8 @@ $action = New-ScheduledTaskAction `
     -WorkingDirectory $runtime
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
 $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -WakeToRun `
     -MultipleInstances IgnoreNew `

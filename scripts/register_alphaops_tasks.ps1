@@ -125,6 +125,8 @@ foreach ($definition in $taskDefinitions) {
         $trigger.Repetition = $repetition
     }
     $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
         -WakeToRun `
         -MultipleInstances IgnoreNew `
