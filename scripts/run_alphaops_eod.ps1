@@ -246,6 +246,40 @@ try {
         Set-OverallFailure -ExitCode $outcomeGap.exit_code
     }
 
+    # Scenario Intelligence is an independent paper challenger.  Its terminal
+    # lifecycle and return reconciliation must finish before the canonical
+    # PaperOps chain and daily publication; a failure is recorded explicitly
+    # rather than silently presenting stale Scenario states tomorrow.
+    if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
+        $scenarioStarted = (Get-Date).ToUniversalTime().ToString("o")
+        $scenarioClose = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-close", "--db-path", $dbPath, "--market-date", $MarketDate, "--source", "auto", "--notify", "telegram") `
+            -LogRoot $logRoot `
+            -LogName "scenario_close-$MarketDate"
+        $scenarioEodExit = $scenarioClose.exit_code
+        if ($scenarioEodExit -eq 0) {
+            $scenarioFinalize = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-finalize", "--db-path", $dbPath, "--market-date", $MarketDate) `
+                -LogRoot $logRoot `
+                -LogName "scenario_finalize-$MarketDate"
+            $scenarioEodExit = $scenarioFinalize.exit_code
+        }
+        if ($scenarioEodExit -eq 0) {
+            Write-Stage -Name scenario_finalization -Status COMPLETE -ExitCode 0 -StartedAt $scenarioStarted
+        }
+        else {
+            Set-OverallFailure -ExitCode $scenarioEodExit
+            Write-Stage `
+                -Name scenario_finalization `
+                -Status FAILED `
+                -ExitCode $scenarioEodExit `
+                -StartedAt $scenarioStarted `
+                -ErrorCode scenario_finalization_failed
+        }
+    }
+
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")
     $paperInit = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
