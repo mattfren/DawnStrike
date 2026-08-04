@@ -74,6 +74,7 @@ def _write_publishable_fixture(
         ),
         encoding="utf-8",
     )
+    scenario_hash = hashlib.sha256(scenarios.read_bytes()).hexdigest()
     calendar = root / "data" / "calendar.json"
     calendar.write_bytes(b'{"days":[]}')
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
@@ -95,6 +96,7 @@ def _write_publishable_fixture(
             {
                 "performance_payload_sha256": snapshot_hash,
                 "calendar_payload_sha256": calendar_hash,
+                "scenario_payload_sha256": scenario_hash,
                 "publication_set_sha256": publication_set_hash,
             }
         ),

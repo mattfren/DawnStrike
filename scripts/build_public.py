@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     if not paper_ops_root.is_absolute():
         paper_ops_root = root / paper_ops_root
     state_root = configured_state_root or db_path.parent.resolve()
+    scenario_payload = scenario_public_snapshot(db_path=db_path)
     result = DailyFinalizeService(
         db_path,
         output_root,
@@ -110,11 +111,15 @@ def main(argv: list[str] | None = None) -> int:
         market_date=market_date,
         retry_limit=max(0, args.retry_limit),
         retry_delay_seconds=max(0, args.retry_delay_seconds),
+        scenario_payload=scenario_payload,
     )
     shutil.copy2(root / "web" / "index.html", output_root / "index.html")
     shutil.copy2(root / "web" / "favicon.svg", output_root / "favicon.svg")
     shutil.copytree(root / "web" / "assets", output_root / "assets", dirs_exist_ok=True)
-    readiness = result.get("readiness") if isinstance(result.get("readiness"), dict) else {}
+    readiness_value = result.get("readiness")
+    if not isinstance(readiness_value, dict):
+        raise RuntimeError("Daily Finalize did not return a readiness object.")
+    readiness: dict[str, object] = dict(readiness_value)
     performance_hash = str(readiness.get("payload_sha256") or "")
     publication_set_hash = str(readiness.get("publication_set_sha256") or performance_hash)
     build_sha = hashlib.sha256(
@@ -128,39 +133,14 @@ def main(argv: list[str] | None = None) -> int:
     readiness["deployed_build_sha"] = build_sha
     readiness["build_id"] = build_id
     result["readiness"] = readiness
+    (output_root / "readiness.json").write_text(
+        json.dumps(readiness, sort_keys=True, indent=2, default=str),
+        encoding="utf-8",
+    )
     v6_path = output_root / "data" / "v6-learning.json"
     v6_path.parent.mkdir(parents=True, exist_ok=True)
     v6_path.write_text(
         json.dumps(v6_public_status(SQLiteScanStore(db_path)), sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
-    scenario_path = output_root / "data" / "scenarios.json"
-    scenario_payload = scenario_public_snapshot(db_path=db_path)
-    scenario_path.write_text(
-        json.dumps(scenario_payload, sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
-    scenario_manifest = {
-        "schema_version": "dawnstrike-scenarios-public-manifest-v1",
-        "generated_at": scenario_payload.get("generated_at"),
-        "payload_sha256": hashlib.sha256(scenario_path.read_bytes()).hexdigest(),
-        "record_count": len(scenario_payload.get("records") or []),
-        "performance_day_count": len(scenario_payload.get("performance") or []),
-        "calibration_status": "UNCALIBRATED",
-        "research_only": True,
-    }
-    (output_root / "data" / "scenarios.json.manifest.json").write_text(
-        json.dumps(scenario_manifest, sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
-    readiness["scenario_intelligence"] = {
-        "record_count": scenario_manifest["record_count"],
-        "performance_day_count": scenario_manifest["performance_day_count"],
-        "calibration_status": "UNCALIBRATED",
-        "research_only": True,
-    }
-    (output_root / "readiness.json").write_text(
-        json.dumps(readiness, sort_keys=True, indent=2, default=str),
         encoding="utf-8",
     )
     notification = _record_build_notification(

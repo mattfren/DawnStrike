@@ -162,6 +162,51 @@ def test_extraction_contract_rejects_trade_instruction_fields() -> None:
         )
 
 
+def test_engine_abstains_on_unresolved_or_injected_extraction() -> None:
+    article = _article()
+    extraction = ScenarioExtraction.from_dict(
+        article_id=article.article_id,
+        model="gpt-5.6-terra",
+        value={
+            "status": "ok",
+            "claims": [
+                {
+                    "event_type": "contract_customer",
+                    "direction": "bullish",
+                    "factual_claim": "The company announced a customer contract award.",
+                    "evidence_spans": ["material customer contract award"],
+                    "materiality": "high",
+                    "uncertainty_flags": [],
+                    "claim_status": "confirmed",
+                    "causal_mechanism": "Adds contracted revenue demand.",
+                    "affected_business_variable": "revenue backlog",
+                    "horizon": "near_term",
+                    "novelty": "new",
+                }
+            ],
+            "abstain_reason": "",
+            "prompt_injection_detected": True,
+            "contradictions": [],
+            "dependencies": ["customer delivery acceptance"],
+            "unresolved_unknowns": ["contract value"],
+        },
+    )
+
+    decision = evaluate_scenario(
+        article=article,
+        extraction=extraction,
+        ticker="NOVA",
+        decision_at="2026-08-03T14:05:00Z",
+        price_context=None,
+    )
+
+    assert decision.action == "ABSTAIN"
+    assert "prompt_injection_detected" in decision.reason_codes
+    assessment = decision.features["extraction_assessment"]
+    assert assessment["dependencies"] == ["customer delivery acceptance"]
+    assert assessment["unresolved_unknowns"] == ["contract value"]
+
+
 def test_cycle_persists_fact_only_records_and_reuses_extraction_cache(tmp_path: Path) -> None:
     db_path = tmp_path / "scenario.sqlite"
     article = _article()
@@ -279,7 +324,11 @@ def test_finalize_and_public_snapshot_report_only_resolved_paper_return(tmp_path
         ]
     )
 
-    result = finalize_scenario_performance(db_path=db_path, market_date=date)
+    result = finalize_scenario_performance(
+        db_path=db_path,
+        market_date=date,
+        config=_config(db_path),
+    )
     public = scenario_public_snapshot(db_path=db_path)
 
     assert result["gross_return_pct"] == 10.0
@@ -288,6 +337,104 @@ def test_finalize_and_public_snapshot_report_only_resolved_paper_return(tmp_path
     assert public["calibration_status"] == "UNCALIBRATED"
     assert public["records"][0]["headline"] == _article().headline
     assert "content" not in public["records"][0]
+    assert public["records"][0]["paper_lifecycle"]["status"] == "CLOSED"
+
+
+def test_finalize_uses_sourced_spy_bars_for_after_cost_excess(tmp_path: Path) -> None:
+    db_path = tmp_path / "scenario.sqlite"
+    store = SQLiteScanStore(db_path)
+    store.initialize()
+    date = "2026-08-03"
+    store.persist_scenario_decisions(
+        [
+            {
+                "decision_id": "decision-1",
+                "article_id": "article-1",
+                "ticker": "NOVA",
+                "market_date": date,
+                "decision_at": f"{date}T14:00:00Z",
+                "event_type": "contract_customer",
+                "direction": "bullish",
+                "directional_evidence_score": 6.0,
+                "action": "ENTER_LONG",
+                "source_tier": "T1",
+                "source_lineage_hash_sha256": "source",
+                "feature_hash_sha256": "features",
+                "features": {},
+            }
+        ]
+    )
+    store.upsert_scenario_signal_links(
+        [
+            {
+                "decision_id": "decision-1",
+                "signal_id": "scenario:decision-1",
+                "cohort": "scenario_forward",
+                "strategy_id": "news_scenario_v1",
+                "strategy_version": "dawnstrike-news-scenario-v1",
+                "created_at": f"{date}T14:00:00Z",
+                "updated_at": f"{date}T15:00:00Z",
+            }
+        ]
+    )
+    store.persist_paper_positions(
+        [
+            {
+                "position_id": "position-1",
+                "signal_id": "scenario:decision-1",
+                "market_date": date,
+                "ticker": "NOVA",
+                "status": "CLOSED",
+                "quantity": 10,
+                "entry_price": 10,
+                "exit_price": 11,
+                "opened_at": f"{date}T14:00:00Z",
+                "closed_at": f"{date}T15:00:00Z",
+                "realized_pnl": 10,
+                "realized_return_pct": 10,
+                "updated_at": f"{date}T15:00:00Z",
+            }
+        ]
+    )
+
+    class FakeMarket:
+        def get_minute_bars(self, *args, **kwargs):
+            return [
+                {
+                    "ticker": "SPY",
+                    "timestamp": f"{date}T14:00:00Z",
+                    "open": 100,
+                    "high": 100,
+                    "low": 100,
+                    "close": 100,
+                },
+                {
+                    "ticker": "SPY",
+                    "timestamp": f"{date}T15:00:00Z",
+                    "open": 101,
+                    "high": 101,
+                    "low": 101,
+                    "close": 101,
+                },
+            ]
+
+    config = ScannerConfig(
+        database_path=db_path,
+        provider="alpaca",
+        scenario_intelligence_enabled=True,
+        alpaca_api_key_id="test-key",
+        alpaca_api_secret_key="test-secret",
+    )
+    result = finalize_scenario_performance(
+        db_path=db_path,
+        market_date=date,
+        config=config,
+        market_provider=FakeMarket(),
+    )
+
+    assert result["benchmark_return_pct"] == 1.0
+    assert result["excess_return_pct"] == 9.0
+    assert result["benchmark"]["status"] == "sourced_complete"
 
 
 def test_scenario_close_succeeds_when_nothing_is_open(tmp_path: Path) -> None:

@@ -219,10 +219,65 @@ function renderScenarios() {
     ["Closed eligible", replayTotals.closed || "Not reported", replayTotals.closed > 0],
     ["Quarantined", replayTotals.quarantined, replayTotals.quarantined === 0],
   ]);
+  const analytics = payload.analytics || {};
+  const forwardAnalytics = analytics.forward || {};
+  const distribution = latest?.return_distribution || {};
+  const benchmark = latest?.benchmark || {};
+  document.getElementById("scenario-forward-analytics").innerHTML = detailRows([
+    ["Closed eligible / triggered", `${forwardAnalytics.closed_eligible_count ?? 0} / ${forwardAnalytics.triggered_count ?? 0}`, Number(forwardAnalytics.closed_eligible_count || 0) > 0],
+    ["After-cost return", formatPercentText(forwardAnalytics.after_cost_return_pct), forwardAnalytics.after_cost_return_pct != null],
+    ["SPY return", formatPercentText(forwardAnalytics.benchmark_return_pct), forwardAnalytics.benchmark_return_pct != null],
+    ["After-cost excess", formatPercentText(forwardAnalytics.excess_return_pct), forwardAnalytics.excess_return_pct != null],
+    ["Benchmark coverage", benchmark.status === "sourced_complete" ? `${benchmark.eligible_closed_count ?? 0} sourced` : `${benchmark.eligible_closed_count ?? 0} sourced · ${benchmark.missing_closed_count ?? 0} missing`, benchmark.status === "sourced_complete"],
+    ["Missing / quarantined", `${forwardAnalytics.missing_count ?? 0} / ${forwardAnalytics.quarantined_count ?? 0}`, Number(forwardAnalytics.missing_count || 0) === 0 && Number(forwardAnalytics.quarantined_count || 0) === 0],
+    ["Aggregation", forwardAnalytics.aggregation_note || "No closed-position aggregate yet", false],
+  ]);
+  document.getElementById("scenario-learning-evidence").innerHTML = detailRows([
+    ["Calibration", calibration === "UNCALIBRATED" ? "Withheld — uncalibrated" : calibration, calibration !== "UNCALIBRATED"],
+    ["After-cost expectancy", formatPercentText(distribution.after_cost_expectancy_pct), distribution.after_cost_expectancy_pct != null],
+    ["Median after-cost", formatPercentText(distribution.median_after_cost_return_pct), distribution.median_after_cost_return_pct != null],
+    ["Profit factor", distribution.profit_factor == null ? "Not reported" : Number(distribution.profit_factor).toFixed(2), distribution.profit_factor != null && Number(distribution.profit_factor) >= 1],
+    ["Maximum drawdown", formatPercentText(distribution.maximum_drawdown_pct), distribution.maximum_drawdown_pct != null],
+    ["Bootstrap 95% CI", distribution.bootstrap_95_ci_pct?.lower == null ? "Not reported" : `${formatPercentText(distribution.bootstrap_95_ci_pct.lower)} to ${formatPercentText(distribution.bootstrap_95_ci_pct.upper)}`, distribution.bootstrap_95_ci_pct?.lower != null],
+    ["MAE / MFE", latest?.mae_mfe?.status === "sourced_price_observations" ? `${formatPercentText(latest.mae_mfe.mean_mae_pct)} / ${formatPercentText(latest.mae_mfe.mean_mfe_pct)}` : "Withheld — missing sourced observations", latest?.mae_mfe?.status === "sourced_price_observations"],
+  ]);
   const disclosures = Array.isArray(payload.disclosures) ? payload.disclosures : [];
   document.getElementById("scenario-disclosures").innerHTML = disclosures.length
     ? `<strong>Research-only, no broker execution.</strong><span>${disclosures.map(escapeHtml).join("<br>")}</span>`
     : "<strong>Scenario disclosure unavailable.</strong> No scenario claim is being inferred.";
+  const lifecycleBody = document.getElementById("scenario-lifecycle-table");
+  const lifecycleRecords = records.filter((record) => record.paper_lifecycle?.signal_id || record.action === "ENTER_LONG");
+  lifecycleBody.innerHTML = lifecycleRecords.length ? lifecycleRecords.slice(0, 100).map((record) => {
+    const lifecycle = record.paper_lifecycle || {};
+    const afterCost = lifecycle.realized_return_pct == null || lifecycle.modeled_cost_pct == null
+      ? null
+      : Number(lifecycle.realized_return_pct) - Number(lifecycle.modeled_cost_pct);
+    const eventTrail = Array.isArray(lifecycle.events) && lifecycle.events.length
+      ? lifecycle.events.map((event) => `${humanizeIdentifier(event.event_type)} · ${formatTimestamp(event.event_timestamp)}`).join("<br>")
+      : "No triggered lifecycle event";
+    return `<tr>
+      <td><strong>${escapeHtml(record.ticker || "Not reported")}</strong></td>
+      <td>${escapeHtml(humanizeIdentifier(record.action || "not_reported"))}<br><span class="value-muted">${escapeHtml(shortHash(record.decision_id) || "Missing")}</span></td>
+      <td>${statusChip(lifecycle.status || "NOT_TRIGGERED")}</td>
+      <td>${escapeHtml(formatPrice(lifecycle.entry_price))} / ${escapeHtml(formatPrice(lifecycle.exit_price))}</td>
+      <td>${afterCost == null ? "Not reported" : formatPercent(afterCost)}<br><span class="value-muted">cost ${formatPercentText(lifecycle.modeled_cost_pct)}</span></td>
+      <td>${eventTrail}</td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="6">No scenario paper lifecycle has triggered. This is not a zero-return claim.</td></tr>';
+  const performanceBody = document.getElementById("scenario-performance-table");
+  const performanceRows = [
+    ...performance.map((row) => ({ ...row, cohort_label: "Forward paper" })),
+    ...replayPerformance.map((row) => ({ ...row, cohort_label: "Historical replay" })),
+  ].sort((a, b) => String(b.market_date).localeCompare(String(a.market_date)));
+  performanceBody.innerHTML = performanceRows.length ? performanceRows.map((row) => `<tr>
+    <td>${escapeHtml(row.cohort_label)}</td>
+    <td>${escapeHtml(row.market_date || "Not reported")}</td>
+    <td>${escapeHtml(`${row.closed_eligible_count ?? 0} / ${row.open_count ?? 0} / ${row.missing_count ?? 0}`)}</td>
+    <td>${formatPercent(row.modeled_after_cost_return_pct)}</td>
+    <td>${formatPercent(row.benchmark_return_pct)}</td>
+    <td>${formatPercent(row.excess_return_pct)}</td>
+    <td>${escapeHtml(row.return_status || "Not reported")}</td>
+  </tr>`).join("") : '<tr><td colspan="7">No scenario performance rows have been published. This is not a zero-return claim.</td></tr>';
   const body = document.getElementById("scenario-table");
   if (!records.length) {
     body.innerHTML = '<tr><td colspan="7">No scenario records have been published yet. This is not a zero-return claim.</td></tr>';

@@ -26,7 +26,8 @@ function Write-MorningStage {
         [string]$Name,
         [string]$Status,
         [int]$ExitCode,
-        [string]$ErrorCode = ""
+        [string]$ErrorCode = "",
+        [switch]$NotRequired
     )
     $arguments = @(
         "scripts\record_daily_stage.py",
@@ -40,6 +41,7 @@ function Write-MorningStage {
         "--started-at", $startedAt
     )
     if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    if ($NotRequired) { $arguments += "--not-required" }
     $receipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList $arguments `
@@ -103,13 +105,26 @@ try {
         $scenarioSince = (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
         $scenarioCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-cycle", "--db-path", $dbPath, "--since", $scenarioSince) `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
             -LogRoot $logRoot `
             -LogName "scenario_morning-$MarketDate"
         if ($scenarioCycle.exit_code -ne 0) {
             $stageExit = $scenarioCycle.exit_code
             $errorCode = "scenario_cycle_failed"
         }
+        Write-MorningStage `
+            -Name "scenario_intelligence" `
+            -Status $(if ($scenarioCycle.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
+            -ExitCode $scenarioCycle.exit_code `
+            -ErrorCode $(if ($scenarioCycle.exit_code -eq 0) { "" } else { "scenario_cycle_failed" }) `
+            -NotRequired
+    }
+    elseif ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -notmatch '^(?i:true|1|yes|y)$') {
+        Write-MorningStage `
+            -Name "scenario_intelligence" `
+            -Status "SKIPPED_NOT_APPLICABLE" `
+            -ExitCode 0 `
+            -NotRequired
     }
     $status = if ($stageExit -eq 0) { "COMPLETE" } else { "FAILED" }
     foreach ($stage in @("morning_collection", "ranking_delivery")) {

@@ -92,10 +92,17 @@ def evaluate_scenario(
                     "materiality": claim.materiality,
                     "evidence_count": len(claim.evidence_spans),
                     "uncertainty_flags": list(claim.uncertainty_flags),
+                    "claim_status": claim.claim_status,
+                    "causal_mechanism": claim.causal_mechanism,
+                    "affected_business_variable": claim.affected_business_variable,
+                    "horizon": claim.horizon,
+                    "novelty": claim.novelty,
                 }
             )
             if claim.uncertainty_flags:
                 reason_codes.extend(f"uncertainty:{flag}" for flag in claim.uncertainty_flags)
+            if claim.claim_status in {"rumor", "disputed"}:
+                reason_codes.append(f"claim_status:{claim.claim_status}")
     tier = article.tier
     score += _TIER_BONUS[tier]
     if tier == "UNKNOWN":
@@ -106,6 +113,10 @@ def evaluate_scenario(
         reason_codes.append("rumor_requires_independent_corroboration")
     if "bullish" in directions and "bearish" in directions:
         reason_codes.append("contradictory_claim_directions")
+    if extraction.prompt_injection_detected:
+        reason_codes.append("prompt_injection_detected")
+    if extraction.contradictions:
+        reason_codes.append("extractor_reported_contradictions")
     direction = "bullish" if score >= 1.0 else "bearish" if score <= -1.0 else "mixed"
     action = "WATCH"
     entry_trigger = invalidation = target = None
@@ -115,8 +126,10 @@ def evaluate_scenario(
             "unknown_source",
             "rumor_requires_independent_corroboration",
             "contradictory_claim_directions",
+            "prompt_injection_detected",
+            "extractor_reported_contradictions",
         }
-        or code.startswith("uncertainty:")
+        or code.startswith(("uncertainty:", "claim_status:"))
         for code in reason_codes
     )
     if extraction.status != "ok" or blocked:
@@ -152,6 +165,12 @@ def evaluate_scenario(
         "score_components": {
             "directional_score": round(score, 4),
             "tier_bonus": _TIER_BONUS[tier],
+        },
+        "extraction_assessment": {
+            "prompt_injection_detected": extraction.prompt_injection_detected,
+            "contradictions": list(extraction.contradictions),
+            "dependencies": list(extraction.dependencies),
+            "unresolved_unknowns": list(extraction.unresolved_unknowns),
         },
         "price_context": (
             {

@@ -71,6 +71,7 @@ class DailyFinalizeService:
         retry_limit: int = 2,
         retry_delay_seconds: int = 0,
         now: str | None = None,
+        scenario_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         acquired = False
@@ -151,10 +152,15 @@ class DailyFinalizeService:
                         payload=calendar_publication["manifest"],
                         observed_at=now,
                     )
+                    scenario_publication = self._stage_scenario_snapshot(
+                        staging_root,
+                        scenario_payload=scenario_payload,
+                    )
                     publication_set = self._promote_publication_pair(
                         staging_root,
                         publication=publication,
                         calendar_publication=calendar_publication,
+                        scenario_publication=scenario_publication,
                         generated_at=now,
                     )
                     self._record_shared_stage(
@@ -174,6 +180,8 @@ class DailyFinalizeService:
                         result,
                         publication,
                         calendar_publication,
+                        publication_set,
+                        scenario_publication,
                         market_date,
                         upstream_status,
                         publication_timestamp=now,
@@ -226,6 +234,8 @@ class DailyFinalizeService:
                         result,
                         publication,
                         calendar_publication,
+                        publication_set,
+                        scenario_publication,
                         readiness,
                         attempt,
                         upstream_stages=upstream_stages,
@@ -261,6 +271,11 @@ class DailyFinalizeService:
                         "readiness": readiness,
                         "stage_manifest": stage,
                         "calendar_publication": calendar_publication["manifest"],
+                        "scenario_publication": (
+                            scenario_publication["manifest"]
+                            if scenario_publication is not None
+                            else None
+                        ),
                         "publication_set": publication_set,
                         "daily_run": daily_snapshot,
                         "reconciliation": {
@@ -340,12 +355,42 @@ class DailyFinalizeService:
         ) as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
+    @staticmethod
+    def _stage_scenario_snapshot(
+        staging_root: Path,
+        *,
+        scenario_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Write the sanitized scenario projection into the same staged publication set."""
+
+        if scenario_payload is None:
+            return None
+        snapshot_path = staging_root / "scenarios.json"
+        _atomic_write_json(snapshot_path, scenario_payload)
+        manifest = {
+            "schema_version": "dawnstrike-scenarios-public-manifest-v1",
+            "generated_at": scenario_payload.get("generated_at"),
+            "payload_sha256": hashlib.sha256(snapshot_path.read_bytes()).hexdigest(),
+            "record_count": len(scenario_payload.get("records") or []),
+            "performance_day_count": len(scenario_payload.get("performance") or []),
+            "calibration_status": scenario_payload.get("calibration_status") or "UNCALIBRATED",
+            "research_only": True,
+        }
+        manifest_path = staging_root / "scenarios.json.manifest.json"
+        _atomic_write_json(manifest_path, manifest)
+        return {
+            "snapshot_path": str(snapshot_path),
+            "manifest_path": str(manifest_path),
+            "manifest": manifest,
+        }
+
     def _promote_publication_pair(
         self,
         staging_root: Path,
         *,
         publication: dict[str, Any],
         calendar_publication: dict[str, Any],
+        scenario_publication: dict[str, Any] | None = None,
         generated_at: str | None = None,
     ) -> dict[str, Any]:
         """Promote one staged performance/calendar generation as a bound set."""
@@ -366,6 +411,15 @@ class DailyFinalizeService:
             "calendar.json": Path(calendar_publication["calendar_path"]),
             "calendar.json.manifest.json": Path(calendar_publication["manifest_path"]),
         }
+        if scenario_publication is not None:
+            staged.update(
+                {
+                    "scenarios.json": Path(scenario_publication["snapshot_path"]),
+                    "scenarios.json.manifest.json": Path(
+                        scenario_publication["manifest_path"]
+                    ),
+                }
+            )
         if any(not path.is_file() or path.parent != staging_root for path in staged.values()):
             raise ValueError("publication pair is not fully staged")
         destination = self.output_root / "data"
@@ -380,8 +434,13 @@ class DailyFinalizeService:
         calendar_publication["manifest_path"] = str(
             destination / "calendar.json.manifest.json"
         )
+        if scenario_publication is not None:
+            scenario_publication["snapshot_path"] = str(destination / "scenarios.json")
+            scenario_publication["manifest_path"] = str(
+                destination / "scenarios.json.manifest.json"
+            )
         publication_set = {
-            "schema_version": "dawnstrike.publication_set.v1",
+            "schema_version": "dawnstrike.publication_set.v2",
             "market_date": performance_manifest.get("market_date"),
             "canonical_input_hash_sha256": canonical_hash,
             "performance_payload_sha256": performance_manifest.get("payload_sha256"),
@@ -392,9 +451,19 @@ class DailyFinalizeService:
             "research_only": True,
             "live_trading_enabled": False,
         }
+        scenario_manifest: dict[str, Any] | None = None
+        if scenario_publication is not None:
+            scenario_manifest = scenario_publication["manifest"]
+            publication_set["scenario_payload_sha256"] = scenario_manifest.get(
+                "payload_sha256"
+            )
+            publication_set["scenario_manifest_sha256"] = hashlib.sha256(
+                Path(scenario_publication["manifest_path"]).read_bytes()
+            ).hexdigest()
         publication_set["publication_set_sha256"] = _publication_pair_hash(
             performance_manifest,
             calendar_manifest,
+            scenario_manifest,
         )
         _atomic_write_json(destination / "publication-set.json", publication_set)
         staging_root.rmdir()
@@ -409,6 +478,8 @@ class DailyFinalizeService:
             "performance.json.manifest.json",
             "calendar.json",
             "calendar.json.manifest.json",
+            "scenarios.json",
+            "scenarios.json.manifest.json",
         ):
             path = staging_root / name
             if path.is_file():
@@ -423,6 +494,8 @@ class DailyFinalizeService:
         reconciliation: dict[str, Any],
         publication: dict[str, Any],
         calendar_publication: dict[str, Any],
+        publication_set: dict[str, Any],
+        scenario_publication: dict[str, Any] | None,
         market_date: str,
         upstream_status: str = "not_recorded",
         publication_timestamp: str | None = None,
@@ -458,10 +531,7 @@ class DailyFinalizeService:
             "calendar_payload_sha256": calendar_publication["manifest"].get(
                 "payload_sha256"
             ),
-            "publication_set_sha256": _publication_pair_hash(
-                publication["manifest"],
-                calendar_publication["manifest"],
-            ),
+            "publication_set_sha256": publication_set.get("publication_set_sha256"),
             "source_data_watermark": market_date,
             "outcome_coverage": _coverage_summary(
                 reconciliation.get("daily"),
@@ -474,6 +544,15 @@ class DailyFinalizeService:
             if status == "ready"
             else "missing_or_degraded_upstream_truth_or_safety",
         }
+        if scenario_publication is not None:
+            scenario_manifest = scenario_publication["manifest"]
+            payload["scenario_intelligence"] = {
+                "record_count": scenario_manifest.get("record_count"),
+                "performance_day_count": scenario_manifest.get("performance_day_count"),
+                "calibration_status": scenario_manifest.get("calibration_status"),
+                "payload_sha256": scenario_manifest.get("payload_sha256"),
+                "research_only": True,
+            }
         path = self.output_root / "readiness.json"
         _atomic_write_json(path, payload)
         return payload
@@ -609,6 +688,8 @@ class DailyFinalizeService:
         reconciliation: dict[str, Any],
         publication: dict[str, Any],
         calendar_publication: dict[str, Any],
+        publication_set: dict[str, Any],
+        scenario_publication: dict[str, Any] | None,
         readiness: dict[str, Any],
         retry_count: int,
         upstream_stages: dict[str, str] | None = None,
@@ -620,10 +701,7 @@ class DailyFinalizeService:
         calendar_output_hash = calendar_publication["manifest"].get(
             "payload_sha256"
         )
-        output_hash = _publication_pair_hash(
-            publication["manifest"],
-            calendar_publication["manifest"],
-        )
+        output_hash = publication_set.get("publication_set_sha256")
         upstream_status = str(readiness.get("upstream_status") or "not_recorded")
         reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
@@ -747,6 +825,27 @@ class DailyFinalizeService:
                     else "Verify Calendar values match the canonical snapshot."
                 ),
             ),
+            *(
+                [
+                    self._stage_record(
+                        "scenario_snapshot",
+                        "complete",
+                        "dawnstrike-scenarios-public-v1",
+                        input_hash=input_hash,
+                        output_hash=scenario_publication["manifest"].get(
+                            "payload_sha256"
+                        ),
+                        retry_count=retry_count,
+                        generated_at=generated_at,
+                        next_action=(
+                            "Keep Scenario cohorts and calibration disclosure separate "
+                            "from official paper performance."
+                        ),
+                    )
+                ]
+                if scenario_publication is not None
+                else []
+            ),
             self._stage_record(
                 "preview_deployment",
                 "not_recorded",
@@ -798,6 +897,11 @@ class DailyFinalizeService:
                 "data/calendar.json.manifest.json",
                 "data/publication-set.json",
                 "data/v6-learning.json",
+                *(
+                    ["data/scenarios.json", "data/scenarios.json.manifest.json"]
+                    if scenario_publication is not None
+                    else []
+                ),
                 "readiness.json",
             ],
             "research_only": True,
@@ -909,6 +1013,7 @@ def _atomic_write_json(path: Path, payload: object) -> None:
 def _publication_pair_hash(
     performance_manifest: dict[str, Any],
     calendar_manifest: dict[str, Any],
+    scenario_manifest: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "market_date": performance_manifest.get("market_date"),
@@ -920,6 +1025,9 @@ def _publication_pair_hash(
         "performance_manifest_id": performance_manifest.get("manifest_id"),
         "calendar_manifest_id": calendar_manifest.get("manifest_id"),
     }
+    if scenario_manifest is not None:
+        payload["scenario_payload_sha256"] = scenario_manifest.get("payload_sha256")
+        payload["scenario_schema_version"] = scenario_manifest.get("schema_version")
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
