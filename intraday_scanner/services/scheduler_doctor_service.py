@@ -16,6 +16,13 @@ EXPECTED_TASKS = {
     "Dawnstrike AlphaOps V6 Weekly Training": "run_alphaops_weekly_training.ps1",
     CANONICAL_TASK_NAME: "run_daily_finalize.ps1",
 }
+EXPECTED_TASK_STARTS = {
+    "Dawnstrike AlphaOps Morning": "07:15",
+    "Dawnstrike AlphaOps Monitor 5m": "08:35",
+    "Dawnstrike AlphaOps EOD Full Report": "15:15",
+    "Dawnstrike AlphaOps V6 Weekly Training": "17:30",
+    CANONICAL_TASK_NAME: "17:30",
+}
 SCHED_S_TASK_RUNNING = 0x00041301
 SCHED_S_TASK_HAS_NOT_RUN = 0x00041303
 ACCEPTABLE_LAST_RESULTS = {
@@ -63,8 +70,16 @@ def scheduler_doctor(
                 expected_runner=runtime / "scripts" / script_name,
                 runtime_root=runtime,
                 state_root=state,
+                expected_start=EXPECTED_TASK_STARTS[name],
             )
         )
+    unexpected_enabled = [
+        row
+        for row in task_rows
+        if str(row.get("name") or "") not in EXPECTED_TASKS
+        and row.get("enabled") is True
+        and str(runtime / "scripts").lower() in str(row.get("arguments") or "").lower()
+    ]
     failed_checks = [
         check
         for check in checks
@@ -79,11 +94,11 @@ def scheduler_doctor(
             "Run scheduler-doctor on the approved Windows runtime with "
             "Task Scheduler query access."
         )
-    elif failed_checks:
+    elif failed_checks or unexpected_enabled:
         status = "BLOCKED_EXTERNAL"
         next_action = (
             "Register or repair every Dawnstrike V6 task against the exact runtime "
-            "and state roots, then rerun scheduler-doctor."
+            "and state roots, remove duplicate enabled runners, then rerun scheduler-doctor."
         )
     else:
         status = "LOCAL_VERIFIED"
@@ -100,7 +115,7 @@ def scheduler_doctor(
         _missing_task(CANONICAL_TASK_NAME),
     )
     return {
-        "schema_version": "dawnstrike.scheduler_doctor.v3",
+        "schema_version": "dawnstrike.scheduler_doctor.v4",
         "status": status,
         "runtime_root": str(runtime),
         "state_root": str(state),
@@ -110,6 +125,7 @@ def scheduler_doctor(
         "scheduled_task": finalize,
         "expected_task_name": CANONICAL_TASK_NAME,
         "failed_task_count": len(failed_checks),
+        "unexpected_enabled_tasks": unexpected_enabled,
         "next_scheduled_run": next_runs[0] if next_runs else None,
         "forbidden_legacy_root": FORBIDDEN_LEGACY_ROOT,
         "next_action": next_action,
@@ -122,6 +138,7 @@ def _task_check(
     expected_runner: Path,
     runtime_root: Path,
     state_root: Path,
+    expected_start: str,
 ) -> dict[str, Any]:
     state = str(task.get("state") or "unknown")
     arguments = str(task.get("arguments") or "")
@@ -147,6 +164,8 @@ def _task_check(
     last_result = task.get("last_task_result")
     healthy_state = state in {"Ready", "Running"}
     last_run_result_acceptable = last_result in ACCEPTABLE_LAST_RESULTS
+    next_run_time = str(task.get("next_run_time") or "")
+    scheduled_time_matches = f"T{expected_start}:" in next_run_time
     logon_type = str(task.get("logon_type") or "")
     noninteractive = logon_type in NONINTERACTIVE_LOGON_TYPES
     start_when_available = task.get("start_when_available") is True
@@ -165,6 +184,8 @@ def _task_check(
             noninteractive,
             start_when_available,
             battery_safe,
+            scheduled_time_matches,
+            last_run_result_acceptable,
         )
     )
     return {
@@ -181,6 +202,8 @@ def _task_check(
         "last_run_status": (
             "ACCEPTABLE" if last_run_result_acceptable else "STALE_OR_FAILED"
         ),
+        "expected_start_local": expected_start,
+        "scheduled_time_matches": scheduled_time_matches,
         "status": "LOCAL_VERIFIED" if verified else "FAILED",
     }
 
@@ -195,9 +218,15 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
             }
             for name in EXPECTED_TASKS
         ]
-    names_json = json.dumps(list(EXPECTED_TASKS))
     script = (
-        f"$names = ConvertFrom-Json '{names_json}'; "
+        "$names = @(Get-ScheduledTask | Where-Object { "
+        "$_.TaskName -like 'Dawnstrike AlphaOps*' -or "
+        "$_.TaskName -eq 'Dawnstrike 10of10 Daily Finalize' "
+        "} | Select-Object -ExpandProperty TaskName); "
+        # Explicitly preserve missing canonical rows in the output; querying all
+        # similarly named tasks also exposes enabled duplicate runners.
+        f"$expected = ConvertFrom-Json '{json.dumps(list(EXPECTED_TASKS))}'; "
+        "$names = @($names + ($expected | Where-Object { $_ -notin $names })); "
         "$rows = foreach ($name in $names) { "
         "$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; "
         "if ($null -eq $task) { "

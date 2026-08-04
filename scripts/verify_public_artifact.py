@@ -35,7 +35,12 @@ ABSOLUTE_PATH_PATTERN = re.compile(
 )
 
 
-def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
+def verify(
+    root: Path,
+    *,
+    allow_degraded: bool = False,
+    expected_source_sha: str = "",
+) -> dict[str, object]:
     errors: list[str] = []
     missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
     errors.extend(f"missing:{name}" for name in missing)
@@ -144,6 +149,8 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):
             errors.append("source_sha_missing")
+        if expected_source_sha and build_manifest.get("source_sha") != expected_source_sha:
+            errors.append("source_sha_not_expected_runtime_head")
         if build_manifest.get("source_clean") is not True:
             errors.append("source_not_clean")
         if not build_manifest.get("build_id"):
@@ -158,6 +165,11 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")
         else:
+            for name in REQUIRED_FILES:
+                if name == "build-manifest.json":
+                    continue
+                if name not in recorded_hashes:
+                    errors.append(f"required_file_hash_missing:{name}")
             for name, expected_hash in recorded_hashes.items():
                 path = root / str(name)
                 if not path.is_file():
@@ -213,8 +225,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="build/public")
     parser.add_argument("--allow-degraded", action="store_true")
+    parser.add_argument("--expected-source-sha", default="")
     args = parser.parse_args(argv)
-    result = verify(Path(args.root).resolve(), allow_degraded=args.allow_degraded)
+    result = verify(
+        Path(args.root).resolve(),
+        allow_degraded=args.allow_degraded,
+        expected_source_sha=args.expected_source_sha.strip(),
+    )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0 if result["status"] == "PASS" else 2
 
