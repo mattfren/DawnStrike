@@ -6848,15 +6848,22 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
-                row = connection.execute(
+                rows = connection.execute(
                     """
                     SELECT * FROM scenario_claim_extractions
-                    WHERE article_id = ? AND model = ? AND input_hash_sha256 = ?
-                    ORDER BY created_at DESC LIMIT 1
+                    WHERE article_id = ? AND input_hash_sha256 = ?
+                    ORDER BY created_at DESC
                     """,
-                    (article_id, model, input_hash_sha256),
-                ).fetchone()
-                return _json_row(row) if row is not None else None
+                    (article_id, input_hash_sha256),
+                ).fetchall()
+                for row in rows:
+                    payload = _json_row(row)
+                    requested_model = str(
+                        payload.get("requested_model") or payload.get("model") or ""
+                    )
+                    if requested_model == model:
+                        return payload
+                return None
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load scenario extraction: {exc}") from exc
 

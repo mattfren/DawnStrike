@@ -31,6 +31,7 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
 )
+from intraday_scanner.scenario.point_in_time import subsequent_entry_evidence_violations
 from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
@@ -753,6 +754,21 @@ def _decision_for_signal(
         return _exit_decision(signal, observation, open_position, scanner_config)
     if prior_entry:
         return {"state": STATE_CLOSED, "reason": "Signal already has a paper entry record."}
+    if str(signal.get("strategy_id") or "") == SCENARIO_STRATEGY_ID:
+        violations = subsequent_entry_evidence_violations(
+            decision_at=str(signal.get("generated_at") or signal.get("selected_at") or ""),
+            requested_at=str(observation.get("requested_at") or ""),
+            observed_at=str(observation.get("observed_at") or ""),
+            bar_completed_at=str(observation.get("bar_completed_at") or ""),
+            is_complete=observation.get("is_complete"),
+            source_bar_hash_sha256=str(observation.get("source_bar_hash_sha256") or ""),
+        )
+        if violations:
+            return {
+                "state": STATE_STALE_DATA,
+                "reason": "Scenario entry evidence failed point-in-time guard: "
+                + ", ".join(violations),
+            }
     return _entry_decision(
         signal,
         observation,
@@ -1094,6 +1110,7 @@ def _intent(
         "reason": reason,
         "blocked_reason": blocked_reason,
         "source_observation_id": str(observation.get("observation_id") or ""),
+        "source_bar_hash_sha256": str(observation.get("source_bar_hash_sha256") or ""),
         "selection_id": str(signal.get("selection_id") or ""),
         "strategy_id": str(signal.get("strategy_id") or ALPHAOPS_STRATEGY_ID),
         "strategy_version": str(

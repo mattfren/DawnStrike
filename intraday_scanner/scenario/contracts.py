@@ -11,8 +11,8 @@ from typing import Any
 
 SCENARIO_POLICY_VERSION = "dawnstrike-news-scenario-v1"
 SCENARIO_FEATURE_SCHEMA_VERSION = "dawnstrike-news-scenario-features-v1"
-SCENARIO_EXTRACTION_SCHEMA_VERSION = "dawnstrike-news-extraction-v2"
-SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v3"
+SCENARIO_EXTRACTION_SCHEMA_VERSION = "dawnstrike-news-extraction-v3"
+SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v4"
 SCENARIO_STRATEGY_ID = "news_scenario_v1"
 SCENARIO_FORWARD_COHORT = "scenario_forward"
 SCENARIO_REPLAY_COHORT = "scenario_historical_replay"
@@ -35,25 +35,100 @@ EVENT_TYPES = {
     "rumor",
     "other",
 }
+CLAIM_STATUSES = {
+    "verified_fact",
+    "company_claim",
+    "attributed_third_party_claim",
+    "rumor",
+    "opinion",
+    "unclear",
+}
+MECHANISM_POLARITIES = {"positive", "negative", "mixed", "unclear"}
 FORBIDDEN_EXTRACTION_KEYS = {
     "action",
+    "allocation",
+    "bull_probability",
     "trade_action",
+    "confidence",
+    "confidence_score",
+    "direction",
+    "downside",
     "recommendation",
+    "rating",
     "buy",
     "sell",
     "short",
+    "long",
     "target",
     "target_price",
     "entry",
+    "entry_level",
     "exit",
+    "exit_level",
+    "invalidation_level",
+    "stop_loss",
+    "take_profit",
     "probability",
+    "odds",
+    "likelihood",
     "expected_return",
+    "projected_return",
+    "return_pct",
     "position_size",
     "sizing",
+    "upside",
 }
-FORBIDDEN_EXTRACTION_TEXT = re.compile(
-    r"\b(?:price\s+target|target\s+price)\b",
-    flags=re.IGNORECASE,
+FORBIDDEN_EXTRACTION_TEXT = (
+    (
+        "recommendation",
+        re.compile(
+            r"\b(?:buy|sell|hold|short|long|overweight|underweight|outperform|"
+            r"underperform)\b.{0,32}\b(?:rating|recommendation|signal|call)\b|"
+            r"\b(?:rating|recommendation|signal|call)\b.{0,32}\b(?:buy|sell|hold|"
+            r"short|long|overweight|underweight|outperform|underperform)\b|"
+            r"\b(?:rate|rates|rated|recommend(?:s|ed|ing)?)\b.{0,32}\b(?:buy|sell|"
+            r"hold|short|long|overweight|underweight|outperform|underperform)\b|"
+            r"\b(?:should|must)\s+(?:buy|sell|hold|short|go\s+long|go\s+short)\b|"
+            r"\b(?:enter|exit)\s+(?:a\s+)?(?:trade|position|long|short)\b|"
+            r"^\s*(?:buy|sell|short|hold|go\s+long|go\s+short)\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "price-level",
+        re.compile(
+            r"\b(?:price\s+target|target\s+price|entry\s+(?:price|level|trigger)|"
+            r"exit\s+(?:price|level|trigger)|stop[ -]?loss|take[ -]?profit|"
+            r"(?:entry|exit)\s+(?:at|above|below|near)\s+[$\d]|"
+            r"invalidation\s+(?:price|level)|target\s+(?:of|at)\s+[$\d])\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "probability",
+        re.compile(
+            r"\b(?:probabilit(?:y|ies)|likelihood|odds|chance\s+of|"
+            r"percent\s+(?:likely|chance))\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "return",
+        re.compile(
+            r"\b(?:(?:expected|projected|estimated|forecast)\s+returns?|"
+            r"returns?\s+of\s+[-+]?\d|[-+]?\d+(?:\.\d+)?\s*%\s+"
+            r"(?:upside|downside|return)|return\s+on\s+investment|roi)\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "position-sizing",
+        re.compile(
+            r"\b(?:position\s+siz(?:e|ing)|portfolio\s+allocation|allocate\s+"
+            r"\d|shares?\s+to\s+(?:buy|sell)|notional\s+(?:size|amount))\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
 )
 
 
@@ -73,8 +148,11 @@ def source_tier(source: str, source_url: str = "") -> str:
         for token in (
             "sec.gov",
             "businesswire",
+            "business wire",
             "globenewswire",
+            "globe newswire",
             "prnewswire",
+            "pr newswire",
             "company",
             "investor",
         )
@@ -102,8 +180,10 @@ def _reject_forbidden(value: Any) -> None:
     elif isinstance(value, list):
         for nested in value:
             _reject_forbidden(nested)
-    elif isinstance(value, str) and FORBIDDEN_EXTRACTION_TEXT.search(value):
-        raise ValueError("Extraction contains forbidden price-target content")
+    elif isinstance(value, str):
+        for label, pattern in FORBIDDEN_EXTRACTION_TEXT:
+            if pattern.search(value):
+                raise ValueError(f"Extraction contains forbidden {label} content")
 
 
 @dataclass(frozen=True)
@@ -163,12 +243,12 @@ class ScenarioNewsArticle:
 @dataclass(frozen=True)
 class ScenarioClaim:
     event_type: str
-    direction: str
+    mechanism_polarity: str
     factual_claim: str
     evidence_spans: tuple[str, ...]
     materiality: str
     uncertainty_flags: tuple[str, ...] = ()
-    claim_status: str = "unknown"
+    claim_status: str = "unclear"
     causal_mechanism: str = ""
     affected_business_variable: str = ""
     horizon: str = "unknown"
@@ -176,31 +256,39 @@ class ScenarioClaim:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ScenarioClaim:
-        event_type = str(value.get("event_type") or "other").lower()
+        event_type = str(value.get("event_type") or "").lower()
         if event_type not in EVENT_TYPES:
-            event_type = "other"
-        direction = str(value.get("direction") or "unknown").lower()
-        if direction not in {"bullish", "bearish", "mixed", "unknown"}:
-            direction = "unknown"
-        materiality = str(value.get("materiality") or "unknown").lower()
+            raise ValueError("Claim event_type is missing or invalid")
+        mechanism_polarity = str(value.get("mechanism_polarity") or "").lower()
+        if mechanism_polarity not in MECHANISM_POLARITIES:
+            raise ValueError("Claim mechanism_polarity is missing or invalid")
+        materiality = str(value.get("materiality") or "").lower()
         if materiality not in {"high", "medium", "low", "unknown"}:
-            materiality = "unknown"
-        claim_status = str(value.get("claim_status") or "unknown").lower()
-        if claim_status not in {"confirmed", "reported", "rumor", "disputed", "unknown"}:
-            claim_status = "unknown"
-        horizon = str(value.get("horizon") or "unknown").lower()
+            raise ValueError("Claim materiality is missing or invalid")
+        claim_status = str(value.get("claim_status") or "").lower()
+        if claim_status not in CLAIM_STATUSES:
+            raise ValueError("Claim claim_status is missing or invalid")
+        horizon = str(value.get("horizon") or "").lower()
         if horizon not in {"immediate", "near_term", "medium_term", "long_term", "unknown"}:
-            horizon = "unknown"
-        novelty = str(value.get("novelty") or "unknown").lower()
+            raise ValueError("Claim horizon is missing or invalid")
+        novelty = str(value.get("novelty") or "").lower()
         if novelty not in {"new", "known_update", "restatement", "unknown"}:
-            novelty = "unknown"
+            raise ValueError("Claim novelty is missing or invalid")
+        factual_claim = str(value.get("factual_claim") or "").strip()
+        evidence_spans = tuple(
+            str(item).strip() for item in value.get("evidence_spans", []) if str(item).strip()
+        )
+        causal_mechanism = str(value.get("causal_mechanism") or "").strip()
+        affected_business_variable = str(value.get("affected_business_variable") or "").strip()
+        if not factual_claim or not evidence_spans:
+            raise ValueError("Claim requires a factual_claim and supporting evidence")
+        if not causal_mechanism or not affected_business_variable:
+            raise ValueError("Claim mechanism fields must be explicit, using unclear if unknown")
         return cls(
             event_type=event_type,
-            direction=direction,
-            factual_claim=str(value.get("factual_claim") or "").strip(),
-            evidence_spans=tuple(
-                str(item).strip() for item in value.get("evidence_spans", []) if str(item).strip()
-            ),
+            mechanism_polarity=mechanism_polarity,
+            factual_claim=factual_claim,
+            evidence_spans=evidence_spans,
             materiality=materiality,
             uncertainty_flags=tuple(
                 str(item).strip()
@@ -208,10 +296,8 @@ class ScenarioClaim:
                 if str(item).strip()
             ),
             claim_status=claim_status,
-            causal_mechanism=str(value.get("causal_mechanism") or "").strip(),
-            affected_business_variable=str(
-                value.get("affected_business_variable") or ""
-            ).strip(),
+            causal_mechanism=causal_mechanism,
+            affected_business_variable=affected_business_variable,
             horizon=horizon,
             novelty=novelty,
         )
@@ -225,6 +311,7 @@ class ScenarioExtraction:
     claims: tuple[ScenarioClaim, ...]
     abstain_reason: str = ""
     model: str = ""
+    requested_model: str = ""
     response_id: str = ""
     prompt_version: str = SCENARIO_PROMPT_VERSION
     schema_version: str = SCENARIO_EXTRACTION_SCHEMA_VERSION
@@ -244,6 +331,7 @@ class ScenarioExtraction:
         article_id: str,
         value: dict[str, Any],
         model: str,
+        requested_model: str = "",
         response_id: str = "",
         usage: dict[str, Any] | None = None,
     ) -> ScenarioExtraction:
@@ -259,18 +347,30 @@ class ScenarioExtraction:
         reason = str(value.get("abstain_reason") or "").strip()
         if status == "ok" and not claims:
             raise ValueError("Successful extraction must contain at least one factual claim")
+        if status != "ok" and claims:
+            raise ValueError("Failed extraction must not contain claims")
+        actual_model = model.strip()
+        requested = requested_model.strip() or actual_model
+        if status == "ok" and not actual_model:
+            raise ValueError("Successful extraction requires the actual returned model identifier")
         if status != "ok" and not reason:
             reason = "extractor_abstained"
         output_hash = canonical_hash(value)
         return cls(
             extraction_id=canonical_hash(
-                {"article_id": article_id, "output": output_hash, "model": model}
+                {
+                    "article_id": article_id,
+                    "output": output_hash,
+                    "model": actual_model,
+                    "requested_model": requested,
+                }
             )[:32],
             article_id=article_id,
             status=status,
             claims=claims,
             abstain_reason=reason,
-            model=model,
+            model=actual_model,
+            requested_model=requested,
             response_id=response_id,
             input_hash_sha256=str(value.get("input_hash_sha256") or ""),
             output_hash_sha256=output_hash,

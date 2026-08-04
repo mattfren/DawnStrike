@@ -282,11 +282,28 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
         ]
     )
 
+    blocked = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date=market_date,
+        requested_at="10:00",
+        minute_bars=_write_minute_bars(
+            tmp_path / "scenario-decision-bar.csv",
+            [_bar("2026-08-03T09:59:00-04:00", 10.3)],
+        ),
+        include_scenarios=True,
+        dry_run=True,
+    )
+
+    assert blocked["paper_fill_stats"]["inserted"] == 0
+    assert blocked["states"][0]["state"] == "STALE_DATA"
+    assert "entry_not_after_decision_bar" in blocked["states"][0]["reason"]
+
     result = run_trade_watcher(
         db_path=db_path,
         source="csv",
         market_date=market_date,
-        requested_at="10:05",
+        requested_at="10:06",
         minute_bars=_write_minute_bars(
             tmp_path / "scenario-bars.csv",
             [_bar("2026-08-03T10:05:00-04:00", 10.3)],
