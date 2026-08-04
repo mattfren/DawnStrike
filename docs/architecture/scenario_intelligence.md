@@ -17,15 +17,24 @@ It never submits, routes, or simulates a broker order.
    emit `WATCH`, `ENTER_LONG`, `AVOID`, or `ABSTAIN` and calculate paper levels.
 4. An `ENTER_LONG` becomes a bounded `scenario_forward` paper selection. The
    existing watcher records intents, fills, positions, and exits; broker
-   execution remains locked.
-5. End-of-day finalization records only actually closed paper positions.
-   Missing, open, and quarantined rows are disclosed and never counted as zero.
+   execution remains locked. The Scenario lifecycle link is refreshed after
+   watcher actions and preserves the entry/exit intent IDs, position-backed
+   paper-trade ID, entry/exit fill IDs, and outcome ID.
+5. End-of-day finalization admits a return only when one actual entry fill and
+   one actual exit fill agree with the closed position, both fills have explicit
+   non-negative cost values under one named cost model, and sourced SPY bars
+   cover that same fill-to-fill horizon. Untriggered, open, missing, and
+   quarantined rows remain separate states and never enter a return denominator.
+   Confidence intervals use a fixed-seed, with-replacement bootstrap so the same
+   eligible ledger produces the same interval.
 
 ## Historical replay
 
 `scenario-replay` is a separate audit cohort. It uses a completed pre-event
 bar, the first provider quote after the timestamp, only later regular-session
-bars, explicit two-fill slippage, and quarantines ambiguous stop/target bars.
+bars, explicit two-fill slippage, and sourced SPY bars over the same replay
+horizon. Any entry/exit or stop/target ordering that cannot be known within one
+OHLC bar is quarantined with no eligible return.
 It is a timestamp-proxy study, not a forward performance claim.
 
 ## Required runtime environment
