@@ -55,9 +55,6 @@ def _config(db_path: Path) -> ScannerConfig:
     return ScannerConfig(
         database_path=db_path,
         provider="alpaca",
-        alpaca_api_key_id="test",
-        alpaca_api_secret_key="test",
-        openai_api_key="test",
         scenario_intelligence_enabled=True,
     )
 
