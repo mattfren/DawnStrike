@@ -222,7 +222,7 @@ def test_extractor_sanitizes_contract_violations_to_rejected_receipt() -> None:
 
     extraction = extract_claims(
         article=article,
-        api_key="test-key",
+        api_key="test-key",  # pragma: allowlist secret
         model="gpt-5.6-terra",
         timeout_seconds=1.0,
         max_article_chars=1000,
