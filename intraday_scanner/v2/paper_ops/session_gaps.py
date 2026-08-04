@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,10 +31,7 @@ def record_forward_session_gap(
     if selected >= datetime.now(timezone.utc).date():
         raise ValueError("only completed historical sessions can be recorded as gaps")
     normalized_reason = reason_code.strip().lower()
-    if not normalized_reason or any(
-        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
-        for character in normalized_reason
-    ):
+    if re.fullmatch(r"[a-z0-9_-]+", normalized_reason) is None:
         raise ValueError("reason_code must use lowercase letters, numbers, underscores, or hyphens")
     blockers = _session_evidence(paths, market_date)
     if blockers:
