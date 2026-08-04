@@ -961,7 +961,12 @@ class SQLiteScanStore:
                         signal_id TEXT,
                         scan_id TEXT,
                         paper_intent_id TEXT,
+                        entry_intent_id TEXT,
+                        exit_intent_id TEXT,
                         position_id TEXT,
+                        entry_fill_id TEXT,
+                        exit_fill_id TEXT,
+                        paper_trade_id TEXT,
                         outcome_id TEXT,
                         cohort TEXT NOT NULL,
                         strategy_id TEXT NOT NULL,
@@ -6843,15 +6848,22 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
-                row = connection.execute(
+                rows = connection.execute(
                     """
                     SELECT * FROM scenario_claim_extractions
-                    WHERE article_id = ? AND model = ? AND input_hash_sha256 = ?
-                    ORDER BY created_at DESC LIMIT 1
+                    WHERE article_id = ? AND input_hash_sha256 = ?
+                    ORDER BY created_at DESC
                     """,
-                    (article_id, model, input_hash_sha256),
-                ).fetchone()
-                return _json_row(row) if row is not None else None
+                    (article_id, input_hash_sha256),
+                ).fetchall()
+                for row in rows:
+                    payload = _json_row(row)
+                    requested_model = str(
+                        payload.get("requested_model") or payload.get("model") or ""
+                    )
+                    if requested_model == model:
+                        return payload
+                return None
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load scenario extraction: {exc}") from exc
 
@@ -7012,27 +7024,71 @@ class SQLiteScanStore:
                     decision_id = str(row.get("decision_id") or "")
                     if not decision_id:
                         continue
+                    connection.row_factory = sqlite3.Row
+                    existing_row = connection.execute(
+                        "SELECT * FROM scenario_signal_links WHERE decision_id = ?",
+                        (decision_id,),
+                    ).fetchone()
+                    existing = _json_row(existing_row) if existing_row is not None else {}
+                    stable_identity_fields = (
+                        "signal_id",
+                        "scan_id",
+                        "paper_intent_id",
+                        "entry_intent_id",
+                        "exit_intent_id",
+                        "position_id",
+                        "entry_fill_id",
+                        "exit_fill_id",
+                        "paper_trade_id",
+                        "outcome_id",
+                    )
+                    for field in stable_identity_fields:
+                        current = str(existing.get(field) or "")
+                        proposed = str(row.get(field) or "")
+                        if current and proposed and current != proposed:
+                            raise StorageError(
+                                "Scenario lifecycle identity is immutable for "
+                                f"{decision_id}: {field} changed from {current} to {proposed}."
+                            )
+                    merged = dict(existing)
+                    for key, value in row.items():
+                        if key in stable_identity_fields and value in {None, ""}:
+                            continue
+                        merged[key] = value
+                    merged["decision_id"] = decision_id
+                    merged["created_at"] = str(
+                        existing.get("created_at") or row.get("created_at") or ""
+                    )
+                    merged["updated_at"] = str(
+                        row.get("updated_at") or existing.get("updated_at") or ""
+                    )
                     connection.execute(
                         """
                         INSERT OR REPLACE INTO scenario_signal_links
-                        (decision_id, signal_id, scan_id, paper_intent_id, position_id,
-                         outcome_id, cohort, strategy_id, strategy_version, created_at,
-                         updated_at, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (decision_id, signal_id, scan_id, paper_intent_id, entry_intent_id,
+                         exit_intent_id, position_id, entry_fill_id, exit_fill_id,
+                         paper_trade_id, outcome_id, cohort, strategy_id, strategy_version,
+                         created_at, updated_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             decision_id,
-                            str(row.get("signal_id") or ""),
-                            str(row.get("scan_id") or ""),
-                            str(row.get("paper_intent_id") or ""),
-                            str(row.get("position_id") or ""),
-                            str(row.get("outcome_id") or ""),
-                            str(row.get("cohort") or ""),
-                            str(row.get("strategy_id") or ""),
-                            str(row.get("strategy_version") or ""),
-                            str(row.get("created_at") or ""),
-                            str(row.get("updated_at") or ""),
-                            json.dumps(row, sort_keys=True),
+                            str(merged.get("signal_id") or ""),
+                            str(merged.get("scan_id") or ""),
+                            str(merged.get("paper_intent_id") or ""),
+                            str(merged.get("entry_intent_id") or ""),
+                            str(merged.get("exit_intent_id") or ""),
+                            str(merged.get("position_id") or ""),
+                            str(merged.get("entry_fill_id") or ""),
+                            str(merged.get("exit_fill_id") or ""),
+                            str(merged.get("paper_trade_id") or ""),
+                            str(merged.get("outcome_id") or ""),
+                            str(merged.get("cohort") or ""),
+                            str(merged.get("strategy_id") or ""),
+                            str(merged.get("strategy_version") or ""),
+                            str(merged.get("created_at") or ""),
+                            str(merged.get("updated_at") or ""),
+                            json.dumps(merged, sort_keys=True),
                         ),
                     )
                     inserted += 1

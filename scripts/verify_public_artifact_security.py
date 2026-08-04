@@ -8,10 +8,13 @@ time. It never prints a matched value.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections.abc import Sequence
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 MAX_TEXT_BYTES = 5_000_000
 TEXT_SUFFIXES = {
@@ -36,7 +39,7 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "local_or_runtime_path",
         re.compile(
-            r"(?i)(?:[a-z]:\\|/(?:home|users|var|private|tmp)/|"
+            r"(?i)(?:(?<![a-z0-9])[a-z]:\\(?!/)|/(?:home|users|var|private|tmp)/|"
             r"dawnstrike-(?:state|runtime|terra-v6))"
         ),
     ),
@@ -61,6 +64,90 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+_HTML_MARKUP = re.compile(r"<\s*/?\s*[a-z][^>]*>", re.IGNORECASE)
+_LINK_ATTRIBUTES = frozenset({"action", "formaction", "href", "src"})
+
+
+class _PublicLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rules: set[str] = set()
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        del tag
+        for name, value in attrs:
+            if name.lower() not in _LINK_ATTRIBUTES or not value:
+                continue
+            self.rules.update(_external_url_rules(value, prefix="public_link"))
+
+    handle_startendtag = handle_starttag
+
+
+def _external_url_rules(value: str, *, prefix: str) -> set[str]:
+    candidate = value.strip()
+    if not candidate:
+        return set()
+    if candidate.startswith("//"):
+        return {f"{prefix}_not_https"}
+    if candidate.startswith(("#", "/", "./", "../", "?")):
+        return set()
+    if len(candidate) > 2048 or re.search(r"[\x00-\x1f\x7f]", candidate):
+        return {f"{prefix}_malformed"}
+    if not re.match(r"(?i)^https://", candidate):
+        return {f"{prefix}_not_https"}
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+    except ValueError:
+        return {f"{prefix}_malformed"}
+    rules: set[str] = set()
+    if parsed.scheme.lower() != "https":
+        rules.add(f"{prefix}_not_https")
+    if not hostname:
+        rules.add(f"{prefix}_host_missing")
+    if parsed.username is not None or parsed.password is not None:
+        rules.add(f"{prefix}_credentials")
+    return rules
+
+
+def _walk_json(value: object) -> Sequence[tuple[str | None, object]]:
+    rows: list[tuple[str | None, object]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            rows.append((str(key), child))
+            rows.extend(_walk_json(child))
+    elif isinstance(value, list):
+        for child in value:
+            rows.append((None, child))
+            rows.extend(_walk_json(child))
+    return rows
+
+
+def _structured_content_rules(path: Path, content: str) -> set[str]:
+    rules: set[str] = set()
+    if path.suffix.lower() == ".html":
+        parser = _PublicLinkParser()
+        parser.feed(content)
+        rules.update(parser.rules)
+    if path.suffix.lower() != ".json":
+        return rules
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return rules
+    scenario_payload = path.name.lower() == "scenarios.json" or (
+        isinstance(payload, dict)
+        and str(payload.get("schema_version") or "").startswith("dawnstrike-scenarios")
+    )
+    for key, value in _walk_json(payload):
+        if key and key.lower().endswith("source_url") and isinstance(value, str) and value:
+            rules.update(_external_url_rules(value, prefix="scenario_source_url"))
+        if scenario_payload and isinstance(value, str) and _HTML_MARKUP.search(value):
+            rules.add("scenario_raw_html_markup")
+    return rules
+
 
 def scan_public_artifact(root: Path) -> list[Violation]:
     """Return policy violations without returning the sensitive matched text."""
@@ -76,6 +163,8 @@ def scan_public_artifact(root: Path) -> list[Violation]:
         for rule, pattern in _RULES:
             if pattern.search(content):
                 violations.append(Violation(path=path, rule=rule))
+        for rule in sorted(_structured_content_rules(path, content)):
+            violations.append(Violation(path=path, rule=rule))
     return violations
 
 

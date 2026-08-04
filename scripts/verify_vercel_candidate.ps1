@@ -2,6 +2,7 @@
 param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [string]$StageRoot = "build\vercel-stage",
+    [Parameter(Mandatory = $true)][string]$ExpectedSourceSha,
     [switch]$AllowDegraded
 )
 
@@ -17,7 +18,13 @@ $actualFunctions = @($config.functions.PSObject.Properties.Name)
 if (@(Compare-Object -ReferenceObject ($expectedFunctions | Sort-Object) -DifferenceObject ($actualFunctions | Sort-Object)).Count -ne 0) {
     throw "Unexpected Vercel functions in candidate"
 }
-$verifyArgs = @("scripts\verify_public_artifact.py", "--root", $public)
+if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$') {
+    throw "ExpectedSourceSha must be the exact 40-character lowercase runtime commit SHA."
+}
+$verifyArgs = @(
+    "scripts\verify_public_artifact.py", "--root", $public,
+    "--expected-source-sha", $ExpectedSourceSha
+)
 if ($AllowDegraded) {
     $verifyArgs += "--allow-degraded"
 }

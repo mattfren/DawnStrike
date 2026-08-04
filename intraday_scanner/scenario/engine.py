@@ -14,27 +14,29 @@ from intraday_scanner.scenario.contracts import (
     ScenarioNewsArticle,
     canonical_hash,
 )
+from intraday_scanner.scenario.point_in_time import decision_price_evidence_violations
 
-_EVENT_PRIORS = {
+_EVENT_MAGNITUDES = {
     "earnings_guidance": 3.0,
     "contract_customer": 3.0,
     "regulatory_fda": 3.0,
     "mergers_acquisitions": 2.5,
-    "financing_dilution": -4.0,
-    "exchange_halt": -4.0,
-    "bankruptcy_distress": -5.0,
-    "litigation": -2.0,
-    "cybersecurity": -2.0,
-    "recall": -2.0,
-    "management_change": -1.0,
+    "financing_dilution": 4.0,
+    "exchange_halt": 4.0,
+    "bankruptcy_distress": 5.0,
+    "litigation": 2.0,
+    "cybersecurity": 2.0,
+    "recall": 2.0,
+    "management_change": 1.0,
     "analyst_action": 1.0,
     "product_event": 1.5,
     "macro_sector": 0.5,
     "rumor": 0.0,
     "other": 0.0,
 }
-_TIER_BONUS = {"T1": 2.0, "T2": 1.0, "T3": 0.0, "UNKNOWN": -3.0}
+_TIER_MULTIPLIER = {"T1": 1.0, "T2": 0.85, "T3": 0.65, "UNKNOWN": 0.0}
 _MATERIALITY_BONUS = {"high": 2.0, "medium": 1.0, "low": 0.0, "unknown": -0.5}
+_POLARITY_MULTIPLIER = {"positive": 1.0, "negative": -1.0, "mixed": 0.0, "unclear": 0.0}
 
 
 @dataclass(frozen=True)
@@ -43,8 +45,10 @@ class PriceContext:
     price: float | None
     atr: float | None
     spread_pct: float | None
-    liquid: bool
+    liquid: bool | None
     source_bar_hash_sha256: str
+    bar_completed_at: str = ""
+    is_complete: bool = False
     source_kind: str = "minute_bars"
 
 
@@ -67,28 +71,25 @@ def evaluate_scenario(
     reason_codes: list[str] = []
     score = 0.0
     event_type = "other"
-    directions: set[str] = set()
+    mechanism_polarities: set[str] = set()
     feature_claims: list[dict[str, Any]] = []
     if extraction.status != "ok":
         reason_codes.append(extraction.abstain_reason or "extractor_abstained")
     else:
         for claim in extraction.claims:
             event_type = claim.event_type if event_type == "other" else event_type
-            directions.add(claim.direction)
-            direction_multiplier = (
-                1.0
-                if claim.direction == "bullish"
-                else -1.0
-                if claim.direction == "bearish"
-                else 0.0
+            mechanism_polarities.add(claim.mechanism_polarity)
+            polarity_multiplier = _POLARITY_MULTIPLIER[claim.mechanism_polarity]
+            claim_score = (
+                _EVENT_MAGNITUDES.get(claim.event_type, 0.0)
+                + _MATERIALITY_BONUS.get(claim.materiality, -0.5)
             )
-            claim_score = _EVENT_PRIORS.get(claim.event_type, 0.0) * direction_multiplier
-            claim_score += _MATERIALITY_BONUS.get(claim.materiality, -0.5) * direction_multiplier
+            claim_score *= polarity_multiplier * _TIER_MULTIPLIER[article.tier]
             score += claim_score
             feature_claims.append(
                 {
                     "event_type": claim.event_type,
-                    "direction": claim.direction,
+                    "mechanism_polarity": claim.mechanism_polarity,
                     "materiality": claim.materiality,
                     "evidence_count": len(claim.evidence_spans),
                     "uncertainty_flags": list(claim.uncertainty_flags),
@@ -101,22 +102,39 @@ def evaluate_scenario(
             )
             if claim.uncertainty_flags:
                 reason_codes.extend(f"uncertainty:{flag}" for flag in claim.uncertainty_flags)
-            if claim.claim_status in {"rumor", "disputed"}:
+            if claim.claim_status in {"rumor", "opinion", "unclear"}:
                 reason_codes.append(f"claim_status:{claim.claim_status}")
+            if claim.mechanism_polarity == "unclear":
+                reason_codes.append("mechanism_polarity:unclear")
     tier = article.tier
-    score += _TIER_BONUS[tier]
     if tier == "UNKNOWN":
         reason_codes.append("unknown_source")
     if article.timing_kind != "forward_observed":
         reason_codes.append("historical_provider_timestamp_proxy")
     if "rumor" == event_type or any(claim.event_type == "rumor" for claim in extraction.claims):
         reason_codes.append("rumor_requires_independent_corroboration")
-    if "bullish" in directions and "bearish" in directions:
-        reason_codes.append("contradictory_claim_directions")
+    if "positive" in mechanism_polarities and "negative" in mechanism_polarities:
+        reason_codes.append("contradictory_mechanism_polarities")
     if extraction.prompt_injection_detected:
         reason_codes.append("prompt_injection_detected")
     if extraction.contradictions:
         reason_codes.append("extractor_reported_contradictions")
+    price_violations: tuple[str, ...]
+    if price_context is None:
+        price_violations = ("price_context_missing",)
+    else:
+        price_violations = decision_price_evidence_violations(
+            decision_at=decision_at,
+            observed_at=price_context.observed_at,
+            bar_completed_at=price_context.bar_completed_at,
+            is_complete=price_context.is_complete,
+            source_bar_hash_sha256=price_context.source_bar_hash_sha256,
+            price=price_context.price,
+            atr=price_context.atr,
+            spread_pct=price_context.spread_pct,
+            liquid=price_context.liquid,
+        )
+    reason_codes.extend(price_violations)
     direction = "bullish" if score >= 1.0 else "bearish" if score <= -1.0 else "mixed"
     action = "WATCH"
     entry_trigger = invalidation = target = None
@@ -125,36 +143,31 @@ def evaluate_scenario(
         in {
             "unknown_source",
             "rumor_requires_independent_corroboration",
-            "contradictory_claim_directions",
+            "contradictory_mechanism_polarities",
+            "mechanism_polarity:unclear",
             "prompt_injection_detected",
             "extractor_reported_contradictions",
         }
         or code.startswith(("uncertainty:", "claim_status:"))
         for code in reason_codes
     )
-    if extraction.status != "ok" or blocked:
+    if extraction.status != "ok" or blocked or price_violations:
         action = "ABSTAIN"
     elif direction == "bearish" and score <= -3.0:
         action = "AVOID"
     elif direction == "bullish" and score >= 4.0:
-        if price_context is None:
-            reason_codes.append("price_context_missing")
-        elif price_context.price is None or price_context.atr is None or price_context.atr <= 0:
-            reason_codes.append("completed_bar_atr_missing")
-        elif not price_context.liquid:
-            reason_codes.append("liquidity_veto")
-        elif price_context.spread_pct is None or price_context.spread_pct > 2.0:
-            reason_codes.append("spread_veto")
+        assert price_context is not None
+        assert price_context.price is not None
+        assert price_context.atr is not None
+        price = price_context.price
+        risk_unit = max(price_context.atr, price * 0.02)
+        entry_trigger = round(max(price * 1.0025, price + 0.15 * price_context.atr), 4)
+        invalidation = round(entry_trigger - risk_unit, 4)
+        target = round(entry_trigger + 2 * risk_unit, 4)
+        if invalidation > 0 and target > entry_trigger:
+            action = "ENTER_LONG"
         else:
-            price = price_context.price
-            risk_unit = max(price_context.atr, price * 0.02)
-            entry_trigger = round(max(price * 1.0025, price + 0.15 * price_context.atr), 4)
-            invalidation = round(entry_trigger - risk_unit, 4)
-            target = round(entry_trigger + 2 * risk_unit, 4)
-            if invalidation > 0 and target > entry_trigger:
-                action = "ENTER_LONG"
-            else:
-                reason_codes.append("invalid_levels")
+            reason_codes.append("invalid_levels")
     elif direction == "bearish":
         action = "AVOID"
     features = {
@@ -164,7 +177,7 @@ def evaluate_scenario(
         "claims": feature_claims,
         "score_components": {
             "directional_score": round(score, 4),
-            "tier_bonus": _TIER_BONUS[tier],
+            "tier_multiplier": _TIER_MULTIPLIER[tier],
         },
         "extraction_assessment": {
             "prompt_injection_detected": extraction.prompt_injection_detected,
@@ -175,6 +188,8 @@ def evaluate_scenario(
         "price_context": (
             {
                 "observed_at": price_context.observed_at,
+                "bar_completed_at": price_context.bar_completed_at,
+                "is_complete": price_context.is_complete,
                 "price": price_context.price,
                 "atr": price_context.atr,
                 "spread_pct": price_context.spread_pct,

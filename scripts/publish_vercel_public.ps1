@@ -15,6 +15,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
+$expectedSourceSha = (& git.exe -C $resolvedRoot rev-parse HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $expectedSourceSha -notmatch '^[0-9a-f]{40}$') {
+    throw "Could not resolve the exact runtime source SHA before Vercel publication."
+}
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
@@ -118,10 +122,14 @@ function Set-VercelAlias {
 function Assert-PublicationState {
     param(
         [object]$Health,
-        [object]$Readiness,
-        [object]$BuildManifest,
-        [string]$Label
-    )
+    [object]$Readiness,
+    [object]$BuildManifest,
+    [string]$ExpectedSourceSha,
+    [string]$Label
+)
+    if ($BuildManifest.source_sha -ne $ExpectedSourceSha) {
+        throw "$Label build source SHA does not equal the verified runtime HEAD."
+    }
     if ($Health.status -ne "alive") {
         throw "$Label health is not alive."
     }
@@ -159,6 +167,7 @@ function Assert-PublicationState {
 & (Join-Path $resolvedRoot "scripts\verify_vercel_candidate.ps1") `
     -ProjectRoot $resolvedRoot `
     -StageRoot $StageRoot `
+    -ExpectedSourceSha $expectedSourceSha `
     -AllowDegraded:$AllowDegraded
 
 Push-Location $stage
@@ -201,6 +210,7 @@ Assert-PublicationState `
     -Health $previewHealth `
     -Readiness $previewReadiness `
     -BuildManifest $previewManifest `
+    -ExpectedSourceSha $expectedSourceSha `
     -Label "Preview"
 
 if ($Promote) {
@@ -266,6 +276,7 @@ try {
                     -Health $promotedHealth `
                     -Readiness $promotedReadiness `
                     -BuildManifest $promotedManifest `
+                    -ExpectedSourceSha $expectedSourceSha `
                     -Label "Promoted deployment"
                 if (
                     $promotedManifest.source_sha -ne $previewManifest.source_sha -or
@@ -320,6 +331,7 @@ try {
                     -Health $productionHealth `
                     -Readiness $productionReadiness `
                     -BuildManifest $productionManifest `
+                    -ExpectedSourceSha $expectedSourceSha `
                     -Label "Production"
                 if (
                     $productionManifest.source_sha -ne $previewManifest.source_sha -or

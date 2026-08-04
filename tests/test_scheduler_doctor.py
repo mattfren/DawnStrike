@@ -31,7 +31,10 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
             "disallow_start_if_on_batteries": False,
             "last_task_result": last_result,
             "last_run_time": "2026-07-30T17:30:00-05:00",
-            "next_run_time": "2026-07-31T08:10:00-05:00",
+            "next_run_time": (
+                "2026-07-31T"
+                f"{scheduler_service.EXPECTED_TASK_STARTS[name]}:00-05:00"
+            ),
             "execute": "powershell.exe",
             "arguments": (
                 f'-File "{runtime / "scripts" / script}" '
@@ -90,7 +93,7 @@ def test_scheduler_doctor_accepts_one_release_and_state_boundary(
     assert all(row["legacy_root_absent"] for row in result["scheduled_tasks"])
 
 
-def test_scheduler_doctor_keeps_stale_run_history_separate_from_schedule_health(
+def test_scheduler_doctor_blocks_failed_or_stale_task_history(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -107,12 +110,39 @@ def test_scheduler_doctor_keeps_stale_run_history_separate_from_schedule_health(
 
     result = scheduler_service.scheduler_doctor(runtime, state)
 
-    assert result["status"] == "LOCAL_VERIFIED"
-    assert result["failed_task_count"] == 0
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
     assert all(
         row["last_run_status"] == "STALE_OR_FAILED"
         for row in result["scheduled_tasks"]
     )
+
+
+def test_scheduler_doctor_blocks_enabled_duplicate_runner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    rows.append(
+        {
+            **rows[0],
+            "name": "Dawnstrike AlphaOps Morning Early",
+            "next_run_time": "2026-07-31T07:15:00-05:00",
+        }
+    )
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert [row["name"] for row in result["unexpected_enabled_tasks"]] == [
+        "Dawnstrike AlphaOps Morning Early"
+    ]
 
 
 def test_scheduler_doctor_rejects_legacy_source_root(

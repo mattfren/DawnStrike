@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import uuid
 from collections import defaultdict
 from dataclasses import replace
@@ -27,8 +28,17 @@ from intraday_scanner.scenario.contracts import (
     utc_now_iso,
 )
 from intraday_scanner.scenario.engine import PriceContext, evaluate_scenario
+from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
+from intraday_scanner.scenario.point_in_time import (
+    completed_minute_bar_at,
+    parse_aware_timestamp,
+)
 from intraday_scanner.services.trade_watcher_service import MODE_PAPER, run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+SCENARIO_COST_MODEL_VERSION = "scenario-paper-fill-slippage-v1"
+SCENARIO_BOOTSTRAP_SEED = 20260803
+SCENARIO_BOOTSTRAP_SAMPLES = 2_000
 
 
 def scenario_doctor(*, db_path: str | Path, config: ScannerConfig | None = None) -> dict[str, Any]:
@@ -227,116 +237,232 @@ def finalize_scenario_performance(
     store = SQLiteScanStore(db_path)
     store.initialize()
     date = market_date or datetime.now(UTC).date().isoformat()
+    refresh_scenario_lifecycle_links(store, updated_at=utc_now_iso())
     links = store.load_scenario_signal_links(limit=50_000)
-    links_by_signal = {
-        str(row.get("signal_id") or ""): row for row in links if row.get("signal_id")
+    links_by_decision = {
+        str(row.get("decision_id") or ""): row for row in links if row.get("decision_id")
     }
     decisions = store.load_scenario_decisions(
         start=date, end=date, cohort=SCENARIO_FORWARD_COHORT, limit=50_000
     )
-    triggered = [row for row in decisions if row.get("action") == "ENTER_LONG"]
-    positions = [
-        row
+    candidates = [row for row in decisions if row.get("action") == "ENTER_LONG"]
+    candidate_signals = {
+        str(link.get("signal_id") or "")
+        for decision in candidates
+        if (link := links_by_decision.get(str(decision.get("decision_id") or "")))
+        and link.get("signal_id")
+    }
+    positions_by_signal = {
+        str(row.get("signal_id") or ""): row
         for row in store.load_paper_positions(market_date=date, limit=50_000)
-        if str(row.get("signal_id") or "") in links_by_signal
-    ]
+        if str(row.get("signal_id") or "") in candidate_signals
+    }
     fills = store.load_paper_trade_fills(market_date=date, limit=50_000)
     fills_by_signal: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for fill in fills:
         fills_by_signal[str(fill.get("signal_id") or "")].append(fill)
-    closed = [
-        row
-        for row in positions
-        if str(row.get("status") or "") == "CLOSED" and row.get("realized_return_pct") is not None
+
+    lifecycle_rows = [
+        _forward_lifecycle_row(
+            decision=decision,
+            link=links_by_decision.get(str(decision.get("decision_id") or "")),
+            position=positions_by_signal.get(
+                str(
+                    (
+                        links_by_decision.get(str(decision.get("decision_id") or ""))
+                        or {}
+                    ).get("signal_id")
+                    or ""
+                )
+            ),
+            fills=fills_by_signal.get(
+                str(
+                    (
+                        links_by_decision.get(str(decision.get("decision_id") or ""))
+                        or {}
+                    ).get("signal_id")
+                    or ""
+                ),
+                [],
+            ),
+        )
+        for decision in candidates
     ]
-    open_rows = [row for row in positions if str(row.get("status") or "") == "OPEN"]
-    gross = _mean([float(row["realized_return_pct"]) for row in closed])
-    after_costs: list[float] = []
+    benchmark_candidates = [
+        row for row in lifecycle_rows if row["eligibility_state"] == "awaiting_benchmark"
+    ]
     benchmark_by_position = _forward_benchmarks(
-        positions=closed,
+        lifecycles=benchmark_candidates,
         config=config,
         market_provider=market_provider,
     )
-    benchmark_returns: list[float] = []
-    after_cost_excess_returns: list[float] = []
-    outcome_rows: list[dict[str, Any]] = []
-    for position in closed:
-        signal_id = str(position.get("signal_id") or "")
-        cost_pct = sum(
-            float(fill.get("slippage_bps") or 0.0) / 100.0 for fill in fills_by_signal[signal_id]
+    for row in benchmark_candidates:
+        benchmark = benchmark_by_position.get(str(row.get("position_id") or ""))
+        if benchmark is None:
+            row["eligibility_state"] = "missing"
+            row["eligibility_reason"] = "missing_sourced_spy_same_horizon_benchmark"
+            continue
+        row["eligibility_state"] = "eligible"
+        row["eligibility_reason"] = "complete_fill_cost_and_benchmark_truth"
+        row["benchmark"] = benchmark
+        row["after_cost_excess_return_pct"] = round(
+            float(row["modeled_after_cost_return_pct"]) - float(benchmark["return_pct"]),
+            4,
         )
-        after_costs.append(float(position["realized_return_pct"]) - cost_pct)
-        benchmark = benchmark_by_position.get(str(position.get("position_id") or ""))
-        if benchmark is not None:
-            benchmark_returns.append(benchmark["return_pct"])
-            after_cost_excess_returns.append(after_costs[-1] - benchmark["return_pct"])
+
+    eligible = [row for row in lifecycle_rows if row["eligibility_state"] == "eligible"]
+    open_rows = [row for row in lifecycle_rows if row["eligibility_state"] == "open"]
+    untriggered = [
+        row for row in lifecycle_rows if row["eligibility_state"] == "untriggered"
+    ]
+    missing = [row for row in lifecycle_rows if row["eligibility_state"] == "missing"]
+    quarantined = [
+        row for row in lifecycle_rows if row["eligibility_state"] == "quarantined"
+    ]
+    gross_returns = [float(row["gross_return_pct"]) for row in eligible]
+    after_costs = [float(row["modeled_after_cost_return_pct"]) for row in eligible]
+    benchmark_returns = [float(row["benchmark"]["return_pct"]) for row in eligible]
+    after_cost_excess_returns = [
+        float(row["after_cost_excess_return_pct"]) for row in eligible
+    ]
+    outcome_rows: list[dict[str, Any]] = []
+    for row in lifecycle_rows:
+        signal_id = str(row.get("signal_id") or "")
+        if not signal_id:
+            continue
+        benchmark = row.get("benchmark") or {}
+        state = str(row["eligibility_state"])
         outcome_rows.append(
             {
                 "signal_id": signal_id,
                 "market_date": date,
-                "ticker": position.get("ticker"),
+                "ticker": row.get("ticker"),
                 "outcome_source": "scenario_paper_lifecycle",
-                "entry_time": position.get("opened_at"),
-                "entry_price": position.get("entry_price"),
-                "close_price": position.get("exit_price"),
+                "entry_time": row.get("entry_at"),
+                "entry_price": row.get("entry_price"),
+                "close_price": row.get("exit_price"),
                 "high_after_entry": None,
                 "low_after_entry": None,
                 "halted": None,
                 "notes": (
-                    "Scenario paper lifecycle resolved from sourced price observations; "
-                    "modeled costs separately disclosed."
+                    "Scenario lifecycle state is preserved without imputing a return: "
+                    f"{state} ({row['eligibility_reason']})."
                 ),
                 "imported_at": utc_now_iso(),
                 "validated_against_signal_timestamp": True,
-                "outcome_status": "complete",
+                "outcome_status": {
+                    "eligible": "complete",
+                    "untriggered": "not_triggered",
+                    "open": "open",
+                    "missing": "missing",
+                    "quarantined": "quarantined",
+                }[state],
                 "payload_json": {
-                    "position_id": position.get("position_id"),
-                    "modeled_cost_pct": cost_pct,
-                    "benchmark_return_pct": benchmark["return_pct"] if benchmark else None,
-                    "benchmark_source_bar_hash_sha256": (
-                        benchmark["source_bar_hash_sha256"] if benchmark else ""
+                    "outcome_id": signal_id,
+                    "decision_id": row.get("decision_id"),
+                    "position_id": row.get("position_id"),
+                    "entry_fill_id": row.get("entry_fill_id"),
+                    "exit_fill_id": row.get("exit_fill_id"),
+                    "eligibility_state": state,
+                    "eligibility_reason": row.get("eligibility_reason"),
+                    "gross_return_pct": row.get("gross_return_pct"),
+                    "modeled_after_cost_return_pct": row.get(
+                        "modeled_after_cost_return_pct"
                     ),
+                    "modeled_cost_pct": row.get("modeled_cost_pct"),
+                    "cost_model_version": row.get("cost_model_version") or "",
+                    "benchmark_return_pct": benchmark.get("return_pct"),
+                    "benchmark_entry_at": benchmark.get("entry_at") or "",
+                    "benchmark_exit_at": benchmark.get("exit_at") or "",
+                    "benchmark_source_bar_hash_sha256": benchmark.get(
+                        "source_bar_hash_sha256"
+                    )
+                    or "",
                     "benchmark_status": "sourced" if benchmark else "missing_source_bars",
                 },
             }
         )
     if outcome_rows:
         store.persist_signal_outcomes(outcome_rows, replace=True)
+        refresh_scenario_lifecycle_links(
+            store,
+            signal_ids={str(row["signal_id"]) for row in outcome_rows},
+            updated_at=utc_now_iso(),
+        )
+    triggered_count = sum(bool(row.get("entry_fill_id")) for row in lifecycle_rows)
+    closed_ineligible_count = sum(
+        bool(row.get("exit_fill_id")) and row["eligibility_state"] != "eligible"
+        for row in lifecycle_rows
+    )
     metrics = {
         "market_date": date,
         "cohort": SCENARIO_FORWARD_COHORT,
         "strategy_id": SCENARIO_STRATEGY_ID,
         "policy_version": SCENARIO_POLICY_VERSION,
         "signal_count": len(decisions),
-        "triggered_count": len(triggered),
-        "closed_eligible_count": len(closed),
+        "candidate_count": len(candidates),
+        "non_entry_decision_count": len(decisions) - len(candidates),
+        "triggered_count": triggered_count,
+        "untriggered_count": len(untriggered),
+        "closed_eligible_count": len(eligible),
+        "return_denominator_count": len(eligible),
+        "closed_ineligible_count": closed_ineligible_count,
         "open_count": len(open_rows),
-        "missing_count": max(len(triggered) - len(closed) - len(open_rows), 0),
-        "quarantined_count": 0,
-        "gross_return_pct": gross,
+        "missing_count": len(missing),
+        "quarantined_count": len(quarantined),
+        "gross_return_pct": _mean(gross_returns),
         "modeled_after_cost_return_pct": _mean(after_costs),
         "benchmark_return_pct": _mean(benchmark_returns),
         "excess_return_pct": _mean(after_cost_excess_returns),
         "hit_rate_pct": _pct(
-            sum(float(row["realized_return_pct"]) > 0 for row in closed), len(closed)
+            sum(float(row["gross_return_pct"]) > 0 for row in eligible), len(eligible)
         ),
-        "return_status": "complete" if closed else "no_closed_eligible_positions",
-        "cost_model": "sum of recorded paper-fill slippage_bps; no unstated fees",
+        "return_status": (
+            "eligible_returns_available" if eligible else "no_closed_eligible_positions"
+        ),
+        "cost_model": (
+            "entry and exit fill slippage_bps under one explicit cost_model_version; "
+            "no unstated fees"
+        ),
+        "eligibility_contract": (
+            "Return denominator requires one actual entry fill, one actual exit fill, "
+            "explicit non-negative fill costs under one model, and sourced SPY bars "
+            "aligned to the fill horizon."
+        ),
+        "lifecycle_states": [
+            {
+                key: row.get(key)
+                for key in (
+                    "decision_id",
+                    "signal_id",
+                    "position_id",
+                    "ticker",
+                    "eligibility_state",
+                    "eligibility_reason",
+                    "entry_fill_id",
+                    "exit_fill_id",
+                )
+            }
+            for row in lifecycle_rows
+        ],
         "benchmark": {
             "ticker": "SPY",
             "source": "alpaca_minute_bars",
             "eligible_closed_count": len(benchmark_returns),
-            "missing_closed_count": len(closed) - len(benchmark_returns),
+            "missing_closed_count": closed_ineligible_count,
             "status": (
                 "sourced_complete"
-                if closed and len(benchmark_returns) == len(closed)
+                if eligible and not closed_ineligible_count
                 else "partial_source_coverage"
                 if benchmark_returns
                 else "missing_source_bars"
             ),
         },
         "return_distribution": _return_distribution(after_costs),
-        "mae_mfe": _position_excursions(store, closed),
+        "mae_mfe": _position_excursions(
+            store,
+            [positions_by_signal[str(row["signal_id"])] for row in eligible],
+        ),
         "calibration_status": "UNCALIBRATED",
         "research_only": True,
     }
@@ -451,11 +577,12 @@ def run_scenario_historical_replay(
                 config=config,
             )
             context = _replay_price_context(bars, event_time=event_time, quote=quote)
+            decision_at = context.bar_completed_at if context is not None else article.created_at
             decision = evaluate_scenario(
                 article=article,
                 extraction=extraction,
                 ticker=ticker,
-                decision_at=article.created_at,
+                decision_at=decision_at,
                 price_context=context,
                 cohort="scenario_historical_replay",
             )
@@ -466,7 +593,7 @@ def run_scenario_historical_replay(
                 store,
                 decision_id=decision.decision_id,
                 event_type="REPLAY_DECISION_RECORDED",
-                event_timestamp=article.created_at,
+                event_timestamp=decision_at,
                 payload={"action": decision.action, "cohort": "scenario_historical_replay"},
             )
             if decision.action != "ENTER_LONG":
@@ -475,7 +602,7 @@ def run_scenario_historical_replay(
                 decision=payload,
                 article=article,
                 bars=bars,
-                event_time=event_time,
+                event_time=_parse_iso(decision_at),
                 slippage_bps=config.slippage_bps,
                 quote=quote,
             )
@@ -531,6 +658,11 @@ def scenario_public_snapshot(*, db_path: str | Path, limit: int = 250) -> dict[s
     fills_by_signal: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for fill in store.load_paper_trade_fills(limit=50_000):
         fills_by_signal[str(fill.get("signal_id") or "")].append(fill)
+    outcomes_by_signal = {
+        str(row.get("signal_id") or ""): row
+        for row in store.load_signal_outcomes(limit=50_000)
+        if str(row.get("signal_id") or "").startswith("scenario:")
+    }
     events_by_signal: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in store.load_signal_events(limit=50_000):
         events_by_signal[str(event.get("signal_id") or "")].append(event)
@@ -541,6 +673,18 @@ def scenario_public_snapshot(*, db_path: str | Path, limit: int = 250) -> dict[s
         signal_id = str(link.get("signal_id") or "")
         position = positions_by_signal.get(signal_id, {})
         fills = fills_by_signal.get(signal_id, [])
+        outcome = outcomes_by_signal.get(signal_id, {})
+        explicit_fill_costs = [_nonnegative_float(fill.get("slippage_bps")) for fill in fills]
+        cost_models = {
+            str(fill.get("cost_model_version") or "")
+            for fill in fills
+            if fill.get("cost_model_version")
+        }
+        complete_cost_truth = bool(
+            fills
+            and all(value is not None for value in explicit_fill_costs)
+            and len(cost_models) == 1
+        )
         lifecycle = [
             {
                 "event_type": event.get("event_type"),
@@ -578,19 +722,31 @@ def scenario_public_snapshot(*, db_path: str | Path, limit: int = 250) -> dict[s
                 "paper_lifecycle": {
                     "signal_id": signal_id,
                     "paper_intent_id": link.get("paper_intent_id") or "",
+                    "entry_intent_id": link.get("entry_intent_id") or "",
+                    "exit_intent_id": link.get("exit_intent_id") or "",
                     "position_id": position.get("position_id") or link.get("position_id") or "",
+                    "paper_trade_id": link.get("paper_trade_id") or "",
+                    "entry_fill_id": link.get("entry_fill_id") or "",
+                    "exit_fill_id": link.get("exit_fill_id") or "",
+                    "outcome_id": link.get("outcome_id") or "",
                     "status": position.get("status") or "NOT_TRIGGERED",
+                    "return_eligibility_status": outcome.get("eligibility_state") or "unresolved",
+                    "return_eligibility_reason": outcome.get("eligibility_reason") or "",
                     "opened_at": position.get("opened_at"),
                     "closed_at": position.get("closed_at"),
                     "entry_price": position.get("entry_price"),
                     "exit_price": position.get("exit_price"),
                     "realized_return_pct": position.get("realized_return_pct"),
-                    "modeled_cost_pct": round(
-                        sum(float(fill.get("slippage_bps") or 0.0) / 100.0 for fill in fills),
-                        4,
-                    )
-                    if fills
-                    else None,
+                    "modeled_cost_pct": (
+                        round(
+                            sum(value for value in explicit_fill_costs if value is not None)
+                            / 100.0,
+                            4,
+                        )
+                        if complete_cost_truth
+                        else None
+                    ),
+                    "cost_model_version": next(iter(cost_models)) if len(cost_models) == 1 else "",
                     "events": lifecycle,
                 },
             }
@@ -679,6 +835,7 @@ def _performance_analytics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "day_count": len(rows),
         "signal_count": sum(int(row.get("signal_count") or 0) for row in rows),
         "triggered_count": sum(int(row.get("triggered_count") or 0) for row in rows),
+        "untriggered_count": sum(int(row.get("untriggered_count") or 0) for row in rows),
         "closed_eligible_count": closed,
         "open_count": sum(int(row.get("open_count") or 0) for row in rows),
         "missing_count": sum(int(row.get("missing_count") or 0) for row in rows),
@@ -752,7 +909,8 @@ def _extraction_for_article(
                 "dependencies": payload.get("dependencies") or [],
                 "unresolved_unknowns": payload.get("unresolved_unknowns") or [],
             },
-            model=str(payload.get("model") or config.scenario_openai_model),
+            model=str(payload.get("model") or ""),
+            requested_model=str(payload.get("requested_model") or config.scenario_openai_model),
             response_id=str(payload.get("response_id") or ""),
             usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
         )
@@ -774,6 +932,9 @@ def _extraction_for_article(
 def _live_price_contexts(
     config: ScannerConfig, symbols: list[str], *, as_of: str
 ) -> dict[str, PriceContext]:
+    cutoff = parse_aware_timestamp(as_of)
+    if cutoff is None:
+        return {}
     provider = AlpacaProvider(config)
     try:
         snapshots = {row.ticker: row for row in provider.get_premarket_snapshot(symbols, config)}
@@ -786,27 +947,51 @@ def _live_price_contexts(
         by_ticker[str(row.get("ticker") or "").upper()].append(row)
     output: dict[str, PriceContext] = {}
     for ticker in symbols:
-        rows = sorted(by_ticker[ticker], key=lambda row: str(row.get("timestamp") or ""))
+        rows = []
+        for row in by_ticker[ticker]:
+            observed = parse_aware_timestamp(str(row.get("timestamp") or ""))
+            completed = completed_minute_bar_at(observed) if observed is not None else None
+            if completed is not None and completed <= cutoff and _valid_bar(row):
+                rows.append(row)
+        rows.sort(key=lambda row: str(row.get("timestamp") or ""))
         snapshot = snapshots.get(ticker)
         if not rows or snapshot is None:
             continue
+        snapshot_at = parse_aware_timestamp(str(snapshot.as_of_timestamp or ""))
+        if snapshot_at is None or snapshot_at > cutoff:
+            continue
         last = rows[-1]
-        closes = [float(row["close"]) for row in rows if _positive(row.get("close"))]
+        sample = rows[-14:]
+        closes = [float(row["close"]) for row in sample if _positive(row.get("close"))]
         ranges = [
             float(row["high"]) - float(row["low"])
-            for row in rows[-14:]
+            for row in sample
             if _positive(row.get("high")) and _positive(row.get("low"))
         ]
         atr = sum(ranges) / len(ranges) if ranges else None
+        observed_at = str(last.get("timestamp") or "")
+        completed_at = completed_minute_bar_at(observed_at)
+        if completed_at is None:
+            continue
         output[ticker] = PriceContext(
-            observed_at=str(last.get("timestamp") or as_of),
+            observed_at=observed_at,
             price=closes[-1] if closes else None,
             atr=atr,
             spread_pct=float(snapshot.spread_pct) if snapshot.spread_pct is not None else None,
             liquid=bool(
                 float(last.get("volume") or 0.0) * float(last.get("close") or 0.0) >= 20_000
             ),
-            source_bar_hash_sha256=canonical_hash(rows[-14:]),
+            source_bar_hash_sha256=canonical_hash(
+                {
+                    "bars": sample,
+                    "snapshot": {
+                        "as_of_timestamp": snapshot.as_of_timestamp,
+                        "spread_pct": snapshot.spread_pct,
+                    },
+                }
+            ),
+            bar_completed_at=completed_at.isoformat().replace("+00:00", "Z"),
+            is_complete=True,
         )
     return output
 
@@ -845,7 +1030,12 @@ def _materialize_decision(store: SQLiteScanStore, decision: dict[str, Any]) -> d
         "risk_flags_json": ["research_only", "uncalibrated"],
         "avoid_reasons_json": [],
         "catalyst_summary": f"{decision['event_type']} / {decision['direction']}",
-        "raw_payload_json": {"scenario_decision": decision},
+        "raw_payload_json": {
+            "scenario_decision": decision,
+            "cost_model_version": SCENARIO_COST_MODEL_VERSION,
+            "cost_components": ["entry_slippage_bps", "exit_slippage_bps"],
+            "fee_model": "no_additional_fees",
+        },
     }
     selection = {
         "selection_id": f"scenario-selection:{decision_id}",
@@ -887,7 +1077,11 @@ def _link_watcher_records(
     positions = {
         str(row.get("signal_id") or ""): row for row in watcher.get("paper_positions") or []
     }
-    intents = {str(row.get("signal_id") or ""): row for row in watcher.get("intents") or []}
+    intents = {
+        str(row.get("signal_id") or ""): row
+        for row in watcher.get("intents") or []
+        if str(row.get("action") or "") == "ENTER_LONG"
+    }
     rows = []
     for item in materialized:
         signal_id = item["signal_id"]
@@ -922,19 +1116,42 @@ def _link_watcher_records(
 def _replay_price_context(
     bars: list[dict[str, Any]], *, event_time: datetime, quote: dict[str, Any] | None
 ) -> PriceContext | None:
-    prior = [row for row in bars if _bar_time(row) < event_time and _valid_bar(row)]
-    if not prior or not quote:
+    if not quote:
         return None
-    sample = prior[-14:]
-    last = sample[-1]
+    quote_at = parse_aware_timestamp(str(quote.get("timestamp") or ""))
+    if quote_at is None or quote_at < event_time:
+        return None
+    completed_rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in bars:
+        if not _valid_bar(row):
+            continue
+        completed_at = completed_minute_bar_at(_bar_time(row))
+        if completed_at is not None:
+            completed_rows.append((completed_at, row))
+    completed_rows.sort(key=lambda item: item[0])
+    decision_bar = next(
+        (
+            (completed_at, row)
+            for completed_at, row in completed_rows
+            if completed_at > event_time and quote_at <= completed_at
+        ),
+        None,
+    )
+    if decision_bar is None:
+        return None
+    decision_at, last = decision_bar
+    sample = [row for completed_at, row in completed_rows if completed_at <= decision_at][-14:]
     ranges = [float(row["high"]) - float(row["low"]) for row in sample]
+    spread_pct = _nonnegative_float(quote.get("spread_pct"))
     return PriceContext(
         observed_at=str(last.get("timestamp") or ""),
         price=float(last["close"]),
         atr=sum(ranges) / len(ranges) if ranges else None,
-        spread_pct=float(quote.get("spread_pct") or 0.0),
+        spread_pct=spread_pct,
         liquid=float(last.get("volume") or 0.0) * float(last["close"]) >= 20_000,
-        source_bar_hash_sha256=canonical_hash(sample),
+        source_bar_hash_sha256=canonical_hash({"bars": sample, "quote": quote}),
+        bar_completed_at=decision_at.isoformat().replace("+00:00", "Z"),
+        is_complete=True,
         source_kind="historical_minute_bars_and_quote",
     )
 
@@ -988,6 +1205,19 @@ def _simulate_replay_trade(
             "exit_price": None,
             "gross_return_pct": None,
             "modeled_after_cost_return_pct": None,
+        }
+    entry_bar = future[entry_index]
+    if float(entry_bar["low"]) <= stop or float(entry_bar["high"]) >= target:
+        return {
+            **base,
+            "outcome_status": "quarantined",
+            "entry_at": str(entry_bar["timestamp"]),
+            "entry_price": entry_price,
+            "exit_at": str(entry_bar["timestamp"]),
+            "exit_price": None,
+            "gross_return_pct": None,
+            "modeled_after_cost_return_pct": None,
+            "quarantine_reason": "same_bar_entry_exit_order_ambiguous",
         }
     for bar in future[entry_index + 1 :]:
         hit_stop = float(bar["low"]) <= stop
@@ -1080,6 +1310,7 @@ def _with_replay_benchmark(
     )
     if benchmark is None:
         return outcome | {
+            "outcome_status": "missing_benchmark",
             "benchmark_return_pct": None,
             "after_cost_excess_return_pct": None,
             "benchmark_source_bar_hash_sha256": "",
@@ -1092,13 +1323,205 @@ def _with_replay_benchmark(
     }
 
 
+def _forward_lifecycle_row(
+    *,
+    decision: dict[str, Any],
+    link: dict[str, Any] | None,
+    position: dict[str, Any] | None,
+    fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    link = link or {}
+    position = position or {}
+    signal_id = str(link.get("signal_id") or "")
+    position_id = str(position.get("position_id") or link.get("position_id") or "")
+    relevant_fills = [
+        row
+        for row in fills
+        if not position_id or str(row.get("position_id") or "") == position_id
+    ]
+    entries = sorted(
+        (row for row in relevant_fills if str(row.get("side") or "") == "BUY"),
+        key=lambda row: (str(row.get("fill_time") or ""), str(row.get("fill_id") or "")),
+    )
+    exits = sorted(
+        (row for row in relevant_fills if str(row.get("side") or "") == "SELL"),
+        key=lambda row: (str(row.get("fill_time") or ""), str(row.get("fill_id") or "")),
+    )
+    base = {
+        "decision_id": decision.get("decision_id"),
+        "signal_id": signal_id,
+        "position_id": position_id,
+        "ticker": decision.get("ticker"),
+        "entry_fill_id": str(entries[0].get("fill_id") or "") if entries else "",
+        "exit_fill_id": str(exits[-1].get("fill_id") or "") if exits else "",
+        "entry_at": str(entries[0].get("fill_time") or "") if entries else "",
+        "exit_at": str(exits[-1].get("fill_time") or "") if exits else "",
+        "entry_price": entries[0].get("fill_price") if entries else None,
+        "exit_price": exits[-1].get("fill_price") if exits else None,
+        "gross_return_pct": None,
+        "modeled_cost_pct": None,
+        "modeled_after_cost_return_pct": None,
+        "cost_model_version": "",
+        "benchmark": None,
+        "after_cost_excess_return_pct": None,
+    }
+    if not signal_id:
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "missing_scenario_signal_link",
+        }
+    if not position:
+        return base | {
+            "eligibility_state": "quarantined" if relevant_fills else "untriggered",
+            "eligibility_reason": (
+                "orphan_fill_without_position" if relevant_fills else "entry_trigger_not_filled"
+            ),
+        }
+    if len(entries) > 1 or len(exits) > 1:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "multiple_entry_or_exit_fills_are_ambiguous",
+        }
+    status = str(position.get("status") or "")
+    if status == "OPEN":
+        if not entries:
+            return base | {
+                "eligibility_state": "missing",
+                "eligibility_reason": "open_position_missing_entry_fill",
+            }
+        if exits:
+            return base | {
+                "eligibility_state": "quarantined",
+                "eligibility_reason": "open_position_has_exit_fill",
+            }
+        return base | {
+            "eligibility_state": "open",
+            "eligibility_reason": "actual_entry_fill_without_exit_fill",
+        }
+    if status != "CLOSED":
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "unsupported_position_status",
+        }
+    if not entries or not exits:
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "closed_position_missing_entry_or_exit_fill",
+        }
+
+    entry = entries[0]
+    exit_fill = exits[0]
+    required_strings = {
+        "entry_fill_id": entry.get("fill_id"),
+        "entry_intent_id": entry.get("intent_id"),
+        "entry_time": entry.get("fill_time"),
+        "exit_fill_id": exit_fill.get("fill_id"),
+        "exit_intent_id": exit_fill.get("intent_id"),
+        "exit_time": exit_fill.get("fill_time"),
+    }
+    if any(not str(value or "") for value in required_strings.values()):
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "fill_identity_or_timestamp_missing",
+        }
+    entry_cost_model = str(entry.get("cost_model_version") or "")
+    exit_cost_model = str(exit_fill.get("cost_model_version") or "")
+    if not entry_cost_model or not exit_cost_model:
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "fill_cost_model_missing",
+        }
+    if entry_cost_model != exit_cost_model:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "entry_exit_cost_model_conflict",
+        }
+    entry_cost = _nonnegative_float(entry.get("slippage_bps"))
+    exit_cost = _nonnegative_float(exit_fill.get("slippage_bps"))
+    if entry_cost is None or exit_cost is None:
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "explicit_fill_cost_value_missing",
+        }
+    entry_price = _positive_float(entry.get("fill_price"))
+    exit_price = _positive_float(exit_fill.get("fill_price"))
+    entry_quantity = _positive_float(entry.get("quantity"))
+    exit_quantity = _positive_float(exit_fill.get("quantity"))
+    if any(
+        value is None for value in (entry_price, exit_price, entry_quantity, exit_quantity)
+    ):
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "invalid_fill_price_or_quantity",
+        }
+    assert entry_price is not None
+    assert exit_price is not None
+    assert entry_quantity is not None
+    assert exit_quantity is not None
+    if abs(entry_quantity - exit_quantity) > 1e-6:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "entry_exit_quantity_mismatch",
+        }
+    if str(entry.get("position_id") or "") != position_id or str(
+        exit_fill.get("position_id") or ""
+    ) != position_id:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "fill_position_identity_mismatch",
+        }
+    if str(position.get("entry_intent_id") or "") != str(entry.get("intent_id") or "") or str(
+        position.get("exit_intent_id") or ""
+    ) != str(exit_fill.get("intent_id") or ""):
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "fill_intent_identity_mismatch",
+        }
+    try:
+        entry_at = _parse_iso(str(entry["fill_time"]))
+        exit_at = _parse_iso(str(exit_fill["fill_time"]))
+    except ValueError:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "invalid_fill_timestamp",
+        }
+    if exit_at <= entry_at:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "same_bar_or_reversed_fill_order_ambiguous",
+        }
+    gross = ((exit_price - entry_price) / entry_price) * 100.0
+    recorded_return = position.get("realized_return_pct")
+    if recorded_return is None:
+        return base | {
+            "eligibility_state": "missing",
+            "eligibility_reason": "closed_position_missing_realized_return",
+        }
+    if abs(float(recorded_return) - gross) > 0.0001:
+        return base | {
+            "eligibility_state": "quarantined",
+            "eligibility_reason": "position_and_fill_return_conflict",
+        }
+    modeled_cost_pct = (entry_cost + exit_cost) / 100.0
+    return base | {
+        "eligibility_state": "awaiting_benchmark",
+        "eligibility_reason": "fill_and_cost_truth_complete",
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "gross_return_pct": round(gross, 4),
+        "modeled_cost_pct": round(modeled_cost_pct, 4),
+        "modeled_after_cost_return_pct": round(gross - modeled_cost_pct, 4),
+        "cost_model_version": entry_cost_model,
+    }
+
+
 def _forward_benchmarks(
     *,
-    positions: list[dict[str, Any]],
+    lifecycles: list[dict[str, Any]],
     config: ScannerConfig | None,
     market_provider: AlpacaProvider | None,
 ) -> dict[str, dict[str, Any]]:
-    if not positions:
+    if not lifecycles:
         return {}
     resolved_config = config
     if resolved_config is None:
@@ -1108,8 +1531,8 @@ def _forward_benchmarks(
             return {}
     if not resolved_config.alpaca_api_key_id or not resolved_config.alpaca_api_secret_key:
         return {}
-    starts = [str(row.get("opened_at") or "") for row in positions if row.get("opened_at")]
-    ends = [str(row.get("closed_at") or "") for row in positions if row.get("closed_at")]
+    starts = [str(row.get("entry_at") or "") for row in lifecycles if row.get("entry_at")]
+    ends = [str(row.get("exit_at") or "") for row in lifecycles if row.get("exit_at")]
     if not starts or not ends:
         return {}
     try:
@@ -1119,14 +1542,14 @@ def _forward_benchmarks(
     except (DataProviderError, OSError, ValueError):
         return {}
     output: dict[str, dict[str, Any]] = {}
-    for position in positions:
+    for lifecycle in lifecycles:
         benchmark = _benchmark_return_from_bars(
             bars,
-            entry_at=str(position.get("opened_at") or ""),
-            exit_at=str(position.get("closed_at") or ""),
+            entry_at=str(lifecycle.get("entry_at") or ""),
+            exit_at=str(lifecycle.get("exit_at") or ""),
         )
-        if benchmark is not None and position.get("position_id"):
-            output[str(position["position_id"])] = benchmark
+        if benchmark is not None and lifecycle.get("position_id"):
+            output[str(lifecycle["position_id"])] = benchmark
     return output
 
 
@@ -1142,10 +1565,22 @@ def _benchmark_return_from_bars(
         return None
     if exit_time <= entry_time:
         return None
-    valid = sorted((row for row in bars if _valid_bar(row)), key=_bar_time)
+    valid = sorted(
+        (
+            row
+            for row in bars
+            if _valid_bar(row)
+            and str(row.get("ticker") or row.get("symbol") or "").upper() == "SPY"
+        ),
+        key=_bar_time,
+    )
     entry = next((row for row in valid if _bar_time(row) >= entry_time), None)
     exit_row = next((row for row in reversed(valid) if _bar_time(row) <= exit_time), None)
     if entry is None or exit_row is None:
+        return None
+    selected_entry_at = _bar_time(entry)
+    selected_exit_at = _bar_time(exit_row)
+    if selected_entry_at >= selected_exit_at:
         return None
     entry_price = float(entry["close"])
     exit_price = float(exit_row["close"])
@@ -1153,8 +1588,20 @@ def _benchmark_return_from_bars(
         return None
     return {
         "return_pct": round(((exit_price - entry_price) / entry_price) * 100.0, 4),
+        "ticker": "SPY",
+        "source": "alpaca_minute_bars",
+        "entry_at": str(entry.get("timestamp") or ""),
+        "exit_at": str(exit_row.get("timestamp") or ""),
+        "requested_entry_at": entry_at,
+        "requested_exit_at": exit_at,
         "source_bar_hash_sha256": canonical_hash(
-            {"entry": entry, "exit": exit_row, "ticker": "SPY"}
+            {
+                "entry": entry,
+                "exit": exit_row,
+                "ticker": "SPY",
+                "requested_entry_at": entry_at,
+                "requested_exit_at": exit_at,
+            }
         ),
     }
 
@@ -1166,7 +1613,7 @@ def _return_distribution(values: list[float]) -> dict[str, Any]:
             "after_cost_expectancy_pct": None,
             "profit_factor": None,
             "maximum_drawdown_pct": None,
-            "bootstrap_95_ci_pct": {"lower": None, "upper": None},
+            "bootstrap_95_ci_pct": _deterministic_bootstrap_ci([]),
         }
     positive = sum(value for value in values if value > 0)
     negative = abs(sum(value for value in values if value < 0))
@@ -1190,19 +1637,29 @@ def _maximum_drawdown(values: list[float]) -> float:
     return round(worst, 4)
 
 
-def _deterministic_bootstrap_ci(values: list[float]) -> dict[str, float | None]:
+def _deterministic_bootstrap_ci(values: list[float]) -> dict[str, Any]:
     if len(values) < 2:
-        return {"lower": None, "upper": None}
-    # Deterministic resampling makes the published interval reproducible from the same ledger.
-    samples = []
-    count = len(values)
-    for seed in range(200):
-        indexes = [((seed * 73) + (index * 37) + 11) % count for index in range(count)]
-        samples.append(sum(values[index] for index in indexes) / count)
+        return {
+            "lower": None,
+            "upper": None,
+            "seed": SCENARIO_BOOTSTRAP_SEED,
+            "resamples": SCENARIO_BOOTSTRAP_SAMPLES,
+            "method": "seeded_with_replacement_mean",
+        }
+    population = tuple(sorted(float(value) for value in values))
+    count = len(population)
+    rng = random.Random(SCENARIO_BOOTSTRAP_SEED)
+    samples = [
+        sum(population[rng.randrange(count)] for _ in range(count)) / count
+        for _ in range(SCENARIO_BOOTSTRAP_SAMPLES)
+    ]
     samples.sort()
     return {
         "lower": round(samples[int((len(samples) - 1) * 0.025)], 4),
         "upper": round(samples[int((len(samples) - 1) * 0.975)], 4),
+        "seed": SCENARIO_BOOTSTRAP_SEED,
+        "resamples": SCENARIO_BOOTSTRAP_SAMPLES,
+        "method": "seeded_with_replacement_mean",
     }
 
 
@@ -1241,6 +1698,15 @@ def _historical_replay_metrics(
         rows = by_day.get(date, [])
         complete = [row for row in rows if row.get("outcome_status") == "complete"]
         quarantined = [row for row in rows if row.get("outcome_status") == "quarantined"]
+        missing = [
+            row
+            for row in rows
+            if row.get("outcome_status") in {"missing_bars", "missing_benchmark"}
+        ]
+        untriggered = [row for row in rows if row.get("outcome_status") == "not_triggered"]
+        missing_benchmarks = [
+            row for row in rows if row.get("outcome_status") == "missing_benchmark"
+        ]
         after_costs = [float(row["modeled_after_cost_return_pct"]) for row in complete]
         benchmarks = [
             float(row["benchmark_return_pct"])
@@ -1260,9 +1726,11 @@ def _historical_replay_metrics(
                 "policy_version": SCENARIO_POLICY_VERSION,
                 "signal_count": decision_counts.get(date, 0),
                 "triggered_count": sum(row.get("entry_price") is not None for row in rows),
+                "untriggered_count": len(untriggered),
                 "closed_eligible_count": len(complete),
+                "return_denominator_count": len(complete),
                 "open_count": 0,
-                "missing_count": sum(row.get("outcome_status") == "missing_bars" for row in rows),
+                "missing_count": len(missing),
                 "quarantined_count": len(quarantined),
                 "gross_return_pct": _mean([float(row["gross_return_pct"]) for row in complete]),
                 "modeled_after_cost_return_pct": _mean(after_costs),
@@ -1280,12 +1748,12 @@ def _historical_replay_metrics(
                     "ticker": "SPY",
                     "source": "alpaca_minute_bars",
                     "eligible_closed_count": len(benchmarks),
-                    "missing_closed_count": len(complete) - len(benchmarks),
+                    "missing_closed_count": len(missing_benchmarks),
                     "status": (
                         "sourced_complete"
-                        if complete and len(benchmarks) == len(complete)
+                        if complete and not missing_benchmarks
                         else "partial_source_coverage"
-                        if benchmarks
+                        if benchmarks or missing_benchmarks
                         else "missing_source_bars"
                     ),
                 },
@@ -1389,3 +1857,11 @@ def _positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if result > 0 else None
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result >= 0 else None

@@ -20,6 +20,48 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
+$scenarioWatermarkPath = Join-Path $state "scenario_monitor_watermark.json"
+
+function Get-ScenarioMonitorWatermark {
+    # The watermark is deliberately durable and only advances after a successful
+    # Scenario cycle.  A short overlap is safe because provider/article and
+    # extraction identities are idempotent; a clock-only window is not safe
+    # because a delayed task or provider page can otherwise create a gap.
+    if (Test-Path -LiteralPath $scenarioWatermarkPath) {
+        try {
+            $saved = Get-Content -LiteralPath $scenarioWatermarkPath -Raw | ConvertFrom-Json
+            $parsed = [DateTimeOffset]::Parse([string]$saved.watermark_utc)
+            return $parsed.ToUniversalTime().ToString("o")
+        }
+        catch {
+            throw "Scenario monitor watermark is invalid; refusing to infer a narrower news window. Repair $scenarioWatermarkPath before rerunning."
+        }
+    }
+    # First monitor after deployment has no cursor.  The wide initial window is
+    # intentional and safe: downstream ids deduplicate it, while an artificially
+    # short window could silently omit premarket news.
+    return (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
+}
+
+function Save-ScenarioMonitorWatermark {
+    param([string]$WatermarkUtc)
+    $payload = [ordered]@{
+        schema_version = 1
+        watermark_utc = $WatermarkUtc
+        recorded_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+        producer = "run_alphaops_monitor.ps1"
+    } | ConvertTo-Json -Compress
+    $temporary = "$scenarioWatermarkPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporary, $payload, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $scenarioWatermarkPath -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
 function Write-MonitorStage {
     param([string]$Status, [int]$ExitCode, [string]$ErrorCode = "")
     $arguments = @(
@@ -106,7 +148,11 @@ try {
     }
     if ($exitCode -eq 0) {
         if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
-            $scenarioSince = (Get-Date).ToUniversalTime().AddMinutes(-10).ToString("o")
+            $scenarioSince = Get-ScenarioMonitorWatermark
+            # Record the start rather than the end.  The next query overlaps this
+            # run, so news published while the provider/extractor is working is
+            # re-read and deduplicated instead of being lost.
+            $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
             $scenario = Invoke-DawnstrikeNativeProcess `
                 -FilePath "py.exe" `
                 -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
@@ -115,6 +161,9 @@ try {
             if ($scenario.exit_code -ne 0) {
                 $exitCode = $scenario.exit_code
                 $errorCode = "scenario_cycle_failed"
+            }
+            else {
+                Save-ScenarioMonitorWatermark -WatermarkUtc $nextScenarioWatermark
             }
             $scenarioStage = Write-ScenarioStage `
                 -Status $(if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `

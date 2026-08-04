@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
@@ -50,6 +51,7 @@ class AlpacaNewsProvider(NewsProvider):
         self.secret_key = config.alpaca_api_secret_key
         self.timeout = config.request_timeout_seconds
         self.retries = config.request_retries
+        self.symbol_batch_size = config.scenario_news_symbol_batch_size
 
     def validate_credentials(self) -> None:
         missing = []
@@ -98,34 +100,43 @@ class AlpacaNewsProvider(NewsProvider):
         )
         if not normalized:
             return []
-        token: str | None = None
         articles: list[ScenarioNewsArticle] = []
         seen: set[str] = set()
-        while True:
-            params = {
-                "symbols": ",".join(normalized),
-                "sort": "asc",
-                "limit": str(min(max(limit, 1), 50)),
-                "include_content": "true",
-            }
-            if since:
-                params["start"] = since
-            if until:
-                params["end"] = until
-            if token:
-                params["page_token"] = token
-            payload = self._request_json(params)
-            for raw in payload.get("news", []):
-                if not isinstance(raw, dict):
-                    continue
-                article = _scenario_article_from_alpaca(raw, historical=historical)
-                if article is not None and article.article_id not in seen:
-                    articles.append(article)
-                    seen.add(article.article_id)
-            token = str(payload.get("next_page_token") or "").strip() or None
-            if not token or len(articles) >= limit:
-                break
-        return articles[:limit]
+        for start_index in range(0, len(normalized), self.symbol_batch_size):
+            token: str | None = None
+            page_count = 0
+            max_pages = max(1, math.ceil(limit / 50))
+            batch = normalized[start_index : start_index + self.symbol_batch_size]
+            while True:
+                params = {
+                    "symbols": ",".join(batch),
+                    "sort": "asc",
+                    "limit": "50",
+                    "include_content": "true",
+                }
+                if since:
+                    params["start"] = since
+                if until:
+                    params["end"] = until
+                if token:
+                    params["page_token"] = token
+                payload = self._request_json(params)
+                page_count += 1
+                for raw in payload.get("news", []):
+                    if not isinstance(raw, dict):
+                        continue
+                    article = _scenario_article_from_alpaca(raw, historical=historical)
+                    if article is not None and article.article_id not in seen:
+                        articles.append(article)
+                        seen.add(article.article_id)
+                token = str(payload.get("next_page_token") or "").strip() or None
+                # Page only to the configured bounded collection ceiling, then
+                # sort across batches before applying the processing limit.  This
+                # preserves deterministic pagination without allowing a delayed
+                # historical query to consume unbounded provider pages.
+                if not token or page_count >= max_pages:
+                    break
+        return sorted(articles, key=lambda item: (item.created_at, item.article_id))[:limit]
 
     def _request_json(self, params: dict[str, str]) -> dict[str, Any]:
         url = f"{self.endpoint}?{urllib.parse.urlencode(params)}"
@@ -139,7 +150,10 @@ class AlpacaNewsProvider(NewsProvider):
             method="GET",
         )
         last_error: Exception | None = None
-        for attempt in range(1, self.retries + 1):
+        # Configured request_retries historically means total attempts.  Cap
+        # this transport at the Scenario contract's two transient retries.
+        max_attempts = min(max(self.retries, 1), 3)
+        for attempt in range(1, max_attempts + 1):
             try:
                 with open_allowlisted_url(
                     request,
@@ -158,7 +172,7 @@ class AlpacaNewsProvider(NewsProvider):
                 last_error = exc
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                 last_error = exc
-            if attempt < self.retries:
+            if attempt < max_attempts:
                 time.sleep(min(2 ** (attempt - 1), 8))
         raise DataProviderError("Alpaca news request failed after bounded retries.") from last_error
 
@@ -300,13 +314,12 @@ def _scenario_article_from_alpaca(
     symbols = tuple(
         sorted({str(symbol).upper().strip() for symbol in raw_symbols if str(symbol).strip()})
     )
-    created_at = str(raw.get("created_at") or raw.get("updated_at") or "")
-    try:
-        datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except ValueError:
+    created_at = _normalize_rfc3339(raw.get("created_at"))
+    if not created_at:
         # A fabricated "now" would make an unsafely timed record look forward
         # eligible. Keep this record out of the governed signal path instead.
         return None
+    updated_at = _normalize_rfc3339(raw.get("updated_at")) or ""
     provider_id = str(raw.get("id") or "").strip()
     content = str(raw.get("content") or "")
     if not provider_id:
@@ -319,6 +332,8 @@ def _scenario_article_from_alpaca(
             }
         )
     now = utc_now_iso()
+    fetched_at = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    published_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     return ScenarioNewsArticle(
         article_id=provider_id,
         symbols=symbols,
@@ -328,10 +343,26 @@ def _scenario_article_from_alpaca(
         source=str(raw.get("source") or "alpaca_news").strip(),
         source_url=str(raw.get("url") or "").strip(),
         created_at=created_at,
-        updated_at=str(raw.get("updated_at") or "").strip(),
+        updated_at=updated_at,
         author=str(raw.get("author") or "").strip(),
         provider="alpaca",
         fetched_at=now,
         first_seen_at=now,
         timing_kind="provider_published_at_proxy" if historical else "forward_observed",
+        provider_delay_seconds=round(
+            max(0.0, (fetched_at - published_at).total_seconds()), 3
+        ),
     )
+
+
+def _normalize_rfc3339(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -951,6 +951,45 @@ def _migration_019_account_comparison_contract(
     )
 
 
+def _migration_020_scenario_lifecycle_identity(
+    connection: sqlite3.Connection,
+) -> None:
+    """Link every Scenario decision to the complete durable paper lifecycle."""
+
+    # Some historical databases are created exclusively through this formal
+    # ledger and have never passed through SQLiteScanStore.initialize().  Create
+    # the base table here before adding its later identity columns so the
+    # migration is both additive and independently runnable.
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scenario_signal_links (
+            decision_id TEXT PRIMARY KEY,
+            signal_id TEXT,
+            scan_id TEXT,
+            paper_intent_id TEXT,
+            position_id TEXT,
+            outcome_id TEXT,
+            cohort TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scenario_links_signal
+        ON scenario_signal_links(signal_id, cohort);
+        """
+    )
+    for column in (
+        "entry_intent_id TEXT",
+        "exit_intent_id TEXT",
+        "entry_fill_id TEXT",
+        "exit_fill_id TEXT",
+        "paper_trade_id TEXT",
+    ):
+        _add_column_if_missing(connection, "scenario_signal_links", column)
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -980,4 +1019,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (17, _migration_017_alphaops_v6_one_time_holdout),
     (18, _migration_018_alphaops_v6_operational_receipts),
     (19, _migration_019_account_comparison_contract),
+    (20, _migration_020_scenario_lifecycle_identity),
 )
