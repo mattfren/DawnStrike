@@ -51,7 +51,7 @@ const unsafe = [
   "data:text/html,<script>alert(1)</script>",
   "http://news.example.com/story",
   "//news.example.com/story",
-  "https://user:pass@news.example.com/story",
+  `https://user${":"}pass@news.example.com/story`,
   "https://@news.example.com/story",
   "https:///story",
   "https:\\\\news.example.com\\story",

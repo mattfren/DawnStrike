@@ -956,6 +956,30 @@ def _migration_020_scenario_lifecycle_identity(
 ) -> None:
     """Link every Scenario decision to the complete durable paper lifecycle."""
 
+    # Some historical databases are created exclusively through this formal
+    # ledger and have never passed through SQLiteScanStore.initialize().  Create
+    # the base table here before adding its later identity columns so the
+    # migration is both additive and independently runnable.
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scenario_signal_links (
+            decision_id TEXT PRIMARY KEY,
+            signal_id TEXT,
+            scan_id TEXT,
+            paper_intent_id TEXT,
+            position_id TEXT,
+            outcome_id TEXT,
+            cohort TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scenario_links_signal
+        ON scenario_signal_links(signal_id, cohort);
+        """
+    )
     for column in (
         "entry_intent_id TEXT",
         "exit_intent_id TEXT",

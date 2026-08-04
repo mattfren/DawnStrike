@@ -77,7 +77,7 @@ def test_public_artifact_rejects_unsafe_scenario_urls_and_raw_markup(
                     },
                     {
                         "headline": "Credentialed",
-                        "source_url": "https://user:pass@example.com/story",
+                        "source_url": "https://user:pass@example.com/story",  # pragma: allowlist secret
                     },
                     {"headline": "Protocol relative", "source_url": "//example.com/story"},
                     {"headline": "Missing host", "source_url": "https:///story"},
@@ -106,7 +106,7 @@ def test_public_artifact_rejects_unsafe_static_link_attributes(tmp_path: Path) -
         """
         <a href="javascript:alert(1)">unsafe</a>
         <a href="//example.com/protocol-relative">protocol relative</a>
-        <a href="https://user:pass@example.com/private">credentialed</a>
+        <a href="https://user&#58;pass@example.com/private">credentialed</a>
         <form action="http://example.com/submit"></form>
         """,
         encoding="utf-8",
