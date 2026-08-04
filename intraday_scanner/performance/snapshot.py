@@ -169,10 +169,16 @@ def _snapshot_status(payload: dict[str, Any], effective_date: str) -> str:
     ]
     if not daily:
         return "no_data"
-    if any(str(row.get("status")) == "DEGRADED" for row in daily):
+    official = [
+        row
+        for row in daily
+        if str(row.get("cohort") or "") == "official_forward_paper"
+    ]
+    readiness_rows = official or daily
+    if any(str(row.get("status")) == "DEGRADED" for row in readiness_rows):
         return "degraded"
-    if any(str(row.get("status")) == "PARTIAL" for row in daily):
+    if any(str(row.get("status")) == "PARTIAL" for row in readiness_rows):
         return "degraded"
-    if all(str(row.get("status")) == "NO_TRADE" for row in daily):
+    if all(str(row.get("status")) == "NO_TRADE" for row in readiness_rows):
         return "no_trade"
     return "complete"

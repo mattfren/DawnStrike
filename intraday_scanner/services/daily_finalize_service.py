@@ -41,6 +41,13 @@ DAILY_STAGE_NAMES = (
     "readiness",
 )
 
+_NON_BLOCKING_RECONCILIATION_WARNING_CODES = frozenset(
+    {
+        "missing_outcome",
+        "paper_ops_equity_pnl_component_mismatch",
+    }
+)
+
 
 class DailyFinalizeService:
     """Finalize one market date and fail readiness if any upstream step is incomplete."""
@@ -100,17 +107,26 @@ class DailyFinalizeService:
                         persist=True,
                         now=now,
                     )
+                    reconciliation_gate = _reconciliation_gate(
+                        result,
+                        market_date=market_date,
+                    )
                     self._record_shared_stage(
                         market_date=market_date,
                         stage_name="canonical_performance",
-                        status=_daily_stage_status(result.get("status")),
-                        exit_code=0,
+                        status=(
+                            "COMPLETE"
+                            if reconciliation_gate["ready"]
+                            else _daily_stage_status(result.get("status"))
+                        ),
+                        exit_code=0 if reconciliation_gate["ready"] else 2,
                         output_hash=str(result.get("output_hash_sha256") or "") or None,
                         source_data_watermark=market_date,
                         payload={
                             "reconciliation_status": result.get("status"),
                             "issue_count": result.get("issue_count"),
                             "row_count": result.get("row_count"),
+                            "reconciliation_gate": reconciliation_gate,
                         },
                         observed_at=now,
                     )
@@ -184,6 +200,7 @@ class DailyFinalizeService:
                         scenario_publication,
                         market_date,
                         upstream_status,
+                        reconciliation_gate=reconciliation_gate,
                         publication_timestamp=now,
                     )
                     readiness_stage_status = (
@@ -238,6 +255,7 @@ class DailyFinalizeService:
                         scenario_publication,
                         readiness,
                         attempt,
+                        reconciliation_gate=reconciliation_gate,
                         upstream_stages=upstream_stages,
                         generated_at=now,
                     )
@@ -287,6 +305,7 @@ class DailyFinalizeService:
                             "paper_ops": _paper_ops_summary(
                                 result.get("paper_ops_reconciliation")
                             ),
+                            "gate": reconciliation_gate,
                         },
                         "upstream_status": upstream_status,
                     }
@@ -498,6 +517,7 @@ class DailyFinalizeService:
         scenario_publication: dict[str, Any] | None,
         market_date: str,
         upstream_status: str = "not_recorded",
+        reconciliation_gate: dict[str, Any] | None = None,
         publication_timestamp: str | None = None,
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
@@ -506,6 +526,12 @@ class DailyFinalizeService:
         )
         safety_evidence = publication["manifest"].get("safety_evidence")
         safety_verified = _safety_is_verified(safety_evidence)
+        gate = reconciliation_gate or {
+            "ready": False,
+            "status": "blocked",
+            "warnings": [],
+            "blocking": ["reconciliation gate was not evaluated"],
+        }
         status = (
             "ready"
             if (
@@ -513,6 +539,7 @@ class DailyFinalizeService:
                 and calendar_status in {"complete", "no_trade"}
                 and upstream_status == "complete"
                 and safety_verified
+                and gate.get("ready") is True
             )
             else "not_ready"
         )
@@ -526,6 +553,7 @@ class DailyFinalizeService:
             "upstream_status": upstream_status,
             "safety_status": "verified" if safety_verified else "blocked_or_unknown",
             "reconciliation_status": reconciliation.get("status"),
+            "reconciliation_gate": gate,
             "input_hash_sha256": reconciliation.get("input_hash_sha256"),
             "payload_sha256": publication["manifest"].get("payload_sha256"),
             "calendar_payload_sha256": calendar_publication["manifest"].get(
@@ -692,6 +720,7 @@ class DailyFinalizeService:
         scenario_publication: dict[str, Any] | None,
         readiness: dict[str, Any],
         retry_count: int,
+        reconciliation_gate: dict[str, Any] | None = None,
         upstream_stages: dict[str, str] | None = None,
         generated_at: str | None = None,
     ) -> dict[str, Any]:
@@ -703,7 +732,13 @@ class DailyFinalizeService:
         )
         output_hash = publication_set.get("publication_set_sha256")
         upstream_status = str(readiness.get("upstream_status") or "not_recorded")
-        reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
+        raw_reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
+        gate = reconciliation_gate or {}
+        reconciliation_status = (
+            str(gate.get("status") or "")
+            if gate.get("ready") is True
+            else raw_reconciliation_status
+        )
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
         calendar_status = str(
             calendar_publication["manifest"].get("status") or "degraded"
@@ -774,12 +809,12 @@ class DailyFinalizeService:
                 generated_at=generated_at,
                 next_action=(
                     "Resolve reconciliation issues before declaring complete."
-                    if reconciliation.get("issue_count", 0)
+                    if gate.get("ready") is not True
                     else "Keep the reconciled read model as the source for canonical performance."
                 ),
                 warning=(
-                    f"{reconciliation.get('issue_count', 0)} reconciliation issue(s)"
-                    if reconciliation.get("issue_count", 0)
+                    "; ".join(str(item) for item in gate.get("warnings") or [])
+                    if gate.get("warnings")
                     else None
                 ),
             ),
@@ -793,7 +828,7 @@ class DailyFinalizeService:
                 generated_at=generated_at,
                 next_action=(
                     "Collect eligible source outcomes and equity observations before publication."
-                    if reconciliation_status == "NO_DATA"
+                    if raw_reconciliation_status == "NO_DATA"
                     else "Review any pending or degraded rows before promotion."
                 ),
             ),
@@ -1039,7 +1074,15 @@ def _utc_now() -> str:
 
 def _stage_status(domain_status: str) -> str:
     normalized = domain_status.strip().lower()
-    if normalized in {"complete", "no_trade", "ready", "passed", "success"}:
+    if normalized in {
+        "complete",
+        "complete_with_warnings",
+        "no_trade",
+        "ready",
+        "ready_with_warnings",
+        "passed",
+        "success",
+    }:
         return "LOCAL_VERIFIED"
     if normalized in {"failed", "unreadable", "error"}:
         return "FAILED"
@@ -1124,6 +1167,110 @@ def _public_daily_run(snapshot: dict[str, Any]) -> dict[str, Any]:
         ),
         "upstream": snapshot.get("upstream"),
         "last_fully_successful_run": select(last_success),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _reconciliation_gate(
+    reconciliation: dict[str, Any],
+    *,
+    market_date: str,
+) -> dict[str, Any]:
+    """Allow only declared, non-current warning classes to pass publication."""
+
+    blocking: list[str] = []
+    warning_counts: dict[str, int] = {}
+    raw_issues = reconciliation.get("issues")
+    issues = raw_issues if isinstance(raw_issues, list) else []
+    if int(reconciliation.get("issue_count") or 0) != len(issues):
+        blocking.append("reconciliation issue inventory count mismatch")
+    for issue in issues:
+        if not isinstance(issue, dict):
+            blocking.append("reconciliation contains a malformed issue")
+            continue
+        code = str(issue.get("issue_code") or "").strip()
+        severity = str(issue.get("severity") or "").strip().lower()
+        issue_date = str(issue.get("market_date") or "")[:10]
+        allowed = (
+            severity == "warning"
+            and code in _NON_BLOCKING_RECONCILIATION_WARNING_CODES
+            and (
+                code == "paper_ops_equity_pnl_component_mismatch"
+                or (code == "missing_outcome" and issue_date < market_date)
+            )
+        )
+        if allowed:
+            warning_counts[code] = warning_counts.get(code, 0) + 1
+        else:
+            blocking.append(
+                f"blocking reconciliation issue {code or 'unknown'} "
+                f"for {issue_date or 'unknown-date'}"
+            )
+
+    paper_ops = reconciliation.get("paper_ops_reconciliation")
+    if not isinstance(paper_ops, dict):
+        blocking.append("PaperOps reconciliation inventory is missing")
+    else:
+        if str(paper_ops.get("state") or "") not in {"complete", "partial"}:
+            blocking.append("PaperOps reconciliation state is not publishable")
+        if int(paper_ops.get("quarantined_count") or 0) != 0:
+            blocking.append("PaperOps contains quarantined rows")
+        if int(paper_ops.get("source_return_field_mismatch_count") or 0) != 0:
+            blocking.append("PaperOps source return fields do not reconcile")
+
+    current_official = [
+        row
+        for row in reconciliation.get("daily") or []
+        if isinstance(row, dict)
+        and str(row.get("market_date") or "") == market_date
+        and str(row.get("cohort") or "") == "official_forward_paper"
+    ]
+    if not current_official:
+        blocking.append("current official forward-paper performance is missing")
+    for row in current_official:
+        status = str(row.get("status") or "").upper()
+        raw_coverage = row.get("coverage")
+        coverage = raw_coverage if isinstance(raw_coverage, dict) else {}
+        if status not in {"COMPLETE", "NO_TRADE"}:
+            blocking.append(
+                f"current official strategy {row.get('strategy_id') or 'unknown'} "
+                f"is {status or 'UNKNOWN'}"
+            )
+        if int(row.get("missing_outcome_count") or 0) != 0:
+            blocking.append("current official performance has a missing outcome")
+        if int(row.get("quarantined_count") or 0) != 0:
+            blocking.append("current official performance has quarantined evidence")
+        if int(coverage.get("missing_count") or 0) != 0:
+            blocking.append("current official coverage is incomplete")
+        if status == "NO_TRADE":
+            try:
+                return_pct = float(str(row.get("return_pct")))
+            except (TypeError, ValueError):
+                return_pct = None
+            if return_pct != 0.0 or int(row.get("no_trade_count") or 0) < 1:
+                blocking.append("current official NO_TRADE row is not an observed zero")
+
+    warnings = [
+        f"{count} {code} warning(s) retained with missing truth kept null"
+        if code == "missing_outcome"
+        else f"{count} {code} warning(s) retained after daily equity identity passed"
+        for code, count in sorted(warning_counts.items())
+    ]
+    unique_blocking = sorted(set(blocking))
+    ready = not unique_blocking
+    return {
+        "status": (
+            "ready_with_warnings"
+            if ready and warnings
+            else "complete" if ready else "blocked"
+        ),
+        "ready": ready,
+        "warning_codes": sorted(warning_counts),
+        "warning_count": sum(warning_counts.values()),
+        "warnings": warnings,
+        "blocking": unique_blocking,
+        "missing_truth_is_zero": False,
         "research_only": True,
         "broker_execution_enabled": False,
     }
