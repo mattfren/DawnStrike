@@ -74,8 +74,9 @@ def forward_readiness(*, output_root: Path = Path("data/v2_paper_ops")) -> Forwa
         warnings.append(f"data status {data_status} blocks forward readiness")
     if ledger.status != "passed":
         warnings.append("ledger rebuild did not match stored state/calendar")
-    if calendar.status != "passed":
+    if calendar.status == "failed":
         warnings.append("calendar truth verification failed")
+    warnings.extend(calendar.warnings)
     status = (
         "ready_with_warnings"
         if not _hard_block(data_status, ledger.status, calendar.status)
@@ -124,7 +125,7 @@ def _hard_block(data_status: str, ledger_status: str, calendar_status: str) -> b
     return (
         data_status in {"mismatch", "insufficient_overlap", "provider_error"}
         or ledger_status != "passed"
-        or calendar_status != "passed"
+        or calendar_status not in {"passed", "passed_with_warnings"}
     )
 
 

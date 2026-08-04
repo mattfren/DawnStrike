@@ -28,6 +28,7 @@ from intraday_scanner.v2.paper_ops.engine import (
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
+from intraday_scanner.v2.paper_ops.session_gaps import record_forward_session_gap
 from intraday_scanner.v2.paper_ops.shadow_runner import (
     initialize_shadow_registry,
     register_shadow_challenger,
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             "shadow-register",
             "shadow-run",
             "challenger-evaluate",
+            "record-forward-gap",
         ),
     )
     parser.add_argument("--date", default=date.today().isoformat())
@@ -79,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", default="data/v2_paper_ops")
     parser.add_argument("--write-rebuilt", action="store_true")
     parser.add_argument("--manifest")
+    parser.add_argument("--reason-code", default="historical_forward_run_absent")
     args = parser.parse_args(argv)
 
     output_root = Path(args.output_root)
@@ -148,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "challenger-evaluate":
         result = evaluate_paperops_challengers(output_root=output_root)
+    elif args.command == "record-forward-gap":
+        result = record_forward_session_gap(
+            output_root=output_root,
+            market_date=run_date.isoformat(),
+            reason_code=args.reason_code,
+        )
     else:
         result = demo(output_root=output_root)
     for key, value in result.items():

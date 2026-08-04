@@ -178,6 +178,46 @@ def test_truth_gate_detects_whole_missing_forward_market_session(
     ]
 
 
+def test_truth_gate_keeps_acknowledged_terminal_session_missing_not_zero(
+    tmp_path: Path,
+) -> None:
+    paths = PaperOpsPaths.create(tmp_path / "paper_ops")
+    policy = "paper-policy-v1"
+    fingerprint = "a" * 64
+    write_json(
+        paths.state / "strategy_registry.json",
+        [_registry_row("alpha", fingerprint, policy)],
+    )
+    write_json(
+        paths.state / "strategy_semantics_manifest.json",
+        {
+            "schema_version": "v2.strategy_semantics_manifest.v1",
+            "strategies": {
+                "alpha@v1.0": _manifest_entry(
+                    fingerprint,
+                    "2026-07-01T12:00:00+00:00",
+                    "2026-07-01",
+                )
+            },
+        },
+    )
+    _write_policy_manifest(paths, policy)
+    rows = [
+        _calendar_row("2026-07-14", "alpha", fingerprint, policy),
+        _calendar_row("2026-07-16", "alpha", fingerprint, policy),
+    ]
+
+    missing = _missing_strategy_rows(
+        paths,
+        rows,
+        [],
+        acknowledged_session_dates={"2026-07-15"},
+    )
+
+    assert missing == []
+    assert all(row["date"] != "2026-07-15" for row in rows)
+
+
 def _registry_row(
     strategy_id: str,
     fingerprint: str,

@@ -21,6 +21,7 @@ from intraday_scanner.v2.paper_ops.engine import (
     _recover_pending_transaction,
 )
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
+from intraday_scanner.v2.paper_ops.session_gaps import load_forward_session_gaps
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 
 _NUMERIC_FIELDS = (
@@ -67,7 +68,8 @@ class CalendarTruthResult:
     math_mismatches: tuple[str, ...]
     ledger_mismatches: tuple[str, ...]
     warnings: tuple[str, ...]
-    schema_version: str = "v2.paper_ops_calendar_truth.v2"
+    terminal_missing_sessions: tuple[str, ...] = ()
+    schema_version: str = "v2.paper_ops_calendar_truth.v3"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,6 +79,7 @@ class CalendarTruthResult:
             "missing_rows": list(self.missing_rows),
             "schema_version": self.schema_version,
             "status": self.status,
+            "terminal_missing_sessions": list(self.terminal_missing_sessions),
             "warnings": list(self.warnings),
         }
 
@@ -88,11 +91,25 @@ def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> C
     events, ledger_integrity = _read_strict_ledger(
         paths.ledger / "paper_ledger.jsonl"
     )
+    session_gaps, session_gap_errors = load_forward_session_gaps(paths)
+    terminal_missing_sessions = tuple(
+        f"{row['market_date']}:{row['reason_code']}" for row in session_gaps
+    )
+    acknowledged_dates = {
+        str(row["market_date"])
+        for row in session_gaps
+    }
     duplicate_rows = _duplicates(rows)
     missing_rows = [
         *(("calendar has no rows",) if not rows else ()),
         *(("ledger has no events",) if not events else ()),
-        *_missing_strategy_rows(paths, rows, events),
+        *(f"terminal session gap ledger invalid: {item}" for item in session_gap_errors),
+        *_missing_strategy_rows(
+            paths,
+            rows,
+            events,
+            acknowledged_session_dates=acknowledged_dates,
+        ),
         *_completed_report_coverage(paths, rows, events),
     ]
     math_mismatches = _math_mismatches(rows)
@@ -102,11 +119,23 @@ def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> C
         + [f"account mismatch: {item}" for item in rebuild.account_mismatches]
         + [f"ledger warning: {item}" for item in rebuild.warnings]
     )
-    warnings = _warnings(rows, events)
+    warnings = [
+        *_warnings(rows, events),
+        *(
+            "forward session is terminal missing; returns remain absent, never zero: "
+            f"{row['market_date']} ({row['reason_code']})"
+            for row in session_gaps
+        ),
+    ]
+    has_failures = bool(
+        duplicate_rows or missing_rows or math_mismatches or ledger_mismatches
+    )
     status = (
-        "passed"
-        if not duplicate_rows and not missing_rows and not math_mismatches and not ledger_mismatches
-        else "failed"
+        "failed"
+        if has_failures
+        else "passed_with_warnings"
+        if terminal_missing_sessions
+        else "passed"
     )
     result = CalendarTruthResult(
         status=status,
@@ -115,6 +144,7 @@ def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> C
         math_mismatches=tuple(math_mismatches),
         ledger_mismatches=ledger_mismatches,
         warnings=tuple(warnings),
+        terminal_missing_sessions=terminal_missing_sessions,
     )
     _write_reports(paths, result)
     return result
@@ -241,6 +271,8 @@ def _missing_strategy_rows(
     paths: PaperOpsPaths,
     rows: list[dict[str, str]],
     events: list[dict[str, object]],
+    *,
+    acknowledged_session_dates: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     registry_path = paths.state / "strategy_registry.json"
     if not registry_path.exists():
@@ -294,6 +326,7 @@ def _missing_strategy_rows(
         for row_date, mode in dates_modes
         for identity, inception_date in registry_inceptions.items()
         if row_date >= inception_date
+        if mode != "forward" or row_date not in acknowledged_session_dates
         if (row_date, mode, *identity) not in present
     }
     pre_inception_forward = {
@@ -707,6 +740,7 @@ def _write_reports(paths: PaperOpsPaths, result: CalendarTruthResult) -> None:
         f"- Missing rows: `{len(result.missing_rows)}`",
         f"- Math mismatches: `{len(result.math_mismatches)}`",
         f"- Ledger mismatches: `{len(result.ledger_mismatches)}`",
+        f"- Terminal missing sessions: `{len(result.terminal_missing_sessions)}`",
         "",
         "## Warnings",
         "",

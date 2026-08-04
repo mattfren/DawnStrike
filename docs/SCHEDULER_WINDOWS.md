@@ -69,3 +69,27 @@ The repo also includes:
 Use the dashboard `5-Min Monitor` button or this script for the current local
 5-minute task setup. Use `monitor-open --continuous` when you want 1-minute
 market-open monitoring.
+
+## AlphaOps EOD Truth Rules
+
+The EOD runner always captures shadow research outcomes, but official
+reconciliation and canonical learning run only when the exact
+`official_telegram` selection cohort contains real signals. An explicit
+`NO_TRADE` selection plus a `NO_ELIGIBLE` outcome-gap receipt records those
+stages as `SKIPPED_NOT_APPLICABLE`. Missing selection evidence still fails
+closed, and missing shadow outcomes remain missing and learning-ineligible.
+
+If a historical PaperOps forward session never ran, do not synthesize a zero
+return or replay it as forward evidence. After confirming that the session has
+no calendar row, completed report, or ledger event, record the terminal gap:
+
+```powershell
+py -m intraday_scanner.v2.paper_ops record-forward-gap `
+  --date 2026-07-31 `
+  --reason-code scheduler_run_absent `
+  --output-root C:\r\dawnstrike-state\v2_paper_ops_live
+```
+
+The record is append-only and integrity-hashed. Calendar truth then reports
+`passed_with_warnings`, the rendered calendar labels the session
+`Missing - not zero`, and any conflicting later forward evidence fails closed.

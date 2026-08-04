@@ -123,41 +123,84 @@ try {
         -LogRoot $logRoot `
         -LogName "alpha_outcomes-$MarketDate"
     $captureExit = $capture.exit_code
-    if ($captureExit -eq 0) {
+    $outcomeGapResult = Join-Path $captureRoot "outcome-gap.json"
+    $outcomeGap = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "outcome-gap", "--db-path", $dbPath, "--market-date", $MarketDate, "--out", $outcomeGapResult) `
+        -LogRoot $logRoot `
+        -LogName "alpha_outcome_gap-$MarketDate"
+    $gateResult = Join-Path $captureRoot "alpha_eod_gate.json"
+    $gate = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-eod-gate", "--db-path", $dbPath, "--market-date", $MarketDate, "--capture-exit-code", "$captureExit", "--capture-result", $captureResult, "--outcome-gap", $outcomeGapResult, "--out", $gateResult) `
+        -LogRoot $logRoot `
+        -LogName "alpha_eod_gate-$MarketDate"
+    $gateExit = $gate.exit_code
+    $officialOutcomesRequired = $true
+    if ($gateExit -eq 0 -and (Test-Path -LiteralPath $gateResult)) {
+        try {
+            $gatePayload = Get-Content -LiteralPath $gateResult -Raw | ConvertFrom-Json
+            $officialOutcomesRequired = [bool]$gatePayload.official_outcomes_required
+        }
+        catch {
+            $gateExit = 2
+        }
+    }
+    if ($gateExit -ne 0) {
+        Set-OverallFailure -ExitCode $gateExit
+        Write-Stage `
+            -Name eod_outcome_capture `
+            -Status TERMINAL_MISSING `
+            -ExitCode $gateExit `
+            -StartedAt $captureStarted `
+            -ResultFile $gateResult `
+            -OutputFile $captureResult `
+            -ErrorCode outcome_capture_incomplete
+    }
+    elseif (-not $officialOutcomesRequired) {
+        Write-Stage `
+            -Name eod_outcome_capture `
+            -Status SKIPPED_NOT_APPLICABLE `
+            -ExitCode 0 `
+            -StartedAt $captureStarted `
+            -ResultFile $gateResult `
+            -OutputFile $captureResult
+    }
+    else {
         Write-Stage `
             -Name eod_outcome_capture `
             -Status COMPLETE `
             -ExitCode 0 `
             -StartedAt $captureStarted `
-            -ResultFile $captureResult `
+            -ResultFile $gateResult `
             -OutputFile $captureResult
-    } else {
-        Set-OverallFailure -ExitCode $captureExit
-        Write-Stage `
-            -Name eod_outcome_capture `
-            -Status TERMINAL_MISSING `
-            -ExitCode $captureExit `
-            -StartedAt $captureStarted `
-            -ResultFile $captureResult `
-            -OutputFile $captureResult `
-            -ErrorCode outcome_capture_incomplete
     }
 
     $reconcileRoot = Join-Path $outputRoot "strategy_reconciliation\$MarketDate"
     New-Item -ItemType Directory -Path $reconcileRoot -Force | Out-Null
     $reconcileResult = Join-Path $reconcileRoot "reconciliation.json"
     $reconcileStarted = (Get-Date).ToUniversalTime().ToString("o")
-    if ($captureExit -eq 0) {
+    if ($gateExit -ne 0) {
+        $reconcileExit = $gateExit
+    }
+    elseif (-not $officialOutcomesRequired) {
+        $reconcileExit = 0
+        Write-Stage `
+            -Name paper_reconciliation `
+            -Status SKIPPED_NOT_APPLICABLE `
+            -ExitCode 0 `
+            -StartedAt $reconcileStarted `
+            -ResultFile $gateResult
+    }
+    else {
         $reconcile = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
             -ArgumentList @("-m", "intraday_scanner.cli", "alpha-paper-reconcile", "--db-path", $dbPath, "--market-date", $MarketDate, "--out-dir", $reconcileRoot, "--persist") `
             -LogRoot $logRoot `
             -LogName "alpha_reconcile-$MarketDate"
         $reconcileExit = $reconcile.exit_code
-    } else {
-        $reconcileExit = 2
     }
-    if ($reconcileExit -eq 0) {
+    if ($reconcileExit -eq 0 -and $officialOutcomesRequired) {
         Write-Stage `
             -Name paper_reconciliation `
             -Status COMPLETE `
@@ -165,7 +208,7 @@ try {
             -StartedAt $reconcileStarted `
             -ResultFile $reconcileResult `
             -OutputFile $reconcileResult
-    } else {
+    } elseif ($reconcileExit -ne 0) {
         Set-OverallFailure -ExitCode $reconcileExit
         Write-Stage `
             -Name paper_reconciliation `
@@ -177,7 +220,14 @@ try {
     }
 
     $learnStarted = (Get-Date).ToUniversalTime().ToString("o")
-    if ($reconcileExit -eq 0) {
+    $alphaLearningRequired = $officialOutcomesRequired
+    if ($gateExit -ne 0) {
+        $learnExit = $gateExit
+    }
+    elseif (-not $alphaLearningRequired) {
+        $learnExit = 0
+    }
+    elseif ($reconcileExit -eq 0) {
         $learning = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
             -ArgumentList @("-m", "intraday_scanner.cli", "alpha-learn", "--db-path", $dbPath) `
@@ -187,7 +237,9 @@ try {
     } else {
         $learnExit = 2
     }
-    Set-OverallFailure -ExitCode $learnExit
+    if ($learnExit -ne 0) {
+        Set-OverallFailure -ExitCode $learnExit
+    }
 
     $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -225,7 +277,14 @@ try {
             $learningErrorCode = $v6Result.Code
         }
     }
-    if ($learningStageExit -eq 0) {
+    if ($learningStageExit -eq 0 -and -not $alphaLearningRequired) {
+        Write-Stage `
+            -Name alpha_learning `
+            -Status SKIPPED_NOT_APPLICABLE `
+            -ExitCode 0 `
+            -StartedAt $learnStarted `
+            -ResultFile $gateResult
+    } elseif ($learningStageExit -eq 0) {
         Write-Stage -Name alpha_learning -Status COMPLETE -ExitCode 0 -StartedAt $learnStarted
     } else {
         Write-Stage `
@@ -244,11 +303,6 @@ try {
     if ($attribution.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $attribution.exit_code
     }
-    $outcomeGap = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "outcome-gap", "--db-path", $dbPath, "--market-date", $MarketDate, "--out", (Join-Path $captureRoot "outcome-gap.json")) `
-        -LogRoot $logRoot `
-        -LogName "alpha_outcome_gap-$MarketDate"
     if ($outcomeGap.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $outcomeGap.exit_code
     }
@@ -321,6 +375,7 @@ try {
         foreach ($command in @(
             "reconcile",
             "verify-calendar",
+            "calendar-view",
             "rebuild-ledger",
             "verify-source-bars",
             "blotter",
