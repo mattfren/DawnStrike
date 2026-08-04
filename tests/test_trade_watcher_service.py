@@ -242,7 +242,10 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
                 "entry_watch_level": 10.25,
                 "invalidation_level": 9.5,
                 "target_1": 11.5,
-                "raw_payload_json": {"research_only": True},
+                "raw_payload_json": {
+                    "research_only": True,
+                    "cost_model_version": "scenario-paper-fill-slippage-v1",
+                },
             }
         ]
     )
@@ -264,6 +267,20 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
             }
         ]
     )
+    store.upsert_scenario_signal_links(
+        [
+            {
+                "decision_id": "decision-1",
+                "signal_id": "scenario:decision-1",
+                "scan_id": "scenario:2026-08-03",
+                "cohort": SCENARIO_FORWARD_COHORT,
+                "strategy_id": SCENARIO_STRATEGY_ID,
+                "strategy_version": SCENARIO_POLICY_VERSION,
+                "created_at": "2026-08-03T14:00:00Z",
+                "updated_at": "2026-08-03T14:00:00Z",
+            }
+        ]
+    )
 
     result = run_trade_watcher(
         db_path=db_path,
@@ -279,10 +296,41 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
     )
 
     positions = store.load_paper_positions(market_date=market_date)
+    entry_link = store.load_scenario_signal_links(decision_id="decision-1")[0]
     assert result["signal_count"] == 1
     assert result["paper_fill_stats"]["inserted"] == 1
+    assert result["scenario_link_stats"]["refreshed"] == 1
     assert positions[0]["strategy_id"] == SCENARIO_STRATEGY_ID
     assert positions[0]["cohort"] == SCENARIO_FORWARD_COHORT
+    assert entry_link["paper_intent_id"] == positions[0]["entry_intent_id"]
+    assert entry_link["entry_fill_id"]
+    assert entry_link["exit_fill_id"] == ""
+    assert entry_link["paper_trade_id"] == positions[0]["position_id"]
+
+    exit_result = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date=market_date,
+        requested_at="10:10",
+        minute_bars=_write_minute_bars(
+            tmp_path / "scenario-exit-bars.csv",
+            [
+                _bar("2026-08-03T10:05:00-04:00", 10.3),
+                _bar("2026-08-03T10:10:00-04:00", 11.6),
+            ],
+        ),
+        include_scenarios=True,
+        dry_run=True,
+    )
+    closed = store.load_paper_positions(market_date=market_date)[0]
+    exit_link = store.load_scenario_signal_links(decision_id="decision-1")[0]
+
+    assert exit_result["paper_fill_stats"]["inserted"] == 1
+    assert closed["status"] == "CLOSED"
+    assert exit_link["entry_intent_id"] == closed["entry_intent_id"]
+    assert exit_link["exit_intent_id"] == closed["exit_intent_id"]
+    assert exit_link["entry_fill_id"]
+    assert exit_link["exit_fill_id"]
 
 
 def test_trade_watcher_fails_closed_on_partially_persisted_selection(

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -951,6 +951,21 @@ def _migration_019_account_comparison_contract(
     )
 
 
+def _migration_020_scenario_lifecycle_identity(
+    connection: sqlite3.Connection,
+) -> None:
+    """Link every Scenario decision to the complete durable paper lifecycle."""
+
+    for column in (
+        "entry_intent_id TEXT",
+        "exit_intent_id TEXT",
+        "entry_fill_id TEXT",
+        "exit_fill_id TEXT",
+        "paper_trade_id TEXT",
+    ):
+        _add_column_if_missing(connection, "scenario_signal_links", column)
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -980,4 +995,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (17, _migration_017_alphaops_v6_one_time_holdout),
     (18, _migration_018_alphaops_v6_operational_receipts),
     (19, _migration_019_account_comparison_contract),
+    (20, _migration_020_scenario_lifecycle_identity),
 )

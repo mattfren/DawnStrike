@@ -31,6 +31,7 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
 )
+from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
     recover_legacy_alpha_delivery_membership,
@@ -268,6 +269,19 @@ def run_trade_watcher(
         paper_fills=paper_fills,
         signal_events=signal_events,
     )
+    scenario_link_stats = (
+        refresh_scenario_lifecycle_links(
+            store,
+            signal_ids={
+                _signal_id(signal)
+                for signal in signals
+                if str(signal.get("strategy_id") or "") == SCENARIO_STRATEGY_ID
+            },
+            updated_at=created_at,
+        )
+        if include_scenarios
+        else {"refreshed": 0, "row_count": 0}
+    )
     intent_stats = lifecycle_stats["intents"]
     position_stats = lifecycle_stats["paper_positions"]
     fill_stats = lifecycle_stats["paper_fills"]
@@ -290,6 +304,7 @@ def run_trade_watcher(
         "paper_position_stats": position_stats,
         "paper_fill_stats": fill_stats,
         "signal_event_stats": event_stats,
+        "scenario_link_stats": scenario_link_stats,
         "notification_stats": notification_stats,
         "notification_outbox": {
             "candidate_count": len(notification_events_by_key),
@@ -1057,6 +1072,9 @@ def _intent(
         stable_block=stable_block,
     )
     trace = dict(decision_trace or {})
+    raw_signal_payload = signal.get("raw_payload_json")
+    if not isinstance(raw_signal_payload, dict):
+        raw_signal_payload = {}
     return {
         "intent_id": intent_id,
         "signal_id": signal_id,
@@ -1086,7 +1104,11 @@ def _intent(
         "cohort": str(signal.get("cohort") or "algorithm_selected"),
         "account_id": str(trace.get("account_id") or ""),
         "execution_policy_version": str(trace.get("policy_version") or ""),
-        "cost_model_version": str(trace.get("cost_model_version") or ""),
+        "cost_model_version": str(
+            trace.get("cost_model_version")
+            or raw_signal_payload.get("cost_model_version")
+            or ""
+        ),
         "decision_fingerprint": str(trace.get("decision_fingerprint") or ""),
         "official_paper_eligible": trace.get("eligible_for_official_paper"),
         "decision_trace": trace,

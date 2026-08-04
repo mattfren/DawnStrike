@@ -38,8 +38,10 @@ DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS=45
 3. Entered paper scenarios use the shared paper watcher. Its durable outbox sends
    only deduplicated entry and exit Telegram notices.
 4. EOD runs `scenario-close` and `scenario-finalize`. Reported returns exclude
-   open, missing, and quarantined outcomes; sourced SPY comparison remains null
-   when the source bars are incomplete.
+   untriggered, open, missing, and quarantined outcomes. A closed position is
+   still ineligible unless its entry and exit fills, named cost model and cost
+   values, stable lifecycle identities, and same-horizon sourced SPY bars are
+   complete. Missing SPY evidence leaves every return metric for that row null.
 5. `build_public.py` binds `scenarios.json` and its manifest into the same atomic
    publication set as performance and calendar data. A degraded artifact must
    not be deployed or promoted.
