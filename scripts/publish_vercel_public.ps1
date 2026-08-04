@@ -97,6 +97,21 @@ function Invoke-VercelJson {
     return Convert-VercelJson -Output @($output) -Label $Label
 }
 
+function Get-OptionalJsonProperty {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($null -eq $InputObject) {
+        return $null
+    }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
 function Set-VercelAlias {
     param(
         [string]$DeploymentUrl,
@@ -139,10 +154,16 @@ function Assert-PublicationState {
     if ($Health.build_id -ne $BuildManifest.build_id) {
         throw "$Label health build ID does not match the build manifest."
     }
-    if ($Readiness.source_sha -and $Readiness.source_sha -ne $BuildManifest.source_sha) {
+    $readinessSourceSha = Get-OptionalJsonProperty `
+        -InputObject $Readiness `
+        -Name "source_sha"
+    $readinessBuildId = Get-OptionalJsonProperty `
+        -InputObject $Readiness `
+        -Name "build_id"
+    if ($readinessSourceSha -and $readinessSourceSha -ne $BuildManifest.source_sha) {
         throw "$Label readiness source SHA does not match the build manifest."
     }
-    if ($Readiness.build_id -and $Readiness.build_id -ne $BuildManifest.build_id) {
+    if ($readinessBuildId -and $readinessBuildId -ne $BuildManifest.build_id) {
         throw "$Label readiness build ID does not match the build manifest."
     }
     if ($Readiness.data_hash_sha256 -ne $BuildManifest.data_hash_sha256) {
@@ -179,8 +200,11 @@ try {
     $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
         -Label "Vercel prebuilt deploy"
-    $deployment = if ($deploymentResponse.deployment) {
-        $deploymentResponse.deployment
+    $wrappedDeployment = Get-OptionalJsonProperty `
+        -InputObject $deploymentResponse `
+        -Name "deployment"
+    $deployment = if ($null -ne $wrappedDeployment) {
+        $wrappedDeployment
     }
     else {
         $deploymentResponse
@@ -190,8 +214,11 @@ finally {
     Pop-Location
 }
 
-$previewUrl = [string]$deployment.url
-if (-not $deployment.id -or -not $previewUrl) {
+$deploymentId = Get-OptionalJsonProperty -InputObject $deployment -Name "id"
+$previewUrl = [string](
+    Get-OptionalJsonProperty -InputObject $deployment -Name "url"
+)
+if (-not $deploymentId -or -not $previewUrl) {
     throw "Vercel prebuilt deploy did not return a deployment ID and URL."
 }
 if (-not $previewUrl.StartsWith("http")) {
@@ -240,12 +267,32 @@ try {
                 $deploymentsResponse = Invoke-VercelJson `
                     -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
                     -Label "Promoted deployment list"
+                $listedDeployments = @(
+                    Get-OptionalJsonProperty `
+                        -InputObject $deploymentsResponse `
+                        -Name "deployments"
+                )
+                if (-not $listedDeployments.Count) {
+                    throw "Promoted deployment list did not return deployments."
+                }
                 $promotedCandidates = @(
-                    $deploymentsResponse.deployments |
+                    $listedDeployments |
                         Where-Object {
-                            $_.target -eq "production" -and
-                            $_.meta.action -eq "promote" -and
-                            $_.meta.originalDeploymentId -eq $deployment.id
+                            $target = Get-OptionalJsonProperty `
+                                -InputObject $_ `
+                                -Name "target"
+                            $metadata = Get-OptionalJsonProperty `
+                                -InputObject $_ `
+                                -Name "meta"
+                            $action = Get-OptionalJsonProperty `
+                                -InputObject $metadata `
+                                -Name "action"
+                            $originalDeploymentId = Get-OptionalJsonProperty `
+                                -InputObject $metadata `
+                                -Name "originalDeploymentId"
+                            $target -eq "production" -and
+                            $action -eq "promote" -and
+                            $originalDeploymentId -eq $deploymentId
                         } |
                         Sort-Object -Property createdAt -Descending
                 )
@@ -300,8 +347,13 @@ try {
             throw "Promoted deployment verification did not converge: $promotionVerificationError"
         }
 
-        $promotedUrl = [string]$promotedDeployment.url
-        if (-not $promotedDeployment.id -or -not $promotedUrl) {
+        $promotedDeploymentId = Get-OptionalJsonProperty `
+            -InputObject $promotedDeployment `
+            -Name "id"
+        $promotedUrl = [string](
+            Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "url"
+        )
+        if (-not $promotedDeploymentId -or -not $promotedUrl) {
             throw "Promoted deployment inspect did not return a deployment ID and URL."
         }
         foreach ($alias in $allProductionAliases) {
@@ -364,12 +416,18 @@ try {
 }
 catch {
     $publicationError = $_.Exception.Message
-    if ($promoted -and $priorProduction.id -and $priorProduction.url) {
+    $priorProductionId = Get-OptionalJsonProperty `
+        -InputObject $priorProduction `
+        -Name "id"
+    $priorProductionUrl = [string](
+        Get-OptionalJsonProperty -InputObject $priorProduction -Name "url"
+    )
+    if ($promoted -and $priorProductionId -and $priorProductionUrl) {
         $rollbackErrors = @()
         foreach ($alias in $allProductionAliases) {
             try {
                 Set-VercelAlias `
-                    -DeploymentUrl ([string]$priorProduction.url) `
+                    -DeploymentUrl $priorProductionUrl `
                     -AliasUrl ([string]$alias) `
                     -Label "Production rollback for $alias"
             }
@@ -389,8 +447,8 @@ $result = [ordered]@{
     generated_at = [DateTimeOffset]::UtcNow.ToString("o")
     project_id = $ProjectId
     preview_url = $previewUrl
-    preview_deployment_id = $deployment.id
-    preview_ready_state = $deployment.readyState
+    preview_deployment_id = $deploymentId
+    preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
     source_sha = $previewManifest.source_sha
     build_id = $previewManifest.build_id
     data_hash_sha256 = $previewManifest.data_hash_sha256
@@ -401,10 +459,10 @@ $result = [ordered]@{
     readiness_http_status = $previewReadiness.http_status
     allow_degraded = [bool]$AllowDegraded
     promoted = [bool]$Promote
-    prior_production_deployment_id = if ($priorProduction) { $priorProduction.id } else { $null }
+    prior_production_deployment_id = Get-OptionalJsonProperty -InputObject $priorProduction -Name "id"
     production_aliases = if ($Promote) { @($allProductionAliases) } else { @() }
-    promoted_deployment_id = if ($promotedDeployment) { $promotedDeployment.id } else { $null }
-    production_deployment_id = if ($production) { $production.id } else { $null }
+    promoted_deployment_id = Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "id"
+    production_deployment_id = Get-OptionalJsonProperty -InputObject $production -Name "id"
     live_trading_enabled = $false
     research_only = $true
     status = if ($Promote) { "PRODUCTION_VERIFIED" } else { "PREVIEW_VERIFIED" }
