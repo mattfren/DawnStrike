@@ -10,8 +10,8 @@ from typing import Any
 
 SCENARIO_POLICY_VERSION = "dawnstrike-news-scenario-v1"
 SCENARIO_FEATURE_SCHEMA_VERSION = "dawnstrike-news-scenario-features-v1"
-SCENARIO_EXTRACTION_SCHEMA_VERSION = "dawnstrike-news-extraction-v1"
-SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v1"
+SCENARIO_EXTRACTION_SCHEMA_VERSION = "dawnstrike-news-extraction-v2"
+SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v2"
 SCENARIO_STRATEGY_ID = "news_scenario_v1"
 SCENARIO_FORWARD_COHORT = "scenario_forward"
 SCENARIO_REPLAY_COHORT = "scenario_historical_replay"
@@ -160,6 +160,11 @@ class ScenarioClaim:
     evidence_spans: tuple[str, ...]
     materiality: str
     uncertainty_flags: tuple[str, ...] = ()
+    claim_status: str = "unknown"
+    causal_mechanism: str = ""
+    affected_business_variable: str = ""
+    horizon: str = "unknown"
+    novelty: str = "unknown"
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ScenarioClaim:
@@ -172,6 +177,15 @@ class ScenarioClaim:
         materiality = str(value.get("materiality") or "unknown").lower()
         if materiality not in {"high", "medium", "low", "unknown"}:
             materiality = "unknown"
+        claim_status = str(value.get("claim_status") or "unknown").lower()
+        if claim_status not in {"confirmed", "reported", "rumor", "disputed", "unknown"}:
+            claim_status = "unknown"
+        horizon = str(value.get("horizon") or "unknown").lower()
+        if horizon not in {"immediate", "near_term", "medium_term", "long_term", "unknown"}:
+            horizon = "unknown"
+        novelty = str(value.get("novelty") or "unknown").lower()
+        if novelty not in {"new", "known_update", "restatement", "unknown"}:
+            novelty = "unknown"
         return cls(
             event_type=event_type,
             direction=direction,
@@ -185,6 +199,13 @@ class ScenarioClaim:
                 for item in value.get("uncertainty_flags", [])
                 if str(item).strip()
             ),
+            claim_status=claim_status,
+            causal_mechanism=str(value.get("causal_mechanism") or "").strip(),
+            affected_business_variable=str(
+                value.get("affected_business_variable") or ""
+            ).strip(),
+            horizon=horizon,
+            novelty=novelty,
         )
 
 
@@ -203,6 +224,10 @@ class ScenarioExtraction:
     output_hash_sha256: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     usage: dict[str, Any] = field(default_factory=dict)
+    prompt_injection_detected: bool = False
+    contradictions: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
+    unresolved_unknowns: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(
@@ -242,6 +267,18 @@ class ScenarioExtraction:
             input_hash_sha256=str(value.get("input_hash_sha256") or ""),
             output_hash_sha256=output_hash,
             usage=dict(usage or {}),
+            prompt_injection_detected=bool(value.get("prompt_injection_detected")),
+            contradictions=tuple(
+                str(item).strip() for item in value.get("contradictions", []) if str(item).strip()
+            ),
+            dependencies=tuple(
+                str(item).strip() for item in value.get("dependencies", []) if str(item).strip()
+            ),
+            unresolved_unknowns=tuple(
+                str(item).strip()
+                for item in value.get("unresolved_unknowns", [])
+                if str(item).strip()
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:

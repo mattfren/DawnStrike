@@ -135,6 +135,11 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
             errors.append("scenario_hash_mismatch")
         if scenarios_manifest.get("calibration_status") != "UNCALIBRATED":
             errors.append("scenario_calibration_disclosure_missing")
+        if publication_set_path.is_file() and (
+            publication_set.get("scenario_payload_sha256")
+            != scenarios_manifest.get("payload_sha256")
+        ):
+            errors.append("publication_set_scenario_hash_mismatch")
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):

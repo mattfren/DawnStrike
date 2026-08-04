@@ -650,6 +650,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scenario_cycle_parser.add_argument("--since", default=None)
     scenario_cycle_parser.add_argument("--until", default=None)
     scenario_cycle_parser.add_argument("--dry-run", action="store_true")
+    scenario_cycle_parser.add_argument("--notify", default="console")
+
+    scenario_monitor_parser = subparsers.add_parser(
+        "scenario-monitor",
+        help="Run the deduplicated Scenario Intelligence monitor and paper lifecycle check",
+    )
+    scenario_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_monitor_parser.add_argument("--symbols", default=None)
+    scenario_monitor_parser.add_argument("--since", default=None)
+    scenario_monitor_parser.add_argument("--until", default=None)
+    scenario_monitor_parser.add_argument("--dry-run", action="store_true")
+    scenario_monitor_parser.add_argument("--notify", default="console")
 
     scenario_replay_parser = subparsers.add_parser(
         "scenario-replay", help="Record a separately labeled historical scenario research cohort"
@@ -672,6 +684,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scenario_close_parser.add_argument("--market-date", default=None)
     scenario_close_parser.add_argument("--at", default="16:00")
     scenario_close_parser.add_argument("--source", default="alpaca")
+    scenario_close_parser.add_argument("--notify", default="console")
 
     scenario_report_parser = subparsers.add_parser(
         "scenario-report", help="Print the safe static Scenario Intelligence projection"
@@ -1149,6 +1162,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "scenario-doctor":
             return _run_scenario_doctor(args)
         if args.command == "scenario-cycle":
+            return _run_scenario_cycle(args)
+        if args.command == "scenario-monitor":
             return _run_scenario_cycle(args)
         if args.command == "scenario-replay":
             return _run_scenario_replay(args)
@@ -1886,6 +1901,7 @@ def _run_scenario_cycle(args: argparse.Namespace) -> int:
         since=args.since,
         until=args.until,
         dry_run=args.dry_run,
+        notify=args.notify,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1915,6 +1931,7 @@ def _run_scenario_close(args: argparse.Namespace) -> int:
         market_date=args.market_date,
         requested_at=args.at,
         source=args.source,
+        notify=args.notify,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

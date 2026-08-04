@@ -66,6 +66,19 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         ),
         encoding="utf-8",
     )
+    scenario = data_root / "scenarios.json"
+    scenario.write_bytes(b'{"records":[],"performance":[]}')
+    scenario_hash = hashlib.sha256(scenario.read_bytes()).hexdigest()
+    scenario_manifest = data_root / "scenarios.json.manifest.json"
+    scenario_manifest.write_text(
+        json.dumps(
+            {
+                "payload_sha256": scenario_hash,
+                "calibration_status": "UNCALIBRATED",
+            }
+        ),
+        encoding="utf-8",
+    )
     publication_set_hash = hashlib.sha256(
         f"{snapshot_hash}:{calendar_hash}".encode()
     ).hexdigest()
@@ -75,6 +88,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
             {
                 "performance_payload_sha256": snapshot_hash,
                 "calendar_payload_sha256": calendar_hash,
+                "scenario_payload_sha256": scenario_hash,
                 "publication_set_sha256": publication_set_hash,
             }
         ),
@@ -117,6 +131,8 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     )
     monkeypatch.setattr(readiness, "CALENDAR_PATH", calendar)
     monkeypatch.setattr(readiness, "CALENDAR_MANIFEST_PATH", calendar_manifest)
+    monkeypatch.setattr(readiness, "SCENARIO_PATH", scenario)
+    monkeypatch.setattr(readiness, "SCENARIO_MANIFEST_PATH", scenario_manifest)
     monkeypatch.setattr(readiness, "PUBLICATION_SET_PATH", publication_set)
     monkeypatch.setattr(readiness, "BUILD_MANIFEST_PATH", build_manifest)
     assert readiness._validate_public_state(readiness_payload) == []

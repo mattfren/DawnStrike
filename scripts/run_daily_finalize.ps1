@@ -71,7 +71,7 @@ try {
     if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
         $scenarioClose = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-close", "--db-path", $dbPath, "--market-date", $MarketDate, "--at", "16:00", "--source", "alpaca") `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-close", "--db-path", $dbPath, "--market-date", $MarketDate, "--at", "16:00", "--source", "alpaca", "--notify", "telegram") `
             -LogRoot $logRoot `
             -LogName "scenario_close-$MarketDate"
         if ($scenarioClose.exit_code -ne 0) {

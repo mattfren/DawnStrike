@@ -40,6 +40,27 @@ function Write-MonitorStage {
         -LogRoot $logRoot `
         -LogName "record_stage-intraday_monitor-$MarketDate"
 }
+function Write-ScenarioStage {
+    param([string]$Status, [int]$ExitCode, [string]$ErrorCode = "")
+    $arguments = @(
+        "scripts\record_daily_stage.py",
+        "--db-path", $dbPath,
+        "--market-date", $MarketDate,
+        "--stage", "scenario_intelligence",
+        "--status", $Status,
+        "--runtime-root", $runtime,
+        "--state-root", $state,
+        "--exit-code", "$ExitCode",
+        "--started-at", $startedAt,
+        "--not-required"
+    )
+    if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    return Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList $arguments `
+        -LogRoot $logRoot `
+        -LogName "record_stage-scenario_intelligence-$MarketDate"
+}
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor"
 if (-not $dailyLock.acquired) {
     Write-Output "Skipped duplicate AlphaOps monitor run: $($dailyLock.reason)"
@@ -88,12 +109,20 @@ try {
             $scenarioSince = (Get-Date).ToUniversalTime().AddMinutes(-10).ToString("o")
             $scenario = Invoke-DawnstrikeNativeProcess `
                 -FilePath "py.exe" `
-                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-cycle", "--db-path", $dbPath, "--since", $scenarioSince) `
+                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
                 -LogRoot $logRoot `
                 -LogName "scenario_monitor-$MarketDate"
             if ($scenario.exit_code -ne 0) {
                 $exitCode = $scenario.exit_code
                 $errorCode = "scenario_cycle_failed"
+            }
+            $scenarioStage = Write-ScenarioStage `
+                -Status $(if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
+                -ExitCode $scenario.exit_code `
+                -ErrorCode $(if ($scenario.exit_code -eq 0) { "" } else { "scenario_cycle_failed" })
+            if ($scenarioStage.exit_code -ne 0 -and $exitCode -eq 0) {
+                $exitCode = 2
+                $errorCode = "scenario_stage_record_failed"
             }
         }
     }

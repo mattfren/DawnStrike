@@ -42,6 +42,14 @@ SNAPSHOT_MANIFEST_PATH = _artifact_path(
 )
 CALENDAR_PATH = PUBLIC_ROOT / "data" / "calendar.json"
 CALENDAR_MANIFEST_PATH = PUBLIC_ROOT / "data" / "calendar.json.manifest.json"
+SCENARIO_PATH = _artifact_path(
+    PUBLIC_ROOT / "data" / "scenarios.json",
+    PUBLIC_ROOT / "data" / "scenarios.json",
+)
+SCENARIO_MANIFEST_PATH = _artifact_path(
+    PUBLIC_ROOT / "data" / "scenarios.json.manifest.json",
+    PUBLIC_ROOT / "data" / "scenarios.json.manifest.json",
+)
 PUBLICATION_SET_PATH = PUBLIC_ROOT / "data" / "publication-set.json"
 BUILD_MANIFEST_PATH = PUBLIC_ROOT / "build-manifest.json"
 REQUIRED_HASHED_FILES = {
@@ -55,6 +63,8 @@ REQUIRED_HASHED_FILES = {
     "data/performance.json.manifest.json",
     "data/calendar.json",
     "data/calendar.json.manifest.json",
+    "data/scenarios.json",
+    "data/scenarios.json.manifest.json",
     "data/publication-set.json",
     "release-manifest.json",
 }
@@ -98,8 +108,8 @@ class handler(BaseHTTPRequestHandler):
         )
         status = 200 if not checks else 503
         build_manifest = _read_object(BUILD_MANIFEST_PATH)
-        if not build_manifest and isinstance(PUBLIC_STATE.get("build_manifest"), dict):
-            build_manifest = PUBLIC_STATE["build_manifest"]
+        if not build_manifest:
+            build_manifest = _object_dict(PUBLIC_STATE.get("build_manifest"))
         payload = {
             **payload,
             "status": "ready" if status == 200 else "not_ready",
@@ -117,16 +127,8 @@ class handler(BaseHTTPRequestHandler):
 
 def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    snapshot_manifest = (
-        PUBLIC_STATE.get("snapshot_manifest")
-        if isinstance(PUBLIC_STATE.get("snapshot_manifest"), dict)
-        else {}
-    )
-    build_manifest = (
-        PUBLIC_STATE.get("build_manifest")
-        if isinstance(PUBLIC_STATE.get("build_manifest"), dict)
-        else {}
-    )
+    snapshot_manifest = _object_dict(PUBLIC_STATE.get("snapshot_manifest"))
+    build_manifest = _object_dict(PUBLIC_STATE.get("build_manifest"))
     encoded_snapshot = PUBLIC_STATE.get("snapshot_b64")
     if not isinstance(encoded_snapshot, str):
         failures.append("snapshot_missing")
@@ -137,16 +139,8 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         except (ValueError, TypeError):
             failures.append("snapshot_unreadable")
             payload_bytes = b""
-    calendar_manifest = (
-        PUBLIC_STATE.get("calendar_manifest")
-        if isinstance(PUBLIC_STATE.get("calendar_manifest"), dict)
-        else {}
-    )
-    publication_set = (
-        PUBLIC_STATE.get("publication_set")
-        if isinstance(PUBLIC_STATE.get("publication_set"), dict)
-        else {}
-    )
+    calendar_manifest = _object_dict(PUBLIC_STATE.get("calendar_manifest"))
+    publication_set = _object_dict(PUBLIC_STATE.get("publication_set"))
     encoded_calendar = PUBLIC_STATE.get("calendar_b64")
     if not isinstance(encoded_calendar, str):
         failures.append("calendar_missing")
@@ -160,6 +154,17 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         except (ValueError, TypeError):
             failures.append("calendar_unreadable")
             calendar_bytes = b""
+    scenario_manifest = _object_dict(PUBLIC_STATE.get("scenario_manifest"))
+    encoded_scenario = PUBLIC_STATE.get("scenario_b64")
+    if not isinstance(encoded_scenario, str):
+        failures.append("scenario_missing")
+        scenario_bytes = b""
+    else:
+        try:
+            scenario_bytes = base64.b64decode(encoded_scenario, validate=True)
+        except (ValueError, TypeError):
+            failures.append("scenario_unreadable")
+            scenario_bytes = b""
     if not snapshot_manifest:
         failures.append("snapshot_manifest_missing")
     else:
@@ -195,6 +200,18 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         != calendar_manifest.get("payload_sha256")
     ):
         failures.append("publication_set_calendar_hash_mismatch")
+    if not scenario_manifest:
+        failures.append("scenario_manifest_missing")
+    else:
+        if scenario_manifest.get("payload_sha256") != hashlib.sha256(scenario_bytes).hexdigest():
+            failures.append("scenario_hash_mismatch")
+        if scenario_manifest.get("calibration_status") != "UNCALIBRATED":
+            failures.append("scenario_calibration_disclosure_missing")
+    if (
+        publication_set.get("scenario_payload_sha256")
+        != scenario_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_scenario_hash_mismatch")
     if not build_manifest:
         failures.append("build_manifest_missing")
     if not build_manifest.get("source_sha"):
@@ -242,11 +259,16 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("snapshot_missing")
     if not SNAPSHOT_MANIFEST_PATH.is_file():
         failures.append("snapshot_manifest_missing")
+    if not SCENARIO_PATH.is_file():
+        failures.append("scenario_missing")
+    if not SCENARIO_MANIFEST_PATH.is_file():
+        failures.append("scenario_manifest_missing")
     if not BUILD_MANIFEST_PATH.is_file():
         failures.append("build_manifest_missing")
     snapshot_manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
     calendar_manifest: dict[str, object] = {}
+    scenario_manifest: dict[str, object] = {}
     publication_set: dict[str, object] = {}
     if SNAPSHOT_PATH.is_file() and SNAPSHOT_MANIFEST_PATH.is_file():
         try:
@@ -291,6 +313,19 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
             failures.append("calendar_unreadable")
     else:
         failures.append("calendar_missing")
+    if SCENARIO_PATH.is_file() and SCENARIO_MANIFEST_PATH.is_file():
+        try:
+            scenario_bytes = SCENARIO_PATH.read_bytes()
+            scenario_manifest = _read_object(SCENARIO_MANIFEST_PATH)
+            if (
+                scenario_manifest.get("payload_sha256")
+                != hashlib.sha256(scenario_bytes).hexdigest()
+            ):
+                failures.append("scenario_hash_mismatch")
+            if scenario_manifest.get("calibration_status") != "UNCALIBRATED":
+                failures.append("scenario_calibration_disclosure_missing")
+        except OSError:
+            failures.append("scenario_unreadable")
     publication_set = _read_object(PUBLICATION_SET_PATH)
     if (
         publication_set.get("performance_payload_sha256")
@@ -302,6 +337,11 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         != calendar_manifest.get("payload_sha256")
     ):
         failures.append("publication_set_calendar_hash_mismatch")
+    if (
+        publication_set.get("scenario_payload_sha256")
+        != scenario_manifest.get("payload_sha256")
+    ):
+        failures.append("publication_set_scenario_hash_mismatch")
     if not build_manifest.get("source_sha"):
         failures.append("source_sha_missing")
     if not build_manifest.get("build_id"):
@@ -441,3 +481,9 @@ def _read_object(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _object_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
