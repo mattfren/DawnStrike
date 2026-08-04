@@ -495,13 +495,15 @@ def data_confidence_score(row: SnapshotRow, warnings: list[str]) -> float:
 
 def field_sources(row: SnapshotRow) -> dict[str, str]:
     base = row.source or "unknown"
+    premarket = row.premarket_range_source or base
     return {
-        "premarket_price": base,
-        "premarket_high": base,
-        "premarket_low": base,
-        "premarket_volume": base,
-        "gap_pct": base,
-        "dollar_volume": base,
+        "premarket_price": row.premarket_price_source or premarket,
+        "previous_close": row.previous_close_source or premarket,
+        "premarket_high": row.premarket_high_source or premarket,
+        "premarket_low": row.premarket_low_source or premarket,
+        "premarket_volume": row.premarket_volume_source or premarket,
+        "gap_pct": row.gap_pct_source or premarket,
+        "dollar_volume": row.dollar_volume_source or premarket,
         "float_shares": base if row.float_shares else "missing",
         "catalyst_headline": base if row.catalyst_headline else "missing",
         "spread_pct": base,

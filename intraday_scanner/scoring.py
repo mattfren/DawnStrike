@@ -100,7 +100,9 @@ def score_snapshot(
             "target_basis_kind": "premarket_range_extension",
             "target_basis_value": round(first_target, 4),
             "target_basis_source": str(
-                row.source_url
+                row.premarket_range_source_url
+                or row.premarket_range_source
+                or row.source_url
                 or row.preferred_source
                 or row.source
                 or "unknown"
@@ -317,6 +319,18 @@ def _source_lineage(
         "row_merge_reason": row.row_merge_reason,
         "raw_file_path": row.raw_file_path,
         "coverage_warning": row.coverage_warning,
+        "premarket_observation": {
+            "source": row.premarket_range_source,
+            "source_url": row.premarket_range_source_url,
+            "status": row.enrichment_status,
+            "observed_at": row.enrichment_observed_at,
+            "bar_completed_at": row.enrichment_bar_completed_at,
+            "is_complete": row.enrichment_is_complete,
+            "fallback_status": row.enrichment_fallback_status,
+            "fallback_source": row.enrichment_fallback_source,
+            "was_fallback": row.enrichment_was_fallback,
+            "observation_sha256": row.enrichment_observation_sha256,
+        },
     }
 
 
