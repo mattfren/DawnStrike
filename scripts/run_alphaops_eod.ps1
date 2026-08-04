@@ -357,7 +357,21 @@ try {
         -LogRoot $logRoot `
         -LogName "paperops_init-$MarketDate"
     $paperExit = $paperInit.exit_code
-    if ($paperExit -eq 0) {
+    $reuseExistingDailyReport = $false
+    $existingDailyReport = Join-Path $paperOpsRoot "reports\daily\forward_$MarketDate.json"
+    if ($paperExit -eq 0 -and (Test-Path -LiteralPath $existingDailyReport -PathType Leaf)) {
+        # A scheduler retry must not regenerate immutable events from a newer
+        # provider snapshot.  Reuse an existing completed day only when the
+        # entire stored ledger reconciles first; all truth checks below still run.
+        $paperResume = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.v2.paper_ops", "reconcile", "--output-root", $paperOpsRoot) `
+            -LogRoot $logRoot `
+            -LogName "paperops-resume-reconcile-$MarketDate"
+        $paperExit = $paperResume.exit_code
+        $reuseExistingDailyReport = ($paperExit -eq 0)
+    }
+    if ($paperExit -eq 0 -and -not $reuseExistingDailyReport) {
         for ($attempt = 1; $attempt -le $PaperOpsRetryLimit; $attempt++) {
             $paperDay = Invoke-DawnstrikeNativeProcess `
                 -FilePath "py.exe" `
