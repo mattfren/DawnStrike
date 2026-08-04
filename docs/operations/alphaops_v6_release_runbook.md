@@ -79,6 +79,9 @@ omitted. For a service-account installation only:
 ## Required production proof
 
 1. Run `scheduler-doctor`; its exit code must be zero and `status` must be `LOCAL_VERIFIED`.
+   The doctor validates each configured trigger start boundary, not the moving
+   next-run timestamp of a repeating task. A failed last-run result is ignored
+   only when its timestamp provably predates the current trigger definition.
 2. Run the morning task on a market session. It must use the real source config; example fallback is prohibited.
 3. Run EOD capture and V6 learning. Activated V6 outcomes require independent sourced SPY and IWM observations; missing data must create a terminal-missing or ineligible receipt, not a zero label.
 4. Build the public artifact. `verify_public_artifact.py` must pass without `--allow-degraded`.

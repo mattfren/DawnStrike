@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import intraday_scanner.services.scheduler_doctor_service as scheduler_service
 
 
@@ -47,6 +49,10 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
             "disallow_start_if_on_batteries": False,
             "last_task_result": last_result,
             "last_run_time": "2026-07-30T17:30:00-05:00",
+            "trigger_start_boundary": (
+                "2026-07-01T"
+                f"{scheduler_service.EXPECTED_TASK_STARTS[name]}:00-05:00"
+            ),
             "next_run_time": (
                 "2026-07-31T"
                 f"{scheduler_service.EXPECTED_TASK_STARTS[name]}:00-05:00"
@@ -180,6 +186,178 @@ def test_scheduler_doctor_blocks_failed_or_stale_task_history(
         row["last_run_status"] == "STALE_OR_FAILED"
         for row in result["scheduled_tasks"]
     )
+
+
+def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    morning = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Morning"
+    )
+    morning["last_task_result"] = 127
+    morning["last_run_time"] = "2026-07-30T08:10:00-05:00"
+    morning["trigger_start_boundary"] = "2026-07-31T07:15:00-05:00"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Morning"
+    )
+    assert checked["last_run_status"] == "SUPERSEDED_BY_CURRENT_DEFINITION"
+    assert checked["history_superseded_by_current_definition"] is True
+
+
+@pytest.mark.parametrize(
+    "last_run_time",
+    [
+        "2026-07-31T07:00:00-05:00",
+        "2026-07-31T07:15:00-05:00",
+        "2026-07-31T07:30:00-05:00",
+    ],
+)
+def test_scheduler_doctor_keeps_same_day_failure_blocking(
+    tmp_path: Path,
+    monkeypatch,
+    last_run_time: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    morning = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Morning"
+    )
+    morning["last_task_result"] = 1
+    morning["last_run_time"] = last_run_time
+    morning["trigger_start_boundary"] = "2026-07-31T07:15:00-05:00"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Morning"
+    )
+    assert checked["last_run_status"] == "STALE_OR_FAILED"
+    assert checked["history_superseded_by_current_definition"] is False
+
+
+def test_scheduler_doctor_uses_trigger_start_for_repeating_task(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monitor = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    monitor["trigger_start_boundary"] = "2026-07-31T08:35:00-05:00"
+    monitor["last_run_time"] = "2026-07-31T14:00:00-05:00"
+    monitor["next_run_time"] = "2026-07-31T14:05:00-05:00"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    assert checked["scheduled_time_matches"] is True
+
+
+def test_scheduler_doctor_rejects_wrong_trigger_start_even_if_next_run_matches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monitor = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    monitor["trigger_start_boundary"] = "2026-07-01T08:30:00-05:00"
+    monitor["next_run_time"] = "2026-07-31T08:35:00-05:00"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    assert checked["scheduled_time_matches"] is False
+
+
+@pytest.mark.parametrize(
+    "trigger_start_boundary",
+    [
+        "not-isoT08:35:00",
+        "2026-07-31T08:35:00",
+        "2026-07-31T08:35:00.123-05:00",
+    ],
+)
+def test_scheduler_doctor_rejects_invalid_or_naive_trigger_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    trigger_start_boundary: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monitor = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    monitor["trigger_start_boundary"] = trigger_start_boundary
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    assert checked["scheduled_time_matches"] is False
 
 
 def test_scheduler_doctor_blocks_enabled_duplicate_runner(
