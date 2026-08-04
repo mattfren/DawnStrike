@@ -28,11 +28,11 @@ from intraday_scanner.scenario.contracts import (
     utc_now_iso,
 )
 from intraday_scanner.scenario.engine import PriceContext, evaluate_scenario
+from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.scenario.point_in_time import (
     completed_minute_bar_at,
     parse_aware_timestamp,
 )
-from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.services.trade_watcher_service import MODE_PAPER, run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 

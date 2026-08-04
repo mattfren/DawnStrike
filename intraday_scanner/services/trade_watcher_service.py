@@ -31,8 +31,8 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
 )
-from intraday_scanner.scenario.point_in_time import subsequent_entry_evidence_violations
 from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
+from intraday_scanner.scenario.point_in_time import subsequent_entry_evidence_violations
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
     recover_legacy_alpha_delivery_membership,
