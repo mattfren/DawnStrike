@@ -826,15 +826,24 @@ def test_historical_replay_uses_strictly_later_bars_and_stays_out_of_forward_met
             "close": 10.1,
             "volume": 10_000,
         },
-        {
-            "ticker": "NOVA",
-            "timestamp": "2026-08-03T14:03:00Z",
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-08-03T14:03:00Z",
             "open": 10.2,
-            "high": 11.0,
+                "high": 10.35,
             "low": 10.2,
             "close": 10.9,
-            "volume": 10_000,
-        },
+                "volume": 10_000,
+            },
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-08-03T14:04:00Z",
+                "open": 10.9,
+                "high": 10.9,
+                "low": 10.8,
+                "close": 10.9,
+                "volume": 10_000,
+            },
     ]
 
     class FakeNews:
@@ -853,15 +862,31 @@ def test_historical_replay_uses_strictly_later_bars_and_stays_out_of_forward_met
                         "low": 100.0,
                         "close": 100.0,
                     },
-                    {
-                        "ticker": "SPY",
-                        "timestamp": "2026-08-03T14:02:00Z",
+                        {
+                            "ticker": "SPY",
+                            "timestamp": "2026-08-03T14:02:00Z",
                         "open": 101.0,
                         "high": 101.0,
                         "low": 101.0,
-                        "close": 101.0,
-                    },
-                ]
+                            "close": 101.0,
+                        },
+                        {
+                            "ticker": "SPY",
+                            "timestamp": "2026-08-03T14:03:00Z",
+                            "open": 101.0,
+                            "high": 101.0,
+                            "low": 101.0,
+                            "close": 101.0,
+                        },
+                        {
+                            "ticker": "SPY",
+                            "timestamp": "2026-08-03T14:04:00Z",
+                            "open": 101.0,
+                            "high": 101.0,
+                            "low": 101.0,
+                            "close": 101.0,
+                        },
+                    ]
             return bars
 
         def get_first_quote_after(self, *args, **kwargs):
