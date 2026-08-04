@@ -61,6 +61,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     alpha_report,
     alpha_status,
 )
+from intraday_scanner.services.alpha_eod_gate_service import evaluate_alpha_eod_gate
 from intraday_scanner.services.alpha_outcome_capture_service import (
     capture_sourced_alpha_outcomes,
 )
@@ -465,6 +466,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=90,
     )
+
+    alpha_eod_gate_parser = subparsers.add_parser(
+        "alpha-eod-gate",
+        help="Fail closed unless exact official outcome truth permits EOD continuation",
+    )
+    alpha_eod_gate_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    alpha_eod_gate_parser.add_argument("--market-date", required=True)
+    alpha_eod_gate_parser.add_argument("--capture-exit-code", required=True, type=int)
+    alpha_eod_gate_parser.add_argument("--capture-result", required=True)
+    alpha_eod_gate_parser.add_argument("--outcome-gap", required=True)
+    alpha_eod_gate_parser.add_argument("--out", required=True)
 
     alpha_paper_reconcile_parser = subparsers.add_parser(
         "alpha-paper-reconcile",
@@ -1121,6 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_alert_replay(args)
         if args.command == "alpha-capture-outcomes":
             return _run_alpha_capture_outcomes(args)
+        if args.command == "alpha-eod-gate":
+            return _run_alpha_eod_gate(args)
         if args.command == "alpha-paper-reconcile":
             return _run_alpha_paper_reconcile(args)
         if args.command == "alpha-learn":
@@ -1952,6 +1966,19 @@ def _run_outcome_gap(args: argparse.Namespace) -> int:
     result = outcome_gap_report(
         db_path=args.db_path,
         market_date=args.market_date,
+        out_path=args.out,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") in {"COMPLETE", "NO_ELIGIBLE"} else 2
+
+
+def _run_alpha_eod_gate(args: argparse.Namespace) -> int:
+    result = evaluate_alpha_eod_gate(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        capture_exit_code=args.capture_exit_code,
+        capture_result_path=args.capture_result,
+        outcome_gap_path=args.outcome_gap,
         out_path=args.out,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

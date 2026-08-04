@@ -69,3 +69,39 @@ The repo also includes:
 Use the dashboard `5-Min Monitor` button or this script for the current local
 5-minute task setup. Use `monitor-open --continuous` when you want 1-minute
 market-open monitoring.
+
+## AlphaOps EOD Truth Rules
+
+The EOD runner always captures shadow research outcomes, but official
+reconciliation and canonical learning run only when the frozen
+`official_telegram` cohort contains real signals and every exact `signal_id`
+has a conclusive sourced outcome. An explicit `NO_TRADE` member with matching
+Telegram delivery proof records those stages as `SKIPPED_NOT_APPLICABLE`.
+Aggregate shadow outcome gaps remain diagnostic: they cannot authorize or
+block the official cohort. Missing cohort, delivery, or exact outcome evidence
+still fails closed, and missing shadow outcomes remain missing and
+learning-ineligible.
+
+If a historical PaperOps forward session never ran, do not synthesize a zero
+return or replay it as forward evidence. After confirming that the session has
+no calendar row, completed report, or ledger event, record the terminal gap:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File C:\r\dawnstrike-runtime\scripts\ensure_forward_gap_signing_key.ps1 `
+  -StateRoot C:\r\dawnstrike-state
+. C:\r\dawnstrike-runtime\scripts\import_dawnstrike_environment.ps1
+Import-DawnstrikeEnvironment -StateRoot C:\r\dawnstrike-state
+py -m intraday_scanner.v2.paper_ops record-forward-gap `
+  --date 2026-07-31 `
+  --reason-code scheduler_run_absent `
+  --output-root C:\r\dawnstrike-state\v2_paper_ops_live
+```
+
+The strict-schema record is sequence-chained and bound to a separately chained,
+HMAC-signed anchor journal containing the exact ledger digest. The signing key
+lives only in `C:\r\dawnstrike-state\secrets\runtime.env`, outside PaperOps
+state, and is never printed or published. Calendar truth then reports
+`passed_with_warnings`, the rendered calendar labels the session
+`Missing - not zero`, and any tampering or conflicting later forward evidence
+fails closed.

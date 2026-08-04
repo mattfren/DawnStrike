@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -990,6 +990,35 @@ def _migration_020_scenario_lifecycle_identity(
         _add_column_if_missing(connection, "scenario_signal_links", column)
 
 
+def _migration_021_official_strategy_cohort_lock(
+    connection: sqlite3.Connection,
+) -> None:
+    """Freeze one exact official Telegram cohort per strategy session."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS official_strategy_cohorts (
+            official_cohort_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            cohort TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            event_key TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL,
+            membership_sha256 TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (market_date, strategy_id, strategy_version, cohort)
+        );
+        CREATE INDEX IF NOT EXISTS idx_official_strategy_cohort_scan
+        ON official_strategy_cohorts(scan_id, event_key);
+        CREATE INDEX IF NOT EXISTS idx_official_strategy_cohort_date
+        ON official_strategy_cohorts(market_date, cohort);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1020,4 +1049,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (18, _migration_018_alphaops_v6_operational_receipts),
     (19, _migration_019_account_comparison_contract),
     (20, _migration_020_scenario_lifecycle_identity),
+    (21, _migration_021_official_strategy_cohort_lock),
 )

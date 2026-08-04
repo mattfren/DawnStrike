@@ -87,6 +87,34 @@ def test_scenario_eod_closes_then_finalizes_the_paper_challenger() -> None:
     assert '-NotRequired' in script
 
 
+def test_eod_gates_official_reconciliation_on_exact_no_trade_truth() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_alphaops_eod.ps1"
+    ).read_text(encoding="utf-8")
+
+    capture_at = script.index('"alpha-capture-outcomes"')
+    gap_at = script.index('"outcome-gap"')
+    gate_at = script.index('"alpha-eod-gate"')
+    reconcile_at = script.index('"alpha-paper-reconcile"')
+    assert capture_at < gap_at < gate_at < reconcile_at
+    assert "$officialOutcomesRequired = [bool]$gatePayload.official_outcomes_required" in script
+    assert "elseif (-not $officialOutcomesRequired)" in script
+    assert '-Status SKIPPED_NOT_APPLICABLE' in script
+    assert 'if ($learningStageExit -eq 0 -and -not $alphaLearningRequired)' in script
+
+
+def test_eod_renders_calendar_after_truth_verification() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_alphaops_eod.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert script.index('"verify-calendar"') < script.index('"calendar-view"')
+
+
 def test_morning_skips_optional_scenario_when_no_candidates_exist() -> None:
     script = (
         Path(__file__).resolve().parents[1]

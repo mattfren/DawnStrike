@@ -11,6 +11,14 @@ from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
 
+_ALLOWED_DATA_STATUSES = frozenset(
+    {
+        "reconciled",
+        "reconciled_with_minor_diffs",
+        "single_provider_unreconciled",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ForwardReadinessResult:
@@ -70,12 +78,13 @@ def forward_readiness(*, output_root: Path = Path("data/v2_paper_ops")) -> Forwa
     warnings: list[str] = []
     if data_status == "single_provider_unreconciled":
         warnings.append("data is single-provider only; not independently reconciled")
-    if data_status in {"mismatch", "insufficient_overlap", "provider_error"}:
+    if data_status not in _ALLOWED_DATA_STATUSES:
         warnings.append(f"data status {data_status} blocks forward readiness")
     if ledger.status != "passed":
         warnings.append("ledger rebuild did not match stored state/calendar")
-    if calendar.status != "passed":
+    if calendar.status == "failed":
         warnings.append("calendar truth verification failed")
+    warnings.extend(calendar.warnings)
     status = (
         "ready_with_warnings"
         if not _hard_block(data_status, ledger.status, calendar.status)
@@ -122,9 +131,9 @@ def _list_file(path: Path) -> list[object]:
 
 def _hard_block(data_status: str, ledger_status: str, calendar_status: str) -> bool:
     return (
-        data_status in {"mismatch", "insufficient_overlap", "provider_error"}
+        data_status not in _ALLOWED_DATA_STATUSES
         or ledger_status != "passed"
-        or calendar_status != "passed"
+        or calendar_status not in {"passed", "passed_with_warnings"}
     )
 
 

@@ -28,6 +28,7 @@ from intraday_scanner.v2.data_truth.reconcile import (
 )
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops import ledger_rebuild as ledger_rebuild_module
+from intraday_scanner.v2.paper_ops import readiness as readiness_module
 from intraday_scanner.v2.paper_ops import strategy_evidence as strategy_evidence_module
 from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
@@ -2796,6 +2797,17 @@ def test_forward_readiness_blocks_on_rebuild_or_calendar_failure(
 
     assert result.status in {"blocked", "ready_with_warnings"}
     assert any("single-provider" in warning for warning in result.warnings)
+
+
+def test_forward_readiness_blocks_unknown_or_future_data_truth() -> None:
+    for status in ("unknown", "", "future_unreviewed_status", "provider_error"):
+        assert readiness_module._hard_block(status, "passed", "passed") is True
+    for status in (
+        "reconciled",
+        "reconciled_with_minor_diffs",
+        "single_provider_unreconciled",
+    ):
+        assert readiness_module._hard_block(status, "passed", "passed") is False
 
 
 def test_paperops_modules_avoid_live_execution_and_database_paths() -> None:
