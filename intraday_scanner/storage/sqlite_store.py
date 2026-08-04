@@ -7142,33 +7142,46 @@ class SQLiteScanStore:
         end: str | None = None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        allowed_tables = {
-            "scenario_news_items",
-            "scenario_run_receipts",
-            "scenario_daily_performance",
+        query_specs = {
+            "scenario_news_items": (
+                "SELECT * FROM scenario_news_items",
+                "created_at >= ?",
+                "created_at <= ?",
+                " ORDER BY created_at DESC, article_id ASC LIMIT ?",
+                "created_at DESC, article_id ASC",
+            ),
+            "scenario_run_receipts": (
+                "SELECT * FROM scenario_run_receipts",
+                "started_at >= ?",
+                "started_at <= ?",
+                " ORDER BY started_at DESC, run_id ASC LIMIT ?",
+                "started_at DESC, run_id ASC",
+            ),
+            "scenario_daily_performance": (
+                "SELECT * FROM scenario_daily_performance",
+                "market_date >= ?",
+                "market_date <= ?",
+                " ORDER BY market_date DESC LIMIT ?",
+                "market_date DESC",
+            ),
         }
-        if table not in allowed_tables:
+        spec = query_specs.get(table)
+        if spec is None or order_by != spec[4]:
             raise StorageError("Unsupported scenario payload table")
         self.initialize()
-        time_column = (
-            "created_at"
-            if table == "scenario_news_items"
-            else "market_date"
-            if table == "scenario_daily_performance"
-            else "started_at"
-        )
+        query_prefix, start_clause, end_clause, order_clause, _ = spec
         clauses: list[str] = []
         params: list[Any] = []
         if start:
-            clauses.append(f"{time_column} >= ?")
+            clauses.append(start_clause)
             params.append(start)
         if end:
-            clauses.append(f"{time_column} <= ?")
+            clauses.append(end_clause)
             params.append(end)
-        query = f"SELECT * FROM {table}"  # noqa: S608
+        query = query_prefix
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        query += f" ORDER BY {order_by} LIMIT ?"  # noqa: S608
+        query += order_clause
         params.append(limit)
         try:
             with self._connect() as connection:

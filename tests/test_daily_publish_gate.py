@@ -37,6 +37,7 @@ def _write_publishable_fixture(
         "assets/dawnstrike.js": b"console.log('fixture')",
         "data/performance.json": b'{"rows":[]}',
         "data/v6-learning.json": b'{"performance_status":"WAITING_FOR_FORWARD_EVIDENCE"}',
+        "data/scenarios.json": b'{"records":[],"performance":[]}',
     }
     for name, payload in required.items():
         path = root / name
@@ -63,6 +64,16 @@ def _write_publishable_fixture(
     required["data/performance.json.manifest.json"] = (
         root / "data" / "performance.json.manifest.json"
     ).read_bytes()
+    scenarios = root / "data" / "scenarios.json"
+    (root / "data" / "scenarios.json.manifest.json").write_text(
+        json.dumps(
+            {
+                "payload_sha256": hashlib.sha256(scenarios.read_bytes()).hexdigest(),
+                "calibration_status": "UNCALIBRATED",
+            }
+        ),
+        encoding="utf-8",
+    )
     calendar = root / "data" / "calendar.json"
     calendar.write_bytes(b'{"days":[]}')
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
@@ -98,6 +109,9 @@ def _write_publishable_fixture(
             ).read_bytes(),
             "data/publication-set.json": (
                 root / "data" / "publication-set.json"
+            ).read_bytes(),
+            "data/scenarios.json.manifest.json": (
+                root / "data" / "scenarios.json.manifest.json"
             ).read_bytes(),
             "release-manifest.json": (root / "release-manifest.json").read_bytes(),
         }
