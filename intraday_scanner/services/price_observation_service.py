@@ -26,6 +26,8 @@ from intraday_scanner.providers.yahoo_chart_provider import (
     bars_from_yahoo_chart_payload,
     fetch_yahoo_chart,
 )
+from intraday_scanner.scenario.contracts import canonical_hash
+from intraday_scanner.scenario.point_in_time import completed_minute_bar_at
 from intraday_scanner.snapshot_builder import MINUTE_BAR_COLUMNS
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -338,6 +340,11 @@ def _observation_from_bars(
         )
     requested_iso = _iso_utc(requested_at)
     observed_iso = _iso_utc(observed_at)
+    bar_completed_at = completed_minute_bar_at(observed_at)
+    completed_iso = _iso_utc(bar_completed_at) if bar_completed_at is not None else ""
+    is_complete = bar_completed_at is not None and bar_completed_at <= requested_at
+    safe_bar = _safe_bar_payload(bar)
+    source_bar_hash = canonical_hash(safe_bar)
     return {
         "observation_id": _observation_id(target, source, requested_iso),
         "signal_id": target.signal_id,
@@ -345,6 +352,9 @@ def _observation_from_bars(
         "ticker": target.ticker,
         "requested_at": requested_iso,
         "observed_at": observed_iso,
+        "bar_completed_at": completed_iso,
+        "is_complete": is_complete,
+        "source_bar_hash_sha256": source_bar_hash,
         "price": price,
         "current_price": price,
         "price_type": "last_bar_close_at_or_before",
@@ -357,7 +367,10 @@ def _observation_from_bars(
         "is_usable": True,
         "created_at": created_at,
         "payload_json": {
-            "bar": _safe_bar_payload(bar),
+            "bar": safe_bar,
+            "bar_completed_at": completed_iso,
+            "is_complete": is_complete,
+            "source_bar_hash_sha256": source_bar_hash,
             "no_lookahead": True,
             "price_rule": "latest bar timestamp <= requested_at",
         },
@@ -385,6 +398,9 @@ def _rejected_observation(
         "ticker": target.ticker,
         "requested_at": requested_iso,
         "observed_at": _iso_utc(observed_at) if observed_at is not None else "",
+        "bar_completed_at": "",
+        "is_complete": False,
+        "source_bar_hash_sha256": "",
         "price": None,
         "current_price": None,
         "price_type": "last_bar_close_at_or_before",
@@ -398,6 +414,9 @@ def _rejected_observation(
         "created_at": created_at,
         "payload_json": {
             "bar": _safe_bar_payload(bar or {}),
+            "bar_completed_at": "",
+            "is_complete": False,
+            "source_bar_hash_sha256": "",
             "no_lookahead": True,
             "reject_reason": status,
         },

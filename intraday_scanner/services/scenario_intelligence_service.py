@@ -27,6 +27,10 @@ from intraday_scanner.scenario.contracts import (
     utc_now_iso,
 )
 from intraday_scanner.scenario.engine import PriceContext, evaluate_scenario
+from intraday_scanner.scenario.point_in_time import (
+    completed_minute_bar_at,
+    parse_aware_timestamp,
+)
 from intraday_scanner.services.trade_watcher_service import MODE_PAPER, run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -451,11 +455,12 @@ def run_scenario_historical_replay(
                 config=config,
             )
             context = _replay_price_context(bars, event_time=event_time, quote=quote)
+            decision_at = context.bar_completed_at if context is not None else article.created_at
             decision = evaluate_scenario(
                 article=article,
                 extraction=extraction,
                 ticker=ticker,
-                decision_at=article.created_at,
+                decision_at=decision_at,
                 price_context=context,
                 cohort="scenario_historical_replay",
             )
@@ -466,7 +471,7 @@ def run_scenario_historical_replay(
                 store,
                 decision_id=decision.decision_id,
                 event_type="REPLAY_DECISION_RECORDED",
-                event_timestamp=article.created_at,
+                event_timestamp=decision_at,
                 payload={"action": decision.action, "cohort": "scenario_historical_replay"},
             )
             if decision.action != "ENTER_LONG":
@@ -475,7 +480,7 @@ def run_scenario_historical_replay(
                 decision=payload,
                 article=article,
                 bars=bars,
-                event_time=event_time,
+                event_time=_parse_iso(decision_at),
                 slippage_bps=config.slippage_bps,
                 quote=quote,
             )
@@ -752,7 +757,8 @@ def _extraction_for_article(
                 "dependencies": payload.get("dependencies") or [],
                 "unresolved_unknowns": payload.get("unresolved_unknowns") or [],
             },
-            model=str(payload.get("model") or config.scenario_openai_model),
+            model=str(payload.get("model") or ""),
+            requested_model=str(payload.get("requested_model") or config.scenario_openai_model),
             response_id=str(payload.get("response_id") or ""),
             usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
         )
@@ -774,6 +780,9 @@ def _extraction_for_article(
 def _live_price_contexts(
     config: ScannerConfig, symbols: list[str], *, as_of: str
 ) -> dict[str, PriceContext]:
+    cutoff = parse_aware_timestamp(as_of)
+    if cutoff is None:
+        return {}
     provider = AlpacaProvider(config)
     try:
         snapshots = {row.ticker: row for row in provider.get_premarket_snapshot(symbols, config)}
@@ -786,27 +795,51 @@ def _live_price_contexts(
         by_ticker[str(row.get("ticker") or "").upper()].append(row)
     output: dict[str, PriceContext] = {}
     for ticker in symbols:
-        rows = sorted(by_ticker[ticker], key=lambda row: str(row.get("timestamp") or ""))
+        rows = []
+        for row in by_ticker[ticker]:
+            observed = parse_aware_timestamp(str(row.get("timestamp") or ""))
+            completed = completed_minute_bar_at(observed) if observed is not None else None
+            if completed is not None and completed <= cutoff and _valid_bar(row):
+                rows.append(row)
+        rows.sort(key=lambda row: str(row.get("timestamp") or ""))
         snapshot = snapshots.get(ticker)
         if not rows or snapshot is None:
             continue
+        snapshot_at = parse_aware_timestamp(str(snapshot.as_of_timestamp or ""))
+        if snapshot_at is None or snapshot_at > cutoff:
+            continue
         last = rows[-1]
-        closes = [float(row["close"]) for row in rows if _positive(row.get("close"))]
+        sample = rows[-14:]
+        closes = [float(row["close"]) for row in sample if _positive(row.get("close"))]
         ranges = [
             float(row["high"]) - float(row["low"])
-            for row in rows[-14:]
+            for row in sample
             if _positive(row.get("high")) and _positive(row.get("low"))
         ]
         atr = sum(ranges) / len(ranges) if ranges else None
+        observed_at = str(last.get("timestamp") or "")
+        completed_at = completed_minute_bar_at(observed_at)
+        if completed_at is None:
+            continue
         output[ticker] = PriceContext(
-            observed_at=str(last.get("timestamp") or as_of),
+            observed_at=observed_at,
             price=closes[-1] if closes else None,
             atr=atr,
             spread_pct=float(snapshot.spread_pct) if snapshot.spread_pct is not None else None,
             liquid=bool(
                 float(last.get("volume") or 0.0) * float(last.get("close") or 0.0) >= 20_000
             ),
-            source_bar_hash_sha256=canonical_hash(rows[-14:]),
+            source_bar_hash_sha256=canonical_hash(
+                {
+                    "bars": sample,
+                    "snapshot": {
+                        "as_of_timestamp": snapshot.as_of_timestamp,
+                        "spread_pct": snapshot.spread_pct,
+                    },
+                }
+            ),
+            bar_completed_at=completed_at.isoformat().replace("+00:00", "Z"),
+            is_complete=True,
         )
     return output
 
@@ -922,19 +955,42 @@ def _link_watcher_records(
 def _replay_price_context(
     bars: list[dict[str, Any]], *, event_time: datetime, quote: dict[str, Any] | None
 ) -> PriceContext | None:
-    prior = [row for row in bars if _bar_time(row) < event_time and _valid_bar(row)]
-    if not prior or not quote:
+    if not quote:
         return None
-    sample = prior[-14:]
-    last = sample[-1]
+    quote_at = parse_aware_timestamp(str(quote.get("timestamp") or ""))
+    if quote_at is None or quote_at < event_time:
+        return None
+    completed_rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in bars:
+        if not _valid_bar(row):
+            continue
+        completed_at = completed_minute_bar_at(_bar_time(row))
+        if completed_at is not None:
+            completed_rows.append((completed_at, row))
+    completed_rows.sort(key=lambda item: item[0])
+    decision_bar = next(
+        (
+            (completed_at, row)
+            for completed_at, row in completed_rows
+            if completed_at > event_time and quote_at <= completed_at
+        ),
+        None,
+    )
+    if decision_bar is None:
+        return None
+    decision_at, last = decision_bar
+    sample = [row for completed_at, row in completed_rows if completed_at <= decision_at][-14:]
     ranges = [float(row["high"]) - float(row["low"]) for row in sample]
+    spread_pct = _nonnegative_float(quote.get("spread_pct"))
     return PriceContext(
         observed_at=str(last.get("timestamp") or ""),
         price=float(last["close"]),
         atr=sum(ranges) / len(ranges) if ranges else None,
-        spread_pct=float(quote.get("spread_pct") or 0.0),
+        spread_pct=spread_pct,
         liquid=float(last.get("volume") or 0.0) * float(last["close"]) >= 20_000,
-        source_bar_hash_sha256=canonical_hash(sample),
+        source_bar_hash_sha256=canonical_hash({"bars": sample, "quote": quote}),
+        bar_completed_at=decision_at.isoformat().replace("+00:00", "Z"),
+        is_complete=True,
         source_kind="historical_minute_bars_and_quote",
     )
 
@@ -1389,3 +1445,11 @@ def _positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if result > 0 else None
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result >= 0 else None
