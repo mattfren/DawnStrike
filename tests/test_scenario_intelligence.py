@@ -423,7 +423,7 @@ def test_finalize_uses_sourced_spy_bars_for_after_cost_excess(tmp_path: Path) ->
         provider="alpaca",
         scenario_intelligence_enabled=True,
         alpaca_api_key_id="test-key",
-        alpaca_api_secret_key="test-secret",
+        alpaca_api_secret_key="test-secret",  # pragma: allowlist secret
     )
     result = finalize_scenario_performance(
         db_path=db_path,
