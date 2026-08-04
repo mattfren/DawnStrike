@@ -32,8 +32,11 @@ function Set-OverallFailure {
 }
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod"
 if (-not $dailyLock.acquired) {
-    Write-Output "Skipped duplicate AlphaOps EOD run: $($dailyLock.reason)"
-    exit 0
+    $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod" -Lock $dailyLock
+    [Console]::Error.WriteLine(
+        "Required AlphaOps EOD run blocked by daily lock: $($dailyLock.reason)"
+    )
+    exit $(if ($receiptWritten) { 3 } else { 2 })
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `

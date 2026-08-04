@@ -940,7 +940,7 @@ def _write_web_config(
             [
                 "enabled: true",
                 "respect_robots: true",
-                "user_agent: test",
+                "user_agent: DawnstrikeTest Contact: test@dawnstrike.test",
                 "timeout_seconds: 1",
                 "rate_limit_seconds: 0",
                 "save_raw: true",
@@ -977,7 +977,7 @@ def _write_source_reliability_config(tmp_path: Path) -> Path:
             [
                 "enabled: true",
                 "respect_robots: true",
-                "user_agent: test",
+                "user_agent: DawnstrikeTest Contact: test@dawnstrike.test",
                 "timeout_seconds: 1",
                 "rate_limit_seconds: 0",
                 "save_raw: true",

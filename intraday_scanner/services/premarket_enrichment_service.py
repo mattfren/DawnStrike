@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SNAPSHOT_COLUMNS
+from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.yahoo_chart_provider import (
     YAHOO_SOURCE_NAME,
     bars_from_yahoo_chart_payload,
@@ -33,6 +34,9 @@ from intraday_scanner.providers.yahoo_chart_provider import (
 UTC = timezone.utc
 EASTERN = ZoneInfo("America/New_York")
 FetchChart = Callable[[str, ScannerConfig], dict[str, Any]]
+ALPACA_BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
+ONE_MINUTE_SECONDS = 60
+MAX_YAHOO_FALLBACK_RATIO = 0.25
 
 
 @dataclass(frozen=True)
@@ -42,7 +46,11 @@ class PremarketObservation:
     premarket_high: float | None = None
     premarket_low: float | None = None
     previous_close: float | None = None
+    latest_price: float | None = None
+    premarket_volume: int | None = None
     observed_at: str = ""
+    bar_completed_at: str = ""
+    is_complete: bool = False
     bar_count: int = 0
     age_seconds: int | None = None
     source: str = YAHOO_SOURCE_NAME
@@ -53,6 +61,8 @@ class PremarketObservation:
     def is_usable(self) -> bool:
         return (
             self.status == "verified"
+            and self.is_complete
+            and bool(self.bar_completed_at)
             and self.premarket_high is not None
             and self.premarket_low is not None
             and self.premarket_high > self.premarket_low > 0
@@ -65,6 +75,9 @@ def enrich_premarket_rows(
     config: ScannerConfig,
     requested_at: datetime | None = None,
     fetcher: FetchChart = fetch_yahoo_chart,
+    source: str = "yahoo",
+    alpaca_provider: AlpacaProvider | None = None,
+    allow_yahoo_fallback: bool = False,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return rows plus auditable, point-in-time enrichment observations."""
@@ -74,20 +87,90 @@ def enrich_premarket_rows(
     selected = _select_candidates(copied, config)
     selected_tickers = [str(row.get("ticker") or "").upper() for row in selected]
     observations: dict[str, PremarketObservation] = {}
+    fallback_count = 0
+    fallback_candidate_count = 0
+    fallback_status = "not_applicable"
+    fallback_status_by_ticker: dict[str, str] = {}
+    normalized_source = source.strip().lower()
+    if normalized_source not in {"alpaca", "yahoo"}:
+        raise DataProviderError("Premarket enrichment source must be alpaca or yahoo.")
+    source_name = (
+        f"alpaca_market_data_{config.alpaca_data_feed.lower()}"
+        if normalized_source == "alpaca"
+        else YAHOO_SOURCE_NAME
+    )
 
     if config.premarket_enrichment_enabled and selected_tickers:
-        worker_count = min(config.premarket_enrichment_workers, len(selected_tickers))
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            futures = {
-                pool.submit(_observe_ticker, ticker, config, at, fetcher): ticker
+        if normalized_source == "alpaca":
+            observations = _observe_alpaca_tickers(
+                selected_tickers,
+                config=config,
+                requested_at=at,
+                provider=alpaca_provider,
+            )
+            fallback_tickers = [
+                ticker
+                for ticker in selected_tickers
+                if observations[ticker].status
+                in {"missing_premarket_bars", "stale_observation"}
+            ]
+            fallback_candidate_count = len(fallback_tickers)
+            fallback_candidate_ratio = _ratio(
+                fallback_candidate_count,
+                len(selected_tickers),
+            )
+            fallback_status_by_ticker = {
+                ticker: (
+                    "candidate"
+                    if ticker in fallback_tickers
+                    else ("not_needed" if observations[ticker].is_usable else "ineligible")
+                )
                 for ticker in selected_tickers
             }
-            for future in as_completed(futures):
-                ticker = futures[future]
-                try:
-                    observations[ticker] = future.result()
-                except (DataProviderError, OSError, TypeError, ValueError) as exc:
-                    observations[ticker] = _failed_observation(ticker, str(exc))
+            if not allow_yahoo_fallback:
+                fallback_status = "disabled"
+                for ticker in fallback_tickers:
+                    fallback_status_by_ticker[ticker] = "disabled"
+            elif not fallback_tickers:
+                fallback_status = "not_needed"
+            elif fallback_candidate_ratio > MAX_YAHOO_FALLBACK_RATIO:
+                raise DataProviderError(
+                    "Alpaca premarket coverage failed the Yahoo fallback ceiling: "
+                    f"{fallback_candidate_count}/{len(selected_tickers)} symbols "
+                    f"({fallback_candidate_ratio:.3f}) require fallback, above "
+                    f"{MAX_YAHOO_FALLBACK_RATIO:.3f}. The cycle was aborted before "
+                    "public-page price facts could reach ranking."
+                )
+            else:
+                fallback_observations = _observe_yahoo_tickers(
+                    fallback_tickers,
+                    config=config,
+                    requested_at=at,
+                    fetcher=fetcher,
+                )
+                for ticker, fallback in fallback_observations.items():
+                    if fallback.is_usable:
+                        observations[ticker] = fallback
+                        fallback_count += 1
+                        fallback_status_by_ticker[ticker] = "applied"
+                    else:
+                        fallback_status_by_ticker[ticker] = "attempted_unusable"
+                if fallback_count == len(fallback_tickers):
+                    fallback_status = "applied"
+                elif fallback_count:
+                    fallback_status = "partial"
+                else:
+                    fallback_status = "attempted_unusable"
+        else:
+            observations = _observe_yahoo_tickers(
+                selected_tickers,
+                config=config,
+                requested_at=at,
+                fetcher=fetcher,
+            )
+            fallback_status_by_ticker = {
+                ticker: "not_applicable" for ticker in selected_tickers
+            }
 
     enriched_rows = [
         _apply_observation(
@@ -95,6 +178,11 @@ def enrich_premarket_rows(
             observations.get(str(row.get("ticker") or "").upper()),
             enabled=config.premarket_enrichment_enabled,
             selected=str(row.get("ticker") or "").upper() in set(selected_tickers),
+            primary_source=source_name,
+            fallback_status=fallback_status_by_ticker.get(
+                str(row.get("ticker") or "").upper(),
+                "not_applicable",
+            ),
         )
         for row in copied
     ]
@@ -107,7 +195,28 @@ def enrich_premarket_rows(
             verified_count=sum(1 for item in observations.values() if item.is_usable),
         ),
         "requested_at": at.isoformat(),
-        "source": YAHOO_SOURCE_NAME,
+        "source": source_name,
+        "secondary_source": (
+            YAHOO_SOURCE_NAME
+            if normalized_source == "alpaca" and allow_yahoo_fallback
+            else None
+        ),
+        "secondary_fallback_count": fallback_count,
+        "secondary_fallback_ratio": _ratio(fallback_count, len(selected_tickers)),
+        "secondary_fallback_candidate_count": fallback_candidate_count,
+        "secondary_fallback_candidate_ratio": _ratio(
+            fallback_candidate_count,
+            len(selected_tickers),
+        ),
+        "secondary_fallback_ceiling_ratio": MAX_YAHOO_FALLBACK_RATIO,
+        "secondary_fallback_status": fallback_status,
+        "verified_by_source": dict(
+            sorted(
+                Counter(
+                    item.source for item in observations.values() if item.is_usable
+                ).items()
+            )
+        ),
         "input_count": len(rows),
         "selected_count": len(selected_tickers),
         "verified_count": sum(1 for item in observations.values() if item.is_usable),
@@ -169,12 +278,16 @@ def observation_from_chart_payload(
             status="missing_range_values",
         )
     observed_epoch = max(int(row["timestamp"]) for row in eligible)
-    age_seconds = max(0, requested_epoch - observed_epoch)
+    completed_epoch = observed_epoch + ONE_MINUTE_SECONDS
+    completed_at = datetime.fromtimestamp(completed_epoch, UTC).isoformat()
+    age_seconds = max(0, requested_epoch - completed_epoch)
     if age_seconds > max_age_seconds:
         return PremarketObservation(
             ticker=ticker,
             status="stale_observation",
             observed_at=datetime.fromtimestamp(observed_epoch, UTC).isoformat(),
+            bar_completed_at=completed_at,
+            is_complete=True,
             bar_count=len(eligible),
             age_seconds=age_seconds,
             source_url=source_url,
@@ -190,6 +303,8 @@ def observation_from_chart_payload(
             premarket_low=round(low, 6),
             previous_close=_previous_close(meta),
             observed_at=datetime.fromtimestamp(observed_epoch, UTC).isoformat(),
+            bar_completed_at=completed_at,
+            is_complete=True,
             bar_count=len(eligible),
             age_seconds=age_seconds,
             source_url=source_url,
@@ -202,10 +317,156 @@ def observation_from_chart_payload(
         premarket_low=round(low, 6),
         previous_close=_previous_close(meta),
         observed_at=datetime.fromtimestamp(observed_epoch, UTC).isoformat(),
+        bar_completed_at=completed_at,
+        is_complete=True,
         bar_count=len(eligible),
         age_seconds=age_seconds,
         source_url=source_url,
     )
+
+
+def observation_from_alpaca_bars(
+    ticker: str,
+    bars: list[dict[str, Any]],
+    *,
+    previous_close: float | None,
+    requested_at: datetime,
+    max_age_seconds: int,
+    feed: str,
+) -> PremarketObservation:
+    """Build one point-in-time premarket observation from Alpaca IEX bars."""
+
+    source_name = f"alpaca_market_data_{feed.lower()}"
+    requested_epoch = int(_as_utc(requested_at).timestamp())
+    session_start, session_end = _premarket_session_bounds({}, requested_at)
+    eligible: list[tuple[int, dict[str, Any]]] = []
+    for row in bars:
+        observed_epoch = _bar_epoch(row.get("timestamp"))
+        if (
+            observed_epoch is not None
+            and session_start <= observed_epoch < session_end
+            and observed_epoch + ONE_MINUTE_SECONDS <= requested_epoch
+        ):
+            eligible.append((observed_epoch, row))
+    if not eligible:
+        return _failed_observation(
+            ticker,
+            "no completed Alpaca premarket bars at or before requested_at",
+            source=source_name,
+            source_url=ALPACA_BARS_URL,
+            status="missing_premarket_bars",
+        )
+    usable_highs = [
+        value
+        for _, row in eligible
+        if (value := _float(row.get("high"))) is not None and value > 0
+    ]
+    usable_lows = [
+        value
+        for _, row in eligible
+        if (value := _float(row.get("low"))) is not None and value > 0
+    ]
+    if not usable_highs or not usable_lows:
+        return _failed_observation(
+            ticker,
+            "Alpaca premarket bars lacked high/low facts",
+            source=source_name,
+            source_url=ALPACA_BARS_URL,
+            status="missing_range_values",
+        )
+    observed_epoch, latest_bar = max(eligible, key=lambda item: item[0])
+    completed_epoch = observed_epoch + ONE_MINUTE_SECONDS
+    completed_at = datetime.fromtimestamp(completed_epoch, UTC).isoformat()
+    age_seconds = max(0, requested_epoch - completed_epoch)
+    if age_seconds > max_age_seconds:
+        return PremarketObservation(
+            ticker=ticker,
+            status="stale_observation",
+            observed_at=datetime.fromtimestamp(observed_epoch, UTC).isoformat(),
+            bar_completed_at=completed_at,
+            is_complete=True,
+            bar_count=len(eligible),
+            age_seconds=age_seconds,
+            source=source_name,
+            source_url=ALPACA_BARS_URL,
+            failure_reason=f"latest Alpaca premarket bar is {age_seconds}s old",
+        )
+    high = max(usable_highs)
+    low = min(usable_lows)
+    latest_price = _float(latest_bar.get("close"))
+    volume = sum(max(0, _int(row.get("volume")) or 0) for _, row in eligible)
+    status = "verified" if high > low else "insufficient_range"
+    return PremarketObservation(
+        ticker=ticker,
+        status=status,
+        premarket_high=round(high, 6),
+        premarket_low=round(low, 6),
+        previous_close=(
+            round(previous_close, 6)
+            if previous_close is not None and previous_close > 0
+            else None
+        ),
+        latest_price=(
+            round(latest_price, 6)
+            if latest_price is not None and latest_price > 0
+            else None
+        ),
+        premarket_volume=volume,
+        observed_at=datetime.fromtimestamp(observed_epoch, UTC).isoformat(),
+        bar_completed_at=completed_at,
+        is_complete=True,
+        bar_count=len(eligible),
+        age_seconds=age_seconds,
+        source=source_name,
+        source_url=ALPACA_BARS_URL,
+        failure_reason=("" if status == "verified" else "observed high did not exceed low"),
+    )
+
+
+def _observe_alpaca_tickers(
+    tickers: list[str],
+    *,
+    config: ScannerConfig,
+    requested_at: datetime,
+    provider: AlpacaProvider | None,
+) -> dict[str, PremarketObservation]:
+    active_provider = provider or AlpacaProvider(config)
+    try:
+        active_provider.validate_credentials()
+        start_epoch, _ = _premarket_session_bounds({}, requested_at)
+        bars = active_provider.get_minute_bars(
+            tickers,
+            datetime.fromtimestamp(start_epoch, UTC).isoformat(),
+            _as_utc(requested_at).isoformat(),
+            config,
+        )
+        snapshots = active_provider.get_premarket_snapshot(tickers, config)
+    except (DataProviderError, OSError, TypeError, ValueError) as exc:
+        raise DataProviderError(
+            "Systemic Alpaca premarket enrichment failure; "
+            "Yahoo fallback was not attempted."
+        ) from exc
+    grouped: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in tickers}
+    for row in bars:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker in grouped:
+            grouped[ticker].append(row)
+    previous_closes = {
+        row.ticker.upper(): row.previous_close
+        for row in snapshots
+        if row.previous_close > 0
+    }
+    return {
+        ticker: observation_from_alpaca_bars(
+            ticker,
+            grouped.get(ticker, []),
+            previous_close=previous_closes.get(ticker),
+            requested_at=requested_at,
+            max_age_seconds=config.premarket_enrichment_max_age_seconds,
+            feed=config.alpaca_data_feed,
+        )
+        for ticker in tickers
+    }
 
 
 def _observe_ticker(
@@ -260,8 +521,16 @@ def _apply_observation(
     *,
     enabled: bool,
     selected: bool,
+    primary_source: str,
+    fallback_status: str,
 ) -> dict[str, Any]:
     output = dict(row)
+    output["enrichment_primary_source"] = primary_source
+    output["enrichment_fallback_status"] = fallback_status
+    output["enrichment_fallback_source"] = ""
+    output["enrichment_was_fallback"] = False
+    output["enrichment_bar_completed_at"] = ""
+    output["enrichment_is_complete"] = False
     if not enabled:
         output["enrichment_status"] = "disabled"
         return output
@@ -274,11 +543,23 @@ def _apply_observation(
     output["enrichment_status"] = observation.status
     output["enrichment_source_url"] = observation.source_url
     output["enrichment_observed_at"] = observation.observed_at
+    output["enrichment_bar_completed_at"] = observation.bar_completed_at
+    output["enrichment_is_complete"] = observation.is_complete
+    if fallback_status == "applied" and observation.source != primary_source:
+        output["enrichment_fallback_source"] = observation.source
+        output["enrichment_was_fallback"] = True
     if not observation.is_usable:
         return output
     output["premarket_high"] = observation.premarket_high
     output["premarket_low"] = observation.premarket_low
     output["premarket_range_source"] = observation.source
+    if observation.latest_price is not None and observation.latest_price > 0:
+        output["premarket_price"] = observation.latest_price
+    if observation.premarket_volume is not None:
+        output["premarket_volume"] = observation.premarket_volume
+        price = _float(output.get("premarket_price"))
+        if price is not None:
+            output["dollar_volume"] = round(price * observation.premarket_volume, 2)
     if observation.previous_close is not None and observation.previous_close > 0:
         output["previous_close"] = observation.previous_close
         output["previous_close_source"] = observation.source
@@ -332,7 +613,7 @@ def _is_eligible_premarket_bar(
     return bool(
         timestamp
         and session_start <= timestamp < session_end
-        and timestamp <= requested_epoch
+        and timestamp + ONE_MINUTE_SECONDS <= requested_epoch
         and row.get("source") == YAHOO_SOURCE_NAME
     )
 
@@ -349,15 +630,57 @@ def _failed_observation(
     ticker: str,
     reason: str,
     *,
+    source: str = YAHOO_SOURCE_NAME,
     source_url: str = "",
     status: str = "provider_error",
 ) -> PremarketObservation:
     return PremarketObservation(
         ticker=ticker,
         status=status,
-        source_url=source_url or yahoo_chart_url(ticker),
+        source=source,
+        source_url=(
+            source_url
+            or (yahoo_chart_url(ticker) if source == YAHOO_SOURCE_NAME else "")
+        ),
         failure_reason=reason[:500],
     )
+
+
+def _observe_yahoo_tickers(
+    tickers: list[str],
+    *,
+    config: ScannerConfig,
+    requested_at: datetime,
+    fetcher: FetchChart,
+) -> dict[str, PremarketObservation]:
+    if not tickers:
+        return {}
+    observations: dict[str, PremarketObservation] = {}
+    worker_count = min(config.premarket_enrichment_workers, len(tickers))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = {
+            pool.submit(_observe_ticker, ticker, config, requested_at, fetcher): ticker
+            for ticker in tickers
+        }
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                observations[ticker] = future.result()
+            except (DataProviderError, OSError, TypeError, ValueError) as exc:
+                observations[ticker] = _failed_observation(ticker, str(exc))
+    return observations
+
+
+def _bar_epoch(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
 
 
 def _summary_status(*, enabled: bool, selected_count: int, verified_count: int) -> str:
@@ -370,6 +693,12 @@ def _summary_status(*, enabled: bool, selected_count: int, verified_count: int) 
     if verified_count:
         return "partial"
     return "unavailable"
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
 
 
 def _write_artifacts(output_dir: Path, result: dict[str, Any]) -> dict[str, str]:
@@ -442,5 +771,6 @@ def _truthy(value: Any) -> bool:
 __all__ = [
     "PremarketObservation",
     "enrich_premarket_rows",
+    "observation_from_alpaca_bars",
     "observation_from_chart_payload",
 ]

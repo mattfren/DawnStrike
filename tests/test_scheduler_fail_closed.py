@@ -11,6 +11,18 @@ def test_scheduler_doctor_rejects_interactive_and_s4u_tasks(tmp_path: Path, monk
     scripts = runtime / "scripts"
     scripts.mkdir(parents=True)
     state.mkdir()
+    source_config = state / "config" / "web_sources.yaml"
+    source_config.parent.mkdir()
+    source_config.write_text(
+        "enabled: true\n"
+        "user_agent: DawnstrikeTest Contact: test@dawnstrike.test\n"
+        "sources:\n"
+        "  - name: candidates\n"
+        "    type: local_inbox\n"
+        "    enabled: true\n"
+        "    path: data\\inbox\\screener\n",
+        encoding="utf-8",
+    )
     for name in (
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
@@ -40,6 +52,8 @@ def test_scheduler_doctor_rejects_interactive_and_s4u_tasks(tmp_path: Path, monk
                     f'-StateRoot "{state}"'
                 ),
                 "working_directory": str(runtime),
+                "execution_time_limit": scheduler.EXPECTED_EXECUTION_LIMITS[name],
+                "repetition_duration": scheduler.EXPECTED_TASK_REPETITIONS.get(name),
             }
         )
     monkeypatch.setattr(scheduler, "_query_scheduled_tasks", lambda: rows)

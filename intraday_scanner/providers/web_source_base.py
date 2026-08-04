@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -143,12 +144,45 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
     """Validate a declared production source contract without weakening fixtures."""
 
     if not config.production_contract:
+        forward_violations: list[str] = []
+        if not config.enabled:
+            forward_violations.append("web_collection_disabled")
+        normalized_agent = config.user_agent.strip().lower()
+        contact_match = re.search(
+            r"contact:\s*([^\s@]+@[^\s@]+\.[^\s@]+)",
+            normalized_agent,
+        )
+        if (
+            not contact_match
+            or "required_" in normalized_agent
+            or "example.com" in normalized_agent
+        ):
+            forward_violations.append("accountable_user_agent_contact_required")
+        candidate_sources = [
+            source
+            for source in config.sources
+            if source.enabled
+            and source.type in {"local_inbox", "public_table_url", "browser_table_url"}
+        ]
+        invalid_candidates = [
+            source.name or "unnamed"
+            for source in candidate_sources
+            if not _candidate_source_semantically_valid(source, config.allowed_domains)
+        ]
+        if not candidate_sources:
+            forward_violations.append("enabled_candidate_source_required")
+        for source_name in invalid_candidates:
+            forward_violations.append(f"invalid_candidate_source:{source_name}")
         return {
-            "status": "DEVELOPMENT_OR_FIXTURE_CONFIG",
-            "ready": True,
-            "violations": [],
+            "status": "FORWARD_RESEARCH_ONLY",
+            "ready": not forward_violations,
+            "violations": forward_violations,
+            "historical_backfill_enabled": False,
+            "broker_execution_enabled": False,
         }
     violations: list[str] = []
+    if not config.enabled:
+        violations.append("web_collection_disabled")
     values = {
         "primary_quote_source": config.primary_quote_source,
         "secondary_quote_source": config.secondary_quote_source,
@@ -161,12 +195,37 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
         if not normalized or "REQUIRED" in normalized or "PLACEHOLDER" in normalized:
             violations.append(f"missing_{name}")
     user_agent = config.user_agent.upper()
-    if "YOUR_EMAIL_HERE" in user_agent or "REQUIRED_ACCOUNTABLE_EMAIL" in user_agent:
-        violations.append("placeholder_user_agent_contact")
-    enabled_names = {source.name for source in config.sources if source.enabled}
-    for source_name in ("nasdaq_halts", "sec_edgar"):
-        if source_name not in enabled_names:
+    if (
+        not re.search(r"CONTACT:\s*([^\s@]+@[^\s@]+\.[^\s@]+)", user_agent)
+        or "YOUR_EMAIL_HERE" in user_agent
+        or "REQUIRED_ACCOUNTABLE_EMAIL" in user_agent
+        or "EXAMPLE.COM" in user_agent
+    ):
+        violations.append("accountable_user_agent_contact_required")
+    enabled_by_name = {
+        source.name: source for source in config.sources if source.enabled
+    }
+    required_safety_types = {
+        "nasdaq_halts": "nasdaq_trade_halts_rss",
+        "sec_edgar": "sec_edgar",
+    }
+    for source_name, source_type in required_safety_types.items():
+        source = enabled_by_name.get(source_name)
+        if source is None:
             violations.append(f"required_safety_source_disabled:{source_name}")
+        elif source.type != source_type:
+            violations.append(f"invalid_safety_source_type:{source_name}")
+    candidate_sources = [
+        source
+        for source in config.sources
+        if source.enabled
+        and source.type in {"local_inbox", "public_table_url", "browser_table_url"}
+    ]
+    if not candidate_sources:
+        violations.append("enabled_candidate_source_required")
+    for source in candidate_sources:
+        if not _candidate_source_semantically_valid(source, config.allowed_domains):
+            violations.append(f"invalid_candidate_source:{source.name or 'unnamed'}")
     if config.primary_benchmark not in {"SPY", "IWM"}:
         violations.append("primary_benchmark_must_be_spy_or_iwm")
     return {
@@ -179,6 +238,52 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
         "secondary_benchmark": config.secondary_benchmark or None,
         "universe_version": config.universe_version or None,
     }
+
+
+def validate_web_source_config(config_path: str | Path) -> dict[str, Any]:
+    """Parse and semantically validate the exact durable source configuration."""
+
+    path = Path(config_path).resolve()
+    try:
+        config = load_web_sources_config(path)
+        contract = production_contract_status(config)
+    except (ConfigError, OSError, TypeError, ValueError) as exc:
+        return {
+            "status": "BLOCKED_CONFIGURATION",
+            "ready": False,
+            "config_path": str(path),
+            "config_sha256": None,
+            "violations": ["source_config_unreadable_or_invalid"],
+            "detail": str(exc),
+        }
+    return {
+        **contract,
+        "config_path": str(path),
+        "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _candidate_source_semantically_valid(
+    source: WebSourceConfig,
+    allowed_domains: tuple[str, ...],
+) -> bool:
+    if not source.name.strip():
+        return False
+    if source.type == "local_inbox":
+        return bool(source.path.strip())
+    if source.type not in {"public_table_url", "browser_table_url"}:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(source.url)
+    except ValueError:
+        return False
+    host = str(parsed.hostname or "").lower()
+    allowed = tuple(domain.lower().lstrip(".") for domain in allowed_domains)
+    return bool(
+        parsed.scheme == "https"
+        and host
+        and any(host == domain or host.endswith("." + domain) for domain in allowed)
+    )
 
 
 def get_source(config: WebCollectionConfig, source_type: str) -> WebSourceConfig | None:

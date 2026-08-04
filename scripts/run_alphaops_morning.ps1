@@ -15,6 +15,7 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
+$sourceConfigPath = Join-Path $state "config\web_sources.yaml"
 $outputRoot = Join-Path $state "outputs\alpha_cycle\$MarketDate"
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
@@ -41,6 +42,9 @@ function Write-MorningStage {
         "--started-at", $startedAt
     )
     if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    if (Test-Path -LiteralPath $sourceConfigPath -PathType Leaf) {
+        $arguments += @("--input-file", $sourceConfigPath)
+    }
     if ($NotRequired) { $arguments += "--not-required" }
     $receipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -51,8 +55,16 @@ function Write-MorningStage {
 }
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning"
 if (-not $dailyLock.acquired) {
-    Write-Output "Skipped duplicate AlphaOps morning run: $($dailyLock.reason)"
-    exit 0
+    $lockReceiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning" -Lock $dailyLock
+    foreach ($stage in @("morning_collection", "ranking_delivery")) {
+        Write-MorningStage `
+            -Name $stage `
+            -Status FAILED `
+            -ExitCode 3 `
+            -ErrorCode "daily_lock_unavailable"
+    }
+    Write-Error "Required AlphaOps morning run blocked by daily lock: $($dailyLock.reason)"
+    exit $(if ($recordStageFailed -or -not $lockReceiptWritten) { 2 } else { 3 })
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
@@ -85,7 +97,7 @@ try {
         throw "Market calendar failed with exit code $calendarExit"
     }
 
-    $configPath = Join-Path $runtime "config\web_sources.yaml"
+    $configPath = $sourceConfigPath
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         $stageExit = 2
         $errorCode = "source_config_missing"

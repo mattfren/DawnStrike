@@ -35,8 +35,11 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $resultPath) -Force | Out
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize"
 if (-not $dailyLock.acquired) {
-    Write-Output "Skipped duplicate daily finalize run: $($dailyLock.reason)"
-    exit 0
+    $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize" -Lock $dailyLock
+    [Console]::Error.WriteLine(
+        "Required daily finalize run blocked by daily lock: $($dailyLock.reason)"
+    )
+    exit $(if ($receiptWritten) { 3 } else { 2 })
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `

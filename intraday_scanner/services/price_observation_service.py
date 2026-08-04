@@ -116,7 +116,7 @@ def collect_price_observations(
         "persisted": persisted,
         "observations": observations,
         "no_lookahead": True,
-        "note": "Only bars observed at or before requested_at are eligible.",
+        "note": "Only minute bars completed at or before requested_at are eligible.",
     }
 
 
@@ -294,26 +294,57 @@ def _observation_from_bars(
     max_age_seconds: int,
     created_at: str,
 ) -> dict[str, Any]:
-    prior = [
-        row
-        for row in bars
-        if (timestamp := _bar_time(row)) is not None and timestamp <= requested_at
-    ]
-    prior.sort(key=lambda row: _bar_time(row) or datetime.min.replace(tzinfo=UTC), reverse=True)
-    if not prior:
+    market_bars = [row for row in bars if row.get("provider_status") != "provider_error"]
+    if bars and not market_bars:
+        error_bar = bars[0]
         return _rejected_observation(
             target=target,
             requested_at=requested_at,
             market_date=market_date,
             source=source,
-            status="no_prior_bar",
+            status="provider_error",
+            max_age_seconds=max_age_seconds,
+            created_at=created_at,
+            bar=error_bar,
+        )
+    timed_bars = [
+        (row, timestamp, completed_at)
+        for row in market_bars
+        if (timestamp := _bar_time(row)) is not None
+        and (completed_at := completed_minute_bar_at(timestamp)) is not None
+    ]
+    completed_bars = [
+        item for item in timed_bars if item[2] <= requested_at
+    ]
+    completed_bars.sort(key=lambda item: item[1], reverse=True)
+    if not completed_bars:
+        started_bars = [item for item in timed_bars if item[1] <= requested_at]
+        started_bars.sort(key=lambda item: item[1], reverse=True)
+        if started_bars:
+            incomplete_bar, incomplete_at, _ = started_bars[0]
+            return _rejected_observation(
+                target=target,
+                requested_at=requested_at,
+                market_date=market_date,
+                source=source,
+                status="incomplete_bar_rejected",
+                max_age_seconds=max_age_seconds,
+                created_at=created_at,
+                observed_at=incomplete_at,
+                bar=incomplete_bar,
+            )
+        return _rejected_observation(
+            target=target,
+            requested_at=requested_at,
+            market_date=market_date,
+            source=source,
+            status="no_completed_bar",
             max_age_seconds=max_age_seconds,
             created_at=created_at,
         )
-    bar = prior[0]
-    observed_at = _bar_time(bar)
+    bar, observed_at, bar_completed_at = completed_bars[0]
     price = _bar_price(bar)
-    if observed_at is None or price is None or price <= 0:
+    if price is None or price <= 0:
         return _rejected_observation(
             target=target,
             requested_at=requested_at,
@@ -324,7 +355,7 @@ def _observation_from_bars(
             created_at=created_at,
             bar=bar,
         )
-    freshness = int((requested_at - observed_at).total_seconds())
+    freshness = int((requested_at - bar_completed_at).total_seconds())
     if freshness > max_age_seconds:
         return _rejected_observation(
             target=target,
@@ -340,9 +371,8 @@ def _observation_from_bars(
         )
     requested_iso = _iso_utc(requested_at)
     observed_iso = _iso_utc(observed_at)
-    bar_completed_at = completed_minute_bar_at(observed_at)
-    completed_iso = _iso_utc(bar_completed_at) if bar_completed_at is not None else ""
-    is_complete = bar_completed_at is not None and bar_completed_at <= requested_at
+    completed_iso = _iso_utc(bar_completed_at)
+    is_complete = bar_completed_at <= requested_at
     safe_bar = _safe_bar_payload(bar)
     source_bar_hash = canonical_hash(safe_bar)
     return {
@@ -364,7 +394,7 @@ def _observation_from_bars(
         "provider_status": "exact" if freshness == 0 else "fresh_prior_bar",
         "freshness_seconds": freshness,
         "tolerance_seconds": max_age_seconds,
-        "is_usable": True,
+        "is_usable": is_complete,
         "created_at": created_at,
         "payload_json": {
             "bar": safe_bar,
@@ -372,7 +402,7 @@ def _observation_from_bars(
             "is_complete": is_complete,
             "source_bar_hash_sha256": source_bar_hash,
             "no_lookahead": True,
-            "price_rule": "latest bar timestamp <= requested_at",
+            "price_rule": "latest minute bar with completion <= requested_at",
         },
     }
 
