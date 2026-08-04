@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
 from intraday_scanner.services.daily_run_service import release_manifest_payload
+from intraday_scanner.services.scenario_intelligence_service import scenario_public_snapshot
 from intraday_scanner.services.scheduler_doctor_service import scheduler_doctor
 from intraday_scanner.services.v6_learning_service import v6_public_status
 from intraday_scanner.storage.migrations import get_schema_version
@@ -49,9 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
-    configured_state_root = (
-        Path(args.state_root).resolve() if args.state_root else None
-    )
+    configured_state_root = Path(args.state_root).resolve() if args.state_root else None
     try:
         if configured_state_root is None:
             db_path = _resolve_repository_database(root, args.db_path)
@@ -69,8 +68,7 @@ def main(argv: list[str] | None = None) -> int:
                     "reason": "database_path_outside_approved_boundary",
                     "message": str(exc),
                     "next_action": (
-                        "Use a database under the clean runtime or the explicit "
-                        "durable state root."
+                        "Use a database under the clean runtime or the explicit durable state root."
                     ),
                 },
                 sort_keys=True,
@@ -116,20 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copy2(root / "web" / "index.html", output_root / "index.html")
     shutil.copy2(root / "web" / "favicon.svg", output_root / "favicon.svg")
     shutil.copytree(root / "web" / "assets", output_root / "assets", dirs_exist_ok=True)
-    readiness = (
-        result.get("readiness")
-        if isinstance(result.get("readiness"), dict)
-        else {}
-    )
+    readiness = result.get("readiness") if isinstance(result.get("readiness"), dict) else {}
     performance_hash = str(readiness.get("payload_sha256") or "")
-    publication_set_hash = str(
-        readiness.get("publication_set_sha256") or performance_hash
-    )
+    publication_set_hash = str(readiness.get("publication_set_sha256") or performance_hash)
     build_sha = hashlib.sha256(
-        (
-            f"{source.get('source_sha')}:{publication_set_hash}:"
-            f"{market_date}"
-        ).encode()
+        (f"{source.get('source_sha')}:{publication_set_hash}:{market_date}").encode()
     ).hexdigest()
     build_id = build_sha[:20]
     scheduler = scheduler_doctor(root, state_root=state_root)
@@ -139,14 +128,39 @@ def main(argv: list[str] | None = None) -> int:
     readiness["deployed_build_sha"] = build_sha
     readiness["build_id"] = build_id
     result["readiness"] = readiness
-    (output_root / "readiness.json").write_text(
-        json.dumps(readiness, sort_keys=True, indent=2, default=str),
-        encoding="utf-8",
-    )
     v6_path = output_root / "data" / "v6-learning.json"
     v6_path.parent.mkdir(parents=True, exist_ok=True)
     v6_path.write_text(
         json.dumps(v6_public_status(SQLiteScanStore(db_path)), sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    scenario_path = output_root / "data" / "scenarios.json"
+    scenario_payload = scenario_public_snapshot(db_path=db_path)
+    scenario_path.write_text(
+        json.dumps(scenario_payload, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    scenario_manifest = {
+        "schema_version": "dawnstrike-scenarios-public-manifest-v1",
+        "generated_at": scenario_payload.get("generated_at"),
+        "payload_sha256": hashlib.sha256(scenario_path.read_bytes()).hexdigest(),
+        "record_count": len(scenario_payload.get("records") or []),
+        "performance_day_count": len(scenario_payload.get("performance") or []),
+        "calibration_status": "UNCALIBRATED",
+        "research_only": True,
+    }
+    (output_root / "data" / "scenarios.json.manifest.json").write_text(
+        json.dumps(scenario_manifest, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    readiness["scenario_intelligence"] = {
+        "record_count": scenario_manifest["record_count"],
+        "performance_day_count": scenario_manifest["performance_day_count"],
+        "calibration_status": "UNCALIBRATED",
+        "research_only": True,
+    }
+    (output_root / "readiness.json").write_text(
+        json.dumps(readiness, sort_keys=True, indent=2, default=str),
         encoding="utf-8",
     )
     notification = _record_build_notification(
@@ -176,9 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_root=root,
         state_root=state_root,
         schema_version=_database_schema_version(db_path),
-        data_watermark=str(
-            readiness.get("source_data_watermark") or market_date
-        ),
+        data_watermark=str(readiness.get("source_data_watermark") or market_date),
         artifact_hashes=artifact_hashes,
     )
     (output_root / "release-manifest.json").write_text(
@@ -186,9 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    )
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     (output_root / "build-manifest.json").write_text(
         json.dumps(
             {
@@ -199,9 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                 "build_sha": build_sha,
                 "data_hash_sha256": performance_hash,
                 "publication_set_sha256": publication_set_hash,
-                "release_manifest_sha256": release_manifest.get(
-                    "release_manifest_sha256"
-                ),
+                "release_manifest_sha256": release_manifest.get("release_manifest_sha256"),
                 "market_date": market_date,
                 "generated_at": generated_at,
                 "status": result.get("status"),
@@ -231,8 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                         for item in violations
                     ],
                     "next_action": (
-                        "Rebuild from an explicit safe public DTO; do not redact "
-                        "at deploy time."
+                        "Rebuild from an explicit safe public DTO; do not redact at deploy time."
                     ),
                 },
                 sort_keys=True,
@@ -241,12 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
-    return (
-        0
-        if result.get("status") == "COMPLETE"
-        and readiness.get("status") == "ready"
-        else 2
-    )
+    return 0 if result.get("status") == "COMPLETE" and readiness.get("status") == "ready" else 2
 
 
 def _resolve_repository_database(
@@ -267,10 +269,7 @@ def _resolve_repository_database(
         approved_roots.append(state_root.resolve())
     if not any(_is_relative_to(resolved, boundary) for boundary in approved_roots):
         approved = ", ".join(str(path) for path in approved_roots)
-        raise ValueError(
-            f"database path must be inside an approved root ({approved}): "
-            f"{resolved}"
-        )
+        raise ValueError(f"database path must be inside an approved root ({approved}): {resolved}")
     return resolved
 
 

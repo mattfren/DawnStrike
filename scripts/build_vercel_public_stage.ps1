@@ -47,6 +47,8 @@ Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json") -Destin
 Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json.manifest.json") -Destination (Join-Path $functionData "performance-snapshot-manifest.json") -Force
 Copy-Item -LiteralPath (Join-Path $publicSource "data\calendar.json") -Destination (Join-Path $functionData "calendar.json") -Force
 Copy-Item -LiteralPath (Join-Path $publicSource "data\calendar.json.manifest.json") -Destination (Join-Path $functionData "calendar.json.manifest.json") -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "data\scenarios.json") -Destination (Join-Path $functionData "scenarios.json") -Force
+Copy-Item -LiteralPath (Join-Path $publicSource "data\scenarios.json.manifest.json") -Destination (Join-Path $functionData "scenarios.json.manifest.json") -Force
 Copy-Item -LiteralPath (Join-Path $publicSource "data\publication-set.json") -Destination (Join-Path $functionData "publication-set.json") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\health.py") -Destination (Join-Path $stage "api\health.py") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\readiness.py") -Destination (Join-Path $stage "api\readiness.py") -Force
@@ -54,6 +56,7 @@ Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\public_state.py") -Destinat
 
 $snapshotBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\performance.json"))
 $calendarBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\calendar.json"))
+$scenarioBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\scenarios.json"))
 $state = [ordered]@{
     readiness = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "readiness.json") | ConvertFrom-Json)
     snapshot_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\performance.json.manifest.json") | ConvertFrom-Json)
@@ -61,6 +64,8 @@ $state = [ordered]@{
     snapshot_b64 = [Convert]::ToBase64String($snapshotBytes)
     calendar_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\calendar.json.manifest.json") | ConvertFrom-Json)
     calendar_b64 = [Convert]::ToBase64String($calendarBytes)
+    scenario_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\scenarios.json.manifest.json") | ConvertFrom-Json)
+    scenario_b64 = [Convert]::ToBase64String($scenarioBytes)
     publication_set = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\publication-set.json") | ConvertFrom-Json)
     static_file_hashes_verified = $true
 }

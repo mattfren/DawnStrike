@@ -24,6 +24,7 @@
         <button class="nav-link" data-view="calendar" aria-controls="view-calendar" aria-pressed="false">Calendar</button>
         <button class="nav-link" data-view="performance" aria-controls="view-performance" aria-pressed="false">Performance</button>
         <button class="nav-link" data-view="research" aria-controls="view-research" aria-pressed="false">Research</button>
+        <button class="nav-link" data-view="scenarios" aria-controls="view-scenarios" aria-pressed="false">Scenarios</button>
         <button class="nav-link" data-view="system" aria-controls="view-system" aria-pressed="false">System</button>
       </nav>
       <div class="desk-status">
@@ -193,6 +194,19 @@
           <div class="panel-heading"><div><p class="eyebrow">Decision Replay</p><h3>What the system knew—and why it acted</h3><p class="muted">Probabilities and expected returns stay hidden until calibration, interval, and no-lookahead gates pass.</p></div></div>
           <div id="v6-replay-list" class="decision-replay-list"><span class="muted">Loading immutable decisions…</span></div>
         </article>
+      </section>
+
+      <section id="view-scenarios" class="page-view" aria-labelledby="scenarios-title">
+        <div class="section-heading"><div><p class="eyebrow">Scenario intelligence</p><h2 id="scenarios-title">Sourced catalyst scenarios, governed paper outcomes.</h2><p class="muted">The AI extracts factual claims only. Deterministic policy owns every research action, level, and veto.</p></div><span class="section-pill" id="scenario-calibration">Loading</span></div>
+        <div class="scenario-metric-grid" aria-label="Scenario return evidence">
+          <article class="calendar-summary-card"><span>Forward paper return</span><strong id="scenario-net-return">Not reported</strong><small id="scenario-return-note">No completed paper positions</small></article>
+          <article class="calendar-summary-card"><span>Gross observed</span><strong id="scenario-gross-return">Not reported</strong><small>Closed eligible positions only</small></article>
+          <article class="calendar-summary-card"><span>Closed / open</span><strong id="scenario-position-count">Not reported</strong><small id="scenario-coverage-note">Missing stays excluded</small></article>
+          <article class="calendar-summary-card"><span>Hit rate</span><strong id="scenario-hit-rate">Not reported</strong><small>Resolved paper positions</small></article>
+        </div>
+        <article class="panel scenario-replay-summary"><div class="panel-heading"><div><p class="eyebrow">Historical replay · separate cohort</p><h3>What past provider timestamps would have produced</h3><p class="muted" id="scenario-replay-disclosure">Historical replay not run.</p></div><span class="status-chip" id="scenario-replay-status">Not run</span></div><dl class="detail-list" id="scenario-replay-metrics"></dl></article>
+        <article class="panel scenario-disclosure"><p class="eyebrow">Truth boundary</p><div id="scenario-disclosures" class="callout"><strong>Loading disclosures</strong></div></article>
+        <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Decision trail</p><h3>What sourced news said, how the policy responded, and the paper lifecycle</h3></div><span class="muted" id="scenario-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Scenario Intelligence factual claims and deterministic paper decisions</caption><thead><tr><th scope="col">Time</th><th scope="col">Ticker</th><th scope="col">Source</th><th scope="col">Event</th><th scope="col">Policy action</th><th scope="col">Levels</th><th scope="col">Veto / evidence</th></tr></thead><tbody id="scenario-table"><tr><td colspan="7">Loading scenario records…</td></tr></tbody></table></div></article>
       </section>
 
       <section id="view-system" class="page-view" aria-labelledby="system-title">

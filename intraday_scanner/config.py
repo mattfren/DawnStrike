@@ -91,6 +91,11 @@ class ScannerConfig:
     score_weight_data_quality: float = 1.0
     score_weight_risk_penalty: float = 1.0
     openai_api_key: str = ""
+    scenario_intelligence_enabled: bool = False
+    scenario_openai_model: str = "gpt-5.6-terra"
+    scenario_openai_timeout_seconds: float = 45.0
+    scenario_openai_max_articles_per_run: int = 20
+    scenario_article_max_chars: int = 12_000
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
@@ -151,6 +156,14 @@ class ScannerConfig:
             raise ConfigError("request_timeout_seconds must be positive")
         if self.request_retries < 1:
             raise ConfigError("request_retries must be at least 1")
+        if not self.scenario_openai_model.strip():
+            raise ConfigError("DAWNSTRIKE_OPENAI_MODEL must not be empty")
+        if self.scenario_openai_timeout_seconds <= 0:
+            raise ConfigError("DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS must be positive")
+        if self.scenario_openai_max_articles_per_run < 1:
+            raise ConfigError("DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN must be positive")
+        if self.scenario_article_max_chars < 1:
+            raise ConfigError("DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS must be positive")
         outcome_providers = [
             item.strip().lower()
             for item in self.outcome_capture_provider_order.split(",")
@@ -330,6 +343,24 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
             _env("INTRADAY_SCORE_WEIGHT_RISK_PENALTY", "1.0", env_values),
         ),
         openai_api_key=_env("OPENAI_API_KEY", "", env_values),
+        scenario_intelligence_enabled=_to_bool(
+            _env("DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED", "false", env_values)
+        ),
+        scenario_openai_model=_env(
+            "DAWNSTRIKE_OPENAI_MODEL", "gpt-5.6-terra", env_values
+        ),
+        scenario_openai_timeout_seconds=_to_float(
+            "DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS",
+            _env("DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS", "45", env_values),
+        ),
+        scenario_openai_max_articles_per_run=_to_int(
+            "DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN",
+            _env("DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN", "20", env_values),
+        ),
+        scenario_article_max_chars=_to_int(
+            "DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS",
+            _env("DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS", "12000", env_values),
+        ),
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),
         alpaca_data_feed=_env("ALPACA_DATA_FEED", "iex", env_values),

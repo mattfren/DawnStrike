@@ -883,6 +883,153 @@ class SQLiteScanStore:
                     ON paper_positions(market_date, status, ticker);
                     CREATE INDEX IF NOT EXISTS idx_paper_fills_day_ticker
                     ON paper_trade_fills(market_date, ticker, fill_time);
+                    CREATE TABLE IF NOT EXISTS scenario_news_items (
+                        article_id TEXT PRIMARY KEY,
+                        provider TEXT NOT NULL,
+                        symbols_json TEXT NOT NULL,
+                        headline TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        author TEXT NOT NULL,
+                        source_url TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        timing_kind TEXT NOT NULL,
+                        source_tier TEXT NOT NULL,
+                        content_hash_sha256 TEXT NOT NULL,
+                        source_lineage_hash_sha256 TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_scenario_news_created
+                    ON scenario_news_items(created_at, timing_kind);
+                    CREATE TABLE IF NOT EXISTS scenario_claim_extractions (
+                        extraction_id TEXT PRIMARY KEY,
+                        article_id TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        response_id TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL,
+                        schema_version TEXT NOT NULL,
+                        input_hash_sha256 TEXT NOT NULL,
+                        output_hash_sha256 TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_code TEXT NOT NULL,
+                        usage_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        UNIQUE(article_id, model, prompt_version, schema_version, input_hash_sha256)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_scenario_extractions_article
+                    ON scenario_claim_extractions(article_id, created_at);
+                    CREATE TABLE IF NOT EXISTS scenario_decisions (
+                        decision_id TEXT PRIMARY KEY,
+                        article_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        market_date TEXT NOT NULL,
+                        decision_at TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        directional_evidence_score REAL NOT NULL,
+                        action TEXT NOT NULL,
+                        calibration_status TEXT NOT NULL,
+                        entry_trigger REAL,
+                        invalidation_level REAL,
+                        target_1 REAL,
+                        time_stop TEXT NOT NULL,
+                        source_tier TEXT NOT NULL,
+                        source_lineage_hash_sha256 TEXT NOT NULL,
+                        feature_hash_sha256 TEXT NOT NULL,
+                        cohort TEXT NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        feature_schema_version TEXT NOT NULL,
+                        research_only INTEGER NOT NULL,
+                        broker_execution_enabled INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_scenario_decisions_date
+                    ON scenario_decisions(market_date, cohort, ticker, decision_at);
+                    CREATE TABLE IF NOT EXISTS scenario_events (
+                        event_id TEXT PRIMARY KEY,
+                        decision_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        event_timestamp TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS scenario_signal_links (
+                        decision_id TEXT PRIMARY KEY,
+                        signal_id TEXT,
+                        scan_id TEXT,
+                        paper_intent_id TEXT,
+                        position_id TEXT,
+                        outcome_id TEXT,
+                        cohort TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        strategy_version TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_scenario_links_signal
+                    ON scenario_signal_links(signal_id, cohort);
+                    CREATE TABLE IF NOT EXISTS scenario_model_registry (
+                        model_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        feature_schema_version TEXT NOT NULL,
+                        calibration_status TEXT NOT NULL,
+                        sample_count INTEGER NOT NULL,
+                        promotion_state TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS scenario_run_receipts (
+                        run_id TEXT PRIMARY KEY,
+                        run_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        error_code TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS scenario_daily_performance (
+                        market_date TEXT NOT NULL,
+                        cohort TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        signal_count INTEGER NOT NULL,
+                        triggered_count INTEGER NOT NULL,
+                        closed_eligible_count INTEGER NOT NULL,
+                        open_count INTEGER NOT NULL,
+                        missing_count INTEGER NOT NULL,
+                        quarantined_count INTEGER NOT NULL,
+                        gross_return_pct REAL,
+                        modeled_after_cost_return_pct REAL,
+                        benchmark_return_pct REAL,
+                        excess_return_pct REAL,
+                        hit_rate_pct REAL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY(market_date, cohort, strategy_id, policy_version)
+                    );
+                    CREATE TABLE IF NOT EXISTS scenario_replay_trades (
+                        replay_trade_id TEXT PRIMARY KEY,
+                        decision_id TEXT NOT NULL,
+                        article_id TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        market_date TEXT NOT NULL,
+                        entry_at TEXT,
+                        entry_price REAL,
+                        exit_at TEXT,
+                        exit_price REAL,
+                        outcome_status TEXT NOT NULL,
+                        gross_return_pct REAL,
+                        modeled_after_cost_return_pct REAL,
+                        quarantine_reason TEXT NOT NULL,
+                        source_bar_hash_sha256 TEXT NOT NULL,
+                        source_quote_hash_sha256 TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_scenario_replay_date
+                    ON scenario_replay_trades(market_date, ticker, outcome_status);
                     """
                 )
                 from intraday_scanner.storage.migrations import run_migrations
@@ -6595,6 +6742,506 @@ class SQLiteScanStore:
             (run_id,),
         ).fetchall()
         return [json.loads(str(row["payload_json"])) for row in rows]
+
+    def persist_scenario_news_items(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Upsert source records while retaining the complete private payload."""
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    article_id = str(row.get("article_id") or "")
+                    if not article_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO scenario_news_items
+                        (article_id, provider, symbols_json, headline, summary, source, author,
+                         source_url, created_at, updated_at, fetched_at, first_seen_at,
+                         timing_kind, source_tier, content_hash_sha256,
+                         source_lineage_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            article_id,
+                            str(row.get("provider") or ""),
+                            json.dumps(row.get("symbols") or [], sort_keys=True),
+                            str(row.get("headline") or ""),
+                            str(row.get("summary") or ""),
+                            str(row.get("source") or ""),
+                            str(row.get("author") or ""),
+                            str(row.get("source_url") or ""),
+                            str(row.get("created_at") or ""),
+                            str(row.get("updated_at") or ""),
+                            str(row.get("fetched_at") or ""),
+                            str(row.get("first_seen_at") or ""),
+                            str(row.get("timing_kind") or ""),
+                            str(row.get("source_tier") or ""),
+                            str(row.get("content_hash_sha256") or ""),
+                            str(row.get("source_lineage_hash_sha256") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario news items: {exc}") from exc
+
+    def load_scenario_news_items(
+        self, *, start: str | None = None, end: str | None = None, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        return self._load_scenario_payloads(
+            table="scenario_news_items",
+            order_by="created_at DESC, article_id ASC",
+            start=start,
+            end=end,
+            limit=limit,
+        )
+
+    def persist_scenario_extractions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    extraction_id = str(row.get("extraction_id") or "")
+                    if not extraction_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO scenario_claim_extractions
+                        (extraction_id, article_id, model, response_id, prompt_version,
+                         schema_version, input_hash_sha256, output_hash_sha256, status,
+                         error_code, usage_json, created_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            extraction_id,
+                            str(row.get("article_id") or ""),
+                            str(row.get("model") or ""),
+                            str(row.get("response_id") or ""),
+                            str(row.get("prompt_version") or ""),
+                            str(row.get("schema_version") or ""),
+                            str(row.get("input_hash_sha256") or ""),
+                            str(row.get("output_hash_sha256") or ""),
+                            str(row.get("status") or ""),
+                            str(row.get("error_code") or ""),
+                            json.dumps(row.get("usage") or {}, sort_keys=True),
+                            str(row.get("created_at") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario extractions: {exc}") from exc
+
+    def load_scenario_extraction(
+        self, *, article_id: str, model: str, input_hash_sha256: str
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    """
+                    SELECT * FROM scenario_claim_extractions
+                    WHERE article_id = ? AND model = ? AND input_hash_sha256 = ?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (article_id, model, input_hash_sha256),
+                ).fetchone()
+                return _json_row(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scenario extraction: {exc}") from exc
+
+    def persist_scenario_decisions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    decision_id = str(row.get("decision_id") or "")
+                    if not decision_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO scenario_decisions
+                        (decision_id, article_id, ticker, market_date, decision_at, event_type,
+                         direction, directional_evidence_score, action, calibration_status,
+                         entry_trigger, invalidation_level, target_1, time_stop, source_tier,
+                         source_lineage_hash_sha256, feature_hash_sha256, cohort,
+                         policy_version, feature_schema_version, research_only,
+                         broker_execution_enabled, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            decision_id,
+                            str(row.get("article_id") or ""),
+                            str(row.get("ticker") or "").upper(),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("decision_at") or ""),
+                            str(row.get("event_type") or ""),
+                            str(row.get("direction") or ""),
+                            float(row.get("directional_evidence_score") or 0.0),
+                            str(row.get("action") or ""),
+                            str(row.get("calibration_status") or "UNCALIBRATED"),
+                            _float_or_none(row.get("entry_trigger")),
+                            _float_or_none(row.get("invalidation_level")),
+                            _float_or_none(row.get("target_1")),
+                            str(row.get("time_stop") or "market_close"),
+                            str(row.get("source_tier") or ""),
+                            str(row.get("source_lineage_hash_sha256") or ""),
+                            str(row.get("feature_hash_sha256") or ""),
+                            str(row.get("cohort") or ""),
+                            str(row.get("policy_version") or ""),
+                            str(row.get("feature_schema_version") or ""),
+                            1 if row.get("research_only", True) else 0,
+                            1 if row.get("broker_execution_enabled") else 0,
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario decisions: {exc}") from exc
+
+    def load_scenario_decisions(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        cohort: str | None = None,
+        ticker: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start[:10])
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end[:10])
+        if cohort:
+            clauses.append("cohort = ?")
+            params.append(cohort)
+        if ticker:
+            clauses.append("ticker = ?")
+            params.append(ticker.upper())
+        query = "SELECT * FROM scenario_decisions"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY decision_at DESC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                return [_json_row(row) for row in connection.execute(query, params).fetchall()]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scenario decisions: {exc}") from exc
+
+    def persist_scenario_events(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Append immutable lifecycle events for every scenario decision."""
+
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    event_id = str(row.get("event_id") or "")
+                    decision_id = str(row.get("decision_id") or "")
+                    if not event_id or not decision_id:
+                        continue
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO scenario_events
+                        (event_id, decision_id, event_type, event_timestamp, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            decision_id,
+                            str(row.get("event_type") or ""),
+                            str(row.get("event_timestamp") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += int(cursor.rowcount > 0)
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario events: {exc}") from exc
+
+    def upsert_scenario_model_registry(self, row: dict[str, Any]) -> None:
+        """Record governed policy metadata without treating it as calibration evidence."""
+
+        self.initialize()
+        model_id = str(row.get("model_id") or "")
+        if not model_id:
+            raise StorageError("Scenario model registry requires model_id.")
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO scenario_model_registry
+                    (model_id, created_at, policy_version, feature_schema_version,
+                     calibration_status, sample_count, promotion_state, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        model_id,
+                        str(row.get("created_at") or ""),
+                        str(row.get("policy_version") or ""),
+                        str(row.get("feature_schema_version") or ""),
+                        str(row.get("calibration_status") or "UNCALIBRATED"),
+                        int(row.get("sample_count") or 0),
+                        str(row.get("promotion_state") or "research_only"),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario model registry: {exc}") from exc
+
+    def upsert_scenario_signal_links(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    decision_id = str(row.get("decision_id") or "")
+                    if not decision_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO scenario_signal_links
+                        (decision_id, signal_id, scan_id, paper_intent_id, position_id,
+                         outcome_id, cohort, strategy_id, strategy_version, created_at,
+                         updated_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            decision_id,
+                            str(row.get("signal_id") or ""),
+                            str(row.get("scan_id") or ""),
+                            str(row.get("paper_intent_id") or ""),
+                            str(row.get("position_id") or ""),
+                            str(row.get("outcome_id") or ""),
+                            str(row.get("cohort") or ""),
+                            str(row.get("strategy_id") or ""),
+                            str(row.get("strategy_version") or ""),
+                            str(row.get("created_at") or ""),
+                            str(row.get("updated_at") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario signal links: {exc}") from exc
+
+    def load_scenario_signal_links(
+        self, *, decision_id: str | None = None, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        query = "SELECT * FROM scenario_signal_links"
+        params: list[Any] = []
+        if decision_id:
+            query += " WHERE decision_id = ?"
+            params.append(decision_id)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                return [_json_row(row) for row in connection.execute(query, params).fetchall()]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scenario signal links: {exc}") from exc
+
+    def persist_scenario_run_receipt(self, row: dict[str, Any]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO scenario_run_receipts
+                    (run_id, run_type, status, started_at, completed_at, error_code, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("run_id") or ""),
+                        str(row.get("run_type") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("started_at") or ""),
+                        str(row.get("completed_at") or ""),
+                        str(row.get("error_code") or ""),
+                        json.dumps(row, sort_keys=True),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario run receipt: {exc}") from exc
+
+    def load_scenario_run_receipts(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self._load_scenario_payloads(
+            table="scenario_run_receipts", order_by="started_at DESC, run_id ASC", limit=limit
+        )
+
+    def persist_scenario_daily_performance(self, rows: list[dict[str, Any]]) -> None:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO scenario_daily_performance
+                        (market_date, cohort, strategy_id, policy_version, signal_count,
+                         triggered_count, closed_eligible_count, open_count, missing_count,
+                         quarantined_count, gross_return_pct, modeled_after_cost_return_pct,
+                         benchmark_return_pct, excess_return_pct, hit_rate_pct, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("cohort") or ""),
+                            str(row.get("strategy_id") or ""),
+                            str(row.get("policy_version") or ""),
+                            int(row.get("signal_count") or 0),
+                            int(row.get("triggered_count") or 0),
+                            int(row.get("closed_eligible_count") or 0),
+                            int(row.get("open_count") or 0),
+                            int(row.get("missing_count") or 0),
+                            int(row.get("quarantined_count") or 0),
+                            _float_or_none(row.get("gross_return_pct")),
+                            _float_or_none(row.get("modeled_after_cost_return_pct")),
+                            _float_or_none(row.get("benchmark_return_pct")),
+                            _float_or_none(row.get("excess_return_pct")),
+                            _float_or_none(row.get("hit_rate_pct")),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario daily performance: {exc}") from exc
+
+    def load_scenario_daily_performance(
+        self, *, start: str | None = None, end: str | None = None, limit: int = 10000
+    ) -> list[dict[str, Any]]:
+        return self._load_scenario_payloads(
+            table="scenario_daily_performance",
+            order_by="market_date DESC",
+            start=start,
+            end=end,
+            limit=limit,
+        )
+
+    def _load_scenario_payloads(
+        self,
+        *,
+        table: str,
+        order_by: str,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        allowed_tables = {
+            "scenario_news_items",
+            "scenario_run_receipts",
+            "scenario_daily_performance",
+        }
+        if table not in allowed_tables:
+            raise StorageError("Unsupported scenario payload table")
+        self.initialize()
+        time_column = (
+            "created_at"
+            if table == "scenario_news_items"
+            else "market_date"
+            if table == "scenario_daily_performance"
+            else "started_at"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append(f"{time_column} >= ?")
+            params.append(start)
+        if end:
+            clauses.append(f"{time_column} <= ?")
+            params.append(end)
+        query = f"SELECT * FROM {table}"  # noqa: S608
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += f" ORDER BY {order_by} LIMIT ?"  # noqa: S608
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                return [_json_row(row) for row in connection.execute(query, params).fetchall()]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scenario payloads: {exc}") from exc
+
+    def persist_scenario_replay_trades(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        self.initialize()
+        inserted = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    identity = str(row.get("replay_trade_id") or "")
+                    if not identity:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO scenario_replay_trades
+                        (replay_trade_id, decision_id, article_id, ticker, market_date, entry_at,
+                         entry_price, exit_at, exit_price, outcome_status, gross_return_pct,
+                         modeled_after_cost_return_pct, quarantine_reason,
+                         source_bar_hash_sha256, source_quote_hash_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            identity,
+                            str(row.get("decision_id") or ""),
+                            str(row.get("article_id") or ""),
+                            str(row.get("ticker") or "").upper(),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("entry_at") or ""),
+                            _float_or_none(row.get("entry_price")),
+                            str(row.get("exit_at") or ""),
+                            _float_or_none(row.get("exit_price")),
+                            str(row.get("outcome_status") or ""),
+                            _float_or_none(row.get("gross_return_pct")),
+                            _float_or_none(row.get("modeled_after_cost_return_pct")),
+                            str(row.get("quarantine_reason") or ""),
+                            str(row.get("source_bar_hash_sha256") or ""),
+                            str(row.get("source_quote_hash_sha256") or ""),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist scenario replay trades: {exc}") from exc
+
+    def load_scenario_replay_trades(
+        self, *, start: str | None = None, end: str | None = None, limit: int = 50000
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start:
+            clauses.append("market_date >= ?")
+            params.append(start[:10])
+        if end:
+            clauses.append("market_date <= ?")
+            params.append(end[:10])
+        query = "SELECT * FROM scenario_replay_trades"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date DESC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                return [_json_row(row) for row in connection.execute(query, params).fetchall()]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load scenario replay trades: {exc}") from exc
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)

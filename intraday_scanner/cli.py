@@ -151,6 +151,14 @@ from intraday_scanner.services.return_attribution_service import (
     historical_report,
 )
 from intraday_scanner.services.scan_service import ScanService
+from intraday_scanner.services.scenario_intelligence_service import (
+    close_open_scenario_positions,
+    finalize_scenario_performance,
+    run_scenario_cycle,
+    run_scenario_historical_replay,
+    scenario_doctor,
+    scenario_public_snapshot,
+)
 from intraday_scanner.services.screener_automation import (
     auto_shadow_daily,
     auto_shadow_from_screener,
@@ -629,6 +637,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional bounded PaperOps root for cross-version attribution.",
     )
 
+    scenario_doctor_parser = subparsers.add_parser(
+        "scenario-doctor", help="Check Scenario Intelligence readiness without calling providers"
+    )
+    scenario_doctor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+
+    scenario_cycle_parser = subparsers.add_parser(
+        "scenario-cycle", help="Fetch Alpaca news and create research-only scenario candidates"
+    )
+    scenario_cycle_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_cycle_parser.add_argument("--symbols", default=None)
+    scenario_cycle_parser.add_argument("--since", default=None)
+    scenario_cycle_parser.add_argument("--until", default=None)
+    scenario_cycle_parser.add_argument("--dry-run", action="store_true")
+
+    scenario_replay_parser = subparsers.add_parser(
+        "scenario-replay", help="Record a separately labeled historical scenario research cohort"
+    )
+    scenario_replay_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_replay_parser.add_argument("--symbols", required=True)
+    scenario_replay_parser.add_argument("--start", required=True)
+    scenario_replay_parser.add_argument("--end", required=True)
+
+    scenario_finalize_parser = subparsers.add_parser(
+        "scenario-finalize", help="Reconcile scenario-linked paper return records"
+    )
+    scenario_finalize_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_finalize_parser.add_argument("--market-date", default=None)
+
+    scenario_close_parser = subparsers.add_parser(
+        "scenario-close", help="Close open Scenario Intelligence paper positions at EOD"
+    )
+    scenario_close_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_close_parser.add_argument("--market-date", default=None)
+    scenario_close_parser.add_argument("--at", default="16:00")
+    scenario_close_parser.add_argument("--source", default="alpaca")
+
+    scenario_report_parser = subparsers.add_parser(
+        "scenario-report", help="Print the safe static Scenario Intelligence projection"
+    )
+    scenario_report_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    scenario_report_parser.add_argument("--limit", type=int, default=250)
+
     outcome_gap_parser = subparsers.add_parser(
         "outcome-gap",
         help="Report unresolved outcome truth without converting gaps to zero",
@@ -911,6 +961,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch.add_argument("--max-daily-entries", type=int, default=10)
     trade_watch.add_argument("--min-reward-risk", type=float, default=1.5)
     trade_watch.add_argument("--notify-blocked", action="store_true")
+    trade_watch.add_argument(
+        "--include-scenarios",
+        action="store_true",
+        help=(
+            "Include bounded Scenario Intelligence paper candidates alongside AlphaOps selections."
+        ),
+    )
 
     trade_watch_loop = subparsers.add_parser(
         "trade-watch-loop",
@@ -940,6 +997,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch_loop.add_argument("--max-daily-entries", type=int, default=10)
     trade_watch_loop.add_argument("--min-reward-risk", type=float, default=1.5)
     trade_watch_loop.add_argument("--notify-blocked", action="store_true")
+    trade_watch_loop.add_argument("--include-scenarios", action="store_true")
     trade_watch_loop.add_argument("--interval-seconds", type=float, default=60.0)
     trade_watch_loop.add_argument("--max-iterations", type=int, default=0)
 
@@ -1088,6 +1146,18 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_report(args)
         if args.command == "alpha-attribution":
             return _run_alpha_attribution(args)
+        if args.command == "scenario-doctor":
+            return _run_scenario_doctor(args)
+        if args.command == "scenario-cycle":
+            return _run_scenario_cycle(args)
+        if args.command == "scenario-replay":
+            return _run_scenario_replay(args)
+        if args.command == "scenario-finalize":
+            return _run_scenario_finalize(args)
+        if args.command == "scenario-close":
+            return _run_scenario_close(args)
+        if args.command == "scenario-report":
+            return _run_scenario_report(args)
         if args.command == "outcome-gap":
             return _run_outcome_gap(args)
         if args.command == "attribute-returns":
@@ -1802,6 +1872,59 @@ def _run_alpha_attribution(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"complete", "no_evidence"} else 1
 
 
+def _run_scenario_doctor(args: argparse.Namespace) -> int:
+    result = scenario_doctor(db_path=args.db_path)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "READY" else 2
+
+
+def _run_scenario_cycle(args: argparse.Namespace) -> int:
+    symbols = [item.strip().upper() for item in str(args.symbols or "").split(",") if item.strip()]
+    result = run_scenario_cycle(
+        db_path=args.db_path,
+        symbols=symbols or None,
+        since=args.since,
+        until=args.until,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_scenario_replay(args: argparse.Namespace) -> int:
+    symbols = [item.strip().upper() for item in str(args.symbols).split(",") if item.strip()]
+    result = run_scenario_historical_replay(
+        db_path=args.db_path,
+        symbols=symbols,
+        start=args.start,
+        end=args.end,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_scenario_finalize(args: argparse.Namespace) -> int:
+    result = finalize_scenario_performance(db_path=args.db_path, market_date=args.market_date)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_scenario_close(args: argparse.Namespace) -> int:
+    result = close_open_scenario_positions(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        requested_at=args.at,
+        source=args.source,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_scenario_report(args: argparse.Namespace) -> int:
+    print(json.dumps(scenario_public_snapshot(db_path=args.db_path, limit=args.limit), indent=2))
+    return 0
+
+
 def _run_alpha_alert_replay(args: argparse.Namespace) -> int:
     result = write_alpha_alert_replay_report(db_path=args.db_path, out_path=args.out)
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -2351,6 +2474,7 @@ def _trade_watch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "max_daily_entries": args.max_daily_entries,
         "min_reward_risk": args.min_reward_risk,
         "notify_blocked": args.notify_blocked,
+        "include_scenarios": args.include_scenarios,
     }
 
 

@@ -182,6 +182,46 @@ class AlpacaProvider(MarketDataProvider):
         snapshots = self.get_premarket_snapshot(symbols, config)
         return {snapshot.ticker: snapshot.previous_close for snapshot in snapshots}
 
+    def get_first_quote_after(
+        self,
+        symbol: str,
+        *,
+        start: str,
+        end: str,
+        config: ScannerConfig,
+    ) -> dict[str, Any] | None:
+        """Return the first sourced quote after an event; never use a later-day proxy."""
+
+        payload = self._request_json(
+            "/v2/stocks/quotes",
+            {
+                "symbols": symbol.upper(),
+                "start": start,
+                "end": end,
+                "feed": self.feed,
+                "limit": "50",
+                "sort": "asc",
+            },
+            config,
+        )
+        rows = payload.get("quotes", {}).get(symbol.upper(), [])
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bid = _first_number(row.get("bp"), 0.0)
+            ask = _first_number(row.get("ap"), 0.0)
+            if bid > 0 and ask >= bid:
+                return {
+                    "timestamp": str(row.get("t") or ""),
+                    "bid": bid,
+                    "ask": ask,
+                    "spread_pct": _spread_pct(bid, ask),
+                    "raw": row,
+                }
+        return None
+
 
 def _first_number(*values: Any) -> float:
     for value in values:

@@ -68,6 +68,25 @@ try {
         }
     }
 
+    if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
+        $scenarioClose = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-close", "--db-path", $dbPath, "--market-date", $MarketDate, "--at", "16:00", "--source", "alpaca") `
+            -LogRoot $logRoot `
+            -LogName "scenario_close-$MarketDate"
+        if ($scenarioClose.exit_code -ne 0) {
+            throw "Scenario end-of-day paper lifecycle failed with exit code $($scenarioClose.exit_code)"
+        }
+        $scenarioFinalize = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-finalize", "--db-path", $dbPath, "--market-date", $MarketDate) `
+            -LogRoot $logRoot `
+            -LogName "scenario_finalize-$MarketDate"
+        if ($scenarioFinalize.exit_code -ne 0) {
+            throw "Scenario performance finalization failed with exit code $($scenarioFinalize.exit_code)"
+        }
+    }
+
     $build = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList @("scripts\build_public.py", "--db-path", $dbPath, "--state-root", $state, "--paper-ops-root", $paperOpsRoot, "--out-dir", $outputPath, "--result-out", $resultPath, "--date", $MarketDate, "--retry-limit", "$RetryLimit", "--retry-delay-seconds", "$RetryDelaySeconds") `

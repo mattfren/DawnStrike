@@ -36,7 +36,9 @@ $taskDefinitions = @(
         Name = "Dawnstrike AlphaOps Morning"
         Description = "Dawnstrike V6 morning research collection and ranked delivery. Research-only; no broker execution."
         Script = "run_alphaops_morning.ps1"
-        Start = "08:10"
+        # Scheduled Task timestamps use the host's local zone (Central here);
+        # 07:15 local leaves an explicit buffer before the 09:30 ET gate.
+        Start = "07:15"
         Days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
         Repeat = $false
         DurationHours = 0
@@ -124,8 +126,6 @@ foreach ($definition in $taskDefinitions) {
     }
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
         -WakeToRun `
         -MultipleInstances IgnoreNew `
         -RestartCount 3 `

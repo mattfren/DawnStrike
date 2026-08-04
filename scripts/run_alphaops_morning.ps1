@@ -96,6 +96,21 @@ try {
         $stageExit = $alphaCycle.exit_code
         $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
     }
+    if (
+        $stageExit -eq 0 -and
+        $env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$'
+    ) {
+        $scenarioSince = (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
+        $scenarioCycle = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-cycle", "--db-path", $dbPath, "--since", $scenarioSince) `
+            -LogRoot $logRoot `
+            -LogName "scenario_morning-$MarketDate"
+        if ($scenarioCycle.exit_code -ne 0) {
+            $stageExit = $scenarioCycle.exit_code
+            $errorCode = "scenario_cycle_failed"
+        }
+    }
     $status = if ($stageExit -eq 0) { "COMPLETE" } else { "FAILED" }
     foreach ($stage in @("morning_collection", "ranking_delivery")) {
         Write-MorningStage `

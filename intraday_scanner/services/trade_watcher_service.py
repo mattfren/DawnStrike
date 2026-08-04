@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.alpha.v5_policy import (
+    ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
     alphaops_strategy_contract,
     evaluate_v5_official_paper,
@@ -25,6 +26,11 @@ from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.notifiers.service import build_notifiers, dispatch_events
+from intraday_scanner.scenario.contracts import (
+    SCENARIO_FORWARD_COHORT,
+    SCENARIO_POLICY_VERSION,
+    SCENARIO_STRATEGY_ID,
+)
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
     recover_legacy_alpha_delivery_membership,
@@ -84,6 +90,7 @@ def run_trade_watcher(
     max_daily_entries: int = 10,
     min_reward_risk: float = 1.5,
     notify_blocked: bool = False,
+    include_scenarios: bool = False,
     config: ScannerConfig | None = None,
 ) -> dict[str, Any]:
     """Run one watch cycle and optionally create paper trade fills."""
@@ -123,7 +130,11 @@ def run_trade_watcher(
     store.initialize()
     resolved_at = parse_requested_at(requested_at, market_date=market_date)
     resolved_day = market_date or resolved_at.astimezone(EASTERN).date().isoformat()
-    session_signals = _watch_signals(store, market_date=resolved_day)
+    session_signals = _watch_signals(
+        store,
+        market_date=resolved_day,
+        include_scenarios=include_scenarios,
+    )
     existing_intents = store.load_trade_intents(limit=50_000)
     existing_intent_ids = {str(row.get("intent_id") or "") for row in existing_intents}
     positions = store.load_paper_positions(limit=50_000)
@@ -168,10 +179,7 @@ def run_trade_watcher(
         for row in existing_intents
         if row.get("action") == ACTION_ENTER
     }
-    open_positions = {
-        str(row.get("signal_id") or ""): dict(row)
-        for row in remaining_open_rows
-    }
+    open_positions = {str(row.get("signal_id") or ""): dict(row) for row in remaining_open_rows}
     all_position_signal_ids = {str(row.get("signal_id") or "") for row in positions}
     daily_entry_count = sum(
         1
@@ -182,13 +190,9 @@ def run_trade_watcher(
     observations_by_signal, observations_by_ticker = _latest_observations(observations)
 
     new_intents: list[dict[str, Any]] = [
-        row
-        for row in repair_intents
-        if str(row.get("intent_id") or "") not in existing_intent_ids
+        row for row in repair_intents if str(row.get("intent_id") or "") not in existing_intent_ids
     ]
-    existing_intent_ids.update(
-        str(row.get("intent_id") or "") for row in new_intents
-    )
+    existing_intent_ids.update(str(row.get("intent_id") or "") for row in new_intents)
     paper_positions: list[dict[str, Any]] = list(repair_positions)
     paper_fills: list[dict[str, Any]] = list(repair_fills)
     signal_events: list[dict[str, Any]] = list(repair_events)
@@ -303,7 +307,12 @@ def run_trade_watcher(
     }
 
 
-def _watch_signals(store: SQLiteScanStore, *, market_date: str) -> list[dict[str, Any]]:
+def _watch_signals(
+    store: SQLiteScanStore,
+    *,
+    market_date: str,
+    include_scenarios: bool = False,
+) -> list[dict[str, Any]]:
     recover_legacy_alpha_delivery_membership(
         store,
         market_date=market_date,
@@ -342,7 +351,25 @@ def _watch_signals(store: SQLiteScanStore, *, market_date: str) -> list[dict[str
             f"observed {observed}."
         )
     _validate_exact_session_selections(all_selections, market_date=market_date)
-    if not all_selections:
+    scenario_selections = []
+    if include_scenarios:
+        scenario_selections = [
+            row
+            for row in store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT, limit=50_000)
+            if str(row.get("selected_at") or "")[:10] == market_date
+        ]
+        _validate_scenario_selections(scenario_selections, market_date=market_date)
+    scenario_open_positions = []
+    if include_scenarios:
+        scenario_open_positions = [
+            row
+            for row in store.load_paper_positions(limit=50_000)
+            if str(row.get("status") or "") == "OPEN"
+            and str(row.get("strategy_id") or "") == SCENARIO_STRATEGY_ID
+            and str(row.get("strategy_version") or "") == SCENARIO_POLICY_VERSION
+            and str(row.get("cohort") or "") == SCENARIO_FORWARD_COHORT
+        ]
+    if not all_selections and not scenario_selections and not scenario_open_positions:
         raise SnapshotValidationError(
             "Exact AlphaOps session selection evidence is absent; paper watcher "
             "refuses ranked, legacy, or partial fallback rows."
@@ -369,9 +396,7 @@ def _watch_signals(store: SQLiteScanStore, *, market_date: str) -> list[dict[str
         for row in store.load_historical_signals(market_date=market_date, limit=100)
         if _is_watchable_signal(row)
     ]
-    historical_by_id = {
-        str(row.get("signal_id") or ""): row for row in historical
-    }
+    historical_by_id = {str(row.get("signal_id") or ""): row for row in historical}
     missing_signal_ids = {
         str(selection.get("signal_id") or "")
         for selection in selections
@@ -381,6 +406,18 @@ def _watch_signals(store: SQLiteScanStore, *, market_date: str) -> list[dict[str
         raise SnapshotValidationError(
             "Exact AlphaOps session selection is only partially persisted; missing "
             "watchable historical signals: " + ", ".join(sorted(missing_signal_ids))
+        )
+    selected_rows = selections + scenario_selections
+    missing_signal_ids = {
+        str(selection.get("signal_id") or "")
+        for selection in selected_rows
+        if str(selection.get("signal_id") or "") not in historical_by_id
+    }
+    if missing_signal_ids:
+        raise SnapshotValidationError(
+            "Selected paper signals are only partially persisted; "
+            "missing watchable historical signals: "
+            + ", ".join(sorted(missing_signal_ids))
         )
     return [
         {
@@ -393,7 +430,7 @@ def _watch_signals(store: SQLiteScanStore, *, market_date: str) -> list[dict[str
             "selected_at": selection.get("selected_at"),
             "selection_payload_json": selection.get("payload_json") or {},
         }
-        for selection in selections
+        for selection in selected_rows
     ]
 
 
@@ -423,6 +460,22 @@ def _validate_exact_session_selections(
             )
 
 
+def _validate_scenario_selections(rows: list[dict[str, Any]], *, market_date: str) -> None:
+    """Validate scenario members without weakening AlphaOps' frozen cohort contract."""
+
+    _validate_exact_session_selections(rows, market_date=market_date)
+    for row in rows:
+        if (
+            str(row.get("strategy_id") or "") != SCENARIO_STRATEGY_ID
+            or str(row.get("strategy_version") or "") != SCENARIO_POLICY_VERSION
+            or str(row.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+            or str(row.get("decision") or "").lower() != "paper_entry"
+        ):
+            raise SnapshotValidationError(
+                "Scenario selection violates the bounded paper-lifecycle contract."
+            )
+
+
 def _signals_for_open_positions(
     store: SQLiteScanStore,
     positions: list[dict[str, Any]],
@@ -444,20 +497,22 @@ def _signals_for_open_positions(
         # The position snapshot is itself durable lifecycle truth.  If the source
         # signal row was lost, its saved stop/target are enough to carry or close
         # safely without inventing a new entry.
-        output.append({
-            **historical,
-            "signal_id": signal_id,
-            "market_date": str(position.get("market_date") or "")[:10],
-            "ticker": str(position.get("ticker") or "").upper(),
-            "entry_watch_level": position.get("entry_price"),
-            "invalidation_level": position.get("stop_price"),
-            "target_1": position.get("target_price"),
-            "selection_id": position.get("selection_id"),
-            "strategy_id": position.get("strategy_id") or ALPHAOPS_STRATEGY_ID,
-            "strategy_version": position.get("strategy_version"),
-            "cohort": position.get("cohort") or "official_telegram",
-            "carry_forward_open_position": True,
-        })
+        output.append(
+            {
+                **historical,
+                "signal_id": signal_id,
+                "market_date": str(position.get("market_date") or "")[:10],
+                "ticker": str(position.get("ticker") or "").upper(),
+                "entry_watch_level": position.get("entry_price"),
+                "invalidation_level": position.get("stop_price"),
+                "target_1": position.get("target_price"),
+                "selection_id": position.get("selection_id"),
+                "strategy_id": position.get("strategy_id") or ALPHAOPS_STRATEGY_ID,
+                "strategy_version": position.get("strategy_version"),
+                "cohort": position.get("cohort") or "official_telegram",
+                "carry_forward_open_position": True,
+            }
+        )
     return output
 
 
@@ -514,9 +569,12 @@ def _canonical_eod_repairs(
         exit_time = str(trade.get("exit_time") or "")
         if not trade_id or not position_id or exit_price is None or exit_price <= 0:
             continue
-        intent_id = "ti_" + hashlib.sha256(
-            f"canonical_eod_repair:{trade_id}:{position_id}".encode()
-        ).hexdigest()[:24]
+        intent_id = (
+            "ti_"
+            + hashlib.sha256(f"canonical_eod_repair:{trade_id}:{position_id}".encode()).hexdigest()[
+                :24
+            ]
+        )
         intent = {
             "intent_id": intent_id,
             "signal_id": signal_id,
@@ -582,11 +640,13 @@ def _canonical_eod_repairs(
             quantity=quantity,
             config=config,
         )
-        fill.update({
-            "source_reconciliation_trade_id": trade_id,
-            "source_bar_hash_sha256": trade.get("source_bar_hash_sha256"),
-            "canonical_eod_repair": True,
-        })
+        fill.update(
+            {
+                "source_reconciliation_trade_id": trade_id,
+                "source_bar_hash_sha256": trade.get("source_bar_hash_sha256"),
+                "canonical_eod_repair": True,
+            }
+        )
         fill["payload_json"] = dict(fill)
         intents.append(intent)
         positions.append(closed)
@@ -707,12 +767,10 @@ def _entry_decision(
     )
     stop = _level(signal, "invalidation_level", "invalidation", "exit_line")
     target = _level(signal, "target_1", "first_target", "target")
-    decision_time = str(
-        observation.get("requested_at")
-        or observation.get("observed_at")
-        or ""
-    )
-    if is_v5_active(decision_time):
+    decision_time = str(observation.get("requested_at") or observation.get("observed_at") or "")
+    if str(signal.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID and is_v5_active(
+        decision_time
+    ):
         v5 = evaluate_v5_official_paper(
             signal,
             observation,
@@ -1078,9 +1136,10 @@ def _open_paper_position(
         if fill_price > 0
         else 0.0
     )
-    position_id = "pp_" + hashlib.sha256(
-        f"{intent['signal_id']}:{intent['market_date']}".encode()
-    ).hexdigest()[:24]
+    position_id = (
+        "pp_"
+        + hashlib.sha256(f"{intent['signal_id']}:{intent['market_date']}".encode()).hexdigest()[:24]
+    )
     now = str(intent.get("decision_time") or "")
     position = {
         "position_id": position_id,
@@ -1167,9 +1226,10 @@ def _fill(
     quantity: float,
     config: ScannerConfig,
 ) -> dict[str, Any]:
-    fill_id = "pf_" + hashlib.sha256(
-        f"{intent['intent_id']}:{side}:{position_id}".encode()
-    ).hexdigest()[:24]
+    fill_id = (
+        "pf_"
+        + hashlib.sha256(f"{intent['intent_id']}:{side}:{position_id}".encode()).hexdigest()[:24]
+    )
     fill = {
         "fill_id": fill_id,
         "position_id": position_id,
@@ -1197,9 +1257,9 @@ def _fill(
 
 
 def _signal_event(intent: dict[str, Any], event_type: str) -> dict[str, Any]:
-    event_id = "se_" + hashlib.sha256(
-        f"{intent['intent_id']}:{event_type}".encode()
-    ).hexdigest()[:24]
+    event_id = (
+        "se_" + hashlib.sha256(f"{intent['intent_id']}:{event_type}".encode()).hexdigest()[:24]
+    )
     return {
         "event_id": event_id,
         "signal_id": intent["signal_id"],
@@ -1217,9 +1277,7 @@ def _signal_event(intent: dict[str, Any], event_type: str) -> dict[str, Any]:
             "strategy_id": intent.get("strategy_id"),
             "strategy_version": intent.get("strategy_version"),
             "cohort": intent.get("cohort"),
-            "source_reconciliation_trade_id": intent.get(
-                "source_reconciliation_trade_id"
-            ),
+            "source_reconciliation_trade_id": intent.get("source_reconciliation_trade_id"),
             "source_bar_hash_sha256": intent.get("source_bar_hash_sha256"),
             "research_only": True,
             "broker_execution_enabled": False,
@@ -1283,8 +1341,10 @@ def _dispatch_notifications(
         channels = ["console"]
     config = load_config(database_path=Path(db_path), notifier_channels=",".join(channels))
     notifiers: list[BaseNotifier]
-    if dry_run and "telegram" in channels and not (
-        config.telegram_bot_token and config.telegram_chat_id
+    if (
+        dry_run
+        and "telegram" in channels
+        and not (config.telegram_bot_token and config.telegram_chat_id)
     ):
         notifiers = [ConsoleNotifier()]
     else:
@@ -1315,15 +1375,13 @@ def _state_row(
         "invalidation_level": _level(signal, "invalidation_level", "invalidation", "exit_line"),
         "target_1": _level(signal, "target_1", "first_target", "target"),
         "open_position_id": dict(open_position or {}).get("position_id", ""),
-        "official_paper_eligible": dict(
-            decision.get("decision_trace") or {}
-        ).get("eligible_for_official_paper"),
-        "decision_fingerprint": dict(
-            decision.get("decision_trace") or {}
-        ).get("decision_fingerprint", ""),
-        "feasibility_score": dict(
-            decision.get("decision_trace") or {}
-        ).get("feasibility_score"),
+        "official_paper_eligible": dict(decision.get("decision_trace") or {}).get(
+            "eligible_for_official_paper"
+        ),
+        "decision_fingerprint": dict(decision.get("decision_trace") or {}).get(
+            "decision_fingerprint", ""
+        ),
+        "feasibility_score": dict(decision.get("decision_trace") or {}).get("feasibility_score"),
     }
 
 
