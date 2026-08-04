@@ -56,7 +56,8 @@ function Write-Stage {
         [string]$StartedAt,
         [string]$ResultFile = "",
         [string]$OutputFile = "",
-        [string]$ErrorCode = ""
+        [string]$ErrorCode = "",
+        [switch]$NotRequired
     )
     $arguments = @(
         "scripts\record_daily_stage.py",
@@ -72,6 +73,7 @@ function Write-Stage {
     if ($ResultFile) { $arguments += @("--result-file", $ResultFile) }
     if ($OutputFile) { $arguments += @("--output-file", $OutputFile) }
     if ($ErrorCode) { $arguments += @("--error-code", $ErrorCode) }
+    if ($NotRequired) { $arguments += "--not-required" }
     $receipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList $arguments `
@@ -95,13 +97,15 @@ try {
             "eod_outcome_capture",
             "paper_reconciliation",
             "alpha_learning",
-            "paperops_forward"
+            "paperops_forward",
+            "scenario_finalization"
         )) {
             Write-Stage `
                 -Name $stage `
                 -Status SKIPPED_NOT_APPLICABLE `
                 -ExitCode 0 `
-                -StartedAt ((Get-Date).ToUniversalTime().ToString("o"))
+                -StartedAt ((Get-Date).ToUniversalTime().ToString("o")) `
+                -NotRequired:($stage -eq "scenario_finalization")
         }
         exit $overallExit
     }
@@ -270,7 +274,7 @@ try {
             $scenarioEodExit = $scenarioFinalize.exit_code
         }
         if ($scenarioEodExit -eq 0) {
-            Write-Stage -Name scenario_finalization -Status COMPLETE -ExitCode 0 -StartedAt $scenarioStarted
+            Write-Stage -Name scenario_finalization -Status COMPLETE -ExitCode 0 -StartedAt $scenarioStarted -NotRequired
         }
         else {
             Set-OverallFailure -ExitCode $scenarioEodExit
@@ -279,8 +283,17 @@ try {
                 -Status FAILED `
                 -ExitCode $scenarioEodExit `
                 -StartedAt $scenarioStarted `
-                -ErrorCode scenario_finalization_failed
+                -ErrorCode scenario_finalization_failed `
+                -NotRequired
         }
+    }
+    else {
+        Write-Stage `
+            -Name scenario_finalization `
+            -Status SKIPPED_NOT_APPLICABLE `
+            -ExitCode 0 `
+            -StartedAt ((Get-Date).ToUniversalTime().ToString("o")) `
+            -NotRequired
     }
 
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")

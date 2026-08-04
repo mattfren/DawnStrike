@@ -23,6 +23,7 @@ DAILY_STAGE_ORDER = (
     "ranking_delivery",
     "intraday_monitor",
     "scenario_intelligence",
+    "scenario_finalization",
     "eod_outcome_capture",
     "paper_reconciliation",
     "alpha_learning",

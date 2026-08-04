@@ -30,24 +30,27 @@ function Test-DawnstrikeNonNegativeInteger {
 function Test-DawnstrikeAlphaCycleArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactPath,
-        [Parameter(Mandatory = $true)][object]$ProcessReceipt,
+        [AllowNull()][object]$ProcessReceipt = $null,
         [Parameter(Mandatory = $true)][string]$MarketDate
     )
     if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
         throw "Current AlphaOps cycle artifact is missing: $ArtifactPath"
     }
-    $startedAtText = [string]$ProcessReceipt.started_at
-    if ([string]::IsNullOrWhiteSpace($startedAtText)) {
-        throw "AlphaOps process receipt is missing started_at."
-    }
-    try {
-        $startedAt = [datetimeoffset]::Parse($startedAtText).UtcDateTime
-    }
-    catch {
-        throw "AlphaOps process receipt started_at is invalid."
+    $startedAt = $null
+    if ($null -ne $ProcessReceipt) {
+        $startedAtText = [string]$ProcessReceipt.started_at
+        if ([string]::IsNullOrWhiteSpace($startedAtText)) {
+            throw "AlphaOps process receipt is missing started_at."
+        }
+        try {
+            $startedAt = [datetimeoffset]::Parse($startedAtText).UtcDateTime
+        }
+        catch {
+            throw "AlphaOps process receipt started_at is invalid."
+        }
     }
     $artifactInfo = Get-Item -LiteralPath $ArtifactPath
-    if ($artifactInfo.LastWriteTimeUtc -lt $startedAt) {
+    if ($null -ne $startedAt -and $artifactInfo.LastWriteTimeUtc -lt $startedAt) {
         throw "AlphaOps cycle artifact predates the current process attempt."
     }
     try {
@@ -101,19 +104,19 @@ function Test-DawnstrikeAlphaCycleArtifact {
         market_date = $MarketDate
         source_status = [string]$contract.source_status
         artifact_last_write_utc = $artifactInfo.LastWriteTimeUtc.ToString("o")
-        process_started_at_utc = $startedAt.ToString("o")
+        process_started_at_utc = if ($null -eq $startedAt) { $null } else { $startedAt.ToString("o") }
     }
 }
 
-function Resolve-DawnstrikeMorningOutcome {
+function Resolve-DawnstrikeCoreOptionalOutcome {
     param(
         [Parameter(Mandatory = $true)][int]$CoreExitCode,
-        [AllowNull()][Nullable[int]]$ScenarioExitCode,
+        [AllowNull()][Nullable[int]]$OptionalExitCode,
         [Parameter(Mandatory = $true)][bool]$RecordStageFailed
     )
     $finalExit = $CoreExitCode
-    if ($CoreExitCode -eq 0 -and $null -ne $ScenarioExitCode) {
-        $finalExit = [int]$ScenarioExitCode
+    if ($CoreExitCode -eq 0 -and $null -ne $OptionalExitCode) {
+        $finalExit = [int]$OptionalExitCode
     }
     if ($RecordStageFailed) {
         $finalExit = 2
@@ -123,4 +126,16 @@ function Resolve-DawnstrikeMorningOutcome {
         core_exit_code = $CoreExitCode
         final_exit_code = $finalExit
     }
+}
+
+function Resolve-DawnstrikeMorningOutcome {
+    param(
+        [Parameter(Mandatory = $true)][int]$CoreExitCode,
+        [AllowNull()][Nullable[int]]$ScenarioExitCode,
+        [Parameter(Mandatory = $true)][bool]$RecordStageFailed
+    )
+    return Resolve-DawnstrikeCoreOptionalOutcome `
+        -CoreExitCode $CoreExitCode `
+        -OptionalExitCode $ScenarioExitCode `
+        -RecordStageFailed $RecordStageFailed
 }

@@ -13,6 +13,7 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
+. (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $logRoot = Join-Path $state "logs"
@@ -20,7 +21,11 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
+$scenarioCandidateCount = 0
+$scenarioExitCode = $null
+$scenarioStageRecordFailed = $false
 $scenarioWatermarkPath = Join-Path $state "scenario_monitor_watermark.json"
+$alphaCyclePath = Join-Path $state "outputs\alpha_cycle\$MarketDate\alpha_cycle.json"
 
 function Get-ScenarioMonitorWatermark {
     # The watermark is deliberately durable and only advances after a successful
@@ -133,11 +138,24 @@ try {
     $calendarExit = $calendar.exit_code
     if ($calendarExit -eq 10) {
         $record = Write-MonitorStage -Status SKIPPED_NOT_APPLICABLE -ExitCode 0
-        exit $record.exit_code
+        exit $(if ($record.exit_code -eq 0) { 0 } else { 2 })
     }
     if ($calendarExit -ne 0) {
         $exitCode = $calendarExit
         $errorCode = "market_calendar_failed"
+    }
+
+    if ($exitCode -eq 0) {
+        try {
+            $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
+                -ArtifactPath $alphaCyclePath `
+                -MarketDate $MarketDate
+            $scenarioCandidateCount = [int64]$alphaArtifact.signal_count
+        }
+        catch {
+            $exitCode = 2
+            $errorCode = "alpha_cycle_artifact_invalid"
+        }
     }
 
     if ($exitCode -eq 0) {
@@ -166,49 +184,71 @@ try {
             $errorCode = "trade_watcher_failed"
         }
     }
+    $coreExitCode = $exitCode
+    $coreErrorCode = $errorCode
+    $status = if ($coreExitCode -eq 0) { "COMPLETE" } else { "FAILED" }
+    $coreRecord = Write-MonitorStage `
+        -Status $status `
+        -ExitCode $coreExitCode `
+        -ErrorCode $coreErrorCode
     if (
-        $exitCode -eq 0 -and
+        $coreExitCode -eq 0 -and
         $env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$'
     ) {
-        # The five-minute monitor owns time-sensitive paper lifecycle checks.
-        # Scenario work therefore runs after trade-watch and is hard-bounded to
-        # at most three 30-second model calls inside the four-minute task limit.
-        $env:DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN = "3"
-        $env:DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS = "30"
-        $scenarioSince = Get-ScenarioMonitorWatermark
-        # Record the start rather than the end. The next query overlaps this run,
-        # so news published while processing is re-read and deduplicated.
-        $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
-        $scenario = Invoke-DawnstrikeNativeProcess `
-            -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
-            -LogRoot $logRoot `
-            -LogName "scenario_monitor-$MarketDate"
-        if ($scenario.exit_code -ne 0) {
-            $exitCode = $scenario.exit_code
-            $errorCode = "scenario_cycle_failed"
+        if ($scenarioCandidateCount -le 0) {
+            $scenarioStatus = "SKIPPED_NOT_APPLICABLE"
+            $scenarioErrorCode = ""
         }
         else {
+            try {
+                # The five-minute monitor owns time-sensitive paper lifecycle checks.
+                # Scenario work therefore runs after trade-watch and is hard-bounded to
+                # at most three 30-second model calls inside the four-minute task limit.
+                $env:DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN = "3"
+                $env:DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS = "30"
+                $scenarioSince = Get-ScenarioMonitorWatermark
+                # Record the start rather than the end. The next query overlaps this run,
+                # so news published while processing is re-read and deduplicated.
+                $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
+                $scenario = Invoke-DawnstrikeNativeProcess `
+                    -FilePath "py.exe" `
+                    -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
+                    -LogRoot $logRoot `
+                    -LogName "scenario_monitor-$MarketDate"
+                $scenarioExitCode = [int]$scenario.exit_code
+                $scenarioStatus = if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }
+                $scenarioErrorCode = if ($scenario.exit_code -eq 0) { "" } else { "scenario_cycle_failed" }
+                if ($scenario.exit_code -ne 0) {
+                    # The optional Scenario stage records its own failure below.
+                }
+                else {
             Save-ScenarioMonitorWatermark -WatermarkUtc $nextScenarioWatermark
+                }
+            }
+            catch {
+                $scenarioExitCode = 2
+                $scenarioStatus = "FAILED"
+                $scenarioErrorCode = "scenario_orchestration_failed"
+            }
         }
-        $scenarioStage = Write-ScenarioStage `
-            -Status $(if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
-            -ExitCode $scenario.exit_code `
-            -ErrorCode $(if ($scenario.exit_code -eq 0) { "" } else { "scenario_cycle_failed" })
-        if ($scenarioStage.exit_code -ne 0 -and $exitCode -eq 0) {
-            $exitCode = 2
-            $errorCode = "scenario_stage_record_failed"
+        try {
+            $scenarioStage = Write-ScenarioStage `
+                -Status $scenarioStatus `
+                -ExitCode $(if ($null -eq $scenarioExitCode) { 0 } else { $scenarioExitCode }) `
+                -ErrorCode $scenarioErrorCode
+            if ($scenarioStage.exit_code -ne 0) {
+                $scenarioStageRecordFailed = $true
+            }
+        }
+        catch {
+            $scenarioStageRecordFailed = $true
         }
     }
-    $status = if ($exitCode -eq 0) { "COMPLETE" } else { "FAILED" }
-    $record = Write-MonitorStage `
-        -Status $status `
-        -ExitCode $exitCode `
-        -ErrorCode $errorCode
-    if ($record.exit_code -ne 0) {
-        $exitCode = 2
-    }
-    exit $exitCode
+    $outcome = Resolve-DawnstrikeCoreOptionalOutcome `
+        -CoreExitCode $coreExitCode `
+        -OptionalExitCode $scenarioExitCode `
+        -RecordStageFailed ($scenarioStageRecordFailed -or $coreRecord.exit_code -ne 0)
+    exit $outcome.final_exit_code
 }
 finally {
     Pop-Location

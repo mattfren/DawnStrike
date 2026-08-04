@@ -128,6 +128,29 @@ def test_full_release_bound_chain_completes_only_after_readiness(tmp_path: Path)
     )
 
 
+def test_scenario_finalization_is_allowed_as_an_optional_stage(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+
+    snapshot = record_daily_stage(
+        db_path=tmp_path / "state.sqlite",
+        market_date="2026-08-04",
+        stage_name="scenario_finalization",
+        status="SKIPPED_NOT_APPLICABLE",
+        runtime_root=runtime,
+        state_root=state,
+        release_sha="f" * 40,
+        required=False,
+        exit_code=0,
+    )
+
+    stage = snapshot["latest_stage_statuses"]["scenario_finalization"]
+    assert stage["status"] == "SKIPPED_NOT_APPLICABLE"
+    assert snapshot["run"]["status"] == "IN_PROGRESS"
+
+
 def test_release_manifest_binds_runtime_state_schema_and_artifacts(
     tmp_path: Path,
 ) -> None:
