@@ -85,7 +85,14 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "AdditionalProductionAliases" in script
     assert "Set-VercelAlias" in script
     assert '($AliasUrl -replace "^https?://", "").TrimEnd("/")' in script
-    assert "$_.meta.originalDeploymentId -eq $deployment.id" in script
+    assert "function Get-OptionalJsonProperty" in script
+    assert '$InputObject.PSObject.Properties[$Name]' in script
+    assert '-Name "deployment"' in script
+    assert '-Name "originalDeploymentId"' in script
+    assert "$deploymentResponse.deployment" not in script
+    assert "$_.meta" not in script
+    assert "$priorProduction.id" not in script
+    assert "$deployment.readyState" not in script
     assert "$stderrPath = [System.IO.Path]::GetTempFileName()" in script
     assert "2> $stderrPath" in script
     assert "[System.IO.File]::ReadAllText($stderrPath).Trim()" in script
