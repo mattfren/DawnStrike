@@ -58,8 +58,10 @@ py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-
 py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --state-root C:\r\dawnstrike-state
 ```
 
-For an already-approved password-backed installation, update definitions without
-retrieving or re-entering the stored password:
+`ReuseExistingPrincipal` is only valid for an approved Windows service account.
+Windows requires `RunAsCredential` again when any password-logon task definition
+changes; the registration script fails before mutation if that credential is
+omitted. For a service-account installation only:
 
 ```powershell
 .\scripts\register_alphaops_tasks.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -ReuseExistingPrincipal

@@ -80,6 +80,8 @@ def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
     assert "RestartIntervalMinutes = 15" in register
     assert "ReuseExistingPrincipal" in register
     assert "Set-ScheduledTask" in register
+    assert "Existing Password tasks require RunAsCredential" in register
+    assert "-ErrorAction Stop" in register
     assert "preserving its approved stored principal" in register
     assert register.index("$taskPreflight = @{}") < register.index("Set-ScheduledTask")
     assert register.index("Existing AlphaOps tasks do not share") < register.index(
