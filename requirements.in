@@ -11,3 +11,4 @@ cyclonedx-bom>=7.0
 bandit>=1.9
 detect-secrets>=1.5
 defusedxml>=0.7
+openai>=2.0

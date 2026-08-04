@@ -36,6 +36,7 @@ const state = {
   calendar: null,
   calendarManifest: null,
   publicationSet: null,
+  scenarios: null,
   v6: null,
   stage: null,
   calendarMonth: null,
@@ -115,7 +116,7 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6] = await Promise.all([
+    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
@@ -124,6 +125,7 @@ async function init() {
       loadJson("/data/calendar.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/v6-learning.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/scenarios.json").catch(() => ({ payload: {}, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
@@ -132,12 +134,13 @@ async function init() {
     state.calendarManifest = calendarManifest.payload;
     state.publicationSet = publicationSet.payload;
     state.v6 = v6.payload;
+    state.scenarios = scenarios.payload;
     state.stage = stage.payload;
     state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
     initializeCalendarFilters();
     render();
     const requestedView = window.location.hash.slice(1);
-    if (["overview", "calendar", "performance", "research", "system"].includes(requestedView)) showView(requestedView);
+    if (["overview", "calendar", "performance", "research", "scenarios", "system"].includes(requestedView)) showView(requestedView);
   } catch (error) {
     document.getElementById("header-status").textContent = "Snapshot unavailable";
     document.getElementById("app-alert").textContent = "The public snapshot could not be loaded. No return is being shown.";
@@ -181,8 +184,70 @@ function render() {
   renderCurve(official);
   renderResearchCohorts(daily);
   renderV6Research();
+  renderScenarios();
   renderCalendar();
   renderSystem(state.readiness, state.manifest, state.stage, data);
+}
+
+function renderScenarios() {
+  const payload = state.scenarios || {};
+  const performance = Array.isArray(payload.performance) ? payload.performance : [];
+  const replay = payload.historical_replay || {};
+  const replayPerformance = Array.isArray(replay.performance) ? replay.performance : [];
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  const latest = performance.slice().sort((a, b) => String(b.market_date).localeCompare(String(a.market_date)))[0];
+  const calibration = payload.calibration_status || "UNCALIBRATED";
+  setStatus("scenario-calibration", calibration === "UNCALIBRATED" ? "Uncalibrated" : calibration, calibration === "UNCALIBRATED" ? "PARTIAL" : "COMPLETE");
+  document.getElementById("scenario-updated").textContent = payload.generated_at ? `Published ${formatTimestamp(payload.generated_at)}` : "Not published";
+  document.getElementById("scenario-net-return").innerHTML = formatPercent(latest?.modeled_after_cost_return_pct);
+  document.getElementById("scenario-gross-return").innerHTML = formatPercent(latest?.gross_return_pct);
+  document.getElementById("scenario-position-count").textContent = latest ? `${latest.closed_eligible_count ?? 0} / ${latest.open_count ?? 0}` : "Not reported";
+  document.getElementById("scenario-hit-rate").innerHTML = formatPercent(latest?.hit_rate_pct);
+  document.getElementById("scenario-return-note").textContent = latest?.return_status === "complete" ? `After recorded paper-fill costs · ${latest.market_date}` : "No completed paper positions";
+  document.getElementById("scenario-coverage-note").textContent = latest ? `${latest.triggered_count ?? 0} triggered · ${latest.missing_count ?? 0} missing` : "Missing stays excluded";
+  const replayTotals = replayPerformance.reduce((total, row) => ({
+    closed: total.closed + Number(row.closed_eligible_count || 0),
+    quarantined: total.quarantined + Number(row.quarantined_count || 0),
+    returns: row.modeled_after_cost_return_pct == null ? total.returns : [...total.returns, Number(row.modeled_after_cost_return_pct)],
+  }), { closed: 0, quarantined: 0, returns: [] });
+  const replayMean = replayTotals.returns.length ? replayTotals.returns.reduce((sum, value) => sum + value, 0) / replayTotals.returns.length : null;
+  document.getElementById("scenario-replay-disclosure").textContent = replay.disclosure || "Historical replay not run.";
+  setStatus("scenario-replay-status", replayPerformance.length ? "Separate audit cohort" : "Not run", replayPerformance.length ? "PARTIAL" : "");
+  document.getElementById("scenario-replay-metrics").innerHTML = detailRows([
+    ["Days", replayPerformance.length || "Not reported", replayPerformance.length > 0],
+    ["Mean after-cost result", formatPercentText(replayMean), replayMean != null],
+    ["Closed eligible", replayTotals.closed || "Not reported", replayTotals.closed > 0],
+    ["Quarantined", replayTotals.quarantined, replayTotals.quarantined === 0],
+  ]);
+  const disclosures = Array.isArray(payload.disclosures) ? payload.disclosures : [];
+  document.getElementById("scenario-disclosures").innerHTML = disclosures.length
+    ? `<strong>Research-only, no broker execution.</strong><span>${disclosures.map(escapeHtml).join("<br>")}</span>`
+    : "<strong>Scenario disclosure unavailable.</strong> No scenario claim is being inferred.";
+  const body = document.getElementById("scenario-table");
+  if (!records.length) {
+    body.innerHTML = '<tr><td colspan="7">No scenario records have been published yet. This is not a zero-return claim.</td></tr>';
+    return;
+  }
+  body.innerHTML = records.slice(0, 100).map((record) => {
+    const levels = record.entry_trigger == null
+      ? "Not eligible"
+      : `Entry ${formatPrice(record.entry_trigger)} · Stop ${formatPrice(record.invalidation_level)} · Target ${formatPrice(record.target_1)}`;
+    const source = record.source_url
+      ? `<a class="source-link" href="${escapeHtml(record.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(record.source_tier || "Source")}</a>`
+      : escapeHtml(record.source_tier || "Not reported");
+    const evidence = [record.headline, ...(Array.isArray(record.reason_codes) ? record.reason_codes : [])]
+      .filter(Boolean)
+      .join(" · ");
+    return `<tr>
+      <td>${escapeHtml(formatTimestamp(record.decision_at))}</td>
+      <td><strong>${escapeHtml(record.ticker || "Not reported")}</strong></td>
+      <td>${source}</td>
+      <td>${escapeHtml(humanizeIdentifier(record.event_type || "not_reported"))}<br><span class="value-muted">${escapeHtml(record.direction || "unknown")}</span></td>
+      <td><span class="status-chip ${record.action === "ENTER_LONG" ? "good" : ["ABSTAIN", "AVOID"].includes(record.action) ? "bad" : ""}">${escapeHtml(humanizeIdentifier(record.action || "not_reported"))}</span></td>
+      <td>${escapeHtml(levels)}</td>
+      <td>${escapeHtml(evidence || "Not reported")}</td>
+    </tr>`;
+  }).join("");
 }
 
 function renderOverview(official, latest) {
@@ -776,6 +841,7 @@ function statusChip(status) { const label = labelForStatus(status); const cls = 
 function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
 function formatPercent(value) { return numberOrNull(value) == null ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
 function formatPercentText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`; }
+function formatPrice(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `$${numeric.toFixed(2)}`; }
 function formatMoney(value) { const numeric = numberOrNull(value); return numeric == null ? '<span class="value-muted">Not reported</span>' : `<span>${numeric >= 0 ? "+" : "-"}$${Math.abs(numeric / 100).toFixed(2)}</span>`; }
 function formatMoneyText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric < 0 ? "-" : ""}$${Math.abs(numeric / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 function returnContext(item) {

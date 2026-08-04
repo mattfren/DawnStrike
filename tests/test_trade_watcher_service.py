@@ -11,6 +11,11 @@ from intraday_scanner.alpha.v5_policy import (
 )
 from intraday_scanner.cli import main
 from intraday_scanner.errors import SnapshotValidationError
+from intraday_scanner.scenario.contracts import (
+    SCENARIO_FORWARD_COHORT,
+    SCENARIO_POLICY_VERSION,
+    SCENARIO_STRATEGY_ID,
+)
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -218,6 +223,66 @@ def test_trade_watcher_fails_closed_without_exact_session_selection(
             ),
             dry_run=True,
         )
+
+
+def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Path) -> None:
+    db_path = tmp_path / "scenario.sqlite"
+    store = SQLiteScanStore(db_path)
+    market_date = "2026-08-03"
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "scenario:decision-1",
+                "scan_id": "scenario:2026-08-03",
+                "generated_at": "2026-08-03T14:00:00Z",
+                "market_date": market_date,
+                "ticker": "NOVA",
+                "rank": 1,
+                "signal_label": "scenario_enter_long",
+                "entry_watch_level": 10.25,
+                "invalidation_level": 9.5,
+                "target_1": 11.5,
+                "raw_payload_json": {"research_only": True},
+            }
+        ]
+    )
+    store.persist_signal_selections(
+        [
+            {
+                "selection_id": "scenario-selection:decision-1",
+                "scan_id": "scenario:2026-08-03",
+                "signal_id": "scenario:decision-1",
+                "ticker": "NOVA",
+                "rank": 1,
+                "strategy_id": SCENARIO_STRATEGY_ID,
+                "strategy_version": SCENARIO_POLICY_VERSION,
+                "cohort": SCENARIO_FORWARD_COHORT,
+                "decision": "paper_entry",
+                "selected_at": "2026-08-03T14:00:00Z",
+                "event_key": "scenario-paper:decision-1",
+                "body_sha256": "scenario-body-hash",
+            }
+        ]
+    )
+
+    result = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date=market_date,
+        requested_at="10:05",
+        minute_bars=_write_minute_bars(
+            tmp_path / "scenario-bars.csv",
+            [_bar("2026-08-03T10:05:00-04:00", 10.3)],
+        ),
+        include_scenarios=True,
+        dry_run=True,
+    )
+
+    positions = store.load_paper_positions(market_date=market_date)
+    assert result["signal_count"] == 1
+    assert result["paper_fill_stats"]["inserted"] == 1
+    assert positions[0]["strategy_id"] == SCENARIO_STRATEGY_ID
+    assert positions[0]["cohort"] == SCENARIO_FORWARD_COHORT
 
 
 def test_trade_watcher_fails_closed_on_partially_persisted_selection(

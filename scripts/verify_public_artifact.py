@@ -24,6 +24,8 @@ REQUIRED_FILES = (
     "data/calendar.json.manifest.json",
     "data/publication-set.json",
     "data/v6-learning.json",
+    "data/scenarios.json",
+    "data/scenarios.json.manifest.json",
     "release-manifest.json",
 )
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
@@ -54,9 +56,7 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
             except UnicodeDecodeError:
                 continue
             if ABSOLUTE_PATH_PATTERN.search(text):
-                exposed_paths.append(
-                    str(path.relative_to(root)).replace("\\", "/")
-                )
+                exposed_paths.append(str(path.relative_to(root)).replace("\\", "/"))
     errors.extend(f"forbidden_absolute_path:{name}" for name in exposed_paths)
 
     snapshot_path = root / "data" / "performance.json"
@@ -65,11 +65,14 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
     calendar_path = root / "data" / "calendar.json"
     calendar_manifest_path = root / "data" / "calendar.json.manifest.json"
     publication_set_path = root / "data" / "publication-set.json"
+    scenarios_path = root / "data" / "scenarios.json"
+    scenarios_manifest_path = root / "data" / "scenarios.json.manifest.json"
     snapshot: dict[str, object] = {}
     manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
     calendar_manifest: dict[str, object] = {}
     publication_set: dict[str, object] = {}
+    scenarios_manifest: dict[str, object] = {}
     snapshot_row_count = 0
     compressed_byte_count: int | None = None
     if snapshot_path.is_file():
@@ -103,38 +106,35 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
         if manifest.get("compression") != "gzip":
             errors.append("snapshot_compression_missing")
     if calendar_manifest_path.is_file():
-        calendar_manifest = json.loads(
-            calendar_manifest_path.read_text(encoding="utf-8")
-        )
+        calendar_manifest = json.loads(calendar_manifest_path.read_text(encoding="utf-8"))
         if calendar_path.is_file() and (
             calendar_manifest.get("payload_sha256")
             != hashlib.sha256(calendar_path.read_bytes()).hexdigest()
         ):
             errors.append("calendar_hash_mismatch")
-        if (
-            calendar_manifest.get("canonical_input_hash_sha256")
-            != manifest.get("input_hash_sha256")
+        if calendar_manifest.get("canonical_input_hash_sha256") != manifest.get(
+            "input_hash_sha256"
         ):
             errors.append("calendar_canonical_hash_mismatch")
-        if (
-            calendar_manifest.get("performance_payload_sha256")
-            != manifest.get("payload_sha256")
-        ):
+        if calendar_manifest.get("performance_payload_sha256") != manifest.get("payload_sha256"):
             errors.append("calendar_performance_hash_mismatch")
     if publication_set_path.is_file():
-        publication_set = json.loads(
-            publication_set_path.read_text(encoding="utf-8")
-        )
-        if (
-            publication_set.get("performance_payload_sha256")
-            != manifest.get("payload_sha256")
-        ):
+        publication_set = json.loads(publication_set_path.read_text(encoding="utf-8"))
+        if publication_set.get("performance_payload_sha256") != manifest.get("payload_sha256"):
             errors.append("publication_set_performance_hash_mismatch")
-        if (
-            publication_set.get("calendar_payload_sha256")
-            != calendar_manifest.get("payload_sha256")
+        if publication_set.get("calendar_payload_sha256") != calendar_manifest.get(
+            "payload_sha256"
         ):
             errors.append("publication_set_calendar_hash_mismatch")
+    if scenarios_manifest_path.is_file():
+        scenarios_manifest = json.loads(scenarios_manifest_path.read_text(encoding="utf-8"))
+        if scenarios_path.is_file() and (
+            scenarios_manifest.get("payload_sha256")
+            != hashlib.sha256(scenarios_path.read_bytes()).hexdigest()
+        ):
+            errors.append("scenario_hash_mismatch")
+        if scenarios_manifest.get("calibration_status") != "UNCALIBRATED":
+            errors.append("scenario_calibration_disclosure_missing")
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):
@@ -145,9 +145,8 @@ def verify(root: Path, *, allow_degraded: bool = False) -> dict[str, object]:
             errors.append("build_id_missing")
         if build_manifest.get("data_hash_sha256") != manifest.get("payload_sha256"):
             errors.append("build_data_hash_mismatch")
-        if (
-            build_manifest.get("publication_set_sha256")
-            != publication_set.get("publication_set_sha256")
+        if build_manifest.get("publication_set_sha256") != publication_set.get(
+            "publication_set_sha256"
         ):
             errors.append("build_publication_set_hash_mismatch")
         recorded_hashes = build_manifest.get("file_hashes")

@@ -84,9 +84,27 @@ try {
         }
     }
     if ($exitCode -eq 0) {
+        if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
+            $scenarioSince = (Get-Date).ToUniversalTime().AddMinutes(-10).ToString("o")
+            $scenario = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-cycle", "--db-path", $dbPath, "--since", $scenarioSince) `
+                -LogRoot $logRoot `
+                -LogName "scenario_monitor-$MarketDate"
+            if ($scenario.exit_code -ne 0) {
+                $exitCode = $scenario.exit_code
+                $errorCode = "scenario_cycle_failed"
+            }
+        }
+    }
+    if ($exitCode -eq 0) {
+        $scenarioWatchArgs = @()
+        if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
+            $scenarioWatchArgs += "--include-scenarios"
+        }
         $watch = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "auto", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") `
+            -ArgumentList (@("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "auto", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") + $scenarioWatchArgs) `
             -LogRoot $logRoot `
             -LogName "trade_watch-$MarketDate"
         if ($watch.exit_code -ne 0) {

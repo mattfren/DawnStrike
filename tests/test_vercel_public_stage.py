@@ -47,6 +47,8 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert '$functionPublic = Join-Path $stage "api\\public"' in script
     assert "performance-snapshot.json" in script
     assert "performance-snapshot-manifest.json" in script
+    assert "scenarios.json.manifest.json" in script
+    assert "scenario_b64" in script
     assert "static_file_hashes_verified = $true" in script
     assert "api\\public_state.py" in script
     assert "StageRoot must resolve inside the project build directory" in script
