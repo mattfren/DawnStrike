@@ -96,6 +96,7 @@ class ScannerConfig:
     scenario_openai_timeout_seconds: float = 45.0
     scenario_openai_max_articles_per_run: int = 20
     scenario_article_max_chars: int = 12_000
+    scenario_news_symbol_batch_size: int = 50
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
@@ -164,6 +165,8 @@ class ScannerConfig:
             raise ConfigError("DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN must be positive")
         if self.scenario_article_max_chars < 1:
             raise ConfigError("DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS must be positive")
+        if not 1 <= self.scenario_news_symbol_batch_size <= 50:
+            raise ConfigError("DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE must be 1 through 50")
         outcome_providers = [
             item.strip().lower()
             for item in self.outcome_capture_provider_order.split(",")
@@ -360,6 +363,10 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         scenario_article_max_chars=_to_int(
             "DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS",
             _env("DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS", "12000", env_values),
+        ),
+        scenario_news_symbol_batch_size=_to_int(
+            "DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE",
+            _env("DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE", "50", env_values),
         ),
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),

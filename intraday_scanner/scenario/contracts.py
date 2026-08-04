@@ -122,6 +122,7 @@ class ScenarioNewsArticle:
     fetched_at: str = field(default_factory=utc_now_iso)
     first_seen_at: str = field(default_factory=utc_now_iso)
     timing_kind: str = "forward_observed"
+    provider_delay_seconds: float | None = None
 
     @property
     def tier(self) -> str:
