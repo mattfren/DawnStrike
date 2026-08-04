@@ -60,6 +60,17 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "headers = $securityHeaders" in script
 
 
+def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> None:
+    script = Path("scripts/verify_vercel_candidate.ps1").read_text(encoding="utf-8")
+
+    assert '$config.PSObject.Properties["routes"]' in script
+    assert '$config.PSObject.Properties["crons"]' in script
+    assert "$config.routes" not in script
+    assert "$config.crons" not in script
+    assert "$null -ne $routesProperty" in script
+    assert "$null -ne $cronsProperty" in script
+
+
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
 
