@@ -12,7 +12,14 @@ $stage = Join-Path $resolvedRoot $StageRoot
 $public = Join-Path $stage "public"
 $config = Get-Content -Raw -LiteralPath (Join-Path $stage "vercel.json") | ConvertFrom-Json
 if ($config.outputDirectory -ne "public") { throw "Unexpected Vercel output directory" }
-if ($config.routes -or $config.crons) { throw "Legacy routes or crons remain in the candidate" }
+$routesProperty = $config.PSObject.Properties["routes"]
+$cronsProperty = $config.PSObject.Properties["crons"]
+if (
+    ($null -ne $routesProperty -and $routesProperty.Value) -or
+    ($null -ne $cronsProperty -and $cronsProperty.Value)
+) {
+    throw "Legacy routes or crons remain in the candidate"
+}
 $expectedFunctions = @("api/health.py", "api/readiness.py")
 $actualFunctions = @($config.functions.PSObject.Properties.Name)
 if (@(Compare-Object -ReferenceObject ($expectedFunctions | Sort-Object) -DifferenceObject ($actualFunctions | Sort-Object)).Count -ne 0) {
