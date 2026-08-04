@@ -40,12 +40,20 @@ def evaluate_alpha_eod_gate(
         strategy_version=strategy_version,
     )
     selections = list(validation.selections)
-    no_trade = [row for row in selections if _is_no_trade(row)]
-    official = [row for row in selections if not _is_no_trade(row)]
+    no_trade = [row for row in selections if _is_canonical_no_trade(row, selected_date)]
+    contradictory = [
+        row
+        for row in selections
+        if _has_no_trade_marker(row)
+        and not _is_canonical_no_trade(row, selected_date)
+    ]
+    official = [row for row in selections if not _has_no_trade_marker(row)]
 
     capture, capture_error = _load_json_object(capture_result_path)
     outcome_gap, gap_error = _load_json_object(outcome_gap_path)
     errors = list(validation.errors)
+    if contradictory:
+        errors.append("official cohort contains a contradictory no-trade identity")
     if no_trade and official:
         errors.append("official cohort mixes no-trade and selected signals")
     if len(no_trade) > 1:
@@ -215,10 +223,26 @@ def _artifact_errors(
     return errors
 
 
-def _is_no_trade(selection: dict[str, Any]) -> bool:
+def _is_canonical_no_trade(selection: dict[str, Any], market_date: str) -> bool:
+    scan_id = str(selection.get("scan_id") or "")
     return (
         str(selection.get("decision") or "").lower() == "no_trade"
-        or str(selection.get("ticker") or "").upper() == "NO_TRADE"
+        and str(selection.get("ticker") or "").upper() == "NO_TRADE"
+        and selection.get("rank") == 0
+        and str(selection.get("signal_id") or "")
+        == f"no_trade:{scan_id}:{market_date}"
+        and str(selection.get("event_key") or "").endswith(":alpha_no_trade")
+    )
+
+
+def _has_no_trade_marker(selection: dict[str, Any]) -> bool:
+    return any(
+        (
+            str(selection.get("decision") or "").lower() == "no_trade",
+            str(selection.get("ticker") or "").upper() == "NO_TRADE",
+            str(selection.get("signal_id") or "").startswith("no_trade:"),
+            str(selection.get("event_key") or "").endswith(":alpha_no_trade"),
+        )
     )
 
 

@@ -87,14 +87,21 @@ return or replay it as forward evidence. After confirming that the session has
 no calendar row, completed report, or ledger event, record the terminal gap:
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File C:\r\dawnstrike-runtime\scripts\ensure_forward_gap_signing_key.ps1 `
+  -StateRoot C:\r\dawnstrike-state
+. C:\r\dawnstrike-runtime\scripts\import_dawnstrike_environment.ps1
+Import-DawnstrikeEnvironment -StateRoot C:\r\dawnstrike-state
 py -m intraday_scanner.v2.paper_ops record-forward-gap `
   --date 2026-07-31 `
   --reason-code scheduler_run_absent `
   --output-root C:\r\dawnstrike-state\v2_paper_ops_live
 ```
 
-The strict-schema record is sequence-chained and bound to a separately chained
-anchor journal containing the exact ledger digest. Calendar truth then reports
+The strict-schema record is sequence-chained and bound to a separately chained,
+HMAC-signed anchor journal containing the exact ledger digest. The signing key
+lives only in `C:\r\dawnstrike-state\secrets\runtime.env`, outside PaperOps
+state, and is never printed or published. Calendar truth then reports
 `passed_with_warnings`, the rendered calendar labels the session
 `Missing - not zero`, and any tampering or conflicting later forward evidence
 fails closed.

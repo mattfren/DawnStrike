@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import json
+import os
 import re
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -20,7 +22,8 @@ from intraday_scanner.v2.paper_ops.storage import (
 )
 
 GAP_SCHEMA_VERSION = "v2.paper_ops_forward_session_gap.v2"
-ANCHOR_SCHEMA_VERSION = "v2.paper_ops_forward_session_gap_anchor.v1"
+ANCHOR_SCHEMA_VERSION = "v2.paper_ops_forward_session_gap_anchor.v2"
+SIGNING_KEY_ENV = "DAWNSTRIKE_FORWARD_GAP_HMAC_KEY"
 _GAP_FIELDS = frozenset(
     {
         "schema_version",
@@ -47,6 +50,7 @@ _ANCHOR_FIELDS = frozenset(
         "ledger_sha256",
         "anchored_at",
         "anchor_id",
+        "signature_hmac_sha256",
     }
 )
 
@@ -109,11 +113,17 @@ def record_forward_session_gap(
             **canonical,
             "record_id": hashlib.sha256(_canonical_bytes(canonical)).hexdigest(),
         }
+        signing_key = _signing_key()
         gap_path = paths.state / "forward_session_gaps.jsonl"
         appended = append_jsonl_unique(gap_path, [record], "record_id")
         if appended != 1:
             raise ValueError("forward-session gap append was not unique")
-        _append_anchor(paths, gap_path=gap_path, record=record)
+        _append_anchor(
+            paths,
+            gap_path=gap_path,
+            record=record,
+            signing_key=signing_key,
+        )
         verified, verification_errors = _load_forward_session_gaps(paths)
         if verification_errors or len(verified) != sequence:
             raise ValueError(
@@ -206,6 +216,7 @@ def _append_anchor(
     *,
     gap_path: Path,
     record: dict[str, object],
+    signing_key: bytes,
 ) -> None:
     anchor_path = paths.state / "forward_session_gap_anchors.jsonl"
     existing = read_jsonl(anchor_path)
@@ -221,9 +232,17 @@ def _append_anchor(
         "ledger_sha256": hashlib.sha256(gap_path.read_bytes()).hexdigest(),
         "anchored_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
-    anchor = {
+    identified = {
         **canonical,
         "anchor_id": hashlib.sha256(_canonical_bytes(canonical)).hexdigest(),
+    }
+    anchor = {
+        **identified,
+        "signature_hmac_sha256": hmac.new(
+            signing_key,
+            _canonical_bytes(identified),
+            hashlib.sha256,
+        ).hexdigest(),
     }
     if append_jsonl_unique(anchor_path, [anchor], "anchor_id") != 1:
         raise ValueError("forward-session anchor append was not unique")
@@ -238,6 +257,12 @@ def _anchor_errors(
     if bool(rows) != bool(anchors):
         return ["forward session gap ledger and anchor ledger presence mismatch"]
     errors: list[str] = []
+    signing_key: bytes | None = None
+    if anchors:
+        try:
+            signing_key = _signing_key()
+        except ValueError as exc:
+            errors.append(str(exc))
     previous_anchor_id = ""
     for index, raw in enumerate(anchors, start=1):
         label = f"forward session gap anchor {index}"
@@ -245,9 +270,22 @@ def _anchor_errors(
             errors.append(f"{label} has non-canonical fields")
             continue
         row = dict(raw)
+        signature = str(row.pop("signature_hmac_sha256", ""))
         anchor_id = str(row.pop("anchor_id", ""))
         if anchor_id != hashlib.sha256(_canonical_bytes(row)).hexdigest():
             errors.append(f"{label} anchor_id integrity mismatch")
+        identified = {**row, "anchor_id": anchor_id}
+        expected_signature = (
+            hmac.new(
+                signing_key,
+                _canonical_bytes(identified),
+                hashlib.sha256,
+            ).hexdigest()
+            if signing_key is not None
+            else ""
+        )
+        if not signature or not hmac.compare_digest(signature, expected_signature):
+            errors.append(f"{label} signature_hmac_sha256 mismatch")
         if row.get("schema_version") != ANCHOR_SCHEMA_VERSION:
             errors.append(f"{label} has unsupported schema_version")
         if row.get("sequence") != index:
@@ -330,4 +368,17 @@ def _canonical_bytes(payload: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-__all__ = ["load_forward_session_gaps", "record_forward_session_gap"]
+def _signing_key() -> bytes:
+    raw = os.environ.get(SIGNING_KEY_ENV, "").strip()
+    if len(raw) < 32:
+        raise ValueError(
+            f"{SIGNING_KEY_ENV} is required and must contain at least 32 characters"
+        )
+    return raw.encode("utf-8")
+
+
+__all__ = [
+    "SIGNING_KEY_ENV",
+    "load_forward_session_gaps",
+    "record_forward_session_gap",
+]

@@ -121,6 +121,7 @@ def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:
     assert "SetEnvironmentVariable" in helper
     assert "TELEGRAM_BOT_TOKEN" in helper
     assert "TELEGRAM_CHAT_ID" in helper
+    assert "DAWNSTRIKE_FORWARD_GAP_HMAC_KEY" in helper
     assert "Write-Output" not in helper
     for filename in runners:
         runner = Path("scripts", filename).read_text(encoding="utf-8")

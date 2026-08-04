@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
 from intraday_scanner.services.alpha_eod_gate_service import evaluate_alpha_eod_gate
 from intraday_scanner.services.alpha_official_cohort_service import (
@@ -46,6 +48,26 @@ def test_orphan_no_trade_selection_cannot_authorize_skip(tmp_path: Path) -> None
 
     assert result["status"] == "BLOCKED"
     assert any("lacks Telegram delivery proof" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize(
+    ("ticker", "decision"),
+    (("ABCD", "no_trade"), ("NO_TRADE", "clean_edge")),
+)
+def test_contradictory_no_trade_identity_cannot_authorize_skip(
+    tmp_path: Path,
+    ticker: str,
+    decision: str,
+) -> None:
+    db_path = tmp_path / "alpha.sqlite"
+    store = SQLiteScanStore(db_path)
+    _freeze_selection(store, ticker=ticker, decision=decision)
+    capture, gap = _artifacts(tmp_path)
+
+    result = _evaluate(db_path, capture, gap)
+
+    assert result["status"] == "BLOCKED"
+    assert any("contradictory no-trade identity" in error for error in result["errors"])
 
 
 def test_missing_official_cohort_never_becomes_no_trade(tmp_path: Path) -> None:
@@ -169,10 +191,15 @@ def _selection(*, ticker: str, decision: str) -> dict[str, object]:
     strategy_id, strategy_version = alphaops_strategy_contract(
         f"{DAY}T12:00:00-04:00"
     )
+    is_sentinel_ticker = ticker == "NO_TRADE"
     return {
         "selection_id": f"selection-{ticker}",
         "scan_id": "scan-eod-gate",
-        "signal_id": f"signal-{ticker}",
+        "signal_id": (
+            f"no_trade:scan-eod-gate:{DAY}"
+            if is_sentinel_ticker
+            else f"signal-{ticker}"
+        ),
         "ticker": ticker,
         "rank": 0 if ticker == "NO_TRADE" else 1,
         "strategy_id": strategy_id,
@@ -180,7 +207,11 @@ def _selection(*, ticker: str, decision: str) -> dict[str, object]:
         "cohort": "official_telegram",
         "decision": decision,
         "selected_at": f"{DAY}T13:00:00Z",
-        "event_key": "alphaops:eod-gate",
+        "event_key": (
+            "alphaops:eod-gate:alpha_no_trade"
+            if is_sentinel_ticker
+            else "alphaops:eod-gate"
+        ),
         "body_sha256": "eod-gate-body",
     }
 
