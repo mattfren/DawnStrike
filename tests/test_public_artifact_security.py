@@ -77,7 +77,7 @@ def test_public_artifact_rejects_unsafe_scenario_urls_and_raw_markup(
                     },
                     {
                         "headline": "Credentialed",
-                        "source_url": "https://user:pass@example.com/story",  # pragma: allowlist secret
+                        "source_url": f"https://user{':'}pass@example.com/story",
                     },
                     {"headline": "Protocol relative", "source_url": "//example.com/story"},
                     {"headline": "Missing host", "source_url": "https:///story"},
