@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.ai.scenario_claim_extractor import extract_claims
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.news_provider import _scenario_article_from_alpaca
 from intraday_scanner.scenario.contracts import ScenarioExtraction, ScenarioNewsArticle
@@ -160,6 +161,79 @@ def test_extraction_contract_rejects_trade_instruction_fields() -> None:
                 "action": "buy",
             },
         )
+
+
+def test_extraction_contract_rejects_price_target_text() -> None:
+    with pytest.raises(ValueError, match="forbidden price-target content"):
+        ScenarioExtraction.from_dict(
+            article_id="news-1",
+            model="gpt-5.6-terra",
+            value={
+                "status": "ok",
+                "claims": [
+                    {
+                        "event_type": "analyst_action",
+                        "direction": "bullish",
+                        "factual_claim": "An analyst raised a price target to $210.",
+                        "evidence_spans": [],
+                        "materiality": "medium",
+                        "uncertainty_flags": [],
+                    }
+                ],
+                "abstain_reason": "",
+            },
+        )
+
+
+def test_extractor_sanitizes_contract_violations_to_rejected_receipt() -> None:
+    article = _article()
+
+    class FakeResponse:
+        id = "resp-test"
+        usage = {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}
+        output_text = """{
+          \"status\": \"ok\",
+          \"claims\": [{
+            \"event_type\": \"analyst_action\",
+            \"direction\": \"bullish\",
+            \"factual_claim\": \"The analyst raised a price target to $210.\",
+            \"evidence_spans\": [],
+            \"materiality\": \"medium\",
+            \"uncertainty_flags\": [],
+            \"claim_status\": \"reported\",
+            \"causal_mechanism\": \"Sentiment changed.\",
+            \"affected_business_variable\": \"valuation\",
+            \"horizon\": \"near_term\",
+            \"novelty\": \"new\"
+          }],
+          \"abstain_reason\": \"\",
+          \"prompt_injection_detected\": false,
+          \"contradictions\": [],
+          \"dependencies\": [],
+          \"unresolved_unknowns\": []
+        }"""
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    extraction = extract_claims(
+        article=article,
+        api_key="test-key",  # pragma: allowlist secret
+        model="gpt-5.6-terra",
+        timeout_seconds=1.0,
+        max_article_chars=1000,
+        client=FakeClient(),
+    )
+
+    assert extraction.status == "rejected"
+    assert extraction.claims == ()
+    assert extraction.abstain_reason == "fact_only_contract_violation"
+    assert extraction.response_id == "resp-test"
+    assert extraction.usage["total_tokens"] == 5
 
 
 def test_engine_abstains_on_unresolved_or_injected_extraction() -> None:

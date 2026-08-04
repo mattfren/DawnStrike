@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 SCENARIO_POLICY_VERSION = "dawnstrike-news-scenario-v1"
 SCENARIO_FEATURE_SCHEMA_VERSION = "dawnstrike-news-scenario-features-v1"
 SCENARIO_EXTRACTION_SCHEMA_VERSION = "dawnstrike-news-extraction-v2"
-SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v2"
+SCENARIO_PROMPT_VERSION = "dawnstrike-news-extraction-prompt-v3"
 SCENARIO_STRATEGY_ID = "news_scenario_v1"
 SCENARIO_FORWARD_COHORT = "scenario_forward"
 SCENARIO_REPLAY_COHORT = "scenario_historical_replay"
@@ -50,6 +51,10 @@ FORBIDDEN_EXTRACTION_KEYS = {
     "position_size",
     "sizing",
 }
+FORBIDDEN_EXTRACTION_TEXT = re.compile(
+    r"\b(?:price\s+target|target\s+price)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def utc_now_iso() -> str:
@@ -97,6 +102,8 @@ def _reject_forbidden(value: Any) -> None:
     elif isinstance(value, list):
         for nested in value:
             _reject_forbidden(nested)
+    elif isinstance(value, str) and FORBIDDEN_EXTRACTION_TEXT.search(value):
+        raise ValueError("Extraction contains forbidden price-target content")
 
 
 @dataclass(frozen=True)
