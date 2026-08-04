@@ -127,6 +127,32 @@ def test_artifact_accepts_current_zero_and_positive_counts(
     assert json.loads(result.stdout)["signal_count"] == signal_count
 
 
+def test_artifact_can_validate_a_current_session_without_process_receipt(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "alpha_cycle.json"
+    artifact.write_text(json.dumps(_valid_payload(0)), encoding="utf-8")
+    command = (
+        f". '{HELPER}'; "
+        f"$result = Test-DawnstrikeAlphaCycleArtifact -ArtifactPath '{artifact}' "
+        f"-MarketDate '{MARKET_DATE}'; "
+        "$result | ConvertTo-Json -Compress"
+    )
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["signal_count"] == 0
+    assert result["process_started_at_utc"] is None
+
+
 def test_artifact_rejects_identity_and_source_failures(tmp_path: Path) -> None:
     payload = _valid_payload()
     payload["run_contract"]["producer_run_id"] = "different-scan"
