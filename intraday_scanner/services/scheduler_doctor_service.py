@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.providers.web_source_base import validate_web_source_config
+
 CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
 EXPECTED_TASKS = {
     "Dawnstrike AlphaOps Morning": "run_alphaops_morning.ps1",
@@ -20,8 +22,18 @@ EXPECTED_TASK_STARTS = {
     "Dawnstrike AlphaOps Morning": "07:15",
     "Dawnstrike AlphaOps Monitor 5m": "08:35",
     "Dawnstrike AlphaOps EOD Full Report": "15:15",
-    "Dawnstrike AlphaOps V6 Weekly Training": "17:30",
+    "Dawnstrike AlphaOps V6 Weekly Training": "21:00",
     CANONICAL_TASK_NAME: "17:30",
+}
+EXPECTED_TASK_REPETITIONS = {
+    "Dawnstrike AlphaOps Monitor 5m": "PT6H35M",
+}
+EXPECTED_EXECUTION_LIMITS = {
+    "Dawnstrike AlphaOps Morning": "PT1H",
+    "Dawnstrike AlphaOps Monitor 5m": "PT4M",
+    "Dawnstrike AlphaOps EOD Full Report": "PT2H",
+    "Dawnstrike AlphaOps V6 Weekly Training": "PT3H",
+    CANONICAL_TASK_NAME: "PT3H",
 }
 SCHED_S_TASK_RUNNING = 0x00041301
 SCHED_S_TASK_HAS_NOT_RUN = 0x00041303
@@ -56,8 +68,10 @@ def scheduler_doctor(
             runtime / "scripts" / "register_daily_finalize_task.ps1"
         ),
         "rollback": runtime / "scripts" / "restore_dawnstrike_tasks.ps1",
+        "durable_source_config": state / "config" / "web_sources.yaml",
     }
     present = {name: path.is_file() for name, path in required.items()}
+    source_config = validate_web_source_config(required["durable_source_config"])
     queried = _query_scheduled_tasks()
     task_rows = _normalize_task_rows(queried)
     by_name = {str(row.get("name") or ""): row for row in task_rows}
@@ -71,6 +85,8 @@ def scheduler_doctor(
                 runtime_root=runtime,
                 state_root=state,
                 expected_start=EXPECTED_TASK_STARTS[name],
+                expected_repetition=EXPECTED_TASK_REPETITIONS.get(name),
+                expected_execution_limit=EXPECTED_EXECUTION_LIMITS[name],
             )
         )
     unexpected_enabled = [
@@ -85,9 +101,12 @@ def scheduler_doctor(
         for check in checks
         if str(check.get("status") or "") not in {"LOCAL_VERIFIED"}
     ]
-    if not all(present.values()):
+    if not all(present.values()) or source_config.get("ready") is not True:
         status = "FAILED"
-        next_action = "Restore the missing V6 scheduler artifacts."
+        next_action = (
+            "Restore the missing V6 scheduler artifacts and a semantically valid "
+            "durable source configuration."
+        )
     elif any(check.get("state") in {"unavailable", "unknown"} for check in checks):
         status = "BLOCKED_EXTERNAL"
         next_action = (
@@ -120,6 +139,7 @@ def scheduler_doctor(
         "runtime_root": str(runtime),
         "state_root": str(state),
         "required_files": present,
+        "durable_source_config": source_config,
         "expected_task_names": list(EXPECTED_TASKS),
         "scheduled_tasks": checks,
         "scheduled_task": finalize,
@@ -139,6 +159,8 @@ def _task_check(
     runtime_root: Path,
     state_root: Path,
     expected_start: str,
+    expected_repetition: str | None,
+    expected_execution_limit: str,
 ) -> dict[str, Any]:
     state = str(task.get("state") or "unknown")
     arguments = str(task.get("arguments") or "")
@@ -166,6 +188,12 @@ def _task_check(
     last_run_result_acceptable = last_result in ACCEPTABLE_LAST_RESULTS
     next_run_time = str(task.get("next_run_time") or "")
     scheduled_time_matches = f"T{expected_start}:" in next_run_time
+    repetition_duration = str(task.get("repetition_duration") or "")
+    repetition_matches = (
+        expected_repetition is None or repetition_duration == expected_repetition
+    )
+    execution_time_limit = str(task.get("execution_time_limit") or "")
+    execution_limit_matches = execution_time_limit == expected_execution_limit
     logon_type = str(task.get("logon_type") or "")
     noninteractive = logon_type in NONINTERACTIVE_LOGON_TYPES
     start_when_available = task.get("start_when_available") is True
@@ -185,6 +213,8 @@ def _task_check(
             start_when_available,
             battery_safe,
             scheduled_time_matches,
+            repetition_matches,
+            execution_limit_matches,
             last_run_result_acceptable,
         )
     )
@@ -204,6 +234,10 @@ def _task_check(
         ),
         "expected_start_local": expected_start,
         "scheduled_time_matches": scheduled_time_matches,
+        "expected_repetition_duration": expected_repetition,
+        "repetition_duration_matches": repetition_matches,
+        "expected_execution_time_limit": expected_execution_limit,
+        "execution_time_limit_matches": execution_limit_matches,
         "status": "LOCAL_VERIFIED" if verified else "FAILED",
     }
 
@@ -232,7 +266,8 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
         "if ($null -eq $task) { "
         "[pscustomobject]@{name=$name; state='missing'; enabled=$null; "
         "last_task_result=$null; last_run_time=$null; next_run_time=$null; "
-        "execute=$null; arguments=$null; working_directory=$null} "
+        "execute=$null; arguments=$null; working_directory=$null; "
+        "execution_time_limit=$null; repetition_duration=$null} "
         "} else { "
         "$info = Get-ScheduledTaskInfo -TaskName $task.TaskName; "
         "$action = @($task.Actions)[0]; "
@@ -242,6 +277,9 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
         "start_when_available=[bool]$task.Settings.StartWhenAvailable; "
         "stop_if_going_on_batteries=[bool]$task.Settings.StopIfGoingOnBatteries; "
         "disallow_start_if_on_batteries=[bool]$task.Settings.DisallowStartIfOnBatteries; "
+        "execution_time_limit=[string]$task.Settings.ExecutionTimeLimit; "
+        "repetition_duration=if (@($task.Triggers)[0].Repetition) "
+        "{[string]@($task.Triggers)[0].Repetition.Duration} else {$null}; "
         "last_task_result=$info.LastTaskResult; "
         "last_run_time=if ($info.LastRunTime) "
         "{$info.LastRunTime.ToString('o')} else {$null}; "
@@ -318,6 +356,8 @@ def _missing_task(name: str) -> dict[str, Any]:
         "execute": None,
         "arguments": None,
         "working_directory": None,
+        "repetition_duration": None,
+        "execution_time_limit": None,
     }
 
 

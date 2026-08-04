@@ -19,7 +19,23 @@ def _write_required_scripts(root: Path) -> None:
         (scripts / name).write_text("placeholder", encoding="utf-8")
 
 
+def _write_required_state(state: Path) -> None:
+    config = state / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "web_sources.yaml").write_text(
+        "enabled: true\n"
+        "user_agent: DawnstrikeTest Contact: test@dawnstrike.test\n"
+        "sources:\n"
+        "  - name: candidates\n"
+        "    type: local_inbox\n"
+        "    enabled: true\n"
+        "    path: data\\inbox\\screener\n",
+        encoding="utf-8",
+    )
+
+
 def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
+    _write_required_state(state)
     return [
         {
             "name": name,
@@ -41,6 +57,10 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
                 f'-RuntimeRoot "{runtime}" -StateRoot "{state}"'
             ),
             "working_directory": str(runtime),
+            "repetition_duration": (
+                scheduler_service.EXPECTED_TASK_REPETITIONS.get(name)
+            ),
+            "execution_time_limit": scheduler_service.EXPECTED_EXECUTION_LIMITS[name],
         }
         for name, script in scheduler_service.EXPECTED_TASKS.items()
     ]
@@ -80,17 +100,60 @@ def test_scheduler_doctor_accepts_one_release_and_state_boundary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
     monkeypatch.setattr(
         scheduler_service,
         "_query_scheduled_tasks",
-        lambda: _healthy_tasks(runtime, state),
+        lambda: rows,
     )
 
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "LOCAL_VERIFIED"
     assert result["failed_task_count"] == 0
+    assert result["durable_source_config"]["ready"] is True
     assert all(row["legacy_root_absent"] for row in result["scheduled_tasks"])
+
+
+def test_scheduler_doctor_rejects_semantically_invalid_durable_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    (state / "config" / "web_sources.yaml").write_text(
+        "enabled: true\nuser_agent: REQUIRED_ACCOUNTABLE_EMAIL\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "FAILED"
+    assert result["durable_source_config"]["ready"] is False
+
+
+def test_scheduler_doctor_rejects_wrong_execution_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    rows[1]["execution_time_limit"] = "PT2H"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["failed_task_count"] == 1
 
 
 def test_scheduler_doctor_blocks_failed_or_stale_task_history(
@@ -102,10 +165,11 @@ def test_scheduler_doctor_blocks_failed_or_stale_task_history(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state, last_result=1)
     monkeypatch.setattr(
         scheduler_service,
         "_query_scheduled_tasks",
-        lambda: _healthy_tasks(runtime, state, last_result=1),
+        lambda: rows,
     )
 
     result = scheduler_service.scheduler_doctor(runtime, state)
@@ -197,3 +261,32 @@ def test_scheduler_doctor_rejects_s4u_for_networked_alphaops(
         if row["name"] == "Dawnstrike AlphaOps Morning"
     )
     assert morning["noninteractive"] is False
+
+
+def test_scheduler_doctor_rejects_monitor_overlap_duration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monitor = next(
+        row
+        for row in rows
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    monitor["repetition_duration"] = "PT7H"
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = next(
+        row
+        for row in result["scheduled_tasks"]
+        if row["name"] == "Dawnstrike AlphaOps Monitor 5m"
+    )
+    assert checked["repetition_duration_matches"] is False

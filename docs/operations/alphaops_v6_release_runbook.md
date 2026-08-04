@@ -6,7 +6,7 @@ Do not promote a static build when any of these checks fail:
 
 1. The clean source SHA has passed tests, lint, and type checking.
 2. The durable SQLite backup checksum is recorded.
-3. `config/web_sources.yaml` exists in the runtime, has a real accountable contact in its user agent, and passes `web-source-doctor`.
+3. `C:\r\dawnstrike-state\config\web_sources.yaml` exists in durable state, has a real accountable contact in its user agent, and passes semantic contract validation. Runtime-local fallback is prohibited.
 4. The source configuration is not the example file and no required source is merely a placeholder.
 5. A dated, source-backed small-cap universe snapshot has been registered before the market session. Build its review candidate from the approved source contract and exact recorded raw artifact; hand-written universe JSON is not accepted. Its source lineage, membership status, ticker history, and corporate-action fields must be complete.
 6. The production scheduler uses a dedicated password-logon Windows identity that can access the network, encrypted secrets, the runtime and durable state roots, starts when available, and does not stop/refuse runs on battery. S4U is prohibited: it has no network or encrypted-file access.
@@ -16,13 +16,24 @@ Do not promote a static build when any of these checks fail:
 When no licensed point-in-time universe is available, prospective paper
 learning may start without pretending to validate historical strategy edge:
 
-1. Copy `config\web_sources.forward_alpaca.template.yaml` to the ignored local
-   `config\web_sources.yaml`; replace `REQUIRED_ACCOUNTABLE_EMAIL` with the
-   operator contact.
+1. Copy `config\web_sources.forward_alpaca.template.yaml` to the durable private
+   path `C:\r\dawnstrike-state\config\web_sources.yaml`; replace
+   `REQUIRED_ACCOUNTABLE_EMAIL` with the operator contact. The morning runner
+   reads this state-owned file exclusively so clean runtime cutovers cannot remove
+   it or silently substitute an ignored checkout file.
 2. Add `INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER=alpaca,yahoo` to the private
    runtime environment. Alpaca is the read-only primary outcome source; Yahoo
    is retained solely for bounded independent reconciliation.
-3. Keep `production_contract: false`. This configuration must not register a
+   AlphaOps premarket enrichment follows the same order: Alpaca IEX is queried
+   first. A systemic Alpaca/auth/network failure blocks the cycle. Yahoo is used
+   only for bounded symbol-specific missing/stale IEX bars after successful
+   Alpaca requests, and the cycle fails when the fallback ceiling is exceeded.
+   Every row records the provider that supplied its range; the run summary
+   reports fallback count and ratio. Intraday monitoring remains Alpaca and
+   fails closed when no fresh, complete IEX bar exists.
+3. Keep `production_contract: false`. The doctor reports this explicitly as
+   `FORWARD_RESEARCH_ONLY`; it is never labeled a historical production
+   contract. This configuration must not register a
    V6 point-in-time universe, backfill historical performance, or claim model
    superiority. Missing or conflicting source evidence remains ineligible.
 
@@ -47,6 +58,13 @@ py -m intraday_scanner.cli alpha-v6-register-universe --db-path C:\r\dawnstrike-
 py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --state-root C:\r\dawnstrike-state
 ```
 
+For an already-approved password-backed installation, update definitions without
+retrieving or re-entering the stored password:
+
+```powershell
+.\scripts\register_alphaops_tasks.ps1 -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state -ReuseExistingPrincipal
+```
+
 ## Required production proof
 
 1. Run `scheduler-doctor`; its exit code must be zero and `status` must be `LOCAL_VERIFIED`.
@@ -56,9 +74,13 @@ py -m intraday_scanner.cli scheduler-doctor --root C:\r\dawnstrike-runtime --sta
 5. Verify preview and production health/readiness in a browser. Health alone is insufficient; readiness must be HTTP 200.
 6. Confirm the deployed SHA and public calendar hash bind to the source SHA and canonical performance snapshot.
 
-## Current blocked condition
+## Forward-only boundary
 
-The runtime currently has no `config/web_sources.yaml` or dated registered V6 universe snapshot. It is unsafe to copy either template because its source identity fields are placeholders. A production-contract scan now fails closed when any candidate lacks point-in-time universe membership. This is the only acceptable behavior; synthetic, placeholder, or changing-universe source truth must not start the learning loop.
+The durable forward-only source contract permits prospective paper evidence but
+does not create a dated historical V6 universe snapshot. A production-contract
+scan still fails closed when any candidate lacks point-in-time universe
+membership. Synthetic, placeholder, or changing-universe source truth must not
+start a historical learning loop.
 
 The input's `source_lineage` must include a non-placeholder `source_id`,
 ISO-8601 `retrieved_at`, `raw_artifact_sha256`, and

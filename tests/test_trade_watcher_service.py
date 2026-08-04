@@ -25,7 +25,7 @@ def test_trade_watcher_enters_once_and_persists_paper_fill(tmp_path: Path) -> No
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
         [
-            _bar("2026-06-22T09:35:00-04:00", 10.3),
+            _bar("2026-06-22T09:34:00-04:00", 10.3),
         ],
     )
     _persist_signal(SQLiteScanStore(db_path))
@@ -71,8 +71,8 @@ def test_trade_watcher_exits_open_position_at_target(tmp_path: Path) -> None:
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
         [
-            _bar("2026-06-22T09:35:00-04:00", 10.3),
-            _bar("2026-06-22T09:40:00-04:00", 11.6),
+            _bar("2026-06-22T09:34:00-04:00", 10.3),
+            _bar("2026-06-22T09:39:00-04:00", 11.6),
         ],
     )
     _persist_signal(SQLiteScanStore(db_path))
@@ -122,7 +122,7 @@ def test_v5_trade_watcher_risk_sizes_an_official_entry(tmp_path: Path) -> None:
     db_path = tmp_path / "scanner.sqlite"
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
-        [_bar("2026-07-31T10:00:00-04:00", 10.05)],
+        [_bar("2026-07-31T09:59:00-04:00", 10.05)],
     )
     _persist_v5_signal(SQLiteScanStore(db_path))
 
@@ -160,7 +160,7 @@ def test_v5_trade_watcher_never_fills_a_watch_only_selection(
     db_path = tmp_path / "scanner.sqlite"
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
-        [_bar("2026-07-31T10:00:00-04:00", 10.05)],
+        [_bar("2026-07-31T09:59:00-04:00", 10.05)],
     )
     _persist_v5_signal(
         SQLiteScanStore(db_path),
@@ -219,7 +219,7 @@ def test_trade_watcher_fails_closed_without_exact_session_selection(
             requested_at="09:35",
             minute_bars=_write_minute_bars(
                 tmp_path / "bars.csv",
-                [_bar("2026-06-22T09:35:00-04:00", 10.3)],
+                [_bar("2026-06-22T09:34:00-04:00", 10.3)],
             ),
             dry_run=True,
         )
@@ -333,7 +333,7 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
             tmp_path / "scenario-exit-bars.csv",
             [
                 _bar("2026-08-03T10:05:00-04:00", 10.3),
-                _bar("2026-08-03T10:10:00-04:00", 11.6),
+                _bar("2026-08-03T10:09:00-04:00", 11.6),
             ],
         ),
         include_scenarios=True,
@@ -392,7 +392,7 @@ def test_notification_failure_retries_from_durable_intent_outbox(
     db_path = tmp_path / "scanner.sqlite"
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
-        [_bar("2026-06-22T09:35:00-04:00", 10.3)],
+        [_bar("2026-06-22T09:34:00-04:00", 10.3)],
     )
     _persist_signal(SQLiteScanStore(db_path))
     real_dispatch = watcher_module._dispatch_notifications
@@ -438,7 +438,7 @@ def test_prior_day_open_position_is_closed_from_canonical_eod_repair(
     _persist_signal(store)
     entry_bars = _write_minute_bars(
         tmp_path / "entry-bars.csv",
-        [_bar("2026-06-22T09:35:00-04:00", 10.3)],
+        [_bar("2026-06-22T09:34:00-04:00", 10.3)],
     )
     run_trade_watcher(
         db_path=db_path,
@@ -492,7 +492,7 @@ def test_prior_day_open_position_is_safely_carried_and_revisited_without_eod_tru
         requested_at="09:35",
         minute_bars=_write_minute_bars(
             tmp_path / "entry-bars.csv",
-            [_bar("2026-06-22T09:35:00-04:00", 10.3)],
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
         ),
         dry_run=True,
     )
@@ -505,7 +505,7 @@ def test_prior_day_open_position_is_safely_carried_and_revisited_without_eod_tru
         requested_at="09:35",
         minute_bars=_write_minute_bars(
             tmp_path / "carry-bars.csv",
-            [_bar("2026-06-23T09:35:00-04:00", 10.4)],
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
         ),
         dry_run=True,
     )
@@ -646,9 +646,9 @@ def test_trade_watcher_consumes_only_the_frozen_selected_cohort(tmp_path: Path) 
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
         [
-            _bar("2026-06-22T09:35:00-04:00", 10.3),
+            _bar("2026-06-22T09:34:00-04:00", 10.3),
             {
-                **_bar("2026-06-22T09:35:00-04:00", 10.3),
+                **_bar("2026-06-22T09:34:00-04:00", 10.3),
                 "ticker": "BLOCK",
             },
         ],
@@ -674,8 +674,8 @@ def test_trade_watcher_exit_message_is_paper_intent_only(tmp_path: Path) -> None
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
         [
-            _bar("2026-06-22T09:35:00-04:00", 10.3),
-            _bar("2026-06-22T09:40:00-04:00", 11.6),
+            _bar("2026-06-22T09:34:00-04:00", 10.3),
+            _bar("2026-06-22T09:39:00-04:00", 11.6),
         ],
     )
     _persist_signal(SQLiteScanStore(db_path))
@@ -706,7 +706,7 @@ def test_trade_watcher_exit_message_is_paper_intent_only(tmp_path: Path) -> None
 
 def test_cli_trade_watch_runs_paper_cycle(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "scanner.sqlite"
-    bars = _write_minute_bars(tmp_path / "bars.csv", [_bar("2026-06-22T09:35:00-04:00", 10.3)])
+    bars = _write_minute_bars(tmp_path / "bars.csv", [_bar("2026-06-22T09:34:00-04:00", 10.3)])
     _persist_signal(SQLiteScanStore(db_path))
 
     status = main(
@@ -735,7 +735,7 @@ def test_cli_trade_watch_runs_paper_cycle(tmp_path: Path, capsys) -> None:
 
 def test_cli_trade_watch_loop_runs_one_iteration(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "scanner.sqlite"
-    bars = _write_minute_bars(tmp_path / "bars.csv", [_bar("2026-06-22T09:35:00-04:00", 10.3)])
+    bars = _write_minute_bars(tmp_path / "bars.csv", [_bar("2026-06-22T09:34:00-04:00", 10.3)])
     _persist_signal(SQLiteScanStore(db_path))
 
     status = main(

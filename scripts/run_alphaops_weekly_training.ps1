@@ -25,8 +25,9 @@ $dailyLock = Enter-DawnstrikeDailyRunLock `
     -MarketDate $MarketDate `
     -Owner "alphaops_v6_weekly_training"
 if (-not $dailyLock.acquired) {
+    $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_v6_weekly_training" -Lock $dailyLock
     Write-Error "V6 weekly training could not acquire the daily state lock: $($dailyLock.reason)"
-    exit 2
+    exit $(if ($receiptWritten) { 3 } else { 2 })
 }
 
 Push-Location $runtime
@@ -42,6 +43,16 @@ try {
     }
     if ($calendar.exit_code -ne 0) {
         throw "Market calendar failed with exit code $($calendar.exit_code)."
+    }
+
+    $finalizeReceipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("scripts\verify_daily_finalize_receipt.py", "--db-path", $dbPath, "--market-date", $MarketDate, "--release-sha", $releaseSha) `
+        -LogRoot $logRoot `
+        -LogName "alpha_v6_weekly_finalize_receipt-$MarketDate"
+    if ($finalizeReceipt.exit_code -ne 0) {
+        Write-Error "Weekly training requires a completed exact-release Daily Finalize receipt; Task Scheduler will apply bounded retry."
+        exit 4
     }
 
     $training = Invoke-DawnstrikeNativeProcess `

@@ -15,6 +15,34 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert "--retry-delay-seconds" in runner
     assert '$dbPath = Join-Path $state "shadow_real.sqlite"' in runner
     assert "publish_vercel_public.ps1" in runner
+    assert "Required daily finalize run blocked by daily lock" in runner
+    assert "exit $(if ($receiptWritten) { 3 } else { 2 })" in runner
+
+    eod = Path("scripts/run_alphaops_eod.ps1").read_text(encoding="utf-8")
+    assert "Required AlphaOps EOD run blocked by daily lock" in eod
+    assert "exit $(if ($receiptWritten) { 3 } else { 2 })" in eod
+    assert "Write-DawnstrikeLockDenialReceipt" in eod
+    assert "Write-DawnstrikeLockDenialReceipt" in runner
+
+    weekly = Path("scripts/run_alphaops_weekly_training.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Write-DawnstrikeLockDenialReceipt" in weekly
+
+    lock_helper = Path("scripts/invoke_dawnstrike_stage.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "dawnstrike.daily_run_lock.v2" in lock_helper
+    assert "lock_token" in lock_helper
+    assert "Get-Process -Id" in lock_helper
+    assert "dawnstrike.lock_denial.v1" in lock_helper
+
+    morning = Path("scripts/run_alphaops_morning.ps1").read_text(encoding="utf-8")
+    monitor = Path("scripts/run_alphaops_monitor.ps1").read_text(encoding="utf-8")
+    assert "Required AlphaOps morning run blocked by daily lock" in morning
+    assert "Required AlphaOps monitor run blocked by daily lock" in monitor
+    assert "daily_lock_unavailable" in morning
+    assert "daily_lock_unavailable" in monitor
 
 
 def test_task_scripts_use_the_installed_windows_battery_safe_switches() -> None:
@@ -38,9 +66,42 @@ def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
     assert '-ClassName "MSFT_TaskRepetitionPattern"' in register
     assert '-ClientOnly' in register
     assert 'Interval = "PT5M"' in register
-    assert 'Duration = "PT$([int]$definition.DurationHours)H"' in register
+    assert 'RepetitionDuration = "PT6H35M"' in register
+    assert 'Duration = [string]$definition.RepetitionDuration' in register
+    assert 'Start = "21:00"' in register
+    assert "ExecutionLimitMinutes = 60" in register
+    assert "ExecutionLimitMinutes = 4" in register
+    assert "New-TimeSpan -Minutes ([int]$definition.ExecutionLimitMinutes)" in register
+    assert "validate_web_source_config.py" in register
+    assert "failed semantic validation" in register
+    assert "source-config-validation.json" in register
+    assert "--runtime-root" in register
+    assert "--receipt" in register
+    assert "RestartIntervalMinutes = 15" in register
+    assert "ReuseExistingPrincipal" in register
+    assert "Set-ScheduledTask" in register
+    assert "preserving its approved stored principal" in register
+    assert register.index("$taskPreflight = @{}") < register.index("Set-ScheduledTask")
+    assert register.index("Existing AlphaOps tasks do not share") < register.index(
+        "Set-ScheduledTask"
+    )
     assert "$trigger.Repetition = $repetition" in register
     assert "$trigger.Repetition.Interval =" not in register
+
+
+def test_weekly_training_waits_for_exact_release_finalize_receipt() -> None:
+    runner = Path("scripts/run_alphaops_weekly_training.ps1").read_text(
+        encoding="utf-8"
+    )
+    verifier = Path("scripts/verify_daily_finalize_receipt.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "verify_daily_finalize_receipt.py" in runner
+    assert "Task Scheduler will apply bounded retry" in runner
+    assert "FINALIZE_STAGES" in verifier
+    assert '"publication"' in verifier
+    assert '"readiness"' in verifier
 
 
 def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:

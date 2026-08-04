@@ -129,7 +129,11 @@ def extract_claims(
             raise DataProviderError(
                 "OpenAI SDK is not installed; install the project dependencies."
             ) from exc
-        client = OpenAI(api_key=api_key, timeout=timeout_seconds)
+        # Scheduled Scenario work has an explicit total time budget. SDK-level
+        # retries would multiply each per-article timeout and can overrun the
+        # monitor's four-minute execution lease; the next idempotent monitor
+        # cycle is the retry boundary.
+        client = OpenAI(api_key=api_key, timeout=timeout_seconds, max_retries=0)
     try:
         response = client.responses.create(
             model=model,

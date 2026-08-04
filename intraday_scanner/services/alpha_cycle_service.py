@@ -19,7 +19,7 @@ from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
-from intraday_scanner.errors import SnapshotValidationError
+from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
     core_session_phase,
@@ -40,6 +40,7 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_watch,
 )
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
+from intraday_scanner.providers.web_source_base import load_web_sources_config
 from intraday_scanner.reporting import write_scan_outputs
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
@@ -275,9 +276,16 @@ def alpha_cycle(
         output_dir=output_dir / "scan",
         database_path=Path(db_path),
     )
+    source_config = load_web_sources_config(config_path)
+    fixture_mode = any(
+        source.enabled and bool(source.fixture_path)
+        for source in source_config.sources
+    )
     enrichment = enrich_premarket_rows(
         list(collection.get("rows") or []),
         config=scanner_config,
+        source=("yahoo" if fixture_mode else "alpaca"),
+        allow_yahoo_fallback=not fixture_mode,
         out_dir=output_dir / "premarket_enrichment",
     )
     source_summary["premarket_enrichment"] = enrichment["summary"]
@@ -618,13 +626,24 @@ def alpha_monitor(
     ]
     price_observation: dict[str, Any] | None = None
     if current_prices is None and active_signals:
-        price_observation = collect_price_observations(
-            db_path=db_path,
-            source="yahoo",
-            tickers=[str(row.get("ticker") or "") for row in active_signals],
-            max_age_seconds=360,
-            persist=False,
-        )
+        try:
+            price_observation = collect_price_observations(
+                db_path=db_path,
+                source="alpaca",
+                tickers=[str(row.get("ticker") or "") for row in active_signals],
+                max_age_seconds=360,
+                persist=False,
+            )
+        except DataProviderError:
+            if not dry_run:
+                raise
+            price_observation = {
+                "status": "provider_unavailable_dry_run",
+                "usable_count": 0,
+                "observations": [],
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
         current_prices = {
             str(row.get("ticker") or "").upper(): float(row["current_price"])
             for row in price_observation.get("observations", [])

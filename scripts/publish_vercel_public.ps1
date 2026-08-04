@@ -394,6 +394,7 @@ $result = [ordered]@{
     source_sha = $previewManifest.source_sha
     build_id = $previewManifest.build_id
     data_hash_sha256 = $previewManifest.data_hash_sha256
+    publication_set_sha256 = $previewManifest.publication_set_sha256
     market_date = $previewManifest.market_date
     snapshot_status = $previewReadiness.snapshot_status
     readiness_status = $previewReadiness.status

@@ -105,8 +105,13 @@ function Write-ScenarioStage {
 }
 $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor"
 if (-not $dailyLock.acquired) {
-    Write-Output "Skipped duplicate AlphaOps monitor run: $($dailyLock.reason)"
-    exit 0
+    $lockReceiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor" -Lock $dailyLock
+    $record = Write-MonitorStage `
+        -Status FAILED `
+        -ExitCode 3 `
+        -ErrorCode "daily_lock_unavailable"
+    Write-Error "Required AlphaOps monitor run blocked by daily lock: $($dailyLock.reason)"
+    exit $(if ($record.exit_code -ne 0 -or -not $lockReceiptWritten) { 2 } else { 3 })
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
@@ -147,47 +152,52 @@ try {
         }
     }
     if ($exitCode -eq 0) {
-        if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
-            $scenarioSince = Get-ScenarioMonitorWatermark
-            # Record the start rather than the end.  The next query overlaps this
-            # run, so news published while the provider/extractor is working is
-            # re-read and deduplicated instead of being lost.
-            $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
-            $scenario = Invoke-DawnstrikeNativeProcess `
-                -FilePath "py.exe" `
-                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
-                -LogRoot $logRoot `
-                -LogName "scenario_monitor-$MarketDate"
-            if ($scenario.exit_code -ne 0) {
-                $exitCode = $scenario.exit_code
-                $errorCode = "scenario_cycle_failed"
-            }
-            else {
-                Save-ScenarioMonitorWatermark -WatermarkUtc $nextScenarioWatermark
-            }
-            $scenarioStage = Write-ScenarioStage `
-                -Status $(if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
-                -ExitCode $scenario.exit_code `
-                -ErrorCode $(if ($scenario.exit_code -eq 0) { "" } else { "scenario_cycle_failed" })
-            if ($scenarioStage.exit_code -ne 0 -and $exitCode -eq 0) {
-                $exitCode = 2
-                $errorCode = "scenario_stage_record_failed"
-            }
-        }
-    }
-    if ($exitCode -eq 0) {
         $scenarioWatchArgs = @()
         if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {
             $scenarioWatchArgs += "--include-scenarios"
         }
         $watch = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList (@("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "auto", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") + $scenarioWatchArgs) `
+            -ArgumentList (@("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "alpaca", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") + $scenarioWatchArgs) `
             -LogRoot $logRoot `
             -LogName "trade_watch-$MarketDate"
         if ($watch.exit_code -ne 0) {
             $exitCode = $watch.exit_code
             $errorCode = "trade_watcher_failed"
+        }
+    }
+    if (
+        $exitCode -eq 0 -and
+        $env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$'
+    ) {
+        # The five-minute monitor owns time-sensitive paper lifecycle checks.
+        # Scenario work therefore runs after trade-watch and is hard-bounded to
+        # at most three 30-second model calls inside the four-minute task limit.
+        $env:DAWNSTRIKE_SCENARIO_MAX_ARTICLES_PER_RUN = "3"
+        $env:DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS = "30"
+        $scenarioSince = Get-ScenarioMonitorWatermark
+        # Record the start rather than the end. The next query overlaps this run,
+        # so news published while processing is re-read and deduplicated.
+        $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
+        $scenario = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
+            -LogRoot $logRoot `
+            -LogName "scenario_monitor-$MarketDate"
+        if ($scenario.exit_code -ne 0) {
+            $exitCode = $scenario.exit_code
+            $errorCode = "scenario_cycle_failed"
+        }
+        else {
+            Save-ScenarioMonitorWatermark -WatermarkUtc $nextScenarioWatermark
+        }
+        $scenarioStage = Write-ScenarioStage `
+            -Status $(if ($scenario.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
+            -ExitCode $scenario.exit_code `
+            -ErrorCode $(if ($scenario.exit_code -eq 0) { "" } else { "scenario_cycle_failed" })
+        if ($scenarioStage.exit_code -ne 0 -and $exitCode -eq 0) {
+            $exitCode = 2
+            $errorCode = "scenario_stage_record_failed"
         }
     }
     $status = if ($exitCode -eq 0) { "COMPLETE" } else { "FAILED" }

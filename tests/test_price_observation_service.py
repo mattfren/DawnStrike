@@ -56,8 +56,46 @@ def test_csv_price_observation_persists_latest_prior_bar_without_lookahead(
     assert row["ticker"] == "NOVA"
     assert row["price"] == 10.0
     assert row["provider_status"] == "fresh_prior_bar"
-    assert row["freshness_seconds"] == 240
+    assert row["freshness_seconds"] == 180
+    assert row["bar_completed_at"] == "2026-06-22T13:31:00+00:00"
+    assert row["is_complete"] == 1
     assert row["no_lookahead"] is True
+
+
+def test_monitor_rejects_bar_that_has_started_but_not_completed(tmp_path: Path) -> None:
+    db_path = tmp_path / "scanner.sqlite"
+    minute_bars = _write_minute_bars(
+        tmp_path / "bars.csv",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-06-22T09:35:00-04:00",
+                "open": "10",
+                "high": "10.2",
+                "low": "9.9",
+                "close": "10",
+                "volume": "1000",
+            }
+        ],
+    )
+
+    result = collect_price_observations(
+        db_path=db_path,
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:35:00-04:00",
+        minute_bars=minute_bars,
+        max_age_seconds=600,
+    )
+
+    row = SQLiteScanStore(db_path).load_price_observations()[0]
+    assert result["status"] == "no_usable_prices"
+    assert result["usable_count"] == 0
+    assert row["provider_status"] == "incomplete_bar_rejected"
+    assert row["price"] is None
+    assert row["is_complete"] == 0
+    assert row["is_usable"] == 0
 
 
 def test_csv_price_observation_rejects_stale_prior_bar(tmp_path: Path) -> None:
@@ -105,7 +143,7 @@ def test_cli_price_observe_csv_updates_dashboard_current_price(
         [
             {
                 "ticker": "NOVA",
-                "timestamp": "2026-06-22T09:35:00-04:00",
+                "timestamp": "2026-06-22T09:34:00-04:00",
                 "open": "10.45",
                 "high": "10.8",
                 "low": "10.25",
@@ -145,6 +183,7 @@ def test_cli_price_observe_csv_updates_dashboard_current_price(
     assert status == 0
     assert '"usable_count": 1' in captured.out
     assert observations[0]["price"] == 10.5
+    assert observations[0]["provider_status"] == "exact"
     assert row["Current"] == "$10.5"
     assert row["_current_source"] == "price_observations"
 
@@ -193,7 +232,9 @@ def test_yahoo_price_observation_persists_public_chart_price(
     row = SQLiteScanStore(db_path).load_price_observations(usable_only=True)[0]
     assert result["usable_count"] == 1
     assert row["ticker"] == "NOVA"
-    assert row["price"] == 10.75
+    assert row["price"] == 10.25
+    assert row["bar_completed_at"] == "2026-06-22T13:31:00+00:00"
+    assert row["is_complete"] == 1
     assert row["source"] == "yahoo"
     assert row["source_kind"] == "public_web_market_data"
     assert row["provider"] == "yahoo_finance_chart"
@@ -212,7 +253,7 @@ def test_auto_price_observe_uses_yahoo_when_no_minute_file(
             "chart": {
                 "result": [
                     {
-                        "timestamp": [1782135000],
+                        "timestamp": [1782134940],
                         "indicators": {"quote": [{"close": [10.25]}]},
                     }
                 ]
@@ -279,7 +320,7 @@ def test_price_observation_service_persists_when_store_method_is_stale(
         [
             {
                 "ticker": "NOVA",
-                "timestamp": "2026-06-22T09:30:00-04:00",
+                "timestamp": "2026-06-22T09:29:00-04:00",
                 "open": "10",
                 "high": "10.2",
                 "low": "9.9",
@@ -321,7 +362,7 @@ def test_saved_signal_targets_skip_no_trade_and_dedupe_yahoo_requests(
             "chart": {
                 "result": [
                     {
-                        "timestamp": [1782135000],
+                        "timestamp": [1782134940],
                         "indicators": {"quote": [{"close": [10.25]}]},
                     }
                 ]
