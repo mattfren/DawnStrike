@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -185,9 +186,23 @@ def _task_check(
     enabled = task.get("enabled") is True
     last_result = task.get("last_task_result")
     healthy_state = state in {"Ready", "Running"}
-    last_run_result_acceptable = last_result in ACCEPTABLE_LAST_RESULTS
-    next_run_time = str(task.get("next_run_time") or "")
-    scheduled_time_matches = f"T{expected_start}:" in next_run_time
+    trigger_start_boundary = str(task.get("trigger_start_boundary") or "")
+    trigger_start = _parse_aware_datetime(trigger_start_boundary)
+    history_superseded = _history_predates_trigger_definition(
+        last_run_time=str(task.get("last_run_time") or ""),
+        trigger_start=trigger_start,
+    )
+    last_run_result_acceptable = (
+        last_result in ACCEPTABLE_LAST_RESULTS or history_superseded
+    )
+    expected_hour, expected_minute = (int(value) for value in expected_start.split(":"))
+    scheduled_time_matches = (
+        trigger_start is not None
+        and trigger_start.hour == expected_hour
+        and trigger_start.minute == expected_minute
+        and trigger_start.second == 0
+        and trigger_start.microsecond == 0
+    )
     repetition_duration = str(task.get("repetition_duration") or "")
     repetition_matches = (
         expected_repetition is None or repetition_duration == expected_repetition
@@ -230,8 +245,13 @@ def _task_check(
         "battery_safe": battery_safe,
         "last_run_result_acceptable": last_run_result_acceptable,
         "last_run_status": (
-            "ACCEPTABLE" if last_run_result_acceptable else "STALE_OR_FAILED"
+            "SUPERSEDED_BY_CURRENT_DEFINITION"
+            if history_superseded and last_result not in ACCEPTABLE_LAST_RESULTS
+            else "ACCEPTABLE"
+            if last_run_result_acceptable
+            else "STALE_OR_FAILED"
         ),
+        "history_superseded_by_current_definition": history_superseded,
         "expected_start_local": expected_start,
         "scheduled_time_matches": scheduled_time_matches,
         "expected_repetition_duration": expected_repetition,
@@ -278,6 +298,8 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
         "stop_if_going_on_batteries=[bool]$task.Settings.StopIfGoingOnBatteries; "
         "disallow_start_if_on_batteries=[bool]$task.Settings.DisallowStartIfOnBatteries; "
         "execution_time_limit=[string]$task.Settings.ExecutionTimeLimit; "
+        "trigger_start_boundary=if (@($task.Triggers)[0].StartBoundary) "
+        "{[string]@($task.Triggers)[0].StartBoundary} else {$null}; "
         "repetition_duration=if (@($task.Triggers)[0].Repetition) "
         "{[string]@($task.Triggers)[0].Repetition.Duration} else {$null}; "
         "last_task_result=$info.LastTaskResult; "
@@ -358,7 +380,29 @@ def _missing_task(name: str) -> dict[str, Any]:
         "working_directory": None,
         "repetition_duration": None,
         "execution_time_limit": None,
+        "trigger_start_boundary": None,
     }
+
+
+def _history_predates_trigger_definition(
+    *,
+    last_run_time: str,
+    trigger_start: datetime | None,
+) -> bool:
+    """Return true only when failure history belongs to the replaced definition."""
+
+    last_run = _parse_aware_datetime(last_run_time)
+    if last_run is None or trigger_start is None:
+        return False
+    return last_run.astimezone(trigger_start.tzinfo).date() < trigger_start.date()
+
+
+def _parse_aware_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 __all__ = [
