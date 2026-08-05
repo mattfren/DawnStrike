@@ -530,7 +530,10 @@ def test_cycle_persists_fact_only_records_and_reuses_extraction_cache(tmp_path: 
 
     store = SQLiteScanStore(db_path)
     assert first["action_counts"] == {"ABSTAIN": 1}
+    assert first["model_request_count"] == 1
+    assert first["ai_role"] == "schema_validated_factual_claim_extraction_only"
     assert second["cached_extraction_count"] == 1
+    assert second["model_request_count"] == 0
     assert calls == ["news-1"]
     assert len(store.load_scenario_news_items()) == 1
     assert len(store.load_scenario_decisions()) == 1

@@ -373,6 +373,7 @@ def test_alpaca_primary_uses_explicit_provenance_labeled_yahoo_fallback():
     assert result["summary"]["secondary_fallback_candidate_ratio"] == 0.25
     assert result["summary"]["secondary_fallback_ceiling_ratio"] == 0.25
     assert result["summary"]["secondary_fallback_status"] == "applied"
+    assert result["summary"]["selected_symbols"] == ["ALFA", "BETA", "GAMM", "NOVA"]
     assert result["summary"]["verified_by_source"] == {
         "alpaca_market_data_iex": 3,
         "yahoo_finance_chart": 1,
@@ -423,6 +424,7 @@ def test_alpaca_100_percent_symbol_fallback_finishes_data_ineligible_without_yah
     assert result["summary"]["secondary_fallback_status"] == (
         "ceiling_exceeded_not_applied"
     )
+    assert result["summary"]["selected_symbols"] == ["NOVA"]
     assert result["summary"]["ranking_eligible_count"] == 0
     assert result["summary"]["ranking_excluded_count"] == 1
     assert result["ranking_rows"] == []

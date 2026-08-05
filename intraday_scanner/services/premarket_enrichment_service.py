@@ -242,6 +242,7 @@ def enrich_premarket_rows(
         ),
         "input_count": len(rows),
         "selected_count": len(selected_tickers),
+        "selected_symbols": sorted(set(selected_tickers)),
         "verified_count": sum(1 for item in observations.values() if item.is_usable),
         "failed_count": sum(1 for item in observations.values() if not item.is_usable),
         "ranking_eligible_count": len(ranking_rows),

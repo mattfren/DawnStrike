@@ -127,6 +127,7 @@ def run_scenario_cycle(
         decisions: list[dict[str, Any]] = []
         materialized: list[dict[str, Any]] = []
         cached_count = 0
+        model_request_count = 0
         for article in articles:
             extraction, cached = _extraction_for_article(
                 store=store,
@@ -136,6 +137,7 @@ def run_scenario_cycle(
                 dry_run=dry_run,
             )
             cached_count += int(cached)
+            model_request_count += int(not cached)
             for ticker in article.symbols:
                 if ticker not in wanted_symbols:
                     continue
@@ -191,6 +193,8 @@ def run_scenario_cycle(
             "symbol_count": len(wanted_symbols),
             "article_count": len(articles),
             "cached_extraction_count": cached_count,
+            "model_request_count": model_request_count,
+            "ai_role": "schema_validated_factual_claim_extraction_only",
             "decision_count": len(decisions),
             "action_counts": _counts(decisions, "action"),
             "materialized_signal_count": len(materialized),

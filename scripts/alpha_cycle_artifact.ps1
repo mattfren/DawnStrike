@@ -98,9 +98,32 @@ function Test-DawnstrikeAlphaCycleArtifact {
     if ([decimal]$payload.signal_count -ne [decimal]$contract.signal_count) {
         throw "AlphaOps cycle artifact signal_count is inconsistent."
     }
+    $contractHasResearchCount = $contract.PSObject.Properties.Name -contains "research_candidate_count"
+    $contractHasResearchSymbols = $contract.PSObject.Properties.Name -contains "research_symbols"
+    if (-not $contractHasResearchCount -or -not $contractHasResearchSymbols) {
+        throw "AlphaOps cycle artifact is missing its research candidate universe."
+    }
+    if (-not (Test-DawnstrikeNonNegativeInteger -Value $contract.research_candidate_count)) {
+        throw "AlphaOps cycle artifact research_candidate_count must be a nonnegative integer."
+    }
+    $researchSymbols = @($contract.research_symbols)
+    if ([decimal]$contract.research_candidate_count -ne $researchSymbols.Count) {
+        throw "AlphaOps cycle artifact research candidate count is inconsistent."
+    }
+    $uniqueResearchSymbols = @($researchSymbols | Select-Object -Unique)
+    if ($uniqueResearchSymbols.Count -ne $researchSymbols.Count) {
+        throw "AlphaOps cycle artifact research symbols must be unique."
+    }
+    foreach ($symbol in $researchSymbols) {
+        if ([string]$symbol -cnotmatch '^[A-Z][A-Z0-9.-]{0,14}$') {
+            throw "AlphaOps cycle artifact contains an invalid research symbol."
+        }
+    }
     return [pscustomobject]@{
         scan_id = $scanId
         signal_count = [int64]$contract.signal_count
+        research_candidate_count = [int64]$contract.research_candidate_count
+        research_symbols = @($researchSymbols)
         market_date = $MarketDate
         source_status = [string]$contract.source_status
         artifact_last_write_utc = $artifactInfo.LastWriteTimeUtc.ToString("o")

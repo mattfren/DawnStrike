@@ -22,6 +22,7 @@ $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
 $scenarioCandidateCount = 0
+$scenarioSymbols = ""
 $scenarioExitCode = $null
 $scenarioStageRecordFailed = $false
 $scenarioWatermarkPath = Join-Path $state "scenario_monitor_watermark.json"
@@ -150,7 +151,8 @@ try {
             $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
                 -ArtifactPath $alphaCyclePath `
                 -MarketDate $MarketDate
-            $scenarioCandidateCount = [int64]$alphaArtifact.signal_count
+            $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
+            $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
         }
         catch {
             $exitCode = 2
@@ -212,7 +214,7 @@ try {
                 $nextScenarioWatermark = (Get-Date).ToUniversalTime().ToString("o")
                 $scenario = Invoke-DawnstrikeNativeProcess `
                     -FilePath "py.exe" `
-                    -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
+                    -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--symbols", $scenarioSymbols, "--since", $scenarioSince, "--notify", $Notify) `
                     -LogRoot $logRoot `
                     -LogName "scenario_monitor-$MarketDate"
                 $scenarioExitCode = [int]$scenario.exit_code

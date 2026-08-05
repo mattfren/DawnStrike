@@ -125,6 +125,23 @@ def test_no_trade_filter_allows_no_clean_edge():
     assert "Do not force" in decision.next_action
 
 
+def test_no_trade_filter_does_not_call_sparse_provider_coverage_no_edge():
+    source_summary = {
+        "status": "success",
+        "premarket_enrichment": {
+            "selected_count": 9,
+            "verified_count": 2,
+            "secondary_fallback_status": "ceiling_exceeded_not_applied",
+        },
+    }
+
+    decision = evaluate_no_trade([], source_summary=source_summary)
+
+    assert decision.no_trade is True
+    assert "2 of 9" in decision.reason
+    assert "market no-edge" in decision.next_action
+
+
 def test_no_trade_filter_quarantines_low_confidence_uncalibrated_fallback():
     signal = _candidate(
         alpha_score=40.4,

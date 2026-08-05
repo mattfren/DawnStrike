@@ -33,8 +33,12 @@ DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS=45
 ## Required evidence path
 
 1. `scenario-doctor` must report `READY` without printing credentials.
-2. Morning and five-minute monitor jobs run `scenario-monitor`; the task ledger
-   records the optional `scenario_intelligence` stage.
+2. Morning and five-minute monitor jobs run `scenario-monitor` for the bounded
+   premarket research universe, even when deterministic AlphaOps produces zero
+   final picks. The task ledger records the optional `scenario_intelligence`
+   stage, while each Scenario run receipt records article, cache-hit, and actual
+   model-request counts. With zero articles, zero model requests is the correct
+   result; the system must never manufacture content merely to call a model.
 3. Entered paper scenarios use the shared paper watcher. Its durable outbox sends
    only deduplicated entry and exit Telegram notices.
 4. EOD runs `scenario-close` and `scenario-finalize`. Reported returns exclude
@@ -57,3 +61,8 @@ py scripts\verify_public_artifact.py --root C:\r\dawnstrike-runtime\build\public
 The dashboard's Scenario Intelligence view separates forward paper performance
 from historical provider-timestamp replay. `UNCALIBRATED` is a withholding
 state, not a probability or an investment recommendation.
+
+OpenAI does not select AlphaOps picks. It only extracts schema-validated factual
+claims from sourced articles. Deterministic code owns every action and may still
+abstain after a successful model request when price, liquidity, source, or
+point-in-time evidence is missing.
