@@ -19,7 +19,10 @@ HELPER = ROOT / "scripts" / "alpha_cycle_artifact.ps1"
 MARKET_DATE = "2026-08-04"
 
 
-def _valid_payload(signal_count: Any = 0) -> dict[str, Any]:
+def _valid_payload(
+    signal_count: Any = 0, research_symbols: list[str] | None = None
+) -> dict[str, Any]:
+    research_symbols = ["NOVA"] if research_symbols is None else research_symbols
     return {
         "status": "no_trade" if signal_count == 0 else "complete",
         "scan_id": "scan-current-attempt",
@@ -31,6 +34,8 @@ def _valid_payload(signal_count: Any = 0) -> dict[str, Any]:
             "market_date": MARKET_DATE,
             "source_status": "success",
             "signal_count": signal_count,
+            "research_candidate_count": len(research_symbols),
+            "research_symbols": research_symbols,
         },
     }
 
@@ -125,6 +130,17 @@ def test_artifact_accepts_current_zero_and_positive_counts(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["signal_count"] == signal_count
+    assert json.loads(result.stdout)["research_symbols"] == ["NOVA"]
+
+
+def test_artifact_rejects_inconsistent_research_candidate_universe(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["run_contract"]["research_candidate_count"] = 2
+
+    result = _validate(tmp_path, payload)
+
+    assert result.returncode == 1
+    assert "research candidate count is inconsistent" in result.stderr
 
 
 def test_artifact_can_validate_a_current_session_without_process_receipt(

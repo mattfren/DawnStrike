@@ -46,7 +46,8 @@ def test_monitor_skips_empty_scenario_without_overwriting_core_truth() -> None:
     ).read_text(encoding="utf-8")
 
     assert "Test-DawnstrikeAlphaCycleArtifact" in script
-    assert "$scenarioCandidateCount = [int64]$alphaArtifact.signal_count" in script
+    assert "$scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count" in script
+    assert '"--symbols", $scenarioSymbols' in script
     assert "if ($scenarioCandidateCount -le 0)" in script
     assert "$coreExitCode = $exitCode" in script
     assert "Resolve-DawnstrikeCoreOptionalOutcome" in script
@@ -115,7 +116,7 @@ def test_eod_renders_calendar_after_truth_verification() -> None:
     assert script.index('"verify-calendar"') < script.index('"calendar-view"')
 
 
-def test_morning_skips_optional_scenario_when_no_candidates_exist() -> None:
+def test_morning_runs_optional_scenario_for_research_candidates_not_only_final_picks() -> None:
     script = (
         Path(__file__).resolve().parents[1]
         / "scripts"
@@ -123,7 +124,9 @@ def test_morning_skips_optional_scenario_when_no_candidates_exist() -> None:
     ).read_text(encoding="utf-8")
 
     assert "Test-DawnstrikeAlphaCycleArtifact" in script
-    assert "$scenarioCandidateCount = [int64]$alphaArtifact.signal_count" in script
+    assert "$scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count" in script
+    assert '$scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))' in script
+    assert '"--symbols", $scenarioSymbols' in script
     assert 'if ($scenarioCandidateCount -le 0)' in script
     assert '-Status "SKIPPED_NOT_APPLICABLE"' in script
     assert '$coreStageExit = $stageExit' in script

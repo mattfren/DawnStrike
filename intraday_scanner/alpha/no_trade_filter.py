@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from intraday_scanner.alpha.data_eligibility import evaluate_premarket_coverage
+
 ALERT_SOURCE_CONFIDENCE_FLOOR = 80.0
 FALLBACK_ALPHA_SCORE_FLOOR = 58.0
 FALLBACK_RISK_SCORE_FLOOR = 80.0
@@ -43,14 +45,6 @@ def evaluate_no_trade(
     min_fallback_source_confidence: float = ALERT_SOURCE_CONFIDENCE_FLOOR,
     min_fallback_risk_score: float = FALLBACK_RISK_SCORE_FLOOR,
 ) -> NoTradeDecision:
-    if not candidates:
-        return NoTradeDecision(
-            no_trade=True,
-            reason="No usable candidates passed the scanner filters.",
-            next_action="Wait for cleaner data or use the manual CSV fallback.",
-            clean_count=0,
-            blocked_count=0,
-        )
     source_summary = dict(source_summary or {})
     status = str(source_summary.get("status") or source_summary.get("source_status") or "")
     if status in {"failed", "empty", "no_data"}:
@@ -60,6 +54,26 @@ def evaluate_no_trade(
             next_action="Wait for the next collection cycle or drop a manual CSV.",
             clean_count=0,
             blocked_count=len(candidates),
+        )
+    coverage = evaluate_premarket_coverage(source_summary)
+    if coverage.data_ineligible:
+        return NoTradeDecision(
+            no_trade=True,
+            reason=coverage.operator_reason(),
+            next_action=(
+                "Do not treat this as a market no-edge result. Retry after fresh bars "
+                "or switch to a full-market feed before selecting a watchlist."
+            ),
+            clean_count=0,
+            blocked_count=len(candidates),
+        )
+    if not candidates:
+        return NoTradeDecision(
+            no_trade=True,
+            reason="No usable candidates passed the scanner filters.",
+            next_action="Wait for cleaner data or use the manual CSV fallback.",
+            clean_count=0,
+            blocked_count=0,
         )
 
     clean = [

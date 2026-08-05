@@ -28,8 +28,10 @@ learning may start without pretending to validate historical strategy edge:
    first. A systemic Alpaca/auth/network failure blocks the cycle. Yahoo is used
    only for bounded symbol-specific missing/stale IEX bars after successful
    Alpaca requests. If symbol-level fallback demand exceeds the 25% ceiling,
-   Yahoo is not called; only verified Alpaca rows can rank, and zero verified
-   rows produce an auditable DATA_INELIGIBLE/no-trade cycle. Systemic Alpaca
+   Yahoo is not called and the entire cycle is labeled
+   `DATA_INELIGIBLE` even when a few Alpaca rows were usable. The Telegram
+   message must report the verified fraction and must not call incomplete
+   coverage a valid market no-edge result. Systemic Alpaca
    authentication, network, or HTTP failures still fail the cycle closed.
    The ranking snapshot contains only verified rows and carries the market-data
    provider, source URL, completion timestamp, fallback state, and immutable
@@ -40,6 +42,11 @@ learning may start without pretending to validate historical strategy edge:
    Every row records the provider that supplied its range; the run summary
    reports fallback count and ratio. Intraday monitoring remains Alpaca and
    fails closed when no fresh, complete IEX bar exists.
+   IEX is a single-exchange testing feed and is not adequate as the sole source
+   for small-cap premarket selection. For production-quality current coverage,
+   subscribe the Alpaca account to real-time SIP and set `ALPACA_DATA_FEED=sip`.
+   If SIP is unavailable, keep the cycle data-ineligible and add an independent
+   consolidated provider adapter; do not raise the Yahoo fallback ceiling.
 3. Keep `production_contract: false`. The doctor reports this explicitly as
    `FORWARD_RESEARCH_ONLY`; it is never labeled a historical production
    contract. This configuration must not register a

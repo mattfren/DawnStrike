@@ -118,6 +118,7 @@ try {
     $coreStageExit = $stageExit
     $coreErrorCode = $errorCode
     $scenarioCandidateCount = 0
+    $scenarioSymbols = ""
     $scenarioExitCode = $null
     if ($coreStageExit -eq 0) {
         try {
@@ -125,7 +126,8 @@ try {
                 -ArtifactPath $alphaCyclePath `
                 -ProcessReceipt $alphaCycle `
                 -MarketDate $MarketDate
-            $scenarioCandidateCount = [int64]$alphaArtifact.signal_count
+            $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
+            $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
         }
         catch {
             $coreStageExit = 2
@@ -147,7 +149,7 @@ try {
             $scenarioSince = (Get-Date).ToUniversalTime().AddHours(-12).ToString("o")
             $scenarioCycle = Invoke-DawnstrikeNativeProcess `
                 -FilePath "py.exe" `
-                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--since", $scenarioSince, "--notify", $Notify) `
+                -ArgumentList @("-m", "intraday_scanner.cli", "scenario-monitor", "--db-path", $dbPath, "--symbols", $scenarioSymbols, "--since", $scenarioSince, "--notify", $Notify) `
                 -LogRoot $logRoot `
                 -LogName "scenario_morning-$MarketDate"
             if ($scenarioCycle.exit_code -ne 0) {

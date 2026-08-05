@@ -24,6 +24,18 @@ ALPACA_API_SECRET_KEY=your_secret
 ALPACA_DATA_FEED=iex
 ```
 
+`iex` is suitable for development but covers only one exchange. Small-cap
+premarket names can legitimately have no recent IEX bars even while they trade
+elsewhere. For current full-market selection, enable real-time SIP on the Alpaca
+account and set `ALPACA_DATA_FEED=sip`. Dawnstrike will fail the selection closed
+when sparse coverage exceeds its bounded secondary-source ceiling; it will not
+convert missing bars to zero or pretend that incomplete coverage means no edge.
+
+For a future independent secondary, use a licensed consolidated provider such
+as Massive (formerly Polygon) behind the existing `MarketDataProvider` boundary.
+Do not use Yahoo as the sole production selection feed or increase its 25%
+fallback ceiling to conceal a primary-feed coverage problem.
+
 Run:
 
 ```powershell
