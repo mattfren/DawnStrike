@@ -43,6 +43,7 @@ def monitor_alpha_signals(
     signals: list[dict[str, Any]],
     *,
     current_prices: dict[str, float] | None = None,
+    current_quotes: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     current_prices = dict(current_prices or {})
     if not current_prices:
@@ -60,25 +61,44 @@ def monitor_alpha_signals(
         price = current_prices.get(ticker)
         if price is None:
             continue
-        trigger = _float(row.get("breakout_trigger") or row.get("entry_trigger"))
-        invalidation = _float(row.get("invalidation_level") or row.get("invalidation"))
-        target = _float(row.get("first_target") or row.get("target_1"))
-        label = "BREAKOUT WATCH"
+        trigger = _float(row.get("entry_trigger") or row.get("breakout_trigger"))
+        invalidation = _float(row.get("invalidation") or row.get("invalidation_level"))
+        target = _float(row.get("target_1") or row.get("first_target"))
+        quote = dict((current_quotes or {}).get(ticker) or {})
+        quote_required = (
+            current_quotes is not None
+            and str(row.get("monitor_cohort") or "") == "research_radar"
+        )
+        spread = _float(quote.get("spread_pct"))
+        label = "WAITING FOR TRIGGER"
         if invalidation and price <= invalidation:
-            label = "INVALIDATED"
+            label = "SETUP INVALIDATED"
+        elif quote_required and not quote.get("is_usable"):
+            label = "WAITING FOR LIQUID QUOTE"
+        elif quote_required and (spread is None or spread > 3.0):
+            label = "SPREAD TOO WIDE"
         elif target and price >= target:
-            label = "CAUTION"
-        elif trigger and price < trigger:
-            label = "BREAKOUT WATCH"
+            label = "TARGET HIT"
+        elif trigger and price >= trigger:
+            label = "ENTRY TRIGGERED"
         events.append({
             "ticker": ticker,
             "current_price": price,
             "label": label,
             "status": label.lower().replace(" ", "_"),
+            "entry_trigger": trigger,
+            "invalidation_level": invalidation,
+            "target_1": target,
+            "monitor_cohort": row.get("monitor_cohort") or "official_telegram",
+            "bid": quote.get("bid"),
+            "ask": quote.get("ask"),
+            "spread_pct": spread,
+            "quote_is_usable": quote.get("is_usable") if quote_required else None,
+            "research_only": True,
         })
     return {
         "status": "checked",
-        "label": "BREAKOUT WATCH" if events else "MANUAL REVIEW",
+        "label": "ACTIVE DAY-TRADE RADAR" if events else "MANUAL REVIEW",
         "message": "Checked configured current prices.",
         "events": events,
     }

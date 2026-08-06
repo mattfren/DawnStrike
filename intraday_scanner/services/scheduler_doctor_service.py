@@ -20,7 +20,7 @@ EXPECTED_TASKS = {
     CANONICAL_TASK_NAME: "run_daily_finalize.ps1",
 }
 EXPECTED_TASK_STARTS = {
-    "Dawnstrike AlphaOps Morning": "07:15",
+    "Dawnstrike AlphaOps Morning": "08:00",
     "Dawnstrike AlphaOps Monitor 5m": "08:35",
     "Dawnstrike AlphaOps EOD Full Report": "15:15",
     "Dawnstrike AlphaOps V6 Weekly Training": "21:00",

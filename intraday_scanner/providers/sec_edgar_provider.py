@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,13 +51,20 @@ def collect_sec_risk(
         return summary
     events: list[dict[str, Any]] = []
     fetches: list[dict[str, Any]] = []
+    checked_tickers: list[str] = []
+    unchecked_tickers: list[str] = []
     if source.fixture_path:
         events.extend(_events_from_fixture(source, config, clean_tickers, fetches, store, persist))
+        if any(str(row.get("status") or "") == "success" for row in fetches):
+            checked_tickers.extend(clean_tickers)
+        else:
+            unchecked_tickers.extend(clean_tickers)
     else:
         cik_map = fetch_company_ticker_map(source, config, store=store, persist=persist)
         for ticker in clean_tickers:
             cik = cik_map.get(ticker)
             if cik is None:
+                unchecked_tickers.append(ticker)
                 continue
             fetch = fetch_text(
                 source,
@@ -68,12 +76,16 @@ def collect_sec_risk(
             if persist and store is not None:
                 store.persist_web_fetch_run(fetch.payload())
             if fetch.status != "success":
+                unchecked_tickers.append(ticker)
                 continue
+            checked_tickers.append(ticker)
             events.extend(parse_submissions_json(fetch.content, ticker=ticker))
     summary = {
-        "status": "success",
+        "status": "success" if checked_tickers else "partial",
         "source": source.name,
         "tickers": clean_tickers,
+        "checked_tickers": sorted(set(checked_tickers)),
+        "unchecked_tickers": sorted(set(unchecked_tickers)),
         "event_count": len(events),
         "events": events,
         "fetches": fetches,
@@ -131,6 +143,7 @@ def parse_submissions_json(text: str, *, ticker: str) -> list[dict[str, Any]]:
     primary = _as_list(recent.get("primaryDocument"))
     descriptions = _as_list(recent.get("primaryDocDescription"))
     events = []
+    today = datetime.now(timezone.utc).date()
     for index, form in enumerate(forms):
         form_type = str(form or "").upper()
         filed_at = _value_at(filed, index)
@@ -139,6 +152,8 @@ def parse_submissions_json(text: str, *, ticker: str) -> list[dict[str, Any]]:
         text_blob = f"{form_type} {description} {doc}".lower()
         labels = _risk_labels(form_type, text_blob)
         if not labels:
+            continue
+        if not _retain_event(filed_at, labels, today):
             continue
         accession_number = _value_at(accession, index) or f"{filed_at}:{index}"
         url = _filing_url(payload, accession_number, doc)
@@ -159,30 +174,95 @@ def parse_submissions_json(text: str, *, ticker: str) -> list[dict[str, Any]]:
 
 
 def enrich_rows_with_sec_risk(
-    rows: list[dict[str, Any]], events: list[dict[str, Any]]
+    rows: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    *,
+    checked_tickers: list[str] | None = None,
+    as_of: str | datetime | None = None,
 ) -> list[dict[str, Any]]:
+    """Attach only time-bounded SEC risk, preserving unknown checks as unknown."""
+
     by_ticker: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         by_ticker.setdefault(str(event.get("ticker") or "").upper(), []).append(event)
+    checked = {str(ticker).upper() for ticker in list(checked_tickers or [])}
+    reference_date = _as_date(as_of)
     enriched = []
     for row in rows:
         updated = dict(row)
-        matches = by_ticker.get(str(updated.get("ticker") or "").upper(), [])
+        ticker = str(updated.get("ticker") or "").upper()
+        matches = by_ticker.get(ticker, [])
         if matches:
+            updated["sec_risk_events"] = matches
+        active_matches = [
+            event for event in matches if _event_is_active(event, reference_date)
+        ]
+        if active_matches:
             labels = sorted(
                 {
                     label
-                    for event in matches
+                    for event in active_matches
                     for label in list(event.get("risk_labels") or [])
                 }
             )
-            updated["sec_risk_events"] = matches
+            updated["sec_active_risk_events"] = active_matches
             updated["recent_offering"] = any("dilution" in label for label in labels)
+            updated["reverse_split_90d"] = any(
+                "reverse_split" in label for label in labels
+            )
             flags = [part for part in str(updated.get("coverage_warning") or "").split(";") if part]
-            flags.extend(labels)
+            flags.extend(label for label in labels if label != "filing_watch")
             updated["coverage_warning"] = ";".join(dict.fromkeys(flags))
+        checked_ok = ticker in checked
+        if checked_ok and not active_matches:
+            updated["recent_offering"] = False
+            updated["reverse_split_90d"] = False
+        has_active_risk = bool(
+            updated.get("recent_offering") or updated.get("reverse_split_90d")
+        )
+        updated["sec_risk_status"] = (
+            "BLOCKED" if has_active_risk else "CLEAR" if checked_ok else "UNKNOWN"
+        )
+        updated["corporate_action_status"] = (
+            "BLOCKED"
+            if updated.get("reverse_split_90d")
+            else "CLEAR"
+            if checked_ok
+            else "UNKNOWN"
+        )
         enriched.append(updated)
     return enriched
+
+
+def _as_date(value: str | datetime | None) -> date:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).date()
+    raw = str(value or "")[:10]
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).date()
+
+
+def _event_is_active(event: dict[str, Any], as_of: date) -> bool:
+    labels = {str(label) for label in list(event.get("risk_labels") or [])}
+    material = labels - {"filing_watch"}
+    if not material:
+        return False
+    filed_raw = str(event.get("filed_at") or "")[:10]
+    if not filed_raw:
+        return True
+    try:
+        filed = date.fromisoformat(filed_raw)
+    except ValueError:
+        return True
+    age_days = (as_of - filed).days
+    if age_days < 0:
+        return False
+    window = 90 if material & {"dilution_risk", "reverse_split_risk", "warrant_risk"} else 180
+    return age_days <= window
 
 
 def _events_from_fixture(
@@ -222,9 +302,26 @@ def _risk_labels(form_type: str, text_blob: str) -> list[str]:
     for term, label in RISK_TERMS.items():
         if term in text_blob:
             labels.append(label)
-    if form_type.startswith("424B") or form_type in {"S-1", "S-3"}:
+    # 424B2 is commonly a bank/debt pricing supplement and is not, by itself,
+    # evidence of common-stock dilution. Equity-oriented registration and
+    # prospectus forms remain conservative risk signals.
+    if form_type.startswith(("424B3", "424B4", "424B5")) or form_type in {"S-1", "S-3"}:
         labels.append("dilution_risk")
     return sorted(set(labels))
+
+
+def _retain_event(filed_at: str, labels: list[str], today: date) -> bool:
+    """Bound the feed to decision-relevant history instead of all SEC history."""
+
+    try:
+        filed = date.fromisoformat(str(filed_at or "")[:10])
+    except ValueError:
+        return True
+    age_days = (today - filed).days
+    if age_days < 0:
+        return False
+    material = set(labels) - {"filing_watch"}
+    return age_days <= (365 if material else 45)
 
 
 def _filing_url(payload: dict[str, Any], accession: str, doc: str) -> str:

@@ -25,7 +25,7 @@ matches the repo.
 
 | Time | Scheduled task | What it runs | Result |
 | --- | --- | --- | --- |
-| 8:10 AM CT | `Dawnstrike AlphaOps Morning` | `alpha-cycle` | Collects sources, scores candidates, sends Telegram watchlist or no-clean-edge message. |
+| 8:00 AM CT | `Dawnstrike AlphaOps Morning` | `alpha-cycle` | Collects sources, scores candidates, sends official candidates plus an always-labeled conditional research radar. |
 | 8:35 AM CT | `Dawnstrike AlphaOps Monitor 5m` | `alpha-monitor` every 5 minutes for 6 hours | Re-checks saved AlphaOps names and sends manual review/status messages. |
 | 3:15 PM CT | `Dawnstrike AlphaOps EOD Report` | `alpha-report`, `attribute-returns`, `historical-report` | Writes end-of-day evidence, return-attribution, and historical-report files from saved outcomes. |
 

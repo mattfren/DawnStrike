@@ -205,7 +205,7 @@ def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
     )
     morning["last_task_result"] = 127
     morning["last_run_time"] = "2026-07-30T08:10:00-05:00"
-    morning["trigger_start_boundary"] = "2026-07-31T07:15:00-05:00"
+    morning["trigger_start_boundary"] = "2026-07-31T08:00:00-05:00"
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
 
     result = scheduler_service.scheduler_doctor(runtime, state)
@@ -223,9 +223,9 @@ def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
 @pytest.mark.parametrize(
     "last_run_time",
     [
-        "2026-07-31T07:00:00-05:00",
-        "2026-07-31T07:15:00-05:00",
-        "2026-07-31T07:30:00-05:00",
+        "2026-07-31T07:45:00-05:00",
+        "2026-07-31T08:00:00-05:00",
+        "2026-07-31T08:15:00-05:00",
     ],
 )
 def test_scheduler_doctor_keeps_same_day_failure_blocking(
@@ -246,7 +246,7 @@ def test_scheduler_doctor_keeps_same_day_failure_blocking(
     )
     morning["last_task_result"] = 1
     morning["last_run_time"] = last_run_time
-    morning["trigger_start_boundary"] = "2026-07-31T07:15:00-05:00"
+    morning["trigger_start_boundary"] = "2026-07-31T08:00:00-05:00"
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
 
     result = scheduler_service.scheduler_doctor(runtime, state)

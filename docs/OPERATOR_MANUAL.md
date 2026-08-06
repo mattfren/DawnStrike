@@ -15,7 +15,7 @@ It creates three weekday tasks:
 
 | Task | Time | Command | Log |
 | --- | --- | --- | --- |
-| `Dawnstrike AlphaOps Morning` | 8:10 AM CT | `py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram` | `logs\alpha_morning.log` |
+| `Dawnstrike AlphaOps Morning` | 8:00 AM CT | `py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram` | `logs\alpha_morning.log` |
 | `Dawnstrike AlphaOps Monitor 5m` | 8:35 AM CT, every 5 minutes for 6 hours | `py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram` | `logs\alpha_monitor.log` |
 | `Dawnstrike AlphaOps EOD Report` | 3:15 PM CT | `py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report && py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist && py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report` | `logs\alpha_report.log` |
 

@@ -13,8 +13,8 @@ from typing import Any, cast
 
 from intraday_scanner.alpha.alert_gate import is_alertable_notification_candidate
 from intraday_scanner.config import load_config
-from intraday_scanner.errors import ConfigError, NotificationError
-from intraday_scanner.models import SNAPSHOT_COLUMNS, utc_now_iso
+from intraday_scanner.errors import ConfigError, DataProviderError, NotificationError
+from intraday_scanner.models import SNAPSHOT_COLUMNS, parse_bool, utc_now_iso
 from intraday_scanner.notifiers import ConsoleNotifier, NotificationEvent, dispatch_events
 from intraday_scanner.notifiers.base import BaseNotifier
 from intraday_scanner.notifiers.telegram_formatter import (
@@ -26,6 +26,7 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_source_check,
 )
 from intraday_scanner.notifiers.webhooks import TelegramNotifier
+from intraday_scanner.providers.alpaca_screener_provider import AlpacaScreenerProvider
 from intraday_scanner.providers.browser_table_provider import (
     browser_extractor_status,
     ingest_browser_table,
@@ -68,6 +69,7 @@ WEB_OUT_ROOT = Path("outputs/web_auto")
 
 SOURCE_PRIORITY = (
     "local_inbox",
+    "alpaca_screener",
     "stockanalysis_premarket",
     "tradingview_premarket",
     "tradingview_premarket_browser",
@@ -220,26 +222,47 @@ def web_auto_collect(
                 persist=persist,
                 print_rows=False,
             )
+        elif source.type == "alpaca_screener_api":
+            result = _collect_alpaca_screener_source(
+                source=source,
+                db_path=db_path,
+            )
         else:
             continue
-        source_attempts.append(_annotate_source_attempt(result))
+        source_attempts.append(
+            _annotate_source_attempt({key: value for key, value in result.items() if key != "rows"})
+        )
         if result.get("status") == "success":
-            rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
+            if source.type == "alpaca_screener_api":
+                rows.extend(list(result.get("rows") or []))
+            else:
+                rows.extend(_read_snapshot_rows(Path(result["paths"]["premarket_snapshot"])))
         else:
             failures.append(result)
         if "not in configured allowed_domains" in str(result.get("failure_reason", "")):
             blocked_source_count += 1
 
+    deduped = _dedupe_rows(rows)
     halt_summary = _maybe_collect_halts(config, output_dir, store if persist else None, persist)
     halt_events = list(halt_summary.get("events") or [])
-    if halt_events:
-        rows = attach_halt_status(rows, halt_events)
-    sec_summary = _maybe_collect_sec(config, output_dir, store if persist else None, rows, persist)
+    if str(halt_summary.get("status") or "") == "success":
+        deduped = attach_halt_status(deduped, halt_events, feed_verified=True)
+    sec_summary = _maybe_collect_sec(
+        config,
+        output_dir,
+        store if persist else None,
+        deduped[:20],
+        persist,
+    )
     sec_events = list(sec_summary.get("events") or [])
-    if sec_events:
-        rows = enrich_rows_with_sec_risk(rows, sec_events)
+    deduped = enrich_rows_with_sec_risk(
+        deduped,
+        sec_events,
+        checked_tickers=list(sec_summary.get("checked_tickers") or []),
+        as_of=utc_now_iso(),
+    )
 
-    deduped = _dedupe_rows(rows)
+    deduped = [_attach_source_quality_status(row) for row in deduped]
     snapshot_path = output_dir / "premarket_snapshot.csv"
     _write_snapshot(snapshot_path, deduped)
     source_summary = {
@@ -804,6 +827,9 @@ def _doctor_source(
             print_rows=False,
         )
         return _doctor_from_result(base, result)
+    if source.type == "alpaca_screener_api":
+        result = _collect_alpaca_screener_source(source=source, db_path="data/shadow_real.sqlite")
+        return _doctor_from_result(base, result)
     if source.type == "nasdaq_symbol_directory":
         return {
             **base,
@@ -915,6 +941,50 @@ def _collect_local_inbox(
     if persist and store is not None:
         store.record_source_health(source.name, "ok", utc_now_iso(), f"rows={len(rows)}", summary)
     return {"summary": summary, "rows": rows}
+
+
+def _collect_alpaca_screener_source(
+    *,
+    source: WebSourceConfig,
+    db_path: str | Path,
+) -> dict[str, Any]:
+    """Collect one authenticated read-only screener source without leaking secrets."""
+
+    started_at = utc_now_iso()
+    try:
+        scanner_config = load_config(
+            provider="alpaca",
+            database_path=Path(db_path),
+        )
+        params = dict(source.params or {})
+        result = AlpacaScreenerProvider(scanner_config).collect(
+            most_active_limit=int(params.get("most_active_limit") or 100),
+            mover_limit=int(params.get("mover_limit") or 50),
+            include_losers=str(params.get("include_losers") or "false").lower()
+            in {"true", "1", "yes", "y"},
+            max_symbols=int(params.get("max_symbols") or 160),
+        )
+        evidence = result.get("universe_evidence")
+        if isinstance(evidence, dict):
+            evidence["registration_approved"] = str(
+                params.get("v6_registration_approved") or "false"
+            ).lower() in {"true", "1", "yes", "y"}
+        return result
+    except (DataProviderError, OSError, TypeError, ValueError) as exc:
+        return {
+            "status": "failed",
+            "source": source.name,
+            "source_type": source.type,
+            "started_at": started_at,
+            "completed_at": utc_now_iso(),
+            "rows_extracted": 0,
+            "rows_normalized": 0,
+            "rows_rejected": 0,
+            "failure_reason": str(exc),
+            "rows": [],
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
 
 
 def _maybe_collect_halts(
@@ -1157,7 +1227,12 @@ def _only_universe_or_enrichment_enabled(config: Any) -> bool:
 
 
 def _source_classification(source: WebSourceConfig) -> str:
-    if source.type in {"local_inbox", "public_table_url", "browser_table_url"}:
+    if source.type in {
+        "local_inbox",
+        "public_table_url",
+        "browser_table_url",
+        "alpaca_screener_api",
+    }:
         return "candidate"
     if source.type == "nasdaq_symbol_directory":
         return "universe"
@@ -1175,6 +1250,8 @@ def _next_action_for_source(source: WebSourceConfig, classification: str) -> str
         return "If no_candidate_table, use a local CSV or enable browser_table_url."
     if source.type == "browser_table_url":
         return "Install browser extra and chromium, then enable only for allowed public pages."
+    if source.type == "alpaca_screener_api":
+        return "Verify Alpaca market-data credentials and rerun the source doctor."
     if source.type == "nasdaq_symbol_directory":
         return "Use this for universe filtering only; enable a candidate source for picks."
     if classification == "enrichment":
@@ -1318,6 +1395,21 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key=lambda row: _float(row.get("dollar_volume")),
         reverse=True,
     )
+
+
+def _attach_source_quality_status(row: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(row)
+    confidence = _float(updated.get("source_confidence"))
+    stale = parse_bool(updated.get("stale_data_flag"))
+    conflicts = str(updated.get("conflict_flags") or "").strip()
+    if confidence >= 80 and not stale and not conflicts:
+        status = "VERIFIED"
+    elif confidence > 0 and not stale:
+        status = "LIMITED"
+    else:
+        status = "UNKNOWN"
+    updated["source_quality_status"] = status
+    return updated
 
 
 def _conflict_flags(rows: list[dict[str, Any]]) -> list[str]:

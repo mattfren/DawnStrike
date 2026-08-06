@@ -26,6 +26,11 @@ def test_scoring_ranks_expected_ticker_first():
     assert row["target_basis_kind"] == "premarket_range_extension"
     assert row["target_derived_from_risk"] is False
     assert row["target_policy_version"] == "alphaops-v5-premarket-range-extension-v1"
+    assert row["float_shares"] == result.ranked_candidates[0].snapshot.float_shares
+    assert row["market_cap"] == result.ranked_candidates[0].snapshot.market_cap
+    assert row["spread_pct"] == result.ranked_candidates[0].snapshot.spread_pct
+    assert row["current_halt"] is result.ranked_candidates[0].snapshot.current_halt
+    assert row["recent_offering"] is result.ranked_candidates[0].snapshot.recent_offering
     expected_target = row["premarket_high"] + (
         row["premarket_high"] - row["premarket_low"]
     ) * 1.618

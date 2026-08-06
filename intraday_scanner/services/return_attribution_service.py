@@ -1236,12 +1236,16 @@ def _events_by_signal(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 
 def _monitor_event_type(event: dict[str, Any]) -> str:
     text = " ".join(str(event.get(key) or "") for key in ("label", "status")).upper()
+    if "TARGET HIT" in text:
+        return "TARGET_HIT"
     if "INVALIDATED" in text:
         return "INVALIDATED"
     if "THESIS" in text:
         return "THESIS_BROKEN"
-    if "BREAKOUT" in text:
+    if "ENTRY TRIGGERED" in text or "BREAKOUT" in text:
         return "BREAKOUT_CONFIRMED"
+    if "WAITING FOR" in text or "SPREAD TOO WIDE" in text:
+        return "WATCH_CHECK"
     return "TRIGGER_TOUCHED"
 
 
