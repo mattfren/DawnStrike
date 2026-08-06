@@ -131,7 +131,10 @@ def parse_halt_rss(text: str) -> list[dict[str, Any]]:
 
 
 def attach_halt_status(
-    rows: list[dict[str, Any]], halt_events: list[dict[str, Any]]
+    rows: list[dict[str, Any]],
+    halt_events: list[dict[str, Any]],
+    *,
+    feed_verified: bool = True,
 ) -> list[dict[str, Any]]:
     halted = {str(event.get("ticker") or "").upper(): event for event in halt_events}
     output = []
@@ -139,8 +142,10 @@ def attach_halt_status(
         updated = dict(row)
         ticker = str(updated.get("ticker") or "").upper()
         event = halted.get(ticker)
+        updated["halt_status"] = "CLEAR" if feed_verified else "UNKNOWN"
         if event:
             updated["current_halt"] = True
+            updated["halt_status"] = "BLOCKED"
             flags = [part for part in str(updated.get("coverage_warning") or "").split(";") if part]
             flags.append("nasdaq_halt_feed_match")
             updated["coverage_warning"] = ";".join(dict.fromkeys(flags))

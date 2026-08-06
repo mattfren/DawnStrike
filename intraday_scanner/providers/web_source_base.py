@@ -162,7 +162,12 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
             source
             for source in config.sources
             if source.enabled
-            and source.type in {"local_inbox", "public_table_url", "browser_table_url"}
+            and source.type in {
+                "local_inbox",
+                "public_table_url",
+                "browser_table_url",
+                "alpaca_screener_api",
+            }
         ]
         invalid_candidates = [
             source.name or "unnamed"
@@ -219,7 +224,12 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
         source
         for source in config.sources
         if source.enabled
-        and source.type in {"local_inbox", "public_table_url", "browser_table_url"}
+        and source.type in {
+            "local_inbox",
+            "public_table_url",
+            "browser_table_url",
+            "alpaca_screener_api",
+        }
     ]
     if not candidate_sources:
         violations.append("enabled_candidate_source_required")
@@ -271,6 +281,8 @@ def _candidate_source_semantically_valid(
         return False
     if source.type == "local_inbox":
         return bool(source.path.strip())
+    if source.type == "alpaca_screener_api":
+        return bool(source.name.strip())
     if source.type not in {"public_table_url", "browser_table_url"}:
         return False
     try:

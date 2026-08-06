@@ -387,7 +387,7 @@ def test_alpaca_primary_uses_explicit_provenance_labeled_yahoo_fallback():
     assert rows["ALFA"]["enrichment_fallback_status"] == "not_needed"
 
 
-def test_alpaca_100_percent_symbol_fallback_finishes_data_ineligible_without_yahoo():
+def test_alpaca_100_percent_symbol_fallback_attempts_research_only_yahoo():
     class EmptyAlpacaProvider:
         def validate_credentials(self):
             return None
@@ -419,11 +419,9 @@ def test_alpaca_100_percent_symbol_fallback_finishes_data_ineligible_without_yah
         fetcher=fetcher,
     )
 
-    assert yahoo_called is False
+    assert yahoo_called is True
     assert result["summary"]["status"] == "unavailable"
-    assert result["summary"]["secondary_fallback_status"] == (
-        "ceiling_exceeded_not_applied"
-    )
+    assert result["summary"]["secondary_fallback_status"] == "attempted_unusable"
     assert result["summary"]["selected_symbols"] == ["NOVA"]
     assert result["summary"]["ranking_eligible_count"] == 0
     assert result["summary"]["ranking_excluded_count"] == 1

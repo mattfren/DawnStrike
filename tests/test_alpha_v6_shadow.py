@@ -27,6 +27,7 @@ def _signal(*, can_alert: bool = True) -> dict[str, object]:
         "rank": 1,
         "can_alert": can_alert,
         "alert_gate_status": "PASS" if can_alert else "BLOCKED",
+        "source_confidence": 90.0,
         "entry_watch_level": 10.0,
         "target_1": 12.0,
         "invalidation_level": 9.0,
@@ -86,8 +87,10 @@ def test_v6_public_status_exposes_only_aggregate_failure_attribution(tmp_path) -
 
 
 def test_v6_safety_veto_cannot_be_learned_away() -> None:
+    signal = _signal(can_alert=False)
+    signal["current_halt"] = True
     decisions = build_v6_shadow_decisions(
-        signals=[_signal(can_alert=False)],
+        signals=[signal],
         feature_vectors=[_feature()],
         source_summary={"status": "success"},
         regime={"regime": "SELECTIVE"},
@@ -96,7 +99,7 @@ def test_v6_safety_veto_cannot_be_learned_away() -> None:
     )
 
     assert decisions[0]["action"] == "SHADOW_REJECT_VETO"
-    assert "legacy_alert_gate_not_passed" in decisions[0]["safety_vetoes"]
+    assert "current_halt" in decisions[0]["safety_vetoes"]
 
 
 def test_v6_outcome_is_sourced_after_cost_and_missing_is_not_zero() -> None:

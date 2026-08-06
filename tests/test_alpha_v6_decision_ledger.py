@@ -16,6 +16,7 @@ def test_v6_ledgers_tracked_and_policy_rejected_candidates() -> None:
                 "timestamp": "2026-08-03T12:00:00+00:00",
                 "can_alert": True,
                 "alert_gate_status": "PASS",
+                "source_confidence": 90.0,
             }
         ],
         candidates=[{"ticker": "ALFA"}, {"ticker": "BETA", "source": "fixture"}],

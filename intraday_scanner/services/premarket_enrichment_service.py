@@ -140,15 +140,6 @@ def enrich_premarket_rows(
                     fallback_status_by_ticker[ticker] = "disabled"
             elif not fallback_tickers:
                 fallback_status = "not_needed"
-            elif fallback_candidate_ratio > MAX_YAHOO_FALLBACK_RATIO:
-                # Sparse free-feed coverage is a symbol-level data-quality event,
-                # not a systemic provider outage.  Keep Yahoo out of the ranking
-                # path when the ceiling is exceeded, and let the cycle finish with
-                # only the independently verified Alpaca rows (or an honest
-                # DATA_INELIGIBLE/no-trade result when none remain).
-                fallback_status = "ceiling_exceeded_not_applied"
-                for ticker in fallback_tickers:
-                    fallback_status_by_ticker[ticker] = fallback_status
             else:
                 fallback_observations = _observe_yahoo_tickers(
                     fallback_tickers,
@@ -160,11 +151,19 @@ def enrich_premarket_rows(
                     if fallback.is_usable:
                         observations[ticker] = fallback
                         fallback_count += 1
-                        fallback_status_by_ticker[ticker] = "applied"
+                        fallback_status_by_ticker[ticker] = (
+                            "applied_research_only_above_ceiling"
+                            if fallback_candidate_ratio > MAX_YAHOO_FALLBACK_RATIO
+                            else "applied"
+                        )
                     else:
                         fallback_status_by_ticker[ticker] = "attempted_unusable"
                 if fallback_count == len(fallback_tickers):
-                    fallback_status = "applied"
+                    fallback_status = (
+                        "research_only_applied_above_ceiling"
+                        if fallback_candidate_ratio > MAX_YAHOO_FALLBACK_RATIO
+                        else "applied"
+                    )
                 elif fallback_count:
                     fallback_status = "partial"
                 else:
@@ -606,7 +605,7 @@ def _apply_observation(
     output["enrichment_bar_completed_at"] = observation.bar_completed_at
     output["enrichment_is_complete"] = observation.is_complete
     output["enrichment_observation_sha256"] = _observation_sha256(observation)
-    if fallback_status == "applied" and observation.source != primary_source:
+    if fallback_status.startswith("applied") and observation.source != primary_source:
         output["enrichment_fallback_source"] = observation.source
         output["enrichment_was_fallback"] = True
     if not observation.is_usable:

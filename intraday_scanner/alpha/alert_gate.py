@@ -162,6 +162,8 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         missing.append("premarket high/low missing")
     if _is_public_url(row):
         warnings.append("free web data - verify manually")
+    if _truthy(row.get("enrichment_was_fallback")):
+        warnings.append("secondary Yahoo range used - research only")
     if _no_catalyst(row):
         edge_reasons.append("no clear catalyst")
     catalyst_confidence = _optional_float(row.get("catalyst_confidence"))

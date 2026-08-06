@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,15 +39,22 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_summary,
     format_alpha_watch,
 )
+from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
-from intraday_scanner.providers.web_source_base import load_web_sources_config
+from intraday_scanner.providers.sec_edgar_provider import (
+    collect_sec_risk,
+    enrich_rows_with_sec_risk,
+)
+from intraday_scanner.providers.web_source_base import get_source, load_web_sources_config
 from intraday_scanner.reporting import write_scan_outputs
 from intraday_scanner.services.alpha_official_cohort_service import (
     build_official_cohort_row,
 )
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
+    register_alpha_v6_universe,
 )
+from intraday_scanner.services.candidate_news_service import enrich_candidate_news
 from intraday_scanner.services.learning_service import (
     load_production_alpha_learning_labels,
     run_alpha_learning,
@@ -72,6 +79,8 @@ DEFAULT_DB_PATH = "data/shadow_real.sqlite"
 DEFAULT_WEB_CONFIG = "config/web_sources.yaml"
 ALPHAOPS_STRATEGY_ID = "alphaops_v4"
 ALPHAOPS_OFFICIAL_COHORT = "official_telegram"
+ALPHAOPS_RADAR_COHORT = "research_radar"
+ALPHAOPS_RADAR_VERSION = "dawnstrike-research-radar-v1"
 _LEGACY_PICK_PATTERN = re.compile(
     r"^\s*\d+\)\s+([A-Z][A-Z0-9.-]{0,11})\s+-\s+Opportunity\b",
     re.MULTILINE,
@@ -284,6 +293,8 @@ def alpha_cycle(
         source.enabled and bool(source.fixture_path)
         for source in source_config.sources
     )
+    if not fixture_mode:
+        scanner_config = _alphaops_scanner_config(scanner_config)
     enrichment = enrich_premarket_rows(
         list(collection.get("rows") or []),
         config=scanner_config,
@@ -293,8 +304,19 @@ def alpha_cycle(
         out_dir=output_dir / "premarket_enrichment",
     )
     source_summary["premarket_enrichment"] = enrichment["summary"]
+    news_enrichment = enrich_candidate_news(
+        list(enrichment.get("ranking_rows") or []),
+        config=scanner_config,
+        requested_at=as_of,
+        max_symbols=scanner_config.premarket_enrichment_max_candidates,
+        rehearsal_mode=fixture_mode,
+        out_dir=output_dir / "candidate_news",
+    )
+    source_summary["candidate_news"] = dict(news_enrichment["summary"])
     enriched_snapshot_path = str(
-        dict(enrichment.get("paths") or {}).get("snapshot") or collection["snapshot_path"]
+        news_enrichment.get("snapshot_path")
+        or dict(enrichment.get("paths") or {}).get("snapshot")
+        or collection["snapshot_path"]
     )
     scan_result = ScanService(
         CsvSnapshotProvider(enriched_snapshot_path),
@@ -304,6 +326,16 @@ def alpha_cycle(
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
     timestamp = scan_result.created_at
+    ranked, ranked_sec_summary = _verify_ranked_sec_safety(
+        ranked,
+        source_config=source_config,
+        store=store,
+        out_dir=output_dir / "ranked_sec_safety",
+        as_of=timestamp,
+        rehearsal_mode=fixture_mode,
+    )
+    source_summary["ranked_sec_safety"] = ranked_sec_summary
+    all_candidates = _merge_ranked_safety(all_candidates, ranked)
     reliability_by_source = {row["source"]: row for row in source_reliability}
     feature_vectors = [
         build_feature_vector(
@@ -330,8 +362,17 @@ def alpha_cycle(
         for index, row in enumerate(signals, 1)
     ]
     signals = apply_alert_gates(signals)
+    review = review_alpha_signals(signals, source_summary=source_summary)
+    decision = dict(review["decision"])
+    research_radar = _research_radar(signals) if decision.get("no_trade") else []
+    signals = _annotate_research_radar(signals, research_radar)
     store.persist_alpha_signals(signals)
     regime = detect_regime(signals, source_summary)
+    v6_universe_registration = _register_alpaca_screening_universe(
+        store,
+        source_summary=source_summary,
+        market_date=timestamp[:10],
+    )
     universe_memberships = active_alpha_v6_membership_by_ticker(
         store,
         market_date=timestamp[:10],
@@ -365,8 +406,6 @@ def alpha_cycle(
         universe_membership_by_ticker=universe_memberships,
     )
     v6_decision_stats = store.persist_alpha_v6_decisions(v6_decisions)
-    review = review_alpha_signals(signals, source_summary=source_summary)
-    decision = dict(review["decision"])
     historical_rows = record_alpha_historical_signals(
         store,
         signals,
@@ -388,6 +427,7 @@ def alpha_cycle(
         message = format_alpha_no_trade(
             reason=str(decision.get("reason") or ""),
             next_action=str(decision.get("next_action") or ""),
+            research_signals=research_radar,
         )
         hint = "alpha_no_trade"
         title = "Dawnstrike Alpha Check"
@@ -412,6 +452,7 @@ def alpha_cycle(
             title,
             message,
             selected_signals=selected_signals,
+            research_signals=research_radar,
         )
     ]
     selection_members = selected_signals or ([no_trade_row] if no_trade_row is not None else [])
@@ -423,7 +464,15 @@ def alpha_cycle(
         selected_at=timestamp,
         event=events[0],
     )
-    selected_signal_ids = [str(row["signal_id"]) for row in selected_rows]
+    radar_selection_rows, radar_selection_stats = _persist_research_radar_selections(
+        store,
+        scan_id=scan_result.run_id,
+        radar=research_radar,
+        selected_at=timestamp,
+        event=events[0],
+    )
+    delivery_selection_rows = [*selected_rows, *radar_selection_rows]
+    selected_signal_ids = [str(row["signal_id"]) for row in delivery_selection_rows]
     preexisting_notification_keys = _existing_notification_keys(
         store,
         events=events,
@@ -456,7 +505,7 @@ def alpha_cycle(
     except Exception:
         _persist_notification_delivery_memberships(
             store,
-            selections=selected_rows,
+            selections=delivery_selection_rows,
             events=events,
             notify=notify,
             preexisting_notification_keys=preexisting_notification_keys,
@@ -472,7 +521,7 @@ def alpha_cycle(
         raise
     notification_deliveries = _persist_notification_delivery_memberships(
         store,
-        selections=selected_rows,
+        selections=delivery_selection_rows,
         events=events,
         notify=notify,
         preexisting_notification_keys=preexisting_notification_keys,
@@ -512,15 +561,18 @@ def alpha_cycle(
             "persistence": v6_decision_stats,
             "versioned_universe_membership_count": len(universe_memberships),
             "missing_versioned_universe_memberships": missing_v6_universe_memberships,
+            "universe_registration": v6_universe_registration,
             "research_only": True,
             "broker_execution_enabled": False,
         },
         "signal_count": len(signals),
+        "research_radar": research_radar,
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,
         "top_signal": signals[0] if signals else None,
         "review": review,
         "selection_stats": selection_stats,
+        "research_radar_selection_stats": radar_selection_stats,
         "notification_stats": notification_stats,
         "notification_deliveries": notification_deliveries,
         "run_contract": run_contract.to_dict(),
@@ -594,19 +646,36 @@ def alpha_monitor(
             cohort=ALPHAOPS_OFFICIAL_COHORT,
             limit=500,
         )
+    radar_selections = store.load_signal_selections(
+        scan_id=latest_scan_id,
+        cohort=ALPHAOPS_RADAR_COHORT,
+        limit=50,
+    )
+    selection_evidence_status = "legacy_manual_fallback"
     if exact_selections:
-        selected_signal_ids = {
+        official_signal_ids = {
             str(row.get("signal_id") or "")
             for row in exact_selections
             if str(row.get("decision") or "").lower() != "no_trade"
             and str(row.get("ticker") or "").upper() != "NO_TRADE"
         }
-        signals = [
-            row
-            for row in signals
-            if str(row.get("signal_id") or row.get("signal_key") or "")
-            in selected_signal_ids
-        ]
+        if official_signal_ids:
+            signals = [
+                row
+                for row in signals
+                if str(row.get("signal_id") or row.get("signal_key") or "")
+                in official_signal_ids
+            ]
+            selection_evidence_status = "exact_official_cohort"
+        elif radar_selections:
+            signals = _radar_monitor_signals(signals, radar_selections)
+            selection_evidence_status = "exact_research_radar_cohort"
+        else:
+            signals = []
+            selection_evidence_status = "exact_no_trade_cohort"
+    elif radar_selections:
+        signals = _radar_monitor_signals(signals, radar_selections)
+        selection_evidence_status = "exact_research_radar_cohort"
     elif session_gate is not None and signals:
         return {
             "status": "selection_evidence_unavailable",
@@ -626,9 +695,16 @@ def alpha_monitor(
     active_signals = [
         row
         for row in signals
-        if bool(row.get("can_alert")) and not str(row.get("no_trade_reason") or "").strip()
+        if (
+            str(row.get("monitor_cohort") or "") == ALPHAOPS_RADAR_COHORT
+            or (
+                bool(row.get("can_alert"))
+                and not str(row.get("no_trade_reason") or "").strip()
+            )
+        )
     ]
     price_observation: dict[str, Any] | None = None
+    current_quotes: dict[str, dict[str, Any]] | None = None
     if current_prices is None and active_signals:
         try:
             price_observation = collect_price_observations(
@@ -653,6 +729,26 @@ def alpha_monitor(
             for row in price_observation.get("observations", [])
             if row.get("is_usable") and row.get("current_price") not in {None, ""}
         }
+        try:
+            live_config = load_config(database_path=Path(db_path))
+            quote_provider = AlpacaProvider(live_config)
+            quote_provider.validate_credentials()
+            quote_rows = quote_provider.get_latest_quotes(
+                [str(row.get("ticker") or "") for row in active_signals],
+                live_config,
+            )
+            current_quotes = {
+                ticker: {
+                    **row,
+                    "is_usable": _live_quote_is_usable(row, as_of=as_of),
+                }
+                for ticker, row in quote_rows.items()
+            }
+        except DataProviderError as exc:
+            current_quotes = {}
+            if price_observation is not None:
+                price_observation["quote_status"] = "provider_unavailable"
+                price_observation["quote_error"] = str(exc)
     if not active_signals:
         result: dict[str, Any] = {
             "status": "no_active_watchlist",
@@ -662,7 +758,11 @@ def alpha_monitor(
             "events": [],
         }
     else:
-        result = monitor_alpha_signals(active_signals, current_prices=current_prices)
+        result = monitor_alpha_signals(
+            active_signals,
+            current_prices=current_prices,
+            current_quotes=current_quotes,
+        )
     if price_observation is not None:
         result["price_observation"] = {
             key: value
@@ -686,6 +786,15 @@ def alpha_monitor(
                     ],
                 }
             )
+    if current_quotes is not None:
+        result["live_quote_check"] = {
+            "required_for_research_radar": True,
+            "usable_count": sum(
+                1 for row in current_quotes.values() if row.get("is_usable")
+            ),
+            "requested_count": len(active_signals),
+            "maximum_spread_pct": 3.0,
+        }
     result["historical_event_stats"] = record_monitor_signal_events(
         store,
         signals=active_signals,
@@ -706,9 +815,7 @@ def alpha_monitor(
     )
     if session_gate is not None:
         result["session_gate"] = session_gate.to_dict()
-    result["selection_evidence_status"] = (
-        "exact_official_cohort" if exact_selections else "legacy_manual_fallback"
-    )
+    result["selection_evidence_status"] = selection_evidence_status
     return result
 
 
@@ -720,6 +827,65 @@ def _monitor_event_key(scan_id: str, result: dict[str, Any]) -> str:
     state_text = ";".join(states) or str(result.get("status") or "unknown")
     digest = hashlib.sha256(f"{scan_id}|{state_text}".encode()).hexdigest()[:16]
     return f"{scan_id or 'no-scan'}:{digest}"
+
+
+def _radar_monitor_signals(
+    signals: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selection_by_signal = {
+        str(row.get("signal_id") or ""): row
+        for row in selections
+        if row.get("signal_id")
+    }
+    monitored: list[dict[str, Any]] = []
+    for signal in signals:
+        signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
+        selection = selection_by_signal.get(signal_id)
+        if selection is None:
+            continue
+        selection_payload = dict(selection.get("payload_json") or {})
+        radar_signal = dict(selection_payload.get("signal") or {})
+        target = _number(
+            radar_signal.get("radar_target")
+            or signal.get("research_radar_target")
+        )
+        monitored.append(
+            {
+                **signal,
+                "monitor_cohort": ALPHAOPS_RADAR_COHORT,
+                "monitor_strategy_version": ALPHAOPS_RADAR_VERSION,
+                "target_1": target or signal.get("target_1"),
+                "first_target": target or signal.get("first_target"),
+                "research_radar_target": target,
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        )
+    return monitored
+
+
+def _live_quote_is_usable(
+    quote: dict[str, Any],
+    *,
+    as_of: datetime | None,
+) -> bool:
+    bid = _number(quote.get("bid"))
+    ask = _number(quote.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask < bid:
+        return False
+    raw_timestamp = str(quote.get("timestamp") or "").strip()
+    if not raw_timestamp:
+        return False
+    try:
+        observed_at = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    reference = as_of.astimezone(timezone.utc) if as_of else datetime.now(timezone.utc)
+    age_seconds = (reference - observed_at.astimezone(timezone.utc)).total_seconds()
+    return -5.0 <= age_seconds <= 120.0
 
 
 def _scheduled_session_gate(
@@ -918,6 +1084,344 @@ def _persist_run_contract(
     return contract
 
 
+def _alphaops_scanner_config(config: Any) -> Any:
+    """Use a liquid day-trading universe instead of the legacy penny-gap profile."""
+
+    return config.with_overrides(
+        min_gap_pct=1.0,
+        ideal_gap_low_pct=3.0,
+        ideal_gap_high_pct=25.0,
+        max_credible_gap_pct=50.0,
+        min_premarket_dollar_volume=1_000_000.0,
+        min_premarket_share_volume=50_000,
+        min_price=1.0,
+        max_price=500.0,
+        top_n=20,
+        wide_spread_pct=3.0,
+        premarket_enrichment_max_candidates=60,
+    )
+
+
+def _verify_ranked_sec_safety(
+    ranked: list[dict[str, Any]],
+    *,
+    source_config: Any,
+    store: SQLiteScanStore,
+    out_dir: Path,
+    as_of: str,
+    rehearsal_mode: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Verify SEC safety against the candidates that actually survived ranking."""
+
+    tickers = [str(row.get("ticker") or "").upper() for row in ranked if row.get("ticker")]
+    if not tickers:
+        return ranked, {"status": "NO_RANKED_CANDIDATES", "checked_tickers": []}
+    if rehearsal_mode:
+        return ranked, {
+            "status": "REHEARSAL_REUSED_COLLECTION_EVIDENCE",
+            "checked_tickers": sorted(
+                ticker
+                for ticker, row in zip(tickers, ranked, strict=False)
+                if str(row.get("sec_risk_status") or "").upper() in {"CLEAR", "BLOCKED"}
+            ),
+        }
+    source = get_source(source_config, "sec_edgar")
+    if source is None:
+        return ranked, {
+            "status": "DISABLED",
+            "checked_tickers": [],
+            "unchecked_tickers": sorted(set(tickers)),
+        }
+    summary = collect_sec_risk(
+        source=source,
+        config=source_config,
+        tickers=tickers,
+        out_dir=out_dir,
+        store=store,
+        persist=True,
+    )
+    enriched = enrich_rows_with_sec_risk(
+        ranked,
+        list(summary.get("events") or []),
+        checked_tickers=list(summary.get("checked_tickers") or []),
+        as_of=as_of,
+    )
+    return enriched, {
+        "status": str(summary.get("status") or "partial").upper(),
+        "checked_tickers": list(summary.get("checked_tickers") or []),
+        "unchecked_tickers": list(summary.get("unchecked_tickers") or []),
+        "event_count": int(summary.get("event_count") or 0),
+        "ranked_candidate_count": len(tickers),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _merge_ranked_safety(
+    candidates: list[dict[str, Any]],
+    ranked: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    safety_by_ticker = {
+        str(row.get("ticker") or "").upper(): row
+        for row in ranked
+        if row.get("ticker")
+    }
+    fields = (
+        "sec_risk_status",
+        "corporate_action_status",
+        "recent_offering",
+        "reverse_split_90d",
+        "sec_active_risk_events",
+        "coverage_warning",
+    )
+    merged: list[dict[str, Any]] = []
+    for candidate in candidates:
+        updated = dict(candidate)
+        safety = safety_by_ticker.get(str(updated.get("ticker") or "").upper())
+        if safety:
+            for field in fields:
+                if field in safety:
+                    updated[field] = safety[field]
+        merged.append(updated)
+    return merged
+
+
+def _register_alpaca_screening_universe(
+    store: SQLiteScanStore,
+    *,
+    source_summary: dict[str, Any],
+    market_date: str,
+) -> dict[str, Any]:
+    attempts = list(source_summary.get("attempts") or [])
+    evidence = next(
+        (
+            dict(row.get("universe_evidence") or {})
+            for row in attempts
+            if str(row.get("source_type") or "") == "alpaca_screener_api"
+            and str(row.get("status") or "") == "success"
+            and isinstance(row.get("universe_evidence"), dict)
+        ),
+        {},
+    )
+    members = list(evidence.get("members") or [])
+    if not members:
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "authenticated_alpaca_screening_universe_missing",
+            "member_count": 0,
+        }
+    if evidence.get("registration_approved") is not True:
+        return {
+            "status": "BLOCKED_CONFIGURATION",
+            "reason": "alpaca_v6_registration_not_approved",
+            "member_count": len(members),
+        }
+    contract = {
+        "provider_id": "alpaca",
+        "dataset_id": str(evidence.get("dataset_id") or "stocks-screener-plus-active-assets"),
+        "dataset_version": str(evidence.get("dataset_version") or evidence.get("retrieved_at")),
+        "terms_reference": str(evidence.get("terms_reference") or "https://docs.alpaca.markets/"),
+        "entitlement_reference": str(
+            evidence.get("entitlement_reference") or "configured-alpaca-account"
+        ),
+        "accountable_contact": str(
+            evidence.get("accountable_contact") or "dawnstrikebot@gmail.com"
+        ),
+        "approval_status": "APPROVED",
+        "critical_truth_complete": True,
+        "registration_allowed": True,
+    }
+    contract_hash = hashlib.sha256(
+        json.dumps(contract, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    raw_hash = str(evidence.get("raw_artifact_sha256") or "")
+    if len(raw_hash) != 64:
+        return {
+            "status": "BLOCKED_EVIDENCE",
+            "reason": "alpaca_universe_artifact_hash_missing",
+            "member_count": len(members),
+        }
+    lineage = {
+        "source_id": "alpaca:stocks-screener-plus-active-assets",
+        **contract,
+        "source_contract_hash_sha256": contract_hash,
+        "retrieved_at": str(evidence.get("retrieved_at") or utc_now_iso()),
+        "raw_artifact_sha256": raw_hash,
+        "configuration_hash_sha256": hashlib.sha256(
+            json.dumps(
+                {
+                    "market_date": market_date,
+                    "policy": ALPHAOPS_RADAR_VERSION,
+                    "members": sorted(str(row.get("ticker") or "") for row in members),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    registered = register_alpha_v6_universe(
+        store,
+        as_of_date=market_date,
+        members=members,
+        source_lineage=lineage,
+    )
+    return {
+        "status": "REGISTERED",
+        "universe_id": registered.get("universe_id"),
+        "member_count": int(registered.get("membership_count") or len(members)),
+        "persisted": registered.get("persisted"),
+        "source_lineage_hash_sha256": registered.get("source_lineage_hash_sha256"),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _research_radar(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select safe-to-study conditional setups even when official evidence is incomplete."""
+
+    rows: list[dict[str, Any]] = []
+    for signal in signals:
+        hard = signal.get("hard_avoid_reasons")
+        hard_reasons = (
+            [str(item) for item in hard]
+            if isinstance(hard, list)
+            else [part for part in str(hard or "").split(";") if part]
+        )
+        if hard_reasons:
+            continue
+        if bool(signal.get("stale_data_flag")):
+            continue
+        if (_number(signal.get("source_confidence")) or 0.0) < 25.0:
+            continue
+        if str(signal.get("source_quality_status") or "").upper() not in {
+            "VERIFIED",
+            "LIMITED",
+        }:
+            continue
+        if str(signal.get("halt_status") or "").upper() != "CLEAR":
+            continue
+        if str(signal.get("sec_risk_status") or "").upper() != "CLEAR":
+            continue
+        if str(signal.get("corporate_action_status") or "").upper() != "CLEAR":
+            continue
+        risk_text = ";".join(
+            str(signal.get(field) or "")
+            for field in ("risk_flags", "coverage_warning", "catalyst_risk_flags")
+        ).lower()
+        if "wide_spread" in risk_text or "extreme spread" in risk_text:
+            continue
+        trigger = _number(signal.get("entry_trigger") or signal.get("breakout_trigger"))
+        stop = _number(signal.get("invalidation") or signal.get("invalidation_level"))
+        dollar_volume = _number(signal.get("dollar_volume")) or 0.0
+        spread = _number(signal.get("spread_pct")) or 0.0
+        gap = _number(signal.get("gap_pct"))
+        if (
+            trigger is None
+            or stop is None
+            or not (trigger > stop > 0)
+            or dollar_volume < 1_000_000
+            or spread > 3.0
+            or gap is None
+            or not (1.0 <= gap <= 50.0)
+        ):
+            continue
+        stop_distance_pct = (trigger - stop) / trigger * 100.0
+        if stop_distance_pct > 8.0:
+            continue
+        target_options = (
+            (
+                "first_range_extension",
+                _number(signal.get("target_1") or signal.get("first_target")),
+            ),
+            (
+                "stretch_range_extension",
+                _number(signal.get("target_2") or signal.get("stretch_target")),
+            ),
+        )
+        chosen_target = None
+        target_role = ""
+        reward_risk = 0.0
+        for role, target in target_options:
+            if target is None or target <= trigger:
+                continue
+            candidate_rr = (target - trigger) / (trigger - stop)
+            if candidate_rr >= 1.5:
+                chosen_target = target
+                target_role = role
+                reward_risk = candidate_rr
+                break
+        if chosen_target is None:
+            continue
+        reasons = signal.get("alert_gate_reasons") or []
+        reason_text = (
+            "; ".join(str(item) for item in reasons)
+            if isinstance(reasons, list)
+            else str(reasons)
+        )
+        rows.append(
+            {
+                **signal,
+                "cohort": ALPHAOPS_RADAR_COHORT,
+                "strategy_version": ALPHAOPS_RADAR_VERSION,
+                "decision_tier": "research_radar",
+                "classification": "RESEARCH RADAR",
+                "review_label": "CONDITIONAL PAPER WATCH",
+                "reward_risk_ratio": round(reward_risk, 3),
+                "radar_target": round(chosen_target, 4),
+                "radar_target_role": target_role,
+                "radar_stop_distance_pct": round(stop_distance_pct, 3),
+                "radar_reason": reason_text or "official evidence gate incomplete",
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            float(row.get("alpha_score") or 0.0),
+            float(row.get("dollar_volume") or 0.0),
+        ),
+        reverse=True,
+    )[:3]
+
+
+def _annotate_research_radar(
+    signals: list[dict[str, Any]],
+    radar: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    radar_by_id = {
+        str(row.get("signal_id") or row.get("signal_key") or ""): row
+        for row in radar
+    }
+    output: list[dict[str, Any]] = []
+    for signal in signals:
+        signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
+        selected = radar_by_id.get(signal_id)
+        if not selected:
+            output.append(signal)
+            continue
+        output.append(
+            {
+                **signal,
+                "research_radar_selected": True,
+                "research_radar_target": selected.get("radar_target"),
+                "research_radar_target_role": selected.get("radar_target_role"),
+                "research_radar_reward_risk_ratio": selected.get("reward_risk_ratio"),
+                "research_radar_stop_distance_pct": selected.get("radar_stop_distance_pct"),
+                "research_radar_policy": ALPHAOPS_RADAR_VERSION,
+            }
+        )
+    return output
+
+
+def _number(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(str(value).replace("$", "").replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int) -> dict[str, Any]:
     return {
         **row,
@@ -959,15 +1463,19 @@ def _official_selection_notification_event(
     body: str,
     *,
     selected_signals: list[dict[str, Any]],
+    research_signals: list[dict[str, Any]] | None = None,
 ) -> NotificationEvent:
-    """Build an event whose structured members exactly match the rendered cohort."""
+    """Keep official cohort members separate from labeled research radar rows."""
 
     return _notification_event(
         run_id,
         hint,
         title,
         body,
-        payload={"signals": list(selected_signals)},
+        payload={
+            "signals": list(selected_signals),
+            "research_radar": list(research_signals or []),
+        },
     )
 
 
@@ -1070,6 +1578,88 @@ def _persist_official_selections(
         "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "cohort": ALPHAOPS_OFFICIAL_COHORT,
+    }
+
+
+def _persist_research_radar_selections(
+    store: SQLiteScanStore,
+    *,
+    scan_id: str,
+    radar: list[dict[str, Any]],
+    selected_at: str,
+    event: NotificationEvent,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Persist the exact conditional radar plans represented in Telegram."""
+
+    if not radar:
+        return [], {
+            "inserted": 0,
+            "skipped": 0,
+            "cohort": ALPHAOPS_RADAR_COHORT,
+            "strategy_version": ALPHAOPS_RADAR_VERSION,
+        }
+    strategy_stats = store.persist_strategy_versions(
+        [
+            {
+                "strategy_id": ALPHAOPS_RADAR_COHORT,
+                "strategy_version": ALPHAOPS_RADAR_VERSION,
+                "registered_at": selected_at,
+                "definition_json": {
+                    "name": "Dawnstrike conditional research radar",
+                    "cohort": ALPHAOPS_RADAR_COHORT,
+                    "minimum_reward_risk": 1.5,
+                    "maximum_stop_distance_pct": 8.0,
+                    "maximum_spread_pct": 3.0,
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                },
+                "payload_json": {
+                    "strategy_id": ALPHAOPS_RADAR_COHORT,
+                    "strategy_version": ALPHAOPS_RADAR_VERSION,
+                    "registered_at": selected_at,
+                    "research_only": True,
+                },
+            }
+        ]
+    )
+    body_sha256 = _body_sha256(event.body)
+    rows: list[dict[str, Any]] = []
+    for signal in radar:
+        signal_id = _selection_signal_id(signal, scan_id)
+        if not signal_id:
+            continue
+        identity = (
+            f"{ALPHAOPS_RADAR_COHORT}|{ALPHAOPS_RADAR_VERSION}|"
+            f"{scan_id}|{signal_id}"
+        )
+        row = {
+            "selection_id": f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}",
+            "scan_id": scan_id,
+            "signal_id": signal_id,
+            "ticker": str(signal.get("ticker") or "").upper(),
+            "rank": signal.get("rank"),
+            "strategy_id": ALPHAOPS_RADAR_COHORT,
+            "strategy_version": ALPHAOPS_RADAR_VERSION,
+            "cohort": ALPHAOPS_RADAR_COHORT,
+            "decision": "conditional_paper_watch",
+            "selected_at": selected_at,
+            "event_key": event.event_key,
+            "body_sha256": body_sha256,
+        }
+        row["payload_json"] = {
+            **row,
+            "signal": signal,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        rows.append(row)
+    persisted = store.persist_signal_selections(rows)
+    return rows, {
+        **persisted,
+        "cohort": ALPHAOPS_RADAR_COHORT,
+        "strategy_version": ALPHAOPS_RADAR_VERSION,
+        "strategy_versions_inserted": strategy_stats["inserted"],
+        "strategy_versions_skipped": strategy_stats["skipped"],
     }
 
 
@@ -1426,9 +2016,15 @@ def _link_notification_events(
                             "channel": channel,
                             "was_alerted": was_alerted,
                             "signal_id": signal_id,
-                            "strategy_id": ALPHAOPS_STRATEGY_ID,
-                            "strategy_version": ALPHA_MODEL_VERSION,
-                            "cohort": ALPHAOPS_OFFICIAL_COHORT,
+                            "strategy_id": delivery_by_signal.get(signal_id, {}).get(
+                                "strategy_id", ALPHAOPS_STRATEGY_ID
+                            ),
+                            "strategy_version": delivery_by_signal.get(signal_id, {}).get(
+                                "strategy_version", ALPHA_MODEL_VERSION
+                            ),
+                            "cohort": delivery_by_signal.get(signal_id, {}).get(
+                                "cohort", ALPHAOPS_OFFICIAL_COHORT
+                            ),
                             "body_sha256": delivery_by_signal.get(signal_id, {}).get(
                                 "body_sha256"
                             ),

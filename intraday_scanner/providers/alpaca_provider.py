@@ -109,9 +109,13 @@ class AlpacaProvider(MarketDataProvider):
             latest_trade = snapshot.get("latestTrade") or {}
             price = _first_number(latest_trade.get("p"), minute_bar.get("c"), daily_bar.get("c"))
             previous_close = _first_number(prev_daily_bar.get("c"), 0.0)
-            high = _first_number(minute_bar.get("h"), price)
-            low = _first_number(minute_bar.get("l"), price)
-            volume = int(_first_number(minute_bar.get("v"), daily_bar.get("v"), 0.0))
+            high = _first_number(daily_bar.get("h"), minute_bar.get("h"), price)
+            low = _first_number(daily_bar.get("l"), minute_bar.get("l"), price)
+            # The latest minute's volume is not a usable premarket-liquidity
+            # screen. Alpaca's current daily bar is cumulative and is therefore
+            # the correct discovery-stage volume; the enrichment service later
+            # replaces it with an exact 04:00-to-decision premarket sum.
+            volume = int(_first_number(daily_bar.get("v"), minute_bar.get("v"), 0.0))
             bid = _first_number(latest_quote.get("bp"), 0.0)
             ask = _first_number(latest_quote.get("ap"), 0.0)
             spread_pct = _spread_pct(bid, ask)
@@ -181,6 +185,43 @@ class AlpacaProvider(MarketDataProvider):
     def get_previous_close(self, symbols: Sequence[str], config: ScannerConfig) -> dict[str, float]:
         snapshots = self.get_premarket_snapshot(symbols, config)
         return {snapshot.ticker: snapshot.previous_close for snapshot in snapshots}
+
+    def get_latest_quotes(
+        self,
+        symbols: Sequence[str],
+        config: ScannerConfig,
+    ) -> dict[str, dict[str, Any]]:
+        """Return current bid/ask evidence for pre-entry liquidity checks."""
+
+        clean = sorted({str(symbol).upper() for symbol in symbols if str(symbol).strip()})
+        if not clean:
+            return {}
+        payload = self._request_json(
+            "/v2/stocks/quotes/latest",
+            {"symbols": ",".join(clean), "feed": self.feed},
+            config,
+        )
+        raw_quotes = payload.get("quotes") or {}
+        if not isinstance(raw_quotes, dict):
+            return {}
+        output: dict[str, dict[str, Any]] = {}
+        for symbol in clean:
+            row = raw_quotes.get(symbol)
+            if not isinstance(row, dict):
+                continue
+            bid = _first_number(row.get("bp"), 0.0)
+            ask = _first_number(row.get("ap"), 0.0)
+            if bid <= 0 or ask < bid:
+                continue
+            output[symbol] = {
+                "ticker": symbol,
+                "timestamp": str(row.get("t") or ""),
+                "bid": bid,
+                "ask": ask,
+                "spread_pct": _spread_pct(bid, ask),
+                "source": f"alpaca_market_data_{self.feed}",
+            }
+        return output
 
     def get_first_quote_after(
         self,

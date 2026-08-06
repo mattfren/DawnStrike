@@ -1,10 +1,11 @@
-# Candidate source required for picks: local_inbox, public_table_url, or browser_table_url.
+# Candidate source required for picks: alpaca_screener_api, local_inbox,
+# public_table_url, or browser_table_url.
 # nasdaq_symbols does not generate premarket picks; it is universe-only.
 enabled: true
 respect_robots: true
 user_agent: "DawnstrikeResearchBot/0.1 contact: YOUR_EMAIL_HERE"
 timeout_seconds: 15
-rate_limit_seconds: 5
+rate_limit_seconds: 0.35
 save_raw: true
 allowed_domains:
   - nasdaqtrader.com
@@ -24,6 +25,15 @@ sources:
     type: local_inbox
     enabled: true
     path: data\inbox\screener
+
+  - name: alpaca_screener
+    type: alpaca_screener_api
+    enabled: true
+    most_active_limit: 100
+    mover_limit: 50
+    include_losers: false
+    max_symbols: 160
+    v6_registration_approved: false
 
   - name: stockanalysis_premarket
     type: public_table_url

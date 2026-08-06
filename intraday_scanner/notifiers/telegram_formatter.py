@@ -343,27 +343,53 @@ def format_alpha_no_trade(
     *,
     reason: str,
     next_action: str,
+    research_signals: list[dict[str, Any]] | None = None,
     max_chars: int = DEFAULT_ALERT_MAX_CHARS,
 ) -> str:
+    radar = list(research_signals or [])[:3]
+    lines = [
+        "📡 Dawnstrike Alpha Check",
+        "No clean edge today.",
+        "",
+        "OFFICIAL PAPER CANDIDATES",
+        "- None",
+        "",
+        "RESEARCH WATCHLIST / RADAR — CONDITIONAL PAPER STUDY",
+    ]
+    if not radar:
+        lines.append("- None passed the liquid 1.5R research floor")
+    for index, row in enumerate(radar, start=1):
+        radar_target = row.get("radar_target") or row.get("target_1") or row.get("first_target")
+        lines.append(
+            f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
+            f"{format_score(row.get('alpha_score'))} | "
+            f"Gap {format_percent(row.get('gap_pct'))} | "
+            f"{format_score(row.get('reward_risk_ratio'))}R"
+        )
+        lines.append(
+            f"   Trigger {format_price(row.get('entry_trigger') or row.get('breakout_trigger'))} | "
+            f"Invalid {format_price(row.get('invalidation') or row.get('invalidation_level'))} | "
+            f"Target {format_price(radar_target)}"
+        )
+        lines.append(
+            "   Why research-only: "
+            + _truncate(
+                str(row.get("radar_reason") or "official evidence gate incomplete"),
+                110,
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "NO TRADE / BLOCKED REASONS",
+            f"- {reason}",
+            f"Next: {next_action}",
+            "",
+            "Radar outcomes are tracked after close. No orders placed.",
+        ]
+    )
     return _clip(
-        "\n".join(
-            [
-                "📡 Dawnstrike Alpha Check",
-                "No clean edge today.",
-                "",
-                "OFFICIAL PAPER CANDIDATES",
-                "- None",
-                "",
-                "RESEARCH WATCHLIST",
-                "- None",
-                "",
-                "NO TRADE / BLOCKED REASONS",
-                f"- {reason}",
-                f"Next: {next_action}",
-                "",
-                "No orders placed. Research only.",
-            ]
-        ),
+        "\n".join(lines),
         max_chars,
     )
 
@@ -391,6 +417,13 @@ def format_alpha_monitor(result: dict[str, Any], max_chars: int = DEFAULT_ALERT_
             f"{_text(event.get('ticker'), 'n/a')}: {_text(event.get('label'), 'MANUAL REVIEW')} "
             f"at {format_price(event.get('current_price'))}"
         )
+        lines.append(
+            f"   Trigger {format_price(event.get('entry_trigger'))} | "
+            f"Invalid {format_price(event.get('invalidation_level'))} | "
+            f"Target {format_price(event.get('target_1'))}"
+        )
+        if event.get("spread_pct") not in {None, ""}:
+            lines.append(f"   Live spread {format_percent(event.get('spread_pct'))}")
     if not events:
         lines.append("No active events.")
     lines.extend(["", "No orders placed. Research only."])

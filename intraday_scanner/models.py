@@ -26,9 +26,19 @@ SNAPSHOT_COLUMNS = [
     "has_news",
     "catalyst_headline",
     "catalyst_url",
+    "catalyst_summary",
+    "catalyst_tier",
+    "catalyst_category",
+    "catalyst_confidence",
+    "catalyst_status",
+    "catalyst_risk_flags",
     "current_halt",
     "recent_offering",
     "reverse_split_90d",
+    "halt_status",
+    "sec_risk_status",
+    "corporate_action_status",
+    "source_quality_status",
     "source",
     "source_url",
     "extraction_mode",
@@ -41,6 +51,7 @@ SNAPSHOT_COLUMNS = [
     "conflict_flags",
     "preferred_source",
     "row_merge_reason",
+    "discovery_context",
     "as_of_timestamp",
     "data_source_kind",
     "shadow_mode",
@@ -124,6 +135,14 @@ CANDIDATE_COLUMNS = [
     "premarket_high",
     "premarket_low",
     "premarket_volume",
+    "float_shares",
+    "market_cap",
+    "spread_pct",
+    "short_float_pct",
+    "has_news",
+    "current_halt",
+    "recent_offering",
+    "reverse_split_90d",
     "catalyst_headline",
     "catalyst_url",
     "breakout_trigger",
@@ -150,6 +169,7 @@ CANDIDATE_COLUMNS = [
     "catalyst_category",
     "catalyst_summary",
     "catalyst_confidence",
+    "catalyst_status",
     "catalyst_risk_flags",
     "premarket_structure",
     "structure_notes",
@@ -188,6 +208,11 @@ CANDIDATE_COLUMNS = [
     "conflict_flags",
     "preferred_source",
     "row_merge_reason",
+    "discovery_context",
+    "halt_status",
+    "sec_risk_status",
+    "corporate_action_status",
+    "source_quality_status",
     "as_of_timestamp",
     "data_source_kind",
     "shadow_mode",
@@ -308,6 +333,17 @@ class SnapshotRow:
     gap_pct: float = 0.0
     catalyst_headline: str = ""
     catalyst_url: str = ""
+    catalyst_summary: str = ""
+    catalyst_tier: str = ""
+    catalyst_category: str = ""
+    catalyst_confidence: float | None = None
+    catalyst_status: str = ""
+    catalyst_risk_flags: str = ""
+    halt_status: str = ""
+    sec_risk_status: str = ""
+    corporate_action_status: str = ""
+    source_quality_status: str = ""
+    discovery_context: str = ""
     data_source_kind: str = ""
     shadow_mode: bool = False
     paid_data: bool = False
@@ -406,6 +442,21 @@ class SnapshotRow:
             gap_pct=gap_pct,
             catalyst_headline=str(row.get("catalyst_headline") or "").strip(),
             catalyst_url=str(row.get("catalyst_url") or "").strip(),
+            catalyst_summary=str(row.get("catalyst_summary") or "").strip(),
+            catalyst_tier=str(row.get("catalyst_tier") or "").strip(),
+            catalyst_category=str(row.get("catalyst_category") or "").strip(),
+            catalyst_confidence=(
+                None
+                if row.get("catalyst_confidence") in {None, ""}
+                else parse_float(row.get("catalyst_confidence"), "catalyst_confidence")
+            ),
+            catalyst_status=str(row.get("catalyst_status") or "").strip(),
+            catalyst_risk_flags=str(row.get("catalyst_risk_flags") or "").strip(),
+            halt_status=str(row.get("halt_status") or "").strip(),
+            sec_risk_status=str(row.get("sec_risk_status") or "").strip(),
+            corporate_action_status=str(row.get("corporate_action_status") or "").strip(),
+            source_quality_status=str(row.get("source_quality_status") or "").strip(),
+            discovery_context=str(row.get("discovery_context") or "").strip(),
             data_source_kind=str(row.get("data_source_kind") or "").strip(),
             shadow_mode=parse_bool(row.get("shadow_mode")),
             paid_data=parse_bool(row.get("paid_data")),
@@ -489,9 +540,19 @@ class SnapshotRow:
             "has_news": self.has_news,
             "catalyst_headline": self.catalyst_headline,
             "catalyst_url": self.catalyst_url,
+            "catalyst_summary": self.catalyst_summary,
+            "catalyst_tier": self.catalyst_tier,
+            "catalyst_category": self.catalyst_category,
+            "catalyst_confidence": self.catalyst_confidence,
+            "catalyst_status": self.catalyst_status,
+            "catalyst_risk_flags": self.catalyst_risk_flags,
             "current_halt": self.current_halt,
             "recent_offering": self.recent_offering,
             "reverse_split_90d": self.reverse_split_90d,
+            "halt_status": self.halt_status,
+            "sec_risk_status": self.sec_risk_status,
+            "corporate_action_status": self.corporate_action_status,
+            "source_quality_status": self.source_quality_status,
             "source": self.source,
             "source_url": self.source_url,
             "extraction_mode": self.extraction_mode,
@@ -504,6 +565,7 @@ class SnapshotRow:
             "conflict_flags": self.conflict_flags,
             "preferred_source": self.preferred_source,
             "row_merge_reason": self.row_merge_reason,
+            "discovery_context": self.discovery_context,
             "as_of_timestamp": self.as_of_timestamp,
             "data_source_kind": self.data_source_kind,
             "shadow_mode": self.shadow_mode,
@@ -619,8 +681,35 @@ class ScoredCandidate:
             "premarket_high": self.snapshot.premarket_high,
             "premarket_low": self.snapshot.premarket_low,
             "premarket_volume": self.snapshot.premarket_volume,
+            "float_shares": self.snapshot.float_shares,
+            "market_cap": self.snapshot.market_cap,
+            "spread_pct": self.snapshot.spread_pct,
+            "short_float_pct": self.snapshot.short_float_pct,
+            "has_news": self.snapshot.has_news,
             "catalyst_headline": self.snapshot.catalyst_headline,
             "catalyst_url": self.snapshot.catalyst_url,
+            "catalyst_summary": self.snapshot.catalyst_summary,
+            "catalyst_tier": (
+                self.snapshot.catalyst_tier
+                or self.intelligence.get("catalyst_tier", "")
+            ),
+            "catalyst_category": (
+                self.snapshot.catalyst_category
+                or self.intelligence.get("catalyst_category", "")
+            ),
+            "catalyst_confidence": (
+                self.snapshot.catalyst_confidence
+                if self.snapshot.catalyst_confidence is not None
+                else self.intelligence.get("catalyst_confidence")
+            ),
+            "catalyst_status": self.snapshot.catalyst_status,
+            "catalyst_risk_flags": (
+                self.snapshot.catalyst_risk_flags
+                or self.intelligence.get("catalyst_risk_flags", "")
+            ),
+            "current_halt": self.snapshot.current_halt,
+            "recent_offering": self.snapshot.recent_offering,
+            "reverse_split_90d": self.snapshot.reverse_split_90d,
             "breakout_trigger": self.breakout_trigger,
             "pullback_zone": self.pullback_zone,
             "invalidation_level": self.invalidation_level,
@@ -648,6 +737,11 @@ class ScoredCandidate:
             "conflict_flags": self.snapshot.conflict_flags,
             "preferred_source": self.snapshot.preferred_source or self.snapshot.source,
             "row_merge_reason": self.snapshot.row_merge_reason,
+            "discovery_context": self.snapshot.discovery_context,
+            "halt_status": self.snapshot.halt_status,
+            "sec_risk_status": self.snapshot.sec_risk_status,
+            "corporate_action_status": self.snapshot.corporate_action_status,
+            "source_quality_status": self.snapshot.source_quality_status,
             "as_of_timestamp": self.snapshot.as_of_timestamp,
             "data_source_kind": self.snapshot.data_source_kind,
             "shadow_mode": self.snapshot.shadow_mode,

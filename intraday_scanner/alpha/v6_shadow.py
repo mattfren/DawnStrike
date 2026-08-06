@@ -670,13 +670,41 @@ def _safety_vetoes(
     universe_membership: dict[str, Any],
 ) -> list[str]:
     vetoes: list[str] = []
-    if signal.get("can_alert") is not True:
-        vetoes.append("legacy_alert_gate_not_passed")
-    gate = str(signal.get("alert_gate_status") or "").upper()
-    if gate and gate not in _PASSING_GATES:
-        vetoes.append("alert_gate_not_passed")
-    if str(signal.get("no_trade_reason") or "").strip():
-        vetoes.append("signal_no_trade_reason")
+    # V6 is the research-learning cohort, not the official-paper cohort.  A
+    # legacy confidence/evidence gate may keep a row out of Telegram's official
+    # section, but it must not create a cold-start deadlock that prevents safe
+    # candidates from collecting forward outcomes.  Only material safety facts
+    # veto research tracking here.
+    hard_reasons = _tokens(signal.get("hard_avoid_reasons"))
+    material_flags = _tokens(signal.get("risk_flags"))
+    material_flags.extend(_tokens(signal.get("catalyst_risk_flags")))
+    material_flags.extend(_tokens(signal.get("coverage_warning")))
+    if signal.get("current_halt") is True or "current_halt" in material_flags:
+        hard_reasons.append("current_halt")
+    if signal.get("recent_offering") is True or any(
+        item in material_flags
+        for item in (
+            "recent_offering",
+            "active_offering",
+            "active_dilution",
+            "news_dilution_language",
+            "dilution_risk",
+        )
+    ):
+        hard_reasons.append("active_offering")
+    if signal.get("reverse_split_90d") is True or "reverse_split_90d" in material_flags:
+        hard_reasons.append("recent_reverse_split")
+    if signal.get("stale_data_flag") is True or "stale_source" in material_flags:
+        hard_reasons.append("stale_source")
+    if str(signal.get("conflict_flags") or "").strip():
+        hard_reasons.append("source_conflict")
+    try:
+        source_confidence = float(signal.get("source_confidence") or 0.0)
+    except (TypeError, ValueError):
+        source_confidence = 0.0
+    if source_confidence < 18.0:
+        hard_reasons.append("source_confidence_below_hard_floor")
+    vetoes.extend(hard_reasons)
     raw = signal.get("raw_payload_json")
     raw_payload = raw if isinstance(raw, dict) else {}
     if raw_payload.get("avoid_reasons") or signal.get("avoid_reasons"):
@@ -688,6 +716,16 @@ def _safety_vetoes(
     if not feature.get("config_hash"):
         vetoes.append("feature_lineage_missing")
     return sorted(set(vetoes))
+
+
+def _tokens(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    return [
+        part.strip().lower()
+        for part in str(value or "").replace(",", ";").split(";")
+        if part.strip()
+    ]
 
 
 def _universe_membership(membership: dict[str, Any] | None) -> dict[str, Any]:

@@ -21,7 +21,7 @@ credentials.
 
 Daily AlphaOps schedule:
 
-- 8:10 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
+- 8:00 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
 - 8:35 AM CT: `Dawnstrike AlphaOps Monitor 5m` starts checking saved names
   every 5 minutes.
 - 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` writes the evidence report.

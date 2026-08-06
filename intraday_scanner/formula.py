@@ -169,17 +169,23 @@ def _execution_quality_score(row: SnapshotRow, config: ScannerConfig) -> float:
 
 
 def _data_quality_score(row: SnapshotRow) -> float:
-    checks = [
-        row.previous_close > 0,
-        row.premarket_price > 0,
-        row.premarket_high >= row.premarket_low,
-        row.premarket_volume > 0,
-        row.float_shares is not None and row.float_shares > 0,
-        row.market_cap is not None and row.market_cap > 0,
-        row.short_float_pct is not None,
-        bool(row.as_of_timestamp),
-    ]
-    return (sum(1 for passed in checks if passed) / len(checks)) * 100
+    # Day-trading quality is primarily market-observation quality. Optional
+    # fundamentals improve the score but can no longer make a complete,
+    # timestamped price/range/volume observation look unusable by themselves.
+    weighted_checks = (
+        (row.previous_close > 0, 15.0),
+        (row.premarket_price > 0, 15.0),
+        (row.premarket_high > row.premarket_low > 0, 15.0),
+        (row.premarket_volume > 0, 15.0),
+        (bool(row.as_of_timestamp), 10.0),
+        (row.enrichment_is_complete, 15.0),
+        (not row.stale_data_flag, 5.0),
+        (row.spread_pct > 0, 5.0),
+        (row.float_shares is not None and row.float_shares > 0, 2.0),
+        (row.market_cap is not None and row.market_cap > 0, 2.0),
+        (row.short_float_pct is not None, 1.0),
+    )
+    return sum(weight for passed, weight in weighted_checks if passed)
 
 
 def _risk_flags(

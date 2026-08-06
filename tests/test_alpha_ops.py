@@ -19,7 +19,11 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_summary,
     format_alpha_watch,
 )
-from intraday_scanner.services.alpha_cycle_service import alpha_monitor
+from intraday_scanner.services.alpha_cycle_service import (
+    _radar_monitor_signals,
+    _research_radar,
+    alpha_monitor,
+)
 from intraday_scanner.services.signal_review_service import (
     monitor_alpha_signals,
     review_alpha_signals,
@@ -408,6 +412,69 @@ def test_manual_monitor_no_price_source_dedupes_without_spam(tmp_path):
     assert first["notification_stats"]["sent"] == 1
     assert second["notification_stats"]["skipped"] == 1
     assert "MANUAL REVIEW" in format_alpha_monitor(monitor_alpha_signals([], current_prices={}))
+
+
+def test_research_radar_uses_independent_stretch_target_and_tracks_lifecycle():
+    signal = _candidate(
+        signal_key="scan-radar:1:NOVA",
+        gap_pct=8.0,
+        spread_pct=0.8,
+        dollar_volume=8_000_000,
+        source_confidence=90.0,
+        source_quality_status="VERIFIED",
+        halt_status="CLEAR",
+        sec_risk_status="CLEAR",
+        corporate_action_status="CLEAR",
+        hard_avoid_reasons=[],
+        entry_trigger=10.0,
+        invalidation=9.5,
+        target_1=10.6,
+        target_2=11.0,
+    )
+
+    radar = _research_radar([signal])
+
+    assert len(radar) == 1
+    assert radar[0]["radar_target"] == 11.0
+    assert radar[0]["radar_target_role"] == "stretch_range_extension"
+    selection = {
+        "signal_id": signal["signal_key"],
+        "payload_json": {"signal": radar[0]},
+    }
+    monitored = _radar_monitor_signals([signal], [selection])
+    assert monitored[0]["target_1"] == 11.0
+
+    assert monitor_alpha_signals(monitored, current_prices={"NOVA": 9.8})["events"][0][
+        "label"
+    ] == "WAITING FOR TRIGGER"
+    assert monitor_alpha_signals(monitored, current_prices={"NOVA": 10.1})["events"][0][
+        "label"
+    ] == "ENTRY TRIGGERED"
+    assert monitor_alpha_signals(monitored, current_prices={"NOVA": 11.0})["events"][0][
+        "label"
+    ] == "TARGET HIT"
+    assert monitor_alpha_signals(monitored, current_prices={"NOVA": 9.4})["events"][0][
+        "label"
+    ] == "SETUP INVALIDATED"
+    assert monitor_alpha_signals(
+        monitored,
+        current_prices={"NOVA": 10.1},
+        current_quotes={},
+    )["events"][0]["label"] == "WAITING FOR LIQUID QUOTE"
+    assert monitor_alpha_signals(
+        monitored,
+        current_prices={"NOVA": 10.1},
+        current_quotes={
+            "NOVA": {"bid": 9.8, "ask": 10.3, "spread_pct": 4.98, "is_usable": True}
+        },
+    )["events"][0]["label"] == "SPREAD TOO WIDE"
+    assert monitor_alpha_signals(
+        monitored,
+        current_prices={"NOVA": 10.1},
+        current_quotes={
+            "NOVA": {"bid": 10.08, "ask": 10.12, "spread_pct": 0.4, "is_usable": True}
+        },
+    )["events"][0]["label"] == "ENTRY TRIGGERED"
 
 
 def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkeypatch):

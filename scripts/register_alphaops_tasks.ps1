@@ -64,8 +64,9 @@ $taskDefinitions = @(
         Description = "Dawnstrike V6 morning research collection and ranked delivery. Research-only; no broker execution."
         Script = "run_alphaops_morning.ps1"
         # Scheduled Task timestamps use the host's local zone (Central here);
-        # 07:15 local leaves an explicit buffer before the 09:30 ET gate.
-        Start = "07:15"
+        # 08:00 Central captures materially deeper premarket liquidity while
+        # preserving a 30-minute buffer before the 09:30 Eastern open.
+        Start = "08:00"
         Days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
         Repeat = $false
         RepetitionDuration = ""

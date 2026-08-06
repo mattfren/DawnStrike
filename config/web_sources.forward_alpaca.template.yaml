@@ -5,7 +5,7 @@ enabled: true
 respect_robots: true
 user_agent: "DawnstrikeResearchBot/1.0 contact: REQUIRED_ACCOUNTABLE_EMAIL"
 timeout_seconds: 15
-rate_limit_seconds: 5
+rate_limit_seconds: 0.35
 save_raw: true
 production_contract: false
 allowed_domains:
@@ -20,6 +20,14 @@ sources:
     type: local_inbox
     enabled: true
     path: data\inbox\screener
+  - name: alpaca_screener
+    type: alpaca_screener_api
+    enabled: true
+    most_active_limit: 100
+    mover_limit: 50
+    include_losers: false
+    max_symbols: 160
+    v6_registration_approved: true
   - name: stockanalysis_premarket
     type: public_table_url
     enabled: true
