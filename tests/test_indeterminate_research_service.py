@@ -12,7 +12,7 @@ from intraday_scanner.services.indeterminate_research_service import (
 
 def _config(**overrides: Any) -> ScannerConfig:
     return ScannerConfig(
-        openai_api_key="secret",
+        openai_api_key="secret",  # pragma: allowlist secret
         indeterminate_research_enabled=True,
         **overrides,
     )

@@ -79,7 +79,7 @@ def test_web_research_requires_citations_and_persists_tool_sources() -> None:
     result = research_symbol(
         symbol="TEST",
         market_date="2026-08-07",
-        api_key="secret",
+        api_key="secret",  # pragma: allowlist secret
         model="gpt-test",
         timeout_seconds=10,
         max_tool_calls=3,
@@ -106,7 +106,7 @@ def test_uncited_output_is_not_exposed_as_sourced_research() -> None:
     result = research_symbol(
         symbol="TEST",
         market_date="2026-08-07",
-        api_key="secret",
+        api_key="secret",  # pragma: allowlist secret
         model="gpt-test",
         timeout_seconds=10,
         max_tool_calls=3,
