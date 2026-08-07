@@ -120,6 +120,9 @@ from intraday_scanner.services.historical_ingestion_service import (
     backfill_snapshot_runs,
     ingest_minute_bars,
 )
+from intraday_scanner.services.indeterminate_research_service import (
+    run_indeterminate_research,
+)
 from intraday_scanner.services.mover_discovery_service import (
     provider_count_payload,
     record_provider_counts,
@@ -654,6 +657,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     scenario_doctor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
 
+    indeterminate_research_parser = subparsers.add_parser(
+        "indeterminate-research",
+        help="Collect cited OpenAI web research for a data-ineligible AlphaOps universe",
+    )
+    indeterminate_research_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    indeterminate_research_parser.add_argument("--symbols", required=True)
+    indeterminate_research_parser.add_argument("--selection-outcome", required=True)
+    indeterminate_research_parser.add_argument("--market-date", required=True)
+    indeterminate_research_parser.add_argument("--out", required=True)
+    indeterminate_research_parser.add_argument("--notify", default="console")
+    indeterminate_research_parser.add_argument("--dry-run", action="store_true")
+
     scenario_cycle_parser = subparsers.add_parser(
         "scenario-cycle", help="Fetch Alpaca news and create research-only scenario candidates"
     )
@@ -1175,6 +1190,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_attribution(args)
         if args.command == "scenario-doctor":
             return _run_scenario_doctor(args)
+        if args.command == "indeterminate-research":
+            return _run_indeterminate_research(args)
         if args.command == "scenario-cycle":
             return _run_scenario_cycle(args)
         if args.command == "scenario-monitor":
@@ -1905,6 +1922,21 @@ def _run_scenario_doctor(args: argparse.Namespace) -> int:
     result = scenario_doctor(db_path=args.db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "READY" else 2
+
+
+def _run_indeterminate_research(args: argparse.Namespace) -> int:
+    symbols = [item.strip().upper() for item in str(args.symbols).split(",") if item.strip()]
+    result = run_indeterminate_research(
+        db_path=args.db_path,
+        symbols=symbols,
+        selection_outcome=args.selection_outcome,
+        market_date=args.market_date,
+        out_path=args.out,
+        notify=args.notify,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") == "failed" else 0
 
 
 def _run_scenario_cycle(args: argparse.Namespace) -> int:

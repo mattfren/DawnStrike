@@ -118,6 +118,21 @@ py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-pat
 Purpose: collects rows, scores them, persists scan/features/signals, and sends a
 watchlist or no-clean-edge Telegram message.
 
+If the validated AlphaOps artifact reports `selection_outcome=data_ineligible`
+and `DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED=true`, the same morning runner
+also runs `indeterminate-research`. OpenAI web search gathers a bounded factual
+brief for each explicit research symbol, persists cited URLs in
+`outputs\alpha_cycle\YYYY-MM-DD\indeterminate_research.json`, and sends a
+separate Telegram receipt labeled `Not Picks`. This stage never fills missing
+Alpaca price/volume/bars and never promotes a symbol into the official pick
+cohort.
+
+Manual dry run without Telegram delivery:
+
+```powershell
+py -m intraday_scanner.cli indeterminate-research --db-path data\shadow_real.sqlite --symbols ASPN,SOUN --selection-outcome data_ineligible --market-date 2026-08-07 --out outputs\indeterminate_research.json --notify none --dry-run
+```
+
 ### AlphaOps Status
 
 ```powershell

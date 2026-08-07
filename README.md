@@ -28,6 +28,14 @@ Daily AlphaOps schedule:
   The EOD flow can run `alpha-report`, `attribute-returns`, and
   `historical-report`.
 
+When the AlphaOps run contract is specifically `data_ineligible`, the morning
+runner can invoke OpenAI Responses API web search for the explicit research
+symbol universe. The resulting `indeterminate_research.json` retains cited
+source URLs and is always labeled research-only. It cannot supply missing
+price, volume, or bar data and cannot create a pick. Enable the proof of concept
+with `DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED=true`; bounded request controls
+are documented in `.env.example`.
+
 Manual one-off run:
 
 ```powershell

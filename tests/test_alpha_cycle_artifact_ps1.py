@@ -33,6 +33,7 @@ def _valid_payload(
             "producer_run_id": "scan-current-attempt",
             "market_date": MARKET_DATE,
             "source_status": "success",
+            "selection_outcome": "data_ineligible",
             "signal_count": signal_count,
             "research_candidate_count": len(research_symbols),
             "research_symbols": research_symbols,
@@ -131,6 +132,7 @@ def test_artifact_accepts_current_zero_and_positive_counts(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["signal_count"] == signal_count
     assert json.loads(result.stdout)["research_symbols"] == ["NOVA"]
+    assert json.loads(result.stdout)["selection_outcome"] == "data_ineligible"
 
 
 def test_artifact_rejects_inconsistent_research_candidate_universe(tmp_path: Path) -> None:
