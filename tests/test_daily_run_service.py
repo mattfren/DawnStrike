@@ -151,6 +151,35 @@ def test_scenario_finalization_is_allowed_as_an_optional_stage(tmp_path: Path) -
     assert snapshot["run"]["status"] == "IN_PROGRESS"
 
 
+def test_indeterminate_research_is_allowed_as_an_optional_stage(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+
+    snapshot = record_daily_stage(
+        db_path=tmp_path / "state.sqlite",
+        market_date="2026-08-07",
+        stage_name="indeterminate_research",
+        status="SKIPPED_NOT_APPLICABLE",
+        runtime_root=runtime,
+        state_root=state,
+        release_sha="a" * 40,
+        required=False,
+        exit_code=0,
+    )
+
+    stage = snapshot["latest_stage_statuses"]["indeterminate_research"]
+    persisted_stage = next(
+        row
+        for row in snapshot["stages"]
+        if row["stage_name"] == "indeterminate_research"
+    )
+    assert stage["status"] == "SKIPPED_NOT_APPLICABLE"
+    assert persisted_stage["required"] is False
+    assert snapshot["run"]["status"] == "IN_PROGRESS"
+
+
 def test_release_manifest_binds_runtime_state_schema_and_artifacts(
     tmp_path: Path,
 ) -> None:

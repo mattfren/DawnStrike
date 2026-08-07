@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from intraday_scanner.services.daily_run_service import DAILY_STAGE_ORDER
+
 
 def test_scenario_monitor_uses_a_durable_watermark_not_a_clock_window() -> None:
     script = (
@@ -154,3 +156,4 @@ def test_morning_runs_cited_openai_research_only_for_data_ineligible_runs() -> N
     assert '"--out", $indeterminateResearchPath' in script
     assert '-Name "indeterminate_research"' in script
     assert '"indeterminate_research_failed"' in script
+    assert "indeterminate_research" in DAILY_STAGE_ORDER
