@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+. (Join-Path $runtime "scripts\resolve_dawnstrike_task_principal.ps1")
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 $sourceConfigPath = Join-Path $state "config\web_sources.yaml"
@@ -44,7 +45,9 @@ if (
     )
 }
 $taskPassword = ""
+$taskPrincipal = ""
 if (-not $ReuseExistingPrincipal) {
+    $taskPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
     $taskPassword = $RunAsCredential.GetNetworkCredential().Password
     if ([string]::IsNullOrWhiteSpace($taskPassword)) {
         throw "RunAsCredential must contain a non-empty Windows password."
@@ -235,7 +238,7 @@ foreach ($definition in $taskDefinitions) {
             -Action $action `
             -Trigger $trigger `
             -Settings $settings `
-            -User $RunAsCredential.UserName `
+            -User $taskPrincipal `
             -Password $taskPassword `
             -RunLevel Limited `
             -Description ([string]$definition.Description) `

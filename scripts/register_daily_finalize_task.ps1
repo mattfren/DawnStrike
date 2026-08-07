@@ -14,6 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+. (Join-Path $runtime "scripts\resolve_dawnstrike_task_principal.ps1")
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
@@ -23,6 +24,7 @@ if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential
         "the Dawnstrike state root, and Telegram. Do not use S4U."
     )
 }
+$taskPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
 $taskPassword = $RunAsCredential.GetNetworkCredential().Password
 if ([string]::IsNullOrWhiteSpace($taskPassword)) {
     throw "RunAsCredential must contain a non-empty Windows password."
@@ -76,7 +78,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -User $RunAsCredential.UserName `
+    -User $taskPrincipal `
     -Password $taskPassword `
     -RunLevel Limited `
     -Description "Dawnstrike V6 canonical performance, Calendar, readiness, and publication. Research-only; no broker execution." `

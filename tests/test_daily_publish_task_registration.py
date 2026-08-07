@@ -58,6 +58,31 @@ def test_task_scripts_use_the_installed_windows_battery_safe_switches() -> None:
         assert "-StopIfGoingOnBatteries" not in script
 
 
+def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation() -> None:
+    helper = Path("scripts/resolve_dawnstrike_task_principal.ps1").read_text(
+        encoding="utf-8"
+    )
+    alphaops = Path("scripts/register_alphaops_tasks.ps1").read_text(
+        encoding="utf-8"
+    )
+    finalize = Path("scripts/register_daily_finalize_task.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Resolve-DawnstrikeTaskPrincipal" in helper
+    assert "IdentityNotMappedException" in helper
+    assert "WindowsIdentity]::GetCurrent()" in helper
+    assert "canonicalAccount.Value" in helper
+    assert "cannot be mapped to a Windows SID" in helper
+    for script in (alphaops, finalize):
+        assert 'resolve_dawnstrike_task_principal.ps1' in script
+        assert "Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential" in script
+        assert "-User $taskPrincipal" in script
+        assert script.index("Resolve-DawnstrikeTaskPrincipal") < script.index(
+            "Register-ScheduledTask"
+        )
+
+
 def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
     register = Path("scripts/register_alphaops_tasks.ps1").read_text(
         encoding="utf-8"
