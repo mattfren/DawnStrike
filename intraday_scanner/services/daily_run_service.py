@@ -21,6 +21,7 @@ SCHEDULER_VERSION = "dawnstrike-scheduler-v6"
 DAILY_STAGE_ORDER = (
     "morning_collection",
     "ranking_delivery",
+    "indeterminate_research",
     "intraday_monitor",
     "scenario_intelligence",
     "scenario_finalization",
