@@ -119,6 +119,8 @@ try {
     $coreErrorCode = $errorCode
     $scenarioCandidateCount = 0
     $scenarioSymbols = ""
+    $selectionOutcome = ""
+    $indeterminateResearchExitCode = $null
     $scenarioExitCode = $null
     if ($coreStageExit -eq 0) {
         try {
@@ -128,11 +130,54 @@ try {
                 -MarketDate $MarketDate
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
             $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
+            $selectionOutcome = [string]$alphaArtifact.selection_outcome
         }
         catch {
             $coreStageExit = 2
             $coreErrorCode = "alpha_cycle_artifact_invalid"
         }
+    }
+    if (
+        $coreStageExit -eq 0 -and
+        $env:DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED -match '^(?i:true|1|yes|y)$'
+    ) {
+        if ($selectionOutcome -ne "data_ineligible" -or $scenarioCandidateCount -le 0) {
+            Write-MorningStage `
+                -Name "indeterminate_research" `
+                -Status "SKIPPED_NOT_APPLICABLE" `
+                -ExitCode 0 `
+                -NotRequired
+        }
+        else {
+            $indeterminateResearchPath = Join-Path $outputRoot "indeterminate_research.json"
+            $indeterminateResearch = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @(
+                    "-m", "intraday_scanner.cli", "indeterminate-research",
+                    "--db-path", $dbPath,
+                    "--symbols", $scenarioSymbols,
+                    "--selection-outcome", $selectionOutcome,
+                    "--market-date", $MarketDate,
+                    "--out", $indeterminateResearchPath,
+                    "--notify", $Notify
+                ) `
+                -LogRoot $logRoot `
+                -LogName "indeterminate_research-$MarketDate"
+            $indeterminateResearchExitCode = [int]$indeterminateResearch.exit_code
+            Write-MorningStage `
+                -Name "indeterminate_research" `
+                -Status $(if ($indeterminateResearch.exit_code -eq 0) { "COMPLETE" } else { "FAILED" }) `
+                -ExitCode $indeterminateResearch.exit_code `
+                -ErrorCode $(if ($indeterminateResearch.exit_code -eq 0) { "" } else { "indeterminate_research_failed" }) `
+                -NotRequired
+        }
+    }
+    elseif ($env:DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED -notmatch '^(?i:true|1|yes|y)$') {
+        Write-MorningStage `
+            -Name "indeterminate_research" `
+            -Status "SKIPPED_NOT_APPLICABLE" `
+            -ExitCode 0 `
+            -NotRequired
     }
     if (
         $coreStageExit -eq 0 -and
@@ -181,9 +226,16 @@ try {
             -ExitCode $coreStageExit `
             -ErrorCode $coreErrorCode
     }
+    $optionalExitCode = $scenarioExitCode
+    if (
+        $null -ne $indeterminateResearchExitCode -and
+        [int]$indeterminateResearchExitCode -ne 0
+    ) {
+        $optionalExitCode = [int]$indeterminateResearchExitCode
+    }
     $outcome = Resolve-DawnstrikeMorningOutcome `
         -CoreExitCode $coreStageExit `
-        -ScenarioExitCode $scenarioExitCode `
+        -ScenarioExitCode $optionalExitCode `
         -RecordStageFailed $recordStageFailed
     exit $outcome.final_exit_code
 }

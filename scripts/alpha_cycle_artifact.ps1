@@ -119,11 +119,25 @@ function Test-DawnstrikeAlphaCycleArtifact {
             throw "AlphaOps cycle artifact contains an invalid research symbol."
         }
     }
+    $selectionOutcome = [string]$contract.selection_outcome
+    if (
+        [string]::IsNullOrWhiteSpace($selectionOutcome) -or
+        $selectionOutcome -notin @(
+            "watchlist_ready",
+            "valid_no_edge",
+            "rehearsal_complete",
+            "data_ineligible",
+            "source_failed"
+        )
+    ) {
+        throw "AlphaOps cycle artifact has an invalid selection_outcome."
+    }
     return [pscustomobject]@{
         scan_id = $scanId
         signal_count = [int64]$contract.signal_count
         research_candidate_count = [int64]$contract.research_candidate_count
         research_symbols = @($researchSymbols)
+        selection_outcome = $selectionOutcome
         market_date = $MarketDate
         source_status = [string]$contract.source_status
         artifact_last_write_utc = $artifactInfo.LastWriteTimeUtc.ToString("o")

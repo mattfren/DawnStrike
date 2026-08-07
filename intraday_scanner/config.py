@@ -97,6 +97,10 @@ class ScannerConfig:
     scenario_openai_max_articles_per_run: int = 20
     scenario_article_max_chars: int = 12_000
     scenario_news_symbol_batch_size: int = 50
+    indeterminate_research_enabled: bool = False
+    indeterminate_research_max_symbols: int = 12
+    indeterminate_research_timeout_seconds: float = 60.0
+    indeterminate_research_max_tool_calls: int = 3
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
@@ -167,6 +171,18 @@ class ScannerConfig:
             raise ConfigError("DAWNSTRIKE_SCENARIO_ARTICLE_MAX_CHARS must be positive")
         if not 1 <= self.scenario_news_symbol_batch_size <= 50:
             raise ConfigError("DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE must be 1 through 50")
+        if not 1 <= self.indeterminate_research_max_symbols <= 20:
+            raise ConfigError(
+                "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS must be 1 through 20"
+            )
+        if self.indeterminate_research_timeout_seconds <= 0:
+            raise ConfigError(
+                "DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS must be positive"
+            )
+        if not 1 <= self.indeterminate_research_max_tool_calls <= 10:
+            raise ConfigError(
+                "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS must be 1 through 10"
+            )
         outcome_providers = [
             item.strip().lower()
             for item in self.outcome_capture_provider_order.split(",")
@@ -367,6 +383,21 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         scenario_news_symbol_batch_size=_to_int(
             "DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE",
             _env("DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE", "50", env_values),
+        ),
+        indeterminate_research_enabled=_to_bool(
+            _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED", "false", env_values)
+        ),
+        indeterminate_research_max_symbols=_to_int(
+            "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS",
+            _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS", "12", env_values),
+        ),
+        indeterminate_research_timeout_seconds=_to_float(
+            "DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS",
+            _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS", "60", env_values),
+        ),
+        indeterminate_research_max_tool_calls=_to_int(
+            "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS",
+            _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS", "3", env_values),
         ),
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),

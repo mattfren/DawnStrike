@@ -136,3 +136,21 @@ def test_morning_runs_optional_scenario_for_research_candidates_not_only_final_p
     assert script.rindex('foreach ($stage in @("morning_collection", "ranking_delivery"))') < (
         script.index("$outcome = Resolve-DawnstrikeMorningOutcome")
     )
+
+
+def test_morning_runs_cited_openai_research_only_for_data_ineligible_runs() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_alphaops_morning.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "$selectionOutcome = [string]$alphaArtifact.selection_outcome" in script
+    assert "DAWNSTRIKE_INDETERMINATE_RESEARCH_ENABLED" in script
+    assert '$selectionOutcome -ne "data_ineligible"' in script
+    assert '"indeterminate-research"' in script
+    assert '"--symbols", $scenarioSymbols' in script
+    assert '"--selection-outcome", $selectionOutcome' in script
+    assert '"--out", $indeterminateResearchPath' in script
+    assert '-Name "indeterminate_research"' in script
+    assert '"indeterminate_research_failed"' in script
