@@ -1,0 +1,12 @@
+{
+  "cycle": "CYCLE-001",
+  "decision": "PRESERVE_SCHEMA_26",
+  "audited_base": "ba39a5353045b7d417936ed1aed0ee4802169759",
+  "starting_sha": "7ecd08eef2d6ffd4ab4bd3d7e7a657bfe930e34d",
+  "active_db": {"path": "C:\\r\\dawnstrike-state\\shadow_real.sqlite", "sha256": "4B958BB4C89311592EF2D5D0511A7390F7CC2118B8766407352570B0B7E6262A", "schema_version": 26, "table_count": 121, "quick_check": "ok"},
+  "baseline": {"path": "C:\\r\\dawnstrike-luna-evidence-20260809\\active-baseline.sqlite", "sha256": "6CB1D052C1E0F7FB6C5416E21E6A6A330E8CEA615B12B43C1F206523F33C9893", "schema_version": 21, "table_count": 110, "quick_check": "ok"},
+  "registry_timestamp": {"baseline": "2026-08-09T12:30:16Z", "active": "2026-08-09T19:55:33Z", "preserved_as_incident_evidence": true},
+  "comparison": {"unchanged_common_tables": 100, "altered_v6_tables": 8, "new_evidence_tables": 11, "dropped_tables": 0},
+  "active_state_modified": false,
+  "broker_execution_enabled": false
+}
