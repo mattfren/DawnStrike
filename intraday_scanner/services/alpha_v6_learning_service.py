@@ -23,6 +23,7 @@ from intraday_scanner.alpha.v6.training import (
     walk_forward_challenger_predictions,
 )
 from intraday_scanner.alpha.v6.validation import (
+    compare_catalyst_ablations,
     evaluate_return_predictions,
     expanding_purged_splits,
 )
@@ -178,6 +179,8 @@ def run_alpha_v6_weekly_training(
         "model_competition": model_competition,
         "calibration": calibration,
         "interval_coverage": intervals,
+        "catalyst_ablation_plan": dataset.get("catalyst_ablation_plan"),
+        "catalyst_ablation_comparison": compare_catalyst_ablations(evaluation_rows),
         "no_lookahead": bool(
             predictions and all(row.get("no_lookahead") is True for row in predictions)
         ),
@@ -325,6 +328,29 @@ def _evaluation_rows(
                     "source_key": source.get("source_key"),
                     "liquidity_bucket": source.get("liquidity_bucket"),
                     "catalyst_bucket": source.get("catalyst_bucket"),
+                    "catalyst_feature_block": source.get("catalyst_feature_block"),
+                    "source_artifact_hash_sha256": source.get(
+                        "source_artifact_hash_sha256"
+                    ),
+                    "source_artifact_hashes": source.get("source_artifact_hashes"),
+                    "path_replay_id": source.get("path_replay_id"),
+                    "benchmark_hash_sha256": source.get("benchmark_hash_sha256"),
+                    "observed_cost_model_identity": source.get(
+                        "observed_cost_model_identity"
+                    ),
+                    "modeled_cost_model_identity": source.get(
+                        "modeled_cost_model_identity"
+                    ),
+                    "evidence_cohort": source.get("evidence_cohort"),
+                    "evidence_lineage_hash_sha256": source.get(
+                        "evidence_lineage_hash_sha256"
+                    ),
+                    "retrospective_research_eligible": source.get(
+                        "retrospective_research_eligible"
+                    ),
+                    "prospective_promotion_eligible": source.get(
+                        "prospective_promotion_eligible"
+                    ),
                     "activation_label": (
                         1
                         if outcome.get("activation_status") == "ACTIVATED"
@@ -720,6 +746,8 @@ def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
             "activation_row_count",
             "exclusion_counts",
             "feature_schema_version",
+            "eligibility_counts",
+            "catalyst_ablation_plan",
         )
     }
 

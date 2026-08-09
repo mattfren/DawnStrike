@@ -35,6 +35,33 @@ def test_v6_gradient_boosting_needs_500_labels_and_60_dates() -> None:
     assert "controlled_gradient_boosting" not in eligibility.allowed_families
 
 
+def test_v6_training_receipt_records_exact_lineage_gate_exclusions() -> None:
+    receipt = train_shadow_challengers(
+        {
+            "dataset_id": "d1",
+            "dataset_hash_sha256": "a" * 64,
+            "feature_schema_version": "f1",
+            "training_cutoff": "2026-08-03",
+            "rows": [
+                {
+                    "market_date": "2026-08-03",
+                    "source_artifact_hash_sha256": "b" * 64,
+                    "path_replay_id": "path-1",
+                    "benchmark_hash_sha256": "c" * 64,
+                    "evidence_cohort": "cohort-1",
+                    "retrospective_research_eligible": True,
+                }
+            ],
+        },
+        code_sha="c" * 40,
+    )
+
+    assert receipt["status"] == "NOT_TRAINED_INSUFFICIENT_LABELS"
+    assert receipt["eligibility"]["exact_exclusions"]
+    assert receipt["evidence_lineage"]["path_replay_ids"] == ["path-1"]
+    assert receipt["eligibility_dimensions"]["prospective_promotion"]["eligible"] is False
+
+
 def test_v6_full_learning_service_persists_untrained_evidence_without_fake_returns(
     tmp_path,
 ) -> None:

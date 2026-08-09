@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1253,6 +1253,76 @@ def _migration_024_catalyst_evidence(
     )
 
 
+def _migration_025_v6_evidence_lineage(
+    connection: sqlite3.Connection,
+) -> None:
+    """Carry immutable evidence identity through every V6 research receipt."""
+
+    tables = (
+        "alpha_v6_decisions",
+        "alpha_v6_outcomes",
+        "alpha_v6_labels",
+        "alpha_v6_datasets",
+        "alpha_v6_model_runs",
+        "alpha_v6_model_artifacts",
+        "alpha_v6_evaluations",
+        "alpha_v6_operational_receipts",
+    )
+    columns = (
+        "source_artifact_hash_sha256 TEXT",
+        "path_replay_id TEXT",
+        "benchmark_hash_sha256 TEXT",
+        "observed_cost_model_identity TEXT",
+        "modeled_cost_model_identity TEXT",
+        "evidence_cohort TEXT",
+        "retrospective_research_eligible INTEGER",
+        "prospective_promotion_eligible INTEGER",
+        "evidence_lineage_hash_sha256 TEXT",
+    )
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    for table in tables:
+        if table not in existing_tables:
+            continue
+        for column in columns:
+            _add_column_if_missing(connection, table, column)
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_evidence_lineage "
+            f"ON {table}(evidence_cohort, retrospective_research_eligible, "
+            "prospective_promotion_eligible, evidence_lineage_hash_sha256)"
+        )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_v6_evidence_lineage (
+            lineage_id TEXT PRIMARY KEY,
+            entity_kind TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            source_artifact_hash_sha256 TEXT,
+            path_replay_id TEXT,
+            benchmark_hash_sha256 TEXT,
+            observed_cost_model_identity TEXT,
+            modeled_cost_model_identity TEXT,
+            evidence_cohort TEXT,
+            retrospective_research_eligible INTEGER,
+            prospective_promotion_eligible INTEGER,
+            evidence_lineage_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (entity_kind, entity_id, evidence_lineage_hash_sha256)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_lineage_entity
+        ON alpha_v6_evidence_lineage(entity_kind, entity_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_alpha_v6_lineage_cohort
+        ON alpha_v6_evidence_lineage(evidence_cohort, retrospective_research_eligible,
+                                     prospective_promotion_eligible);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1287,4 +1357,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (22, _migration_022_intraday_evidence_spine),
     (23, _migration_023_alpha_path_replay_reconciliations),
     (24, _migration_024_catalyst_evidence),
+    (25, _migration_025_v6_evidence_lineage),
 )

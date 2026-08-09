@@ -12,6 +12,8 @@ from intraday_scanner.alpha.v6.contracts import (
     point_in_time_valid,
     utc_now,
 )
+from intraday_scanner.alpha.v6.models import evidence_lineage
+from intraday_scanner.alpha.v6.validation import catalyst_ablation_plan
 
 
 def build_return_dataset(
@@ -48,13 +50,16 @@ def build_return_dataset(
         if target_value is None:
             exclusions["target_missing"] += 1
             continue
-        rows.append({
-            **common,
-            "target_net_excess_return_pct": target_value,
-            "activation_label": _label_value(activation),
-            "tail_loss_label": _label_value(families.get("tail_loss_event")),
-            "source_bar_hash_sha256": target.get("source_bar_hash_sha256"),
-        })
+        rows.append(
+            {
+                **common,
+                "target_net_excess_return_pct": target_value,
+                "activation_label": _label_value(activation),
+                "tail_loss_label": _label_value(families.get("tail_loss_event")),
+                "source_bar_hash_sha256": target.get("source_bar_hash_sha256"),
+                "return_label_eligible": target.get("return_label_eligible") is not False,
+            }
+        )
     cutoff = max(
         (str(row["market_date"]) for row in [*rows, *activation_rows]),
         default=None,
@@ -66,6 +71,15 @@ def build_return_dataset(
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "target": "benchmark_relative_excess_return",
         "training_cutoff": cutoff,
+        "catalyst_ablation_plan": catalyst_ablation_plan(rows),
+        "eligibility_counts": {
+            "research_training_eligible": sum(
+                1 for row in rows if row.get("retrospective_research_eligible") is True
+            ),
+            "prospective_promotion_eligible": sum(
+                1 for row in rows if row.get("prospective_promotion_eligible") is True
+            ),
+        },
     }
     return {
         "dataset_id": "v6ds-" + canonical_hash(content)[:28],
@@ -82,6 +96,15 @@ def build_return_dataset(
         "research_only": True,
         "broker_execution_enabled": False,
         "missing_truth_is_zero": False,
+        "catalyst_ablation_plan": catalyst_ablation_plan(rows),
+        "eligibility_counts": {
+            "research_training_eligible": sum(
+                1 for row in rows if row.get("retrospective_research_eligible") is True
+            ),
+            "prospective_promotion_eligible": sum(
+                1 for row in rows if row.get("prospective_promotion_eligible") is True
+            ),
+        },
     }
 
 
@@ -94,6 +117,9 @@ def _dataset_row(
     feature_data = feature if isinstance(feature, dict) else {}
     feature_json = feature_data.get("feature_json")
     raw = feature_json if isinstance(feature_json, dict) else {}
+    target = families.get("benchmark_relative_excess_return") or {}
+    lineage = evidence_lineage(target)
+    catalyst = _catalyst_features(raw)
     return {
         "decision_id": decision_id,
         "market_date": str(decision.get("market_date") or "")[:10],
@@ -108,6 +134,7 @@ def _dataset_row(
             "over_20m",
         ),
         "catalyst_bucket": _catalyst_bucket(raw),
+        "catalyst_feature_block": catalyst,
         "feature_vector": feature_data,
         "feature_schema_version": decision.get("feature_schema_version"),
         "feature_hash_sha256": decision.get("feature_hash_sha256"),
@@ -117,6 +144,16 @@ def _dataset_row(
         "inclusion_probability": _inclusion_probability(decision),
         "inverse_probability_weight": _inverse_probability_weight(decision),
         "simulated_fill_label": _label_value(families.get("simulated_fill_feasibility")),
+        "source_artifact_hash_sha256": lineage["source_artifact_hash_sha256"],
+        "source_artifact_hashes": lineage["source_artifact_hashes"],
+        "path_replay_id": lineage["path_replay_id"],
+        "benchmark_hash_sha256": lineage["benchmark_hash_sha256"],
+        "observed_cost_model_identity": lineage["observed_cost_model_identity"],
+        "modeled_cost_model_identity": lineage["modeled_cost_model_identity"],
+        "evidence_cohort": lineage["evidence_cohort"],
+        "evidence_lineage_hash_sha256": lineage["evidence_lineage_hash_sha256"],
+        "retrospective_research_eligible": lineage["retrospective_research_eligible"],
+        "prospective_promotion_eligible": lineage["prospective_promotion_eligible"],
     }
 
 
@@ -134,6 +171,30 @@ def _catalyst_bucket(raw: dict[str, Any]) -> str:
     if data:
         return "unconfirmed"
     return "missing"
+
+
+def _catalyst_features(raw: dict[str, Any]) -> dict[str, Any]:
+    catalyst = raw.get("catalyst")
+    data = catalyst if isinstance(catalyst, dict) else {}
+    hashes = data.get("evidence_hashes")
+    evidence_hashes = (
+        sorted({str(item) for item in hashes if str(item).strip()})
+        if isinstance(hashes, list)
+        else []
+    )
+    return {
+        "availability_status": str(
+            data.get("availability_status")
+            or data.get("evidence_availability_status")
+            or ("missing" if not data else "present")
+        ),
+        "event_type": data.get("event_type"),
+        "polarity": data.get("polarity"),
+        "financing_mechanism": data.get("financing_mechanism"),
+        "novelty": data.get("novelty"),
+        "timing": data.get("timing"),
+        "evidence_hashes": evidence_hashes,
+    }
 
 
 def _nested_number(raw: dict[str, Any], group: str, key: str) -> float | None:

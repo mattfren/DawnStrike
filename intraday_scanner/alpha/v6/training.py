@@ -11,7 +11,7 @@ from intraday_scanner.alpha.v6.contracts import (
     canonical_hash,
     utc_now,
 )
-from intraday_scanner.alpha.v6.models import model_eligibility
+from intraday_scanner.alpha.v6.models import evidence_lineage, model_eligibility
 from intraday_scanner.alpha.v6.scoring import conservative_utility
 from intraday_scanner.alpha.v6.validation import expanding_purged_splits
 
@@ -60,6 +60,19 @@ def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[
         "feature_schema_version": dataset.get("feature_schema_version"),
         "code_sha": code_sha,
         "eligibility": eligibility,
+        "evidence_lineage": _lineage_summary(rows),
+        "eligibility_dimensions": {
+            "research_training": {
+                "eligible": eligibility["eligible_label_count"] >= 100,
+                "count": eligibility["retrospective_research_eligible_count"],
+            },
+            "prospective_promotion": {
+                "eligible": False,
+                "count": eligibility["prospective_promotion_eligible_count"],
+                "automatic_promotion": False,
+                "status": "MANUAL_REVIEW_REQUIRED",
+            },
+        },
         "research_only": True,
         "broker_execution_enabled": False,
         "automatic_promotion": False,
@@ -156,6 +169,7 @@ def walk_forward_challenger_predictions(
                 "no_lookahead": training_max_date < str(row.get("market_date") or ""),
                 "prediction": prediction,
                 "permitted_families": list(eligibility.allowed_families),
+                "evidence_lineage": _lineage_summary([row]),
                 "research_only": True,
                 "broker_execution_enabled": False,
             }
@@ -852,6 +866,58 @@ def _receipt(
         }
     )[:28]
     return payload
+
+
+def _lineage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    lineages = [evidence_lineage(row) for row in rows]
+    return {
+        "source_artifact_hashes": sorted(
+            {
+                item
+                for lineage in lineages
+                for item in lineage["source_artifact_hashes"]
+            }
+        ),
+        "path_replay_ids": sorted(
+            {
+                str(lineage["path_replay_id"])
+                for lineage in lineages
+                if lineage["path_replay_id"]
+            }
+        ),
+        "benchmark_hashes": sorted(
+            {
+                str(lineage["benchmark_hash_sha256"])
+                for lineage in lineages
+                if lineage["benchmark_hash_sha256"]
+            }
+        ),
+        "observed_cost_model_identities": sorted(
+            {
+                str(lineage["observed_cost_model_identity"])
+                for lineage in lineages
+                if lineage["observed_cost_model_identity"]
+            }
+        ),
+        "modeled_cost_model_identities": sorted(
+            {
+                str(lineage["modeled_cost_model_identity"])
+                for lineage in lineages
+                if lineage["modeled_cost_model_identity"]
+            }
+        ),
+        "evidence_cohorts": sorted(
+            {
+                str(lineage["evidence_cohort"])
+                for lineage in lineages
+                if lineage["evidence_cohort"]
+            }
+        ),
+        "row_lineage_hash_sha256": canonical_hash(
+            [lineage["evidence_lineage_hash_sha256"] for lineage in lineages]
+        ),
+        "missing_truth_is_zero": False,
+    }
 
 
 __all__ = [

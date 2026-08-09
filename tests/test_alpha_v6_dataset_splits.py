@@ -17,6 +17,53 @@ def test_v6_dataset_excludes_unverifiable_label_and_retains_reason() -> None:
     assert dataset["exclusion_counts"]["return_truth_missing_or_ineligible"] == 1
 
 
+def test_v6_dataset_retains_lineage_eligibility_and_catalyst_ablation_contract() -> None:
+    dataset = build_return_dataset(
+        decisions=[
+            {
+                **_decision("d3"),
+                "feature_vector": {
+                    "feature_json": {
+                        "catalyst": {
+                            "confirmed": True,
+                            "event_type": "EARNINGS",
+                            "availability_status": "available_before_decision",
+                            "evidence_hashes": ["c" * 64],
+                        }
+                    }
+                },
+            }
+        ],
+        labels=[
+            {
+                "decision_id": "d3",
+                "label_family": "benchmark_relative_excess_return",
+                "label_value": 1.2,
+                "learning_eligible": True,
+                "return_label_eligible": True,
+                "source_artifact_hash_sha256": "a" * 64,
+                "path_replay_id": "path-3",
+                "benchmark_hash_sha256": "b" * 64,
+                "evidence_cohort": "cohort-3",
+                "retrospective_research_eligible": True,
+                "prospective_promotion_eligible": False,
+            }
+        ],
+    )
+
+    row = dataset["rows"][0]
+    assert row["path_replay_id"] == "path-3"
+    assert row["benchmark_hash_sha256"] == "b" * 64
+    assert row["evidence_cohort"] == "cohort-3"
+    assert row["catalyst_feature_block"]["event_type"] == "EARNINGS"
+    assert dataset["catalyst_ablation_plan"]["modes"] == [
+        "full",
+        "no_catalyst",
+        "catalyst_only",
+        "shuffled_negative_control",
+    ]
+
+
 def _decision(decision_id: str) -> dict[str, object]:
     return {
         "decision_id": decision_id,

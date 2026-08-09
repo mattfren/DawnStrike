@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, utc_now
+from intraday_scanner.alpha.v6.models import evidence_lineage
 
 _RETURN_FAMILIES = (
     "simulated_fill_feasibility",
@@ -36,11 +37,14 @@ def build_label_families(
     activated = str(outcome.get("activation_status") or "").upper() == "ACTIVATED"
     retrospective_eligible = outcome.get("retrospective_research_eligible") is not False
     prospective_eligible = outcome.get("prospective_promotion_eligible") is True
+    lineage = evidence_lineage({**outcome, **decision})
+    return_truth = _return_truth_contract(decision=decision, outcome=outcome)
     eligible_return = bool(
         outcome.get("learning_eligible") is True
         and source_hash
         and path_replay_available
         and retrospective_eligible
+        and return_truth["eligible"]
     )
     observed_at = str(outcome.get("observed_at") or utc_now())
     base = {
@@ -48,11 +52,21 @@ def build_label_families(
         "market_date": market_date,
         "observed_at": observed_at,
         "source_bar_hash_sha256": source_hash,
+        "source_artifact_hash_sha256": lineage["source_artifact_hash_sha256"],
+        "source_artifact_hashes": lineage["source_artifact_hashes"],
         "source_outcome_id": outcome.get("outcome_id"),
-        "path_replay_id": path_replay_id,
+        "path_replay_id": lineage["path_replay_id"],
         "path_truth_status": outcome.get("path_truth_status"),
+        "benchmark_hash_sha256": lineage["benchmark_hash_sha256"],
+        "observed_cost_model_identity": lineage["observed_cost_model_identity"],
+        "modeled_cost_model_identity": lineage["modeled_cost_model_identity"],
+        "evidence_cohort": lineage["evidence_cohort"],
+        "evidence_lineage_hash_sha256": lineage["evidence_lineage_hash_sha256"],
         "retrospective_research_eligible": retrospective_eligible,
         "prospective_promotion_eligible": prospective_eligible,
+        "return_truth_contract_present": return_truth["contract_present"],
+        "return_truth_status": return_truth["status"],
+        "return_label_eligible": eligible_return,
         "label_schema_version": LABEL_SCHEMA_VERSION,
         "no_lookahead": outcome.get("no_lookahead") is True,
         "missing_truth_is_zero": False,
@@ -77,7 +91,11 @@ def build_label_families(
     ]
     values = {
         "simulated_fill_feasibility": 1.0 if activated else 0.0 if conclusive else None,
-        "net_return_after_cost": _number(outcome.get("net_return_pct")),
+        "net_return_after_cost": _number(
+            outcome.get("after_cost_return_pct")
+            if outcome.get("after_cost_return_pct") is not None
+            else outcome.get("net_return_pct")
+        ),
         "benchmark_relative_excess_return": _number(outcome.get("net_excess_return_pct")),
         "stop_first_target_first": _first_touch_label(outcome),
         "mfe_pct": _number(outcome.get("mfe_pct")),
@@ -165,6 +183,75 @@ def _tail_loss_label(outcome: dict[str, Any]) -> float | None:
     if loss is None:
         return None
     return 1.0 if loss <= -3.0 else 0.0
+
+
+def _return_truth_contract(
+    *, decision: dict[str, Any], outcome: dict[str, Any]
+) -> dict[str, Any]:
+    """Check the additive complete-return contract when its fields are present."""
+
+    contract_keys = {
+        "after_cost_return_pct",
+        "benchmark_hash_sha256",
+        "benchmark_source_bar_hash_sha256",
+        "causal_decision_identity",
+        "independent_reconciliation_complete",
+        "independent_reconciliation_status",
+    }
+    contract_present = bool(contract_keys.intersection(outcome))
+    if not contract_present:
+        return {"contract_present": False, "eligible": True, "status": "LEGACY_CONTRACT"}
+
+    after_cost = _number(
+        outcome.get("after_cost_return_pct")
+        if outcome.get("after_cost_return_pct") is not None
+        else outcome.get("net_return_pct")
+    )
+    benchmark_hash = (
+        _text_or_none(outcome.get("benchmark_hash_sha256"))
+        or _text_or_none(outcome.get("benchmark_artifact_hash_sha256"))
+        or _text_or_none(outcome.get("benchmark_source_bar_hash_sha256"))
+    )
+    benchmark_value = _number(outcome.get("benchmark_return_pct"))
+    excess_value = _number(outcome.get("net_excess_return_pct"))
+    independent = outcome.get("independent_reconciliation_complete") is True
+    if not independent:
+        statuses = [
+            outcome.get("independent_reconciliation_status"),
+            outcome.get("benchmark_independent_reconciliation_status"),
+        ]
+        present_statuses = [str(value or "").upper() for value in statuses if value is not None]
+        independent = bool(present_statuses) and all(
+            value in {"PASSED", "PASS", "COMPLETE", "RECONCILED"}
+            for value in present_statuses
+        )
+    causal = outcome.get("causal_decision_identity") is True or (
+        bool(str(decision.get("decision_id") or "").strip())
+        and bool(str(decision.get("input_hash_sha256") or "").strip())
+        and bool(str(decision.get("source_lineage_hash_sha256") or "").strip())
+        and isinstance(decision.get("point_in_time"), dict)
+        and decision["point_in_time"].get(
+            "all_inputs_observed_at_or_before_decision"
+        )
+        is True
+    )
+    missing = []
+    if str(outcome.get("outcome_status") or "").upper() != "COMPLETE_SOURCED":
+        missing.append("complete_sourced_outcome")
+    if not independent:
+        missing.append("independent_reconciliation")
+    if after_cost is None:
+        missing.append("after_cost_return")
+    if not benchmark_hash or benchmark_value is None and excess_value is None:
+        missing.append("benchmark_alignment")
+    if not causal:
+        missing.append("causal_decision_identity")
+    return {
+        "contract_present": True,
+        "eligible": not missing,
+        "status": "COMPLETE" if not missing else "INCOMPLETE",
+        "missing_requirements": missing,
+    }
 
 
 def _number(value: object) -> float | None:

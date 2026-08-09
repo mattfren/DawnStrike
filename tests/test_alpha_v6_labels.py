@@ -40,6 +40,45 @@ def test_v6_return_labels_require_explicit_path_replay_when_present() -> None:
     assert return_label["path_replay_id"] is None
 
 
+def test_v6_return_labels_carry_lineage_and_require_complete_truth_contract() -> None:
+    labels = build_label_families(
+        decision={
+            **_decision(),
+            "input_hash_sha256": "i" * 64,
+            "source_lineage_hash_sha256": "l" * 64,
+            "point_in_time": {
+                "all_inputs_observed_at_or_before_decision": True,
+            },
+        },
+        outcome={
+            "outcome_id": "o3",
+            "outcome_status": "COMPLETE_SOURCED",
+            "activation_status": "ACTIVATED",
+            "source_bar_hash_sha256": "b" * 64,
+            "benchmark_source_bar_hash_sha256": "m" * 64,
+            "independent_reconciliation_status": "PASSED",
+            "benchmark_independent_reconciliation_status": "PASSED",
+            "net_return_pct": 1.0,
+            "net_excess_return_pct": 0.5,
+            "path_replay_id": "path-3",
+            "learning_eligible": True,
+            "evidence_cohort": "cohort-1",
+            "observed_cost_model_version": "observed-v1",
+            "modeled_cost_model_version": "modeled-v1",
+        },
+    )
+    return_label = next(
+        row for row in labels if row["label_family"] == "net_return_after_cost"
+    )
+
+    assert return_label["learning_eligible"] is True
+    assert return_label["source_artifact_hash_sha256"] == "b" * 64
+    assert return_label["benchmark_hash_sha256"] == "m" * 64
+    assert return_label["path_replay_id"] == "path-3"
+    assert return_label["evidence_cohort"] == "cohort-1"
+    assert return_label["return_truth_status"] == "COMPLETE"
+
+
 def _decision() -> dict[str, object]:
     return {
         "decision_id": "d1",

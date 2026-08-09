@@ -8,6 +8,111 @@ from collections import defaultdict
 from statistics import mean, pstdev
 from typing import Any
 
+CATALYST_ABLATION_MODES = (
+    "full",
+    "no_catalyst",
+    "catalyst_only",
+    "shuffled_negative_control",
+)
+
+
+def catalyst_ablation_plan(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe the preregistered catalyst comparison without claiming a result."""
+
+    catalyst_rows = sum(
+        1
+        for row in rows
+        if str(row.get("catalyst_bucket") or "missing") not in {"missing", "unknown"}
+    )
+    return {
+        "status": "PENDING_SEPARATE_OOS_RETRAINING",
+        "modes": list(CATALYST_ABLATION_MODES),
+        "row_count": len(rows),
+        "catalyst_observed_row_count": catalyst_rows,
+        "shuffled_negative_control_seed": 6001,
+        "comparison_requires_exact_common_oos_rows": True,
+        "dominant_catalyst_claim_allowed": False,
+        "missing_catalyst_is_not_zero": True,
+    }
+
+
+def build_catalyst_ablation_views(
+    rows: list[dict[str, Any]], *, seed: int = 6001
+) -> dict[str, list[dict[str, Any]]]:
+    """Build deterministic feature views for four catalyst ablations.
+
+    These are feature views only.  A view is not an evaluation and cannot
+    support a catalyst-dominance claim without separate purged OOS refits.
+    """
+
+    full = [{**row} for row in rows]
+    no_catalyst = []
+    catalyst_only = []
+    for row in rows:
+        without = {**row, "catalyst_bucket": "ablation_removed"}
+        without["catalyst_feature_block"] = {
+            "availability_status": "removed_for_ablation",
+            "event_type": None,
+            "polarity": None,
+            "financing_mechanism": None,
+            "novelty": None,
+            "timing": None,
+            "evidence_hashes": [],
+        }
+        no_catalyst.append(without)
+        only = {
+            **row,
+            "setup_key": "ablation_unknown",
+            "regime_key": "ablation_unknown",
+            "source_key": "ablation_unknown",
+            "liquidity_bucket": "ablation_unknown",
+            "feature_vector": {},
+        }
+        catalyst_only.append(only)
+    shuffled = [{**row} for row in rows]
+    blocks = [row.get("catalyst_feature_block") for row in shuffled]
+    random.Random(seed).shuffle(blocks)
+    for row, block in zip(shuffled, blocks, strict=True):
+        row["catalyst_feature_block"] = block
+        row["catalyst_bucket"] = (
+            str(block.get("availability_status") or "missing")
+            if isinstance(block, dict)
+            else "unknown"
+        )
+    return {
+        "full": full,
+        "no_catalyst": no_catalyst,
+        "catalyst_only": catalyst_only,
+        "shuffled_negative_control": shuffled,
+    }
+
+
+def compare_catalyst_ablations(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a fail-closed comparison receipt for the four catalyst views."""
+
+    full = evaluate_return_predictions(rows) if rows else _empty()
+    return {
+        "status": "PARTIAL_FULL_VIEW_ONLY_REQUIRES_SEPARATE_PURGED_OOS_REFITS",
+        "ablations": {
+            "full": {"status": full.get("status"), "metrics": full},
+            "no_catalyst": {
+                "status": "NOT_EVALUATED_SEPARATE_PURGED_OOS_REFIT_REQUIRED",
+                "metrics": None,
+            },
+            "catalyst_only": {
+                "status": "NOT_EVALUATED_SEPARATE_PURGED_OOS_REFIT_REQUIRED",
+                "metrics": None,
+            },
+            "shuffled_negative_control": {
+                "status": "NOT_EVALUATED_SEPARATE_PURGED_OOS_REFIT_REQUIRED",
+                "metrics": None,
+            },
+        },
+        "dominant_catalyst_claim_allowed": False,
+        "untouched_oos_required_for_dominance": True,
+        "missing_catalyst_is_not_zero": True,
+    }
+
 
 def expanding_purged_splits(
     rows: list[dict[str, Any]], *, embargo_dates: int = 1, minimum_train_dates: int = 20
