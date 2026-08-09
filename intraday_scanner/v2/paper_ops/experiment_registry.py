@@ -201,6 +201,51 @@ def build_experiment_registry() -> tuple[ExperimentContract, ...]:
     return registry
 
 
+def build_intraday_v5_experiment_contract() -> ExperimentContract:
+    """Return the additive causal-replay contract for operator review."""
+
+    contract = ExperimentContract(
+        experiment_id="intraday:alphaops-v5-causal-replay:v1",
+        champion_strategy_id="alphaops_v5_daily_policy",
+        champion_strategy_version="dawnstrike-alphaops-v5.0.0",
+        challenger_strategy_id="alphaops_v5_intraday_causal_replay",
+        challenger_strategy_version="dawnstrike-alphaops-v5-intraday-replay.1",
+        primary_hypothesis=(
+            "Retained point-in-time intraday path evidence can measure the frozen "
+            "AlphaOps V5 policy without lookahead or changing daily outputs."
+        ),
+        controlled_change=(
+            "Add a research-only causal event clock, provisional 50 bps-per-side "
+            "cost model, and path-aware attribution beside the daily backtest."
+        ),
+        frozen_configuration={
+            "event_clock": "timestamp_then_sequence",
+            "entry_rule": "strictly_after_decision_event",
+            "trigger_bar_extrema": "excluded",
+            "cost_model_status": "COST_MODEL_PROVISIONAL",
+            "cost_model_version": "alphaops-v5-cost-model-50bps-0.005ps",
+            "empirical_cost_required": True,
+            "broker_execution_enabled": False,
+        },
+        training_cutoff="2026-07-30",
+        validation_start="2026-07-31",
+        validation_end="2026-10-30",
+        untouched_holdout_start="2026-11-02",
+        untouched_holdout_end="2027-01-29",
+        required_metrics=REQUIRED_PROMOTION_METRICS,
+        promotion_thresholds=REQUIRED_PROMOTION_THRESHOLDS,
+        stop_condition=(
+            "Stop on any future-data breach, missing retained evidence, source "
+            "conflict, unresolved path truth, or protocol reconciliation breach."
+        ),
+        promotion_decision="NOT_EVALUABLE_PENDING_PROTOCOL_APPROVAL",
+        asset_cohort="stocks_and_etfs_separate",
+        status="registered_research_only",
+    )
+    validate_experiment_registry((contract,))
+    return contract
+
+
 def validate_experiment_registry(
     contracts: tuple[ExperimentContract, ...],
 ) -> None:
@@ -315,6 +360,7 @@ __all__ = [
     "REQUIRED_PROMOTION_METRICS",
     "REQUIRED_PROMOTION_THRESHOLDS",
     "build_experiment_registry",
+    "build_intraday_v5_experiment_contract",
     "build_governance_overlay",
     "validate_experiment_registry",
     "write_experiment_registry",
