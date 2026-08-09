@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
+from intraday_scanner.errors import StorageError
 from intraday_scanner.services.daily_run_service import (
     REQUIRED_FULL_CHAIN_STAGES,
     record_daily_stage,
@@ -10,7 +13,7 @@ from scripts.verify_daily_finalize_receipt import FINALIZE_STAGES, verify
 
 
 def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) -> None:
-    db_path = tmp_path / "daily.sqlite"
+    db_path = tmp_path / "daily-state" / "daily.sqlite"
     runtime = tmp_path / "runtime"
     state = tmp_path / "state"
     runtime.mkdir()
@@ -22,7 +25,10 @@ def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) ->
         f"{release_sha}:{publication_set_sha}:{market_date}".encode()
     ).hexdigest()[:20]
 
-    assert verify(db_path, market_date, release_sha)["ready"] is False
+    with pytest.raises(StorageError, match="does not exist"):
+        verify(db_path, market_date, release_sha)
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
 
     for stage in REQUIRED_FULL_CHAIN_STAGES:
         record_daily_stage(

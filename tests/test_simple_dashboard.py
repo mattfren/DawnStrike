@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.dashboard.components import (
     calendar_day_card,
     display_pick_from_raw,
@@ -21,6 +23,7 @@ from intraday_scanner.dashboard.display_text import (
     source_label,
     translate_label,
 )
+from intraday_scanner.errors import StorageError
 
 
 def _raw_pick(ticker: str, rank: int, *, score: float = 80.0) -> dict[str, object]:
@@ -49,9 +52,7 @@ def test_display_text_translates_operator_labels() -> None:
     assert translate_label("INSUFFICIENT_SAMPLE") == "Not enough history yet"
     assert translate_label("NO_EDGE") == "No clear edge"
     assert translate_label("no_previous_close") == "Previous close missing"
-    assert no_trade_reason("Clean") == (
-        "No hard risk flags, but confidence was not high enough."
-    )
+    assert no_trade_reason("Clean") == ("No hard risk flags, but confidence was not high enough.")
     assert source_label("web_url") == "Unverified free web data"
 
 
@@ -162,12 +163,11 @@ def test_calendar_day_and_performance_evidence_are_plain_english() -> None:
 
 
 def test_loader_handles_empty_database(tmp_path: Path) -> None:
-    db_path = tmp_path / "empty.sqlite"
-    data = load_sqlite(db_path)
-
-    assert data["latest_status"]["kind"] == "no_clean_edge"
-    assert data["top_three"] == []
-    assert data["system_health"]["status"] == "Ready"
+    db_path = tmp_path / "absent-parent" / "empty.sqlite"
+    with pytest.raises(StorageError, match="does not exist"):
+        load_sqlite(db_path)
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
 
 
 def test_loader_handles_active_shadow_real_database_if_present() -> None:
@@ -202,6 +202,4 @@ def test_simple_dashboard_code_does_not_add_order_execution() -> None:
 
     assert not any(term in combined for term in forbidden)
     assert "No orders placed" in combined
-    assert no_pick_message("Clean") == (
-        "No hard risk flags, but confidence was not high enough."
-    )
+    assert no_pick_message("Clean") == ("No hard risk flags, but confidence was not high enough.")

@@ -75,21 +75,23 @@ def record_alpha_historical_signals(
     if not rows:
         return []
     store.persist_historical_signals(rows)
-    store.persist_signal_events([
+    store.persist_signal_events(
+        [
             _signal_event(
                 signal_id=str(row["signal_id"]),
-            event_type=(
-                SIGNAL_EVENT_NO_EDGE
-                if row.get("signal_label") == "NO CLEAN EDGE"
-                else SIGNAL_EVENT_ENTRY
-            ),
-            event_timestamp=str(row.get("generated_at") or utc_now_iso()),
-            source="alphaops",
-            notes=_created_note(row),
-            payload=row,
-        )
-        for row in rows
-    ])
+                event_type=(
+                    SIGNAL_EVENT_NO_EDGE
+                    if row.get("signal_label") == "NO CLEAN EDGE"
+                    else SIGNAL_EVENT_ENTRY
+                ),
+                event_timestamp=str(row.get("generated_at") or utc_now_iso()),
+                source="alphaops",
+                notes=_created_note(row),
+                payload=row,
+            )
+            for row in rows
+        ]
+    )
     return rows
 
 
@@ -145,16 +147,18 @@ def record_no_trade_historical_signal(
         },
     }
     store.persist_historical_signals([row])
-    store.persist_signal_events([
-        _signal_event(
-            signal_id=str(row["signal_id"]),
-            event_type=SIGNAL_EVENT_NO_EDGE,
-            event_timestamp=generated_at,
-            source="alphaops",
-            notes=reason,
-            payload=row,
-        )
-    ])
+    store.persist_signal_events(
+        [
+            _signal_event(
+                signal_id=str(row["signal_id"]),
+                event_type=SIGNAL_EVENT_NO_EDGE,
+                event_timestamp=generated_at,
+                source="alphaops",
+                notes=reason,
+                payload=row,
+            )
+        ]
+    )
     return row
 
 
@@ -174,21 +178,23 @@ def link_historical_notification(
     )
     signals = store.load_historical_signals(scan_id=scan_id, limit=500)
     if signals:
-        store.persist_signal_events([
-            _signal_event(
-                signal_id=str(row["signal_id"]),
-                event_type=SIGNAL_EVENT_TELEGRAM,
-                event_timestamp=utc_now_iso(),
-                source=channel,
-                notes="Notification linked to historical signal.",
-                payload={
-                    "event_key": event_key,
-                    "channel": channel,
-                    "was_alerted": was_alerted,
-                },
-            )
-            for row in signals
-        ])
+        store.persist_signal_events(
+            [
+                _signal_event(
+                    signal_id=str(row["signal_id"]),
+                    event_type=SIGNAL_EVENT_TELEGRAM,
+                    event_timestamp=utc_now_iso(),
+                    source=channel,
+                    notes="Notification linked to historical signal.",
+                    payload={
+                        "event_key": event_key,
+                        "channel": channel,
+                        "was_alerted": was_alerted,
+                    },
+                )
+                for row in signals
+            ]
+        )
     return {"updated": updated, "signal_count": len(signals)}
 
 
@@ -253,18 +259,20 @@ def import_historical_outcomes(
     stats = {"inserted": 0, "skipped": 0}
     if persist and accepted:
         stats = store.persist_signal_outcomes(accepted, replace=replace)
-        store.persist_signal_events([
-            _signal_event(
-                signal_id=str(row["signal_id"]),
-                event_type=SIGNAL_EVENT_OUTCOME,
-                event_timestamp=str(row["imported_at"]),
-                event_price=row.get("entry_price"),
-                source=str(row.get("outcome_source") or ""),
-                notes="Manual outcome imported.",
-                payload=row,
-            )
-            for row in accepted
-        ])
+        store.persist_signal_events(
+            [
+                _signal_event(
+                    signal_id=str(row["signal_id"]),
+                    event_type=SIGNAL_EVENT_OUTCOME,
+                    event_timestamp=str(row["imported_at"]),
+                    event_price=row.get("entry_price"),
+                    source=str(row.get("outcome_source") or ""),
+                    notes="Manual outcome imported.",
+                    payload=row,
+                )
+                for row in accepted
+            ]
+        )
     missing = _missing_outcome_tickers(accepted, historical)
     result = {
         "created_at": utc_now_iso(),
@@ -292,6 +300,8 @@ def attribute_returns(
     persist: bool = False,
     notify: str = "",
 ) -> dict[str, Any]:
+    if notify and not persist:
+        raise ValueError("Attribute-return notifications require persist=True.")
     store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
     output_dir = Path(out_dir)
@@ -343,17 +353,19 @@ def attribute_returns(
                 if row.get("audit_status") == "audited"
             }
         )
-        store.persist_signal_events([
-            _signal_event(
-                signal_id=signal_id,
-                event_type=SIGNAL_EVENT_AUDITED,
-                event_timestamp=summary["created_at"],
-                source="return_attribution",
-                notes="Signal return attribution calculated.",
-                payload={"out_dir": str(output_dir)},
-            )
-            for signal_id in audited_signal_ids
-        ])
+        store.persist_signal_events(
+            [
+                _signal_event(
+                    signal_id=signal_id,
+                    event_type=SIGNAL_EVENT_AUDITED,
+                    event_timestamp=summary["created_at"],
+                    source="return_attribution",
+                    notes="Signal return attribution calculated.",
+                    payload={"out_dir": str(output_dir)},
+                )
+                for signal_id in audited_signal_ids
+            ]
+        )
     notification_stats = _send_accuracy_summary(
         store=store,
         db_path=db_path,
@@ -471,9 +483,7 @@ def _historical_signal_from_alpha(
     trigger = _optional_float(row.get("entry_trigger") or row.get("breakout_trigger"))
     invalidation = _optional_float(row.get("invalidation") or row.get("invalidation_level"))
     target_1 = _optional_float(row.get("target_1") or row.get("first_target"))
-    signal_id = str(
-        row.get("signal_key") or f"{row.get('scan_id')}:{row.get('rank')}:{ticker}"
-    )
+    signal_id = str(row.get("signal_key") or f"{row.get('scan_id')}:{row.get('rank')}:{ticker}")
     return {
         "signal_id": signal_id,
         "scan_id": str(row.get("scan_id") or ""),
@@ -499,8 +509,7 @@ def _historical_signal_from_alpha(
         "entry_watch_level": trigger,
         "entry_trigger_type": "breakout_confirmation" if trigger is not None else "not_recorded",
         "entry_condition": str(
-            row.get("entry_condition")
-            or f"Watch only if price confirms above {trigger}."
+            row.get("entry_condition") or f"Watch only if price confirms above {trigger}."
             if trigger is not None
             else ""
         ),
@@ -514,9 +523,7 @@ def _historical_signal_from_alpha(
         "target_2": _optional_float(row.get("target_2") or row.get("stretch_target")),
         "risk_flags_json": _split_flags(row.get("risk_flags")),
         "avoid_reasons_json": _split_flags(row.get("avoid_reasons") or reason),
-        "catalyst_summary": str(
-            row.get("catalyst_summary") or row.get("catalyst_headline") or ""
-        ),
+        "catalyst_summary": str(row.get("catalyst_summary") or row.get("catalyst_headline") or ""),
         "telegram_event_key": str(row.get("telegram_key") or ""),
         "was_alerted": bool(row.get("alert_sent")),
         "no_trade_reason": reason,
@@ -631,9 +638,7 @@ def _match_historical_signal(
         and not _is_no_trade_signal(row)
     ]
     if not same_day:
-        raise SnapshotValidationError(
-            f"No historical signal exists for {ticker} on {market_date}"
-        )
+        raise SnapshotValidationError(f"No historical signal exists for {ticker} on {market_date}")
     valid = [
         row
         for row in same_day
@@ -666,9 +671,7 @@ def _attribution_for_signal(
                 exit_price=exit_price,
                 scenario_or_recommended="scenario",
                 audit_status=(
-                    "audited"
-                    if entry is not None and exit_price is not None
-                    else "unavailable"
+                    "audited" if entry is not None and exit_price is not None else "unavailable"
                 ),
             )
         )
@@ -740,9 +743,7 @@ def _monitor_exit_row(
         exit_price=_optional_float(event.get("event_price")),
         scenario_or_recommended="recommended",
         audit_status=(
-            "audited"
-            if _optional_float(event.get("event_price")) is not None
-            else "unavailable"
+            "audited" if _optional_float(event.get("event_price")) is not None else "unavailable"
         ),
     )
 
@@ -768,9 +769,7 @@ def _trigger_row(signal: dict[str, Any], outcome: dict[str, Any]) -> list[dict[s
                 exit_price=_optional_float(outcome.get(field)),
                 scenario_or_recommended="scenario",
                 audit_status=(
-                    "audited"
-                    if _optional_float(outcome.get(field)) is not None
-                    else "unavailable"
+                    "audited" if _optional_float(outcome.get(field)) is not None else "unavailable"
                 ),
             )
         )
@@ -896,11 +895,13 @@ def _daily_performance(
             for row in day_rows
             if row.get("audit_status") == "audited"
         }
-        missing_count = len([
-            signal
-            for signal in trade_signals
-            if str(signal.get("signal_id") or "") not in audited_signal_ids
-        ])
+        missing_count = len(
+            [
+                signal
+                for signal in trade_signals
+                if str(signal.get("signal_id") or "") not in audited_signal_ids
+            ]
+        )
         row = {
             "market_date": day,
             "signal_count": len(trade_signals),
@@ -1002,9 +1003,7 @@ def _attribution_summary(
         "win_rate": _win_rate(usable),
         "best_day": _best_or_worst_day(daily, best=True),
         "worst_day": _best_or_worst_day(daily, best=False),
-        "max_drawdown": _min_or_none([
-            _optional_float(row.get("max_drawdown")) for row in daily
-        ]),
+        "max_drawdown": _min_or_none([_optional_float(row.get("max_drawdown")) for row in daily]),
         "outlier_dependence": _outlier_dependence(usable),
         "attribution_rows": attribution_rows,
         "daily_rows": daily,
@@ -1061,15 +1060,17 @@ def _bucket_accuracy(
         trigger_hits[bucket].append(bool(row.get("trigger_activated")))
     output = []
     for bucket, values in sorted(grouped.items()):
-        output.append({
-            "bucket": bucket or "unknown",
-            "sample_size": len(values),
-            "avg_close_return": round(sum(values) / len(values), 4),
-            "median_close_return": round(median(values), 4),
-            "win_rate": _win_rate(values),
-            "trigger_accuracy": _bool_rate(trigger_hits[bucket]),
-            "evidence_status": _evidence_status_from_samples(len(values)),
-        })
+        output.append(
+            {
+                "bucket": bucket or "unknown",
+                "sample_size": len(values),
+                "avg_close_return": round(sum(values) / len(values), 4),
+                "median_close_return": round(median(values), 4),
+                "win_rate": _win_rate(values),
+                "trigger_accuracy": _bool_rate(trigger_hits[bucket]),
+                "evidence_status": _evidence_status_from_samples(len(values)),
+            }
+        )
     return output
 
 

@@ -2,6 +2,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts import build_public
 
 
@@ -12,6 +13,7 @@ def test_public_build_records_auditable_finalize_notification(tmp_path: Path, mo
         lambda root: {"source_sha": "clean-fixture-sha", "source_clean": True},
     )
     db_path = tmp_path / "notification.sqlite"
+    SQLiteScanStore(db_path).initialize()
     output = tmp_path / "public"
     monkeypatch.setattr(
         build_public,

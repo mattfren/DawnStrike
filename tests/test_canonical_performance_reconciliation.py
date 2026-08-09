@@ -2,6 +2,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from intraday_scanner.errors import StorageError
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -25,16 +28,12 @@ def test_read_only_reconcile_does_not_create_canonical_tables(tmp_path: Path) ->
 
 
 def test_read_only_reconcile_does_not_create_a_missing_database(tmp_path: Path) -> None:
-    db_path = tmp_path / "missing.sqlite"
+    db_path = tmp_path / "absent-parent" / "missing.sqlite"
 
-    try:
+    with pytest.raises(StorageError, match="does not exist"):
         CanonicalPerformanceService(db_path).reconcile(persist=False)
-    except FileNotFoundError:
-        pass
-    else:  # pragma: no cover - the assertion documents the required failure mode
-        raise AssertionError("read-only reconciliation created or opened a missing database")
-
     assert not db_path.exists()
+    assert not db_path.parent.exists()
 
 
 def test_as_of_reconcile_includes_history_through_requested_date(tmp_path: Path) -> None:
@@ -66,8 +65,6 @@ def test_as_of_reconcile_includes_history_through_requested_date(tmp_path: Path)
                 ),
             )
 
-    result = CanonicalPerformanceService(db_path).reconcile(
-        market_date="2026-07-29", persist=False
-    )
+    result = CanonicalPerformanceService(db_path).reconcile(market_date="2026-07-29", persist=False)
 
     assert {row["market_date"] for row in result["rows"]} == {"2026-07-28", "2026-07-29"}

@@ -1386,7 +1386,7 @@ def _run_import_manual_outcomes(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
     result = import_manual_outcomes(
         input_path=args.input,
-        store=SQLiteScanStore(config.database_path),
+        store=SQLiteScanStore(config.database_path, read_only=not args.persist),
         persist=args.persist,
         replace=args.replace,
     )
@@ -1397,7 +1397,7 @@ def _run_import_manual_outcomes(args: argparse.Namespace) -> int:
 def _run_audit_manual_outcomes(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
     result = audit_manual_outcomes(
-        store=SQLiteScanStore(config.database_path),
+        store=SQLiteScanStore(config.database_path, read_only=not args.persist),
         out_dir=args.out_dir,
         persist=args.persist,
     )
@@ -1411,7 +1411,7 @@ def _run_audit_manual_outcomes(args: argparse.Namespace) -> int:
 def _run_evaluate_intelligence_outcomes(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
     result = evaluate_intelligence_outcomes(
-        store=SQLiteScanStore(config.database_path),
+        store=SQLiteScanStore(config.database_path, read_only=not args.persist),
         run_id=args.run_id,
         min_samples=args.min_samples,
         persist=args.persist,
@@ -1426,7 +1426,7 @@ def _run_evaluate_intelligence_outcomes(args: argparse.Namespace) -> int:
 def _run_free_shadow_report(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
     result = build_free_shadow_report(
-        store=SQLiteScanStore(config.database_path),
+        store=SQLiteScanStore(config.database_path, read_only=not args.persist),
         out_dir=args.out_dir,
         persist=args.persist,
     )
@@ -1775,14 +1775,16 @@ def _run_alpha_v6_evaluate_holdout(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_attribution(args: argparse.Namespace) -> int:
-    result = build_v6_failure_attribution(SQLiteScanStore(args.db_path))
+    result = build_v6_failure_attribution(
+        SQLiteScanStore(args.db_path, read_only=True), persist=False
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
 def _run_alpha_v6_research_packet(args: argparse.Namespace) -> int:
     result = write_alpha_v6_research_packet(
-        SQLiteScanStore(args.db_path),
+        SQLiteScanStore(args.db_path, read_only=True),
         code_sha=args.code_sha,
         out_dir=args.out_dir,
     )
@@ -1836,7 +1838,7 @@ def _run_alpha_v6_build_universe(args: argparse.Namespace) -> int:
 def _run_alpha_v6_preview_universe(args: argparse.Namespace) -> int:
     payload = _read_alpha_v6_universe_candidate(args.input)
     result = preview_alpha_v6_universe(
-        SQLiteScanStore(args.db_path),
+        SQLiteScanStore(args.db_path, read_only=True),
         as_of_date=str(payload.get("as_of_date") or ""),
         members=payload["members"],
         source_lineage=payload["source_lineage"],
@@ -2225,7 +2227,7 @@ def _run_audit_latest(args: argparse.Namespace) -> int:
         slippage_bps=args.slippage_bps,
         entry_mode=args.entry_mode,
     )
-    store = SQLiteScanStore(config.database_path)
+    store = SQLiteScanStore(config.database_path, read_only=not args.persist)
     latest = store.load_latest_scan()
     if latest is None:
         print("No persisted scan is available to audit.", file=sys.stderr)
@@ -2596,7 +2598,7 @@ def _run_release_doctor(result: dict[str, Any], *, require_local_verification: b
 
 def _run_performance_report(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
-    store = SQLiteScanStore(config.database_path)
+    store = SQLiteScanStore(config.database_path, read_only=not args.persist)
     trades = store.load_paper_audit_trades()
     summary = store.load_latest_paper_audit_summary()
     if not trades:
