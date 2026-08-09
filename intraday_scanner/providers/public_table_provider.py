@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.errors import DataProviderError
-from intraday_scanner.models import SNAPSHOT_COLUMNS, SnapshotRow, utc_now_iso
+from intraday_scanner.models import (
+    EVIDENCE_CONFIDENCE_VERSION,
+    SNAPSHOT_COLUMNS,
+    SnapshotRow,
+    utc_now_iso,
+)
 from intraday_scanner.providers.web_source_base import (
     FetchResult,
     WebCollectionConfig,
@@ -464,6 +469,7 @@ def _normalize_row(
         value is None for value in (float_shares, market_cap, short_float)
     ) + 3
     source_confidence = max(20, 100 - optional_missing * 10)
+    field_completeness_score = max(0.0, 100.0 - optional_missing * 10.0)
     normalized = {
         "ticker": ticker,
         "company": company_hint or ticker,
@@ -494,6 +500,11 @@ def _normalize_row(
         "extracted_at": imported_at,
         "stale_data_flag": False,
         "source_confidence": source_confidence,
+        "field_completeness_score": field_completeness_score,
+        "source_reliability_prior": 50.0,
+        "reconciliation_status": "single_source",
+        "reconciliation_confidence_score": 0.0,
+        "evidence_confidence_version": EVIDENCE_CONFIDENCE_VERSION,
         "source_count": 1,
         "score_consensus": "single_source",
         "conflict_flags": "",
@@ -525,6 +536,8 @@ def _failure(fetch: FetchResult, out_dir: Path, reason: str) -> dict[str, Any]:
         "url": fetch.url,
         "reason": reason,
         "failure_reason": fetch.failure_reason,
+        "reconciliation_status": "provider_failed",
+        "evidence_confidence_version": EVIDENCE_CONFIDENCE_VERSION,
         "started_at": fetch.started_at,
         "completed_at": fetch.completed_at,
     }

@@ -18,7 +18,7 @@ from typing import Any
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
-from intraday_scanner.models import utc_now_iso
+from intraday_scanner.models import EVIDENCE_CONFIDENCE_VERSION, utc_now_iso
 from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 
@@ -108,6 +108,22 @@ class AlpacaScreenerProvider:
         for snapshot in snapshots:
             asset = asset_by_symbol.get(snapshot.ticker, {})
             row = snapshot.to_dict()
+            completeness_values = (
+                snapshot.previous_close,
+                snapshot.premarket_price,
+                snapshot.premarket_high,
+                snapshot.premarket_low,
+                snapshot.premarket_volume,
+                snapshot.dollar_volume,
+                snapshot.float_shares,
+                snapshot.market_cap,
+                snapshot.short_float_pct,
+            )
+            field_completeness_score = round(
+                100.0 * sum(value is not None for value in completeness_values)
+                / len(completeness_values),
+                2,
+            )
             row.update(
                 {
                     "company": str(asset.get("name") or snapshot.ticker),
@@ -122,6 +138,11 @@ class AlpacaScreenerProvider:
                     ),
                     "extracted_at": utc_now_iso(),
                     "source_confidence": 92.0,
+                    "field_completeness_score": field_completeness_score,
+                    "source_reliability_prior": 85.0,
+                    "reconciliation_status": "single_source",
+                    "reconciliation_confidence_score": 0.0,
+                    "evidence_confidence_version": EVIDENCE_CONFIDENCE_VERSION,
                     "source_count": 1,
                     "score_consensus": "single_authenticated_source",
                     "preferred_source": self.name,

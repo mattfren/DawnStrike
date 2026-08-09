@@ -1,3 +1,4 @@
+from intraday_scanner.alpha.feature_factory import build_feature_vector, feature_for_model
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot, score_universe
@@ -49,6 +50,29 @@ def test_scoring_edge_cases_are_flagged():
     assert "sub_min_price" in score_snapshot(rows["SUBP"], config).risk_flags
     assert "extreme_gap_above_300_pct" in score_snapshot(rows["MOON"], config).risk_flags
     assert score_snapshot(rows["HALT"], config).setup_grade == "AVOID"
+
+
+def test_feature_serialization_keeps_confidence_axes_independent():
+    row = read_snapshot_csv("sample_data/premarket_snapshot_sample.csv")[0].to_dict()
+    row.update(
+        {
+            "field_completeness_score": 82.0,
+            "source_reliability_prior": 61.0,
+            "reconciliation_status": "single_source",
+            "reconciliation_confidence_score": 0.0,
+            "evidence_confidence_version": "evidence-confidence-v1",
+        }
+    )
+
+    features = feature_for_model(
+        build_feature_vector(row, scan_id="scan-confidence", timestamp=row["as_of_timestamp"])
+    )
+
+    assert features["source_confidence"] != features["field_completeness_score"]
+    assert features["source_reliability_prior"] == 61.0
+    assert features["reconciliation_status"] == "single_source"
+    assert features["reconciliation_confidence_score"] == 0.0
+    assert features["evidence_confidence_version"] == "evidence-confidence-v1"
 
 
 def test_no_previous_close_and_zero_volume_are_safe():

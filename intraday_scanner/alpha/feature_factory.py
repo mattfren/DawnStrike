@@ -140,6 +140,13 @@ def _source_quality(
     if not isinstance(reliability, dict):
         reliability = source_reliability
     source_confidence = _float(row.get("source_confidence"), 0.0)
+    field_completeness_score = _float(row.get("field_completeness_score"))
+    source_reliability_prior = _float(
+        row.get("source_reliability_prior"), _float(reliability.get("reliability_score"), 50.0)
+    )
+    reconciliation_confidence_score = _float(
+        row.get("reconciliation_confidence_score")
+    )
     data_kind = _text(row.get("data_source_kind"))
     coverage_warning = _text(row.get("coverage_warning"))
     conflict_flags = _text(row.get("conflict_flags"))
@@ -148,6 +155,13 @@ def _source_quality(
         "preferred_source": source,
         "source_url": _text(row.get("source_url")),
         "source_confidence": source_confidence,
+        "field_completeness_score": field_completeness_score,
+        "source_reliability_prior": source_reliability_prior,
+        "reconciliation_status": _text(row.get("reconciliation_status"), "unknown"),
+        "reconciliation_confidence_score": reconciliation_confidence_score,
+        "evidence_confidence_version": _text(
+            row.get("evidence_confidence_version"), "legacy-source-confidence-v0"
+        ),
         "source_confidence_bucket": _bucket(
             source_confidence,
             ((35, "low"), (60, "mixed"), (80, "usable"), (95, "strong")),
@@ -173,7 +187,6 @@ def _source_quality(
         ),
         "source_rows_normalized": _float(source_summary.get("rows_normalized"), 0.0),
         "source_reliability_score": _float(reliability.get("reliability_score"), 50.0),
-        "source_reliability_prior": _float(reliability.get("reliability_score"), 50.0),
     }
 
 

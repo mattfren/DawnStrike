@@ -9,6 +9,8 @@ from typing import Any
 
 from intraday_scanner.errors import SnapshotValidationError
 
+EVIDENCE_CONFIDENCE_VERSION = "evidence-confidence-v1"
+
 SNAPSHOT_COLUMNS = [
     "ticker",
     "company",
@@ -46,6 +48,11 @@ SNAPSHOT_COLUMNS = [
     "extracted_at",
     "stale_data_flag",
     "source_confidence",
+    "field_completeness_score",
+    "source_reliability_prior",
+    "reconciliation_status",
+    "reconciliation_confidence_score",
+    "evidence_confidence_version",
     "source_count",
     "score_consensus",
     "conflict_flags",
@@ -203,6 +210,11 @@ CANDIDATE_COLUMNS = [
     "extracted_at",
     "stale_data_flag",
     "source_confidence",
+    "field_completeness_score",
+    "source_reliability_prior",
+    "reconciliation_status",
+    "reconciliation_confidence_score",
+    "evidence_confidence_version",
     "source_count",
     "score_consensus",
     "conflict_flags",
@@ -324,6 +336,11 @@ class SnapshotRow:
     extracted_at: str = ""
     stale_data_flag: bool = False
     source_confidence: float = 0.0
+    field_completeness_score: float | None = None
+    source_reliability_prior: float | None = None
+    reconciliation_status: str = ""
+    reconciliation_confidence_score: float | None = None
+    evidence_confidence_version: str = ""
     source_count: int = 1
     score_consensus: str = "single_source"
     conflict_flags: str = ""
@@ -433,6 +450,28 @@ class SnapshotRow:
             source_confidence=parse_float(
                 row.get("source_confidence"), "source_confidence", default=0.0
             ),
+            field_completeness_score=(
+                None
+                if row.get("field_completeness_score") in {None, ""}
+                else parse_float(row.get("field_completeness_score"), "field_completeness_score")
+            ),
+            source_reliability_prior=(
+                None
+                if row.get("source_reliability_prior") in {None, ""}
+                else parse_float(row.get("source_reliability_prior"), "source_reliability_prior")
+            ),
+            reconciliation_status=str(row.get("reconciliation_status") or "").strip(),
+            reconciliation_confidence_score=(
+                None
+                if row.get("reconciliation_confidence_score") in {None, ""}
+                else parse_float(
+                    row.get("reconciliation_confidence_score"),
+                    "reconciliation_confidence_score",
+                )
+            ),
+            evidence_confidence_version=str(
+                row.get("evidence_confidence_version") or ""
+            ).strip(),
             source_count=parse_int(row.get("source_count"), "source_count", default=1),
             score_consensus=str(row.get("score_consensus") or "single_source").strip(),
             conflict_flags=str(row.get("conflict_flags") or "").strip(),
@@ -523,7 +562,7 @@ class SnapshotRow:
             raise SnapshotValidationError(f"{self.ticker}: spread_pct must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "ticker": self.ticker,
             "company": self.company,
             "previous_close": self.previous_close,
@@ -595,6 +634,17 @@ class SnapshotRow:
             "enrichment_is_complete": self.enrichment_is_complete,
             "enrichment_observation_sha256": self.enrichment_observation_sha256,
         }
+        if self.field_completeness_score is not None:
+            payload["field_completeness_score"] = self.field_completeness_score
+        if self.source_reliability_prior is not None:
+            payload["source_reliability_prior"] = self.source_reliability_prior
+        if self.reconciliation_status:
+            payload["reconciliation_status"] = self.reconciliation_status
+        if self.reconciliation_confidence_score is not None:
+            payload["reconciliation_confidence_score"] = self.reconciliation_confidence_score
+        if self.evidence_confidence_version:
+            payload["evidence_confidence_version"] = self.evidence_confidence_version
+        return payload
 
 
 @dataclass(frozen=True)
@@ -641,6 +691,20 @@ class ScoredCandidate:
             "conflict_flags": self.snapshot.conflict_flags,
         }
         source_lineage = dict(source_lineage)
+        if self.snapshot.field_completeness_score is not None:
+            source_lineage["field_completeness_score"] = self.snapshot.field_completeness_score
+        if self.snapshot.source_reliability_prior is not None:
+            source_lineage["source_reliability_prior"] = self.snapshot.source_reliability_prior
+        if self.snapshot.reconciliation_status:
+            source_lineage["reconciliation_status"] = self.snapshot.reconciliation_status
+        if self.snapshot.reconciliation_confidence_score is not None:
+            source_lineage["reconciliation_confidence_score"] = (
+                self.snapshot.reconciliation_confidence_score
+            )
+        if self.snapshot.evidence_confidence_version:
+            source_lineage["evidence_confidence_version"] = (
+                self.snapshot.evidence_confidence_version
+            )
         source_lineage["premarket_observation"] = {
             "source": self.snapshot.premarket_range_source,
             "source_url": self.snapshot.premarket_range_source_url,
@@ -771,6 +835,18 @@ class ScoredCandidate:
             "enrichment_is_complete": self.snapshot.enrichment_is_complete,
             "enrichment_observation_sha256": self.snapshot.enrichment_observation_sha256,
         }
+        if self.snapshot.field_completeness_score is not None:
+            payload["field_completeness_score"] = self.snapshot.field_completeness_score
+        if self.snapshot.source_reliability_prior is not None:
+            payload["source_reliability_prior"] = self.snapshot.source_reliability_prior
+        if self.snapshot.reconciliation_status:
+            payload["reconciliation_status"] = self.snapshot.reconciliation_status
+        if self.snapshot.reconciliation_confidence_score is not None:
+            payload["reconciliation_confidence_score"] = (
+                self.snapshot.reconciliation_confidence_score
+            )
+        if self.snapshot.evidence_confidence_version:
+            payload["evidence_confidence_version"] = self.snapshot.evidence_confidence_version
         payload.update(self.intelligence)
         return payload
 
