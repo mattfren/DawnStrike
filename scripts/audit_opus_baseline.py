@@ -6,11 +6,10 @@ import argparse
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 from urllib.parse import quote
-
 
 AUDITED_SHA = "ba39a5353045b7d417936ed1aed0ee4802169759"
 DEFAULT_OUTPUT = Path("docs/audit/evidence/opus5_baseline_20260809.json")
@@ -31,7 +30,7 @@ def _quoted_identifier(identifier: str) -> str:
 def _rows(connection: sqlite3.Connection, sql: str) -> list[dict[str, object]]:
     cursor = connection.execute(sql)
     names = [column[0] for column in cursor.description or ()]
-    return [dict(zip(names, row)) for row in cursor.fetchall()]
+    return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
 
 @contextmanager
@@ -282,7 +281,9 @@ def collect_inventory(snapshot: Path, audited_sha: str = AUDITED_SHA) -> dict[st
         }
 
 
-def write_inventory(snapshot: Path, output: Path, audited_sha: str = AUDITED_SHA) -> dict[str, object]:
+def write_inventory(
+    snapshot: Path, output: Path, audited_sha: str = AUDITED_SHA
+) -> dict[str, object]:
     inventory = collect_inventory(snapshot, audited_sha)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -304,7 +305,17 @@ def main() -> int:
         inventory = write_inventory(args.snapshot_db, args.output, args.audited_sha)
     except (OSError, RuntimeError, sqlite3.Error) as exc:
         parser.error(str(exc))
-    print(json.dumps({"status": "PASS", "output": str(args.output), "snapshot_sha256": inventory["snapshot_sha256"]}, sort_keys=True, separators=(",", ":")))
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "output": str(args.output),
+                "snapshot_sha256": inventory["snapshot_sha256"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
     return 0
 
 
