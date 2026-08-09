@@ -15,6 +15,12 @@ from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from intraday_scanner.alpha.execution_cost import (
+    CostModelStatus,
+    ExecutionCostModel,
+)
+from intraday_scanner.alpha.path_replay import resolve_path
+
 EASTERN = ZoneInfo("America/New_York")
 
 ALPHAOPS_V5_STRATEGY_ID = "alphaops_v5"
@@ -22,6 +28,7 @@ ALPHAOPS_V5_STRATEGY_VERSION = "dawnstrike-alphaops-v5.0.0"
 ALPHAOPS_V5_ACCOUNT_ID = "alphaops_v5_simulated"
 ALPHAOPS_V5_POLICY_VERSION = "alphaops-v5-official-paper-policy-2026-07-31"
 ALPHAOPS_V5_COST_MODEL_VERSION = "alphaops-v5-cost-model-50bps-0.005ps"
+ALPHAOPS_V5_COST_MODEL_STATUS = CostModelStatus.PROVISIONAL.value
 ALPHAOPS_V5_ACTIVATION_TIMESTAMP = "2026-07-31T00:00:00-04:00"
 
 PASSING_ALERT_GATES = frozenset({"PASS", "ALERT_OK"})
@@ -80,6 +87,126 @@ class AlphaOpsV5Policy:
 
 
 DEFAULT_V5_POLICY = AlphaOpsV5Policy()
+
+
+def v5_execution_cost_model(
+    *, status: CostModelStatus = CostModelStatus.PROVISIONAL
+) -> ExecutionCostModel:
+    """Return the frozen V5 cost proxy with its empirical-evidence status."""
+
+    return ExecutionCostModel(
+        version=ALPHAOPS_V5_COST_MODEL_VERSION,
+        entry_slippage_bps=DEFAULT_V5_POLICY.entry_slippage_bps,
+        exit_slippage_bps=DEFAULT_V5_POLICY.exit_slippage_bps,
+        commission_per_share_per_side=DEFAULT_V5_POLICY.commission_per_share_per_side,
+        status=status,
+    )
+
+
+def evaluate_v5_causal_exit(
+    bars: list[Any] | tuple[Any, ...],
+    *,
+    decision_at: datetime,
+    trigger: float,
+    target: float,
+    stop: float,
+    exit_policy: str = "target_stop_first",
+) -> dict[str, Any]:
+    """Evaluate a V5 exit challenger from the same causal bar sequence."""
+
+    causal_bars = [
+        {
+            **bar,
+            "observed_at": _bar_timestamp(bar),
+        }
+        if isinstance(bar, dict)
+        else {
+            "observed_at": _bar_timestamp(bar),
+            "open": _bar_value(bar, "open", "open_price"),
+            "high": _bar_value(bar, "high", "high_price"),
+            "low": _bar_value(bar, "low", "low_price"),
+            "close": _bar_value(bar, "close", "close_price"),
+        }
+        for bar in bars
+    ]
+    path = resolve_path(
+        causal_bars,
+        decision_at=decision_at,
+        trigger=trigger,
+        target=target,
+        stop=stop,
+    )
+    payload = path.to_dict()
+    payload.update(
+        {
+            "exit_policy": exit_policy,
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "research_only": True,
+            "promotion_eligible": False,
+        }
+    )
+    if exit_policy == "session_close":
+        post_entry = [
+            bar
+            for bar in causal_bars
+            if (timestamp := _bar_timestamp(bar)) is not None
+            and timestamp > decision_at
+        ]
+        if post_entry:
+            last = post_entry[-1]
+            payload["exit_time"] = _bar_timestamp(last).isoformat()  # type: ignore[union-attr]
+            payload["exit_price"] = _bar_value(last, "close", "close_price")
+            payload["conservative_policy_result"] = "session_close"
+    elif exit_policy == "time_stop":
+        post_entry = [
+            bar
+            for bar in causal_bars
+            if (timestamp := _bar_timestamp(bar)) is not None
+            and timestamp > decision_at
+        ]
+        if post_entry:
+            selected = post_entry[min(2, len(post_entry) - 1)]
+            payload["exit_time"] = _bar_timestamp(selected).isoformat()  # type: ignore[union-attr]
+            payload["exit_price"] = _bar_value(selected, "close", "close_price")
+            payload["conservative_policy_result"] = "time_stop"
+    return payload
+
+
+def build_v5_challenger_registry() -> tuple[dict[str, Any], ...]:
+    """Register cost/risk/exit challengers without enabling any of them."""
+
+    return (
+        {
+            "challenger_id": "v5_baseline",
+            "controlled_change": "none; frozen V5 target-stop policy",
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "promotion_eligible": False,
+        },
+        {
+            "challenger_id": "v5_atr_stop_target",
+            "controlled_change": "ATR stop and independent 2x ATR target geometry",
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "promotion_eligible": False,
+        },
+        {
+            "challenger_id": "v5_liquidity_aware_risk",
+            "controlled_change": "reduce notional when liquidity is not high",
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "promotion_eligible": False,
+        },
+        {
+            "challenger_id": "v5_session_close_exit",
+            "controlled_change": "session-close exit challenger",
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "promotion_eligible": False,
+        },
+        {
+            "challenger_id": "v5_cost_stress_1_5x",
+            "controlled_change": "1.5x slippage stress only",
+            "cost_model_status": ALPHAOPS_V5_COST_MODEL_STATUS,
+            "promotion_eligible": False,
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,6 +918,27 @@ def _parse_datetime(value: str | datetime) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=EASTERN)
     return parsed.astimezone(EASTERN)
+
+
+def _bar_value(value: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(value, dict) and name in value:
+            return value[name]
+        if hasattr(value, name):
+            return getattr(value, name)
+    return None
+
+
+def _bar_timestamp(value: Any) -> datetime | None:
+    timestamp = _bar_value(value, "timestamp")
+    if isinstance(timestamp, datetime):
+        return timestamp
+    if timestamp:
+        try:
+            return datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 def _eastern_time(value: str | datetime) -> time | None:

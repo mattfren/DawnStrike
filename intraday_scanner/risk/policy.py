@@ -32,6 +32,9 @@ class RiskInput:
     source_quality_status: str | None
     spread_bps: float | None
     live_execution_requested: bool = False
+    available_cash_cents: int | None = None
+    liquidity_status: str | None = None
+    session_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,16 @@ def evaluate_risk(request: RiskInput) -> RiskDecision:
         reasons.append("spread_unknown")
     elif request.spread_bps > MAX_SPREAD_BPS:
         reasons.append("spread_exceeds_200_bps")
+    if (
+        request.available_cash_cents is not None
+        and request.proposed_notional_cents is not None
+        and request.proposed_notional_cents > request.available_cash_cents
+    ):
+        reasons.append("available_cash_exceeded")
+    if request.liquidity_status is not None:
+        _status_gate(reasons, request.liquidity_status, "liquidity_status")
+    if request.session_status is not None:
+        _status_gate(reasons, request.session_status, "session_status")
     if _within_eod_window(request.decision_time):
         reasons.append("new_entry_within_30_minutes_of_close")
     if request.live_execution_requested:

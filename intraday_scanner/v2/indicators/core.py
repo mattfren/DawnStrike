@@ -136,6 +136,53 @@ def donchian_low(bars: tuple[MarketBar, ...], index: int, lookback: int) -> floa
     return min(bar.low for bar in bars[index - lookback : index])
 
 
+def prior_sma(values: list[float], period: int) -> list[float | None]:
+    """Return a mean using only observations strictly before each index."""
+
+    _require_period(period)
+    output: list[float | None] = []
+    for index in range(len(values)):
+        if index < period:
+            output.append(None)
+        else:
+            output.append(mean(values[index - period : index]))
+    return output
+
+
+def rolling_zscore(values: list[float], period: int) -> list[float | None]:
+    """Compute a point-in-time z-score against the prior window only."""
+
+    _require_period(period)
+    output: list[float | None] = []
+    for index, value in enumerate(values):
+        if index < period:
+            output.append(None)
+            continue
+        window = values[index - period : index]
+        spread = pstdev(window)
+        output.append((value - mean(window)) / spread if spread else 0.0)
+    return output
+
+
+def session_vwap(bars: tuple[MarketBar, ...]) -> list[float | None]:
+    """Return cumulative session VWAP, resetting on exchange session identity."""
+
+    output: list[float | None] = []
+    session: str | None = None
+    price_volume = 0.0
+    volume_total = 0
+    for bar in bars:
+        if bar.exchange_session_id != session:
+            session = bar.exchange_session_id
+            price_volume = 0.0
+            volume_total = 0
+        typical_price = (bar.high + bar.low + bar.close) / 3.0
+        price_volume += typical_price * bar.volume
+        volume_total += bar.volume
+        output.append(price_volume / volume_total if volume_total else None)
+    return output
+
+
 def _require_period(period: int) -> None:
     if period <= 0 or not math.isfinite(period):
         raise ValueError("period must be a positive integer")

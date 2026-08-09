@@ -10,6 +10,7 @@ from intraday_scanner.alpha.v5_policy import (
     alphaops_strategy_contract,
     evaluate_v5_official_paper,
     is_v5_active,
+    v5_execution_cost_model,
 )
 
 
@@ -146,6 +147,15 @@ def test_v5_clean_candidate_is_risk_sized_from_simulated_equity() -> None:
     assert decision.feasibility_score == 100
     assert len(decision.decision_fingerprint) == 64
     assert decision.broker_execution_enabled is False
+
+
+def test_v5_cost_model_is_explicitly_provisional_until_empirical_evidence() -> None:
+    model = v5_execution_cost_model()
+
+    assert model.version == "alphaops-v5-cost-model-50bps-0.005ps"
+    assert model.entry_slippage_bps == 50.0
+    assert model.exit_slippage_bps == 50.0
+    assert model.evaluation_status == "NOT_EVALUABLE_PENDING_EMPIRICAL_COST"
 
 
 def test_v5_watch_only_fallback_and_manual_confirmation_never_enter() -> None:
