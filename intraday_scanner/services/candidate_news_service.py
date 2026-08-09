@@ -16,6 +16,7 @@ from intraday_scanner.providers.news_provider import (
     AlpacaNewsProvider,
     headline_has_dilution_risk,
 )
+from intraday_scanner.scenario.contracts import canonical_hash
 from intraday_scanner.services.premarket_intelligence import classify_catalyst
 
 
@@ -57,18 +58,46 @@ def enrich_candidate_news(
         except (DataProviderError, OSError, TypeError, ValueError) as exc:
             status = "failed"
             failure_reason = str(exc)
-    latest: dict[str, NewsItem] = {}
-    for item in items:
+    deduped_items = _dedupe_news_items(items)
+    by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for item in deduped_items:
         ticker = str(item.ticker or "").upper()
-        prior = latest.get(ticker)
-        if prior is None or str(item.published_at) > str(prior.published_at):
-            latest[ticker] = item
+        by_ticker.setdefault(ticker, []).append(
+            {
+                "ticker": ticker,
+                "headline": item.headline,
+                "summary": item.summary,
+                "published_at": item.published_at,
+                "first_seen_at": started_at,
+                "source": item.source,
+                "url": item.url,
+                "canonical_url": _canonical_url(item.url),
+                "content_hash_sha256": canonical_hash(
+                    {"headline": item.headline, "summary": item.summary}
+                ),
+                "timing_kind": "forward_observed",
+            }
+        )
+    for ticker in by_ticker:
+        by_ticker[ticker].sort(
+            key=lambda row: (str(row["published_at"]), str(row["first_seen_at"]))
+        )
     enriched: list[dict[str, Any]] = []
     matched = 0
     for row in rows:
         updated = dict(row)
         ticker = str(updated.get("ticker") or "").upper()
-        news_item = latest.get(ticker)
+        articles = by_ticker.get(ticker, [])
+        news_item = deduped_items[
+            max(
+                (
+                    index
+                    for index, item in enumerate(deduped_items)
+                    if str(item.ticker).upper() == ticker
+                ),
+                default=-1,
+            )
+        ] if articles else None
         if news_item is not None:
             matched += 1
             assessment = classify_catalyst(news_item.headline, has_news=True)
@@ -83,6 +112,8 @@ def enrich_candidate_news(
                     "catalyst_confidence": assessment.catalyst_confidence,
                     "catalyst_status": "VERIFIED",
                     "catalyst_risk_flags": ";".join(assessment.catalyst_risk_flags),
+                    "catalyst_articles": articles,
+                    "catalyst_article_count": len(articles),
                 }
             )
             if headline_has_dilution_risk(news_item.headline):
@@ -95,6 +126,8 @@ def enrich_candidate_news(
                 warnings.append("news_dilution_language")
                 updated["coverage_warning"] = ";".join(dict.fromkeys(warnings))
         elif ticker in tickers:
+            updated["catalyst_articles"] = []
+            updated["catalyst_article_count"] = 0
             if not str(updated.get("catalyst_status") or "").strip():
                 updated["catalyst_status"] = "MISSING"
             if updated.get("catalyst_confidence") in {None, ""}:
@@ -108,7 +141,7 @@ def enrich_candidate_news(
         "requested_at": at.isoformat(),
         "provider": "alpaca_news",
         "queried_symbol_count": 0 if rehearsal_mode else len(tickers),
-        "article_count": len(items),
+        "article_count": len(deduped_items),
         "matched_symbol_count": matched,
         "failure_reason": failure_reason,
         "research_only": True,
@@ -129,6 +162,20 @@ def enrich_candidate_news(
         )
         result["snapshot_path"] = str(snapshot)
     return result
+
+
+def _dedupe_news_items(items: list[NewsItem]) -> list[NewsItem]:
+    unique: dict[str, NewsItem] = {}
+    for item in items:
+        key = _canonical_url(item.url) or canonical_hash(
+            {"headline": item.headline, "summary": item.summary}
+        )
+        unique.setdefault(key, item)
+    return sorted(unique.values(), key=lambda item: (str(item.published_at), item.ticker.upper()))
+
+
+def _canonical_url(url: str) -> str:
+    return str(url or "").strip().split("#", 1)[0].rstrip("/")
 
 
 __all__ = ["enrich_candidate_news"]

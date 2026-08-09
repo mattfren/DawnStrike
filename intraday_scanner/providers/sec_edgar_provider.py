@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from intraday_scanner.models import utc_now_iso
 from intraday_scanner.providers.web_source_base import (
@@ -171,6 +175,275 @@ def parse_submissions_json(text: str, *, ticker: str) -> list[dict[str, Any]]:
             }
         )
     return events
+
+
+def parse_filing_evidence(
+    text: str,
+    *,
+    ticker: str,
+    fetched_at: str | None = None,
+    first_seen_at: str | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize SEC submission metadata without treating title as document terms."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    recent = dict(dict(payload.get("filings") or {}).get("recent") or {})
+    forms = _as_list(recent.get("form"))
+    filed = _as_list(recent.get("filingDate"))
+    accession = _as_list(recent.get("accessionNumber"))
+    primary = _as_list(recent.get("primaryDocument"))
+    acceptance = _as_list(recent.get("acceptanceDateTime"))
+    items = _as_list(recent.get("items"))
+    descriptions = _as_list(recent.get("primaryDocDescription"))
+    observed_at = fetched_at or datetime.now(timezone.utc).isoformat()
+    first_seen = first_seen_at or observed_at
+    records: list[dict[str, Any]] = []
+    for index, raw_form in enumerate(forms):
+        form = str(raw_form or "").upper()
+        accession_number = _value_at(accession, index)
+        primary_document = _value_at(primary, index)
+        filing_date = _value_at(filed, index)
+        acceptance_timestamp = _value_at(acceptance, index)
+        records.append(
+            {
+                "ticker": ticker.upper(),
+                "cik": str(payload.get("cik") or ""),
+                "accession_number": accession_number,
+                "form": form.rstrip("/A") if form.endswith("/A") else form,
+                "amendment_status": "amended" if form.endswith("/A") else "original",
+                "sec_acceptance_timestamp": acceptance_timestamp,
+                "filing_date": filing_date,
+                "eight_k_items": (
+                    str(_value_at(items, index) or "") if form.startswith("8-K") else ""
+                ),
+                "primary_document": primary_document,
+                "primary_document_url": _filing_url(payload, accession_number, primary_document),
+                "primary_doc_description": _value_at(descriptions, index),
+                "fetched_at": observed_at,
+                "first_seen_at": first_seen,
+                "source": "sec_edgar",
+                "content_hash_sha256": "",
+            }
+        )
+    return records
+
+
+def fetch_primary_filing_document(
+    *,
+    filing: dict[str, Any],
+    source: WebSourceConfig,
+    config: WebCollectionConfig,
+    out_dir: str | Path,
+) -> dict[str, Any]:
+    """Fetch one primary SEC document under the existing fair-access transport."""
+
+    url = str(filing.get("primary_document_url") or "")
+    if not url:
+        return {"status": "missing_primary_document_url", **filing}
+    fetch = fetch_text(source, config, url=url, allow_unlisted_url=True)
+    payload = {**filing, **fetch.payload()}
+    if fetch.status != "success":
+        payload.update({"status": "provider_failed", "content_hash_sha256": ""})
+        return payload
+    content = fetch.content.encode("utf-8")
+    digest = hashlib.sha256(content).hexdigest()
+    directory = Path(out_dir) / "sec" / str(filing.get("ticker") or "UNKNOWN").upper()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{digest}.html"
+    if destination.exists() and hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+        raise ValueError("SEC primary document hash conflict")
+    if not destination.exists():
+        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(content)
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    payload.update(
+        {
+            "status": "success",
+            "raw_artifact_path": str(destination),
+            "content_hash_sha256": digest,
+            "content_length": len(content),
+        }
+    )
+    return payload
+
+
+def normalize_filing_facts(
+    filing: dict[str, Any],
+    *,
+    document_text: str = "",
+) -> dict[str, Any]:
+    """Extract explicit facts and verify amount/price/share arithmetic."""
+
+    text_blob = " ".join(
+        str(filing.get(key) or "") for key in ("form", "primary_doc_description")
+    ) + " " + document_text
+    normalized = text_blob.lower()
+    security_type = (
+        "common_stock"
+        if "common stock" in normalized or "common shares" in normalized
+        else "preferred_stock"
+        if "preferred stock" in normalized
+        else "debt"
+        if "debt" in normalized or "notes" in normalized
+        else "unknown"
+    )
+    gross_amount = _amount_match(
+        normalized,
+        ("gross proceeds", "aggregate offering amount", "offering amount"),
+    )
+    price = _price_match(normalized)
+    share_count = _share_count_match(normalized)
+    atm_capacity = _amount_match(normalized, ("at-the-market", "atm program", "aggregate sales") )
+    remaining_amount = _amount_match(normalized, ("remaining capacity", "remaining amount"))
+    warrant_count = _number_match(normalized, ("warrants", "warrant"))
+    strike = _number_match(normalized, ("exercise price", "strike price"))
+    reverse_split = bool(re.search(r"reverse split|reverse stock split", normalized))
+    arithmetic_status = "UNKNOWN"
+    if gross_amount is not None and price is not None and share_count is not None:
+        arithmetic_status = (
+            "PASS"
+            if abs(gross_amount - price * share_count)
+            <= max(1.0, gross_amount * 0.05)
+            else "CONFLICT"
+        )
+    return {
+        "security_type": security_type,
+        "gross_amount": gross_amount,
+        "price": price,
+        "share_count": share_count,
+        "atm_capacity": atm_capacity,
+        "atm_remaining_amount": remaining_amount,
+        "warrant_count": warrant_count,
+        "warrant_strike": strike,
+        "warrant_expiry": _date_match(normalized, "expiry"),
+        "reverse_split": reverse_split,
+        "relevant_offering_terms": _offering_terms(normalized),
+        "arithmetic_status": arithmetic_status,
+        "facts_status": (
+            "PARTIAL"
+            if "unknown" in {security_type} or arithmetic_status == "UNKNOWN"
+            else "NORMALIZED"
+        ),
+    }
+
+
+def classify_filing_research_feature(
+    filing: dict[str, Any],
+    facts: dict[str, Any],
+    *,
+    decision_at: str,
+) -> dict[str, Any]:
+    """Register the avoid-long feature without creating a fade/short route."""
+
+    form = str(filing.get("form") or "").upper()
+    filed = str(filing.get("filing_date") or "")[:10]
+    decision_date = str(decision_at or "")[:10]
+    try:
+        age_hours = (
+            (
+                datetime.fromisoformat(decision_at.replace("Z", "+00:00"))
+                - datetime.fromisoformat(f"{filed}T00:00:00+00:00")
+            ).total_seconds()
+            / 3600
+            if filed
+            else None
+        )
+    except ValueError:
+        age_hours = None
+    terms = str(facts.get("relevant_offering_terms") or "")
+    avoid_long = (
+        form in {"S-3", "424B5"}
+        and age_hours is not None
+        and 0 <= age_hours <= 72 * 1.0
+        and bool(terms)
+    )
+    return {
+        "feature_id": "avoid_long_s3_424b5_inside_72h",
+        "symbol": filing.get("ticker", ""),
+        "security_type": facts.get("security_type", "unknown"),
+        "actual_takedown_terms": terms or "unknown",
+        "avoid_long": avoid_long,
+        "route": "none",
+        "status": "VERIFIED" if avoid_long else "NO_ACTION_OR_UNKNOWN",
+        "decision_at": decision_at,
+        "decision_date": decision_date,
+    }
+
+
+def _amount_match(text: str, labels: tuple[str, ...]) -> float | None:
+    if not any(label in text for label in labels):
+        return None
+    match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*(million|billion|m|b)?", text)
+    if not match:
+        return None
+    value = float(match.group(1))
+    multiplier = {
+        "million": 1_000_000.0,
+        "m": 1_000_000.0,
+        "billion": 1_000_000_000.0,
+        "b": 1_000_000_000.0,
+    }.get(match.group(2) or "", 1.0)
+    return value * multiplier
+
+
+def _number_match(text: str, labels: tuple[str, ...]) -> float | None:
+    if not any(label in text for label in labels):
+        return None
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:million|m|billion|b)?", text)
+    return float(match.group(1)) if match else None
+
+
+def _price_match(text: str) -> float | None:
+    match = re.search(
+        r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:price per share|offering price)",
+        text,
+    )
+    return (
+        float(match.group(1))
+        if match
+        else _number_match(text, ("price per share", "offering price"))
+    )
+
+
+def _share_count_match(text: str) -> float | None:
+    match = re.search(
+        r"([0-9]+(?:\.[0-9]+)?)\s*(million|billion|m|b)?\s+shares",
+        text,
+    )
+    if not match:
+        return _number_match(
+            text, ("shares offered", "shares of common stock", "common shares")
+        )
+    multiplier = {
+        "million": 1_000_000.0,
+        "m": 1_000_000.0,
+        "billion": 1_000_000_000.0,
+        "b": 1_000_000_000.0,
+    }.get(match.group(2) or "", 1.0)
+    return float(match.group(1)) * multiplier
+
+
+def _date_match(text: str, label: str) -> str | None:
+    match = re.search(rf"{label}[^0-9]*(20[0-9]{{2}}-[0-9]{{2}}-[0-9]{{2}})", text)
+    return match.group(1) if match else None
+
+
+def _offering_terms(text: str) -> str:
+    markers = [
+        marker
+        for marker in ("takedown", "at-the-market", "shelf", "warrant")
+        if marker in text
+    ]
+    return ";".join(markers) if markers else ""
 
 
 def enrich_rows_with_sec_risk(

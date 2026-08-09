@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1189,6 +1189,70 @@ def _migration_023_alpha_path_replay_reconciliations(
     )
 
 
+def _migration_024_catalyst_evidence(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add append-only point-in-time catalyst evidence and extraction lineage."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS catalyst_evidence_events (
+            event_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            source_content_hash_sha256 TEXT NOT NULL,
+            published_at TEXT,
+            first_seen_at TEXT NOT NULL,
+            available_at_decision INTEGER NOT NULL,
+            decision_at TEXT,
+            event_type TEXT NOT NULL,
+            polarity TEXT NOT NULL,
+            financing_mechanism TEXT NOT NULL,
+            novelty TEXT NOT NULL,
+            timing TEXT NOT NULL,
+            source_coverage_status TEXT NOT NULL,
+            promotional_status TEXT NOT NULL,
+            rumor_status TEXT NOT NULL,
+            squeeze_mechanics TEXT NOT NULL,
+            confidence_status TEXT NOT NULL,
+            raw_artifact_path TEXT,
+            raw_artifact_hash_sha256 TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (source_kind, source_content_hash_sha256)
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalyst_events_symbol_time
+        ON catalyst_evidence_events(symbol, published_at, first_seen_at);
+        CREATE INDEX IF NOT EXISTS idx_catalyst_events_decision_availability
+        ON catalyst_evidence_events(symbol, decision_at, available_at_decision);
+        CREATE INDEX IF NOT EXISTS idx_catalyst_events_feature
+        ON catalyst_evidence_events(event_type, financing_mechanism, timing);
+
+        CREATE TABLE IF NOT EXISTS catalyst_claim_extractions (
+            extraction_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            source_content_hash_sha256 TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL,
+            output_hash_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL,
+            evidence_spans_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (event_id, input_hash_sha256, prompt_version, schema_version),
+            FOREIGN KEY (event_id) REFERENCES catalyst_evidence_events(event_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalyst_extractions_event
+        ON catalyst_claim_extractions(event_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_catalyst_extractions_source_hash
+        ON catalyst_claim_extractions(source_content_hash_sha256, input_hash_sha256);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1222,4 +1286,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (21, _migration_021_official_strategy_cohort_lock),
     (22, _migration_022_intraday_evidence_spine),
     (23, _migration_023_alpha_path_replay_reconciliations),
+    (24, _migration_024_catalyst_evidence),
 )
