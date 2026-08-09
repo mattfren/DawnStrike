@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1268,6 +1268,7 @@ def _migration_025_v6_evidence_lineage(
         "alpha_v6_evaluations",
         "alpha_v6_operational_receipts",
     )
+
     columns = (
         "source_artifact_hash_sha256 TEXT",
         "path_replay_id TEXT",
@@ -1323,6 +1324,56 @@ def _migration_025_v6_evidence_lineage(
     )
 
 
+def _migration_026_trade_attribution_evidence(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add immutable case/factor receipts for diagnostic attribution."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS trade_attribution_cases (
+            case_id TEXT PRIMARY KEY,
+            trade_id TEXT NOT NULL UNIQUE,
+            market_date TEXT,
+            ticker TEXT,
+            strategy_id TEXT,
+            attribution_status TEXT NOT NULL,
+            coverage_status TEXT NOT NULL,
+            evidence_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_attribution_cases_date
+        ON trade_attribution_cases(market_date, strategy_id, coverage_status);
+        CREATE INDEX IF NOT EXISTS idx_trade_attribution_cases_status
+        ON trade_attribution_cases(attribution_status, created_at);
+
+        CREATE TABLE IF NOT EXISTS trade_attribution_factors (
+            factor_id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            factor_key TEXT NOT NULL,
+            factor_status TEXT NOT NULL,
+            evidence_hash_sha256 TEXT,
+            evaluator_version TEXT NOT NULL,
+            confidence_basis TEXT NOT NULL,
+            counterfactual_policy TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK (factor_status IN (
+                'observed_defect', 'supported_contributor', 'suspected',
+                'unknown', 'not_applicable'
+            )),
+            UNIQUE (case_id, factor_key, factor_id),
+            FOREIGN KEY(case_id) REFERENCES trade_attribution_cases(case_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_attribution_factors_case
+        ON trade_attribution_factors(case_id, factor_key, factor_status);
+        CREATE INDEX IF NOT EXISTS idx_trade_attribution_factors_status
+        ON trade_attribution_factors(factor_status, created_at);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1358,4 +1409,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (23, _migration_023_alpha_path_replay_reconciliations),
     (24, _migration_024_catalyst_evidence),
     (25, _migration_025_v6_evidence_lineage),
+    (26, _migration_026_trade_attribution_evidence),
 )

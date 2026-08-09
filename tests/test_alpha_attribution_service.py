@@ -177,6 +177,12 @@ def test_causal_attribution_separates_expectation_observation_and_missing_truth(
     assert no_trade["average_net_return_pct"] is None
     assert report["promotion_status"] == "operator_review_required_not_promoted"
     assert report["broker_execution_enabled"] is False
+    assert report["diagnostic_attribution"]["single_trade_status"] == (
+        "unexplained_within_predeclared_model_distribution"
+    )
+    assert report["diagnostic_attribution"]["aggregate"]["status"] == (
+        "NOT_EVALUABLE_PENDING_PROTOCOL_APPROVAL"
+    )
 
 
 def test_empty_attribution_uses_null_not_zero() -> None:

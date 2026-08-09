@@ -16,12 +16,23 @@ from statistics import mean, median
 from typing import Any
 
 from intraday_scanner.performance.paper_ops import load_paper_ops
+from intraday_scanner.storage.attribution_evidence_store import AttributionEvidenceStore
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 ALPHA_STRATEGIES = frozenset({"alphaops_v4", "alphaops_v5"})
 OFFICIAL_COHORT = "official_telegram"
 ATTRIBUTION_VERSION = "alphaops-causal-attribution-v1"
 CROSS_VERSION_ATTRIBUTION_VERSION = "alphaops-cross-version-attribution-v1"
+SINGLE_TRADE_ATTRIBUTION_STATUS = "unexplained_within_predeclared_model_distribution"
+_FACTOR_STATUSES = frozenset(
+    {
+        "observed_defect",
+        "supported_contributor",
+        "suspected",
+        "unknown",
+        "not_applicable",
+    }
+)
 
 
 def generate_alpha_attribution_report(
@@ -93,6 +104,12 @@ def generate_alpha_attribution_report(
         paper_ops_issues=list(paper_ops.get("issues") or []),
         generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     )
+    diagnostic = dict(report.get("diagnostic_attribution") or {})
+    persistence = AttributionEvidenceStore(db_path).persist_cases(
+        list(diagnostic.get("cases") or [])
+    )
+    report["diagnostic_attribution"] = {**diagnostic, "persistence": persistence}
+    report["payload_hash_sha256"] = _hash(report)
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
     _atomic_json(output / "alpha_attribution.json", report)
@@ -129,6 +146,10 @@ def build_alpha_attribution_report(
         if str(row.get("signal_id") or "")
     }
     enriched = [_enriched_trade(row, signal_by_id, selection_by_signal) for row in trades]
+    diagnostic_attribution = build_trade_attribution_cases(
+        enriched,
+        generated_at=generated_at,
+    )
     official = [row for row in enriched if str(row.get("cohort") or "") == OFFICIAL_COHORT]
     dates = sorted(
         {
@@ -194,6 +215,7 @@ def build_alpha_attribution_report(
             paper_ops_rows=list(paper_ops_rows or []),
             paper_ops_issues=list(paper_ops_issues or []),
         ),
+        "diagnostic_attribution": diagnostic_attribution,
         "outcome_coverage": {
             "attempt_count": len(attempts),
             "resolved_count": len(attempts) - len(terminal_missing),
@@ -238,6 +260,251 @@ def build_alpha_attribution_report(
     )
     report["payload_hash_sha256"] = _hash(report)
     return report
+
+
+def build_trade_attribution_cases(
+    trades: list[dict[str, Any]], *, generated_at: str
+) -> dict[str, Any]:
+    """Build immutable diagnostic cases without asserting a single cause."""
+
+    cases: list[dict[str, Any]] = []
+    for trade in trades:
+        if not _is_reconciled_closed_trade(trade):
+            continue
+        case_id = "tac-" + _hash(
+            {
+                "trade_id": trade.get("trade_id"),
+                "reconciliation_status": trade.get("reconciliation_status"),
+                "source_lineage_hash_sha256": trade.get("source_lineage_hash_sha256"),
+            }
+        )[:28]
+        setup = _setup_factor(case_id, trade, generated_at=generated_at)
+        execution = _execution_factor(case_id, trade, generated_at=generated_at)
+        distribution = _factor(
+            case_id,
+            "outcome_distribution",
+            "unknown",
+            {
+                "after_cost_return_pct": _number(trade.get("net_return_pct")),
+                "expected_return_pct": _number(trade.get("expected_return_pct")),
+                "outcome_reconciliation_quality": trade.get(
+                    "outcome_reconciliation_quality"
+                ),
+            },
+            generated_at=generated_at,
+            missing_fields=["predeclared_model_distribution_evidence"],
+            confidence_basis=(
+                "A single closed trade cannot identify causal correctness or randomness."
+            ),
+            counterfactual_policy=(
+                "No single-trade parameter update; require aggregate preregistered OOS review."
+            ),
+        )
+        factor_list = [setup, execution, distribution]
+        availability = [str(item["coverage_status"]) for item in factor_list]
+        coverage_status = (
+            "complete"
+            if all(item == "complete" for item in availability)
+            else "unknown"
+            if all(item == "unknown" for item in availability)
+            else "partial"
+        )
+        case = {
+            "case_id": case_id,
+            "trade_id": str(trade.get("trade_id") or ""),
+            "market_date": _row_date(trade),
+            "ticker": str(trade.get("ticker") or "").upper() or None,
+            "strategy_id": trade.get("strategy_id"),
+            "attribution_status": SINGLE_TRADE_ATTRIBUTION_STATUS,
+            "coverage_status": coverage_status,
+            "coverage": {
+                "complete_factor_count": availability.count("complete"),
+                "partial_factor_count": availability.count("partial"),
+                "unknown_factor_count": availability.count("unknown"),
+                "missing_truth_is_zero": False,
+            },
+            "frozen_decision_inputs": dict(trade.get("frozen_decision_inputs") or {}),
+            "evidence_links": _evidence_links(trade),
+            "evidence_hash_sha256": _hash(
+                {
+                    "trade_id": trade.get("trade_id"),
+                    "frozen_decision_inputs": trade.get("frozen_decision_inputs"),
+                    "evidence_links": _evidence_links(trade),
+                    "factor_ids": [item["factor_id"] for item in factor_list],
+                }
+            ),
+            "factors": factor_list,
+            "unsupported_unique_causal_claim": False,
+            "automatic_policy_mutation": False,
+            "research_only": True,
+            "broker_execution_enabled": False,
+            "created_at": generated_at,
+        }
+        cases.append(case)
+    complete = sum(1 for case in cases if case["coverage_status"] == "complete")
+    partial = sum(1 for case in cases if case["coverage_status"] == "partial")
+    unknown = sum(1 for case in cases if case["coverage_status"] == "unknown")
+    factor_count = sum(len(case["factors"]) for case in cases)
+    return {
+        "schema_version": "dawnstrike.trade_attribution.v1",
+        "status": "COMPLETE" if cases else "WAITING_FOR_RECONCILED_CLOSED_TRADES",
+        "case_count": len(cases),
+        "factor_count": factor_count,
+        "cases": cases,
+        "coverage": {"complete": complete, "partial": partial, "unknown": unknown},
+        "aggregate": {
+            "status": "NOT_EVALUABLE_PENDING_PROTOCOL_APPROVAL",
+            "effective_n": complete,
+            "preregistered_minimum_effective_n": None,
+            "uncertainty_intervals": None,
+            "sequential_multiple_test_controls": "NOT_APPLIED",
+            "walk_forward_holdout_confirmation": "NOT_CONFIRMED",
+            "shadow_remediation_candidate": None,
+            "automatic_policy_mutation": False,
+        },
+        "single_trade_status": SINGLE_TRADE_ATTRIBUTION_STATUS,
+        "missing_truth_is_zero": False,
+        "unsupported_unique_causal_claim": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _setup_factor(case_id: str, trade: dict[str, Any], *, generated_at: str) -> dict[str, Any]:
+    frozen = dict(trade.get("frozen_decision_inputs") or {})
+    required = (
+        "setup_key",
+        "regime_key",
+        "catalyst_class",
+        "risk_at_decision",
+        "atr_at_decision",
+    )
+    missing = [key for key in required if frozen.get(key) in {None, "", "unknown"}]
+    explicit_status = str(trade.get("setup_attribution_status") or "unknown")
+    status = explicit_status if explicit_status in _FACTOR_STATUSES else "unknown"
+    return _factor(
+        case_id,
+        "setup_risk_catalyst",
+        status,
+        {"frozen_decision_inputs": frozen},
+        generated_at=generated_at,
+        missing_fields=missing,
+        confidence_basis=(
+            "Frozen decision-time risk and catalyst inputs only; realized post-entry "
+            "ATR is excluded."
+        ),
+        counterfactual_policy=(
+            "No parameter change from one trade; require preregistered aggregate OOS "
+            "evidence."
+        ),
+    )
+
+
+def _execution_factor(case_id: str, trade: dict[str, Any], *, generated_at: str) -> dict[str, Any]:
+    aliases = {
+        "intent_timestamp": ("intent_timestamp", "intent_at"),
+        "order_timestamp": ("order_timestamp", "order_submitted_at", "submitted_at"),
+        "quote_feed_identity": ("quote_feed_identity", "quote_feed_id"),
+        "trade_feed_identity": ("trade_feed_identity", "trade_feed_id"),
+        "intent_size": ("intent_size", "intent_quantity", "intent_notional"),
+        "order_size": ("order_size", "order_quantity", "order_notional"),
+        "halt_luld_state": ("halt_luld_state", "halt_status", "luld_state"),
+        "latency_ms": ("latency_ms", "execution_latency_ms"),
+        "modeled_cost": ("modeled_cost_bps", "modeled_cost_identity"),
+        "observed_cost": ("observed_cost_bps", "observed_cost_identity"),
+    }
+    evidence: dict[str, Any] = {}
+    missing: list[str] = []
+    for field, candidates in aliases.items():
+        value = None
+        for key in candidates:
+            candidate = trade.get(key)
+            if candidate is not None and candidate != "":
+                value = candidate
+                break
+        if value is None:
+            missing.append(field)
+        else:
+            evidence[field] = value
+    explicit_status = str(trade.get("execution_attribution_status") or "unknown")
+    status = explicit_status if explicit_status in _FACTOR_STATUSES else "unknown"
+    return _factor(
+        case_id,
+        "execution_quality",
+        status,
+        evidence,
+        generated_at=generated_at,
+        missing_fields=missing,
+        confidence_basis=(
+            "Requires intent/order timestamps, feed identities, sizes, halt/LULD state, "
+            "latency, and modeled-versus-observed cost."
+        ),
+        counterfactual_policy=(
+            "Do not infer execution causality from Yahoo polling or flat slippage."
+        ),
+    )
+
+
+def _factor(
+    case_id: str,
+    factor_key: str,
+    factor_status: str,
+    evidence: dict[str, Any],
+    *,
+    generated_at: str,
+    missing_fields: list[str],
+    confidence_basis: str,
+    counterfactual_policy: str,
+) -> dict[str, Any]:
+    if factor_status not in _FACTOR_STATUSES:
+        factor_status = "unknown"
+    coverage_status = "complete" if not missing_fields else "partial" if evidence else "unknown"
+    evidence_hash = _hash(evidence) if evidence else None
+    return {
+        "factor_id": "taf-" + _hash({"case_id": case_id, "factor_key": factor_key})[:28],
+        "case_id": case_id,
+        "factor_key": factor_key,
+        "factor_status": factor_status,
+        "coverage_status": coverage_status,
+        "missing_fields": sorted(missing_fields),
+        "evidence": evidence,
+        "evidence_hash_sha256": evidence_hash,
+        "evaluator_version": ATTRIBUTION_VERSION,
+        "confidence_basis": confidence_basis,
+        "counterfactual_policy": counterfactual_policy,
+        "unsupported_unique_causal_claim": False,
+        "created_at": generated_at,
+    }
+
+
+def _is_reconciled_closed_trade(trade: dict[str, Any]) -> bool:
+    closed = bool(
+        trade.get("closed_at")
+        or trade.get("exit_time")
+        or trade.get("exit_reason")
+        or trade.get("exit_price") is not None
+    )
+    if not closed or not str(trade.get("trade_id") or "").strip():
+        return False
+    status = str(trade.get("reconciliation_status") or trade.get("record_status") or "").lower()
+    if status not in {"reconciled", "complete", "accepted", "realized", "closed"}:
+        return False
+    return True
+
+
+def _evidence_links(trade: dict[str, Any]) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for field in (
+        "source_lineage_hash_sha256",
+        "source_bar_hash_sha256",
+        "path_replay_id",
+        "benchmark_hash_sha256",
+        "evidence_hash_sha256",
+    ):
+        value = str(trade.get(field) or "").strip()
+        if value:
+            links.append({"field": field, "value": value})
+    return links
 
 
 def _cross_version_attribution(
@@ -890,6 +1157,47 @@ def _enriched_trade(
             "actual_after_cost_reward_risk",
             "after_cost_reward_risk",
             "reward_risk_ratio",
+        ),
+        "frozen_decision_inputs": _frozen_decision_inputs(merged),
+        "evidence_links": _evidence_links(merged),
+    }
+
+
+def _frozen_decision_inputs(merged: dict[str, Any]) -> dict[str, Any]:
+    """Select decision-time fields only; never copy realized post-entry ATR."""
+
+    catalyst = merged.get("catalyst")
+    catalyst_data = dict(catalyst) if isinstance(catalyst, dict) else {}
+    return {
+        "setup_key": merged.get("setup_key") or merged.get("primary_setup"),
+        "regime_key": merged.get("regime_key") or merged.get("market_regime"),
+        "catalyst_class": merged.get("catalyst_category")
+        or merged.get("catalyst_class")
+        or catalyst_data.get("event_type"),
+        "catalyst_evidence_hash": catalyst_data.get("evidence_hash_sha256")
+        or catalyst_data.get("source_content_hash_sha256"),
+        "catalyst_available_at_decision": catalyst_data.get("available_at_decision"),
+        "risk_at_decision": _first_number(
+            merged,
+            "risk_at_decision",
+            "risk_pct_at_decision",
+            "stop_distance_pct",
+        ),
+        "atr_at_decision": _first_number(
+            merged,
+            "atr_at_decision",
+            "decision_atr",
+            "atr_pct_at_decision",
+        ),
+        "stop_price_at_decision": _first_number(
+            merged,
+            "stop_price_at_decision",
+            "stop_price",
+        ),
+        "target_price_at_decision": _first_number(
+            merged,
+            "target_price_at_decision",
+            "target_price",
         ),
     }
 
