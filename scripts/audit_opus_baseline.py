@@ -27,6 +27,13 @@ def _quoted_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _table_count(connection: sqlite3.Connection, name: str) -> int:
+    quoted_name = _quoted_identifier(str(name))
+    return connection.execute(
+        f"SELECT COUNT(*) FROM {quoted_name}"  # nosec B608 - validated identifier
+    ).fetchone()[0]
+
+
 def _rows(connection: sqlite3.Connection, sql: str) -> list[dict[str, object]]:
     cursor = connection.execute(sql)
     names = [column[0] for column in cursor.description or ()]
@@ -84,9 +91,7 @@ def collect_inventory(snapshot: Path, audited_sha: str = AUDITED_SHA) -> dict[st
         ]
         available_tables = {str(name) for name in table_names}
         table_counts = {
-            str(name): connection.execute(
-                f"SELECT COUNT(*) FROM {_quoted_identifier(str(name))}"
-            ).fetchone()[0]
+            str(name): _table_count(connection, name)
             for name in table_names
         }
         baseline_sql = {
