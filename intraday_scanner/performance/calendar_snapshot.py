@@ -18,6 +18,7 @@ from intraday_scanner.performance.contracts import safe_float, stable_hash
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.sql_safety import quote_sql_identifier
 from intraday_scanner.storage.migrations import run_migrations
+from intraday_scanner.storage.read_only import connect_read_only
 
 MAX_CALENDAR_BYTES = 500 * 1024
 DISPLAY_STATUSES = frozenset(
@@ -508,8 +509,7 @@ def _load_selection_context(
     *,
     market_date: str | None,
 ) -> dict[str, dict[str, Any]]:
-    with sqlite3.connect(db_path) as connection:
-        connection.row_factory = sqlite3.Row
+    with connect_read_only(db_path, row_factory=sqlite3.Row) as connection:
         selections = _select_optional(connection, "signal_selections", market_date)
         deliveries = _select_optional(connection, "notification_delivery_memberships", market_date)
         signals = _select_optional(connection, "historical_signals", market_date)

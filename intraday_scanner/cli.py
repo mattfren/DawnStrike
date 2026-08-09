@@ -1879,7 +1879,7 @@ def _run_daily_heartbeat(args: argparse.Namespace) -> int:
 
 def _run_daily_orchestrator_status(args: argparse.Namespace) -> int:
     result = daily_orchestration_status(
-        SQLiteScanStore(args.db_path),
+        SQLiteScanStore(args.db_path, read_only=True),
         market_date=args.market_date,
         state_root=args.state_root,
         heartbeat_ttl_minutes=args.heartbeat_ttl_minutes,

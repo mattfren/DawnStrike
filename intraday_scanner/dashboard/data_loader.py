@@ -41,6 +41,7 @@ from intraday_scanner.sql_safety import (
     quote_sql_identifiers,
     quote_sql_order_by,
 )
+from intraday_scanner.storage.read_only import connect_read_only
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 CALENDAR_RETURN_POLICIES = {
@@ -99,7 +100,7 @@ def load_output_dir(out_dir: str | Path) -> dict[str, Any]:
 
 
 def load_sqlite(db_path: str | Path) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     latest = store.load_latest_scan() or {
         "summary": {},
         "ranked_candidates": [],
@@ -833,7 +834,7 @@ def _calendar_context(db_path: str | Path) -> dict[str, Any]:
         context["warnings"].append(f"Database not found: {path}")
         return context
     try:
-        with sqlite3.connect(path) as connection:
+        with connect_read_only(path, row_factory=sqlite3.Row) as connection:
             connection.row_factory = sqlite3.Row
             tables = _table_names(connection)
             context["warnings"].extend(_missing_calendar_table_warnings(tables))
@@ -2417,8 +2418,7 @@ def _default_calendar_range(db_path: str | Path) -> tuple[str, str]:
     path = Path(db_path)
     if path.exists():
         try:
-            with sqlite3.connect(path) as connection:
-                connection.row_factory = sqlite3.Row
+            with connect_read_only(path, row_factory=sqlite3.Row) as connection:
                 tables = _table_names(connection)
                 for table, column in (
                     ("scan_runs", "created_at"),

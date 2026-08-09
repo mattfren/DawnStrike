@@ -932,7 +932,7 @@ def alpha_learn(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
 
 
 def alpha_status(*, db_path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     latest_scan = store.load_latest_scan()
     signals = store.load_alpha_signals(limit=20)
@@ -1027,7 +1027,7 @@ def alpha_report(
     db_path: str | Path = DEFAULT_DB_PATH,
     out_dir: str | Path = "outputs/alpha_report",
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = load_production_alpha_learning_labels(store)

@@ -11,6 +11,7 @@ from typing import Any
 from intraday_scanner.errors import StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
+from intraday_scanner.storage.read_only import connect_read_only
 
 _V6_PAYLOAD_TABLE_ORDERS = {
     "alpha_v6_experiments": "created_at",
@@ -43,10 +44,15 @@ _V6_SINGLE_PAYLOAD_COLUMNS = {
 
 
 class SQLiteScanStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.db_path = Path(db_path)
+        self.read_only = read_only
 
     def initialize(self) -> None:
+        if self.read_only:
+            with self._connect() as connection:
+                connection.execute("SELECT 1")
+            return
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as connection:
@@ -7313,13 +7319,14 @@ class SQLiteScanStore:
             raise StorageError(f"Could not load scenario replay trades: {exc}") from exc
 
     def _connect(self) -> sqlite3.Connection:
+        if self.read_only:
+            return connect_read_only(self.db_path)
         return sqlite3.connect(self.db_path)
 
     def connect_read_only(self) -> sqlite3.Connection:
         """Open this database without allowing the caller to mutate it."""
 
-        database_uri = f"file:{self.db_path.as_posix()}?mode=ro"
-        return sqlite3.connect(database_uri, uri=True)
+        return connect_read_only(self.db_path)
 
 
 def _assert_applied_backfeed_allowed(

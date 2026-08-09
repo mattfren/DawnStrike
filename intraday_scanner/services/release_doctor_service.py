@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ from intraday_scanner.services.scheduler_doctor_service import (
     scheduler_doctor as _scheduler_doctor,
 )
 from intraday_scanner.sql_safety import quote_sql_identifier
+from intraday_scanner.storage.read_only import connect_read_only
 
 
 def scheduler_doctor(
@@ -76,7 +76,7 @@ def _table_names(db_path: str | Path) -> set[str]:
     path = Path(db_path)
     if not path.exists():
         return set()
-    with sqlite3.connect(path) as connection:
+    with connect_read_only(path) as connection:
         return {
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -84,7 +84,7 @@ def _table_names(db_path: str | Path) -> set[str]:
 
 
 def _count(db_path: str | Path, table: str) -> int:
-    with sqlite3.connect(db_path) as connection:
+    with connect_read_only(db_path) as connection:
         table_sql = quote_sql_identifier(table)
         return int(
             connection.execute(

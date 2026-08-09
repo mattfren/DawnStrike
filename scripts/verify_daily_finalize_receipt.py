@@ -23,7 +23,7 @@ FINALIZE_STAGES = (
 
 def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str, object]:
     run_id = shared_daily_run_id(market_date, release_sha)
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     snapshot = daily_run_snapshot(store, run_id)
     run = snapshot.get("run") or {}

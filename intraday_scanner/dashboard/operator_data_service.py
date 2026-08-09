@@ -14,7 +14,7 @@ def calculate_missing_outcome_status(
     db_path: str | Path,
     market_date: str | None = None,
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     selected_date, signal_rows, outcomes = _canonical_signal_context(store, market_date)
     missing = _missing_rows(signal_rows, outcomes)
     partial = [
@@ -52,7 +52,7 @@ def canonical_missing_outcome_rows(
     db_path: str | Path,
     market_date: str | None = None,
 ) -> list[dict[str, Any]]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     selected_date, signal_rows, outcomes = _canonical_signal_context(store, market_date)
     return [
         {

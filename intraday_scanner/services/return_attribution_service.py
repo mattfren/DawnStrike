@@ -292,7 +292,7 @@ def attribute_returns(
     persist: bool = False,
     notify: str = "",
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -382,7 +382,7 @@ def historical_report(
     start: str | None = None,
     end: str | None = None,
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

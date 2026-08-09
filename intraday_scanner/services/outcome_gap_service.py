@@ -21,7 +21,7 @@ def outcome_gap_report(
     market_date: str | None = None,
     out_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     summary = calculate_missing_outcome_status(db_path, market_date)
     selected_date = str(summary.get("market_date") or market_date or "")[:10]

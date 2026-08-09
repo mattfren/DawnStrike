@@ -2,6 +2,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from intraday_scanner.errors import StorageError
 from intraday_scanner.services.outcome_gap_service import outcome_gap_report
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -63,16 +66,11 @@ def test_terminal_missing_outcome_stays_gap_and_never_learning_eligible(
     assert result["gaps"][0]["error_code"] == "providers_exhausted"
 
 
-def test_no_eligible_candidates_is_not_reported_as_zero_return(
+def test_missing_database_fails_closed_without_creating_an_empty_schema(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "empty.sqlite"
 
-    result = outcome_gap_report(
-        db_path=db_path,
-        market_date="2026-07-31",
-    )
-
-    assert result["status"] == "NO_ELIGIBLE"
-    assert result["eligible_candidate_count"] == 0
-    assert result["missing_truth_is_zero"] is False
+    with pytest.raises(StorageError, match="does not exist"):
+        outcome_gap_report(db_path=db_path, market_date="2026-07-31")
+    assert not db_path.exists()

@@ -17,6 +17,7 @@ from typing import Any
 
 from intraday_scanner.alpha.alert_gate import ALERT_GATE_VERSION, apply_alert_gate
 from intraday_scanner.errors import SnapshotValidationError
+from intraday_scanner.storage.read_only import connect_read_only
 
 ALERT_REPLAY_VERSION = "dawnstrike-alpha-alert-replay-v1.0.0"
 
@@ -28,8 +29,7 @@ def replay_alpha_alert_history(*, db_path: str | Path) -> dict[str, Any]:
     if not path.is_file():
         raise SnapshotValidationError(f"Alpha alert replay database does not exist: {path}")
 
-    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as connection:
-        connection.row_factory = sqlite3.Row
+    with connect_read_only(path, row_factory=sqlite3.Row) as connection:
         tables = _table_names(connection)
         if "alpha_signals" not in tables:
             raise SnapshotValidationError("Alpha alert replay requires alpha_signals.")

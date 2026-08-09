@@ -43,9 +43,9 @@ SCENARIO_BOOTSTRAP_SAMPLES = 2_000
 
 def scenario_doctor(*, db_path: str | Path, config: ScannerConfig | None = None) -> dict[str, Any]:
     config = config or load_config(database_path=Path(db_path))
-    store = SQLiteScanStore(db_path)
+    # Doctor is an observer: it must not initialize, migrate, or register policy.
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
-    _register_scenario_policy(store, config)
     checks = {
         "feature_enabled": config.scenario_intelligence_enabled,
         "openai_key_present": bool(config.openai_api_key),
@@ -635,7 +635,7 @@ def run_scenario_historical_replay(
 def scenario_public_snapshot(*, db_path: str | Path, limit: int = 250) -> dict[str, Any]:
     """Safe static projection: no article content, secrets, or fabricated metrics."""
 
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     decisions = store.load_scenario_decisions(limit=limit)
     news_by_id = {row["article_id"]: row for row in store.load_scenario_news_items(limit=limit)}

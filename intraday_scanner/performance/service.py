@@ -9,7 +9,6 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
@@ -37,6 +36,7 @@ from intraday_scanner.performance.contracts import (
 from intraday_scanner.performance.paper_ops import load_paper_ops
 from intraday_scanner.sql_safety import quote_sql_identifier
 from intraday_scanner.storage.migrations import run_migrations
+from intraday_scanner.storage.read_only import connect_read_only
 
 
 class CanonicalPerformanceService:
@@ -179,9 +179,8 @@ class CanonicalPerformanceService:
     ) -> dict[str, Any]:
         """Return a bounded, secret-free payload for the static public site."""
 
-        with sqlite3.connect(self.db_path) as connection:
+        with connect_read_only(self.db_path, row_factory=sqlite3.Row) as connection:
             connection.row_factory = sqlite3.Row
-            run_migrations(connection)
             as_of = market_date
             if as_of is None:
                 latest = connection.execute(
@@ -1057,10 +1056,7 @@ def _fill_gross_pnl_cents(rows: Iterable[dict[str, Any]]) -> int | None:
 def _open_database(path: Path, *, read_only: bool) -> sqlite3.Connection:
     if not read_only:
         return sqlite3.connect(path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Read-only reconciliation database not found: {path}")
-    uri = f"file:{quote(path.resolve().as_posix(), safe='/:')}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    return connect_read_only(path)
 
 
 def _load_v6_account_ledger(connection: sqlite3.Connection) -> list[dict[str, Any]]:

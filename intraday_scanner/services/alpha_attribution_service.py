@@ -16,7 +16,6 @@ from statistics import mean, median
 from typing import Any
 
 from intraday_scanner.performance.paper_ops import load_paper_ops
-from intraday_scanner.storage.attribution_evidence_store import AttributionEvidenceStore
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 ALPHA_STRATEGIES = frozenset({"alphaops_v4", "alphaops_v5"})
@@ -43,7 +42,7 @@ def generate_alpha_attribution_report(
     end: str | None = None,
     paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=True)
     store.initialize()
     signals = store.load_historical_signals(start=start, end=end, limit=50_000)
     selections = [
@@ -105,9 +104,11 @@ def generate_alpha_attribution_report(
         generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     )
     diagnostic = dict(report.get("diagnostic_attribution") or {})
-    persistence = AttributionEvidenceStore(db_path).persist_cases(
-        list(diagnostic.get("cases") or [])
-    )
+    persistence = {
+        "inserted": 0,
+        "skipped": len(list(diagnostic.get("cases") or [])),
+        "mode": "read_only",
+    }
     report["diagnostic_attribution"] = {**diagnostic, "persistence": persistence}
     report["payload_hash_sha256"] = _hash(report)
     output = Path(out_dir)
