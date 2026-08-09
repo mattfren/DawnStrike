@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from intraday_scanner.alpha.path_replay import PathTruthStatus, resolve_path
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
@@ -1105,15 +1106,43 @@ def _derive_outcome(
             entry_bar=trigger_bar,
             note="Gap-through pricing made the saved target/invalidation geometry invalid.",
         )
+    path_replay = resolve_path(
+        eligible_bars,
+        decision_at=first_eligible_at,
+        trigger=trigger,
+        target=target,
+        stop=invalidation,
+    )
+    base.update(path_replay.to_dict())
+    if path_replay.path_truth_status in {
+        PathTruthStatus.ENTRY_BAR_AMBIGUOUS,
+        PathTruthStatus.MISSING_BARS,
+        PathTruthStatus.KNOWN_HALT_WINDOW,
+        PathTruthStatus.SOURCE_CONFLICT,
+        PathTruthStatus.CORPORATE_ACTION_UNRESOLVED,
+        PathTruthStatus.DATA_INELIGIBLE,
+    }:
+        return _ineligible(
+            base,
+            f"path_truth_{path_replay.path_truth_status.value.lower()}",
+            path_replay.notes[0] if path_replay.notes else "path truth is not eligible",
+        )
     post_entry = [bar for bar in eligible_bars if bar.observed_at >= trigger_bar.observed_at]
     if not post_entry:
         return _ineligible(base, "ineligible_no_post_entry_bars")
+    post_trigger = [bar for bar in post_entry if bar.observed_at > trigger_bar.observed_at]
+    if not post_trigger:
+        return _ineligible(
+            base,
+            "path_truth_entry_bar_ambiguous",
+            "trigger-bar extrema are excluded and no later bar proves the path",
+        )
     high_bar = max(
-        (bar for bar in post_entry if bar.high is not None),
+        (bar for bar in post_trigger if bar.high is not None),
         key=lambda bar: float(bar.high or 0.0),
     )
     low_bar = min(
-        (bar for bar in post_entry if bar.low is not None),
+        (bar for bar in post_trigger if bar.low is not None),
         key=lambda bar: float(bar.low or math.inf),
     )
     high = float(high_bar.high or 0.0)
@@ -1122,8 +1151,8 @@ def _derive_outcome(
     price_5m, price_5m_at = _horizon_price(post_entry, trigger_bar.observed_at, 5)
     price_15m, price_15m_at = _horizon_price(post_entry, trigger_bar.observed_at, 15)
     lunch_price, lunch_at = _lunch_price(post_entry, trigger_bar.observed_at, session)
-    target_at = _first_touch_at(post_entry, "high", target)
-    invalidation_at = _first_touch_at(post_entry, "low", invalidation, at_or_below=True)
+    target_at = path_replay.target_touched_at
+    invalidation_at = path_replay.stop_touched_at
     first_touch = _planned_first_touch(
         entry_at=trigger_bar.observed_at,
         target_at=target_at,

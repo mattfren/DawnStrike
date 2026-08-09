@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.alpha.path_replay import PathTruthStatus
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
     ALPHAOPS_V5_POLICY_VERSION,
@@ -16,6 +17,7 @@ from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
     ALPHAOPS_STRATEGY_VERSION,
     DELIVERED_COHORT,
+    _reconcile_selection,
     reconcile_alpha_paper_trades,
 )
 from intraday_scanner.services.learning_service import (
@@ -27,6 +29,37 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 DAY = "2026-07-15"
 SIGNAL_ID = "scan-paper:1:NOVA"
 SELECTION_ID = "selection-paper-nova"
+
+
+def test_paper_reconciliation_preserves_canonical_path_truth_status() -> None:
+    evaluation, trade, labels = _reconcile_selection(
+        selection={
+            "selection_id": SELECTION_ID,
+            "signal_id": SIGNAL_ID,
+            "ticker": "NOVA",
+            "market_date": DAY,
+            "strategy_id": ALPHAOPS_STRATEGY_ID,
+            "cohort": DELIVERED_COHORT,
+        },
+        signal={"signal_id": SIGNAL_ID, "ticker": "NOVA", "market_date": DAY},
+        outcome={
+            "outcome_status": "complete_sourced",
+            "source_coverage_complete": True,
+            "source_bar_hash_sha256": "bars",
+            "path_truth_status": PathTruthStatus.ENTRY_BAR_AMBIGUOUS.value,
+            "path_replay_id": "replay-1",
+        },
+        delivery=None,
+        reconciled_at="2026-07-15T20:00:00+00:00",
+        notional_per_trade=1000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is None
+    assert labels == []
+    assert evaluation["path_truth_status"] == PathTruthStatus.ENTRY_BAR_AMBIGUOUS.value
+    assert evaluation["reconciliation_status"] == "unresolved"
 
 
 def test_not_triggered_is_resolved_activation_evidence_with_no_trade_return(

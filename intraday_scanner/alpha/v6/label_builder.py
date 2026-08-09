@@ -29,9 +29,19 @@ def build_label_families(
     decision_id = str(decision.get("decision_id") or "")
     market_date = str(decision.get("market_date") or "")[:10]
     source_hash = _text_or_none(outcome.get("source_bar_hash_sha256"))
+    path_replay_id = _text_or_none(outcome.get("path_replay_id"))
+    path_contract_present = "path_replay_id" in outcome
+    path_replay_available = bool(path_replay_id) if path_contract_present else True
     conclusive = str(outcome.get("outcome_status") or "").upper() == "COMPLETE_SOURCED"
     activated = str(outcome.get("activation_status") or "").upper() == "ACTIVATED"
-    eligible_return = bool(outcome.get("learning_eligible") is True and source_hash)
+    retrospective_eligible = outcome.get("retrospective_research_eligible") is not False
+    prospective_eligible = outcome.get("prospective_promotion_eligible") is True
+    eligible_return = bool(
+        outcome.get("learning_eligible") is True
+        and source_hash
+        and path_replay_available
+        and retrospective_eligible
+    )
     observed_at = str(outcome.get("observed_at") or utc_now())
     base = {
         "decision_id": decision_id,
@@ -39,6 +49,10 @@ def build_label_families(
         "observed_at": observed_at,
         "source_bar_hash_sha256": source_hash,
         "source_outcome_id": outcome.get("outcome_id"),
+        "path_replay_id": path_replay_id,
+        "path_truth_status": outcome.get("path_truth_status"),
+        "retrospective_research_eligible": retrospective_eligible,
+        "prospective_promotion_eligible": prospective_eligible,
         "label_schema_version": LABEL_SCHEMA_VERSION,
         "no_lookahead": outcome.get("no_lookahead") is True,
         "missing_truth_is_zero": False,

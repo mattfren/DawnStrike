@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1119,6 +1119,76 @@ def _migration_022_intraday_evidence_spine(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_023_alpha_path_replay_reconciliations(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add append-only path replay and legacy excursion reconciliation facts."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS alpha_path_replays (
+            path_replay_id TEXT PRIMARY KEY,
+            cohort TEXT NOT NULL,
+            selection_id TEXT NOT NULL,
+            signal_id TEXT,
+            market_date TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            artifact_identity TEXT NOT NULL,
+            artifact_hash_sha256 TEXT NOT NULL,
+            path_truth_status TEXT NOT NULL,
+            conservative_policy_result TEXT,
+            entry_at TEXT,
+            entry_price REAL,
+            target_touched_at TEXT,
+            stop_touched_at TEXT,
+            exit_at TEXT,
+            exit_price REAL,
+            mfe_price REAL,
+            mfe_at TEXT,
+            mae_price REAL,
+            mae_at TEXT,
+            retrospective_research_eligible INTEGER NOT NULL,
+            prospective_promotion_eligible INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (cohort, selection_id, policy_version, artifact_identity)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alpha_path_replays_market_status
+        ON alpha_path_replays(market_date, path_truth_status, cohort);
+        CREATE INDEX IF NOT EXISTS idx_alpha_path_replays_signal
+        ON alpha_path_replays(signal_id, selection_id);
+        CREATE INDEX IF NOT EXISTS idx_alpha_path_replays_artifact
+        ON alpha_path_replays(artifact_hash_sha256, artifact_identity);
+
+        CREATE TABLE IF NOT EXISTS paper_position_excursion_reconciliations (
+            reconciliation_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            path_replay_id TEXT NOT NULL,
+            source_bar_hash_sha256 TEXT NOT NULL,
+            source_quote_hash_sha256 TEXT NOT NULL,
+            path_truth_status TEXT NOT NULL,
+            mfe_price REAL,
+            mfe_at TEXT,
+            mae_price REAL,
+            mae_at TEXT,
+            mfe_lower_bound REAL,
+            mfe_upper_bound REAL,
+            mae_lower_bound REAL,
+            mae_upper_bound REAL,
+            reconciliation_receipt_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (position_id, path_replay_id),
+            FOREIGN KEY (path_replay_id) REFERENCES alpha_path_replays(path_replay_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_position_excursion_position
+        ON paper_position_excursion_reconciliations(position_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_position_excursion_status
+        ON paper_position_excursion_reconciliations(path_truth_status, created_at);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1151,4 +1221,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (20, _migration_020_scenario_lifecycle_identity),
     (21, _migration_021_official_strategy_cohort_lock),
     (22, _migration_022_intraday_evidence_spine),
+    (23, _migration_023_alpha_path_replay_reconciliations),
 )

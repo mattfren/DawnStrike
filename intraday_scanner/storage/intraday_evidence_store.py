@@ -375,6 +375,107 @@ class IntradayEvidenceStore:
             code_sha=receipt.code_sha,
         )
 
+    def persist_path_replay(self, replay: dict[str, Any]) -> dict[str, int]:
+        """Append one immutable path replay and return its insert status."""
+
+        self.initialize()
+        with self._sqlite_store._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO alpha_path_replays (
+                    path_replay_id, cohort, selection_id, signal_id, market_date,
+                    policy_version, artifact_identity, artifact_hash_sha256,
+                    path_truth_status, conservative_policy_result, entry_at,
+                    entry_price, target_touched_at, stop_touched_at, exit_at,
+                    exit_price, mfe_price, mfe_at, mae_price, mae_at,
+                    retrospective_research_eligible,
+                    prospective_promotion_eligible, payload_json, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?
+                )
+                """,
+                (
+                    replay["path_replay_id"],
+                    replay["cohort"],
+                    replay["selection_id"],
+                    replay.get("signal_id"),
+                    replay["market_date"],
+                    replay["policy_version"],
+                    replay["artifact_identity"],
+                    replay["artifact_hash_sha256"],
+                    replay["path_truth_status"],
+                    replay.get("conservative_policy_result"),
+                    replay.get("entry_time"),
+                    _number_or_none(replay.get("entry_price")),
+                    replay.get("target_touched_at"),
+                    replay.get("stop_touched_at"),
+                    replay.get("exit_time"),
+                    _number_or_none(replay.get("exit_price")),
+                    _number_or_none(replay.get("mfe_price")),
+                    replay.get("mfe_at"),
+                    _number_or_none(replay.get("mae_price")),
+                    replay.get("mae_at"),
+                    int(bool(replay.get("retrospective_research_eligible", False))),
+                    int(bool(replay.get("prospective_promotion_eligible", False))),
+                    _stable_json(replay),
+                    replay.get("created_at", datetime.now(timezone.utc).isoformat()),
+                ),
+            )
+            row = connection.execute(
+                "SELECT COUNT(*) FROM alpha_path_replays WHERE path_replay_id = ?",
+                (replay["path_replay_id"],),
+            ).fetchone()
+        return {"inserted": int(cursor.rowcount), "row_count": int(row[0]) if row else 0}
+
+    def persist_excursion_reconciliation(
+        self, reconciliation: dict[str, Any]
+    ) -> dict[str, int]:
+        """Append verified excursion facts for an unchanged legacy position."""
+
+        self.initialize()
+        with self._sqlite_store._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO paper_position_excursion_reconciliations (
+                    reconciliation_id, position_id, path_replay_id,
+                    source_bar_hash_sha256, source_quote_hash_sha256,
+                    path_truth_status, mfe_price, mfe_at, mae_price, mae_at,
+                    mfe_lower_bound, mfe_upper_bound, mae_lower_bound,
+                    mae_upper_bound, reconciliation_receipt_hash_sha256,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reconciliation["reconciliation_id"],
+                    reconciliation["position_id"],
+                    reconciliation["path_replay_id"],
+                    reconciliation["source_bar_hash_sha256"],
+                    reconciliation["source_quote_hash_sha256"],
+                    reconciliation["path_truth_status"],
+                    _number_or_none(reconciliation.get("mfe_price")),
+                    reconciliation.get("mfe_at"),
+                    _number_or_none(reconciliation.get("mae_price")),
+                    reconciliation.get("mae_at"),
+                    _number_or_none(reconciliation.get("mfe_lower_bound")),
+                    _number_or_none(reconciliation.get("mfe_upper_bound")),
+                    _number_or_none(reconciliation.get("mae_lower_bound")),
+                    _number_or_none(reconciliation.get("mae_upper_bound")),
+                    reconciliation["reconciliation_receipt_hash_sha256"],
+                    _stable_json(reconciliation),
+                    reconciliation.get("created_at", datetime.now(timezone.utc).isoformat()),
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM paper_position_excursion_reconciliations
+                WHERE reconciliation_id = ?
+                """,
+                (reconciliation["reconciliation_id"],),
+            ).fetchone()
+        return {"inserted": int(cursor.rowcount), "row_count": int(row[0]) if row else 0}
+
     def record_legacy_policy_classification(
         self,
         *,
@@ -496,6 +597,15 @@ def _sha256(content: bytes) -> str:
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _stable_hash(value: Any) -> str:

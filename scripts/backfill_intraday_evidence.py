@@ -20,6 +20,27 @@ from intraday_scanner.v2.data_truth.intraday import (
 )
 
 
+def backfill_path_replay(
+    store: IntradayEvidenceStore,
+    *,
+    replay: dict[str, Any],
+) -> dict[str, int]:
+    """Persist one registered replay receipt without touching legacy positions."""
+
+    required = (
+        "path_replay_id",
+        "cohort",
+        "selection_id",
+        "policy_version",
+        "artifact_identity",
+        "artifact_hash_sha256",
+    )
+    missing = [field for field in required if not str(replay.get(field) or "").strip()]
+    if missing:
+        raise ValueError(f"path replay is missing required identity: {', '.join(missing)}")
+    return store.persist_path_replay(replay)
+
+
 def backfill_fixture(args: argparse.Namespace) -> dict[str, Any]:
     if not args.retention_allowed:
         raise ValueError("fixture backfill requires --retention-allowed from operator metadata")

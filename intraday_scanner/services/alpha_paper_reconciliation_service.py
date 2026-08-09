@@ -17,6 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.path_replay import PathTruthStatus
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_POLICY_VERSION,
     ALPHAOPS_V5_STRATEGY_ID,
@@ -479,7 +480,39 @@ def _reconcile_selection(
         "source_bar_hash_sha256": source_hash,
         "source_bar_count": outcome.get("source_bar_count"),
         "source_coverage_complete": source_complete,
+        "path_replay_id": outcome.get("path_replay_id"),
+        "path_truth_status": outcome.get("path_truth_status"),
+        "retrospective_research_eligible": outcome.get(
+            "retrospective_research_eligible", True
+        ),
+        "prospective_promotion_eligible": outcome.get(
+            "prospective_promotion_eligible", False
+        ),
     }
+    path_status = str(outcome.get("path_truth_status") or "")
+    if path_status in {
+        PathTruthStatus.ENTRY_BAR_AMBIGUOUS.value,
+        PathTruthStatus.MISSING_BARS.value,
+        PathTruthStatus.KNOWN_HALT_WINDOW.value,
+        PathTruthStatus.CORPORATE_ACTION_UNRESOLVED.value,
+        PathTruthStatus.SOURCE_CONFLICT.value,
+        PathTruthStatus.DATA_INELIGIBLE.value,
+    }:
+        return (
+            {
+                **evidence,
+                "terminal_state": path_status.lower(),
+                "reconciliation_status": "unresolved",
+                "activated": None,
+                "filled": False,
+                "closed": False,
+                "trade_return_eligible": False,
+                "net_return_pct": None,
+                "reason": "Canonical path truth is not eligible for paper reconciliation.",
+            },
+            None,
+            [],
+        )
     if outcome_status == "not_triggered" and source_complete:
         evaluation = {
             **evidence,

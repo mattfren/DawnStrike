@@ -23,7 +23,7 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
     }
 
 
-def test_schema_22_migration_is_additive_and_idempotent(tmp_path: Path) -> None:
+def test_current_schema_23_migration_is_additive_and_idempotent(tmp_path: Path) -> None:
     database = tmp_path / "evidence.sqlite"
     SQLiteScanStore(database).initialize()
     with sqlite3.connect(database) as connection:
@@ -33,7 +33,7 @@ def test_schema_22_migration_is_additive_and_idempotent(tmp_path: Path) -> None:
         )
         connection.commit()
         before = connection.execute("SELECT * FROM scan_runs").fetchall()
-        assert get_schema_version(connection) == CURRENT_SCHEMA_VERSION == 22
+        assert get_schema_version(connection) == CURRENT_SCHEMA_VERSION == 23
         assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
         tables = _table_names(connection)
         assert {
@@ -41,8 +41,10 @@ def test_schema_22_migration_is_additive_and_idempotent(tmp_path: Path) -> None:
             "intraday_artifact_manifests",
             "intraday_coverage_receipts",
             "legacy_policy_classifications",
+            "alpha_path_replays",
+            "paper_position_excursion_reconciliations",
         } <= tables
-        assert run_migrations(connection) == 22
+        assert run_migrations(connection) == 23
         assert connection.execute("SELECT * FROM scan_runs").fetchall() == before
 
 
@@ -68,9 +70,9 @@ def test_two_disposable_21_to_22_rehearsals_preserve_daily_rows_and_are_repeatab
         rehearsal = tmp_path / f"rehearsal-{index}.sqlite"
         shutil.copy2(source, rehearsal)
         with sqlite3.connect(rehearsal) as connection:
-            assert run_migrations(connection) == 22
-            assert run_migrations(connection) == 22
-            assert get_schema_version(connection) == 22
+            assert run_migrations(connection) == 23
+            assert run_migrations(connection) == 23
+            assert get_schema_version(connection) == 23
             assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
             row = connection.execute("SELECT id, value FROM daily_truth").fetchone()
             assert hashlib.sha256(f"{row[0]}|{row[1]}".encode()).hexdigest() == source_daily_hash

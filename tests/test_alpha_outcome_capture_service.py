@@ -62,7 +62,9 @@ def test_sourced_eod_capture_is_trigger_aware_persisted_and_learning_ready(
     assert outcome["lunch_price"] == 10.5
     assert outcome["close_price"] == 10.6
     assert outcome["high_after_entry"] == 10.65
-    assert outcome["low_after_entry"] == 9.88
+    assert outcome["low_after_entry"] == 9.9
+    assert outcome["path_truth_status"] == "RESOLVED_TARGET_FIRST"
+    assert outcome["entry_bar_excluded"] is True
     assert outcome["planned_first_touch_outcome"] == "target_1"
     assert outcome["source_bar_hash_sha256"]
     assert outcome["no_lookahead"] is True
@@ -317,9 +319,9 @@ def test_bounded_secondary_provider_fallback_captures_full_attribution(
     assert outcome["exit_reason"] == "target_1"
     assert outcome["holding_duration_minutes"] == 1
     assert outcome["max_favorable_excursion_pct"] == 4.0
-    assert outcome["max_adverse_excursion_pct"] == -1.2
+    assert outcome["max_adverse_excursion_pct"] == -1.0
     assert outcome["time_to_mfe_minutes"] == 388
-    assert outcome["time_to_mae_minutes"] == 0
+    assert outcome["time_to_mae_minutes"] == 2
     assert outcome["benchmark_return_pct"] is not None
     assert outcome["secondary_benchmark_return_pct"] is not None
     assert outcome["excess_return_pct"] is not None
