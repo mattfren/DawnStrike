@@ -1,0 +1,162 @@
+protocol_id: dawnstrike.alphaops-intraday-research-protocol.v1
+protocol_version: 1
+frozen_at_utc: "2026-08-09T16:33:23.5393785Z"
+status: PENDING_OPERATOR_APPROVAL_FOR_UNRESOLVED_PROMOTION_THRESHOLDS
+authority:
+  audited_source_sha: ba39a5353045b7d417936ed1aed0ee4802169759
+  active_snapshot_sha256: a78d0c28842c0831f6c9d810b3fd63269b1470734b09c08c09ca14f37eb807aa
+  immutable_snapshot_sha256: 6cb1d052c1e0f7fb6c5416e21e6a6a330e8cea615b12b43c1f206523f33c9893
+  opus_attachment_sha256: A0A58E6C78E83CB91D49258413766626875C5CB36E7138F178C00F9B4E728C65
+  snapshot_cutoff_utc: "2026-08-07T12:39:14+00:00"
+  source_policy: exact_clean_isolated_worktree_then_read_only_snapshot
+  opus_policy: historical_hypothesis_context_only
+purpose:
+  evidence: retain point_in_time intraday bars, trades, quotes, status, corporate_actions, artifacts, and capability receipts
+  outcome: make official AlphaOps V5 outcomes and path truth reproducible without overwriting legacy paper state
+  research: support retrospective research only when source, cost, benchmark, reconciliation, and causal gates pass
+  promotion: preserve a separate prospective promotion cohort using post_snapshot_forward_evidence_only
+  safety: preserve research_watchlist_and_simulated_paper_audit; broker_execution=false; automatic_promotion=false
+cohort_boundaries:
+  alphaops_v4: historical_pre_v5_baseline
+  alphaops_v5: official_paper_and_champion
+  alpha_v6: shadow_only
+  v2_daily_paperops: separate_daily_evidence_cohort
+  blended_returns_series: prohibited
+  legacy_trade_optimization: prohibited
+eligibility:
+  retrospective_research_eligible:
+    requires: complete_point_in_time_source_lineage_and_independent_reconciliation_after_cost_and_benchmark_alignment
+    contributes_to_forward_promotion_minimum: false
+  prospective_promotion_eligible:
+    requires: post_snapshot_forward_dates_with_registered_trial_and_complete_source_cost_benchmark_reconciliation
+    retrospective_rows_allowed: false
+  missing_stale_disputed_ambiguous_unreconciled_unavailable_future_truth: null_with_explicit_reason
+  raw_retrospective_signals_are_forward_labels: false
+  llm_role: factual_claim_extraction_with_cited_spans_only
+minimums:
+  return_training:
+    minimum_eligible_return_rows: 100
+    insufficient_result: NOT_TRAINED_INSUFFICIENT_LABELS
+  gradient_boosting:
+    minimum_eligible_labels: 500
+    minimum_distinct_market_dates: 60
+    insufficient_result: NOT_TRAINED_INSUFFICIENT_LABELS
+  eligible_source_cost_benchmark_coverage: 0.98
+  confidence_interval:
+    level: 0.95
+    cluster_unit: market_date
+    lower_bound_rule: after_cost_benchmark_excess_lower_bound_must_be_positive_for_any_promotion_claim
+  promotion:
+    minimum_forward_sessions: REQUIRES_OPERATOR_APPROVAL
+    minimum_activated_trades: REQUIRES_OPERATOR_APPROVAL
+    manual_approval_required: true
+    unresolved_result: NOT_EVALUABLE_PENDING_PROTOCOL_APPROVAL
+cost_scenarios:
+  base:
+    identity: frozen_v5_provisional_cost_contract
+    modeled_slippage_bps_per_side: 50
+    commission: current_per_share_commission_from_registered_policy
+    empirical_calibration: pending_stage_g009
+  stress_1_5x:
+    multiplier: 1.5
+    applies_to: observed_cost_and_modeled_impact_separately
+  stress_2x:
+    multiplier: 2.0
+    applies_to: observed_cost_and_modeled_impact_separately
+  promotion_survives_stress_alone: false
+splits:
+  primary_split_unit: market_date
+  duplicate_ticker_date_observations_keep_together: true
+  chronological_expanding_walk_forward: true
+  purge_overlapping_holding_windows: true
+  embargo_horizon: REQUIRES_OPERATOR_APPROVAL
+  ticker_across_dates_may_recur_in_folds: true
+  one_time_holdout:
+    identity: post_snapshot_future_market_dates_not_present_in_active_snapshot_v1
+    evaluated_once: true
+    contamination_policy: any_inspection_or_tuning_invalidates_holdout
+    historical_replay_is_pristine_holdout: false
+thresholds_requiring_operator_approval:
+  concentration: REQUIRES_OPERATOR_APPROVAL
+  maximum_drawdown: REQUIRES_OPERATOR_APPROVAL
+  cvar_or_tail_loss: REQUIRES_OPERATOR_APPROVAL
+  capacity_and_participation: REQUIRES_OPERATOR_APPROVAL
+  fold_stability: REQUIRES_OPERATOR_APPROVAL
+  multiple_trial_adjustment: REQUIRES_OPERATOR_APPROVAL
+  minimum_common_fold_predictions: REQUIRES_OPERATOR_APPROVAL
+  catalyst_validation_precision_recall_coverage_effective_n: REQUIRES_OPERATOR_APPROVAL
+  attribution_minimum_effective_n_and_sequential_controls: REQUIRES_OPERATOR_APPROVAL
+  risk_geometry_effective_sample_shrinkage_and_uncertainty: REQUIRES_OPERATOR_APPROVAL
+historical_evidence_disclosure:
+  note: all items below were visible before this protocol was frozen; they cannot be presented as a pristine holdout
+  opus_state_reconciliation:
+    active_tables: 110
+    active_empty_user_tables: 34
+    active_historical_signals: 258
+    active_historical_signal_dates: 32
+    active_signal_outcomes: 14
+    active_complete_sourced_outcomes: 9
+    active_outcome_interval: one_minute
+    active_halt_rows: 41
+    active_notifications: 137
+    active_notification_event_keys_distinct: 137
+    active_closed_alphaops_positions: 8
+    active_v6_tables: 15
+    active_v6_tables_populated: 12
+  current_snapshot_reaudit:
+    schema_version: 21
+    immutable_snapshot_tables: 110
+    immutable_snapshot_historical_signals: 258
+    immutable_snapshot_historical_signal_dates: 32
+    immutable_snapshot_signal_outcomes: 14
+    immutable_snapshot_alpha_v6_labels: 111
+    immutable_snapshot_alpha_v6_outcomes: 12
+    immutable_snapshot_alpha_v6_datasets: 3
+    frozen_official_outcome_required_selections: 29
+    frozen_official_no_trade_selections: 17
+    frozen_rejected_counterfactual_sample: 50
+    immutable_snapshot_halt_rows: 41
+    immutable_snapshot_notifications: 137
+    immutable_snapshot_paper_positions: 8
+  opus_quoted_v2_paperops_context:
+    forward_events: 4578
+    fills: 42
+    openings: 42
+    closes: 22
+    open_positions: 9
+    cohort: v2_daily_paperops
+    status: historical_context_not_alphaops_v5_evidence
+  legacy_trade_context:
+    pre_v5_paper_positions: 8
+    quoted_win_rate: 0.25
+    legacy_rows_near_0_875R: 165
+    legacy_rows_near_1_5R: 53
+    policy_classification: historical_legacy_policy_only
+    target_derived_from_risk_current_range_rows: false
+    individual_trade_tuning: prohibited
+  biya_context:
+    market_date: "2026-07-20"
+    quoted_simulated_return_pct: -47.26
+    interpretation: stored_polling_and_fill_model_only; no proof of real_fill_queue_nbbo_or_luld_path
+    optimization_target: prohibited
+  current_v5_policy_context:
+    prospectively_official_from: "2026-07-31"
+    planned_risk_pct_of_equity: 0.25
+    symbol_notional_cap_pct: 10
+    maximum_stop_pct: 15
+    spread_ceiling_bps: 200
+    modeled_slippage_bps_per_side: 50
+  catalyst_context:
+    legacy_coverage: overwhelmingly_no_clear_catalyst
+    unsafe_gate_rejected: maximum_no_clear_percentage
+  cost_context:
+    fixed_slippage_is_not_empirical_microstructure: true
+    quote_is_nbbo_only_with_consolidated_feed: true
+    iex_must_remain_labeled_iex: true
+  historical_holdout_statement: historical_replay_is_exploratory_oos_by_time_not_pristine_holdout
+protocol_verdict_rules:
+  unresolved_threshold_behavior: emit_NOT_EVALUABLE_PENDING_PROTOCOL_APPROVAL
+  failed_promotion_gate_behavior: remain_research_or_shadow_only
+  no_broker_or_order_surface: invariant
+  no_automatic_strategy_promotion_or_parameter_update: invariant
+  no_profitability_claim: invariant
