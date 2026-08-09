@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.models import SnapshotRow
@@ -34,6 +34,74 @@ class MarketDataProvider(ABC):
 
 
 BaseProvider = MarketDataProvider
+
+
+@dataclass(frozen=True)
+class IntradayPage:
+    """One verified provider page; ``next_page_token`` is an explicit cursor."""
+
+    provider: str
+    feed: str
+    endpoint: str
+    items: tuple[dict[str, Any], ...]
+    next_page_token: str | None
+    raw_payload_hash_sha256: str
+    request_id: str = ""
+
+
+@runtime_checkable
+class HistoricalIntradayProvider(Protocol):
+    """Read-only historical intraday capability and pagination contract."""
+
+    provider_name: str
+    feed: str
+
+    def capability_probe(self, config: ScannerConfig) -> dict[str, Any]:
+        """Return sanitized capability/entitlement facts without secrets."""
+
+    def get_bars_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        """Return one bounded historical bar page and its restart cursor."""
+
+    def get_trades_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        """Return one bounded historical trade-print page."""
+
+    def get_quotes_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        """Return one bounded historical quote page."""
+
+    def get_corporate_actions_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        """Return one bounded corporate-action page."""
 
 
 @dataclass(frozen=True)

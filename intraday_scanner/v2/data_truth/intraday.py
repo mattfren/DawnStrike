@@ -192,12 +192,34 @@ class IntradayCoverageReceipt(_UtcContract):
     schema_version: str = "v2.intraday_coverage_receipt.v1"
 
 
+@dataclass(frozen=True)
+class IntradayProviderCapabilityReceipt(_UtcContract):
+    """Sanitized provider/entitlement probe receipt."""
+
+    capability_receipt_id: str
+    provider: str
+    feed: str
+    entitlement: str
+    requested_at: datetime
+    request_start: datetime
+    request_end: datetime
+    fetched_at: datetime
+    code_sha: str
+    raw_artifact_hash_sha256: str
+    normalized_artifact_hash_sha256: str
+    retention_status: str
+    capabilities: dict[str, Any]
+    receipt_hash_sha256: str
+    schema_version: str = "v2.intraday_provider_capability_receipt.v1"
+
+
 __all__ = [
     "CorporateActionRecord",
     "IntradayArtifactManifest",
     "IntradayBar",
     "IntradayCoverageReceipt",
     "IntradayCoverageStatus",
+    "IntradayProviderCapabilityReceipt",
     "IntradaySourceMetadata",
     "MarketQuote",
     "MarketStatusInterval",

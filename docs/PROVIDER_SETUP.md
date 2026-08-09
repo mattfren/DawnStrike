@@ -109,3 +109,47 @@ Provider interfaces live in `intraday_scanner.providers.base`:
 Vendor-specific providers should normalize data into the canonical snapshot,
 news, or filing models before services consume it. This keeps Polygon, Databento,
 Benzinga, Finnhub, NewsAPI, or other feeds swappable without changing scanner logic.
+# Historical intraday evidence providers
+
+Historical intraday acquisition is read-only and research-only. It does not
+create orders or connect to a broker trading endpoint.
+
+## Capability and feed identity
+
+The existing Alpaca market-data client supports the explicit `iex` and `sip`
+feed identities. A request for SIP is never silently substituted with IEX.
+The Massive adapter uses `MASSIVE_API_KEY` as its primary credential and
+accepts `POLYGON_API_KEY` only as a compatibility alias. Neither credential is
+printed in probe receipts or logs.
+
+Each provider exposes capability facts for bars, trades, quotes, corporate
+actions, and pagination. A capability may be unavailable; it is recorded as
+unavailable rather than inferred from a plan name.
+
+## Evidence retention and acquisition controls
+
+Set `DAWNSTRIKE_INTRADAY_EVIDENCE_ROOT` to the operator-approved retention
+root. Raw and normalized compressed artifacts are stored outside SQLite and
+indexed in schema 22 with provider, feed, request window, code SHA, content
+hashes, and retention status. The backfill utility refuses to write when the
+operator entitlement metadata does not permit retention.
+
+`DAWNSTRIKE_INTRADAY_PAGE_LIMIT`, `DAWNSTRIKE_INTRADAY_MAX_PAGES`,
+`DAWNSTRIKE_INTRADAY_BACKOFF_SECONDS`, `INTRADAY_REQUEST_TIMEOUT_SECONDS`, and
+`INTRADAY_REQUEST_RETRIES` bound page size, restart work, timeout, and retry
+behavior. HTTP 429 responses use bounded backoff. Every page returns a raw
+payload hash and a next-page cursor so a restart can begin at the last
+verified page.
+
+## Probe behavior
+
+Run `scripts/probe_intraday_provider.py` with an explicit output path. The
+receipt records only credential presence, provider/feed identity, capability
+and entitlement facts, earliest-availability fields when supplied by a live
+probe, session/extended-hours/corporate-action coverage, pagination limits,
+retention permission, and an estimated request/byte volume. The receipt is
+content-hashed and sanitized.
+
+If no approved Massive key and plan exist, the correct result is
+`BLOCKED_EXTERNAL_MARKET_DATA_ENTITLEMENT`. Fixture-backed adapter tests may
+still pass; this status is not a claim of live data coverage.

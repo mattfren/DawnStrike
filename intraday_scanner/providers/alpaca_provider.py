@@ -6,6 +6,7 @@ touch trading or order-submission APIs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -20,12 +21,13 @@ from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.network_safety import open_allowlisted_url
-from intraday_scanner.providers.base import MarketDataProvider
+from intraday_scanner.providers.base import IntradayPage, MarketDataProvider
 
 LOGGER = logging.getLogger(__name__)
 
 
 class AlpacaProvider(MarketDataProvider):
+    provider_name = "alpaca"
     base_url = "https://data.alpaca.markets"
 
     def __init__(self, config: ScannerConfig):
@@ -72,6 +74,12 @@ class AlpacaProvider(MarketDataProvider):
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
+                if exc.code == 429:
+                    last_error = exc
+                    retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
+                    if attempt < config.request_retries:
+                        time.sleep(retry_after or min(2 ** (attempt - 1), 8))
+                        continue
                 if 400 <= exc.code < 500:
                     raise DataProviderError(
                         f"Alpaca request failed with HTTP {exc.code}: {body[:300]}"
@@ -86,6 +94,120 @@ class AlpacaProvider(MarketDataProvider):
         raise DataProviderError(
             f"Alpaca request failed after retries: {last_error}"
         ) from last_error
+
+    def capability_probe(self, config: ScannerConfig) -> dict[str, Any]:
+        """Return configuration-level capability facts without exposing secrets."""
+
+        credentials_present = bool(self.api_key and self.secret_key)
+        return {
+            "provider": self.provider_name,
+            "feed": self.feed,
+            "credential_present": credentials_present,
+            "entitlement_status": "unknown_until_endpoint_probe"
+            if credentials_present
+            else "missing_credentials",
+            "capabilities": {
+                "bars": "configured_read_only_endpoint",
+                "trades": "configured_read_only_endpoint",
+                "quotes": "configured_read_only_endpoint",
+                "corporate_actions": "configured_read_only_endpoint",
+                "pagination": True,
+            },
+            "probe_network_performed": False,
+            "request_timeout_seconds": config.request_timeout_seconds,
+        }
+
+    def get_bars_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        params = {
+            "symbols": ",".join(symbols),
+            "timeframe": "1Min",
+            "start": start,
+            "end": end,
+            "feed": self.feed,
+            "limit": str(config.historical_intraday_page_limit),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        payload = self._request_json("/v2/stocks/bars", params, config)
+        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/bars", payload, "bars")
+
+    def get_trades_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        params = {
+            "symbols": ",".join(symbols),
+            "start": start,
+            "end": end,
+            "feed": self.feed,
+            "limit": str(config.historical_intraday_page_limit),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        payload = self._request_json("/v2/stocks/trades", params, config)
+        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/trades", payload, "trades")
+
+    def get_quotes_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        params = {
+            "symbols": ",".join(symbols),
+            "start": start,
+            "end": end,
+            "feed": self.feed,
+            "limit": str(config.historical_intraday_page_limit),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        payload = self._request_json("/v2/stocks/quotes", params, config)
+        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/quotes", payload, "quotes")
+
+    def get_corporate_actions_page(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+        *,
+        page_token: str | None = None,
+    ) -> IntradayPage:
+        params = {
+            "symbols": ",".join(symbols),
+            "effective_from": start,
+            "effective_to": end,
+            "limit": str(config.historical_intraday_page_limit),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        payload = self._request_json(
+            "/v2/corporate-actions/announcements", params, config
+        )
+        return _alpaca_page(
+            self.provider_name,
+            self.feed,
+            "/v2/corporate-actions/announcements",
+            payload,
+            "corporate_actions",
+        )
 
     def get_premarket_snapshot(
         self, symbols: Sequence[str] | None, config: ScannerConfig
@@ -153,25 +275,16 @@ class AlpacaProvider(MarketDataProvider):
     def get_minute_bars(
         self, symbols: Sequence[str], start: str, end: str, config: ScannerConfig
     ) -> list[dict[str, Any]]:
-        payload = self._request_json(
-            "/v2/stocks/bars",
-            {
-                "symbols": ",".join(symbols),
-                "timeframe": "1Min",
-                "start": start,
-                "end": end,
-                "feed": self.feed,
-                "limit": "10000",
-            },
-            config,
-        )
-        bars = payload.get("bars", {})
         rows: list[dict[str, Any]] = []
-        for symbol, symbol_bars in bars.items():
-            for bar in symbol_bars:
+        page_token: str | None = None
+        for _ in range(config.historical_intraday_max_pages):
+            page = self.get_bars_page(
+                symbols, start, end, config, page_token=page_token
+            )
+            for bar in page.items:
                 rows.append(
                     {
-                        "ticker": str(symbol).upper(),
+                        "ticker": str(bar.get("S") or bar.get("symbol") or "").upper(),
                         "timestamp": bar.get("t"),
                         "open": bar.get("o"),
                         "high": bar.get("h"),
@@ -180,6 +293,9 @@ class AlpacaProvider(MarketDataProvider):
                         "volume": bar.get("v"),
                     }
                 )
+            if not page.next_page_token:
+                break
+            page_token = page.next_page_token
         return rows
 
     def get_previous_close(self, symbols: Sequence[str], config: ScannerConfig) -> dict[str, float]:
@@ -287,3 +403,45 @@ def _gap_pct(price: float, previous_close: float) -> float:
     if previous_close <= 0:
         return 0.0
     return ((price - previous_close) / previous_close) * 100
+
+
+def _alpaca_page(
+    provider: str,
+    feed: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    key: str,
+) -> IntradayPage:
+    raw_items = payload.get(key) or []
+    items: list[dict[str, Any]] = []
+    if isinstance(raw_items, dict):
+        for symbol, rows in raw_items.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    normalized = dict(row)
+                    normalized.setdefault("symbol", str(symbol).upper())
+                    items.append(normalized)
+    elif isinstance(raw_items, list):
+        items = [dict(row) for row in raw_items if isinstance(row, dict)]
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return IntradayPage(
+        provider=provider,
+        feed=feed,
+        endpoint=endpoint,
+        items=tuple(items),
+        next_page_token=str(payload.get("next_page_token") or "") or None,
+        raw_payload_hash_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        request_id=str(payload.get("request_id") or ""),
+    )
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None

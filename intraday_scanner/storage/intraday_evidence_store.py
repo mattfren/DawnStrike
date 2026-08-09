@@ -18,6 +18,7 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from intraday_scanner.v2.data_truth.intraday import (
     IntradayArtifactManifest,
     IntradayCoverageReceipt,
+    IntradayProviderCapabilityReceipt,
 )
 
 
@@ -351,6 +352,28 @@ class IntradayEvidenceStore:
                 ),
             )
         return capability_receipt_id
+
+    def record_provider_capability_receipt(
+        self, receipt: IntradayProviderCapabilityReceipt
+    ) -> str:
+        """Persist a typed, sanitized capability receipt."""
+
+        return self.record_capability_receipt(
+            capability_receipt_id=receipt.capability_receipt_id,
+            provider=receipt.provider,
+            feed=receipt.feed,
+            entitlement=receipt.entitlement,
+            requested_at=receipt.requested_at,
+            request_start=receipt.request_start,
+            request_end=receipt.request_end,
+            fetched_at=receipt.fetched_at,
+            raw_artifact_hash_sha256=receipt.raw_artifact_hash_sha256,
+            normalized_artifact_hash_sha256=receipt.normalized_artifact_hash_sha256,
+            retention_status=receipt.retention_status,
+            capabilities=receipt.capabilities,
+            receipt_hash_sha256=receipt.receipt_hash_sha256,
+            code_sha=receipt.code_sha,
+        )
 
     def record_legacy_policy_classification(
         self,

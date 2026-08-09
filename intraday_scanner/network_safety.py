@@ -7,6 +7,14 @@ import urllib.request
 from collections.abc import Collection
 from typing import Any
 
+INTRADAY_MARKET_DATA_HOSTS = ("data.alpaca.markets", "api.polygon.io")
+SECRET_ENV_NAMES = (
+    "ALPACA_API_KEY_ID",
+    "ALPACA_API_SECRET_KEY",
+    "MASSIVE_API_KEY",
+    "POLYGON_API_KEY",
+)
+
 
 def require_allowed_network_url(
     url: str,
@@ -88,3 +96,11 @@ def _host_matches(host: str, allowed: str) -> bool:
     if not candidate or "/" in candidate or ":" in candidate:
         return False
     return host == candidate or host.endswith(f".{candidate}")
+
+
+def assert_secret_not_in_text(text: str, secrets: Collection[str]) -> None:
+    """Fail closed if a receipt/log candidate contains a non-empty secret."""
+
+    for secret in secrets:
+        if secret and secret in text:
+            raise ValueError("secret material is not permitted in evidence text")

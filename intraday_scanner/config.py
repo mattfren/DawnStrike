@@ -60,6 +60,7 @@ class ScannerConfig:
     provider: str = "csv"
     output_dir: Path = Path("outputs/latest_scan")
     database_path: Path = Path("data/scanner.sqlite")
+    intraday_evidence_root: Path = Path("data/intraday_evidence")
     signal_time: str = "09:30"
     premarket_start: str = "04:00"
     premarket_end: str = "09:29"
@@ -104,6 +105,7 @@ class ScannerConfig:
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
+    massive_api_key: str = ""
     outcome_capture_provider_order: str = "yahoo,alpaca"
     polygon_api_key: str = ""
     databento_api_key: str = ""
@@ -113,6 +115,9 @@ class ScannerConfig:
     database_url: str = ""
     request_timeout_seconds: float = 15.0
     request_retries: int = 3
+    historical_intraday_page_limit: int = 10_000
+    historical_intraday_max_pages: int = 100
+    historical_intraday_backoff_seconds: float = 1.0
     premarket_enrichment_enabled: bool = True
     premarket_enrichment_max_candidates: int = 30
     premarket_enrichment_workers: int = 4
@@ -161,6 +166,14 @@ class ScannerConfig:
             raise ConfigError("request_timeout_seconds must be positive")
         if self.request_retries < 1:
             raise ConfigError("request_retries must be at least 1")
+        if self.alpaca_data_feed not in {"iex", "sip"}:
+            raise ConfigError("ALPACA_DATA_FEED must be exactly iex or sip")
+        if self.historical_intraday_page_limit < 1:
+            raise ConfigError("historical_intraday_page_limit must be positive")
+        if self.historical_intraday_max_pages < 1:
+            raise ConfigError("historical_intraday_max_pages must be positive")
+        if self.historical_intraday_backoff_seconds < 0:
+            raise ConfigError("historical_intraday_backoff_seconds must be non-negative")
         if not self.scenario_openai_model.strip():
             raise ConfigError("DAWNSTRIKE_OPENAI_MODEL must not be empty")
         if self.scenario_openai_timeout_seconds <= 0:
@@ -245,6 +258,7 @@ class ScannerConfig:
             "openai_api_key",
             "alpaca_api_key_id",
             "alpaca_api_secret_key",
+            "massive_api_key",
             "polygon_api_key",
             "databento_api_key",
             "news_api_key",
@@ -263,6 +277,7 @@ class ScannerConfig:
         }
         data["output_dir"] = str(self.output_dir)
         data["database_path"] = str(self.database_path)
+        data["intraday_evidence_root"] = str(self.intraday_evidence_root)
         return data
 
 
@@ -272,6 +287,9 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         provider=_env("INTRADAY_PROVIDER", "csv", env_values).lower(),
         output_dir=Path(_env("INTRADAY_OUTPUT_DIR", "outputs/latest_scan", env_values)),
         database_path=Path(_env("INTRADAY_DATABASE_PATH", "data/scanner.sqlite", env_values)),
+        intraday_evidence_root=Path(
+            _env("DAWNSTRIKE_INTRADAY_EVIDENCE_ROOT", "data/intraday_evidence", env_values)
+        ),
         signal_time=_env("INTRADAY_SIGNAL_TIME", "09:30", env_values),
         premarket_start=_env("INTRADAY_PREMARKET_START", "04:00", env_values),
         premarket_end=_env("INTRADAY_PREMARKET_END", "09:29", env_values),
@@ -402,6 +420,9 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),
         alpaca_data_feed=_env("ALPACA_DATA_FEED", "iex", env_values),
+        massive_api_key=_env_any(
+            ["MASSIVE_API_KEY", "POLYGON_API_KEY"], "", env_values
+        ),
         outcome_capture_provider_order=_env(
             "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER", "yahoo,alpaca", env_values
         ).lower(),
@@ -417,6 +438,18 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         ),
         request_retries=_to_int(
             "INTRADAY_REQUEST_RETRIES", _env("INTRADAY_REQUEST_RETRIES", "3", env_values)
+        ),
+        historical_intraday_page_limit=_to_int(
+            "DAWNSTRIKE_INTRADAY_PAGE_LIMIT",
+            _env("DAWNSTRIKE_INTRADAY_PAGE_LIMIT", "10000", env_values),
+        ),
+        historical_intraday_max_pages=_to_int(
+            "DAWNSTRIKE_INTRADAY_MAX_PAGES",
+            _env("DAWNSTRIKE_INTRADAY_MAX_PAGES", "100", env_values),
+        ),
+        historical_intraday_backoff_seconds=_to_float(
+            "DAWNSTRIKE_INTRADAY_BACKOFF_SECONDS",
+            _env("DAWNSTRIKE_INTRADAY_BACKOFF_SECONDS", "1", env_values),
         ),
         premarket_enrichment_enabled=_to_bool(
             _env("INTRADAY_PREMARKET_ENRICHMENT_ENABLED", "true", env_values)
