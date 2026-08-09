@@ -5,6 +5,20 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 
+from intraday_scanner.v2.contracts.serialization import ContractMixin
+
+
+@dataclass(frozen=True)
+class ExchangeSessionIdentity(ContractMixin):
+    """Stable exchange-session identity carried by intraday evidence."""
+
+    exchange: str
+    session_id: str
+    market_date: str
+    timezone: str
+    session_type: str = "regular"
+    schema_version: str = "v2.exchange_session_identity.v1"
+
 
 @dataclass(frozen=True)
 class DataTruthManifest:

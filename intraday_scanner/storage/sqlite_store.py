@@ -7315,6 +7315,12 @@ class SQLiteScanStore:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
+    def connect_read_only(self) -> sqlite3.Connection:
+        """Open this database without allowing the caller to mutate it."""
+
+        database_uri = f"file:{self.db_path.as_posix()}?mode=ro"
+        return sqlite3.connect(database_uri, uri=True)
+
 
 def _assert_applied_backfeed_allowed(
     events: list[dict[str, Any]],

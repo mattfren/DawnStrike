@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1019,6 +1019,106 @@ def _migration_021_official_strategy_cohort_lock(
     )
 
 
+def _migration_022_intraday_evidence_spine(connection: sqlite3.Connection) -> None:
+    """Add append-only indexes for retained intraday evidence and lineage."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS intraday_provider_capability_receipts (
+            capability_receipt_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            feed TEXT NOT NULL,
+            entitlement TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            request_start TEXT NOT NULL,
+            request_end TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            raw_artifact_hash_sha256 TEXT NOT NULL,
+            normalized_artifact_hash_sha256 TEXT NOT NULL,
+            retention_status TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_intraday_capability_provider_feed
+        ON intraday_provider_capability_receipts(provider, feed, entitlement, fetched_at);
+
+        CREATE TABLE IF NOT EXISTS intraday_artifact_manifests (
+            artifact_manifest_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            feed TEXT NOT NULL,
+            artifact_kind TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            exchange_session_id TEXT NOT NULL,
+            request_start TEXT NOT NULL,
+            request_end TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            raw_artifact_hash_sha256 TEXT NOT NULL,
+            normalized_artifact_hash_sha256 TEXT NOT NULL,
+            raw_artifact_path TEXT NOT NULL,
+            normalized_artifact_path TEXT NOT NULL,
+            retention_status TEXT NOT NULL,
+            artifact_identity TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_intraday_artifact_symbol_date
+        ON intraday_artifact_manifests(symbol, market_date, provider, feed);
+        CREATE INDEX IF NOT EXISTS idx_intraday_artifact_session
+        ON intraday_artifact_manifests(exchange_session_id, fetched_at);
+        CREATE INDEX IF NOT EXISTS idx_intraday_artifact_hashes
+        ON intraday_artifact_manifests(raw_artifact_hash_sha256, normalized_artifact_hash_sha256);
+
+        CREATE TABLE IF NOT EXISTS intraday_coverage_receipts (
+            coverage_receipt_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            feed TEXT NOT NULL,
+            entitlement TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            exchange_session_id TEXT NOT NULL,
+            request_start TEXT NOT NULL,
+            request_end TEXT NOT NULL,
+            observed_start TEXT,
+            observed_end TEXT,
+            status TEXT NOT NULL,
+            artifact_manifest_id TEXT,
+            code_sha TEXT NOT NULL,
+            raw_artifact_hash_sha256 TEXT NOT NULL,
+            normalized_artifact_hash_sha256 TEXT NOT NULL,
+            retention_status TEXT NOT NULL,
+            coverage_identity TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (artifact_manifest_id)
+                REFERENCES intraday_artifact_manifests(artifact_manifest_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_intraday_coverage_symbol_date
+        ON intraday_coverage_receipts(symbol, market_date, status);
+        CREATE INDEX IF NOT EXISTS idx_intraday_coverage_provider_feed
+        ON intraday_coverage_receipts(provider, feed, entitlement, exchange_session_id);
+
+        CREATE TABLE IF NOT EXISTS legacy_policy_classifications (
+            classification_id TEXT PRIMARY KEY,
+            source_db_hash_sha256 TEXT NOT NULL,
+            source_code_sha TEXT NOT NULL,
+            classifier_version TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            inferred_policy TEXT NOT NULL,
+            membership_hash_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (source_db_hash_sha256, classifier_version, membership_hash_sha256)
+        );
+        CREATE INDEX IF NOT EXISTS idx_legacy_policy_source
+        ON legacy_policy_classifications(source_db_hash_sha256, generated_at);
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1050,4 +1150,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (19, _migration_019_account_comparison_contract),
     (20, _migration_020_scenario_lifecycle_identity),
     (21, _migration_021_official_strategy_cohort_lock),
+    (22, _migration_022_intraday_evidence_spine),
 )

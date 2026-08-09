@@ -26,6 +26,13 @@ from intraday_scanner.v2.contracts import (
 
 @dataclass(frozen=True)
 class MarketBar:
+    """Backward-compatible daily/market bar carrier.
+
+    Intraday evidence uses the stricter ``IntradayBar`` contract.  These
+    optional fields let existing read-only loaders carry the same lineage
+    hints without changing their required constructor surface.
+    """
+
     symbol: str
     timestamp: datetime
     open: float
@@ -33,6 +40,9 @@ class MarketBar:
     low: float
     close: float
     volume: int
+    vwap: float | None = None
+    exchange_session_id: str | None = None
+    price_adjustment_basis: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,7 @@ def load_ohlcv_csv(
                     low=float(row["low"]),
                     close=float(row["close"]),
                     volume=int(float(row["volume"])),
+                    vwap=_optional_float(row.get("vwap")),
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 warnings.append(f"row {row_index}: invalid OHLCV row ({exc})")
@@ -376,6 +387,12 @@ def _parse_timestamp(value: str) -> datetime:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp.astimezone(timezone.utc)
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None or not value.strip():
+        return None
+    return float(value)
 
 
 def _format_float(value: float) -> str:
