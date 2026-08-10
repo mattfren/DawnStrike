@@ -220,14 +220,21 @@ def test_legacy_candidate_accepts_only_scoped_drift_and_preserves_frozen_lineage
         registration,
         output_root=root,
     ) == ()
-    _seed_champion_day(root, run_date)
+    data_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=root.parent / "v2_data_truth",
+        fixture_root=tmp_path / "retained_legacy",
+        run_date=run_date,
+        revision="legacy",
+        close=100.0,
+        dataset=_dataset(run_date),
+    )
+    _seed_champion_day(root, run_date, data_manifest=data_manifest)
     _write_truth_audits(root)
 
     def fake_loader(
         **_kwargs: object,
     ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
-        snapshot = f"sourced-shadow-{run_date.isoformat()}"
-        return _dataset(run_date), _manifest(run_date, snapshot), ()
+        return _dataset(run_date), data_manifest, ()
 
     monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
     result = shadow_runner.run_shadow_day(
@@ -367,7 +374,7 @@ def test_shadow_day_loads_exact_retained_champion_snapshot_when_latest_differs(
     _seed_champion_day(
         root,
         run_date,
-        snapshot_id=champion_manifest.snapshot_id,
+        data_manifest=champion_manifest,
     )
     _write_truth_audits(root)
 
@@ -463,7 +470,7 @@ def test_shadow_day_fails_closed_when_retained_champion_snapshot_is_invalid(
     _seed_champion_day(
         root,
         run_date,
-        snapshot_id=champion_manifest.snapshot_id,
+        data_manifest=champion_manifest,
     )
     _write_truth_audits(root)
     registry_path = root / "state" / "strategy_challenger_registry.json"
@@ -606,15 +613,32 @@ def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
     )
     registration = registered["challenger"]
     assert isinstance(registration, dict)
+    manifests = {
+        day_one: _build_retained_data_truth_snapshot(
+            data_truth_root=root.parent / "v2_data_truth",
+            fixture_root=tmp_path / "retained_day_one",
+            run_date=day_one,
+            revision="day-one",
+            close=100.0,
+            dataset=datasets[day_one],
+        ),
+        day_two: _build_retained_data_truth_snapshot(
+            data_truth_root=root.parent / "v2_data_truth",
+            fixture_root=tmp_path / "retained_day_two",
+            run_date=day_two,
+            revision="day-two",
+            close=102.5,
+            dataset=datasets[day_two],
+        ),
+    }
 
     def fake_loader(**kwargs: object) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
         run_date = kwargs["run_date"]
         assert isinstance(run_date, date)
-        snapshot = f"sourced-shadow-{run_date.isoformat()}"
-        return datasets[run_date], _manifest(run_date, snapshot), ()
+        return datasets[run_date], manifests[run_date], ()
 
     monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
-    _seed_champion_day(root, day_one)
+    _seed_champion_day(root, day_one, data_manifest=manifests[day_one])
     _write_truth_audits(root)
 
     first = shadow_runner.run_shadow_day(
@@ -641,7 +665,7 @@ def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
     assert shadow_decisions[0]["strategy_version"] == "v2.0"
     assert shadow_decisions[0]["challenger_id"] == CHALLENGER_ID
 
-    _seed_champion_day(root, day_two)
+    _seed_champion_day(root, day_two, data_manifest=manifests[day_two])
     _write_truth_audits(root)
     second = shadow_runner.run_shadow_day(
         run_date=day_two,
@@ -916,12 +940,19 @@ def test_shadow_day_runs_eligible_challengers_while_preserving_ineligible_as_na(
         },
         registered_at=f"{run_date.isoformat()}T13:00:00+00:00",
     )
-    _seed_champion_day(root, run_date)
+    data_manifest = _build_retained_data_truth_snapshot(
+        data_truth_root=root.parent / "v2_data_truth",
+        fixture_root=tmp_path / "retained_eligible",
+        run_date=run_date,
+        revision="eligible",
+        close=100.0,
+        dataset=_dataset(run_date),
+    )
+    _seed_champion_day(root, run_date, data_manifest=data_manifest)
     _write_truth_audits(root)
 
     def fake_loader(**_kwargs: object) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
-        snapshot = f"sourced-shadow-{run_date.isoformat()}"
-        return _dataset(run_date), _manifest(run_date, snapshot), ()
+        return _dataset(run_date), data_manifest, ()
 
     monkeypatch.setattr(shadow_runner, "_load_retained_champion_snapshot", fake_loader)
     result = shadow_runner.run_shadow_day(
@@ -1183,36 +1214,69 @@ def _seed_champion_day(
     run_date: date,
     *,
     snapshot_id: str | None = None,
+    data_manifest: DataTruthManifest | None = None,
 ) -> None:
     paths = paper_engine.PaperOpsPaths.create(root)
-    snapshot = snapshot_id or f"sourced-shadow-{run_date.isoformat()}"
+    snapshot = (
+        data_manifest.snapshot_id
+        if data_manifest is not None
+        else snapshot_id or f"sourced-shadow-{run_date.isoformat()}"
+    )
     run = paper_engine._paper_run(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
         data_snapshot_id=snapshot,
     )
     config = paper_engine._config(paths)
-    run_manifest = paper_engine.PaperOpsManifest(
-        run_id=run.run_id,
-        mode=run.mode,
-        run_date=run.run_date,
-        data_snapshot_id=run.data_snapshot_id,
-        output_artifacts=(),
-        warnings=(),
-        execution_policy_version=config.execution_policy_version,
-        execution_policy_fingerprint="a" * 64,
-        universe_id=config.universe_id,
-        universe_symbols=config.universe_symbols,
-    ).to_dict()
-    unhashed = dict(run_manifest)
-    unhashed.pop("manifest_payload_hash", None)
-    run_manifest["manifest_payload_hash"] = hashlib.sha256(
-        json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    write_json(
-        paths.manifests / f"{paper_engine._safe_filename(run.run_id)}.json",
-        run_manifest,
-    )
+    if data_manifest is not None:
+        run_manifest = paper_engine.PaperOpsManifest(
+            run_id=run.run_id,
+            mode=run.mode,
+            run_date=run.run_date,
+            data_snapshot_id=run.data_snapshot_id,
+            output_artifacts=(),
+            warnings=tuple(data_manifest.warnings),
+            execution_policy_version=config.execution_policy_version,
+            execution_policy_fingerprint=paper_engine._execution_policy_fingerprint(config),
+            universe_id=config.universe_id,
+            universe_symbols=config.universe_symbols,
+            data_snapshot_content_hash=data_manifest.snapshot_content_hash,
+            data_snapshot_manifest_payload_hash=data_manifest.manifest_payload_hash,
+            data_snapshot_normalized_hash=data_manifest.normalized_artifact_hash,
+            data_snapshot_normalized_path=data_manifest.normalized_artifact_path,
+            data_truth_root_relative="../v2_data_truth",
+        ).to_dict()
+        unhashed = dict(run_manifest)
+        unhashed.pop("manifest_payload_hash", None)
+        run_manifest["manifest_payload_hash"] = hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        write_json(
+            paths.manifests / f"{paper_engine._safe_filename(run.run_id)}.json",
+            run_manifest,
+        )
+    else:
+        run_manifest = paper_engine.PaperOpsManifest(
+            run_id=run.run_id,
+            mode=run.mode,
+            run_date=run.run_date,
+            data_snapshot_id=run.data_snapshot_id,
+            output_artifacts=(),
+            warnings=(),
+            execution_policy_version=config.execution_policy_version,
+            execution_policy_fingerprint="a" * 64,
+            universe_id=config.universe_id,
+            universe_symbols=config.universe_symbols,
+        ).to_dict()
+        unhashed = dict(run_manifest)
+        unhashed.pop("manifest_payload_hash", None)
+        run_manifest["manifest_payload_hash"] = hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        write_json(
+            paths.manifests / f"{paper_engine._safe_filename(run.run_id)}.json",
+            run_manifest,
+        )
     write_json(
         root / "reports" / "daily" / f"forward_{run_date}.json",
         {
@@ -1295,6 +1359,7 @@ def _build_retained_data_truth_snapshot(
     run_date: date,
     revision: str,
     close: float,
+    dataset: MarketDataset | None = None,
 ) -> DataTruthManifest:
     fixture_root.mkdir(parents=True)
     raw_dir = fixture_root / "raw"
@@ -1305,7 +1370,8 @@ def _build_retained_data_truth_snapshot(
     )
     source_csv = fixture_root / "ohlcv.csv"
     write_ohlcv_csv(
-        MarketDataset(
+        dataset
+        or MarketDataset(
             dataset_id=f"fixture-{revision}",
             source_kind="sourced_fixture",
             timeframe="1d",

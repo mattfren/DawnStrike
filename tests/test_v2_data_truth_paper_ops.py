@@ -815,28 +815,48 @@ def test_paperops_daily_fill_is_next_bar_and_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output_root = tmp_path / "paper_ops"
-    dataset = _dataset()
-    manifest = _manifest()
-    reconciliation = DataTruthReconciliationReport(
-        reconciliation_id="recon",
-        created_at=NOW.isoformat(),
-        canonical_snapshot_id=manifest.snapshot_id,
-        provider_count=1,
-        status="single_provider_unreconciled",
-        canonical_provider_id=manifest.provider_id,
-        compared_provider_ids=(),
-        disagreements=(),
-        warnings=("single provider",),
+    dataset = MarketDataset(
+        dataset_id="bound-fill-fixture",
+        source_kind="fixture",
+        timeframe="1d",
+        bars_by_symbol={
+            "TST": (
+                _bar("TST", date(2026, 1, 2), 10.0, 10.5, 9.8, 10.2),
+                _bar("TST", date(2026, 1, 5), 10.2, 11.0, 9.6, 10.8),
+            )
+        },
+    )
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    paper_ops_engine.write_json(
+        paths.state / "paper_ops_config.json", {"universe_symbols": ["TST"]}
+    )
+    paper_ops_engine.init(output_root=output_root)
+    retained = _retained_snapshot_loader_rows(
+        output_root,
+        PaperRunMode.FORWARD,
+        dataset,
+        (date(2026, 1, 2), date(2026, 1, 5)),
     )
 
     def fake_loader(**kwargs: object) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
         assert kwargs["mode"] is PaperRunMode.FORWARD
-        return dataset, manifest, reconciliation.warnings
+        run_date = kwargs["run_date"]
+        assert isinstance(run_date, date)
+        return retained[run_date]
 
     monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", fake_loader)
-    paper_ops_engine.init(output_root=output_root)
-    pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.FORWARD)
-    _write_picks_with_scan_evidence(output_root, [pick])
+    enter_manifest = retained[date(2026, 1, 2)][1]
+    pick = _accepted_pick(
+        output_root,
+        date(2026, 1, 2),
+        PaperRunMode.FORWARD,
+        snapshot_id=enter_manifest.snapshot_id,
+    )
+    _write_picks_with_scan_evidence(
+        output_root,
+        [pick],
+        data_manifest=enter_manifest,
+    )
 
     first_enter = paper_ops_engine.enter(run_date=date(2026, 1, 2), output_root=output_root)
     decisions_path = output_root / "exports" / "order_decisions_forward_2026-01-02.json"
@@ -850,19 +870,19 @@ def test_paperops_daily_fill_is_next_bar_and_idempotent(
     assert _tree_bytes_and_directories(output_root) == tree_after_first_enter
     pending_before_fill = json.loads((output_root / "state" / "pending_orders.json").read_text())
     same_day = paper_ops_engine.check(run_date=date(2026, 1, 2), output_root=output_root)
-    next_day = paper_ops_engine.check(run_date=date(2026, 1, 3), output_root=output_root)
-    next_day_report = output_root / "reports" / "daily" / "forward_2026-01-03.json"
+    next_day = paper_ops_engine.check(run_date=date(2026, 1, 5), output_root=output_root)
+    next_day_report = output_root / "reports" / "daily" / "forward_2026-01-05.json"
     report_after_first_check = next_day_report.read_bytes()
     tree_after_first_check = _tree_bytes_and_directories(output_root)
     repeated_next_day = paper_ops_engine.check(
-        run_date=date(2026, 1, 3), output_root=output_root
+        run_date=date(2026, 1, 5), output_root=output_root
     )
     assert next_day_report.read_bytes() == report_after_first_check
     assert _tree_bytes_and_directories(output_root) == tree_after_first_check
 
     assert first_enter["orders_created"] == 1
     assert second_enter["orders_created"] == 0
-    assert pending_before_fill[0]["earliest_fill_date"] == "2026-01-03"
+    assert pending_before_fill[0]["earliest_fill_date"] == "2026-01-05"
     assert same_day["fills"] == 0
     assert next_day["fills"] == 1
     assert next_day["open_positions"] == 1
@@ -871,6 +891,11 @@ def test_paperops_daily_fill_is_next_bar_and_idempotent(
     events = paper_ops_engine.read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
     event_ids = [event["event_id"] for event in events]
     assert len(event_ids) == len(set(event_ids))
+    assert any(
+        event["event_type"] == "paper_order_pending_no_fill_data"
+        and event["trade_date"] == "2026-01-02"
+        for event in events
+    )
     assert any(event["event_type"] == "paper_position_checked_no_action" for event in events)
 
 
@@ -1125,19 +1150,43 @@ def test_paperops_net_equity_charges_entry_and_exit_fees(
         bars_by_symbol={
             "TST": (
                 _bar("TST", date(2026, 1, 2), 10.0, 10.5, 9.8, 10.2),
-                    _bar("TST", date(2026, 1, 3), 10.2, 11.0, 9.6, 10.8),
+                _bar("TST", date(2026, 1, 3), 10.2, 11.0, 9.6, 10.8),
                 _bar("TST", date(2026, 1, 4), 11.0, 12.5, 10.8, 12.2),
             )
         },
     )
-    monkeypatch.setattr(
-        paper_ops_engine,
-        "_load_dataset_for_mode",
-        lambda **_kwargs: (dataset, _manifest(), ()),
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    paper_ops_engine.write_json(
+        paths.state / "paper_ops_config.json", {"universe_symbols": ["TST"]}
     )
     paper_ops_engine.init(output_root=output_root)
-    pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    _write_picks_with_scan_evidence(output_root, [pick])
+    retained = _retained_snapshot_loader_rows(
+        output_root,
+        PaperRunMode.REPLAY,
+        dataset,
+        (date(2026, 1, 2), date(2026, 1, 3), date(2026, 1, 4)),
+    )
+
+    def retained_loader(
+        **kwargs: object,
+    ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+        run_date = kwargs["run_date"]
+        assert isinstance(run_date, date)
+        return retained[run_date]
+
+    monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", retained_loader)
+    enter_manifest = retained[date(2026, 1, 2)][1]
+    pick = _accepted_pick(
+        output_root,
+        date(2026, 1, 2),
+        PaperRunMode.REPLAY,
+        snapshot_id=enter_manifest.snapshot_id,
+    )
+    _write_picks_with_scan_evidence(
+        output_root,
+        [pick],
+        data_manifest=enter_manifest,
+    )
     paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
         mode=PaperRunMode.REPLAY,
@@ -1158,6 +1207,13 @@ def test_paperops_net_equity_charges_entry_and_exit_fees(
     assert position["entry_fee"] > 0
     assert position["unrealized_pnl"] == pytest.approx(expected_unrealized)
 
+    marked = paper_ops_engine.close(
+        run_date=date(2026, 1, 3),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+    assert marked["marked_positions"] == 1
+
     paper_ops_engine.check(
         run_date=date(2026, 1, 4),
         mode=PaperRunMode.REPLAY,
@@ -1173,6 +1229,17 @@ def test_paperops_net_equity_charges_entry_and_exit_fees(
         - float(close_payload["entry_fee"])
         - float(close_payload["fee"])
     )
+    event_types = {
+        str(event["event_type"])
+        for event in paper_ops_engine.read_jsonl(
+            output_root / "ledger" / "paper_ledger.jsonl"
+        )
+    }
+    assert {
+        "paper_position_checked_no_action",
+        "paper_position_marked_to_market",
+        "paper_position_closed",
+    } <= event_types
 
 
 def test_paperops_blocks_a_new_fill_that_gaps_through_its_stop(

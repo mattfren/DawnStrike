@@ -26,9 +26,13 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
 
 
 def _canonical_event(
-    seed: str = "canonical-event", *, symbol: str = "TST"
+    seed: str = "canonical-event",
+    *,
+    symbol: str = "TST",
+    equity_basis: float | None = None,
+    snapshot_id: str = "fixture-snapshot",
 ) -> dict[str, object]:
-    run_id = "paper_ops:forward:2026-01-02:fixture-snapshot"
+    run_id = f"paper_ops:forward:2026-01-02:{snapshot_id}"
     signal_second = 0 if seed == "canonical-event" else sum(seed.encode("utf-8")) % 60
     signal_time = f"2026-01-02T20:00:{signal_second:02d}+00:00"
     config = paper_ops_engine.PaperOpsConfig()
@@ -53,7 +57,7 @@ def _canonical_event(
         run_id=run_id,
         mode=paper_ops_engine.PaperRunMode.FORWARD,
         run_date="2026-01-02",
-        data_snapshot_id="fixture-snapshot",
+        data_snapshot_id=snapshot_id,
         created_at=signal_time,
     )
     pick = paper_ops_engine.PaperPick(
@@ -84,7 +88,7 @@ def _canonical_event(
         pick,
         run,
         config,
-        equity_basis=config.starting_equity,
+        equity_basis=(config.starting_equity if equity_basis is None else equity_basis),
     )
     order_id = order.order_id
     event_id = paper_ops_engine.stable_id(
@@ -1059,24 +1063,35 @@ def _canonical_fill_open_transaction(
     dict[Path, object],
     paper_ops_engine.PaperPosition,
 ]:
+    run_date = date(2026, 1, 5)
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=run_date,
+        run_bar={
+            "open": 100.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 103.0,
+            "volume": 1_000,
+        },
+    )
+    assert bar is not None
+    return _fill_open_transaction_for_bar(paths, created_event, run, bar)
+
+
+def _fill_open_transaction_for_bar(
+    paths: paper_ops_engine.PaperOpsPaths,
+    created_event: dict[str, object],
+    run: paper_ops_engine.PaperRun,
+    bar: paper_ops_engine.MarketBar,
+) -> tuple[
+    list[paper_ops_engine.PaperLedgerEvent],
+    dict[Path, object],
+    paper_ops_engine.PaperPosition,
+]:
     order_row = created_event["payload"]
     assert isinstance(order_row, dict)
     order = paper_ops_engine._order_from_row(order_row)
-    run_date = date(2026, 1, 5)
-    run = paper_ops_engine._paper_run(
-        run_date=run_date,
-        mode=paper_ops_engine.PaperRunMode.FORWARD,
-        data_snapshot_id="fixture-snapshot",
-    )
-    bar = paper_ops_engine.MarketBar(
-        symbol=order.symbol,
-        timestamp=datetime(2026, 1, 5, 21, 0, tzinfo=timezone.utc),
-        open=100.0,
-        high=105.0,
-        low=97.0,
-        close=103.0,
-        volume=1_000,
-    )
     config = paper_ops_engine._config(paths)
     fill = paper_ops_engine._fill_order(order, bar, run, config)
     opened = paper_ops_engine._position_from_fill(order, fill)
@@ -1107,11 +1122,10 @@ def _canonical_fill_open_transaction(
             checked.strategy_id,
             checked.symbol,
             "paper_position_checked_no_action",
-            f"{checked.position_id}:checked:{run_date.isoformat()}",
+            f"{checked.position_id}:checked:{run.run_date}",
             paper_ops_engine._with_source_bar(checked.to_dict(), bar, run),
         ),
     ]
-    _seed_run_manifest(paths.root, events[0].to_dict())
     accounts = paper_ops_engine._accounts(paths)
     accounts = paper_ops_engine._apply_mark(accounts, checked)
     accounts = paper_ops_engine._recalculate_unrealized_accounts(
@@ -1132,7 +1146,7 @@ def _canonical_fill_open_transaction(
 def _seed_open_canonical_position(
     root: Path,
 ) -> tuple[paper_ops_engine.PaperOpsPaths, paper_ops_engine.PaperPosition]:
-    paths, created_event = _seed_pending_canonical_order(root)
+    paths, created_event = _seed_pending_canonical_order(root, symbol="SPY")
     events, updates, position = _canonical_fill_open_transaction(paths, created_event)
     paper_ops_engine._commit_paper_transaction(paths, events=events, state_updates=updates)
     return paths, position
@@ -1146,20 +1160,19 @@ def _canonical_close_transaction(
     dict[Path, object],
     paper_ops_engine.MarketBar,
 ]:
-    run = paper_ops_engine._paper_run(
+    run, trigger_bar = _seed_bound_check_run(
+        paths,
         run_date=date(2026, 1, 6),
-        mode=paper_ops_engine.PaperRunMode.FORWARD,
-        data_snapshot_id="fixture-snapshot",
+        prior_bar_date=date(2026, 1, 2),
+        run_bar={
+            "open": 103.0,
+            "high": 111.0,
+            "low": 98.0,
+            "close": 108.0,
+            "volume": 1_000,
+        },
     )
-    trigger_bar = paper_ops_engine.MarketBar(
-        symbol=position.symbol,
-        timestamp=datetime(2026, 1, 6, 21, 0, tzinfo=timezone.utc),
-        open=103.0,
-        high=111.0,
-        low=98.0,
-        close=108.0,
-        volume=1_000,
-    )
+    assert trigger_bar is not None
     config = paper_ops_engine._config(paths)
     _, close_record = paper_ops_engine._check_position(position, trigger_bar, run, config)
     assert close_record is not None
@@ -1172,7 +1185,6 @@ def _canonical_close_transaction(
         close_record.close_id,
         paper_ops_engine._with_source_bar(close_record.to_dict(), trigger_bar, run),
     )
-    _seed_run_manifest(paths.root, event.to_dict())
     accounts = paper_ops_engine._accounts(paths)
     accounts = paper_ops_engine._apply_close(accounts, close_record)
     accounts = paper_ops_engine._recalculate_unrealized_accounts(accounts, [])
@@ -1185,6 +1197,139 @@ def _canonical_close_transaction(
         ),
     }
     return [event], updates, trigger_bar
+
+
+def _position_close_phase_transaction_for_bar(
+    paths: paper_ops_engine.PaperOpsPaths,
+    position: paper_ops_engine.PaperPosition,
+    run: paper_ops_engine.PaperRun,
+    bar: paper_ops_engine.MarketBar,
+    *,
+    outcome: str,
+) -> tuple[list[paper_ops_engine.PaperLedgerEvent], dict[Path, object]]:
+    config = paper_ops_engine._config(paths)
+    checked, close_record = paper_ops_engine._check_position(position, bar, run, config)
+    accounts = paper_ops_engine._accounts(paths)
+    if outcome == "close":
+        assert close_record is not None
+        event = paper_ops_engine._event(
+            run,
+            paper_ops_engine.PaperJobPhase.CLOSE,
+            close_record.strategy_id,
+            close_record.symbol,
+            "paper_position_closed",
+            close_record.close_id,
+            paper_ops_engine._with_source_bar(close_record.to_dict(), bar, run),
+        )
+        accounts = paper_ops_engine._apply_close(accounts, close_record)
+        positions: list[dict[str, object]] = []
+    else:
+        assert close_record is None
+        event = paper_ops_engine._event(
+            run,
+            paper_ops_engine.PaperJobPhase.CLOSE,
+            checked.strategy_id,
+            checked.symbol,
+            "paper_position_marked_to_market",
+            f"{checked.position_id}:mark:{run.run_date}",
+            paper_ops_engine._with_source_bar(checked.to_dict(), bar, run),
+        )
+        accounts = paper_ops_engine._apply_mark(accounts, checked)
+        positions = [checked.to_dict()]
+    accounts = paper_ops_engine._recalculate_unrealized_accounts(accounts, positions)
+    updates: dict[Path, object] = {
+        paths.state / "open_positions.json": positions,
+        paths.state / "paper_accounts.json": paper_ops_engine._account_state_payload(
+            paths,
+            paper_ops_engine.PaperRunMode.FORWARD,
+            accounts,
+        ),
+    }
+    return [event], updates
+
+
+def _canonical_mark_transaction(
+    paths: paper_ops_engine.PaperOpsPaths,
+    position: paper_ops_engine.PaperPosition,
+) -> tuple[
+    list[paper_ops_engine.PaperLedgerEvent],
+    dict[Path, object],
+    paper_ops_engine.MarketBar,
+]:
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 6),
+        prior_bar_date=date(2026, 1, 2),
+        run_bar={
+            "open": 103.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 104.0,
+            "volume": 1_000,
+        },
+    )
+    assert bar is not None
+    events, updates = _position_close_phase_transaction_for_bar(
+        paths,
+        position,
+        run,
+        bar,
+        outcome="mark",
+    )
+    return events, updates, bar
+
+
+def _canonical_checked_transaction(
+    paths: paper_ops_engine.PaperOpsPaths,
+    position: paper_ops_engine.PaperPosition,
+) -> tuple[
+    list[paper_ops_engine.PaperLedgerEvent],
+    dict[Path, object],
+    paper_ops_engine.PaperPosition,
+]:
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 6),
+        prior_bar_date=date(2026, 1, 2),
+        run_bar={
+            "open": 103.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 104.0,
+            "volume": 1_000,
+        },
+    )
+    assert bar is not None
+    config = paper_ops_engine._config(paths)
+    checked, close_record = paper_ops_engine._check_position(position, bar, run, config)
+    assert close_record is None
+    event = paper_ops_engine._event(
+        run,
+        paper_ops_engine.PaperJobPhase.CHECK,
+        checked.strategy_id,
+        checked.symbol,
+        "paper_position_checked_no_action",
+        f"{checked.position_id}:checked:{run.run_date}",
+        paper_ops_engine._with_source_bar(checked.to_dict(), bar, run),
+    )
+    accounts = paper_ops_engine._accounts(paths)
+    accounts = paper_ops_engine._apply_mark(accounts, checked)
+    accounts = paper_ops_engine._recalculate_unrealized_accounts(
+        accounts,
+        [checked.to_dict()],
+    )
+    updates: dict[Path, object] = {
+        paths.state / "pending_orders.json": paper_ops_engine.read_json(
+            paths.state / "pending_orders.json", []
+        ),
+        paths.state / "open_positions.json": [checked.to_dict()],
+        paths.state / "paper_accounts.json": paper_ops_engine._account_state_payload(
+            paths,
+            paper_ops_engine.PaperRunMode.FORWARD,
+            accounts,
+        ),
+    }
+    return [event], updates, checked
 
 
 def _write_checksum_valid_journal(
@@ -1281,7 +1426,7 @@ def _seed_bound_check_run(
     run_date: date,
     run_bar: dict[str, float | int] | None,
     prior_bar_date: date = date(2026, 1, 2),
-) -> tuple[paper_ops_engine.PaperRun, paper_ops_engine.MarketBar]:
+) -> tuple[paper_ops_engine.PaperRun, paper_ops_engine.MarketBar | None]:
     config = paper_ops_engine._config(paths)
     raw_dir = paths.root / "fixture_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1338,10 +1483,15 @@ def _seed_bound_check_run(
         result.manifest.snapshot_id,
         paths.root.parent / "v2_data_truth",
     )
-    bar = next(
-        item
-        for item in dataset.bars_by_symbol["SPY"]
-        if item.timestamp > datetime(2026, 1, 2, 20, 0, tzinfo=timezone.utc)
+    bar = (
+        next(
+            item
+            for item in dataset.bars_by_symbol["SPY"]
+            if item.timestamp
+            > datetime(2026, 1, 2, 20, 0, tzinfo=timezone.utc)
+        )
+        if run_bar is not None
+        else None
     )
     return run, bar
 
@@ -1375,6 +1525,37 @@ def _check_block_updates(
 ) -> dict[str, object]:
     return {
         "state/pending_orders.json": [],
+        "state/open_positions.json": paper_ops_engine.read_json(
+            paths.state / "open_positions.json", []
+        ),
+        "state/paper_accounts.json": paper_ops_engine.read_json(
+            paths.state / "paper_accounts.json", {}
+        ),
+    }
+
+
+def _pending_check_event(
+    order_row: dict[str, object],
+    run: paper_ops_engine.PaperRun,
+) -> dict[str, object]:
+    order = paper_ops_engine._order_from_row(order_row)
+    return paper_ops_engine._event(
+        run,
+        paper_ops_engine.PaperJobPhase.CHECK,
+        order.strategy_id,
+        order.symbol,
+        "paper_order_pending_no_fill_data",
+        f"{order.order_id}:pending_check:{run.run_date}",
+        paper_ops_engine._pending_order_lifecycle_payload(order, run),
+    ).to_dict()
+
+
+def _pending_check_updates(
+    paths: paper_ops_engine.PaperOpsPaths,
+    order_row: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "state/pending_orders.json": [order_row],
         "state/open_positions.json": paper_ops_engine.read_json(
             paths.state / "open_positions.json", []
         ),
@@ -1532,6 +1713,7 @@ def test_check_block_rejects_safe_fill_bar(tmp_path: Path) -> None:
             "volume": 1_000,
         },
     )
+    assert bar is not None
     order = created["payload"]
     assert isinstance(order, dict)
     event = _check_block_event(order, run, bar, "gap_through_stop")
@@ -1559,6 +1741,7 @@ def test_check_block_rejects_incorrect_computed_reason(tmp_path: Path) -> None:
             "volume": 1_000,
         },
     )
+    assert bar is not None
     order = created["payload"]
     assert isinstance(order, dict)
     event = _check_block_event(order, run, bar, "missed_fill_session")
@@ -1646,6 +1829,7 @@ def test_check_block_requires_verified_bound_snapshot(
                 "volume": 1_000,
             },
         )
+        assert bar is not None
         event = _check_block_event(order, run, bar, "gap_through_stop")
         manifest = paper_ops_engine.read_json(
             paths.manifests / f"{paper_ops_engine._safe_filename(run.run_id)}.json", {}
@@ -1709,6 +1893,7 @@ def test_canonical_check_block_decision_applies(
         run_bar=run_bar,
         prior_bar_date=prior_bar_date,
     )
+    assert bar is not None
     order = created["payload"]
     assert isinstance(order, dict)
     event = _check_block_event(order, run, bar, reason)
@@ -1721,9 +1906,357 @@ def test_canonical_check_block_decision_applies(
     assert read_jsonl(paths.ledger / "paper_ledger.jsonl")[-1] == event
 
 
+def test_bound_snapshot_pending_no_fill_transaction_applies(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 2),
+        run_bar=None,
+    )
+    assert bar is None
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _pending_check_event(order, run)
+    updates = _pending_check_updates(paths, order)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+
+    paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert paper_ops_engine.read_json(paths.state / "pending_orders.json", None) == [
+        order
+    ]
+    assert read_jsonl(paths.ledger / "paper_ledger.jsonl")[-1] == event
+
+
+def test_bound_snapshot_pending_no_fill_rejects_existing_next_bar_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 5),
+        run_bar={
+            "open": 100.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 103.0,
+            "volume": 1_000,
+        },
+    )
+    assert bar is not None
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _pending_check_event(order, run)
+    updates = _pending_check_updates(paths, order)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="eligible immutable source bar"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+@pytest.mark.parametrize("variant", ("missing", "tampered"))
+def test_bound_snapshot_pending_no_fill_requires_verified_snapshot_exact_tree_no_op(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 2),
+        run_bar=None,
+    )
+    assert bar is None
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _pending_check_event(order, run)
+    manifest_path = (
+        paths.manifests / f"{paper_ops_engine._safe_filename(run.run_id)}.json"
+    )
+    manifest = paper_ops_engine.read_json(manifest_path, {})
+    assert isinstance(manifest, dict)
+    data_root = (paths.root / str(manifest["data_truth_root_relative"])).resolve()
+    if variant == "missing":
+        snapshot_manifest = (
+            data_root / "snapshots" / str(manifest["data_snapshot_id"]) / "manifest.json"
+        )
+        snapshot_manifest.unlink()
+    else:
+        normalized = data_root / str(manifest["data_snapshot_normalized_path"])
+        normalized.write_bytes(normalized.read_bytes() + b"\n")
+    updates = _pending_check_updates(paths, order)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_fill_and_pending_outcomes_conflict_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    events, path_updates, _ = _canonical_fill_open_transaction(paths, created)
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    order = created["payload"]
+    assert isinstance(order, dict)
+    fill_payload = event_rows[0]["payload"]
+    assert isinstance(fill_payload, dict)
+    run = paper_ops_engine.PaperRun(
+        run_id=str(event_rows[0]["run_id"]),
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date=str(event_rows[0]["trade_date"]),
+        data_snapshot_id=str(fill_payload["data_snapshot_id"]),
+        created_at=str(fill_payload["source_bar"]["timestamp"]),
+    )
+    event_rows.append(_pending_check_event(order, run))
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="conflicting check outcomes"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_canonical_fill_transaction_applies(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    events, updates, position = _canonical_fill_open_transaction(paths, created)
+
+    paper_ops_engine._commit_paper_transaction(
+        paths,
+        events=events,
+        state_updates=updates,
+    )
+
+    assert paper_ops_engine.read_json(paths.state / "pending_orders.json", None) == []
+    assert paper_ops_engine.read_json(paths.state / "open_positions.json", None) == [
+        position.to_dict()
+    ]
+
+
+def test_bound_snapshot_fill_open_requires_same_run_position_outcome_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    events, _, _ = _canonical_fill_open_transaction(paths, created)
+    opened_payload = events[1].payload
+    opened_row = paper_ops_engine._model_projection(
+        opened_payload,
+        paper_ops_engine._POSITION_FIELDS,
+    )
+    opened = paper_ops_engine._position_from_row(opened_row)
+    accounts = paper_ops_engine._accounts(paths)
+    accounts = paper_ops_engine._apply_mark(accounts, opened)
+    accounts = paper_ops_engine._recalculate_unrealized_accounts(
+        accounts,
+        [opened.to_dict()],
+    )
+    path_updates: dict[Path, object] = {
+        paths.state / "pending_orders.json": [],
+        paths.state / "open_positions.json": [opened.to_dict()],
+        paths.state / "paper_accounts.json": paper_ops_engine._account_state_payload(
+            paths,
+            paper_ops_engine.PaperRunMode.FORWARD,
+            accounts,
+        ),
+    }
+    event_rows = paper_ops_engine._serialize_transaction_events(events[:2])
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="exactly one outcome"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_positions_only_check_without_pending_applies(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, position = _seed_open_canonical_position(root)
+    events, updates, checked = _canonical_checked_transaction(paths, position)
+
+    paper_ops_engine._commit_paper_transaction(
+        paths,
+        events=events,
+        state_updates=updates,
+    )
+
+    assert paper_ops_engine.read_json(paths.state / "pending_orders.json", None) == []
+    assert paper_ops_engine.read_json(paths.state / "open_positions.json", None) == [
+        checked.to_dict()
+    ]
+
+
+def test_bound_snapshot_positions_only_check_cannot_omit_pending_order_outcome(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, position = _seed_open_canonical_position(root)
+    account = paper_ops_engine._accounts(paths)[position.strategy_id]
+    pending_event = _canonical_event(
+        "pending-with-position",
+        symbol="QQQ",
+        equity_basis=account.current_equity,
+    )
+    _seed_canonical_event_evidence(root, pending_event)
+    pending_order = pending_event["payload"]
+    assert isinstance(pending_order, dict)
+    pending_updates = {"state/pending_orders.json": [pending_order]}
+    paper_ops_engine._apply_transaction_journal(
+        paths,
+        {
+            "events": [pending_event],
+            "schema_version": "v2.paper_transaction.v1",
+            "state_updates": pending_updates,
+            "transaction_id": paper_ops_engine._paper_transaction_id(
+                [pending_event], pending_updates
+            ),
+        },
+    )
+    events, path_updates, _ = _canonical_checked_transaction(paths, position)
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="omits an outcome"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_check_rejects_omitted_effective_order_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, first = _seed_pending_canonical_order(root, symbol="SPY")
+    second = _canonical_event("second-pending", symbol="QQQ")
+    _seed_canonical_event_evidence(root, second)
+    first_order = first["payload"]
+    second_order = second["payload"]
+    assert isinstance(first_order, dict) and isinstance(second_order, dict)
+    second_updates = {
+        "state/pending_orders.json": [first_order, second_order],
+    }
+    paper_ops_engine._apply_transaction_journal(
+        paths,
+        {
+            "events": [second],
+            "schema_version": "v2.paper_transaction.v1",
+            "state_updates": second_updates,
+            "transaction_id": paper_ops_engine._paper_transaction_id(
+                [second], second_updates
+            ),
+        },
+    )
+    events, path_updates, _ = _canonical_fill_open_transaction(paths, first)
+    path_updates[paths.state / "pending_orders.json"] = [second_order]
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="omits an outcome"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_pure_fill_rejects_non_next_bar_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    canonical_events, _, _ = _canonical_fill_open_transaction(paths, created)
+    canonical = canonical_events[0].to_dict()
+    canonical_payload = canonical["payload"]
+    assert isinstance(canonical_payload, dict)
+    forged_bar = paper_ops_engine.MarketBar(
+        symbol="SPY",
+        timestamp=datetime(2026, 1, 5, 22, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=105.0,
+        low=97.0,
+        close=103.0,
+        volume=1_000,
+    )
+    run = paper_ops_engine.PaperRun(
+        run_id=str(canonical["run_id"]),
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date=str(canonical["trade_date"]),
+        data_snapshot_id=str(canonical_payload["data_snapshot_id"]),
+        created_at=forged_bar.timestamp.isoformat(),
+    )
+    forged_events, forged_updates, _ = _fill_open_transaction_for_bar(
+        paths,
+        created,
+        run,
+        forged_bar,
+    )
+    event_rows = paper_ops_engine._serialize_transaction_events(forged_events)
+    updates = paper_ops_engine._serialize_transaction_updates(paths, forged_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="not the next immutable bar"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+@pytest.mark.parametrize("variant", ("missing", "tampered"))
+def test_bound_snapshot_pure_fill_requires_verified_snapshot_exact_tree_no_op(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    events, path_updates, _ = _canonical_fill_open_transaction(paths, created)
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    manifest_path = (
+        paths.manifests
+        / f"{paper_ops_engine._safe_filename(str(event_rows[0]['run_id']))}.json"
+    )
+    manifest = paper_ops_engine.read_json(manifest_path, {})
+    assert isinstance(manifest, dict)
+    data_root = (paths.root / str(manifest["data_truth_root_relative"])).resolve()
+    if variant == "missing":
+        snapshot_manifest = (
+            data_root
+            / "snapshots"
+            / str(manifest["data_snapshot_id"])
+            / "manifest.json"
+        )
+        snapshot_manifest.unlink()
+    else:
+        normalized = data_root / str(manifest["data_snapshot_normalized_path"])
+        normalized.write_bytes(normalized.read_bytes() + b"\n")
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
 def test_cross_series_fill_open_lineage_is_exact_tree_no_op(tmp_path: Path) -> None:
     root = tmp_path / "paper_ops"
-    paths, created_event = _seed_pending_canonical_order(root)
+    paths, created_event = _seed_pending_canonical_order(root, symbol="SPY")
     events, path_updates, _ = _canonical_fill_open_transaction(paths, created_event)
     event_rows = paper_ops_engine._serialize_transaction_events(events)
     updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
@@ -1740,26 +2273,17 @@ def test_cross_series_fill_open_lineage_is_exact_tree_no_op(tmp_path: Path) -> N
         payload = event["payload"]
         assert isinstance(payload, dict)
         event["strategy_id"] = other["strategy_id"]
-        event["symbol"] = "BBB"
         payload.update(
             strategy_id=other["strategy_id"],
             strategy_version=other["strategy_version"],
             strategy_semantics_fingerprint=other["strategy_semantics_fingerprint"],
-            symbol="BBB",
         )
-        source_bar = payload.get("source_bar")
-        if isinstance(source_bar, dict):
-            source_bar["symbol"] = "BBB"
-            payload["source_bar_sha256"] = paper_ops_engine._transaction_payload_sha256(
-                source_bar
-            )
     positions = updates["state/open_positions.json"]
     assert isinstance(positions, list) and isinstance(positions[0], dict)
     positions[0].update(
         strategy_id=other["strategy_id"],
         strategy_version=other["strategy_version"],
         strategy_semantics_fingerprint=other["strategy_semantics_fingerprint"],
-        symbol="BBB",
     )
     journal = _write_checksum_valid_journal(paths, event_rows, updates)
     before = _tree_snapshot(root)
@@ -1795,19 +2319,10 @@ def test_impossible_close_economics_is_exact_tree_no_op(tmp_path: Path) -> None:
     events, path_updates, trigger_bar = _canonical_close_transaction(paths, position)
     event_rows = paper_ops_engine._serialize_transaction_events(events)
     updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
-    safe_bar = {
-        "close": 103.0,
-        "high": 105.0,
-        "low": 97.0,
-        "open": 103.0,
-        "symbol": trigger_bar.symbol,
-        "timestamp": trigger_bar.timestamp.isoformat(),
-        "volume": trigger_bar.volume,
-    }
+    assert trigger_bar.symbol == position.symbol
     payload = event_rows[0]["payload"]
     assert isinstance(payload, dict)
-    payload["source_bar"] = safe_bar
-    payload["source_bar_sha256"] = paper_ops_engine._transaction_payload_sha256(safe_bar)
+    payload["close_price"] = 9_999.0
     journal = _write_checksum_valid_journal(paths, event_rows, updates)
     before = _tree_snapshot(root)
 
@@ -1820,24 +2335,229 @@ def test_impossible_close_economics_is_exact_tree_no_op(tmp_path: Path) -> None:
     assert _tree_snapshot(root) == before
 
 
+@pytest.mark.parametrize("outcome", ("mark", "close"))
+@pytest.mark.parametrize("variant", ("alternate", "missing", "tampered"))
+def test_position_outcome_requires_latest_verified_bound_bar_exact_tree_no_op(
+    tmp_path: Path,
+    outcome: str,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, position = _seed_open_canonical_position(root)
+    if variant == "alternate" and outcome == "close":
+        run, canonical_bar = _seed_bound_check_run(
+            paths,
+            run_date=date(2026, 1, 6),
+            prior_bar_date=date(2026, 1, 2),
+            run_bar={
+                "open": 103.0,
+                "high": 106.0,
+                "low": 98.0,
+                "close": 105.0,
+                "volume": 1_000,
+            },
+        )
+        assert canonical_bar is not None
+        bar = paper_ops_engine.MarketBar(
+            symbol=position.symbol,
+            timestamp=datetime(2026, 1, 6, 22, 0, tzinfo=timezone.utc),
+            open=103.0,
+            high=111.0,
+            low=98.0,
+            close=108.0,
+            volume=1_000,
+        )
+        events, path_updates = _position_close_phase_transaction_for_bar(
+            paths,
+            position,
+            run,
+            bar,
+            outcome="close",
+        )
+    elif outcome == "close":
+        events, path_updates, _ = _canonical_close_transaction(paths, position)
+    else:
+        events, path_updates, canonical_bar = _canonical_mark_transaction(paths, position)
+        if variant == "alternate":
+            payload = events[0].payload
+            run = paper_ops_engine.PaperRun(
+                run_id=events[0].run_id,
+                mode=events[0].mode,
+                run_date=events[0].trade_date,
+                data_snapshot_id=str(payload["data_snapshot_id"]),
+                created_at=canonical_bar.timestamp.isoformat(),
+            )
+            bar = paper_ops_engine.MarketBar(
+                symbol=position.symbol,
+                timestamp=datetime(2026, 1, 6, 22, 0, tzinfo=timezone.utc),
+                open=103.0,
+                high=105.0,
+                low=97.0,
+                close=104.5,
+                volume=1_000,
+            )
+            events, path_updates = _position_close_phase_transaction_for_bar(
+                paths,
+                position,
+                run,
+                bar,
+                outcome="mark",
+            )
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    if variant in {"missing", "tampered"}:
+        manifest_path = (
+            paths.manifests
+            / f"{paper_ops_engine._safe_filename(str(event_rows[0]['run_id']))}.json"
+        )
+        manifest = paper_ops_engine.read_json(manifest_path, {})
+        assert isinstance(manifest, dict)
+        data_root = (paths.root / str(manifest["data_truth_root_relative"])).resolve()
+        if variant == "missing":
+            snapshot_manifest = (
+                data_root
+                / "snapshots"
+                / str(manifest["data_snapshot_id"])
+                / "manifest.json"
+            )
+            snapshot_manifest.unlink()
+        else:
+            normalized = data_root / str(manifest["data_snapshot_normalized_path"])
+            normalized.write_bytes(normalized.read_bytes() + b"\n")
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_checked_and_closed_outcomes_for_one_position_are_exact_tree_no_op(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, position = _seed_open_canonical_position(root)
+    close_events, path_updates, trigger_bar = _canonical_close_transaction(paths, position)
+    close_event = close_events[0]
+    payload = close_event.payload
+    run = paper_ops_engine.PaperRun(
+        run_id=close_event.run_id,
+        mode=close_event.mode,
+        run_date=close_event.trade_date,
+        data_snapshot_id=str(payload["data_snapshot_id"]),
+        created_at=trigger_bar.timestamp.isoformat(),
+    )
+    checked_event = paper_ops_engine._event(
+        run,
+        paper_ops_engine.PaperJobPhase.CHECK,
+        position.strategy_id,
+        position.symbol,
+        "paper_position_checked_no_action",
+        f"{position.position_id}:checked:{run.run_date}",
+        paper_ops_engine._with_source_bar(position.to_dict(), trigger_bar, run),
+    )
+    event_rows = paper_ops_engine._serialize_transaction_events(
+        [checked_event, close_event]
+    )
+    path_updates[paths.state / "pending_orders.json"] = []
+    updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
+    journal = _write_checksum_valid_journal(paths, event_rows, updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="exactly one outcome"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+def test_bound_snapshot_check_rejects_omitted_current_position_outcome(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, position = _seed_open_canonical_position(root)
+    account = paper_ops_engine._accounts(paths)[position.strategy_id]
+    pending_event = _canonical_event(
+        "pending-for-position-omission",
+        symbol="QQQ",
+        equity_basis=account.current_equity,
+    )
+    _seed_canonical_event_evidence(root, pending_event)
+    pending_order = pending_event["payload"]
+    assert isinstance(pending_order, dict)
+    pending_updates = {"state/pending_orders.json": [pending_order]}
+    paper_ops_engine._apply_transaction_journal(
+        paths,
+        {
+            "events": [pending_event],
+            "schema_version": "v2.paper_transaction.v1",
+            "state_updates": pending_updates,
+            "transaction_id": paper_ops_engine._paper_transaction_id(
+                [pending_event], pending_updates
+            ),
+        },
+    )
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 6),
+        prior_bar_date=date(2026, 1, 2),
+        run_bar={
+            "open": 94.0,
+            "high": 100.0,
+            "low": 90.0,
+            "close": 96.0,
+            "volume": 1_000,
+        },
+    )
+    assert bar is not None
+    order_bar = paper_ops_engine.MarketBar(
+        symbol="QQQ",
+        timestamp=bar.timestamp,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+    )
+    blocked = _check_block_event(
+        pending_order,
+        run,
+        order_bar,
+        "gap_through_stop",
+    )
+    updates = {
+        "state/pending_orders.json": [],
+        "state/open_positions.json": [position.to_dict()],
+        "state/paper_accounts.json": paper_ops_engine.read_json(
+            paths.state / "paper_accounts.json", {}
+        ),
+    }
+    journal = _write_checksum_valid_journal(paths, [blocked], updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises(ValueError, match="exactly one outcome"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
 def test_champion_shadow_mark_alias_is_exact_tree_no_op(tmp_path: Path) -> None:
     root = tmp_path / "paper_ops"
     paths, position = _seed_open_canonical_position(root)
     run_date = date(2026, 1, 6)
-    run = paper_ops_engine._paper_run(
+    run, bar = _seed_bound_check_run(
+        paths,
         run_date=run_date,
-        mode=paper_ops_engine.PaperRunMode.FORWARD,
-        data_snapshot_id="fixture-snapshot",
+        prior_bar_date=date(2026, 1, 2),
+        run_bar={
+            "open": 103.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 104.0,
+            "volume": 1_000,
+        },
     )
-    bar = paper_ops_engine.MarketBar(
-        symbol=position.symbol,
-        timestamp=datetime(2026, 1, 6, 21, 0, tzinfo=timezone.utc),
-        open=103.0,
-        high=105.0,
-        low=97.0,
-        close=104.0,
-        volume=1_000,
-    )
+    assert bar is not None
     config = paper_ops_engine._config(paths)
     checked, close_record = paper_ops_engine._check_position(position, bar, run, config)
     assert close_record is None
@@ -1850,7 +2570,6 @@ def test_champion_shadow_mark_alias_is_exact_tree_no_op(tmp_path: Path) -> None:
         f"{checked.position_id}:mark:{run_date.isoformat()}",
         paper_ops_engine._with_source_bar(checked.to_dict(), bar, run),
     )
-    _seed_run_manifest(root, event.to_dict())
     accounts = paper_ops_engine._accounts(paths)
     accounts = paper_ops_engine._apply_mark(accounts, checked)
     accounts = paper_ops_engine._recalculate_unrealized_accounts(
@@ -1914,7 +2633,7 @@ def test_eventful_transaction_target_sets_are_exact_tree_no_ops(
         omitted_target = "state/pending_orders.json"
         extra_target = "state/paper_accounts.json"
     elif phase == "check":
-        paths, created_event = _seed_pending_canonical_order(root)
+        paths, created_event = _seed_pending_canonical_order(root, symbol="SPY")
         events, path_updates, _ = _canonical_fill_open_transaction(paths, created_event)
         event_rows = paper_ops_engine._serialize_transaction_events(events)
         updates = paper_ops_engine._serialize_transaction_updates(paths, path_updates)
@@ -1955,8 +2674,13 @@ def test_eventful_transaction_target_sets_are_exact_tree_no_ops(
 def _canonical_shadow_transaction(
     paths: paper_ops_engine.PaperOpsPaths,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    order_event = _canonical_event("shadow")
-    _seed_run_manifest(paths.root, order_event)
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 2),
+        run_bar=None,
+    )
+    assert bar is None
+    order_event = _canonical_event("shadow", snapshot_id=run.data_snapshot_id)
     assert isinstance(order_event["payload"], dict)
     order_event["payload"]["challenger_id"] = "challenger-a"
     order = {
@@ -2011,7 +2735,11 @@ def _canonical_shadow_transaction(
         "symbol": order["symbol"],
         "trade_date": "2026-01-02",
     }
-    events = [pick_event, order_event]
+    pending_event = _pending_check_event(order, run)
+    pending_payload = pending_event["payload"]
+    assert isinstance(pending_payload, dict)
+    pending_payload["challenger_id"] = "challenger-a"
+    events = [pick_event, order_event, pending_event]
     decision_rows = [
         {
             **pick,
@@ -2042,7 +2770,7 @@ def _canonical_shadow_transaction(
         "calendar_warnings": [],
         "challenger_id": "challenger-a",
         "closes": 0,
-        "data_snapshot_id": "fixture-snapshot",
+        "data_snapshot_id": run.data_snapshot_id,
         "date": "2026-01-02",
         "decision_artifact_sha256": paper_ops_engine._transaction_payload_sha256(decision_rows),
         "decision_coverage": 1,
