@@ -25,6 +25,8 @@ from intraday_scanner.v2.paper_ops.models import (
     PaperOpsManifest,
     PaperOrder,
     PaperOrderStatus,
+    PaperPick,
+    PaperPickDecision,
     PaperPosition,
     PaperPositionStatus,
     PaperRun,
@@ -649,7 +651,7 @@ def _daily_source_fixture(
     tmp_path: Path,
     universe_symbols: tuple[str, ...],
 ) -> tuple[Path, Path, dict[date, MarketBar]]:
-    historical_bar = _daily_bar(date(2026, 1, 4), 98.0, 100.0, 97.0, 99.0)
+    historical_bar = _daily_bar(date(2026, 1, 2), 98.0, 100.0, 97.0, 99.0)
     bars = {
         date(2026, 1, 5): _daily_bar(date(2026, 1, 5), 99.0, 101.0, 98.0, 100.0),
         date(2026, 1, 6): _daily_bar(date(2026, 1, 6), 100.0, 104.0, 98.0, 102.0),
@@ -713,7 +715,16 @@ def _lifecycle_events(
     stop_gross = (stop_fill - entry_price) * quantity
     stop_fee = stop_fill * quantity * config.fee_bps / 10_000.0
     risk = max(0.0, -stop_gross) + entry_fee + stop_fee
-    pick_id = "pick-1"
+    pick_id = stable_id(
+        PaperRunMode.REPLAY.value,
+        signal_bar.timestamp.date().isoformat(),
+        STRATEGY_ID,
+        STRATEGY_VERSION,
+        config.execution_policy_version,
+        "TST",
+        signal_bar.timestamp.isoformat(),
+        "long",
+    )
     order_id = stable_id("order", pick_id)
     position_id = stable_id("position", order_id)
 
@@ -858,47 +869,115 @@ def _lifecycle_events(
             snapshots,
         ),
     ]
-    # A daily scan is a canonical run attestation even when that date's
-    # lifecycle event is later deliberately moved by an adversarial test.
-    # Keep a no-setup decision for every run so those tests reach their
-    # intended source-bar check instead of manufacturing one-sided coverage.
-    events.extend(
-        _no_setup_anchor(bar, snapshots, config)
-        for bar in bars.values()
-    )
-    return events
+    return [*_canonical_scan_events(bars, snapshots, config, order), *events]
 
 
-def _no_setup_anchor(
-    bar: MarketBar,
+def _canonical_scan_events(
+    bars: dict[date, MarketBar],
     snapshots: dict[str, DataTruthManifest],
     config: PaperOpsConfig,
-) -> dict[str, object]:
-    run_date = bar.timestamp.date()
-    manifest = snapshots[run_date.isoformat()]
-    run_id = _run_id(run_date, manifest.snapshot_id)
-    return PaperLedgerEvent(
-        event_id=stable_id("paper_no_setup_decision", run_id, STRATEGY_ID, "TST"),
-        event_type="paper_no_setup_decision",
-        run_id=run_id,
+    order: PaperOrder,
+) -> list[dict[str, object]]:
+    signal_bar = bars[date(2026, 1, 5)]
+    pick = PaperPick(
+        pick_id=order.pick_id,
+        run_id=order.run_id,
         mode=PaperRunMode.REPLAY,
-        trade_date=run_date.isoformat(),
+        trade_date=signal_bar.timestamp.date().isoformat(),
         strategy_id=STRATEGY_ID,
+        strategy_version=STRATEGY_VERSION,
+        strategy_status="active",
         symbol="TST",
-        payload={
-            "data_snapshot_id": manifest.snapshot_id,
-            "decision": "no_setup",
+        signal_time=signal_bar.timestamp.isoformat(),
+        direction="long",
+        setup_score=1.0,
+        entry_reference=signal_bar.close,
+        stop=95.0,
+        target=110.0,
+        risk_per_unit=5.0,
+        reward_per_unit=10.0,
+        reward_risk=2.0,
+        decision=PaperPickDecision.ACCEPTED,
+        reason="fixture_signal_accepted",
+        evidence=("canonical source-bar fixture signal",),
+        execution_policy_version=config.execution_policy_version,
+        strategy_semantics_fingerprint=SEMANTICS_FINGERPRINT,
+    )
+    events = [
+        PaperLedgerEvent(
+            event_id=stable_id(
+                "paper_ops_event",
+                PaperRunMode.REPLAY.value,
+                pick.trade_date,
+                "scan",
+                "paper_pick_decision",
+                pick.pick_id,
+            ),
+            event_type="paper_pick_decision",
+            run_id=pick.run_id,
+            mode=PaperRunMode.REPLAY,
+            trade_date=pick.trade_date,
+            strategy_id=STRATEGY_ID,
+            symbol="TST",
+            payload=pick.to_dict(),
+        ).to_dict()
+    ]
+    for run_date in (date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)):
+        bar = bars[run_date]
+        manifest = snapshots[run_date.isoformat()]
+        run_id = _run_id(run_date, manifest.snapshot_id)
+        decision_id = stable_id(
+            PaperRunMode.REPLAY.value,
+            run_date.isoformat(),
+            STRATEGY_ID,
+            STRATEGY_VERSION,
+            config.execution_policy_version,
+            "TST",
+            bar.timestamp.isoformat(),
+            "no_setup",
+        )
+        payload: dict[str, object] = {
+            "account_return_effect_pct": 0.0,
+            "decision_id": decision_id,
             "decision_status": "no_setup",
+            "direction": "flat",
+            "evidence": ["daily scan completed without a qualifying setup"],
             "execution_policy_version": config.execution_policy_version,
+            "market_date": run_date.isoformat(),
             "mode": PaperRunMode.REPLAY.value,
+            "reason": "fixture_no_setup",
+            "research_only": True,
             "run_id": run_id,
+            "schema_version": "v2.paper_strategy_decision.v1",
+            "signal_time": bar.timestamp.isoformat(),
             "strategy_id": STRATEGY_ID,
             "strategy_semantics_fingerprint": SEMANTICS_FINGERPRINT,
             "strategy_version": STRATEGY_VERSION,
             "symbol": "TST",
-            "trade_date": run_date.isoformat(),
-        },
-    ).to_dict()
+            "trade_return_eligible": False,
+            "trade_return_pct": None,
+            "warnings": [],
+        }
+        events.append(
+            PaperLedgerEvent(
+                event_id=stable_id(
+                    "paper_ops_event",
+                    PaperRunMode.REPLAY.value,
+                    run_date.isoformat(),
+                    "scan",
+                    "paper_no_setup_decision",
+                    decision_id,
+                ),
+                event_type="paper_no_setup_decision",
+                run_id=run_id,
+                mode=PaperRunMode.REPLAY,
+                trade_date=run_date.isoformat(),
+                strategy_id=STRATEGY_ID,
+                symbol="TST",
+                payload=payload,
+            ).to_dict()
+        )
+    return events
 
 
 def _ledger_event(

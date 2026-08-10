@@ -939,30 +939,17 @@ def _seed_candidate_evidence(
                 }
             )
             events.append(
-                {
-                    "event_id": f"no-setup:replay:{session_date}",
-                    "event_type": "paper_no_setup_decision",
-                    "mode": "replay",
-                    "trade_date": session_date,
-                    "run_id": replay_run_id,
-                    "strategy_id": strategy_id,
-                    "symbol": "AAA",
-                    "payload": {
-                        "data_snapshot_id": replay_snapshot,
-                        "decision": "no_setup",
-                        "decision_status": "no_setup",
-                        "execution_policy_version": POLICY,
-                        "mode": "replay",
-                        "run_id": replay_run_id,
-                        "strategy_id": strategy_id,
-                        "strategy_semantics_fingerprint": str(
-                            registration["champion_strategy_semantics_fingerprint"]
-                        ),
-                        "strategy_version": "v1.0",
-                        "symbol": "AAA",
-                        "trade_date": session_date,
-                    },
-                }
+                _canonical_no_setup_event(
+                    mode="replay",
+                    session_date=session_date,
+                    run_id=replay_run_id,
+                    strategy_id=strategy_id,
+                    version="v1.0",
+                    policy=POLICY,
+                    semantics=str(
+                        registration["champion_strategy_semantics_fingerprint"]
+                    ),
+                )
             )
             demo_snapshot = f"{snapshot}_demo"
             demo_run_id = paper_engine.stable_id(
@@ -986,30 +973,17 @@ def _seed_candidate_evidence(
                 }
             )
             events.append(
-                {
-                    "event_id": f"no-setup:wrong-policy:{session_date}",
-                    "event_type": "paper_no_setup_decision",
-                    "mode": "forward",
-                    "trade_date": session_date,
-                    "run_id": wrong_run_id,
-                    "strategy_id": strategy_id,
-                    "symbol": "AAA",
-                    "payload": {
-                        "data_snapshot_id": wrong_snapshot,
-                        "decision": "no_setup",
-                        "decision_status": "no_setup",
-                        "execution_policy_version": "wrong-policy",
-                        "mode": "forward",
-                        "run_id": wrong_run_id,
-                        "strategy_id": strategy_id,
-                        "strategy_semantics_fingerprint": str(
-                            registration["candidate_strategy_semantics_fingerprint"]
-                        ),
-                        "strategy_version": "v2.0",
-                        "symbol": "AAA",
-                        "trade_date": session_date,
-                    },
-                }
+                _canonical_no_setup_event(
+                    mode="forward",
+                    session_date=session_date,
+                    run_id=wrong_run_id,
+                    strategy_id=strategy_id,
+                    version="v2.0",
+                    policy="wrong-policy",
+                    semantics=str(
+                        registration["candidate_strategy_semantics_fingerprint"]
+                    ),
+                )
             )
         write_json(
             root / "manifests" / f"shadow_forward_{session_date}_{challenger_id}.json",
@@ -1297,6 +1271,68 @@ def _seed_same_day_registration_without_candidate_artifacts(
     return challenger_id
 
 
+def _canonical_no_setup_event(
+    *,
+    mode: str,
+    session_date: str,
+    run_id: str,
+    strategy_id: str,
+    version: str,
+    policy: str,
+    semantics: str,
+) -> dict[str, object]:
+    signal_time = f"{session_date}T20:00:00+00:00"
+    decision_id = paper_engine.stable_id(
+        mode,
+        session_date,
+        strategy_id,
+        version,
+        policy,
+        "AAA",
+        signal_time,
+        "no_setup",
+    )
+    return {
+        "event_id": paper_engine.stable_id(
+            "paper_ops_event",
+            mode,
+            session_date,
+            "scan",
+            "paper_no_setup_decision",
+            decision_id,
+        ),
+        "event_type": "paper_no_setup_decision",
+        "mode": mode,
+        "trade_date": session_date,
+        "run_id": run_id,
+        "schema_version": "v2.paper_ledger_event.v1",
+        "strategy_id": strategy_id,
+        "symbol": "AAA",
+        "payload": {
+            "account_return_effect_pct": 0.0,
+            "decision_id": decision_id,
+            "decision_status": "no_setup",
+            "direction": "flat",
+            "evidence": ["daily scan completed without a qualifying setup"],
+            "execution_policy_version": policy,
+            "market_date": session_date,
+            "mode": mode,
+            "reason": "fixture_no_setup",
+            "research_only": True,
+            "run_id": run_id,
+            "schema_version": "v2.paper_strategy_decision.v1",
+            "signal_time": signal_time,
+            "strategy_id": strategy_id,
+            "strategy_semantics_fingerprint": semantics,
+            "strategy_version": version,
+            "symbol": "AAA",
+            "trade_return_eligible": False,
+            "trade_return_pct": None,
+            "warnings": [],
+        },
+    }
+
+
 def _decision(
     strategy_id: str,
     version: str,
@@ -1307,11 +1343,24 @@ def _decision(
     semantics: str,
 ) -> dict[str, object]:
     decision_id = f"decision:{session_date}:{strategy_id}:{version}:AAA"
+    if no_trades:
+        event = _canonical_no_setup_event(
+            mode="forward",
+            session_date=session_date,
+            run_id=run_id,
+            strategy_id=strategy_id,
+            version=version,
+            policy=POLICY,
+            semantics=semantics,
+        )
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        return payload
     return {
         "decision_id": decision_id,
         "pick_id": decision_id,
-        "decision_status": "no_setup" if no_trades else "accepted",
-        "decision": "no_setup" if no_trades else "accepted",
+        "decision_status": "accepted",
+        "decision": "accepted",
         "mode": "forward",
         "trade_date": session_date,
         "run_id": run_id,
@@ -1325,7 +1374,8 @@ def _decision(
         "entry_reference": 100.0,
         "stop": 0.0,
         "target": 1_000.0,
-        "trade_return_eligible": not no_trades,
+        "schema_version": "v2.paper_pick.v2",
+        "trade_return_eligible": True,
         "trade_return_pct": None,
     }
 
@@ -1341,7 +1391,7 @@ def _trade_events(
 ) -> list[dict[str, object]]:
     strategy_id = str(decision["strategy_id"])
     version = str(decision["strategy_version"])
-    pick_id = str(decision["pick_id"])
+    pick_id = str(decision.get("pick_id") or decision["decision_id"])
     suffix = f"{session_date}:{strategy_id}:{version}"
     base = {
         "mode": "forward",
@@ -1361,11 +1411,19 @@ def _trade_events(
     )
     events = [
         {
-            "event_id": f"decision:{suffix}",
+            "event_id": paper_engine.stable_id(
+                "paper_ops_event",
+                "forward",
+                session_date,
+                "scan",
+                decision_event_type,
+                str(decision["decision_id"]),
+            ),
             "event_type": decision_event_type,
             "mode": "forward",
             "trade_date": session_date,
             "run_id": run_id,
+            "schema_version": "v2.paper_ledger_event.v1",
             "strategy_id": strategy_id,
             "symbol": "AAA",
             "payload": dict(decision),

@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from intraday_scanner.v2.paper_ops import __main__ as paper_ops_cli
@@ -26,6 +29,117 @@ def _tree_snapshot(root):
     return directories, files
 
 
+def _complete_run_manifest(mode, run_date, snapshot, policy):
+    run_id = paper_ops_engine.stable_id("paper_ops", mode, run_date, snapshot)
+    payload = {
+        "schema_version": "v2.paper_ops_manifest.v3",
+        "run_id": run_id,
+        "mode": mode,
+        "run_date": run_date,
+        "data_snapshot_id": snapshot,
+        "output_artifacts": [],
+        "warnings": [],
+        "execution_policy_version": policy,
+        "execution_policy_fingerprint": "fixture-policy-fingerprint",
+        "universe_id": "fixture-universe",
+        "universe_symbols": ["TST"],
+        "data_snapshot_content_hash": "fixture-content-hash",
+        "data_snapshot_manifest_payload_hash": "fixture-manifest-hash",
+        "data_snapshot_normalized_hash": "fixture-normalized-hash",
+        "data_snapshot_normalized_path": "normalized/fixture.csv",
+        "data_truth_root_relative": "../v2_data_truth",
+    }
+    payload["manifest_payload_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return payload
+
+
+def _canonical_no_setup_decision(mode, run_date, run_id, policy):
+    signal_time = f"{run_date}T20:00:00+00:00"
+    return {
+        "account_return_effect_pct": 0.0,
+        "decision_id": paper_ops_engine.stable_id(
+            mode,
+            run_date,
+            "fixture-strategy",
+            "fixture-v1",
+            policy,
+            "TST",
+            signal_time,
+            "no_setup",
+        ),
+        "decision_status": "no_setup",
+        "direction": "flat",
+        "evidence": ["fixture scan completed"],
+        "execution_policy_version": policy,
+        "market_date": run_date,
+        "mode": mode,
+        "reason": "fixture_no_setup",
+        "research_only": True,
+        "run_id": run_id,
+        "schema_version": "v2.paper_strategy_decision.v1",
+        "signal_time": signal_time,
+        "strategy_id": "fixture-strategy",
+        "strategy_semantics_fingerprint": "a" * 64,
+        "strategy_version": "fixture-v1",
+        "symbol": "TST",
+        "trade_return_eligible": False,
+        "trade_return_pct": None,
+        "warnings": [],
+    }
+
+
+def _seed_manifest_only_replay_conflict(root):
+    run_date = "2026-01-02"
+    policy = "fixture-policy-v1"
+    snapshot = "fixture-replay-snapshot"
+    manifest = _complete_run_manifest("replay", run_date, snapshot, policy)
+    run_id = manifest["run_id"]
+    row = {field: 0 for field in paper_ops_engine.CALENDAR_FIELDNAMES}
+    row.update(
+        {
+            "date": run_date,
+            "mode": "replay",
+            "strategy_id": "fixture-strategy",
+            "strategy_version": "fixture-v1",
+            "strategy_status": "active",
+            "execution_policy_version": policy,
+            "strategy_semantics_fingerprint": "a" * 64,
+            "data_snapshot_id": snapshot,
+            "warnings": "",
+            "run_id": run_id,
+        }
+    )
+    paper_ops_engine.write_csv(
+        root / "calendar" / "strategy_daily_returns.csv",
+        [row],
+        paper_ops_engine.CALENDAR_FIELDNAMES,
+    )
+    decision = _canonical_no_setup_decision("replay", run_date, run_id, policy)
+    paper_ops_engine.write_jsonl(
+        root / "ledger" / "paper_ledger.jsonl",
+        [
+            {
+                "event_id": "fixture-replay-decision-event",
+                "event_type": "paper_no_setup_decision",
+                "mode": "replay",
+                "payload": decision,
+                "run_id": run_id,
+                "schema_version": "v2.paper_ledger_event.v1",
+                "strategy_id": "fixture-strategy",
+                "symbol": "TST",
+                "trade_date": run_date,
+            }
+        ],
+    )
+    write_json(root / "manifests" / "replay_fixture.json", manifest)
+    extra = _complete_run_manifest(
+        "replay", run_date, "fixture-manifest-only-snapshot", policy
+    )
+    write_json(root / "manifests" / "replay_manifest_only.json", extra)
+
+
 def _seed_pending_journal(root, journal_kind):
     journal = root / "state" / "paper_transaction_pending.json"
     if journal_kind == "malformed":
@@ -40,17 +154,50 @@ def _seed_pending_journal(root, journal_kind):
             },
         )
         return journal
+    run_id = paper_ops_engine.stable_id(
+        "paper_ops", "forward", "2026-01-02", "observer-recovery-snapshot"
+    )
     event = {
         "event_id": "observer-recovery-probe",
-        "event_type": "paper_no_setup_decision",
+        "event_type": "paper_order_created",
         "mode": "forward",
-        "payload": {"mode": "forward"},
-        "run_id": "observer-recovery-run",
+        "payload": {
+            "direction": "long",
+            "earliest_fill_date": "2026-01-05",
+            "entry": 100.0,
+            "execution_policy_version": "observer-recovery-policy-v1",
+            "expected_fill_rule": "next_completed_session_open_plus_slippage",
+            "max_loss_estimate": 50.0,
+            "mode": "forward",
+            "notional_exposure": 1_000.0,
+            "order_id": "observer-recovery-order",
+            "order_status": "pending",
+            "pick_id": "observer-recovery-pick",
+            "quantity": 10,
+            "reward_per_unit": 10.0,
+            "reward_risk": 2.0,
+            "risk_budget": 500.0,
+            "risk_per_unit": 5.0,
+            "run_id": run_id,
+            "schema_version": "v2.paper_order.v2",
+            "signal_time": "2026-01-02T20:00:00+00:00",
+            "stop": 95.0,
+            "strategy_id": "observer-recovery-strategy",
+            "strategy_equity_basis": 100_000.0,
+            "strategy_semantics_fingerprint": "a" * 64,
+            "strategy_version": "observer-recovery-v1",
+            "symbol": "TST",
+            "target": 110.0,
+            "trade_date": "2026-01-02",
+            "warnings": [],
+        },
+        "run_id": run_id,
+        "schema_version": "v2.paper_ledger_event.v1",
         "strategy_id": "observer-recovery-strategy",
         "symbol": "TST",
         "trade_date": "2026-01-02",
     }
-    state_updates = {"state/pending_orders.json": []}
+    state_updates = {"state/pending_orders.json": [event["payload"]]}
     write_json(
         journal,
         {
@@ -94,14 +241,22 @@ def _seed_calendar_variant(root, calendar_kind):
             "execution_policy_version": "fixture-policy-v1",
             "strategy_semantics_fingerprint": "unknown",
             "data_snapshot_id": "fixture-snapshot",
-            "daily_return_pct": "not-a-number",
+            "daily_return_pct": (
+                "not-a-number" if calendar_kind == "malformed_numeric" else 0.0
+            ),
             "warnings": "",
             "run_id": "fixture-run",
         }
     )
     paper_ops_engine.write_csv(
         path,
-        [row],
+        (
+            [row, dict(row)]
+            if calendar_kind == "duplicate"
+            else [row, {**row, "daily_return_pct": 1.0}]
+            if calendar_kind == "conflicting_duplicate"
+            else [row]
+        ),
         paper_ops_engine.CALENDAR_FIELDNAMES,
     )
 
@@ -139,7 +294,14 @@ def test_paper_ops_observers_fail_closed_without_creating_a_missing_tree(tmp_pat
 )
 @pytest.mark.parametrize(
     "calendar_kind",
-    ("zero_byte", "header_only", "wrong_header", "malformed_numeric"),
+    (
+        "zero_byte",
+        "header_only",
+        "wrong_header",
+        "malformed_numeric",
+        "duplicate",
+        "conflicting_duplicate",
+    ),
 )
 def test_calendar_observers_reject_invalid_evidence_without_writes(
     tmp_path,
@@ -158,6 +320,35 @@ def test_calendar_observers_reject_invalid_evidence_without_writes(
     assert _tree_snapshot(root) == before_direct
     before_cli = _tree_snapshot(root)
     assert paper_ops_cli.main([command, "--output-root", str(root)]) == 2
+    assert _tree_snapshot(root) == before_cli
+
+
+def test_manifest_only_replay_run_blocks_direct_and_cli_without_writes(tmp_path) -> None:
+    root = tmp_path / "paper_ops"
+    init(output_root=root)
+    _seed_manifest_only_replay_conflict(root)
+    before_direct = _tree_snapshot(root)
+
+    with pytest.raises(
+        PaperOpsObserverBlocked,
+        match="calendar/ledger/manifest run coverage conflict",
+    ):
+        verify_source_bar_truth(output_root=root, mode="replay")
+
+    assert _tree_snapshot(root) == before_direct
+    before_cli = _tree_snapshot(root)
+    assert (
+        paper_ops_cli.main(
+            [
+                "verify-source-bars",
+                "--mode",
+                "replay",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
     assert _tree_snapshot(root) == before_cli
 
 
@@ -239,19 +430,19 @@ def test_direct_observers_block_before_pending_journal_recovery(
     assert not lock.exists()
 
 
-def test_rebuild_writer_cli_recovers_valid_pending_journal(monkeypatch, tmp_path) -> None:
+def test_init_cli_recovers_canonical_pending_order_transaction(tmp_path) -> None:
     root = tmp_path / "paper_ops"
     init(output_root=root)
     journal = _seed_pending_journal(root, "valid")
-    monkeypatch.setattr(paper_ops_cli, "_result_exit_code", lambda *_args: 0)
 
-    status = paper_ops_cli.main(
-        ["rebuild-ledger", "--write-rebuilt", "--output-root", str(root)]
-    )
+    status = paper_ops_cli.main(["init", "--output-root", str(root)])
 
     assert status == 0
     assert not journal.exists()
-    assert paper_ops_engine.read_json(root / "state" / "pending_orders.json", None) == []
+    pending = paper_ops_engine.read_json(root / "state" / "pending_orders.json", None)
+    assert isinstance(pending, list)
+    assert len(pending) == 1
+    assert pending[0]["order_id"] == "observer-recovery-order"
     assert any(
         row.get("event_id") == "observer-recovery-probe"
         for row in paper_ops_engine.read_jsonl(root / "ledger" / "paper_ledger.jsonl")

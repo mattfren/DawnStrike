@@ -46,6 +46,7 @@ from intraday_scanner.v2.paper_ops.models import (
     stable_id,
     stable_json,
 )
+from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
 from intraday_scanner.v2.strategies import Direction, build_strategy_catalog
@@ -1410,7 +1411,36 @@ def test_paperops_recovers_pending_transaction_idempotently(tmp_path: Path) -> N
     event = _event_row(
         "recovered-event",
         "paper_order_created",
-        {"mode": "forward", "order_id": "recovered-order"},
+        {
+            "direction": "long",
+            "earliest_fill_date": "2026-01-05",
+            "entry": 100.0,
+            "execution_policy_version": "fixture-policy-v1",
+            "expected_fill_rule": "next_completed_session_open_plus_slippage",
+            "max_loss_estimate": 50.0,
+            "mode": "forward",
+            "notional_exposure": 1_000.0,
+            "order_id": "recovered-order",
+            "order_status": "pending",
+            "pick_id": "recovered-pick",
+            "quantity": 10,
+            "reward_per_unit": 10.0,
+            "reward_risk": 2.0,
+            "risk_budget": 500.0,
+            "risk_per_unit": 5.0,
+            "run_id": "run",
+            "schema_version": "v2.paper_order.v2",
+            "signal_time": "2026-01-02T20:00:00+00:00",
+            "stop": 95.0,
+            "strategy_id": "fixture-strategy",
+            "strategy_equity_basis": 100_000.0,
+            "strategy_semantics_fingerprint": "a" * 64,
+            "strategy_version": "fixture-v1",
+            "symbol": "TST",
+            "target": 110.0,
+            "trade_date": "2026-01-02",
+            "warnings": [],
+        },
     )
     journal_path = paths.state / "paper_transaction_pending.json"
     events = [event]
@@ -2688,11 +2718,39 @@ def test_calendar_truth_detects_duplicate_rows(tmp_path: Path) -> None:
         "ending_equity": 100000,
     }
     _write_canonical_calendar_rows(output_root, [row, row])
+    before = (
+        tuple(
+            sorted(
+                path.relative_to(output_root).as_posix()
+                for path in output_root.rglob("*")
+                if path.is_dir()
+            )
+        ),
+        {
+            path.relative_to(output_root).as_posix(): path.read_bytes()
+            for path in output_root.rglob("*")
+            if path.is_file()
+        },
+    )
 
-    result = verify_calendar_truth(output_root=output_root)
+    with pytest.raises(PaperOpsObserverBlocked, match="duplicate evidence row"):
+        verify_calendar_truth(output_root=output_root)
 
-    assert result.status == "failed"
-    assert result.duplicate_rows
+    after = (
+        tuple(
+            sorted(
+                path.relative_to(output_root).as_posix()
+                for path in output_root.rglob("*")
+                if path.is_dir()
+            )
+        ),
+        {
+            path.relative_to(output_root).as_posix(): path.read_bytes()
+            for path in output_root.rglob("*")
+            if path.is_file()
+        },
+    )
+    assert after == before
 
 
 def test_strategy_evidence_keeps_insufficient_forward_evidence_unvalidated(
@@ -3258,8 +3316,8 @@ def _event_row(event_id: str, event_type: str, payload: dict[str, object]) -> di
         "mode": payload.get("mode", "forward"),
         "payload": payload,
         "run_id": "run",
-        "schema_version": "test",
-        "strategy_id": payload.get("strategy_id"),
-        "symbol": payload.get("symbol"),
+        "schema_version": "v2.paper_ledger_event.v1",
+        "strategy_id": payload.get("strategy_id", "fixture-strategy"),
+        "symbol": payload.get("symbol", "TST"),
         "trade_date": "2026-01-02",
     }
