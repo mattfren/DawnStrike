@@ -27,6 +27,10 @@ from intraday_scanner.v2.paper_ops.engine import (
 )
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
+from intraday_scanner.v2.paper_ops.observer_safety import (
+    PaperOpsObserverBlocked,
+    require_observer_tree,
+)
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
 from intraday_scanner.v2.paper_ops.session_gaps import record_forward_session_gap
 from intraday_scanner.v2.paper_ops.shadow_runner import (
@@ -87,6 +91,27 @@ def main(argv: list[str] | None = None) -> int:
     output_root = Path(args.output_root)
     run_date = date.fromisoformat(args.date)
     mode = PaperRunMode(args.mode)
+    observer_commands = {
+        "calendar",
+        "reconcile",
+        "report",
+        "verify-calendar",
+        "evidence",
+        "readiness",
+        "calendar-view",
+        "blotter",
+        "verify-blotter",
+        "verify-source-bars",
+    }
+    if args.command in observer_commands or (
+        args.command == "rebuild-ledger" and not args.write_rebuilt
+    ):
+        try:
+            require_observer_tree(output_root)
+        except PaperOpsObserverBlocked as exc:
+            print(f"status: {exc.status}")
+            print(f"detail: {exc.detail}")
+            return 2
     if args.command == "init":
         result = init(output_root=output_root)
     elif args.command == "preflight":

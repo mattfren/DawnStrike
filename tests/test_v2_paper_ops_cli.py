@@ -3,6 +3,29 @@ import pytest
 from intraday_scanner.v2.paper_ops import __main__ as paper_ops_cli
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "calendar",
+        "reconcile",
+        "report",
+        "rebuild-ledger",
+        "verify-calendar",
+        "evidence",
+        "readiness",
+        "calendar-view",
+        "blotter",
+        "verify-blotter",
+        "verify-source-bars",
+    ),
+)
+def test_paper_ops_observers_fail_closed_without_creating_a_missing_tree(tmp_path, command) -> None:
+    root = tmp_path / "absent" / "paper_ops"
+    assert paper_ops_cli.main([command, "--output-root", str(root)]) == 2
+    assert not root.exists()
+    assert not root.parent.exists()
+
+
 def test_paper_ops_cli_returns_nonzero_for_failed_reconciliation(
     monkeypatch,
     tmp_path,
@@ -13,9 +36,7 @@ def test_paper_ops_cli_returns_nonzero_for_failed_reconciliation(
         lambda **_kwargs: {"status": "failed", "duplicate_event_ids": ["dup"]},
     )
 
-    status = paper_ops_cli.main(
-        ["reconcile", "--output-root", str(tmp_path / "paper_ops")]
-    )
+    status = paper_ops_cli.main(["reconcile", "--output-root", str(tmp_path / "paper_ops")])
 
     assert status == 2
 
@@ -56,38 +77,38 @@ def test_paper_ops_cli_exposes_shadow_registration_run_and_evaluation(
     monkeypatch.setattr(
         paper_ops_cli,
         "register_shadow_challenger",
-        lambda **kwargs: calls.append(("register", kwargs["manifest_path"]))
-        or {"status": "registered"},
+        lambda **kwargs: (
+            calls.append(("register", kwargs["manifest_path"])) or {"status": "registered"}
+        ),
     )
     monkeypatch.setattr(
         paper_ops_cli,
         "run_shadow_day",
-        lambda **kwargs: calls.append(("run", kwargs["run_date"]))
-        or {"status": "passed"},
+        lambda **kwargs: calls.append(("run", kwargs["run_date"])) or {"status": "passed"},
     )
     monkeypatch.setattr(
         paper_ops_cli,
         "evaluate_paperops_challengers",
-        lambda **kwargs: calls.append(("evaluate", kwargs["output_root"]))
-        or {"status": "passed"},
+        lambda **kwargs: calls.append(("evaluate", kwargs["output_root"])) or {"status": "passed"},
     )
     root = tmp_path / "paper"
 
-    assert paper_ops_cli.main(
-        [
-            "shadow-register",
-            "--manifest",
-            str(manifest),
-            "--output-root",
-            str(root),
-        ]
-    ) == 0
-    assert paper_ops_cli.main(
-        ["shadow-run", "--date", "2026-07-15", "--output-root", str(root)]
-    ) == 0
-    assert paper_ops_cli.main(
-        ["challenger-evaluate", "--output-root", str(root)]
-    ) == 0
+    assert (
+        paper_ops_cli.main(
+            [
+                "shadow-register",
+                "--manifest",
+                str(manifest),
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 0
+    )
+    assert (
+        paper_ops_cli.main(["shadow-run", "--date", "2026-07-15", "--output-root", str(root)]) == 0
+    )
+    assert paper_ops_cli.main(["challenger-evaluate", "--output-root", str(root)]) == 0
     assert calls == [
         ("register", manifest),
         ("run", paper_ops_cli.date(2026, 7, 15)),
@@ -133,9 +154,7 @@ def test_shadow_run_cli_propagates_frozen_integrity_failure(
     tmp_path,
 ) -> None:
     def fail_closed(**_kwargs) -> dict[str, object]:
-        raise ValueError(
-            "invalid frozen challenger fixture: shadow implementation source changed"
-        )
+        raise ValueError("invalid frozen challenger fixture: shadow implementation source changed")
 
     monkeypatch.setattr(paper_ops_cli, "run_shadow_day", fail_closed)
 
