@@ -99,7 +99,7 @@ def test_transaction_recovery_collision_does_not_apply_state_update(
         "event_type": "paper_order_created",
         "payload": {"order_id": "conflicting"},
     }
-    state_updates = {"state/collision_probe.json": {"applied": True}}
+    state_updates = {"state/replay_pending_orders.json": []}
     journal_path = paths.state / "paper_transaction_pending.json"
     paper_ops_engine.write_json(
         journal_path,
@@ -118,5 +118,5 @@ def test_transaction_recovery_collision_does_not_apply_state_update(
         paper_ops_engine._recover_pending_transaction(paths)
 
     assert read_jsonl(ledger_path) == [existing]
-    assert not (paths.state / "collision_probe.json").exists()
+    assert not (paths.state / "replay_pending_orders.json").exists()
     assert journal_path.exists()

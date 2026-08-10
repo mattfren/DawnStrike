@@ -50,7 +50,7 @@ def _seed_pending_journal(root, journal_kind):
         "symbol": "TST",
         "trade_date": "2026-01-02",
     }
-    state_updates = {"state/observer_recovery_probe.json": {"recovered": True}}
+    state_updates = {"state/pending_orders.json": []}
     write_json(
         journal,
         {
@@ -251,10 +251,7 @@ def test_rebuild_writer_cli_recovers_valid_pending_journal(monkeypatch, tmp_path
 
     assert status == 0
     assert not journal.exists()
-    assert paper_ops_engine.read_json(
-        root / "state" / "observer_recovery_probe.json",
-        {},
-    ) == {"recovered": True}
+    assert paper_ops_engine.read_json(root / "state" / "pending_orders.json", None) == []
     assert any(
         row.get("event_id") == "observer-recovery-probe"
         for row in paper_ops_engine.read_jsonl(root / "ledger" / "paper_ledger.jsonl")

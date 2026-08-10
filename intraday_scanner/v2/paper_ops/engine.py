@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import os
 import shutil
 import tempfile
@@ -3391,6 +3392,10 @@ def _apply_transaction_journal(
             target.relative_to(paths.root.resolve())
         except ValueError as exc:
             raise ValueError("PaperOps transaction journal path escaped its root") from exc
+        if not _is_allowed_transaction_target(relative_name):
+            raise ValueError(
+                f"PaperOps transaction journal target is not writer-allowlisted: {relative_name}"
+            )
         validated_updates.append((target, payload))
     append_jsonl_unique(
         paths.ledger / "paper_ledger.jsonl",
@@ -3399,6 +3404,37 @@ def _apply_transaction_journal(
     )
     for target, payload in validated_updates:
         write_json(target, payload)
+
+
+def _is_allowed_transaction_target(relative_name: str) -> bool:
+    """Allow only files emitted by production transaction call sites.
+
+    A pending journal is untrusted recovery input.  Keeping this list explicit
+    prevents a checksum-valid journal from becoming a generic root writer.
+    """
+
+    normalized = relative_name.replace("\\", "/")
+    core = {
+        "state/pending_orders.json",
+        "state/open_positions.json",
+        "state/paper_accounts.json",
+        "state/replay_pending_orders.json",
+        "state/replay_open_positions.json",
+        "state/replay_paper_accounts.json",
+        "state/demo_pending_orders.json",
+        "state/demo_open_positions.json",
+        "state/demo_paper_accounts.json",
+    }
+    if normalized in core:
+        return True
+    safe = r"[A-Za-z0-9_.-]+"
+    mode = r"(?:forward|replay|demo)"
+    patterns = (
+        rf"state/shadow/{safe}/{mode}_(?:pending_orders|open_positions|account)\.json",
+        rf"exports/shadow_(?:strategy_decisions|picks|order_decisions)_{mode}_\d{{4}}-\d{{2}}-\d{{2}}_{safe}\.json",
+        rf"manifests/shadow_{mode}_\d{{4}}-\d{{2}}-\d{{2}}_{safe}\.json",
+    )
+    return any(re.fullmatch(pattern, normalized) is not None for pattern in patterns)
 
 
 def _paper_transaction_id(
