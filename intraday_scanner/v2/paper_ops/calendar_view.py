@@ -7,12 +7,12 @@ import html
 from pathlib import Path
 
 from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths
-from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 from intraday_scanner.v2.paper_ops.session_gaps import load_forward_session_gaps
 
 
 def write_calendar_view(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    require_observer_command(output_root, "calendar-view")
     paths = PaperOpsPaths.resolve(output_root)
     rows = _read_rows(paths.calendar / "strategy_daily_returns.csv")
     gaps, gap_errors = load_forward_session_gaps(paths)

@@ -20,7 +20,7 @@ from intraday_scanner.v2.paper_ops.engine import (
     PaperOpsPaths,
 )
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
-from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 from intraday_scanner.v2.paper_ops.session_gaps import load_forward_session_gaps
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 
@@ -85,15 +85,7 @@ class CalendarTruthResult:
 
 
 def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> CalendarTruthResult:
-    require_observer_tree(
-        output_root,
-        required_files=(
-            "calendar/strategy_daily_returns.csv",
-            "state/paper_ops_config.json",
-            "state/strategy_registry.json",
-        ),
-        nonempty_files=("ledger/paper_ledger.jsonl",),
-    )
+    require_observer_command(output_root, "verify-calendar")
     paths = PaperOpsPaths.resolve(output_root)
     rows = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
     events, ledger_integrity = _read_strict_ledger(paths.ledger / "paper_ledger.jsonl")

@@ -136,8 +136,9 @@ def record_forward_session_gap(
 def load_forward_session_gaps(
     paths: PaperOpsPaths,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    with exclusive_file_lock(paths.state / ".forward_session_gaps.lock"):
-        return _load_forward_session_gaps(paths)
+    """Read retained gap evidence without creating observer-side lock state."""
+
+    return _load_forward_session_gaps(paths)
 
 
 def _load_forward_session_gaps(

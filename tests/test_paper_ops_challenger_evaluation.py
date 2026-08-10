@@ -539,6 +539,7 @@ def _dates(count: int) -> list[str]:
 
 
 def _write_registry(root: Path, strategy_ids: tuple[str, ...]) -> None:
+    paper_engine.PaperOpsPaths.create(root)
     catalog = {strategy.strategy_id: strategy for strategy in build_strategy_catalog()}
     fingerprints = {
         strategy_id: paper_engine._strategy_semantics_fingerprint(catalog[strategy_id])
@@ -1047,6 +1048,14 @@ def _seed_same_day_registration_without_candidate_artifacts(
 
     snapshot = f"datatruth_sourced_{session_date.replace('-', '')}_same_day"
     run_id = f"paper_ops:forward:{session_date}:{snapshot}"
+    write_json(
+        root / "manifests" / f"forward_{session_date}.json",
+        {
+            "schema_version": "v2.paper_ops_manifest.v3",
+            "run_id": run_id,
+            "data_snapshot_id": snapshot,
+        },
+    )
     write_csv(
         root / "calendar" / "strategy_daily_returns.csv",
         [
@@ -1118,22 +1127,35 @@ def _seed_same_day_registration_without_candidate_artifacts(
             "symbols": ["AAA"],
         },
     )
+    decision = _decision(
+        strategy_id,
+        "v1.0",
+        session_date,
+        run_id,
+        no_trades=True,
+        semantics=str(registration["champion_strategy_semantics_fingerprint"]),
+    )
     write_json(
         root / "exports" / f"strategy_decisions_forward_{session_date}.json",
-        [
-            _decision(
-                strategy_id,
-                "v1.0",
-                session_date,
-                run_id,
-                no_trades=True,
-                semantics=str(registration["champion_strategy_semantics_fingerprint"]),
-            )
-        ],
+        [decision],
     )
     ledger_path = root / "ledger" / "paper_ledger.jsonl"
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text("", encoding="utf-8")
+    append_jsonl_unique(
+        ledger_path,
+        [
+            {
+                "event_id": f"no-setup:{decision['decision_id']}",
+                "event_type": "paper_no_setup_decision",
+                "mode": "forward",
+                "payload": decision,
+                "run_id": run_id,
+                "strategy_id": strategy_id,
+                "symbol": "AAA",
+                "trade_date": session_date,
+            }
+        ],
+        "event_id",
+    )
     build_trade_blotter(output_root=root)
     verify_trade_blotter(output_root=root)
     for name in (

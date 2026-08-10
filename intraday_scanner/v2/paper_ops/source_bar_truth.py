@@ -77,13 +77,9 @@ def verify_source_bar_truth(
     )
 
     selected_mode = _selected_mode(mode)
-    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_tree(
-        output_root,
-        required_files=("state/execution_policy_manifest.json",),
-        nonempty_files=("ledger/paper_ledger.jsonl",),
-    )
+    require_observer_command(output_root, "verify-source-bars")
     paths = PaperOpsPaths.resolve(output_root)
     warnings: list[str] = []
     policies = _execution_policies(

@@ -25,11 +25,13 @@ from intraday_scanner.v2.paper_ops.engine import (
     run_day,
     scan,
 )
+from intraday_scanner.v2.paper_ops.governance import apply_evidence_governance
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.observer_safety import (
+    OBSERVER_COMMAND_SPECS,
     PaperOpsObserverBlocked,
-    require_observer_tree,
+    require_observer_command,
 )
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
 from intraday_scanner.v2.paper_ops.session_gaps import record_forward_session_gap
@@ -76,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             "shadow-run",
             "challenger-evaluate",
             "record-forward-gap",
+            "apply-evidence-governance",
         ),
     )
     parser.add_argument("--date", default=date.today().isoformat())
@@ -91,81 +94,12 @@ def main(argv: list[str] | None = None) -> int:
     output_root = Path(args.output_root)
     run_date = date.fromisoformat(args.date)
     mode = PaperRunMode(args.mode)
-    observer_commands = {
-        "calendar",
-        "reconcile",
-        "report",
-        "verify-calendar",
-        "evidence",
-        "readiness",
-        "calendar-view",
-        "blotter",
-        "verify-blotter",
-        "verify-source-bars",
-    }
-    required_inputs = {
-        "calendar": (("calendar/strategy_daily_returns.csv",), ()),
-        "report": (("calendar/strategy_daily_returns.csv",), ()),
-        "calendar-view": (("calendar/strategy_daily_returns.csv",), ()),
-        "reconcile": ((), ("ledger/paper_ledger.jsonl",)),
-        "rebuild-ledger": (
-            ("state/paper_ops_config.json", "state/strategy_registry.json"),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "verify-calendar": (
-            (
-                "calendar/strategy_daily_returns.csv",
-                "state/paper_ops_config.json",
-                "state/strategy_registry.json",
-            ),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "verify-source-bars": (
-            ("state/execution_policy_manifest.json",),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "blotter": (
-            (
-                "state/paper_ops_config.json",
-                "state/strategy_registry.json",
-                "state/execution_policy_manifest.json",
-            ),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "verify-blotter": (
-            (
-                "exports/paper_trade_blotter.json",
-                "state/paper_ops_config.json",
-                "state/strategy_registry.json",
-                "state/execution_policy_manifest.json",
-            ),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "evidence": (
-            (
-                "calendar/strategy_daily_returns.csv",
-                "state/paper_ops_config.json",
-                "state/strategy_registry.json",
-                "state/execution_policy_manifest.json",
-            ),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-        "readiness": (
-            (
-                "calendar/strategy_daily_returns.csv",
-                "state/paper_ops_config.json",
-                "state/strategy_registry.json",
-                "state/execution_policy_manifest.json",
-            ),
-            ("ledger/paper_ledger.jsonl",),
-        ),
-    }
-    if args.command in observer_commands or (
-        args.command == "rebuild-ledger" and not args.write_rebuilt
-    ):
+    observer_command = args.command in OBSERVER_COMMAND_SPECS and not (
+        args.command == "rebuild-ledger" and args.write_rebuilt
+    )
+    if observer_command:
         try:
-            files, nonempty = required_inputs.get(args.command, ((), ()))
-            require_observer_tree(output_root, required_files=files, nonempty_files=nonempty)
+            require_observer_command(output_root, args.command)
         except PaperOpsObserverBlocked as exc:
             print(f"status: {exc.status}")
             print(f"detail: {exc.detail}")
@@ -240,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             market_date=run_date.isoformat(),
             reason_code=args.reason_code,
         )
+    elif args.command == "apply-evidence-governance":
+        result = apply_evidence_governance(output_root=output_root)
     else:
         result = demo(output_root=output_root)
     for key, value in result.items():

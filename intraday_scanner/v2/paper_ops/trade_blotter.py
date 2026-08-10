@@ -74,8 +74,9 @@ def build_trade_blotter(
     output_root: Path,
     mode: str | None = None,
     run_date: str | None = None,
+    _writer_authorized: bool = False,
 ) -> dict[str, object]:
-    rows, warnings = _materialize_rows(output_root)
+    rows, warnings = _materialize_rows(output_root, observer=not _writer_authorized)
     selected = [
         row
         for row in rows
@@ -99,6 +100,9 @@ def verify_trade_blotter(
     output_root: Path,
     mode: str | None = None,
 ) -> dict[str, object]:
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
+
+    require_observer_command(output_root, "verify-blotter")
     rows, warnings = _materialize_rows(output_root)
     stored = read_json(output_root / "exports" / "paper_trade_blotter.json", {})
     stored_rows = stored.get("rows", []) if isinstance(stored, dict) else []
@@ -131,19 +135,14 @@ def verify_trade_blotter(
     return result
 
 
-def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:
+def _materialize_rows(
+    output_root: Path, *, observer: bool = True
+) -> tuple[list[dict[str, object]], list[str]]:
 
-    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_tree(
-        output_root,
-        required_files=(
-            "state/paper_ops_config.json",
-            "state/strategy_registry.json",
-            "state/execution_policy_manifest.json",
-        ),
-        nonempty_files=("ledger/paper_ledger.jsonl",),
-    )
+    if observer:
+        require_observer_command(output_root, "blotter")
     events = read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
     ordered = list(events)
     snapshot_by_run = _snapshot_ids_by_run(output_root)

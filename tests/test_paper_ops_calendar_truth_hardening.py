@@ -14,15 +14,43 @@ from intraday_scanner.v2.paper_ops.calendar_truth import (
     _read_strict_ledger,
     verify_calendar_truth,
 )
-from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths, init
+from intraday_scanner.v2.paper_ops.engine import CALENDAR_FIELDNAMES, PaperOpsPaths, init
 from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json, write_jsonl
 
 
 def _seed_calendar_header(root: Path) -> None:
     (root / "calendar" / "strategy_daily_returns.csv").write_text(
-        "date,mode,strategy_id,strategy_version\n", encoding="utf-8"
+        ",".join(CALENDAR_FIELDNAMES) + "\n", encoding="utf-8"
     )
+
+
+def _write_calendar_rows(root: Path, rows: list[dict[str, object]]) -> None:
+    canonical_rows: list[dict[str, object]] = []
+    for overrides in rows:
+        row: dict[str, object] = {field: "0" for field in CALENDAR_FIELDNAMES}
+        row.update(
+            {
+                "date": "2026-01-05",
+                "mode": "forward",
+                "strategy_id": "fixture-strategy",
+                "strategy_version": "fixture-v1",
+                "strategy_status": "candidate",
+                "execution_policy_version": "fixture-policy-v1",
+                "strategy_semantics_fingerprint": "unknown",
+                "data_snapshot_id": "fixture-snapshot",
+                "warnings": "",
+                "run_id": "fixture-run",
+            }
+        )
+        row.update(overrides)
+        canonical_rows.append(row)
+    with (root / "calendar" / "strategy_daily_returns.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=CALENDAR_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(canonical_rows)
 
 
 def test_calendar_truth_fails_closed_on_empty_initialized_root(tmp_path: Path) -> None:
@@ -247,6 +275,15 @@ def test_calendar_truth_never_inherits_current_lineage_for_legacy_event(
     strategy = registry[0]
     assert isinstance(strategy, dict)
     strategy_id = str(strategy["strategy_id"])
+    _write_calendar_rows(
+        root,
+        [
+            {
+                "strategy_id": "preflight-evidence",
+                "run_id": "legacy-run",
+            }
+        ],
+    )
     write_jsonl(
         root / "ledger" / "paper_ledger.jsonl",
         [
@@ -359,11 +396,7 @@ def test_calendar_truth_detects_strategy_missing_from_ledger_and_calendar(
         }
         for strategy in included
     ]
-    calendar_path = root / "calendar" / "strategy_daily_returns.csv"
-    with calendar_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=tuple(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+    _write_calendar_rows(root, rows)
     write_jsonl(
         root / "ledger" / "paper_ledger.jsonl",
         [

@@ -26,11 +26,13 @@ from intraday_scanner.v2.data_truth.reconcile import (
     ReconciliationTolerances,
     reconcile_datasets_v2,
 )
+from intraday_scanner.v2.paper_ops import __main__ as paper_ops_cli
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops import ledger_rebuild as ledger_rebuild_module
 from intraday_scanner.v2.paper_ops import readiness as readiness_module
 from intraday_scanner.v2.paper_ops import strategy_evidence as strategy_evidence_module
 from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
+from intraday_scanner.v2.paper_ops.governance import apply_evidence_governance
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import (
     PaperOpsConfig,
@@ -61,6 +63,78 @@ def _stub_strategy_evidence_source_truth(monkeypatch: pytest.MonkeyPatch) -> Non
         "verify_source_bar_truth",
         lambda *, output_root, mode: _SourceTruthStub(),
     )
+
+
+def _seed_observer_ledger(output_root: Path) -> None:
+    """Seed the minimal retained event needed to reach observer semantics."""
+
+    paper_ops_engine.write_jsonl(
+        output_root / "ledger" / "paper_ledger.jsonl",
+        [
+            {
+                "event_id": "observer-fixture-event",
+                "event_type": "paper_no_setup_decision",
+                "mode": "forward",
+                "payload": {"decision_id": "observer-fixture-decision", "mode": "forward"},
+                "run_id": "observer-fixture-run",
+                "schema_version": "test",
+                "strategy_id": "observer-fixture",
+                "symbol": "TST",
+                "trade_date": "2026-01-02",
+            }
+        ],
+    )
+    paper_ops_engine.write_json(
+        output_root / "manifests" / "observer-fixture-run.json",
+        {
+            "schema_version": "v2.paper_ops_manifest.v3",
+            "run_id": "observer-fixture-run",
+        },
+    )
+
+
+def _write_canonical_calendar_rows(
+    output_root: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    canonical_rows: list[dict[str, object]] = []
+    for overrides in rows:
+        row: dict[str, object] = {
+            field: 0 for field in paper_ops_engine.CALENDAR_FIELDNAMES
+        }
+        row.update(
+            {
+                "date": "2026-01-02",
+                "mode": "forward",
+                "strategy_id": "observer-fixture",
+                "strategy_version": "fixture-v1",
+                "strategy_status": "candidate",
+                "execution_policy_version": "fixture-policy-v1",
+                "strategy_semantics_fingerprint": "unknown",
+                "data_snapshot_id": "fixture-snapshot",
+                "warnings": "",
+                "run_id": "observer-fixture-run",
+            }
+        )
+        row.update(overrides)
+        canonical_rows.append(row)
+    paper_ops_engine.write_csv(
+        output_root / "calendar" / "strategy_daily_returns.csv",
+        canonical_rows,
+        paper_ops_engine.CALENDAR_FIELDNAMES,
+    )
+
+
+def _tree_bytes_and_directories(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
+    directories = tuple(
+        sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir())
+    )
+    files = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return directories, files
 
 
 def _bar(
@@ -1224,8 +1298,8 @@ def test_paperops_replay_promotion_rolls_back_every_mutated_target(
     before = {path: path.read_bytes() for path in watched}
     monkeypatch.setattr(
         paper_ops_engine,
-        "calendar",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("forced promotion failure")),
+        "_calendar_paths",
+        lambda _paths: (_ for _ in ()).throw(RuntimeError("forced promotion failure")),
     )
 
     with pytest.raises(RuntimeError, match="forced promotion failure"):
@@ -1400,10 +1474,11 @@ def test_ledger_rebuild_recovers_pending_transaction_before_read(tmp_path: Path)
         },
     )
 
-    rebuild_ledger(output_root=output_root)
+    with pytest.raises(Exception, match="BLOCKED_PENDING_RECOVERY"):
+        rebuild_ledger(output_root=output_root)
 
-    assert not journal_path.exists()
-    assert any(
+    assert journal_path.exists()
+    assert not any(
         row.get("event_id") == "journal-decision"
         for row in paper_ops_engine.read_jsonl(paths.ledger / "paper_ledger.jsonl")
     )
@@ -1413,10 +1488,8 @@ def test_ledger_rebuild_fails_closed_on_empty_evidence(tmp_path: Path) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
 
-    result = rebuild_ledger(output_root=output_root)
-
-    assert result.status == "mismatch"
-    assert "paper ledger contains no events" in result.warnings
+    with pytest.raises(Exception, match="MISSING_INPUT"):
+        rebuild_ledger(output_root=output_root)
 
 
 def test_ledger_rebuild_separates_semantics_fingerprints(tmp_path: Path) -> None:
@@ -1973,11 +2046,7 @@ def test_paperops_operator_summaries_never_blend_modes_versions_or_references(
             "drawdown_pct": -0.02,
         },
     ]
-    paper_ops_engine.write_csv(
-        paths.calendar / "strategy_daily_returns.csv",
-        rows,
-        paper_ops_engine.CALENDAR_FIELDNAMES,
-    )
+    _write_canonical_calendar_rows(output_root, rows)
 
     paper_ops_engine.report(output_root=output_root)
     paper_ops_engine._write_calendar_summary(paths, rows)
@@ -2514,17 +2583,17 @@ def test_ledger_rebuild_preserves_archived_version_and_policy_series(
 def test_calendar_truth_detects_duplicate_rows(tmp_path: Path) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
-    strategy_id = str(_strategy_row(output_root)["strategy_id"])
-    header = (
-        "date,mode,strategy_id,starting_equity,ending_equity,realized_pnl,unrealized_pnl,"
-        "total_pnl,daily_return_pct,cumulative_return_pct,drawdown_pct,pending_orders,"
-        "trades_closed\n"
-    )
-    row = f"2026-01-02,forward,{strategy_id},100000,100000,0,0,0,0,0,0,0,0\n"
-    (output_root / "calendar" / "strategy_daily_returns.csv").write_text(
-        header + row + row,
-        encoding="utf-8",
-    )
+    _seed_observer_ledger(output_root)
+    strategy = _strategy_row(output_root)
+    row = {
+        "strategy_id": strategy["strategy_id"],
+        "strategy_version": strategy["strategy_version"],
+        "execution_policy_version": strategy["execution_policy_version"],
+        "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
+        "starting_equity": 100000,
+        "ending_equity": 100000,
+    }
+    _write_canonical_calendar_rows(output_root, [row, row])
 
     result = verify_calendar_truth(output_root=output_root)
 
@@ -2538,15 +2607,33 @@ def test_strategy_evidence_keeps_insufficient_forward_evidence_unvalidated(
 ) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
     strategy = _strategy_row(output_root)
     strategy_id = str(strategy["strategy_id"])
     strategy_version = str(strategy["strategy_version"])
     execution_policy_version = str(strategy["execution_policy_version"])
-    (output_root / "calendar" / "strategy_daily_returns.csv").write_text(
-        "date,mode,strategy_id,strategy_version,execution_policy_version,drawdown_pct\n"
-        f"2026-01-02,replay,{strategy_id},{strategy_version},{execution_policy_version},0\n"
-        f"2026-01-03,forward,{strategy_id},{strategy_version},{execution_policy_version},0\n",
-        encoding="utf-8",
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "date": "2026-01-02",
+                "mode": "replay",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
+                "drawdown_pct": 0,
+            },
+            {
+                "date": "2026-01-03",
+                "mode": "forward",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
+                "drawdown_pct": 0,
+            },
+        ],
     )
     monkeypatch.setattr(
         "intraday_scanner.v2.paper_ops.strategy_evidence._forward_data_status",
@@ -2566,19 +2653,32 @@ def test_strategy_evidence_never_uses_replay_drawdown_as_forward_drawdown(
 ) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
     strategy = _strategy_row(output_root)
     strategy_id = str(strategy["strategy_id"])
     strategy_version = str(strategy["strategy_version"])
     execution_policy_version = str(strategy["execution_policy_version"])
     strategy_semantics_fingerprint = str(strategy["strategy_semantics_fingerprint"])
-    (output_root / "calendar" / "strategy_daily_returns.csv").write_text(
-        "date,mode,strategy_id,strategy_version,execution_policy_version,"
-        "strategy_semantics_fingerprint,drawdown_pct\n"
-        f"2026-01-02,replay,{strategy_id},{strategy_version},"
-        f"{execution_policy_version},{strategy_semantics_fingerprint},-0.50\n"
-        f"2026-01-02,forward,{strategy_id},{strategy_version},"
-        f"{execution_policy_version},{strategy_semantics_fingerprint},0\n",
-        encoding="utf-8",
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "mode": "replay",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
+                "drawdown_pct": -0.50,
+            },
+            {
+                "mode": "forward",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
+                "drawdown_pct": 0,
+            },
+        ],
     )
     monkeypatch.setattr(
         "intraday_scanner.v2.paper_ops.strategy_evidence._forward_data_status",
@@ -2599,19 +2699,34 @@ def test_strategy_evidence_quarantines_fragile_robustness(
     output_root = tmp_path / "paper_ops"
     alpha_root = tmp_path / "v2_alpha_lab"
     paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
     strategy = _strategy_row(output_root)
     strategy_id = str(strategy["strategy_id"])
     strategy_version = str(strategy["strategy_version"])
     execution_policy_version = str(strategy["execution_policy_version"])
     strategy_semantics_fingerprint = str(strategy["strategy_semantics_fingerprint"])
-    (output_root / "calendar" / "strategy_daily_returns.csv").write_text(
-        "date,mode,strategy_id,strategy_version,execution_policy_version,"
-        "strategy_semantics_fingerprint,drawdown_pct\n"
-        f"2026-01-02,replay,{strategy_id},{strategy_version},"
-        f"{execution_policy_version},{strategy_semantics_fingerprint},0\n"
-        f"2026-01-03,forward,{strategy_id},{strategy_version},"
-        f"{execution_policy_version},{strategy_semantics_fingerprint},0\n",
-        encoding="utf-8",
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "date": "2026-01-02",
+                "mode": "replay",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
+                "drawdown_pct": 0,
+            },
+            {
+                "date": "2026-01-03",
+                "mode": "forward",
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "execution_policy_version": execution_policy_version,
+                "strategy_semantics_fingerprint": strategy_semantics_fingerprint,
+                "drawdown_pct": 0,
+            },
+        ],
     )
     (alpha_root / "reports").mkdir(parents=True)
     (alpha_root / "reports" / "robustness_summary.json").write_text(
@@ -2647,11 +2762,52 @@ def test_strategy_evidence_quarantines_fragile_robustness(
     assert "Alpha Lab robustness status is fragile" in str(row["blockers"])
 
 
+@pytest.mark.parametrize(
+    ("observer", "command"),
+    (
+        (score_strategy_evidence, "evidence"),
+        (forward_readiness, "readiness"),
+    ),
+)
+def test_evidence_and_readiness_leave_complete_state_tree_unchanged(
+    tmp_path: Path,
+    observer,
+    command: str,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
+    strategy = _strategy_row(output_root)
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "strategy_id": strategy["strategy_id"],
+                "strategy_version": strategy["strategy_version"],
+                "execution_policy_version": strategy["execution_policy_version"],
+                "strategy_semantics_fingerprint": strategy[
+                    "strategy_semantics_fingerprint"
+                ],
+            }
+        ],
+    )
+    state_root = output_root / "state"
+
+    before_direct = _tree_bytes_and_directories(state_root)
+    observer(output_root=output_root)
+    assert _tree_bytes_and_directories(state_root) == before_direct
+
+    before_cli = _tree_bytes_and_directories(state_root)
+    paper_ops_cli.main([command, "--output-root", str(output_root)])
+    assert _tree_bytes_and_directories(state_root) == before_cli
+
+
 def test_strategy_governance_pause_is_exact_and_never_auto_promotes(
     tmp_path: Path,
 ) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
     paths = paper_ops_engine.PaperOpsPaths.create(output_root)
     strategy_row = _strategy_row(output_root)
     score = {
@@ -2698,6 +2854,79 @@ def test_strategy_governance_pause_is_exact_and_never_auto_promotes(
         {},
     )
     assert retained["entries"][0]["allow_entries"] is False
+
+
+def test_apply_evidence_governance_is_explicit_and_idempotent(tmp_path: Path) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
+    strategy = _strategy_row(output_root)
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "strategy_id": strategy["strategy_id"],
+                "strategy_version": strategy["strategy_version"],
+                "execution_policy_version": strategy["execution_policy_version"],
+                "strategy_semantics_fingerprint": strategy[
+                    "strategy_semantics_fingerprint"
+                ],
+            }
+        ],
+    )
+
+    first = apply_evidence_governance(output_root=output_root)
+    overlay = output_root / "state" / "strategy_governance_overlay.json"
+    before = overlay.read_bytes()
+    second = apply_evidence_governance(output_root=output_root)
+    cli_status = paper_ops_cli.main(
+        ["apply-evidence-governance", "--output-root", str(output_root)]
+    )
+
+    assert first["status"] == second["status"] == "applied"
+    assert cli_status == 0
+    assert overlay.read_bytes() == before
+
+
+def test_apply_evidence_governance_recovers_valid_writer_journal(tmp_path: Path) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
+    strategy = _strategy_row(output_root)
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "strategy_id": strategy["strategy_id"],
+                "strategy_version": strategy["strategy_version"],
+                "execution_policy_version": strategy["execution_policy_version"],
+                "strategy_semantics_fingerprint": strategy[
+                    "strategy_semantics_fingerprint"
+                ],
+            }
+        ],
+    )
+    state_updates = {"state/governance_recovery_probe.json": {"recovered": True}}
+    journal = output_root / "state" / "paper_transaction_pending.json"
+    paper_ops_engine.write_json(
+        journal,
+        {
+            "events": [],
+            "schema_version": "v2.paper_transaction.v1",
+            "state_updates": state_updates,
+            "transaction_id": paper_ops_engine._paper_transaction_id([], state_updates),
+        },
+    )
+
+    result = apply_evidence_governance(output_root=output_root)
+
+    assert result["status"] == "applied"
+    assert not journal.exists()
+    assert paper_ops_engine.read_json(
+        output_root / "state" / "governance_recovery_probe.json",
+        {},
+    ) == {"recovered": True}
+    assert (output_root / "state" / "strategy_governance_overlay.json").is_file()
 
 
 def test_strategy_governance_fails_closed_on_malformed_or_stale_overlay(
@@ -2788,6 +3017,22 @@ def test_forward_readiness_blocks_on_rebuild_or_calendar_failure(
 ) -> None:
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
+    strategy = _strategy_row(output_root)
+    _write_canonical_calendar_rows(
+        output_root,
+        [
+            {
+                "strategy_id": strategy["strategy_id"],
+                "strategy_version": strategy["strategy_version"],
+                "execution_policy_version": strategy["execution_policy_version"],
+                "strategy_semantics_fingerprint": strategy[
+                    "strategy_semantics_fingerprint"
+                ],
+                "drawdown_pct": 0,
+            }
+        ],
+    )
     monkeypatch.setattr(
         "intraday_scanner.v2.paper_ops.readiness._data_status",
         lambda _root: "single_provider_unreconciled",

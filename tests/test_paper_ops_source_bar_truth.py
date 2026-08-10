@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import shutil
@@ -10,10 +11,11 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
-from intraday_scanner.v2.data_truth import build_data_truth_snapshot
+from intraday_scanner.v2.data_truth import build_data_truth_snapshot, load_datatruth_snapshot
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.engine import init
+from intraday_scanner.v2.paper_ops.ledger_rebuild import CALENDAR_FIELDNAMES
 from intraday_scanner.v2.paper_ops.models import (
     PaperClose,
     PaperCloseReason,
@@ -25,6 +27,7 @@ from intraday_scanner.v2.paper_ops.models import (
     PaperOrderStatus,
     PaperPosition,
     PaperPositionStatus,
+    PaperRun,
     PaperRunMode,
     stable_id,
 )
@@ -33,6 +36,39 @@ from intraday_scanner.v2.paper_ops.source_bar_truth import (
     verify_source_bar_truth,
 )
 from intraday_scanner.v2.paper_ops.storage import write_json, write_jsonl
+
+
+def _write_canonical_calendar_evidence(
+    root: Path,
+    snapshots: dict[str, DataTruthManifest],
+) -> None:
+    rows: list[dict[str, object]] = []
+    for run_date, manifest in sorted(snapshots.items()):
+        dataset, _ = load_datatruth_snapshot(manifest.snapshot_id, root / "data_truth_replay")
+        run = PaperRun(
+            run_id=_run_id(date.fromisoformat(run_date)),
+            mode=PaperRunMode.REPLAY,
+            run_date=run_date,
+            data_snapshot_id=manifest.snapshot_id,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        reference_rows = paper_ops_engine._reference_calendar_rows(
+            rows,
+            run=run,
+            manifest=manifest,
+            dataset=dataset,
+        )
+        if len(reference_rows) == 2:
+            rows.extend(reference_rows)
+    with (root / "calendar" / "strategy_daily_returns.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=CALENDAR_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(
+            {field: row.get(field, "") for field in CALENDAR_FIELDNAMES}
+            for row in rows
+        )
 
 
 def _bar(
@@ -593,6 +629,7 @@ def _immutable_lifecycle_scenario(
         lifecycle_config=lifecycle_config,
     )
     scenario.persist_events()
+    _write_canonical_calendar_evidence(output_root, snapshots_by_date)
     return scenario
 
 

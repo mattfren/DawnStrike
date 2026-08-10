@@ -10,7 +10,7 @@ from pathlib import Path
 from intraday_scanner.v2.paper_ops.engine import (
     PaperOpsPaths,
 )
-from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import read_json, read_jsonl, write_csv, write_json
 
@@ -42,16 +42,7 @@ def score_strategy_evidence(
     output_root: Path = Path("data/v2_paper_ops"),
     alpha_root: Path | None = None,
 ) -> StrategyEvidenceResult:
-    require_observer_tree(
-        output_root,
-        required_files=(
-            "calendar/strategy_daily_returns.csv",
-            "state/paper_ops_config.json",
-            "state/strategy_registry.json",
-            "state/execution_policy_manifest.json",
-        ),
-        nonempty_files=("ledger/paper_ledger.jsonl",),
-    )
+    require_observer_command(output_root, "evidence")
     paths = PaperOpsPaths.resolve(output_root)
     try:
         source_truth = verify_source_bar_truth(
@@ -208,7 +199,6 @@ def score_strategy_evidence(
         )
     result = StrategyEvidenceResult(status="passed", scores=tuple(scores), warnings=())
     _write_reports(paths, result)
-    _update_governance_overlay(paths, result.scores)
     return result
 
 

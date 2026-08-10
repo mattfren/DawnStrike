@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.v2.paper_ops import engine as paper_engine
+from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import (
     append_jsonl_unique,
@@ -638,7 +639,7 @@ def _verified_blotter_rows(
         from intraday_scanner.v2.paper_ops.trade_blotter import _materialize_rows
 
         materialized, warnings = _materialize_rows(output_root)
-    except (OSError, TypeError, ValueError) as exc:
+    except (OSError, PaperOpsObserverBlocked, TypeError, ValueError) as exc:
         return [], (f"trade blotter deterministic rebuild failed: {exc}",)
     reasons = [f"trade blotter lifecycle verification: {item}" for item in warnings]
     stored = read_json(output_root / "exports" / "paper_trade_blotter.json", {})

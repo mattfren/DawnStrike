@@ -11,7 +11,7 @@ from intraday_scanner.v2.paper_ops.engine import (
     _recover_pending_transaction,
 )
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
-from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 from intraday_scanner.v2.paper_ops.storage import (
     read_json,
     read_jsonl,
@@ -90,11 +90,7 @@ def rebuild_ledger(
         paths = PaperOpsPaths.create(output_root)
         _recover_pending_transaction(paths)
     else:
-        require_observer_tree(
-            output_root,
-            required_files=("state/paper_ops_config.json", "state/strategy_registry.json"),
-            nonempty_files=("ledger/paper_ledger.jsonl",),
-        )
+        require_observer_command(output_root, "rebuild-ledger")
         paths = PaperOpsPaths.resolve(output_root)
     source_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
     events: list[dict[str, object]] = []

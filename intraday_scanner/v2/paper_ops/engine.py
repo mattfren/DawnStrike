@@ -946,7 +946,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
     )
     calendar_result = calendar(output_root=output_root)
-    reconciliation = reconcile(output_root=output_root)
+    reconciliation = _reconcile_paths(PaperOpsPaths.create(output_root))
     if reconciliation.get("status") != "passed":
         raise ValueError("PaperOps daily ledger reconciliation failed")
     source_truth = verify_source_bar_truth(output_root=output_root, mode=mode)
@@ -1054,7 +1054,7 @@ def _verify_replay_staging(staging_root: Path) -> dict[str, object]:
         verify_trade_blotter,
     )
 
-    reconciliation = reconcile(output_root=staging_root)
+    reconciliation = _reconcile_paths(PaperOpsPaths.create(staging_root))
     if reconciliation.get("status") != "passed":
         raise ValueError("PaperOps staged replay reconciliation failed")
     calendar_truth = verify_calendar_truth(output_root=staging_root)
@@ -1149,8 +1149,8 @@ def _promote_replay_staging(
                 if production_data_truth.exists():
                     shutil.rmtree(production_data_truth)
                 shutil.copytree(staging_data_truth, production_data_truth)
-            calendar(output_root=paths.root)
-            reconciliation = reconcile(output_root=paths.root)
+            _calendar_paths(paths)
+            reconciliation = _reconcile_paths(paths)
             if reconciliation.get("status") != "passed":
                 raise ValueError("PaperOps promoted replay reconciliation failed")
             from intraday_scanner.v2.paper_ops.source_bar_truth import (
@@ -1169,8 +1169,8 @@ def _promote_replay_staging(
                 raise ValueError(
                     f"PaperOps promoted replay immutable source-bar verification failed: {details}"
                 )
-            build_trade_blotter(output_root=paths.root)
-            report(output_root=paths.root)
+            build_trade_blotter(output_root=paths.root, _writer_authorized=True)
+            report(output_root=paths.root, _writer_authorized=True)
         except Exception:
             _restore_replay_promotion_targets(paths, rollback_root)
             raise
@@ -1241,10 +1241,16 @@ def _replace_replay_files(source: Path, target: Path) -> None:
 
 
 def calendar(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    require_observer_command(output_root, "calendar")
     paths = PaperOpsPaths.resolve(output_root)
+    return _calendar_paths(paths)
+
+
+def _calendar_paths(paths: PaperOpsPaths) -> dict[str, object]:
+    """Render calendar artifacts for an already writer-authorized tree."""
+
     rows = _read_calendar_rows(paths)
     _write_calendar_matrix(paths, rows)
     _write_monthly_returns(paths, rows)
@@ -1254,10 +1260,16 @@ def calendar(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, obje
 
 
 def reconcile(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_tree(output_root, nonempty_files=("ledger/paper_ledger.jsonl",))
+    require_observer_command(output_root, "reconcile")
     paths = PaperOpsPaths.resolve(output_root)
+    return _reconcile_paths(paths)
+
+
+def _reconcile_paths(paths: PaperOpsPaths) -> dict[str, object]:
+    """Reconcile an already writer-authorized canonical tree."""
+
     events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
     event_id_counts = Counter(str(event.get("event_id")) for event in events)
     duplicates = sorted(event_id for event_id, count in event_id_counts.items() if count > 1)
@@ -1347,10 +1359,13 @@ def _logical_event_key(event: dict[str, object]) -> str | None:
     )
 
 
-def report(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+def report(
+    *, output_root: Path = Path("data/v2_paper_ops"), _writer_authorized: bool = False
+) -> dict[str, object]:
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    if not _writer_authorized:
+        require_observer_command(output_root, "report")
     paths = PaperOpsPaths.resolve(output_root)
     rows = _read_calendar_rows(paths)
     lines = [
@@ -1458,7 +1473,7 @@ def demo(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
     write_json(paths.exports / "demo_dataset_marker.json", {"snapshot_id": manifest.snapshot_id})
     _write_calendar_for_date(paths, run, manifest, manifest.warnings, dataset=dataset)
     calendar(output_root=output_root)
-    reconcile(output_root=output_root)
+    _reconcile_paths(paths)
     report(output_root=output_root)
     return {"mode": "demo", "run_id": run.run_id, "snapshot_id": manifest.snapshot_id}
 
