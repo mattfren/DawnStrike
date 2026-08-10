@@ -8,6 +8,7 @@ from pathlib import Path
 from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
 
@@ -53,7 +54,17 @@ class ForwardReadinessResult:
 
 
 def forward_readiness(*, output_root: Path = Path("data/v2_paper_ops")) -> ForwardReadinessResult:
-    paths = PaperOpsPaths.create(output_root)
+    require_observer_tree(
+        output_root,
+        required_files=(
+            "calendar/strategy_daily_returns.csv",
+            "state/paper_ops_config.json",
+            "state/strategy_registry.json",
+            "state/execution_policy_manifest.json",
+        ),
+        nonempty_files=("ledger/paper_ledger.jsonl",),
+    )
+    paths = PaperOpsPaths.resolve(output_root)
     data_status = _data_status(paths.root.parent / "v2_data_truth")
     ledger = rebuild_ledger(output_root=output_root)
     calendar = verify_calendar_truth(output_root=output_root)

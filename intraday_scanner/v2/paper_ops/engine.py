@@ -130,8 +130,10 @@ class PaperOpsPaths:
     reconciliation: Path
 
     @classmethod
-    def create(cls, root: Path) -> PaperOpsPaths:
-        paths = cls(
+    def resolve(cls, root: Path) -> PaperOpsPaths:
+        """Construct canonical paths without touching the filesystem."""
+
+        return cls(
             root=root,
             ledger=root / "ledger",
             state=root / "state",
@@ -142,6 +144,10 @@ class PaperOpsPaths:
             exports=root / "exports",
             reconciliation=root / "reconciliation",
         )
+
+    @classmethod
+    def create(cls, root: Path) -> PaperOpsPaths:
+        paths = cls.resolve(root)
         for path in (
             paths.root,
             paths.ledger,
@@ -194,17 +200,13 @@ def init(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
     if not (paths.state / "paper_accounts.json").exists():
         write_json(paths.state / "paper_accounts.json", _fresh_account_payload(paths, config))
     _repair_legacy_default_state(paths, config)
-    accounts_by_mode = {
-        mode.value: _accounts(paths, mode)
-        for mode in PaperRunMode
-    }
+    accounts_by_mode = {mode.value: _accounts(paths, mode) for mode in PaperRunMode}
     return {
         "status": "initialized",
         "output_root": output_root.as_posix(),
         "strategy_account_count": len(accounts_by_mode[PaperRunMode.FORWARD.value]),
         "strategy_account_counts_by_mode": {
-            mode: len(accounts)
-            for mode, accounts in accounts_by_mode.items()
+            mode: len(accounts) for mode, accounts in accounts_by_mode.items()
         },
     }
 
@@ -305,8 +307,7 @@ def scan(
     )
     picks = _picks_from_scan(scan_output, strategies, run, config, warnings)
     semantics_by_id = {
-        strategy.strategy_id: _strategy_semantics_fingerprint(strategy)
-        for strategy in strategies
+        strategy.strategy_id: _strategy_semantics_fingerprint(strategy) for strategy in strategies
     }
     no_setup_decisions = [
         _no_setup_decision(
@@ -434,9 +435,7 @@ def enter(
     position_rows = _state_rows(_open_positions_path(paths, mode), mode)
     accounts = _accounts(paths, mode)
     ledger_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
-    existing_ids = {
-        str(row.get("order_id")) for row in pending if row.get("order_id")
-    } | {
+    existing_ids = {str(row.get("order_id")) for row in pending if row.get("order_id")} | {
         str(payload.get("order_id"))
         for event in ledger_events
         for payload in [event.get("payload")]
@@ -503,31 +502,29 @@ def enter(
             *blocked,
         ],
     )
-    transaction_events = (
-        [
-            _event(
-                run,
-                PaperJobPhase.ENTER,
-                order.strategy_id,
-                order.symbol,
-                "paper_order_created",
-                order.order_id,
-                order.to_dict(),
-            )
-            for order in orders
-        ] + [
-            _event(
-                run,
-                PaperJobPhase.ENTER,
-                str(row["strategy_id"]),
-                str(row["symbol"]),
-                "paper_order_blocked",
-                f"{row['order_id']}:{row['reason']}",
-                row,
-            )
-            for row in blocked
-        ]
-    )
+    transaction_events = [
+        _event(
+            run,
+            PaperJobPhase.ENTER,
+            order.strategy_id,
+            order.symbol,
+            "paper_order_created",
+            order.order_id,
+            order.to_dict(),
+        )
+        for order in orders
+    ] + [
+        _event(
+            run,
+            PaperJobPhase.ENTER,
+            str(row["strategy_id"]),
+            str(row["symbol"]),
+            "paper_order_blocked",
+            f"{row['order_id']}:{row['reason']}",
+            row,
+        )
+        for row in blocked
+    ]
     _commit_paper_transaction(
         paths,
         events=transaction_events,
@@ -638,9 +635,7 @@ def check(
             daily_closed_net=daily_net.get(_strategy_version_key(order), 0.0),
         )
         if reason is not None:
-            blocked_orders.append(
-                _blocked_order_payload(order, reason, run, source_bar=fill_bar)
-            )
+            blocked_orders.append(_blocked_order_payload(order, reason, run, source_bar=fill_bar))
             terminal_orders.add(order.order_id)
             continue
         fills.append(fill)
@@ -685,7 +680,8 @@ def check(
                 _with_source_bar(fill.to_dict(), fill_source_bars[fill.fill_id], run),
             )
             for fill in fills
-        ] + [
+        ]
+        + [
             _event(
                 run,
                 PaperJobPhase.CHECK,
@@ -728,7 +724,8 @@ def check(
                 row,
             )
             for row in blocked_orders
-        ] + [
+        ]
+        + [
             _event(
                 run,
                 PaperJobPhase.CHECK,
@@ -743,7 +740,8 @@ def check(
                 ),
             )
             for position in checked_no_action
-        ] + pending_no_fill_events
+        ]
+        + pending_no_fill_events
     )
     _commit_paper_transaction(
         paths,
@@ -837,39 +835,37 @@ def close(
             mark_source_bars[checked.position_id] = bar
             accounts = _apply_mark(accounts, checked)
     accounts = _recalculate_unrealized_accounts(accounts, updated_positions)
-    transaction_events = (
-        [
-            _event(
+    transaction_events = [
+        _event(
+            run,
+            PaperJobPhase.CLOSE,
+            close_record.strategy_id,
+            close_record.symbol,
+            "paper_position_closed",
+            close_record.close_id,
+            _with_source_bar(
+                close_record.to_dict(),
+                close_source_bars[close_record.close_id],
                 run,
-                PaperJobPhase.CLOSE,
-                close_record.strategy_id,
-                close_record.symbol,
-                "paper_position_closed",
-                close_record.close_id,
-                _with_source_bar(
-                    close_record.to_dict(),
-                    close_source_bars[close_record.close_id],
-                    run,
-                ),
-            )
-            for close_record in closes
-        ] + [
-            _event(
+            ),
+        )
+        for close_record in closes
+    ] + [
+        _event(
+            run,
+            PaperJobPhase.CLOSE,
+            position.strategy_id,
+            position.symbol,
+            "paper_position_marked_to_market",
+            f"{position.position_id}:mark:{run_date}",
+            _with_source_bar(
+                position.to_dict(),
+                mark_source_bars[position.position_id],
                 run,
-                PaperJobPhase.CLOSE,
-                position.strategy_id,
-                position.symbol,
-                "paper_position_marked_to_market",
-                f"{position.position_id}:mark:{run_date}",
-                _with_source_bar(
-                    position.to_dict(),
-                    mark_source_bars[position.position_id],
-                    run,
-                ),
-            )
-            for position in marks
-        ]
-    )
+            ),
+        )
+        for position in marks
+    ]
     _commit_paper_transaction(
         paths,
         events=transaction_events,
@@ -956,9 +952,7 @@ def _run_day_unlocked(
     source_truth = verify_source_bar_truth(output_root=output_root, mode=mode)
     if source_truth.status != "passed":
         details = "; ".join(source_truth.warnings) or "no verifier reason was recorded"
-        raise ValueError(
-            f"PaperOps daily immutable source-bar verification failed: {details}"
-        )
+        raise ValueError(f"PaperOps daily immutable source-bar verification failed: {details}")
     blotter = build_trade_blotter(
         output_root=output_root,
         mode=mode.value,
@@ -1170,12 +1164,10 @@ def _promote_replay_staging(
             )
             if promoted_source_truth.status != "passed":
                 details = (
-                    "; ".join(promoted_source_truth.warnings)
-                    or "no verifier reason was recorded"
+                    "; ".join(promoted_source_truth.warnings) or "no verifier reason was recorded"
                 )
                 raise ValueError(
-                    "PaperOps promoted replay immutable source-bar verification failed: "
-                    f"{details}"
+                    f"PaperOps promoted replay immutable source-bar verification failed: {details}"
                 )
             build_trade_blotter(output_root=paths.root)
             report(output_root=paths.root)
@@ -1249,8 +1241,10 @@ def _replace_replay_files(source: Path, target: Path) -> None:
 
 
 def calendar(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+
+    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    paths = PaperOpsPaths.resolve(output_root)
     rows = _read_calendar_rows(paths)
     _write_calendar_matrix(paths, rows)
     _write_monthly_returns(paths, rows)
@@ -1260,24 +1254,20 @@ def calendar(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, obje
 
 
 def reconcile(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+
+    require_observer_tree(output_root, nonempty_files=("ledger/paper_ledger.jsonl",))
+    paths = PaperOpsPaths.resolve(output_root)
     events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
     event_id_counts = Counter(str(event.get("event_id")) for event in events)
-    duplicates = sorted(
-        event_id for event_id, count in event_id_counts.items() if count > 1
-    )
+    duplicates = sorted(event_id for event_id, count in event_id_counts.items() if count > 1)
     logical_ids: dict[str, set[str]] = {}
     for event in events:
         logical_key = _logical_event_key(event)
         if logical_key is None:
             continue
         logical_ids.setdefault(logical_key, set()).add(str(event.get("event_id") or ""))
-    duplicates.extend(
-        f"logical:{key}"
-        for key, ids in sorted(logical_ids.items())
-        if len(ids) > 1
-    )
+    duplicates.extend(f"logical:{key}" for key, ids in sorted(logical_ids.items()) if len(ids) > 1)
     order_ids = {
         str(event.get("payload", {}).get("order_id"))
         for event in events
@@ -1358,8 +1348,10 @@ def _logical_event_key(event: dict[str, object]) -> str | None:
 
 
 def report(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+
+    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    paths = PaperOpsPaths.resolve(output_root)
     rows = _read_calendar_rows(paths)
     lines = [
         "# PaperOps v1 Summary",
@@ -1408,9 +1400,7 @@ def report(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object
             latest = max(series_rows, key=lambda row: str(row.get("date") or ""))
             status = str(latest.get("strategy_status") or "unknown")
             evidence_label = (
-                "reference policy"
-                if status in {"baseline", "benchmark"}
-                else "paper strategy"
+                "reference policy" if status in {"baseline", "benchmark"} else "paper strategy"
             )
             lines.append(
                 f"- `{strategy_id}` version `{strategy_version}` under "
@@ -1558,9 +1548,7 @@ def _load_dataset_for_mode(
         "insufficient_overlap",
         "provider_error",
     }:
-        raise ValueError(
-            f"forward PaperOps blocks DataTruth status {result.reconciliation.status}"
-        )
+        raise ValueError(f"forward PaperOps blocks DataTruth status {result.reconciliation.status}")
     if (
         mode is PaperRunMode.FORWARD
         and result.reconciliation.status == "single_provider_unreconciled"
@@ -1726,8 +1714,7 @@ def _picks_from_scan(
 ) -> tuple[PaperPick, ...]:
     status_by_id = {strategy.strategy_id: strategy.status for strategy in strategies}
     semantics_by_id = {
-        strategy.strategy_id: _strategy_semantics_fingerprint(strategy)
-        for strategy in strategies
+        strategy.strategy_id: _strategy_semantics_fingerprint(strategy) for strategy in strategies
     }
     picks: list[PaperPick] = []
     for card in scan_output.cards:
@@ -1847,9 +1834,7 @@ def _order_from_pick(
     assert pick.stop is not None
     assert pick.risk_per_unit is not None
     if pick.execution_policy_version != config.execution_policy_version:
-        raise ValueError(
-            "PaperOps pick execution policy does not match the active engine policy"
-        )
+        raise ValueError("PaperOps pick execution policy does not match the active engine policy")
     active_equity = max(equity_basis if equity_basis is not None else config.starting_equity, 0.0)
     modeled_risk_per_unit = _modeled_order_stop_loss_per_unit(pick, config)
     quantity = max(
@@ -1906,9 +1891,7 @@ def _modeled_order_stop_loss_per_unit(
         else pick.entry_reference * (1 - rate)
     )
     stop_fill = (
-        pick.stop * (1 - rate)
-        if pick.direction == Direction.LONG
-        else pick.stop * (1 + rate)
+        pick.stop * (1 - rate) if pick.direction == Direction.LONG else pick.stop * (1 + rate)
     )
     gross_loss = max(0.0, -_pnl(pick.direction, entry_fill, stop_fill, 1))
     entry_fee = entry_fill * config.fee_bps / 10_000.0
@@ -2029,9 +2012,7 @@ def _order_entry_block_reason(
         abs(float(row.get("notional_exposure") or 0.0)) for row in matching_pending
     )
     order_notional = (
-        abs(candidate_notional)
-        if candidate_notional is not None
-        else abs(order.notional_exposure)
+        abs(candidate_notional) if candidate_notional is not None else abs(order.notional_exposure)
     )
     gross_limit = max(account.current_equity, 0.0) * config.max_gross_exposure_pct
     if gross_exposure + order_notional > gross_limit + 1e-9:
@@ -2203,12 +2184,8 @@ def _pick_from_row(row: dict[str, object]) -> PaperPick:
         reason=str(row["reason"]),
         evidence=tuple(str(item) for item in row.get("evidence", [])),
         warnings=tuple(str(item) for item in row.get("warnings", [])),
-        execution_policy_version=str(
-            row.get("execution_policy_version") or "legacy_unspecified"
-        ),
-        strategy_semantics_fingerprint=str(
-            row.get("strategy_semantics_fingerprint") or "unknown"
-        ),
+        execution_policy_version=str(row.get("execution_policy_version") or "legacy_unspecified"),
+        strategy_semantics_fingerprint=str(row.get("strategy_semantics_fingerprint") or "unknown"),
     )
 
 
@@ -2546,8 +2523,7 @@ def _write_calendar_for_date(
             strategy.get("strategy_semantics_fingerprint") or "unknown"
         )
         execution_policy_version = str(
-            strategy.get("execution_policy_version")
-            or config.execution_policy_version
+            strategy.get("execution_policy_version") or config.execution_policy_version
         )
         if not _series_is_eligible_for_run(
             paths,
@@ -2563,7 +2539,8 @@ def _write_calendar_for_date(
         day_events = [
             event
             for event in events
-            if event.get("trade_date") == run.run_date and event.get("strategy_id") == strategy_id
+            if event.get("trade_date") == run.run_date
+            and event.get("strategy_id") == strategy_id
             and _event_matches_mode(event, run.mode)
             and _event_matches_strategy_version(
                 event,
@@ -2617,8 +2594,7 @@ def _write_calendar_for_date(
                 for row in existing_calendar_rows
                 if str(row.get("mode") or "") == run.mode.value
                 and str(row.get("strategy_id") or "") == strategy_id
-                and str(row.get("strategy_version") or "")
-                == str(strategy["strategy_version"])
+                and str(row.get("strategy_version") or "") == str(strategy["strategy_version"])
                 and str(row.get("execution_policy_version") or "")
                 == account.execution_policy_version
                 and str(row.get("strategy_semantics_fingerprint") or "unknown")
@@ -2771,8 +2747,7 @@ def _reference_calendar_rows(
         strategy_status="benchmark",
         daily_return=sum(symbol_returns) / len(symbol_returns),
         warning=(
-            "equal-weight configured-universe close-to-close benchmark; "
-            "research comparison only"
+            "equal-weight configured-universe close-to-close benchmark; research comparison only"
         ),
         starting_equity=starting_equity,
     )
@@ -2799,8 +2774,7 @@ def _reference_calendar_row(
             if str(row.get("mode") or "") == run.mode.value
             and str(row.get("strategy_id") or "") == strategy_id
             and str(row.get("strategy_version") or "") == strategy_version
-            and str(row.get("execution_policy_version") or "")
-            == execution_policy_version
+            and str(row.get("execution_policy_version") or "") == execution_policy_version
             and str(row.get("date") or "") < run.run_date
         ),
         key=lambda row: str(row.get("date") or ""),
@@ -2875,12 +2849,8 @@ def _event_matches_strategy_version(
     if not isinstance(payload, dict):
         return False
     payload_strategy_version = str(payload.get("strategy_version") or "unknown")
-    payload_policy = str(
-        payload.get("execution_policy_version") or "legacy_unspecified"
-    )
-    payload_fingerprint = str(
-        payload.get("strategy_semantics_fingerprint") or "unknown"
-    )
+    payload_policy = str(payload.get("execution_policy_version") or "legacy_unspecified")
+    payload_fingerprint = str(payload.get("strategy_semantics_fingerprint") or "unknown")
     return (
         payload_strategy_version == strategy_version
         and payload_policy == execution_policy_version
@@ -2905,21 +2875,13 @@ def _write_calendar_matrix(paths: PaperOpsPaths, rows: list[dict[str, object]]) 
         for strategy_id, _, _ in series
     }
     columns = {
-        item: (
-            item[0]
-            if id_counts[item[0]] == 1
-            else f"{item[0]}@{item[1]}@{item[2]}"
-        )
+        item: (item[0] if id_counts[item[0]] == 1 else f"{item[0]}@{item[1]}@{item[2]}")
         for item in series
     }
     matrix_rows: list[dict[str, object]] = []
     for row_date in dates:
         for mode in modes:
-            mode_rows = [
-                item
-                for item in rows
-                if item["date"] == row_date and item["mode"] == mode
-            ]
+            mode_rows = [item for item in rows if item["date"] == row_date and item["mode"] == mode]
             if not mode_rows:
                 continue
             row: dict[str, object] = {"date": row_date, "mode": mode}
@@ -2927,11 +2889,7 @@ def _write_calendar_matrix(paths: PaperOpsPaths, rows: list[dict[str, object]]) 
             count = 0
             for item in series:
                 match = next(
-                    (
-                        row
-                        for row in mode_rows
-                        if _calendar_series_key(row) == item
-                    ),
+                    (row for row in mode_rows if _calendar_series_key(row) == item),
                     None,
                 )
                 column = columns[item]
@@ -2953,10 +2911,7 @@ def _write_calendar_matrix(paths: PaperOpsPaths, rows: list[dict[str, object]]) 
 
 def _write_monthly_returns(paths: PaperOpsPaths, rows: list[dict[str, object]]) -> None:
     output: list[dict[str, object]] = []
-    keys = {
-        (str(row["date"])[:7], str(row["mode"]), *_calendar_series_key(row))
-        for row in rows
-    }
+    keys = {(str(row["date"])[:7], str(row["mode"]), *_calendar_series_key(row)) for row in rows}
     for key in sorted(keys):
         month, mode, strategy_id, strategy_version, execution_policy_version = key
         matches = [
@@ -3089,8 +3044,7 @@ def _write_calendar_summary(paths: PaperOpsPaths, rows: list[dict[str, object]])
         lines = [
             "# PaperOps Calendar Summary",
             "",
-            "Evidence modes, strategy versions, and execution policies are reported "
-            "separately.",
+            "Evidence modes, strategy versions, and execution policies are reported separately.",
             "",
         ]
         mode_titles = {
@@ -3109,9 +3063,7 @@ def _write_calendar_summary(paths: PaperOpsPaths, rows: list[dict[str, object]])
                 lines.extend(["- No rows recorded for this evidence mode.", ""])
                 continue
             latest_date = max(str(row.get("date") or "") for row in mode_rows)
-            latest = [
-                row for row in mode_rows if str(row.get("date") or "") == latest_date
-            ]
+            latest = [row for row in mode_rows if str(row.get("date") or "") == latest_date]
             strategy_rows = [
                 row
                 for row in latest
@@ -3139,8 +3091,7 @@ def _write_calendar_summary(paths: PaperOpsPaths, rows: list[dict[str, object]])
                     f"(`{worst.get('daily_return_pct', 'N/A')}`)."
                 )
                 lines.append(
-                    "- Strategies in drawdown: "
-                    + (", ".join(drawdown) if drawdown else "none")
+                    "- Strategies in drawdown: " + (", ".join(drawdown) if drawdown else "none")
                 )
             else:
                 lines.append("- No active strategy rows; only reference policies are present.")
@@ -3404,8 +3355,7 @@ def _apply_transaction_journal(
     event_rows = journal.get("events", [])
     updates = journal.get("state_updates", {})
     if not isinstance(event_rows, list) or not all(
-        isinstance(row, dict) and str(row.get("event_id") or "").strip()
-        for row in event_rows
+        isinstance(row, dict) and str(row.get("event_id") or "").strip() for row in event_rows
     ):
         raise ValueError("PaperOps transaction journal events are malformed")
     if not isinstance(updates, dict):
@@ -3491,9 +3441,7 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
         raise ValueError("PaperOps universe_symbols must be an array")
     if any(not isinstance(symbol, str) or not symbol.strip() for symbol in raw_symbols):
         raise ValueError("PaperOps universe_symbols entries must be non-blank strings")
-    universe_symbols = tuple(
-        dict.fromkeys(str(symbol).strip().upper() for symbol in raw_symbols)
-    )
+    universe_symbols = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in raw_symbols))
     if not universe_symbols:
         raise ValueError("PaperOps universe_symbols must not be empty")
     config = PaperOpsConfig(
@@ -3589,9 +3537,7 @@ def _ensure_execution_policy_manifest(
     fingerprint = _execution_policy_fingerprint(active_config)
     existing_policy = policies.get(active_version)
     if active_version in policies and not isinstance(existing_policy, dict):
-        raise ValueError(
-            f"PaperOps execution policy {active_version} manifest entry is malformed"
-        )
+        raise ValueError(f"PaperOps execution policy {active_version} manifest entry is malformed")
     if isinstance(existing_policy, dict):
         if str(existing_policy.get("fingerprint") or "") != fingerprint:
             raise ValueError(
@@ -3603,9 +3549,7 @@ def _ensure_execution_policy_manifest(
             artifact=f"execution policy {active_version}",
         )
     else:
-        previous_active = str(
-            raw_manifest.get("active_execution_policy_version") or ""
-        )
+        previous_active = str(raw_manifest.get("active_execution_policy_version") or "")
         if previous_active == active_version and has_forward_evidence:
             raise ValueError(
                 "PaperOps active execution-policy lineage is missing despite retained "
@@ -3625,9 +3569,7 @@ def _ensure_execution_policy_manifest(
             "configuration": fingerprint_payload,
             "fingerprint": fingerprint,
             "registered_at": registered_at.isoformat(),
-            "coverage_inception_date": next_session_after_registration(
-                registered_at
-            ).isoformat(),
+            "coverage_inception_date": next_session_after_registration(registered_at).isoformat(),
         }
     previous_active = str(raw_manifest.get("active_execution_policy_version") or "")
     if previous_active and previous_active != active_version and active_version in policies:
@@ -3662,13 +3604,17 @@ def _ensure_strategy_semantics_manifest(
         raise ValueError("PaperOps strategy semantics manifest must contain an object")
     fingerprints: dict[tuple[str, str], str] = {}
     prior_registry = read_json(paths.state / "strategy_registry.json", [])
-    prior_registry_keys = {
-        f"{row.get('strategy_id')}@{row.get('strategy_version')}"
-        for row in prior_registry
-        if isinstance(row, dict)
-        and str(row.get("strategy_id") or "")
-        and str(row.get("strategy_version") or "")
-    } if isinstance(prior_registry, list) else set()
+    prior_registry_keys = (
+        {
+            f"{row.get('strategy_id')}@{row.get('strategy_version')}"
+            for row in prior_registry
+            if isinstance(row, dict)
+            and str(row.get("strategy_id") or "")
+            and str(row.get("strategy_version") or "")
+        }
+        if isinstance(prior_registry, list)
+        else set()
+    )
     for strategy in strategies:
         key = f"{strategy.strategy_id}@{strategy.version}"
         configuration = _strategy_semantics_payload(strategy)
@@ -3723,9 +3669,7 @@ def _ensure_registration_coverage(entry: dict[str, object], *, artifact: str) ->
             activation_policy,
         ).isoformat()
     except ValueError as exc:
-        raise ValueError(
-            f"PaperOps {artifact} activation_policy is unsupported"
-        ) from exc
+        raise ValueError(f"PaperOps {artifact} activation_policy is unsupported") from exc
     stored_inception = str(entry.get("coverage_inception_date") or "").strip()
     if stored_inception and stored_inception != expected:
         raise ValueError(
@@ -3759,8 +3703,7 @@ def _strategy_coverage_inception(
         raise ValueError(f"PaperOps strategy registration is missing for {strategy_key}")
     if not isinstance(policy_entry, dict):
         raise ValueError(
-            "PaperOps execution-policy registration is missing for "
-            f"{execution_policy_version}"
+            f"PaperOps execution-policy registration is missing for {execution_policy_version}"
         )
     if str(strategy_entry.get("fingerprint") or "") != strategy_semantics_fingerprint:
         raise ValueError(f"PaperOps strategy registration fingerprint conflicts for {strategy_key}")
@@ -3815,8 +3758,7 @@ def _has_forward_evidence(paths: PaperOpsPaths) -> bool:
         return True
     calendar_json = read_json(paths.calendar / "strategy_daily_returns.json", [])
     if isinstance(calendar_json, list) and any(
-        isinstance(row, dict)
-        and str(row.get("mode") or "") == PaperRunMode.FORWARD.value
+        isinstance(row, dict) and str(row.get("mode") or "") == PaperRunMode.FORWARD.value
         for row in calendar_json
     ):
         return True
@@ -3828,16 +3770,11 @@ def _has_forward_evidence(paths: PaperOpsPaths) -> bool:
         ):
             return True
     account_payload = read_json(paths.state / "paper_accounts.json", {})
-    account_rows = (
-        account_payload.get("accounts", [])
-        if isinstance(account_payload, dict)
-        else []
-    )
+    account_rows = account_payload.get("accounts", []) if isinstance(account_payload, dict) else []
     if isinstance(account_rows, list) and any(
         isinstance(row, dict)
         and (
-            float(row.get("current_equity") or 0.0)
-            != float(row.get("starting_equity") or 0.0)
+            float(row.get("current_equity") or 0.0) != float(row.get("starting_equity") or 0.0)
             or float(row.get("realized_pnl") or 0.0) != 0.0
             or float(row.get("unrealized_pnl") or 0.0) != 0.0
         )
@@ -4208,9 +4145,7 @@ def _repair_pending_order_rows(
             if repaired.get("earliest_fill_date") != expected_fill:
                 repaired["earliest_fill_date"] = expected_fill
                 warnings = [str(item) for item in repaired.get("warnings", [])]
-                warnings.append(
-                    "earliest_fill_date repaired from legacy calendar-day logic"
-                )
+                warnings.append("earliest_fill_date repaired from legacy calendar-day logic")
                 repaired["warnings"] = list(dict.fromkeys(warnings))
         repaired_rows.append(repaired)
     return repaired_rows
@@ -4283,9 +4218,7 @@ def _reset_mode_generated_state(
     ledger_path = paths.ledger / "paper_ledger.jsonl"
     with exclusive_file_lock(jsonl_lock_path(ledger_path)):
         retained_events = [
-            event
-            for event in read_jsonl(ledger_path)
-            if str(event.get("mode") or "") != mode.value
+            event for event in read_jsonl(ledger_path) if str(event.get("mode") or "") != mode.value
         ]
         write_jsonl(ledger_path, retained_events)
     retained_calendar_rows = [
@@ -4361,12 +4294,8 @@ def _order_from_row(row: dict[str, object]) -> PaperOrder:
         notional_exposure=float(row["notional_exposure"]),
         max_loss_estimate=float(row["max_loss_estimate"]),
         strategy_equity_basis=float(row["strategy_equity_basis"]),
-        execution_policy_version=str(
-            row.get("execution_policy_version") or "legacy_unspecified"
-        ),
-        strategy_semantics_fingerprint=str(
-            row.get("strategy_semantics_fingerprint") or "unknown"
-        ),
+        execution_policy_version=str(row.get("execution_policy_version") or "legacy_unspecified"),
+        strategy_semantics_fingerprint=str(row.get("strategy_semantics_fingerprint") or "unknown"),
         warnings=tuple(str(item) for item in row.get("warnings", [])),
     )
 
@@ -4386,12 +4315,8 @@ def _position_from_row(row: dict[str, object]) -> PaperPosition:
         stop=float(row["stop"]),
         target=_optional_float(row.get("target")),
         last_mark_price=float(row["last_mark_price"]),
-        execution_policy_version=str(
-            row.get("execution_policy_version") or "legacy_unspecified"
-        ),
-        strategy_semantics_fingerprint=str(
-            row.get("strategy_semantics_fingerprint") or "unknown"
-        ),
+        execution_policy_version=str(row.get("execution_policy_version") or "legacy_unspecified"),
+        strategy_semantics_fingerprint=str(row.get("strategy_semantics_fingerprint") or "unknown"),
         entry_fee=float(row.get("entry_fee", 0.0)),
         realized_pnl=float(row.get("realized_pnl", 0.0)),
         unrealized_pnl=float(row.get("unrealized_pnl", 0.0)),

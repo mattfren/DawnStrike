@@ -13,6 +13,7 @@ from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data_truth import build_data_truth_snapshot
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
+from intraday_scanner.v2.paper_ops.engine import init
 from intraday_scanner.v2.paper_ops.models import (
     PaperClose,
     PaperCloseReason,
@@ -81,14 +82,17 @@ def test_gap_close_precedence_uses_the_source_open(
     target: float,
     expected: tuple[str, float],
 ) -> None:
-    assert _expected_close(
-        {"opened_at": "2026-01-05T00:00:00+00:00"},
-        bar,
-        5,
-        stop=stop,
-        target=target,
-        direction=direction,
-    ) == expected
+    assert (
+        _expected_close(
+            {"opened_at": "2026-01-05T00:00:00+00:00"},
+            bar,
+            5,
+            stop=stop,
+            target=target,
+            direction=direction,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -161,11 +165,14 @@ def test_full_lifecycle_matches_exact_immutable_daily_snapshot_bytes(tmp_path: P
     assert result.audited_run_count == 4
     assert result.audited_event_count == 4
     assert result.warnings == ()
-    assert json.loads(
-        (scenario.output_root / "reconciliation" / "source_bar_truth_latest.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (scenario.output_root / "reconciliation" / "source_bar_truth_latest.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == result.to_dict()
+        == result.to_dict()
+    )
 
 
 def test_known_shadow_manifest_coexists_with_champion_source_bar_audit(
@@ -207,10 +214,7 @@ def test_unknown_conflicting_manifest_is_not_treated_as_a_shadow_artifact(
     )
 
     assert result.status == "failed"
-    assert (
-        "run paper-run-2026-01-07 has conflicting PaperOps manifests"
-        in result.warnings
-    )
+    assert "run paper-run-2026-01-07 has conflicting PaperOps manifests" in result.warnings
     assert result.audited_event_count == 4
 
 
@@ -268,9 +272,7 @@ def test_retained_normalized_snapshot_tamper_invalidates_bound_run(
         "DataTruth immutable normalized artifact hash mismatch" in warning
         for warning in result.warnings
     )
-    assert (
-        "event event-position-marked has no verified immutable run snapshot" in result.warnings
-    )
+    assert "event event-position-marked has no verified immutable run snapshot" in result.warnings
 
 
 @pytest.mark.parametrize(
@@ -294,9 +296,7 @@ def test_fill_price_and_cost_tamper_is_rejected(
     result = verify_source_bar_truth(output_root=scenario.output_root)
 
     assert result.status == "failed"
-    assert (
-        f"fill event-fill {warning_label} does not match source bar policy" in result.warnings
-    )
+    assert f"fill event-fill {warning_label} does not match source bar policy" in result.warnings
 
 
 @pytest.mark.parametrize(
@@ -399,9 +399,8 @@ def test_mark_cannot_bypass_a_close_triggered_by_its_exact_source_bar(
     mark_event["run_id"] = close_event["run_id"]
     mark_event["trade_date"] = close_event["trade_date"]
     mark["last_mark_price"] = 111.0
-    mark["unrealized_pnl"] = (
-        (111.0 - float(mark["entry_price"])) * int(mark["quantity"])
-        - float(mark["entry_fee"])
+    mark["unrealized_pnl"] = (111.0 - float(mark["entry_price"])) * int(mark["quantity"]) - float(
+        mark["entry_fee"]
     )
     scenario.persist_events()
 
@@ -425,10 +424,7 @@ def test_replay_manifest_cannot_escape_the_canonical_data_truth_root(
     result = verify_source_bar_truth(output_root=scenario.output_root)
 
     assert result.status == "failed"
-    assert (
-        "run paper-run-2026-01-07 DataTruth root is not canonical for replay"
-        in result.warnings
-    )
+    assert "run paper-run-2026-01-07 DataTruth root is not canonical for replay" in result.warnings
 
 
 @pytest.mark.parametrize(
@@ -509,8 +505,7 @@ def test_run_cannot_rebind_an_event_to_a_later_snapshot_containing_the_same_bar(
 
     assert result.status == "failed"
     assert (
-        "run paper-run-2026-01-07 DataTruth accepted end does not equal run date"
-        in result.warnings
+        "run paper-run-2026-01-07 DataTruth accepted end does not equal run date" in result.warnings
     )
 
 
@@ -538,9 +533,7 @@ def test_run_universe_binding_rejects_duplicate_manifest_symbols(tmp_path: Path)
     result = verify_source_bar_truth(output_root=scenario.output_root)
 
     assert result.status == "failed"
-    assert (
-        "run paper-run-2026-01-07 DataTruth universe binding mismatch" in result.warnings
-    )
+    assert "run paper-run-2026-01-07 DataTruth universe binding mismatch" in result.warnings
 
 
 def _immutable_lifecycle_scenario(
@@ -550,6 +543,8 @@ def _immutable_lifecycle_scenario(
     lifecycle_config: PaperOpsConfig | None = None,
 ) -> _ImmutableLifecycleScenario:
     output_root = tmp_path / "paper_ops"
+    init(output_root=output_root)
+    init(output_root=output_root)
     active_config = active_config or _execution_config()
     lifecycle_config = lifecycle_config or active_config
     data_truth_root = output_root / "data_truth_replay"
@@ -879,9 +874,7 @@ def _write_shadow_manifest(
     snapshot = scenario.snapshots_by_date[run_date.isoformat()]
     challenger_id = "ts_momentum_sma_atr_shadow_v2"
     write_json(
-        scenario.output_root
-        / "manifests"
-        / f"shadow_replay_{run_date}_{challenger_id}.json",
+        scenario.output_root / "manifests" / f"shadow_replay_{run_date}_{challenger_id}.json",
         {
             "schema_version": schema_version,
             "status": "completed",

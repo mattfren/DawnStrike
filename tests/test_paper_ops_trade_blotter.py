@@ -6,6 +6,7 @@ import pytest
 
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.engine import init
+from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json, write_jsonl
 from intraday_scanner.v2.paper_ops.trade_blotter import (
     build_trade_blotter,
@@ -239,8 +240,11 @@ def test_trade_blotter_joins_exact_round_trip_and_latest_mark(tmp_path: Path) ->
     assert stored_rows[0]["fill_run_id"] == "run-fill"
     assert stored_rows[0]["fill_data_snapshot_id"] == "snapshot-fill"
     csv_fields = (
-        root / "exports" / "paper_trade_blotter.csv"
-    ).read_text(encoding="utf-8").splitlines()[0].split(",")
+        (root / "exports" / "paper_trade_blotter.csv")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+        .split(",")
+    )
     assert csv_fields[:8] == [
         "record_id",
         "mode",
@@ -288,10 +292,7 @@ def test_trade_blotter_rejects_fill_envelope_payload_run_mismatch(
     assert result["status"] == "failed"
     assert result["rows"][0]["run_id"] == "run-entry"
     assert result["rows"][0]["fill_run_id"] == "run-fill-conflict"
-    assert any(
-        "envelope/payload run_id mismatch" in warning
-        for warning in result["warnings"]
-    )
+    assert any("envelope/payload run_id mismatch" in warning for warning in result["warnings"])
 
 
 def test_trade_blotter_rejects_missing_fill_envelope_run_id(tmp_path: Path) -> None:
@@ -307,10 +308,7 @@ def test_trade_blotter_rejects_missing_fill_envelope_run_id(tmp_path: Path) -> N
 
     assert result["status"] == "failed"
     assert result["rows"][0]["fill_run_id"] == ""
-    assert any(
-        "fill envelope run_id is missing" in warning
-        for warning in result["warnings"]
-    )
+    assert any("fill envelope run_id is missing" in warning for warning in result["warnings"])
 
 
 def test_trade_blotter_fails_when_fill_snapshot_is_unknown(tmp_path: Path) -> None:
@@ -325,9 +323,7 @@ def test_trade_blotter_fails_when_fill_snapshot_is_unknown(tmp_path: Path) -> No
     assert result["status"] == "failed"
     assert result["rows"][0]["data_snapshot_id"] == "snapshot-entry"
     assert result["rows"][0]["fill_data_snapshot_id"] == "unknown"
-    assert any(
-        "unknown fill data snapshot" in warning for warning in result["warnings"]
-    )
+    assert any("unknown fill data snapshot" in warning for warning in result["warnings"])
 
 
 def test_trade_blotter_fails_on_orphan_fill(tmp_path: Path) -> None:
@@ -402,9 +398,7 @@ def test_trade_blotter_recomputes_close_economics(
     _seed_manifests(root)
     events = _lifecycle(root)
     close = next(
-        event["payload"]
-        for event in events
-        if event["event_type"] == "paper_position_closed"
+        event["payload"] for event in events if event["event_type"] == "paper_position_closed"
     )
     assert isinstance(close, dict)
     close[field] = float(close[field]) + 1.0
@@ -435,9 +429,7 @@ def test_trade_blotter_rejects_invalid_close_metadata(
     _seed_manifests(root)
     events = _lifecycle(root)
     close = next(
-        event["payload"]
-        for event in events
-        if event["event_type"] == "paper_position_closed"
+        event["payload"] for event in events if event["event_type"] == "paper_position_closed"
     )
     assert isinstance(close, dict)
     close[field] = value
@@ -512,7 +504,7 @@ def test_trade_blotter_accepts_explicit_cross_day_order_lifecycle_run_ids(
     assert result["rows"][0]["lifecycle_status"] == "blocked"
 
 
-def test_trade_blotter_recovers_pending_transaction_before_read(tmp_path: Path) -> None:
+def test_trade_blotter_blocks_pending_transaction_before_read(tmp_path: Path) -> None:
     root = tmp_path / "paper_ops"
     init(output_root=root)
     _seed_manifests(root)
@@ -526,9 +518,16 @@ def test_trade_blotter_recovers_pending_transaction_before_read(tmp_path: Path) 
     }
     journal_path = root / "state" / "paper_transaction_pending.json"
     write_json(journal_path, journal)
+    (root / "state" / ".paper_transaction.lock").unlink(missing_ok=True)
 
-    result = build_trade_blotter(output_root=root)
-
-    assert result["status"] == "passed"
-    assert result["row_count"] == 1
-    assert not journal_path.exists()
+    before = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    with pytest.raises(PaperOpsObserverBlocked, match="BLOCKED_PENDING_RECOVERY"):
+        build_trade_blotter(output_root=root)
+    after = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert journal_path.exists()
+    assert not (root / "state" / ".paper_transaction.lock").exists()

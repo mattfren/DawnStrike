@@ -74,12 +74,17 @@ def verify_source_bar_truth(
 
     from intraday_scanner.v2.paper_ops.engine import (
         PaperOpsPaths,
-        _recover_pending_transaction,
     )
 
     selected_mode = _selected_mode(mode)
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+
+    require_observer_tree(
+        output_root,
+        required_files=("state/execution_policy_manifest.json",),
+        nonempty_files=("ledger/paper_ledger.jsonl",),
+    )
+    paths = PaperOpsPaths.resolve(output_root)
     warnings: list[str] = []
     policies = _execution_policies(
         paths.state / "execution_policy_manifest.json",
@@ -437,9 +442,11 @@ def _load_bound_snapshot(
     if policy is None or policy.fingerprint != policy_fingerprint:
         warnings.append(f"run {run_id} execution policy binding is invalid")
     raw_universe = run_manifest.get("universe_symbols")
-    expected_universe = tuple(
-        str(symbol).upper() for symbol in raw_universe
-    ) if isinstance(raw_universe, list) else ()
+    expected_universe = (
+        tuple(str(symbol).upper() for symbol in raw_universe)
+        if isinstance(raw_universe, list)
+        else ()
+    )
     dataset_universe = tuple(str(symbol).upper() for symbol in dataset.symbols)
     if (
         not expected_universe
@@ -929,9 +936,7 @@ def _verify_reference_returns(
             warnings.append(f"reference row {row_id} snapshot identity mismatch")
         strategy_id = str(row.get("strategy_id") or "")
         expected_status = (
-            "benchmark"
-            if strategy_id == "benchmark_buy_hold_equal_weight"
-            else "baseline"
+            "benchmark" if strategy_id == "benchmark_buy_hold_equal_weight" else "baseline"
         )
         if row.get("strategy_version") != "v1.0" or row.get("strategy_status") != expected_status:
             warnings.append(f"reference row {row_id} strategy identity mismatch")
@@ -947,9 +952,7 @@ def _verify_reference_returns(
             except ValueError as exc:
                 warnings.append(f"reference row {row_id} {exc}")
                 continue
-            if str(row.get("execution_policy_version") or "") != (
-                "equal_weight_close_to_close_v1"
-            ):
+            if str(row.get("execution_policy_version") or "") != ("equal_weight_close_to_close_v1"):
                 warnings.append(f"reference row {row_id} benchmark policy mismatch")
         elif str(row.get("execution_policy_version") or "") != "cash_zero_interest_v1":
             warnings.append(f"reference row {row_id} cash policy mismatch")
@@ -969,8 +972,7 @@ def _verify_reference_returns(
             "unrealized_pnl": ending - policy.starting_equity,
             "total_pnl": ending - previous,
             "daily_return_pct": expected_daily,
-            "cumulative_return_pct": (ending - policy.starting_equity)
-            / policy.starting_equity,
+            "cumulative_return_pct": (ending - policy.starting_equity) / policy.starting_equity,
             "drawdown_pct": (ending - peak) / peak if peak else 0.0,
             "trades_opened": 0.0,
             "trades_closed": 0.0,
@@ -1013,9 +1015,7 @@ def _benchmark_daily_return(dataset: MarketDataset, run_date: str) -> float:
     returns: list[float] = []
     for symbol in dataset.symbols:
         eligible = [
-            bar
-            for bar in dataset.bars_by_symbol.get(symbol, ())
-            if bar.timestamp.date() <= day
+            bar for bar in dataset.bars_by_symbol.get(symbol, ()) if bar.timestamp.date() <= day
         ]
         if len(eligible) < 2 or eligible[-1].timestamp.date() != day:
             raise ValueError(
@@ -1128,7 +1128,5 @@ def _directional_pnl(
     quantity: int,
 ) -> float:
     return (
-        (exit_price - entry) * quantity
-        if direction == "long"
-        else (entry - exit_price) * quantity
+        (exit_price - entry) * quantity if direction == "long" else (entry - exit_price) * quantity
     )

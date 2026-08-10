@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.v2.paper_ops.calendar_truth import (
     _completed_report_coverage,
     _duplicates,
@@ -13,19 +15,22 @@ from intraday_scanner.v2.paper_ops.calendar_truth import (
     verify_calendar_truth,
 )
 from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths, init
-from intraday_scanner.v2.paper_ops.storage import read_json, read_jsonl, write_json, write_jsonl
+from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
+from intraday_scanner.v2.paper_ops.storage import read_json, write_json, write_jsonl
+
+
+def _seed_calendar_header(root: Path) -> None:
+    (root / "calendar" / "strategy_daily_returns.csv").write_text(
+        "date,mode,strategy_id,strategy_version\n", encoding="utf-8"
+    )
 
 
 def test_calendar_truth_fails_closed_on_empty_initialized_root(tmp_path: Path) -> None:
     root = tmp_path / "paper_ops"
     init(output_root=root)
 
-    result = verify_calendar_truth(output_root=root)
-
-    assert result.status == "failed"
-    assert "calendar has no rows" in result.missing_rows
-    assert "ledger has no events" in result.missing_rows
-    assert "ledger warning: paper ledger contains no events" in result.ledger_mismatches
+    with pytest.raises(PaperOpsObserverBlocked, match="MISSING_INPUT"):
+        verify_calendar_truth(output_root=root)
 
 
 def test_strict_ledger_rejects_non_objects_blank_and_duplicate_event_ids(
@@ -173,7 +178,7 @@ def test_strict_ledger_rejects_conflicting_lifecycle_and_origin_runs(
     assert "ledger line 1 payload origin/run_id mismatch" in mismatches
 
 
-def test_calendar_truth_recovers_pending_transaction_before_reading(
+def test_calendar_truth_blocks_pending_transaction_before_reading(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "paper_ops"
@@ -187,9 +192,7 @@ def test_calendar_truth_recovers_pending_transaction_before_reading(
         "mode": "forward",
         "order_id": "pending-journal-order",
         "strategy_id": strategy["strategy_id"],
-        "strategy_semantics_fingerprint": strategy[
-            "strategy_semantics_fingerprint"
-        ],
+        "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
         "strategy_version": strategy["strategy_version"],
         "symbol": "SPY",
     }
@@ -218,16 +221,19 @@ def test_calendar_truth_recovers_pending_transaction_before_reading(
     }
     journal_path = root / "state" / "paper_transaction_pending.json"
     write_json(journal_path, journal)
+    (root / "state" / ".paper_transaction.lock").unlink(missing_ok=True)
 
-    result = verify_calendar_truth(output_root=root)
-
-    assert result.status == "failed"
-    assert not journal_path.exists()
-    assert read_json(root / "state" / "pending_orders.json", []) == [order]
-    assert [
-        row["event_id"]
-        for row in read_jsonl(root / "ledger" / "paper_ledger.jsonl")
-    ] == ["pending-journal-event"]
+    before = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    with pytest.raises(PaperOpsObserverBlocked, match="BLOCKED_PENDING_RECOVERY"):
+        verify_calendar_truth(output_root=root)
+    after = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert journal_path.exists()
+    assert not (root / "state" / ".paper_transaction.lock").exists()
 
 
 def test_calendar_truth_never_inherits_current_lineage_for_legacy_event(
@@ -235,6 +241,7 @@ def test_calendar_truth_never_inherits_current_lineage_for_legacy_event(
 ) -> None:
     root = tmp_path / "paper_ops"
     init(output_root=root)
+    _seed_calendar_header(root)
     registry = read_json(root / "state" / "strategy_registry.json", [])
     assert isinstance(registry, list) and registry
     strategy = registry[0]
@@ -280,6 +287,7 @@ def test_calendar_truth_blocks_completed_report_without_exact_artifacts(
 ) -> None:
     root = tmp_path / "paper_ops"
     init(output_root=root)
+    _seed_calendar_header(root)
     run_id = "paper_ops:forward:2026-01-05:snapshot"
     write_json(
         root / "reports" / "daily" / "forward_2026-01-05.json",
@@ -292,12 +300,20 @@ def test_calendar_truth_blocks_completed_report_without_exact_artifacts(
         },
     )
 
-    result = verify_calendar_truth(output_root=root)
-
-    assert result.status == "failed"
-    label = f"2026-01-05:forward:{run_id}"
-    assert f"completed report has no exact ledger events {label}" in result.missing_rows
-    assert f"completed report has no exact calendar rows {label}" in result.missing_rows
+    before = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(PaperOpsObserverBlocked, match="MISSING_INPUT"):
+        verify_calendar_truth(output_root=root)
+    after = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert run_id
 
 
 def test_calendar_truth_detects_strategy_missing_from_ledger_and_calendar(
@@ -328,9 +344,7 @@ def test_calendar_truth_detects_strategy_missing_from_ledger_and_calendar(
             "strategy_id": strategy["strategy_id"],
             "strategy_version": strategy["strategy_version"],
             "execution_policy_version": strategy["execution_policy_version"],
-            "strategy_semantics_fingerprint": strategy[
-                "strategy_semantics_fingerprint"
-            ],
+            "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
             "run_id": run_id,
             "starting_equity": "100000",
             "ending_equity": "100000",
@@ -358,14 +372,10 @@ def test_calendar_truth_detects_strategy_missing_from_ledger_and_calendar(
                 "event_type": "paper_no_setup_decision",
                 "mode": "forward",
                 "payload": {
-                    "execution_policy_version": strategy[
-                        "execution_policy_version"
-                    ],
+                    "execution_policy_version": strategy["execution_policy_version"],
                     "mode": "forward",
                     "strategy_id": strategy["strategy_id"],
-                    "strategy_semantics_fingerprint": strategy[
-                        "strategy_semantics_fingerprint"
-                    ],
+                    "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
                     "strategy_version": strategy["strategy_version"],
                     "symbol": "SPY",
                 },
@@ -576,9 +586,7 @@ def test_completed_report_requires_current_fingerprint_ledger_coverage(
             "strategy_id": strategy["strategy_id"],
             "strategy_version": strategy["strategy_version"],
             "execution_policy_version": strategy["execution_policy_version"],
-            "strategy_semantics_fingerprint": strategy[
-                "strategy_semantics_fingerprint"
-            ],
+            "strategy_semantics_fingerprint": strategy["strategy_semantics_fingerprint"],
         }
         for strategy in registered
     ]
@@ -590,9 +598,7 @@ def test_completed_report_requires_current_fingerprint_ledger_coverage(
     events = []
     for index, strategy in enumerate(registered):
         fingerprint = (
-            stale_fingerprint
-            if index == 0
-            else strategy["strategy_semantics_fingerprint"]
+            stale_fingerprint if index == 0 else strategy["strategy_semantics_fingerprint"]
         )
         events.append(
             {
@@ -602,9 +608,7 @@ def test_completed_report_requires_current_fingerprint_ledger_coverage(
                 "payload": {
                     "strategy_id": strategy["strategy_id"],
                     "strategy_version": strategy["strategy_version"],
-                    "execution_policy_version": strategy[
-                        "execution_policy_version"
-                    ],
+                    "execution_policy_version": strategy["execution_policy_version"],
                     "strategy_semantics_fingerprint": fingerprint,
                 },
                 "run_id": run_id,
@@ -726,7 +730,6 @@ def test_completed_report_with_incomplete_identity_fails_closed(tmp_path: Path) 
     gaps = _completed_report_coverage(paths, [], [])
 
     assert any(
-        item.startswith("completed report identity is incomplete ")
-        and "run_id=<missing>" in item
+        item.startswith("completed report identity is incomplete ") and "run_id=<missing>" in item
         for item in gaps
     )

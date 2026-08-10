@@ -11,6 +11,7 @@ from intraday_scanner.v2.paper_ops.engine import (
     _recover_pending_transaction,
 )
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
 from intraday_scanner.v2.paper_ops.storage import (
     read_json,
     read_jsonl,
@@ -85,8 +86,16 @@ def rebuild_ledger(
     output_root: Path = Path("data/v2_paper_ops"),
     write_rebuilt: bool = False,
 ) -> LedgerRebuildResult:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    if write_rebuilt:
+        paths = PaperOpsPaths.create(output_root)
+        _recover_pending_transaction(paths)
+    else:
+        require_observer_tree(
+            output_root,
+            required_files=("state/paper_ops_config.json", "state/strategy_registry.json"),
+            nonempty_files=("ledger/paper_ledger.jsonl",),
+        )
+        paths = PaperOpsPaths.resolve(output_root)
     source_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
     events: list[dict[str, object]] = []
     registry = _registry(paths)
@@ -113,9 +122,7 @@ def rebuild_ledger(
             )
             continue
         events.append(event)
-        mode = (
-            event_mode if event_mode in {item.value for item in PaperRunMode} else payload_mode
-        )
+        mode = event_mode if event_mode in {item.value for item in PaperRunMode} else payload_mode
         strategy_id = str(event.get("strategy_id") or payload.get("strategy_id") or "")
         strategy_version = _strategy_version(payload, registry, strategy_id)
         execution_policy_version = _execution_policy_version(payload, registry, strategy_id)
@@ -213,8 +220,7 @@ def _account_rows(
             strategy_id = str(strategy["strategy_id"])
             strategy_version = str(strategy["strategy_version"])
             execution_policy_version = str(
-                strategy.get("execution_policy_version")
-                or "legacy_unspecified"
+                strategy.get("execution_policy_version") or "legacy_unspecified"
             )
             strategy_semantics_fingerprint = str(
                 strategy.get("strategy_semantics_fingerprint") or "unknown"
@@ -316,8 +322,7 @@ def _calendar_rows_from_events(
                 strategy_id = str(strategy["strategy_id"])
                 strategy_version = str(strategy["strategy_version"])
                 execution_policy_version = str(
-                    strategy.get("execution_policy_version")
-                    or "legacy_unspecified"
+                    strategy.get("execution_policy_version") or "legacy_unspecified"
                 )
                 strategy_semantics_fingerprint = str(
                     strategy.get("strategy_semantics_fingerprint") or "unknown"
@@ -406,9 +411,7 @@ def _calendar_rows_from_events(
                 daily_pnl = equity - prior_equity
                 peak_equity[key] = max(peak_equity.get(key, starting_equity), equity)
                 drawdown = (
-                    (equity - peak_equity[key]) / peak_equity[key]
-                    if peak_equity[key]
-                    else 0.0
+                    (equity - peak_equity[key]) / peak_equity[key] if peak_equity[key] else 0.0
                 )
                 gross_exposure = sum(
                     _position_gross_exposure(position)
@@ -447,9 +450,7 @@ def _calendar_rows_from_events(
                         "realized_pnl": realized,
                         "unrealized_pnl": unrealized,
                         "total_pnl": daily_pnl,
-                        "daily_return_pct": (
-                            daily_pnl / prior_equity if prior_equity else 0.0
-                        ),
+                        "daily_return_pct": (daily_pnl / prior_equity if prior_equity else 0.0),
                         "cumulative_return_pct": (equity - starting_equity) / starting_equity,
                         "drawdown_pct": min(0.0, drawdown),
                         "trades_opened": len(fills),
@@ -514,10 +515,7 @@ def _compare_calendar(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
             str(row["mode"]),
             str(row["strategy_id"]),
             str(row.get("strategy_version") or "unknown"),
-            str(
-                row.get("execution_policy_version")
-                or "legacy_unspecified"
-            ),
+            str(row.get("execution_policy_version") or "legacy_unspecified"),
             str(row.get("strategy_semantics_fingerprint") or "unknown"),
         )
         rebuilt_keys.add(key)
@@ -566,10 +564,7 @@ def _compare_calendar(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
             str(stored_candidate.get("mode") or ""),
             str(stored_candidate.get("strategy_id") or ""),
             str(stored_candidate.get("strategy_version") or "unknown"),
-            str(
-                stored_candidate.get("execution_policy_version")
-                or "legacy_unspecified"
-            ),
+            str(stored_candidate.get("execution_policy_version") or "legacy_unspecified"),
             str(stored_candidate.get("strategy_semantics_fingerprint") or "unknown"),
         )
         if key not in rebuilt_keys:
@@ -595,10 +590,7 @@ def _compare_accounts(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
             (
                 str(row.get("strategy_id") or ""),
                 str(row.get("strategy_version") or "unknown"),
-                str(
-                    row.get("execution_policy_version")
-                    or "legacy_unspecified"
-                ),
+                str(row.get("execution_policy_version") or "legacy_unspecified"),
                 str(row.get("strategy_semantics_fingerprint") or "unknown"),
             ): row
             for row in stored.get("accounts", [])
@@ -610,10 +602,7 @@ def _compare_accounts(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
             key = (
                 str(row["strategy_id"]),
                 str(row.get("strategy_version") or "unknown"),
-                str(
-                    row.get("execution_policy_version")
-                    or "legacy_unspecified"
-                ),
+                str(row.get("execution_policy_version") or "legacy_unspecified"),
                 str(row.get("strategy_semantics_fingerprint") or "unknown"),
             )
             rebuilt_keys.add(key)
@@ -627,16 +616,8 @@ def _compare_accounts(paths: PaperOpsPaths, rebuilt_rows: list[dict[str, object]
                 "realized_pnl",
                 "unrealized_pnl",
             ):
-                if (
-                    abs(
-                        _to_float(stored_row.get(field))
-                        - _to_float(row.get(field))
-                    )
-                    > 0.01
-                ):
-                    mismatches.append(
-                        f"account {field} mismatch {mode.value} {key}"
-                    )
+                if abs(_to_float(stored_row.get(field)) - _to_float(row.get(field))) > 0.01:
+                    mismatches.append(f"account {field} mismatch {mode.value} {key}")
         for key in stored_accounts:
             if key not in rebuilt_keys:
                 mismatches.append(f"stored {mode.value} account has no ledger series {key}")
@@ -755,13 +736,8 @@ def _strategy_series_for_mode(
     for row in registry:
         strategy_id = str(row.get("strategy_id") or "")
         strategy_version = str(row.get("strategy_version") or "unknown")
-        execution_policy_version = str(
-            row.get("execution_policy_version")
-            or "legacy_unspecified"
-        )
-        strategy_semantics_fingerprint = str(
-            row.get("strategy_semantics_fingerprint") or "unknown"
-        )
+        execution_policy_version = str(row.get("execution_policy_version") or "legacy_unspecified")
+        strategy_semantics_fingerprint = str(row.get("strategy_semantics_fingerprint") or "unknown")
         if strategy_id:
             by_key[
                 (

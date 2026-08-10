@@ -9,8 +9,8 @@ from pathlib import Path
 
 from intraday_scanner.v2.paper_ops.engine import (
     PaperOpsPaths,
-    _recover_pending_transaction,
 )
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import read_json, read_jsonl, write_csv, write_json
 
@@ -42,8 +42,17 @@ def score_strategy_evidence(
     output_root: Path = Path("data/v2_paper_ops"),
     alpha_root: Path | None = None,
 ) -> StrategyEvidenceResult:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
+    require_observer_tree(
+        output_root,
+        required_files=(
+            "calendar/strategy_daily_returns.csv",
+            "state/paper_ops_config.json",
+            "state/strategy_registry.json",
+            "state/execution_policy_manifest.json",
+        ),
+        nonempty_files=("ledger/paper_ledger.jsonl",),
+    )
+    paths = PaperOpsPaths.resolve(output_root)
     try:
         source_truth = verify_source_bar_truth(
             output_root=output_root,
@@ -61,9 +70,7 @@ def score_strategy_evidence(
         result = StrategyEvidenceResult(
             status="blocked",
             scores=(),
-            warnings=tuple(
-                f"source-bar truth: {warning}" for warning in source_truth.warnings
-            ),
+            warnings=tuple(f"source-bar truth: {warning}" for warning in source_truth.warnings),
         )
         _write_reports(paths, result)
         return result
@@ -101,8 +108,7 @@ def score_strategy_evidence(
             for row in calendar_rows
             if row.get("strategy_id") == strategy_id
             and str(row.get("strategy_version") or "") == strategy_version
-            and str(row.get("execution_policy_version") or "")
-            == execution_policy_version
+            and str(row.get("execution_policy_version") or "") == execution_policy_version
             and str(row.get("strategy_semantics_fingerprint") or "unknown")
             == strategy_semantics_fingerprint
         ]
@@ -156,9 +162,7 @@ def score_strategy_evidence(
                 promoted_status = "watch"
         if not current_series:
             promoted_status = "archived_reporting_only"
-            blockers = tuple(
-                [*blockers, "archived version/policy series cannot be promoted"]
-            )
+            blockers = tuple([*blockers, "archived version/policy series cannot be promoted"])
         scores.append(
             {
                 "strategy_id": strategy_id,
@@ -173,9 +177,7 @@ def score_strategy_evidence(
                 "replay_evidence_score": min(20, replay_days * 5 + len(replay_closes)),
                 "forward_evidence_score": min(25, forward_days + len(forward_closes)),
                 "data_quality_score": (
-                    20
-                    if data_status in {"reconciled", "reconciled_with_minor_diffs"}
-                    else 10
+                    20 if data_status in {"reconciled", "reconciled_with_minor_diffs"} else 10
                 ),
                 "trade_sample_score": min(10, len(all_closes)),
                 "expectancy": expectancy,
@@ -200,9 +202,7 @@ def score_strategy_evidence(
                 "intraday_supported_forward_fill_count": _int(
                     commit_row.get("intraday_supported_forward_fill_count")
                 ),
-                "validation_blocked_reason": str(
-                    commit_row.get("validation_blocked_reason", "")
-                ),
+                "validation_blocked_reason": str(commit_row.get("validation_blocked_reason", "")),
                 "blockers": " | ".join(blockers),
             }
         )
@@ -227,10 +227,7 @@ def _evidence_series(
         key = (
             str(registry_row.get("strategy_id") or ""),
             str(registry_row.get("strategy_version") or "unknown"),
-            str(
-                registry_row.get("execution_policy_version")
-                or "legacy_unspecified"
-            ),
+            str(registry_row.get("execution_policy_version") or "legacy_unspecified"),
             str(registry_row.get("strategy_semantics_fingerprint") or "unknown"),
         )
         if not key[0]:
@@ -240,10 +237,7 @@ def _evidence_series(
         key = (
             str(calendar_row.get("strategy_id") or ""),
             str(calendar_row.get("strategy_version") or "unknown"),
-            str(
-                calendar_row.get("execution_policy_version")
-                or "legacy_unspecified"
-            ),
+            str(calendar_row.get("execution_policy_version") or "legacy_unspecified"),
             str(calendar_row.get("strategy_semantics_fingerprint") or "unknown"),
         )
         if key[0] and key not in by_key:
@@ -293,8 +287,7 @@ def _event_matches_series(
     return (
         str(event.get("strategy_id") or payload.get("strategy_id") or "") == strategy_id
         and str(payload.get("strategy_version") or "") == strategy_version
-        and str(payload.get("execution_policy_version") or "")
-        == execution_policy_version
+        and str(payload.get("execution_policy_version") or "") == execution_policy_version
         and str(payload.get("strategy_semantics_fingerprint") or "unknown")
         == strategy_semantics_fingerprint
     )
@@ -308,10 +301,8 @@ def _exact_overlay(
 ) -> dict[str, object]:
     if (
         str(row.get("strategy_version") or "") != strategy_version
-        or str(row.get("execution_policy_version") or "")
-        != execution_policy_version
-        or str(row.get("strategy_semantics_fingerprint") or "")
-        != strategy_semantics_fingerprint
+        or str(row.get("execution_policy_version") or "") != execution_policy_version
+        or str(row.get("strategy_semantics_fingerprint") or "") != strategy_semantics_fingerprint
     ):
         return {}
     return row
@@ -324,8 +315,7 @@ def _versioned_robustness(
 ) -> dict[str, object]:
     if (
         str(row.get("strategy_version") or "") != strategy_version
-        or str(row.get("strategy_semantics_fingerprint") or "")
-        != strategy_semantics_fingerprint
+        or str(row.get("strategy_semantics_fingerprint") or "") != strategy_semantics_fingerprint
     ):
         return {}
     return row
@@ -369,9 +359,7 @@ def _forward_data_status(
         payload = read_json(paths.exports / f"preflight_forward_{run_date}.json", {})
         if not isinstance(payload, dict) or not payload:
             return "unknown_missing_forward_preflight"
-        snapshot_ids = {
-            str(row.get("data_snapshot_id") or "") for row in rows
-        }
+        snapshot_ids = {str(row.get("data_snapshot_id") or "") for row in rows}
         if snapshot_ids != {str(payload.get("data_snapshot_id") or "")}:
             return "unknown_forward_snapshot_mismatch"
         status = str(payload.get("reconciliation_status") or "unknown_unverified")
@@ -465,18 +453,8 @@ def _score(
     score += min(25, forward_days)
     score += min(20, forward_closed)
     score += 15 if expectancy is not None and expectancy > 0 else 0
-    score += (
-        10
-        if profit_factor is not None
-        and profit_factor >= MIN_PROFIT_FACTOR
-        else 0
-    )
-    score += (
-        10
-        if max_drawdown is not None
-        and max_drawdown >= MAX_DRAWDOWN_LIMIT
-        else 0
-    )
+    score += 10 if profit_factor is not None and profit_factor >= MIN_PROFIT_FACTOR else 0
+    score += 10 if max_drawdown is not None and max_drawdown >= MAX_DRAWDOWN_LIMIT else 0
     if robustness_status == "fragile":
         score = max(0, score - 20)
     elif robustness_status == "insufficient_oos_trades":
@@ -544,16 +522,10 @@ def _profit_factor(closes: list[dict[str, object]]) -> float | None:
     if not closes:
         return None
     wins = sum(
-        _to_float(item.get("net_pnl"))
-        for item in closes
-        if _to_float(item.get("net_pnl")) > 0
+        _to_float(item.get("net_pnl")) for item in closes if _to_float(item.get("net_pnl")) > 0
     )
     losses = abs(
-        sum(
-            _to_float(item.get("net_pnl"))
-            for item in closes
-            if _to_float(item.get("net_pnl")) < 0
-        )
+        sum(_to_float(item.get("net_pnl")) for item in closes if _to_float(item.get("net_pnl")) < 0)
     )
     if losses == 0:
         return 1_000_000.0 if wins else None
@@ -670,8 +642,7 @@ def _update_governance_overlay(
             "allow_entries": False,
             "execution_policy_version": key[2],
             "strategy_semantics_fingerprint": key[3],
-            "paused_at": prior.get("paused_at")
-            or datetime.now(timezone.utc).isoformat(),
+            "paused_at": prior.get("paused_at") or datetime.now(timezone.utc).isoformat(),
             "reason": str(score.get("blockers") or "negative after-cost evidence"),
             "source": "strategy_evidence",
             "strategy_id": key[0],

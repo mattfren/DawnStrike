@@ -103,11 +103,69 @@ def main(argv: list[str] | None = None) -> int:
         "verify-blotter",
         "verify-source-bars",
     }
+    required_inputs = {
+        "calendar": (("calendar/strategy_daily_returns.csv",), ()),
+        "report": (("calendar/strategy_daily_returns.csv",), ()),
+        "calendar-view": (("calendar/strategy_daily_returns.csv",), ()),
+        "reconcile": ((), ("ledger/paper_ledger.jsonl",)),
+        "rebuild-ledger": (
+            ("state/paper_ops_config.json", "state/strategy_registry.json"),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "verify-calendar": (
+            (
+                "calendar/strategy_daily_returns.csv",
+                "state/paper_ops_config.json",
+                "state/strategy_registry.json",
+            ),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "verify-source-bars": (
+            ("state/execution_policy_manifest.json",),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "blotter": (
+            (
+                "state/paper_ops_config.json",
+                "state/strategy_registry.json",
+                "state/execution_policy_manifest.json",
+            ),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "verify-blotter": (
+            (
+                "exports/paper_trade_blotter.json",
+                "state/paper_ops_config.json",
+                "state/strategy_registry.json",
+                "state/execution_policy_manifest.json",
+            ),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "evidence": (
+            (
+                "calendar/strategy_daily_returns.csv",
+                "state/paper_ops_config.json",
+                "state/strategy_registry.json",
+                "state/execution_policy_manifest.json",
+            ),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+        "readiness": (
+            (
+                "calendar/strategy_daily_returns.csv",
+                "state/paper_ops_config.json",
+                "state/strategy_registry.json",
+                "state/execution_policy_manifest.json",
+            ),
+            ("ledger/paper_ledger.jsonl",),
+        ),
+    }
     if args.command in observer_commands or (
         args.command == "rebuild-ledger" and not args.write_rebuilt
     ):
         try:
-            require_observer_tree(output_root)
+            files, nonempty = required_inputs.get(args.command, ((), ()))
+            require_observer_tree(output_root, required_files=files, nonempty_files=nonempty)
         except PaperOpsObserverBlocked as exc:
             print(f"status: {exc.status}")
             print(f"detail: {exc.detail}")

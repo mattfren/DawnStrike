@@ -108,9 +108,7 @@ def verify_trade_blotter(
         source_result = verify_source_bar_truth(output_root=output_root, mode=mode)
         source_truth = source_result.to_dict()
         if source_result.status != "passed":
-            mismatches.extend(
-                f"source-bar truth: {warning}" for warning in source_result.warnings
-            )
+            mismatches.extend(f"source-bar truth: {warning}" for warning in source_result.warnings)
     except (OSError, TypeError, ValueError) as exc:
         source_truth = {"status": "failed", "warnings": [str(exc)]}
         mismatches.append(f"source-bar truth verification failed: {exc}")
@@ -134,12 +132,18 @@ def verify_trade_blotter(
 
 
 def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:
-    from intraday_scanner.v2.paper_ops.engine import (
-        PaperOpsPaths,
-        _recover_pending_transaction,
-    )
 
-    _recover_pending_transaction(PaperOpsPaths.create(output_root))
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
+
+    require_observer_tree(
+        output_root,
+        required_files=(
+            "state/paper_ops_config.json",
+            "state/strategy_registry.json",
+            "state/execution_policy_manifest.json",
+        ),
+        nonempty_files=("ledger/paper_ledger.jsonl",),
+    )
     events = read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
     ordered = list(events)
     snapshot_by_run = _snapshot_ids_by_run(output_root)
@@ -284,13 +288,7 @@ def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[
             warnings=warnings,
         )
         status = (
-            "blocked"
-            if block
-            else "closed"
-            if close
-            else "open"
-            if fill or position
-            else "pending"
+            "blocked" if block else "closed" if close else "open" if fill or position else "pending"
         )
         rows.append(
             _lifecycle_row(
@@ -310,9 +308,7 @@ def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[
             continue
         decision = decisions[decision_id]
         status = str(
-            decision.get("decision_status")
-            or decision.get("decision")
-            or "signal_recorded"
+            decision.get("decision_status") or decision.get("decision") or "signal_recorded"
         )
         rows.append(
             _decision_only_row(
@@ -490,9 +486,7 @@ def _validate_linked_lifecycle(
             ),
         ):
             if not _numbers_match(left_value, right_value):
-                warnings.append(
-                    f"order {order_id} {left_label}/{right_label} economic mismatch"
-                )
+                warnings.append(f"order {order_id} {left_label}/{right_label} economic mismatch")
     if close and fill and position:
         _validate_close_economics(
             order_id,
@@ -564,9 +558,7 @@ def _validate_close_economics(
     slip_rate = slippage_bps / 10_000.0
     stop_fill = stop * (1.0 - slip_rate) if direction == "long" else stop * (1.0 + slip_rate)
     stop_gross = (
-        (stop_fill - entry) * quantity
-        if direction == "long"
-        else (entry - stop_fill) * quantity
+        (stop_fill - entry) * quantity if direction == "long" else (entry - stop_fill) * quantity
     )
     stop_exit_fee = stop_fill * quantity * fee_bps / 10_000.0
     risk_amount = max(0.0, -stop_gross) + entry_fee + stop_exit_fee
@@ -653,9 +645,7 @@ def _lifecycle_row(
     quantity = _number(fill.get("quantity"))
     fill_price = _number(fill.get("fill_price"))
     entry_notional = (
-        quantity * fill_price
-        if quantity is not None and fill_price is not None
-        else None
+        quantity * fill_price if quantity is not None and fill_price is not None else None
     )
     entry_fee = _number(fill.get("fee"))
     exit_fee = _number(close.get("fee"))
@@ -686,29 +676,17 @@ def _lifecycle_row(
         "fill_run_id": fill_run_id,
         "close_run_id": close_run_id,
         "data_snapshot_id": snapshot_by_run.get(run_id, "unknown"),
-        "fill_data_snapshot_id": (
-            snapshot_by_run.get(fill_run_id, "unknown") if fill else None
-        ),
-        "close_data_snapshot_id": (
-            snapshot_by_run.get(close_run_id, "unknown") if close else None
-        ),
+        "fill_data_snapshot_id": (snapshot_by_run.get(fill_run_id, "unknown") if fill else None),
+        "close_data_snapshot_id": (snapshot_by_run.get(close_run_id, "unknown") if close else None),
         "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "strategy_status": str(
             decision.get("strategy_status") or live_row.get("strategy_status") or "unknown"
         ),
-        "strategy_semantics_fingerprint": str(
-            observed_fingerprint
-        ),
+        "strategy_semantics_fingerprint": str(observed_fingerprint),
         "execution_policy_version": policy,
         "challenger_id": challenger_id,
-        "series_role": (
-            "challenger"
-            if challenger_id
-            else "champion"
-            if live_row
-            else "archived"
-        ),
+        "series_role": ("challenger" if challenger_id else "champion" if live_row else "archived"),
         "symbol": str(order.get("symbol") or ""),
         "direction": str(order.get("direction") or ""),
         "lifecycle_status": status,
@@ -747,9 +725,7 @@ def _lifecycle_row(
         "r_multiple": _number(close.get("r_multiple")),
         "trade_return_pct": (
             net_pnl / entry_notional
-            if net_pnl is not None
-            and entry_notional is not None
-            and entry_notional != 0.0
+            if net_pnl is not None and entry_notional is not None and entry_notional != 0.0
             else None
         ),
     }
@@ -768,9 +744,7 @@ def _decision_only_row(
     strategy_id = str(decision.get("strategy_id") or "")
     strategy_version = str(decision.get("strategy_version") or "unknown")
     policy = str(decision.get("execution_policy_version") or "legacy_unspecified")
-    observed_fingerprint = str(
-        decision.get("strategy_semantics_fingerprint") or "unknown"
-    )
+    observed_fingerprint = str(decision.get("strategy_semantics_fingerprint") or "unknown")
     live_row = live_keys.get(
         (strategy_id, strategy_version, policy, observed_fingerprint),
         {},
@@ -790,21 +764,13 @@ def _decision_only_row(
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
             "strategy_status": str(
-                decision.get("strategy_status")
-                or live_row.get("strategy_status")
-                or "unknown"
+                decision.get("strategy_status") or live_row.get("strategy_status") or "unknown"
             ),
-            "strategy_semantics_fingerprint": str(
-                observed_fingerprint
-            ),
+            "strategy_semantics_fingerprint": str(observed_fingerprint),
             "execution_policy_version": policy,
             "challenger_id": challenger_id,
             "series_role": (
-                "challenger"
-                if challenger_id
-                else "champion"
-                if live_row
-                else "archived"
+                "challenger" if challenger_id else "champion" if live_row else "archived"
             ),
             "symbol": str(decision.get("symbol") or ""),
             "direction": str(decision.get("direction") or ""),
@@ -867,9 +833,7 @@ def _payload(
             )
             == key
         ]
-        series_closed = [
-            row for row in series_rows if row.get("lifecycle_status") == "closed"
-        ]
+        series_closed = [row for row in series_rows if row.get("lifecycle_status") == "closed"]
         series_allocated = _sum_product(
             series_closed,
             "fill_price",
@@ -879,9 +843,7 @@ def _payload(
         series_summaries.append(
             {
                 "allocated_notional_return_pct": (
-                    series_net / series_allocated
-                    if series_closed and series_allocated
-                    else None
+                    series_net / series_allocated if series_closed and series_allocated else None
                 ),
                 "challenger_id": key[4],
                 "closed_trades": len(series_closed),
@@ -909,9 +871,7 @@ def _payload(
         "schema_version": "v2.paper_trade_blotter.v2",
         "series_summaries": series_summaries,
         "official_champion_allocated_notional_return_pct": (
-            champion_net / champion_allocated
-            if champion_closed and champion_allocated
-            else None
+            champion_net / champion_allocated if champion_closed and champion_allocated else None
         ),
         "official_champion_total_net_pnl": champion_net if champion_closed else None,
         "status": "passed" if not warnings else "failed",

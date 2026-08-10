@@ -18,9 +18,9 @@ from intraday_scanner.market_calendar import (
 )
 from intraday_scanner.v2.paper_ops.engine import (
     PaperOpsPaths,
-    _recover_pending_transaction,
 )
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
 from intraday_scanner.v2.paper_ops.session_gaps import load_forward_session_gaps
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 
@@ -85,20 +85,23 @@ class CalendarTruthResult:
 
 
 def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> CalendarTruthResult:
-    paths = PaperOpsPaths.create(output_root)
-    _recover_pending_transaction(paths)
-    rows = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
-    events, ledger_integrity = _read_strict_ledger(
-        paths.ledger / "paper_ledger.jsonl"
+    require_observer_tree(
+        output_root,
+        required_files=(
+            "calendar/strategy_daily_returns.csv",
+            "state/paper_ops_config.json",
+            "state/strategy_registry.json",
+        ),
+        nonempty_files=("ledger/paper_ledger.jsonl",),
     )
+    paths = PaperOpsPaths.resolve(output_root)
+    rows = _read_calendar(paths.calendar / "strategy_daily_returns.csv")
+    events, ledger_integrity = _read_strict_ledger(paths.ledger / "paper_ledger.jsonl")
     session_gaps, session_gap_errors = load_forward_session_gaps(paths)
     terminal_missing_sessions = tuple(
         f"{row['market_date']}:{row['reason_code']}" for row in session_gaps
     )
-    acknowledged_dates = {
-        str(row["market_date"])
-        for row in session_gaps
-    }
+    acknowledged_dates = {str(row["market_date"]) for row in session_gaps}
     duplicate_rows = _duplicates(rows)
     missing_rows = [
         *(("calendar has no rows",) if not rows else ()),
@@ -127,9 +130,7 @@ def verify_calendar_truth(*, output_root: Path = Path("data/v2_paper_ops")) -> C
             for row in session_gaps
         ),
     ]
-    has_failures = bool(
-        duplicate_rows or missing_rows or math_mismatches or ledger_mismatches
-    )
+    has_failures = bool(duplicate_rows or missing_rows or math_mismatches or ledger_mismatches)
     status = (
         "failed"
         if has_failures
@@ -186,9 +187,7 @@ def _read_strict_ledger(path: Path) -> tuple[list[dict[str, object]], list[str]]
             else:
                 event_ids[event_id] += 1
             if row.get("schema_version") != "v2.paper_ledger_event.v1":
-                mismatches.append(
-                    f"ledger line {line_number} has unsupported event schema"
-                )
+                mismatches.append(f"ledger line {line_number} has unsupported event schema")
             for field in ("event_type", "mode", "run_id", "strategy_id", "trade_date"):
                 if not str(row.get(field) or "").strip():
                     mismatches.append(f"ledger line {line_number} has no {field}")
@@ -233,22 +232,16 @@ def _validate_run_lineage(
     has_lifecycle_lineage = "lifecycle_run_id" in payload or "origin_run_id" in payload
     if not has_lifecycle_lineage:
         if payload_run_id and envelope_run_id != payload_run_id:
-            mismatches.append(
-                f"ledger line {line_number} envelope/payload run_id mismatch"
-            )
+            mismatches.append(f"ledger line {line_number} envelope/payload run_id mismatch")
         return
     if not lifecycle_run_id:
         mismatches.append(f"ledger line {line_number} has no payload lifecycle_run_id")
     elif envelope_run_id != lifecycle_run_id:
-        mismatches.append(
-            f"ledger line {line_number} envelope/payload lifecycle_run_id mismatch"
-        )
+        mismatches.append(f"ledger line {line_number} envelope/payload lifecycle_run_id mismatch")
     if not origin_run_id:
         mismatches.append(f"ledger line {line_number} has no payload origin_run_id")
     elif payload_run_id and origin_run_id != payload_run_id:
-        mismatches.append(
-            f"ledger line {line_number} payload origin/run_id mismatch"
-        )
+        mismatches.append(f"ledger line {line_number} payload origin/run_id mismatch")
 
 
 def _duplicates(rows: list[dict[str, str]]) -> list[str]:
@@ -381,11 +374,7 @@ def _registry_coverage_inceptions(
         paths.state / "execution_policy_manifest.json",
         {},
     )
-    semantics = (
-        semantics_payload.get("strategies")
-        if isinstance(semantics_payload, dict)
-        else None
-    )
+    semantics = semantics_payload.get("strategies") if isinstance(semantics_payload, dict) else None
     policies = policy_payload.get("policies") if isinstance(policy_payload, dict) else None
     if not isinstance(semantics, dict):
         return {}, ["strategy semantics manifest is unavailable for coverage inception"]
@@ -407,9 +396,7 @@ def _registry_coverage_inceptions(
             continue
         identity = (strategy_id, strategy_version, policy_version, fingerprint)
         if identity in inceptions:
-            errors.append(
-                "strategy registry duplicates exact identity " + ":".join(identity)
-            )
+            errors.append("strategy registry duplicates exact identity " + ":".join(identity))
             continue
         semantics_key = f"{strategy_id}@{strategy_version}"
         semantics_entry = semantics.get(semantics_key)
@@ -490,9 +477,9 @@ def _completed_report_coverage(
                 continue
             stats = payload.get("stats")
             phases = payload.get("phases")
-            close_complete = (
-                isinstance(stats, dict) and stats.get("phase") == "close"
-            ) or (isinstance(phases, dict) and "close" in phases)
+            close_complete = (isinstance(stats, dict) and stats.get("phase") == "close") or (
+                isinstance(phases, dict) and "close" in phases
+            )
             if not close_complete:
                 continue
             row_date = str(payload.get("date") or "")
@@ -555,10 +542,7 @@ def _completed_report_coverage(
             (
                 str(event.get("strategy_id") or payload.get("strategy_id") or ""),
                 str(payload.get("strategy_version") or "unknown"),
-                str(
-                    payload.get("execution_policy_version")
-                    or "legacy_unspecified"
-                ),
+                str(payload.get("execution_policy_version") or "legacy_unspecified"),
                 str(payload.get("strategy_semantics_fingerprint") or "unknown"),
             )
             for event in exact_events
@@ -570,24 +554,17 @@ def _completed_report_coverage(
             (
                 str(row.get("strategy_id") or ""),
                 str(row.get("strategy_version") or "unknown"),
-                str(
-                    row.get("execution_policy_version")
-                    or "legacy_unspecified"
-                ),
+                str(row.get("execution_policy_version") or "legacy_unspecified"),
                 str(row.get("strategy_semantics_fingerprint") or "unknown"),
             )
             for row in exact_rows
             if row.get("strategy_id")
         }
         for series in sorted(expected_series - event_series):
-            gaps.append(
-                "completed report has no exact ledger strategy "
-                f"{label}:{':'.join(series)}"
-            )
+            gaps.append(f"completed report has no exact ledger strategy {label}:{':'.join(series)}")
         for series in sorted(expected_series - row_series):
             gaps.append(
-                "completed report has no exact calendar strategy "
-                f"{label}:{':'.join(series)}"
+                f"completed report has no exact calendar strategy {label}:{':'.join(series)}"
             )
     return gaps
 
@@ -629,9 +606,7 @@ def _report_strategy_series(
             or str(raw.get("mode") or "") != mode
             or str(raw.get("run_id") or "") != run_id
         ):
-            gaps.append(
-                f"completed report strategy decision envelope mismatch {label}:{index}"
-            )
+            gaps.append(f"completed report strategy decision envelope mismatch {label}:{index}")
             continue
         if not all(identity):
             gaps.append(
@@ -670,8 +645,7 @@ def _math_mismatches(rows: list[dict[str, str]]) -> list[str]:
             else:
                 numeric[field] = value
         mismatches.extend(
-            f"{key}: {field} is missing, invalid, or non-finite"
-            for field in invalid_fields
+            f"{key}: {field} is missing, invalid, or non-finite" for field in invalid_fields
         )
         if invalid_fields:
             continue
@@ -695,9 +669,7 @@ def _math_mismatches(rows: list[dict[str, str]]) -> list[str]:
             value = numeric[field]
             if value < 0 or not value.is_integer():
                 mismatches.append(f"{key}: {field} must be a non-negative integer")
-        if numeric["wins"] + numeric["losses"] + numeric["flats"] != numeric[
-            "trades_closed"
-        ]:
+        if numeric["wins"] + numeric["losses"] + numeric["flats"] != numeric["trades_closed"]:
             mismatches.append(f"{key}: close outcome counts do not equal trades closed")
         for field in ("fees_paid", "slippage_estimate", "exposure_pct"):
             if numeric[field] < 0:
@@ -711,8 +683,10 @@ def _math_mismatches(rows: list[dict[str, str]]) -> list[str]:
             mismatches.append(f"{key}: daily return mismatch")
         if starting and abs(((ending - starting) / starting) - cumulative) > 0.0001:
             mismatches.append(f"{key}: cumulative return mismatch")
-        if int(numeric["pending_orders"]) and abs(realized) > 0.0001 and not int(
-            numeric["trades_closed"]
+        if (
+            int(numeric["pending_orders"])
+            and abs(realized) > 0.0001
+            and not int(numeric["trades_closed"])
         ):
             mismatches.append(f"{key}: pending order appears to affect realized pnl")
         previous_equity[account_key] = ending

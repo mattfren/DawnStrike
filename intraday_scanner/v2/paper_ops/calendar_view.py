@@ -7,11 +7,13 @@ import html
 from pathlib import Path
 
 from intraday_scanner.v2.paper_ops.engine import PaperOpsPaths
+from intraday_scanner.v2.paper_ops.observer_safety import require_observer_tree
 from intraday_scanner.v2.paper_ops.session_gaps import load_forward_session_gaps
 
 
 def write_calendar_view(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
-    paths = PaperOpsPaths.create(output_root)
+    require_observer_tree(output_root, required_files=("calendar/strategy_daily_returns.csv",))
+    paths = PaperOpsPaths.resolve(output_root)
     rows = _read_rows(paths.calendar / "strategy_daily_returns.csv")
     gaps, gap_errors = load_forward_session_gaps(paths)
     html_path = paths.calendar / "calendar_view.html"
@@ -21,13 +23,7 @@ def write_calendar_view(*, output_root: Path = Path("data/v2_paper_ops")) -> dic
         "rows": len(rows),
         "terminal_missing_sessions": len(gaps),
         "gap_errors": gap_errors,
-        "status": (
-            "failed"
-            if gap_errors
-            else "passed_with_warnings"
-            if gaps
-            else "passed"
-        ),
+        "status": ("failed" if gap_errors else "passed_with_warnings" if gaps else "passed"),
     }
 
 
@@ -62,18 +58,16 @@ def _html(
         cells = "".join(f"<td>{html.escape(str(row.get(header, '')))}</td>" for header in headers)
         body.append(f'<tr class="{css_class}">{cells}</tr>')
     gap_rows = "".join(
-        "<tr class=\"missing\">"
+        '<tr class="missing">'
         f"<td>{html.escape(str(row.get('market_date', '')))}</td>"
         f"<td>{html.escape(str(row.get('reason_code', '')))}</td>"
         "<td>Missing - not zero</td></tr>"
         for row in gaps
     )
-    gap_error_rows = "".join(
-        f"<li>{html.escape(error)}</li>" for error in gap_errors
-    )
+    gap_error_rows = "".join(f"<li>{html.escape(error)}</li>" for error in gap_errors)
     return (
         "<!doctype html>\n"
-        "<html><head><meta charset=\"utf-8\"><title>PaperOps Calendar</title>"
+        '<html><head><meta charset="utf-8"><title>PaperOps Calendar</title>'
         "<style>"
         "body{font-family:Arial,sans-serif;margin:24px;color:#18202a}"
         "table{border-collapse:collapse;width:100%;font-size:13px}"
