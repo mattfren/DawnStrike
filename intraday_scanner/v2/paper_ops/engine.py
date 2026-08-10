@@ -329,24 +329,23 @@ def scan(
             f"expected {expected_decisions}, observed {observed_decisions}"
         )
     picks_path = paths.exports / f"picks_{mode.value}_{run_date.isoformat()}.json"
-    write_json(picks_path, [pick.to_dict() for pick in picks])
-    write_json(
-        paths.exports / f"strategy_decisions_{mode.value}_{run_date.isoformat()}.json",
-        [
-            *(
-                {
-                    **pick.to_dict(),
-                    "decision_status": pick.decision.value,
-                    "trade_return_eligible": pick.decision is PaperPickDecision.ACCEPTED,
-                    "trade_return_pct": None,
-                }
-                for pick in picks
-            ),
-            *no_setup_decisions,
-        ],
+    decisions_path = (
+        paths.exports / f"strategy_decisions_{mode.value}_{run_date.isoformat()}.json"
     )
-    _append_events(
-        paths,
+    pick_rows = [pick.to_dict() for pick in picks]
+    decision_rows = [
+        *(
+            {
+                **pick.to_dict(),
+                "decision_status": pick.decision.value,
+                "trade_return_eligible": pick.decision is PaperPickDecision.ACCEPTED,
+                "trade_return_pct": None,
+            }
+            for pick in picks
+        ),
+        *no_setup_decisions,
+    ]
+    scan_events = (
         [
             _event(
                 run,
@@ -370,8 +369,17 @@ def scan(
                 row,
             )
             for row in no_setup_decisions
-        ],
+        ]
     )
+    scan_event_rows = _serialize_transaction_events(scan_events)
+    _validate_run_and_origin_evidence(paths, scan_event_rows, {})
+    _validate_scan_artifact_evidence(scan_event_rows, pick_rows, decision_rows)
+    _preflight_event_append(paths, scan_event_rows)
+    _preflight_immutable_json(picks_path, pick_rows, "PaperOps pick artifact")
+    _preflight_immutable_json(decisions_path, decision_rows, "PaperOps decision artifact")
+    write_json(picks_path, pick_rows)
+    write_json(decisions_path, decision_rows)
+    _append_events(paths, scan_events)
     accepted = [pick for pick in picks if pick.decision is PaperPickDecision.ACCEPTED]
     _write_daily_report(
         paths,
@@ -490,19 +498,39 @@ def enter(
         orders.append(order)
         existing_ids.add(order.order_id)
     pending.extend(order.to_dict() for order in orders)
-    write_json(
-        paths.exports / f"order_decisions_{mode.value}_{run_date.isoformat()}.json",
-        [
-            *(
-                {
-                    "decision": "created",
-                    "reason": "risk_checks_passed",
-                    **order.to_dict(),
-                }
-                for order in orders
-            ),
-            *blocked,
-        ],
+    order_decisions_path = (
+        paths.exports / f"order_decisions_{mode.value}_{run_date.isoformat()}.json"
+    )
+    proposed_order_decisions = [
+        *(
+            {
+                "decision": "created",
+                "reason": "risk_checks_passed",
+                **order.to_dict(),
+            }
+            for order in orders
+        ),
+        *blocked,
+    ]
+    existing_order_decisions = (
+        read_json(order_decisions_path, None) if order_decisions_path.is_file() else None
+    )
+    if existing_order_decisions is not None and not isinstance(existing_order_decisions, list):
+        raise ValueError("PaperOps immutable order-decision artifact is malformed")
+    persisted_order_decisions = _enter_order_decisions_from_events(
+        _exact_run_events(paths, run)
+    )
+    canonical_order_decisions = (
+        proposed_order_decisions if proposed_order_decisions else persisted_order_decisions
+    )
+    if isinstance(existing_order_decisions, list) and (
+        existing_order_decisions != canonical_order_decisions
+    ):
+        raise ValueError("PaperOps immutable order-decision artifact conflicts")
+    _preflight_immutable_json(
+        order_decisions_path,
+        canonical_order_decisions,
+        "PaperOps order-decision artifact",
     )
     transaction_events = [
         _event(
@@ -532,13 +560,24 @@ def enter(
         events=transaction_events,
         state_updates={pending_path: pending},
     )
+    if existing_order_decisions is None:
+        write_json(order_decisions_path, canonical_order_decisions)
+    run_events = _exact_run_events(paths, run)
+    orders_created = sum(
+        row.get("event_type") == "paper_order_created" for row in run_events
+    )
+    orders_blocked = sum(
+        row.get("event_type") == "paper_order_blocked"
+        and ":enter:paper_order_blocked:" in str(row.get("event_id") or "")
+        for row in run_events
+    )
     _write_daily_report(
         paths,
         run,
         manifest,
         {
-            "orders_blocked": len(blocked),
-            "orders_created": len(orders),
+            "orders_blocked": orders_blocked,
+            "orders_created": orders_created,
             "pending_orders": len(pending),
             "phase": "enter",
         },
@@ -754,16 +793,28 @@ def check(
             _paper_accounts_path(paths, mode): _account_state_payload(paths, mode, accounts),
         },
     )
+    run_events = _exact_run_events(paths, run)
+    fill_count = sum(row.get("event_type") == "paper_fill" for row in run_events)
+    close_count = sum(
+        row.get("event_type") == "paper_position_closed"
+        and ":check:paper_position_closed:" in str(row.get("event_id") or "")
+        for row in run_events
+    )
+    blocked_count = sum(
+        row.get("event_type") == "paper_order_blocked"
+        and ":check:paper_order_blocked:" in str(row.get("event_id") or "")
+        for row in run_events
+    )
     _write_calendar_for_date(paths, run, manifest, warnings, dataset=dataset)
     _write_daily_report(
         paths,
         run,
         manifest,
         {
-            "fills": len(fills),
-            "closes": len(closes),
+            "fills": fill_count,
+            "closes": close_count,
             "open_positions": len(updated_positions),
-            "orders_blocked": len(blocked_orders),
+            "orders_blocked": blocked_count,
             "phase": "check",
         },
         warnings,
@@ -876,12 +927,21 @@ def close(
             _paper_accounts_path(paths, mode): _account_state_payload(paths, mode, accounts),
         },
     )
+    run_events = _exact_run_events(paths, run)
+    close_count = sum(
+        row.get("event_type") == "paper_position_closed"
+        and ":close:paper_position_closed:" in str(row.get("event_id") or "")
+        for row in run_events
+    )
+    marked_count = sum(
+        row.get("event_type") == "paper_position_marked_to_market" for row in run_events
+    )
     _write_calendar_for_date(paths, run, manifest, warnings, dataset=dataset)
     _write_daily_report(
         paths,
         run,
         manifest,
-        {"closes": len(closes), "marked_positions": len(marks), "phase": "close"},
+        {"closes": close_count, "marked_positions": marked_count, "phase": "close"},
         warnings,
     )
     return {
@@ -2697,6 +2757,19 @@ def _write_calendar_for_date(
                 starting_equity=config.starting_equity,
             )
         )
+    existing_by_identity: dict[tuple[str, str, str, str, str, str], dict[str, object]] = {}
+    for existing_row in existing_calendar_rows:
+        identity = _calendar_writer_identity(existing_row)
+        prior = existing_by_identity.get(identity)
+        if prior is not None:
+            raise ValueError("PaperOps calendar contains a duplicate canonical series row")
+        existing_by_identity[identity] = existing_row
+    for row in rows:
+        prior = existing_by_identity.get(_calendar_writer_identity(row))
+        if prior is not None and str(prior.get("execution_policy_version") or "") != str(
+            row.get("execution_policy_version") or ""
+        ):
+            raise ValueError("PaperOps calendar canonical series conflicts on execution policy")
     upsert_rows(
         paths.calendar / "strategy_daily_returns.csv",
         rows,
@@ -2705,12 +2778,26 @@ def _write_calendar_for_date(
             "mode",
             "strategy_id",
             "strategy_version",
-            "execution_policy_version",
+            "data_snapshot_id",
+            "run_id",
         ),
         CALENDAR_FIELDNAMES,
     )
     all_rows = _read_calendar_rows(paths)
     write_json(paths.calendar / "strategy_daily_returns.json", all_rows if all_rows else rows)
+
+
+def _calendar_writer_identity(
+    row: dict[str, object],
+) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("date") or ""),
+        str(row.get("mode") or ""),
+        str(row.get("strategy_id") or ""),
+        str(row.get("strategy_version") or ""),
+        str(row.get("data_snapshot_id") or ""),
+        str(row.get("run_id") or ""),
+    )
 
 
 def _read_calendar_rows(paths: PaperOpsPaths) -> list[dict[str, object]]:
@@ -3174,6 +3261,16 @@ def _write_daily_report(
         else {}
     )
     phase_name = str(stats.get("phase") or "latest")
+    if phase_name in phases:
+        if (
+            not isinstance(existing, dict)
+            or existing.get("run_id") != run.run_id
+            or existing.get("mode") != run.mode.value
+            or existing.get("date") != run.run_date
+            or existing.get("data_snapshot_id") != manifest.snapshot_id
+        ):
+            raise ValueError("PaperOps daily report phase conflicts with immutable run identity")
+        return
     phases[phase_name] = {"stats": stats, "warnings": list(warnings)}
     payload = {
         "data_snapshot_id": manifest.snapshot_id,
@@ -3217,6 +3314,39 @@ def _write_daily_report(
             report_markdown,
             encoding="utf-8",
         )
+
+
+def _exact_run_events(paths: PaperOpsPaths, run: PaperRun) -> list[dict[str, object]]:
+    return [
+        row
+        for row in read_jsonl(paths.ledger / "paper_ledger.jsonl")
+        if row.get("run_id") == run.run_id
+        and row.get("mode") == run.mode.value
+        and row.get("trade_date") == run.run_date
+    ]
+
+
+def _enter_order_decisions_from_events(
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    decisions: list[dict[str, object]] = []
+    for event in events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event.get("event_type") == "paper_order_created":
+            decisions.append(
+                {
+                    "decision": "created",
+                    "reason": "risk_checks_passed",
+                    **_model_projection(payload, _ORDER_FIELDS),
+                }
+            )
+        elif event.get("event_type") == "paper_order_blocked" and (
+            ":enter:paper_order_blocked:" in str(event.get("event_id") or "")
+        ):
+            decisions.append(dict(payload))
+    return decisions
 
 
 def _reconciliation_status(manifest: DataTruthManifest) -> str:
@@ -3310,11 +3440,78 @@ def _ensure_run_manifest(
 
 
 def _append_events(paths: PaperOpsPaths, events: list[PaperLedgerEvent]) -> None:
+    rows = _serialize_transaction_events(events)
+    _validate_run_and_origin_evidence(paths, rows, {})
+    _preflight_event_append(paths, rows)
     append_jsonl_unique(
         paths.ledger / "paper_ledger.jsonl",
-        [event.to_dict() for event in events],
+        rows,
         "event_id",
     )
+
+
+def _preflight_event_append(
+    paths: PaperOpsPaths, proposed_rows: list[dict[str, object]]
+) -> None:
+    existing_rows = read_jsonl(paths.ledger / "paper_ledger.jsonl")
+    existing_by_id: dict[str, dict[str, object]] = {}
+    existing_by_logical: dict[str, dict[str, object]] = {}
+    for row in existing_rows:
+        event_id = row.get("event_id")
+        logical_key = _logical_event_key(row)
+        if not isinstance(event_id, str) or logical_key is None:
+            raise ValueError("PaperOps persisted ledger event identity is malformed")
+        if event_id in existing_by_id and existing_by_id[event_id] != row:
+            raise ValueError("PaperOps persisted ledger has a conflicting event ID")
+        if logical_key in existing_by_logical and existing_by_logical[logical_key] != row:
+            raise ValueError("PaperOps persisted ledger has conflicting logical evidence")
+        existing_by_id[event_id] = row
+        existing_by_logical[logical_key] = row
+    for row in proposed_rows:
+        event_id = str(row["event_id"])
+        logical_key = _logical_event_key(row)
+        assert logical_key is not None
+        if event_id in existing_by_id and existing_by_id[event_id] != row:
+            raise ValueError(f"PaperOps ledger conflict for event_id={event_id}")
+        if logical_key in existing_by_logical and existing_by_logical[logical_key] != row:
+            raise ValueError("PaperOps ledger conflict for canonical logical event")
+
+
+def _preflight_immutable_json(path: Path, proposed: object, label: str) -> None:
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{label} target is not a regular file")
+    if path.is_file() and read_json(path, None) != proposed:
+        raise ValueError(f"{label} conflicts with immutable same-run evidence")
+
+
+def _validate_scan_artifact_evidence(
+    event_rows: list[dict[str, object]],
+    picks: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+) -> None:
+    expected_picks: list[dict[str, object]] = []
+    expected_decisions: list[dict[str, object]] = []
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        if event["event_type"] == "paper_pick_decision":
+            pick = _model_projection(payload, _PICK_FIELDS)
+            expected_picks.append(pick)
+            expected_decisions.append(
+                {
+                    **pick,
+                    "decision_status": pick["decision"],
+                    "trade_return_eligible": pick["decision"]
+                    == PaperPickDecision.ACCEPTED.value,
+                    "trade_return_pct": None,
+                }
+            )
+        elif event["event_type"] == "paper_no_setup_decision":
+            expected_decisions.append(_model_projection(payload, _NO_SETUP_FIELDS))
+        else:
+            raise ValueError("PaperOps scan append contains a non-scan event")
+    if picks != expected_picks or decisions != expected_decisions:
+        raise ValueError("PaperOps scan artifacts conflict with ledger decisions")
 
 
 def _commit_paper_transaction(
@@ -3328,11 +3525,17 @@ def _commit_paper_transaction(
     # journal is materialized.  A bad producer must be observably a no-op.
     serialized_updates = _serialize_transaction_updates(paths, state_updates)
     event_rows = _serialize_transaction_events(events)
+    _validate_transaction_coherence(paths, event_rows, serialized_updates)
+    if event_rows:
+        _preflight_event_append(paths, event_rows)
     with exclusive_file_lock(paths.state / ".paper_transaction.lock"):
         _recover_pending_transaction_unlocked(paths, journal_path)
         # Revalidate after acquiring the lock: an attacker can replace a path
         # component with a reparse point between the initial check and write.
         serialized_updates = _serialize_transaction_updates(paths, state_updates)
+        _validate_transaction_coherence(paths, event_rows, serialized_updates)
+        if event_rows:
+            _preflight_event_append(paths, event_rows)
         transaction_id = _paper_transaction_id(event_rows, serialized_updates)
         journal = {
             "events": event_rows,
@@ -3385,13 +3588,21 @@ def _apply_transaction_journal(
     _validate_transaction_event_rows(event_rows)
     validated_updates: list[tuple[Path, object]] = []
     for relative_name, payload in sorted(updates.items()):
-        validated_updates.append((_validated_transaction_target(paths, relative_name), payload))
-    append_jsonl_unique(
-        paths.ledger / "paper_ledger.jsonl",
-        [dict(row) for row in event_rows],
-        "event_id",
-    )
+        target = _validated_transaction_target(paths, relative_name)
+        _validate_transaction_update_payload(str(relative_name), payload)
+        validated_updates.append((target, payload))
+    _validate_transaction_coherence(paths, event_rows, updates)
+    if event_rows:
+        _preflight_event_append(paths, event_rows)
+    if event_rows:
+        append_jsonl_unique(
+            paths.ledger / "paper_ledger.jsonl",
+            [dict(row) for row in event_rows],
+            "event_id",
+        )
     for target, payload in validated_updates:
+        if target.is_file() and read_json(target, None) == payload:
+            continue
         write_json(target, payload)
 
 
@@ -3440,6 +3651,889 @@ def _is_allowed_transaction_target(relative_name: str) -> bool:
     return True
 
 
+_ORDER_FIELDS = frozenset(
+    {
+        "order_id",
+        "pick_id",
+        "run_id",
+        "mode",
+        "trade_date",
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "direction",
+        "order_status",
+        "expected_fill_rule",
+        "signal_time",
+        "earliest_fill_date",
+        "entry",
+        "stop",
+        "target",
+        "risk_per_unit",
+        "reward_per_unit",
+        "reward_risk",
+        "risk_budget",
+        "quantity",
+        "notional_exposure",
+        "max_loss_estimate",
+        "strategy_equity_basis",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "warnings",
+        "schema_version",
+    }
+)
+_PICK_FIELDS = frozenset(
+    {
+        "pick_id",
+        "run_id",
+        "mode",
+        "trade_date",
+        "strategy_id",
+        "strategy_version",
+        "strategy_status",
+        "symbol",
+        "signal_time",
+        "direction",
+        "setup_score",
+        "entry_reference",
+        "stop",
+        "target",
+        "risk_per_unit",
+        "reward_per_unit",
+        "reward_risk",
+        "decision",
+        "reason",
+        "evidence",
+        "warnings",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "schema_version",
+    }
+)
+_POSITION_FIELDS = frozenset(
+    {
+        "position_id",
+        "order_id",
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "direction",
+        "status",
+        "opened_at",
+        "quantity",
+        "entry_price",
+        "stop",
+        "target",
+        "last_mark_price",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "entry_fee",
+        "realized_pnl",
+        "unrealized_pnl",
+        "schema_version",
+    }
+)
+_FILL_FIELDS = frozenset(
+    {
+        "fill_id",
+        "order_id",
+        "run_id",
+        "mode",
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "fill_time",
+        "fill_price",
+        "quantity",
+        "fee",
+        "slippage",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "schema_version",
+    }
+)
+_CLOSE_FIELDS = frozenset(
+    {
+        "close_id",
+        "position_id",
+        "run_id",
+        "mode",
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "close_time",
+        "close_price",
+        "close_reason",
+        "gross_pnl",
+        "net_pnl",
+        "r_multiple",
+        "fee",
+        "slippage",
+        "entry_fee",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "warnings",
+        "schema_version",
+    }
+)
+_NO_SETUP_FIELDS = frozenset(
+    {
+        "account_return_effect_pct",
+        "decision_id",
+        "decision_status",
+        "direction",
+        "evidence",
+        "market_date",
+        "mode",
+        "reason",
+        "research_only",
+        "run_id",
+        "schema_version",
+        "signal_time",
+        "strategy_id",
+        "strategy_semantics_fingerprint",
+        "strategy_version",
+        "execution_policy_version",
+        "symbol",
+        "trade_return_eligible",
+        "trade_return_pct",
+        "warnings",
+    }
+)
+_ACCOUNT_FIELDS = frozenset(
+    {
+        "strategy_id",
+        "strategy_version",
+        "starting_equity",
+        "current_equity",
+        "realized_pnl",
+        "unrealized_pnl",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+        "schema_version",
+    }
+)
+_EVENT_METADATA_FIELDS = frozenset(
+    {
+        "blocked_at",
+        "challenger_id",
+        "data_snapshot_id",
+        "decision",
+        "lifecycle_run_id",
+        "logic_artifact_sha256",
+        "origin_run_id",
+        "reason",
+        "research_only",
+        "source_bar",
+        "source_bar_sha256",
+    }
+)
+
+
+def _validate_transaction_update_payload(relative_name: str, payload: object) -> None:
+    try:
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PaperOps transaction update is not canonical JSON") from exc
+    normalized = "/".join(_canonical_transaction_path_parts(relative_name) or ())
+    match = re.fullmatch(
+        r"state/(?:(replay|demo)_)?pending_orders\.json",
+        normalized,
+    )
+    shadow_match = re.fullmatch(
+        r"state/shadow/([a-z0-9][a-z0-9_.-]{2,80})/(forward|replay|demo)_pending_orders\.json",
+        normalized,
+    )
+    if match or shadow_match:
+        _validate_unique_rows(payload, "order_id", _validate_order_row)
+        assert isinstance(payload, list)
+        if any(
+            not isinstance(row, dict)
+            or row.get("order_status") != PaperOrderStatus.PENDING.value
+            or int(row["quantity"]) <= 0
+            for row in payload
+        ):
+            raise ValueError("PaperOps pending-order state contains a terminal order")
+        mode = shadow_match.group(2) if shadow_match else (match.group(1) or "forward")
+        _validate_rows_target_identity(payload, mode=mode)
+        return
+    match = re.fullmatch(
+        r"state/(?:(replay|demo)_)?open_positions\.json",
+        normalized,
+    )
+    shadow_match = re.fullmatch(
+        r"state/shadow/([a-z0-9][a-z0-9_.-]{2,80})/(forward|replay|demo)_open_positions\.json",
+        normalized,
+    )
+    if match or shadow_match:
+        _validate_unique_rows(payload, "position_id", _validate_position_row)
+        assert isinstance(payload, list)
+        if any(
+            not isinstance(row, dict) or row.get("status") != PaperPositionStatus.OPEN.value
+            for row in payload
+        ):
+            raise ValueError("PaperOps open-position state contains a closed position")
+        return
+    if re.fullmatch(r"state/(?:(?:replay|demo)_)?paper_accounts\.json", normalized):
+        _validate_account_state(payload)
+        return
+    if re.fullmatch(
+        r"state/shadow/[a-z0-9][a-z0-9_.-]{2,80}/(?:forward|replay|demo)_account\.json",
+        normalized,
+    ):
+        _validate_shadow_account(payload)
+        return
+    match = re.fullmatch(
+        r"exports/shadow_picks_(forward|replay|demo)_(\d{4}-\d{2}-\d{2})_([a-z0-9][a-z0-9_.-]{2,80})\.json",
+        normalized,
+    )
+    if match:
+        _validate_unique_rows(payload, "pick_id", _validate_pick_row)
+        _validate_rows_target_identity(payload, mode=match.group(1), run_date=match.group(2))
+        return
+    match = re.fullmatch(
+        r"exports/shadow_strategy_decisions_(forward|replay|demo)_(\d{4}-\d{2}-\d{2})_([a-z0-9][a-z0-9_.-]{2,80})\.json",
+        normalized,
+    )
+    if match:
+        _validate_shadow_decisions(payload)
+        _validate_rows_target_identity(
+            payload,
+            mode=match.group(1),
+            run_date=match.group(2),
+            challenger_id=match.group(3),
+        )
+        return
+    match = re.fullmatch(
+        r"exports/shadow_order_decisions_(forward|replay|demo)_(\d{4}-\d{2}-\d{2})_([a-z0-9][a-z0-9_.-]{2,80})\.json",
+        normalized,
+    )
+    if match:
+        _validate_shadow_order_decisions(payload)
+        _validate_rows_target_identity(payload, mode=match.group(1), run_date=match.group(2))
+        return
+    match = re.fullmatch(
+        r"manifests/shadow_(forward|replay|demo)_(\d{4}-\d{2}-\d{2})_([a-z0-9][a-z0-9_.-]{2,80})\.json",
+        normalized,
+    )
+    if match:
+        _validate_shadow_manifest(payload)
+        assert isinstance(payload, dict)
+        if (
+            payload.get("mode") != match.group(1)
+            or payload.get("date") != match.group(2)
+            or payload.get("challenger_id") != match.group(3)
+        ):
+            raise ValueError("PaperOps shadow manifest target identity conflicts")
+        return
+    raise ValueError(f"PaperOps transaction update has no payload contract: {relative_name}")
+
+
+def _validate_unique_rows(payload: object, id_field: str, validator: object) -> None:
+    if not isinstance(payload, list):
+        raise ValueError("PaperOps transaction state row collection must be an array")
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("PaperOps transaction state row must be an object")
+        validator(item)
+        row_id = item.get(id_field)
+        if not _canonical_string(row_id) or row_id in seen:
+            raise ValueError(f"PaperOps transaction state has duplicate or invalid {id_field}")
+        seen.add(row_id)
+
+
+def _validate_rows_target_identity(
+    payload: object,
+    *,
+    mode: str,
+    run_date: str | None = None,
+    challenger_id: str | None = None,
+) -> None:
+    assert isinstance(payload, list)
+    for row in payload:
+        assert isinstance(row, dict)
+        if row.get("mode") != mode:
+            raise ValueError("PaperOps transaction target mode conflicts with payload")
+        payload_date = row.get("trade_date", row.get("market_date"))
+        if run_date is not None and payload_date != run_date:
+            raise ValueError("PaperOps transaction target date conflicts with payload")
+        if challenger_id is not None and row.get("challenger_id") != challenger_id:
+            raise ValueError("PaperOps transaction target challenger conflicts with payload")
+
+
+def _canonical_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+def _identity_string(value: object) -> bool:
+    return _canonical_string(value) and not any(character.isspace() for character in str(value))
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _strict_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_date(value: object) -> bool:
+    if not _canonical_string(value):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _valid_datetime(value: object) -> bool:
+    if not _canonical_string(value):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return "T" in value and parsed.tzinfo is not None and parsed.isoformat() == value
+
+
+def _string_list(value: object) -> bool:
+    return isinstance(value, list) and all(_canonical_string(item) for item in value)
+
+
+def _require_fields(
+    row: dict[str, object], fields: frozenset[str], extras: frozenset[str] = frozenset()
+) -> None:
+    if not fields.issubset(row) or not set(row).issubset(fields | extras):
+        raise ValueError("PaperOps transaction payload fields are malformed")
+
+
+def _validate_common_identity(row: dict[str, object], schema: str) -> None:
+    if row.get("schema_version") != schema:
+        raise ValueError("PaperOps transaction payload schema is unsupported")
+    for field in (
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+    ):
+        if not _identity_string(row.get(field)):
+            raise ValueError("PaperOps transaction payload identity is malformed")
+
+
+def _validate_run_binding(row: dict[str, object]) -> None:
+    mode = row.get("mode")
+    run_id = row.get("run_id")
+    if mode not in {"forward", "replay", "demo"} or not _canonical_string(run_id):
+        raise ValueError("PaperOps transaction payload run identity is malformed")
+    parts = str(run_id).split(":", 3)
+    if (
+        len(parts) != 4
+        or parts[0] != "paper_ops"
+        or parts[1] != mode
+        or not _valid_date(parts[2])
+        or not _canonical_string(parts[3])
+        or run_id != stable_id("paper_ops", mode, parts[2], parts[3])
+    ):
+        raise ValueError("PaperOps transaction payload run identity is malformed")
+    declared_date = row.get("trade_date", row.get("market_date"))
+    if declared_date is not None and declared_date != parts[2]:
+        raise ValueError("PaperOps transaction payload run identity is malformed")
+
+
+def _validate_order_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    _require_fields(row, _ORDER_FIELDS, _EVENT_METADATA_FIELDS if allow_metadata else frozenset())
+    _validate_common_identity(row, "v2.paper_order.v2")
+    _validate_run_binding(row)
+    for field in ("order_id", "pick_id", "expected_fill_rule"):
+        if not _canonical_string(row.get(field)):
+            raise ValueError("PaperOps order identity is malformed")
+    if row["order_id"] != stable_id("order", row["pick_id"]):
+        raise ValueError("PaperOps order identity is noncanonical")
+    if row.get("direction") not in {"long", "short"} or row.get("order_status") not in {
+        "pending",
+        "filled",
+        "cancelled",
+        "blocked",
+    }:
+        raise ValueError("PaperOps order enum is invalid")
+    if not _valid_datetime(row.get("signal_time")) or not _valid_date(
+        row.get("earliest_fill_date")
+    ):
+        raise ValueError("PaperOps order date is invalid")
+    expected_pick_id = stable_id(
+        row["mode"],
+        row["trade_date"],
+        row["strategy_id"],
+        row["strategy_version"],
+        row["execution_policy_version"],
+        row["symbol"],
+        row["signal_time"],
+        row["direction"],
+    )
+    if row["pick_id"] != expected_pick_id:
+        raise ValueError("PaperOps order pick identity is noncanonical")
+    for field in (
+        "entry",
+        "stop",
+        "risk_per_unit",
+        "risk_budget",
+        "notional_exposure",
+        "max_loss_estimate",
+        "strategy_equity_basis",
+    ):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps order numeric field is invalid")
+    for field in ("target", "reward_per_unit", "reward_risk"):
+        if row.get(field) is not None and not _finite_number(row[field]):
+            raise ValueError("PaperOps order optional numeric field is invalid")
+    if (
+        not _strict_int(row.get("quantity"))
+        or int(row["quantity"]) < 0
+        or not _string_list(row.get("warnings"))
+    ):
+        raise ValueError("PaperOps order quantity or warnings are invalid")
+    entry = float(row["entry"])
+    stop = float(row["stop"])
+    risk_per_unit = float(row["risk_per_unit"])
+    risk_budget = float(row["risk_budget"])
+    equity_basis = float(row["strategy_equity_basis"])
+    quantity = int(row["quantity"])
+    notional = float(row["notional_exposure"])
+    max_loss = float(row["max_loss_estimate"])
+    if (
+        entry <= 0
+        or stop <= 0
+        or risk_per_unit <= 0
+        or risk_budget < 0
+        or equity_basis < 0
+        or (equity_basis == 0) is not (risk_budget == 0)
+        or risk_budget > equity_basis
+        or not math.isclose(notional, quantity * entry, rel_tol=1e-12, abs_tol=1e-9)
+        or not math.isclose(max_loss, quantity * risk_per_unit, rel_tol=1e-12, abs_tol=1e-9)
+        or (quantity == 0 and (notional != 0 or max_loss != 0))
+        or (quantity > 0 and (notional <= 0 or max_loss <= 0))
+    ):
+        raise ValueError("PaperOps order risk economics are inconsistent")
+    direction = str(row["direction"])
+    if (direction == Direction.LONG and stop >= entry) or (
+        direction == Direction.SHORT and stop <= entry
+    ):
+        raise ValueError("PaperOps order stop is inconsistent with direction")
+    target = row.get("target")
+    reward_per_unit = row.get("reward_per_unit")
+    reward_risk = row.get("reward_risk")
+    if target is None:
+        if reward_per_unit is not None or reward_risk is not None:
+            raise ValueError("PaperOps order reward economics are inconsistent")
+    else:
+        target_value = float(target)
+        raw_risk = abs(entry - stop)
+        expected_reward = abs(target_value - entry)
+        if (
+            target_value <= 0
+            or (direction == Direction.LONG and target_value <= entry)
+            or (direction == Direction.SHORT and target_value >= entry)
+            or reward_per_unit is None
+            or reward_risk is None
+            or float(reward_per_unit) <= 0
+            or float(reward_risk) <= 0
+            or not math.isclose(
+                float(reward_per_unit), expected_reward, rel_tol=1e-12, abs_tol=1e-9
+            )
+            or not math.isclose(
+                float(reward_risk), expected_reward / raw_risk, rel_tol=1e-12, abs_tol=1e-9
+            )
+        ):
+            raise ValueError("PaperOps order reward economics are inconsistent")
+
+
+def _validate_pick_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    extras = (
+        frozenset(
+            {
+                "challenger_id",
+                "logic_artifact_sha256",
+                "decision_status",
+                "trade_return_eligible",
+                "trade_return_pct",
+            }
+        )
+        if allow_metadata
+        else frozenset()
+    )
+    _require_fields(row, _PICK_FIELDS, extras)
+    _validate_common_identity(row, "v2.paper_pick.v2")
+    _validate_run_binding(row)
+    for field in ("pick_id", "strategy_status", "reason"):
+        if not _canonical_string(row.get(field)):
+            raise ValueError("PaperOps pick identity is malformed")
+    if row.get("direction") not in {Direction.LONG, Direction.SHORT} or row.get("decision") not in {
+        item.value for item in PaperPickDecision
+    }:
+        raise ValueError("PaperOps pick enum is invalid")
+    if not _valid_datetime(row.get("signal_time")):
+        raise ValueError("PaperOps pick signal time is invalid")
+    expected_id = stable_id(
+        row["mode"],
+        row["trade_date"],
+        row["strategy_id"],
+        row["strategy_version"],
+        row["execution_policy_version"],
+        row["symbol"],
+        row["signal_time"],
+        row["direction"],
+    )
+    if row["pick_id"] != expected_id:
+        raise ValueError("PaperOps pick identity is noncanonical")
+    for field in ("setup_score", "entry_reference"):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps pick numeric field is invalid")
+    for field in ("stop", "target", "risk_per_unit", "reward_per_unit", "reward_risk"):
+        if row.get(field) is not None and not _finite_number(row[field]):
+            raise ValueError("PaperOps pick optional numeric field is invalid")
+    if not _string_list(row.get("evidence")) or not _string_list(row.get("warnings")):
+        raise ValueError("PaperOps pick evidence is invalid")
+
+
+def _validate_position_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    _require_fields(
+        row, _POSITION_FIELDS, _EVENT_METADATA_FIELDS if allow_metadata else frozenset()
+    )
+    _validate_common_identity(row, "v2.paper_position.v2")
+    for field in ("position_id", "order_id"):
+        if not _canonical_string(row.get(field)):
+            raise ValueError("PaperOps position identity is malformed")
+    if row["position_id"] != stable_id("position", row["order_id"]):
+        raise ValueError("PaperOps position identity is noncanonical")
+    if (
+        row.get("direction") not in {"long", "short"}
+        or row.get("status") not in {"open", "closed"}
+        or not _valid_datetime(row.get("opened_at"))
+    ):
+        raise ValueError("PaperOps position enum or date is invalid")
+    if not _strict_int(row.get("quantity")) or int(row["quantity"]) <= 0:
+        raise ValueError("PaperOps position quantity is invalid")
+    for field in (
+        "entry_price",
+        "stop",
+        "last_mark_price",
+        "entry_fee",
+        "realized_pnl",
+        "unrealized_pnl",
+    ):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps position numeric field is invalid")
+    if row.get("target") is not None and not _finite_number(row["target"]):
+        raise ValueError("PaperOps position target is invalid")
+
+
+def _validate_fill_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    _require_fields(row, _FILL_FIELDS, _EVENT_METADATA_FIELDS if allow_metadata else frozenset())
+    _validate_common_identity(row, "v2.paper_fill.v3")
+    _validate_run_binding(row)
+    for field in ("fill_id", "order_id"):
+        if not _canonical_string(row.get(field)):
+            raise ValueError("PaperOps fill identity is malformed")
+    if not _valid_datetime(row.get("fill_time")) or row["fill_id"] != stable_id(
+        "fill", row["order_id"], row["fill_time"]
+    ):
+        raise ValueError("PaperOps fill identity is noncanonical")
+    if not _strict_int(row.get("quantity")) or int(row["quantity"]) <= 0:
+        raise ValueError("PaperOps fill quantity is invalid")
+    for field in ("fill_price", "fee", "slippage"):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps fill numeric field is invalid")
+
+
+def _validate_close_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    _require_fields(row, _CLOSE_FIELDS, _EVENT_METADATA_FIELDS if allow_metadata else frozenset())
+    _validate_common_identity(row, "v2.paper_close.v2")
+    _validate_run_binding(row)
+    for field in ("close_id", "position_id"):
+        if not _canonical_string(row.get(field)):
+            raise ValueError("PaperOps close identity is malformed")
+    if row.get("close_reason") not in {
+        item.value for item in PaperCloseReason
+    } or not _valid_datetime(row.get("close_time")):
+        raise ValueError("PaperOps close enum or date is invalid")
+    if row["close_id"] != stable_id(
+        "close", row["position_id"], row["close_time"], row["close_reason"]
+    ):
+        raise ValueError("PaperOps close identity is noncanonical")
+    for field in (
+        "close_price",
+        "gross_pnl",
+        "net_pnl",
+        "r_multiple",
+        "fee",
+        "slippage",
+        "entry_fee",
+    ):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps close numeric field is invalid")
+    if not _string_list(row.get("warnings")):
+        raise ValueError("PaperOps close warnings are invalid")
+
+
+def _validate_no_setup_row(row: dict[str, object], *, allow_metadata: bool = False) -> None:
+    extras = (
+        frozenset({"challenger_id", "logic_artifact_sha256"}) if allow_metadata else frozenset()
+    )
+    _require_fields(row, _NO_SETUP_FIELDS, extras)
+    _validate_common_identity(row, "v2.paper_strategy_decision.v1")
+    _validate_run_binding(row)
+    if (
+        row.get("decision_status") != "no_setup"
+        or row.get("direction") != "flat"
+        or row.get("research_only") is not True
+        or row.get("trade_return_eligible") is not False
+        or row.get("trade_return_pct") is not None
+    ):
+        raise ValueError("PaperOps no-setup decision fields are invalid")
+    if (
+        not _canonical_string(row.get("decision_id"))
+        or not _canonical_string(row.get("reason"))
+        or not _valid_datetime(row.get("signal_time"))
+    ):
+        raise ValueError("PaperOps no-setup identity is invalid")
+    expected_id = stable_id(
+        row["mode"],
+        row["market_date"],
+        row["strategy_id"],
+        row["strategy_version"],
+        row["execution_policy_version"],
+        row["symbol"],
+        row["signal_time"],
+        "no_setup",
+    )
+    if (
+        row["decision_id"] != expected_id
+        or not _finite_number(row.get("account_return_effect_pct"))
+        or float(row["account_return_effect_pct"]) != 0.0
+    ):
+        raise ValueError("PaperOps no-setup identity or return is invalid")
+    if not _string_list(row.get("evidence")) or not _string_list(row.get("warnings")):
+        raise ValueError("PaperOps no-setup evidence is invalid")
+
+
+def _validate_account_row(row: dict[str, object]) -> None:
+    _require_fields(row, _ACCOUNT_FIELDS)
+    if row.get("schema_version") != "v2.strategy_paper_account.v3":
+        raise ValueError("PaperOps account schema is unsupported")
+    for field in (
+        "strategy_id",
+        "strategy_version",
+        "execution_policy_version",
+        "strategy_semantics_fingerprint",
+    ):
+        if not _identity_string(row.get(field)):
+            raise ValueError("PaperOps account identity is malformed")
+    for field in ("starting_equity", "current_equity", "realized_pnl", "unrealized_pnl"):
+        if not _finite_number(row.get(field)):
+            raise ValueError("PaperOps account numeric field is invalid")
+    starting_equity = float(row["starting_equity"])
+    if starting_equity <= 0:
+        raise ValueError("PaperOps account starting equity must be positive")
+    expected_equity = starting_equity + float(row["realized_pnl"]) + float(row["unrealized_pnl"])
+    if not math.isclose(
+        float(row["current_equity"]),
+        expected_equity,
+        rel_tol=1e-12,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("PaperOps account equity identity conflicts")
+
+
+def _validate_account_state(payload: object) -> None:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"accounts", "schema_version"}
+        or payload.get("schema_version") != "v2.paper_account_state.v3"
+    ):
+        raise ValueError("PaperOps account state is malformed")
+    accounts = payload.get("accounts")
+    if not isinstance(accounts, list):
+        raise ValueError("PaperOps account state rows must be an array")
+    seen: set[tuple[str, str, str, str]] = set()
+    for row in accounts:
+        if not isinstance(row, dict):
+            raise ValueError("PaperOps account state row must be an object")
+        _validate_account_row(row)
+        identity = (
+            str(row["strategy_id"]),
+            str(row["strategy_version"]),
+            str(row["execution_policy_version"]),
+            str(row["strategy_semantics_fingerprint"]),
+        )
+        if identity in seen:
+            raise ValueError("PaperOps account state series identity is duplicated")
+        seen.add(identity)
+
+
+def _validate_shadow_account(payload: object) -> None:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"account", "schema_version"}
+        or payload.get("schema_version") != "v2.paper_ops_shadow_account.v1"
+        or not isinstance(payload.get("account"), dict)
+    ):
+        raise ValueError("PaperOps shadow account is malformed")
+    _validate_account_row(payload["account"])
+
+
+def _validate_shadow_decisions(payload: object) -> None:
+    if not isinstance(payload, list):
+        raise ValueError("PaperOps shadow decisions must be an array")
+    seen: set[str] = set()
+    for row in payload:
+        if not isinstance(row, dict):
+            raise ValueError("PaperOps shadow decision must be an object")
+        if row.get("schema_version") == "v2.paper_pick.v2":
+            _validate_pick_row(row, allow_metadata=True)
+            if (
+                row.get("decision_status") != row.get("decision")
+                or row.get("trade_return_eligible")
+                is not (row.get("decision") == PaperPickDecision.ACCEPTED.value)
+                or row.get("trade_return_pct") is not None
+            ):
+                raise ValueError("PaperOps shadow pick decision metadata is malformed")
+            row_id = row.get("pick_id")
+        else:
+            _validate_no_setup_row(row, allow_metadata=True)
+            row_id = row.get("decision_id")
+        logic_sha = row.get("logic_artifact_sha256")
+        if re.fullmatch(r"[0-9a-f]{64}", str(logic_sha)) is None:
+            raise ValueError("PaperOps shadow decision logic hash is malformed")
+        if not _canonical_string(row_id) or row_id in seen:
+            raise ValueError("PaperOps shadow decision identity is duplicated")
+        seen.add(row_id)
+
+
+def _validate_shadow_order_decisions(payload: object) -> None:
+    if not isinstance(payload, list):
+        raise ValueError("PaperOps shadow order decisions must be an array")
+    seen: set[str] = set()
+    for row in payload:
+        if not isinstance(row, dict):
+            raise ValueError("PaperOps shadow order decision must be an object")
+        _validate_order_row(row, allow_metadata=True)
+        if row.get("decision") not in {"created", "blocked"} or not _canonical_string(
+            row.get("reason")
+        ):
+            raise ValueError("PaperOps shadow order decision is malformed")
+        order_id = row.get("order_id")
+        if not _canonical_string(order_id) or order_id in seen:
+            raise ValueError("PaperOps shadow order decision identity is duplicated")
+        seen.add(order_id)
+
+
+def _validate_shadow_manifest(payload: object) -> None:
+    fields = frozenset(
+        {
+            "schema_version",
+            "status",
+            "date",
+            "mode",
+            "run_id",
+            "data_snapshot_id",
+            "challenger_id",
+            "strategy_id",
+            "strategy_version",
+            "execution_policy_version",
+            "logic_artifact_sha256",
+            "strategy_semantics_fingerprint",
+            "decision_coverage",
+            "decision_coverage_status",
+            "decision_artifact_sha256",
+            "decision_symbols_sha256",
+            "transaction_event_count",
+            "transaction_event_ids_sha256",
+            "transaction_events_sha256",
+            "orders_created",
+            "orders_blocked",
+            "fills",
+            "closes",
+            "pending_orders",
+            "open_positions",
+            "calendar_warnings",
+            "research_only",
+            "automatic_promotion_enabled",
+            "broker_execution_allowed",
+        }
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("PaperOps shadow manifest must be an object")
+    _require_fields(payload, fields)
+    if (
+        payload.get("schema_version") != "v2.paper_ops_shadow_run.v1"
+        or payload.get("status") != "completed"
+    ):
+        raise ValueError("PaperOps shadow manifest schema or status is invalid")
+    for field in (
+        "run_id",
+        "data_snapshot_id",
+        "challenger_id",
+        "strategy_id",
+        "strategy_version",
+        "execution_policy_version",
+        "logic_artifact_sha256",
+        "strategy_semantics_fingerprint",
+        "decision_artifact_sha256",
+        "decision_symbols_sha256",
+        "transaction_event_ids_sha256",
+        "transaction_events_sha256",
+    ):
+        if not _canonical_string(payload.get(field)):
+            raise ValueError("PaperOps shadow manifest identity is malformed")
+    for field in (
+        "logic_artifact_sha256",
+        "strategy_semantics_fingerprint",
+        "decision_artifact_sha256",
+        "decision_symbols_sha256",
+        "transaction_event_ids_sha256",
+        "transaction_events_sha256",
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", str(payload[field])) is None:
+            raise ValueError("PaperOps shadow manifest hash identity is malformed")
+    if payload.get("mode") not in {"forward", "replay", "demo"} or not _valid_date(
+        payload.get("date")
+    ):
+        raise ValueError("PaperOps shadow manifest mode or date is invalid")
+    prefix = f"paper_ops:{payload['mode']}:{payload['date']}:"
+    snapshot = (
+        str(payload["run_id"])[len(prefix) :] if str(payload["run_id"]).startswith(prefix) else ""
+    )
+    if payload["data_snapshot_id"] != snapshot or payload["run_id"] != stable_id(
+        "paper_ops", payload["mode"], payload["date"], snapshot
+    ):
+        raise ValueError("PaperOps shadow manifest run identity is malformed")
+    for field in (
+        "decision_coverage",
+        "transaction_event_count",
+        "orders_created",
+        "orders_blocked",
+        "fills",
+        "closes",
+        "pending_orders",
+        "open_positions",
+    ):
+        if not _strict_int(payload.get(field)) or int(payload[field]) < 0:
+            raise ValueError("PaperOps shadow manifest count is invalid")
+    if payload.get("decision_coverage_status") != "complete" or not _string_list(
+        payload.get("calendar_warnings")
+    ):
+        raise ValueError("PaperOps shadow manifest coverage is invalid")
+    if (
+        payload.get("research_only") is not True
+        or payload.get("automatic_promotion_enabled") is not False
+        or payload.get("broker_execution_allowed") is not False
+    ):
+        raise ValueError("PaperOps shadow manifest safety flags are invalid")
+
+
 def _canonical_transaction_path_parts(relative_name: object) -> tuple[str, ...] | None:
     """Return canonical lexical components for a journal target, if safe."""
 
@@ -3474,6 +4568,7 @@ def _serialize_transaction_updates(
         except ValueError as exc:
             raise ValueError("PaperOps transaction state path escaped its root") from exc
         _validated_transaction_target(paths, relative)
+        _validate_transaction_update_payload(relative, payload)
         if relative in serialized:
             raise ValueError("PaperOps transaction has duplicate state target")
         serialized[relative] = payload
@@ -3499,6 +4594,15 @@ def _validated_transaction_target(paths: PaperOpsPaths, relative_name: object) -
             raise ValueError("PaperOps transaction journal target contains a reparse component")
     if target.exists() and _is_reparse_component(target):
         raise ValueError("PaperOps transaction journal target is a reparse point")
+    if paths.root.exists() and not paths.root.is_dir():
+        raise ValueError("PaperOps transaction root is not a directory")
+    for parent in target.parents:
+        if parent == paths.root.parent:
+            break
+        if parent.exists() and not parent.is_dir():
+            raise ValueError("PaperOps transaction journal target parent is not a directory")
+    if target.exists() and not target.is_file():
+        raise ValueError("PaperOps transaction journal target is not a regular file")
     # resolve(strict=False) checks existing parents too, after the explicit
     # reparse-point scan above, without accepting a different protected path.
     resolved = target.resolve(strict=False)
@@ -3554,14 +4658,24 @@ def _validate_transaction_event_rows(event_rows: list[dict[str, object]]) -> Non
         "paper_position_closed": "v2.paper_close.v2",
     }
     seen_event_ids: set[str] = set()
+    seen_logical_events: set[str] = set()
     for row in event_rows:
+        if set(row) != {
+            "event_id",
+            "event_type",
+            "run_id",
+            "mode",
+            "trade_date",
+            "strategy_id",
+            "symbol",
+            "payload",
+            "schema_version",
+        }:
+            raise ValueError("PaperOps transaction journal events are malformed")
         if row.get("schema_version") != "v2.paper_ledger_event.v1":
             raise ValueError("PaperOps transaction journal events are malformed")
         required = ("event_id", "event_type", "run_id", "strategy_id", "symbol")
-        if not all(
-            isinstance(row.get(field), str) and str(row[field]).strip()
-            for field in required
-        ):
+        if not all(_identity_string(row.get(field)) for field in required):
             raise ValueError("PaperOps transaction journal events are malformed")
         event_id = str(row["event_id"])
         if event_id in seen_event_ids:
@@ -3575,12 +4689,8 @@ def _validate_transaction_event_rows(event_rows: list[dict[str, object]]) -> Non
         }:
             raise ValueError("PaperOps transaction journal events are malformed")
         trade_date = row.get("trade_date")
-        if not isinstance(trade_date, str):
+        if not _valid_date(trade_date):
             raise ValueError("PaperOps transaction journal events are malformed")
-        try:
-            date.fromisoformat(trade_date)
-        except ValueError as exc:
-            raise ValueError("PaperOps transaction journal events are malformed") from exc
         payload = row.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("PaperOps transaction journal events are malformed")
@@ -3589,26 +4699,1271 @@ def _validate_transaction_event_rows(event_rows: list[dict[str, object]]) -> Non
         if entity_field is None:
             raise ValueError("PaperOps transaction journal event type is unsupported")
         entity_id = payload.get(entity_field)
-        if not isinstance(entity_id, str) or not entity_id.strip():
+        if not _identity_string(entity_id):
             raise ValueError("PaperOps transaction journal event entity is malformed")
-        payload_schema = payload.get("schema_version")
-        if payload_schema != payload_schemas[event_type]:
+        if payload.get("schema_version") != payload_schemas[event_type]:
             raise ValueError("PaperOps transaction journal event schema is malformed")
         policy = payload.get("execution_policy_version")
-        if not isinstance(policy, str) or not policy.strip():
+        if not _identity_string(policy):
             raise ValueError("PaperOps transaction journal event policy is malformed")
         for field in ("mode", "strategy_id", "symbol"):
             if field in payload and payload[field] != row[field]:
                 raise ValueError("PaperOps transaction journal event identity conflicts")
         lifecycle_run_id = payload.get("lifecycle_run_id")
         if lifecycle_run_id is not None:
-            if not isinstance(lifecycle_run_id, str) or lifecycle_run_id != row["run_id"]:
+            if not _identity_string(lifecycle_run_id) or lifecycle_run_id != row["run_id"]:
                 raise ValueError("PaperOps transaction journal event identity conflicts")
         elif "run_id" in payload and payload["run_id"] != row["run_id"]:
             raise ValueError("PaperOps transaction journal event identity conflicts")
         if lifecycle_run_id is None and "trade_date" in payload:
             if payload["trade_date"] != trade_date:
                 raise ValueError("PaperOps transaction journal event identity conflicts")
+        _validate_event_model_payload(event_type, payload)
+        _validate_envelope_run_id(row)
+        _validate_event_metadata(row, payload)
+        _validate_event_id(row, payload)
+        logical_key = _logical_event_key(row)
+        if logical_key is None or logical_key in seen_logical_events:
+            raise ValueError("PaperOps transaction journal has duplicate logical events")
+        seen_logical_events.add(logical_key)
+
+
+def _validate_event_model_payload(event_type: str, payload: dict[str, object]) -> None:
+    source_metadata = {"data_snapshot_id", "source_bar", "source_bar_sha256"}
+    allowed_metadata = {
+        "paper_pick_decision": {"challenger_id", "logic_artifact_sha256"},
+        "paper_no_setup_decision": {"challenger_id", "logic_artifact_sha256"},
+        "paper_order_created": {"challenger_id"},
+        "paper_order_blocked": {
+            "blocked_at",
+            "challenger_id",
+            "decision",
+            "lifecycle_run_id",
+            "origin_run_id",
+            "reason",
+            "research_only",
+            *source_metadata,
+        },
+        "paper_order_pending_no_fill_data": {
+            "challenger_id",
+            "lifecycle_run_id",
+            "origin_run_id",
+        },
+        "paper_fill": {"challenger_id", *source_metadata},
+        "paper_position_opened": {"challenger_id", *source_metadata},
+        "paper_position_checked_no_action": {"challenger_id", *source_metadata},
+        "paper_position_marked_to_market": {"challenger_id", *source_metadata},
+        "paper_position_closed": {"challenger_id", *source_metadata},
+    }
+    model_fields = {
+        "paper_pick_decision": _PICK_FIELDS,
+        "paper_no_setup_decision": _NO_SETUP_FIELDS,
+        "paper_order_created": _ORDER_FIELDS,
+        "paper_order_blocked": _ORDER_FIELDS,
+        "paper_order_pending_no_fill_data": _ORDER_FIELDS,
+        "paper_fill": _FILL_FIELDS,
+        "paper_position_opened": _POSITION_FIELDS,
+        "paper_position_checked_no_action": _POSITION_FIELDS,
+        "paper_position_marked_to_market": _POSITION_FIELDS,
+        "paper_position_closed": _CLOSE_FIELDS,
+    }
+    if not set(payload).issubset(model_fields[event_type] | allowed_metadata[event_type]):
+        raise ValueError("PaperOps transaction event metadata is unsupported")
+    if event_type in {
+        "paper_fill",
+        "paper_position_opened",
+        "paper_position_checked_no_action",
+        "paper_position_marked_to_market",
+        "paper_position_closed",
+    } and not source_metadata.issubset(payload):
+        raise ValueError("PaperOps transaction event source-bar evidence is incomplete")
+    if source_metadata & set(payload) and not source_metadata.issubset(payload):
+        raise ValueError("PaperOps transaction event source-bar evidence is incomplete")
+    if event_type == "paper_pick_decision":
+        _validate_pick_row(payload, allow_metadata=True)
+    elif event_type == "paper_no_setup_decision":
+        _validate_no_setup_row(payload, allow_metadata=True)
+    elif event_type in {
+        "paper_order_created",
+        "paper_order_blocked",
+        "paper_order_pending_no_fill_data",
+    }:
+        _validate_order_row(payload, allow_metadata=True)
+        if payload.get("order_status") != PaperOrderStatus.PENDING.value:
+            raise ValueError("PaperOps transaction order event is not pending-shaped")
+        if event_type == "paper_order_created" and int(payload["quantity"]) <= 0:
+            raise ValueError("PaperOps created order quantity is invalid")
+    elif event_type == "paper_fill":
+        _validate_fill_row(payload, allow_metadata=True)
+    elif event_type in {
+        "paper_position_opened",
+        "paper_position_checked_no_action",
+        "paper_position_marked_to_market",
+    }:
+        _validate_position_row(payload, allow_metadata=True)
+    elif event_type == "paper_position_closed":
+        _validate_close_row(payload, allow_metadata=True)
+    if "source_bar" in payload:
+        bar = payload.get("source_bar")
+        if not isinstance(bar, dict) or set(bar) != {
+            "close",
+            "high",
+            "low",
+            "open",
+            "symbol",
+            "timestamp",
+            "volume",
+        }:
+            raise ValueError("PaperOps transaction event source bar is malformed")
+        if not _canonical_string(bar.get("symbol")) or not _valid_datetime(bar.get("timestamp")):
+            raise ValueError("PaperOps transaction event source bar identity is malformed")
+        for field in ("close", "high", "low", "open"):
+            if not _finite_number(bar.get(field)):
+                raise ValueError("PaperOps transaction event source bar numeric field is invalid")
+        if not _strict_int(bar.get("volume")) or int(bar["volume"]) < 0:
+            raise ValueError("PaperOps transaction event source bar volume is invalid")
+        open_price = float(bar["open"])
+        high = float(bar["high"])
+        low = float(bar["low"])
+        close = float(bar["close"])
+        if (
+            min(open_price, high, low, close) <= 0
+            or high < max(open_price, close)
+            or low > min(open_price, close)
+            or high < low
+        ):
+            raise ValueError("PaperOps transaction event source bar OHLC is inconsistent")
+        if not _canonical_string(payload.get("source_bar_sha256")):
+            raise ValueError("PaperOps transaction event source bar hash is malformed")
+
+
+def _validate_event_metadata(row: dict[str, object], payload: dict[str, object]) -> None:
+    event_type = str(row["event_type"])
+    origin_run_id = payload.get("origin_run_id")
+    if origin_run_id is not None and (
+        not _canonical_string(origin_run_id) or origin_run_id != payload.get("run_id")
+    ):
+        raise ValueError("PaperOps transaction event origin identity conflicts")
+    if event_type in {"paper_order_blocked", "paper_order_pending_no_fill_data"}:
+        if payload.get("lifecycle_run_id") != row["run_id"] or origin_run_id is None:
+            raise ValueError("PaperOps transaction event lifecycle identity is incomplete")
+    if event_type == "paper_order_blocked":
+        if (
+            payload.get("decision") != "blocked"
+            or payload.get("research_only") is not True
+            or not _canonical_string(payload.get("reason"))
+            or not _valid_datetime(payload.get("blocked_at"))
+        ):
+            raise ValueError("PaperOps blocked order metadata is malformed")
+    challenger_id = payload.get("challenger_id")
+    if challenger_id is not None and not _identity_string(challenger_id):
+        raise ValueError("PaperOps transaction event challenger identity is malformed")
+    logic_sha = payload.get("logic_artifact_sha256")
+    if logic_sha is not None and (
+        not _canonical_string(logic_sha) or re.fullmatch(r"[0-9a-f]{64}", str(logic_sha)) is None
+    ):
+        raise ValueError("PaperOps transaction event logic artifact hash is malformed")
+    prefix = f"paper_ops:{row['mode']}:{row['trade_date']}:"
+    snapshot_id = str(row["run_id"])[len(prefix) :]
+    if "data_snapshot_id" in payload and payload.get("data_snapshot_id") != snapshot_id:
+        raise ValueError("PaperOps transaction event snapshot identity conflicts")
+    if "source_bar" in payload:
+        source_bar = payload["source_bar"]
+        assert isinstance(source_bar, dict)
+        expected_hash = hashlib.sha256(
+            json.dumps(source_bar, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if payload.get("source_bar_sha256") != expected_hash:
+            raise ValueError("PaperOps transaction event source bar hash conflicts")
+        if source_bar.get("symbol") != row["symbol"]:
+            raise ValueError("PaperOps transaction event source bar identity conflicts")
+
+
+def _validate_envelope_run_id(row: dict[str, object]) -> None:
+    mode = str(row["mode"])
+    trade_date = str(row["trade_date"])
+    run_id = str(row["run_id"])
+    prefix = f"paper_ops:{mode}:{trade_date}:"
+    snapshot_id = run_id[len(prefix) :] if run_id.startswith(prefix) else ""
+    if not _canonical_string(snapshot_id) or run_id != stable_id(
+        "paper_ops", mode, trade_date, snapshot_id
+    ):
+        raise ValueError("PaperOps transaction event run identity is noncanonical")
+
+
+def _validate_event_id(row: dict[str, object], payload: dict[str, object]) -> None:
+    event_type = str(row["event_type"])
+    trade_date = str(row["trade_date"])
+    phases_and_entities: tuple[tuple[str, str], ...]
+    if event_type == "paper_pick_decision":
+        phases_and_entities = (("scan", str(payload["pick_id"])),)
+    elif event_type == "paper_no_setup_decision":
+        phases_and_entities = (("scan", str(payload["decision_id"])),)
+    elif event_type == "paper_order_created":
+        phases_and_entities = (("enter", str(payload["order_id"])),)
+    elif event_type == "paper_order_blocked":
+        entity = f"{payload['order_id']}:{payload['reason']}"
+        phases_and_entities = (("enter", entity), ("check", entity))
+    elif event_type == "paper_order_pending_no_fill_data":
+        phases_and_entities = (("check", f"{payload['order_id']}:pending_check:{trade_date}"),)
+    elif event_type == "paper_fill":
+        phases_and_entities = (("check", str(payload["fill_id"])),)
+    elif event_type == "paper_position_opened":
+        phases_and_entities = (("check", str(payload["position_id"])),)
+    elif event_type == "paper_position_checked_no_action":
+        phases_and_entities = (("check", f"{payload['position_id']}:checked:{trade_date}"),)
+    elif event_type == "paper_position_marked_to_market":
+        position_id = str(payload["position_id"])
+        phases_and_entities = (
+            ("close", f"{position_id}:mark:{trade_date}"),
+            ("close", f"{position_id}:shadow_mark:{trade_date}"),
+        )
+    else:
+        phases_and_entities = (
+            ("check", str(payload["close_id"])),
+            ("close", str(payload["close_id"])),
+        )
+    expected_ids = {
+        stable_id(
+            "paper_ops_event",
+            str(row["mode"]),
+            trade_date,
+            phase,
+            event_type,
+            entity,
+        )
+        for phase, entity in phases_and_entities
+    }
+    if row["event_id"] not in expected_ids:
+        raise ValueError("PaperOps transaction event identity is noncanonical")
+
+
+def _validate_transaction_coherence(
+    paths: PaperOpsPaths,
+    event_rows: list[dict[str, object]],
+    state_updates: dict[str, object],
+) -> None:
+    if not event_rows:
+        for relative_name, payload in state_updates.items():
+            target = paths.root.joinpath(*relative_name.split("/"))
+            if not target.is_file() or read_json(target, None) != payload:
+                raise ValueError("PaperOps event-free transaction state update is not a no-op")
+        return
+    _validate_run_and_origin_evidence(paths, event_rows, state_updates)
+    _validate_immutable_transaction_outputs(paths, state_updates)
+    modes = {str(row["mode"]) for row in event_rows}
+    trade_dates = {str(row["trade_date"]) for row in event_rows}
+    run_ids = {str(row["run_id"]) for row in event_rows}
+    if len(modes) != 1 or len(trade_dates) != 1 or len(run_ids) != 1:
+        raise ValueError("PaperOps transaction events span multiple run identities")
+    mode = next(iter(modes))
+    trade_date = next(iter(trade_dates))
+    challenger_values = {
+        str(payload["challenger_id"])
+        for row in event_rows
+        for payload in [row["payload"]]
+        if isinstance(payload, dict) and "challenger_id" in payload
+    }
+    if len(challenger_values) > 1:
+        raise ValueError("PaperOps transaction events span multiple challengers")
+    challenger_id = next(iter(challenger_values), None)
+    if challenger_id is not None and any(
+        not isinstance(row["payload"], dict) or row["payload"].get("challenger_id") != challenger_id
+        for row in event_rows
+    ):
+        raise ValueError("PaperOps shadow transaction challenger binding is incomplete")
+
+    pending_target = (
+        f"state/shadow/{challenger_id}/{mode}_pending_orders.json"
+        if challenger_id is not None
+        else f"state/{'' if mode == 'forward' else f'{mode}_'}pending_orders.json"
+    )
+    positions_target = (
+        f"state/shadow/{challenger_id}/{mode}_open_positions.json"
+        if challenger_id is not None
+        else f"state/{'' if mode == 'forward' else f'{mode}_'}open_positions.json"
+    )
+    core_account_target = f"state/{'' if mode == 'forward' else f'{mode}_'}paper_accounts.json"
+    if challenger_id is None:
+        _validate_champion_transaction_target_set(
+            event_rows,
+            state_updates,
+            pending_target=pending_target,
+            positions_target=positions_target,
+            core_account_target=core_account_target,
+        )
+    else:
+        required_shadow_targets = {
+            pending_target,
+            positions_target,
+            f"state/shadow/{challenger_id}/{mode}_account.json",
+            core_account_target,
+            f"exports/shadow_strategy_decisions_{mode}_{trade_date}_{challenger_id}.json",
+            f"exports/shadow_picks_{mode}_{trade_date}_{challenger_id}.json",
+            f"exports/shadow_order_decisions_{mode}_{trade_date}_{challenger_id}.json",
+            f"manifests/shadow_{mode}_{trade_date}_{challenger_id}.json",
+        }
+        if set(state_updates) != required_shadow_targets:
+            raise ValueError("PaperOps shadow transaction target set conflicts with producer")
+
+    for relative_name in state_updates:
+        target_mode, target_date, target_challenger, target_family = _transaction_target_identity(
+            relative_name
+        )
+        if target_mode is not None and target_mode != mode:
+            raise ValueError("PaperOps transaction target mode conflicts with events")
+        if target_date is not None and target_date != trade_date:
+            raise ValueError("PaperOps transaction target date conflicts with events")
+        if challenger_id is None and target_challenger is not None:
+            raise ValueError("PaperOps champion transaction cannot write shadow state")
+        if challenger_id is not None:
+            if target_challenger is not None and target_challenger != challenger_id:
+                raise ValueError("PaperOps transaction target challenger conflicts with events")
+            if target_challenger is None and target_family != "accounts":
+                raise ValueError("PaperOps shadow transaction cannot write champion state")
+
+    order_events = [
+        row
+        for row in event_rows
+        if row["event_type"]
+        in {
+            "paper_order_created",
+            "paper_order_blocked",
+            "paper_order_pending_no_fill_data",
+            "paper_fill",
+        }
+    ]
+    if order_events:
+        if pending_target not in state_updates:
+            raise ValueError("PaperOps transaction omits the canonical pending-order update")
+    if pending_target in state_updates:
+        current_pending = _current_state_rows(paths, pending_target, "order_id")
+        config = _config(paths)
+        lineage_orders = _transaction_lineage_orders(current_pending, order_events, config)
+        expected_pending = _apply_order_event_transition(current_pending, order_events, config)
+        if state_updates[pending_target] != expected_pending:
+            raise ValueError("PaperOps transaction pending-order transition conflicts")
+    else:
+        config = _config(paths)
+        lineage_orders = {}
+
+    position_events = [
+        row
+        for row in event_rows
+        if row["event_type"]
+        in {
+            "paper_position_opened",
+            "paper_position_checked_no_action",
+            "paper_position_marked_to_market",
+            "paper_position_closed",
+        }
+    ]
+    if position_events:
+        if positions_target not in state_updates:
+            raise ValueError("PaperOps transaction omits the canonical open-position update")
+    if positions_target in state_updates:
+        current_positions = _current_state_rows(paths, positions_target, "position_id")
+        expected_positions = _apply_position_event_transition(
+            current_positions,
+            position_events,
+            event_rows,
+            lineage_orders,
+            config,
+        )
+        if state_updates[positions_target] != expected_positions:
+            raise ValueError("PaperOps transaction open-position transition conflicts")
+
+    _validate_contextual_event_ids(
+        event_rows,
+        challenger_id=challenger_id,
+        pending_target=pending_target,
+        positions_target=positions_target,
+        core_account_target=core_account_target,
+        state_updates=state_updates,
+    )
+    if position_events and core_account_target not in state_updates:
+        raise ValueError("PaperOps transaction omits the canonical account update")
+    if core_account_target in state_updates:
+        _validate_account_state_transition(
+            paths,
+            event_rows,
+            state_updates,
+            core_account_target=core_account_target,
+            positions_target=positions_target,
+        )
+
+    if challenger_id is not None:
+        shadow_account_target = f"state/shadow/{challenger_id}/{mode}_account.json"
+        decisions_target = (
+            f"exports/shadow_strategy_decisions_{mode}_{trade_date}_{challenger_id}.json"
+        )
+        picks_target = f"exports/shadow_picks_{mode}_{trade_date}_{challenger_id}.json"
+        order_decisions_target = (
+            f"exports/shadow_order_decisions_{mode}_{trade_date}_{challenger_id}.json"
+        )
+        manifest_target = f"manifests/shadow_{mode}_{trade_date}_{challenger_id}.json"
+        _validate_shadow_account_coherence(
+            state_updates,
+            shadow_account_target=shadow_account_target,
+            core_account_target=core_account_target,
+            positions_target=positions_target,
+        )
+        _validate_shadow_evidence_coherence(
+            event_rows,
+            state_updates,
+            pending_target=pending_target,
+            positions_target=positions_target,
+            shadow_account_target=shadow_account_target,
+            decisions_target=decisions_target,
+            picks_target=picks_target,
+            order_decisions_target=order_decisions_target,
+            manifest_target=manifest_target,
+        )
+
+
+def _validate_account_state_transition(
+    paths: PaperOpsPaths,
+    event_rows: list[dict[str, object]],
+    state_updates: dict[str, object],
+    *,
+    core_account_target: str,
+    positions_target: str,
+) -> None:
+    current_path = paths.root.joinpath(*core_account_target.split("/"))
+    current_payload = (
+        read_json(current_path, {"accounts": [], "schema_version": "v2.paper_account_state.v3"})
+        if current_path.is_file()
+        else {"accounts": [], "schema_version": "v2.paper_account_state.v3"}
+    )
+    if (
+        not isinstance(current_payload, dict)
+        or set(current_payload) != {"accounts", "schema_version"}
+        or current_payload.get("schema_version")
+        not in {"v2.paper_account_state.v2", "v2.paper_account_state.v3"}
+        or not isinstance(current_payload.get("accounts"), list)
+    ):
+        raise ValueError("PaperOps persisted account state is malformed")
+    seen_current: set[tuple[str, str, str, str]] = set()
+    for row in current_payload["accounts"]:
+        if not isinstance(row, dict):
+            raise ValueError("PaperOps persisted account state row is malformed")
+        _validate_account_row(row)
+        identity = _account_series_identity(row)
+        if identity in seen_current:
+            raise ValueError("PaperOps persisted account state series is duplicated")
+        seen_current.add(identity)
+    final_payload = state_updates[core_account_target]
+    assert isinstance(current_payload, dict)
+    assert isinstance(final_payload, dict)
+    current_rows = current_payload["accounts"]
+    final_rows = final_payload["accounts"]
+    assert isinstance(current_rows, list)
+    assert isinstance(final_rows, list)
+    current_by_series = {
+        _account_series_identity(row): row for row in current_rows if isinstance(row, dict)
+    }
+    final_by_series = {
+        _account_series_identity(row): row for row in final_rows if isinstance(row, dict)
+    }
+    touched_series = {
+        _account_series_identity(payload)
+        for event in event_rows
+        for payload in [event["payload"]]
+        if isinstance(payload, dict)
+    }
+    if not current_by_series.keys() <= final_by_series.keys():
+        raise ValueError("PaperOps account transition deletes persisted series")
+    for identity, current in current_by_series.items():
+        if identity not in touched_series and final_by_series[identity] != current:
+            raise ValueError("PaperOps account transition mutates an untouched series")
+    if not (final_by_series.keys() - current_by_series.keys()) <= touched_series:
+        raise ValueError("PaperOps account transition injects an unrelated series")
+
+    closing_pnl: dict[tuple[str, str, str, str], float] = {}
+    for event in event_rows:
+        if event["event_type"] != "paper_position_closed":
+            continue
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        identity = _account_series_identity(payload)
+        closing_pnl[identity] = closing_pnl.get(identity, 0.0) + float(payload["net_pnl"])
+    config = _config(paths)
+    final_positions = state_updates.get(positions_target)
+    for identity in touched_series:
+        final = final_by_series.get(identity)
+        if final is None:
+            raise ValueError("PaperOps account transition omits a touched series")
+        current = current_by_series.get(identity)
+        if current is None and not math.isclose(
+            float(final["starting_equity"]),
+            config.starting_equity,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("PaperOps new account starting equity conflicts with config")
+        if current is not None and final["starting_equity"] != current["starting_equity"]:
+            raise ValueError("PaperOps account starting equity changed")
+        expected_realized = float(current["realized_pnl"]) if current is not None else 0.0
+        expected_realized += closing_pnl.get(identity, 0.0)
+        if not math.isclose(
+            float(final["realized_pnl"]),
+            expected_realized,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("PaperOps account realized PnL conflicts with close events")
+        if isinstance(final_positions, list):
+            unrealized = sum(
+                float(row["unrealized_pnl"])
+                for row in final_positions
+                if isinstance(row, dict) and _position_series_identity(row) == identity
+            )
+            if not math.isclose(
+                float(final["unrealized_pnl"]),
+                unrealized,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            ):
+                raise ValueError("PaperOps account unrealized PnL conflicts with final positions")
+
+
+def _current_state_rows(
+    paths: PaperOpsPaths, relative_name: str, id_field: str
+) -> list[dict[str, object]]:
+    target = paths.root.joinpath(*relative_name.split("/"))
+    payload = read_json(target, []) if target.is_file() else []
+    _validate_unique_rows(
+        payload,
+        id_field,
+        _validate_order_row if id_field == "order_id" else _validate_position_row,
+    )
+    assert isinstance(payload, list)
+    return [dict(row) for row in payload if isinstance(row, dict)]
+
+
+def _apply_order_event_transition(
+    current: list[dict[str, object]],
+    event_rows: list[dict[str, object]],
+    config: PaperOpsConfig,
+) -> list[dict[str, object]]:
+    expected = [dict(row) for row in current]
+    for row in expected:
+        _validate_order_economics(row, config)
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        order_id = str(payload["order_id"])
+        index = next(
+            (offset for offset, row in enumerate(expected) if row["order_id"] == order_id),
+            None,
+        )
+        event_type = str(event["event_type"])
+        if event_type == "paper_order_created":
+            canonical = _model_projection(payload, _ORDER_FIELDS)
+            _validate_order_economics(canonical, config)
+            if index is None:
+                expected.append(canonical)
+            elif expected[index] != canonical:
+                raise ValueError("PaperOps created order conflicts with persisted state")
+        elif event_type == "paper_order_pending_no_fill_data":
+            canonical = _model_projection(payload, _ORDER_FIELDS)
+            _validate_order_economics(canonical, config)
+            if index is None or expected[index] != canonical:
+                raise ValueError("PaperOps pending order is absent or mutated")
+        elif event_type == "paper_fill":
+            if index is None:
+                raise ValueError("PaperOps fill order is absent from pending state")
+            order = expected[index]
+            _validate_fill_against_order(event, order, config)
+            expected.pop(index)
+        else:
+            canonical = _model_projection(payload, _ORDER_FIELDS)
+            _validate_order_economics(canonical, config)
+            is_check_block = "source_bar" in payload
+            if is_check_block:
+                if index is None or expected[index] != canonical:
+                    raise ValueError("PaperOps check-blocked order is absent or mutated")
+                expected.pop(index)
+            elif index is not None:
+                raise ValueError("PaperOps enter-blocked order conflicts with persisted state")
+    return expected
+
+
+def _apply_position_event_transition(
+    current: list[dict[str, object]],
+    event_rows: list[dict[str, object]],
+    all_event_rows: list[dict[str, object]],
+    lineage_orders: dict[str, dict[str, object]],
+    config: PaperOpsConfig,
+) -> list[dict[str, object]]:
+    expected = [dict(row) for row in current]
+    fills_by_order: dict[str, dict[str, object]] = {}
+    for event in all_event_rows:
+        if event["event_type"] != "paper_fill":
+            continue
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        order_id = str(payload["order_id"])
+        if order_id in fills_by_order:
+            raise ValueError("PaperOps transaction has duplicate fills for one order")
+        fills_by_order[order_id] = payload
+    opened_order_ids = {
+        str(payload["order_id"])
+        for event in event_rows
+        for payload in [event["payload"]]
+        if event["event_type"] == "paper_position_opened" and isinstance(payload, dict)
+    }
+    if set(fills_by_order) != opened_order_ids:
+        raise ValueError("PaperOps fill and opened-position evidence is incomplete")
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        position_id = str(payload["position_id"])
+        index = next(
+            (offset for offset, row in enumerate(expected) if row["position_id"] == position_id),
+            None,
+        )
+        event_type = str(event["event_type"])
+        if event_type == "paper_position_opened":
+            canonical = _model_projection(payload, _POSITION_FIELDS)
+            order = lineage_orders.get(str(payload["order_id"]))
+            fill = fills_by_order.get(str(payload["order_id"]))
+            if order is None or fill is None:
+                raise ValueError("PaperOps opened position lacks exact order/fill lineage")
+            _validate_open_position_lineage(event, canonical, order, fill)
+            if index is None:
+                expected.append(canonical)
+            elif expected[index] != canonical:
+                raise ValueError("PaperOps opened position conflicts with persisted state")
+        elif event_type in {
+            "paper_position_checked_no_action",
+            "paper_position_marked_to_market",
+        }:
+            if index is None:
+                raise ValueError("PaperOps marked position is absent from persisted state")
+            expected[index] = _validate_position_lifecycle_event(
+                event, expected[index], config, expect_close=False
+            )
+        else:
+            if index is None:
+                raise ValueError("PaperOps closed position is absent from open state")
+            _validate_position_lifecycle_event(event, expected[index], config, expect_close=True)
+            expected.pop(index)
+    return expected
+
+
+def _transaction_lineage_orders(
+    current: list[dict[str, object]],
+    event_rows: list[dict[str, object]],
+    config: PaperOpsConfig,
+) -> dict[str, dict[str, object]]:
+    orders = {str(row["order_id"]): dict(row) for row in current}
+    for row in orders.values():
+        _validate_order_economics(row, config)
+    for event in event_rows:
+        if event["event_type"] != "paper_order_created":
+            continue
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        canonical = _model_projection(payload, _ORDER_FIELDS)
+        _validate_order_economics(canonical, config)
+        order_id = str(canonical["order_id"])
+        prior = orders.get(order_id)
+        if prior is not None and prior != canonical:
+            raise ValueError("PaperOps transaction order lineage conflicts")
+        orders[order_id] = canonical
+    return orders
+
+
+def _validate_order_economics(row: dict[str, object], config: PaperOpsConfig) -> None:
+    if row.get("execution_policy_version") != config.execution_policy_version:
+        raise ValueError("PaperOps order policy conflicts with active config")
+    entry = float(row["entry"])
+    stop = float(row["stop"])
+    direction = str(row["direction"])
+    rate = config.slippage_bps / 10_000.0
+    entry_fill = entry * (1 + rate) if direction == Direction.LONG else entry * (1 - rate)
+    stop_fill = stop * (1 - rate) if direction == Direction.LONG else stop * (1 + rate)
+    expected_risk = max(0.0, -_pnl(direction, entry_fill, stop_fill, 1))
+    expected_risk += (entry_fill + stop_fill) * config.fee_bps / 10_000.0
+    equity_basis = float(row["strategy_equity_basis"])
+    expected_budget = equity_basis * config.risk_per_trade_pct
+    expected_quantity = max(int(expected_budget / expected_risk) if expected_risk > 0 else 0, 0)
+    if (
+        row.get("expected_fill_rule") != "daily signal fills no earlier than next valid bar open"
+        or not math.isclose(
+            float(row["risk_per_unit"]), expected_risk, rel_tol=1e-12, abs_tol=1e-9
+        )
+        or not math.isclose(
+            float(row["risk_budget"]), expected_budget, rel_tol=1e-12, abs_tol=1e-9
+        )
+        or int(row["quantity"]) != expected_quantity
+    ):
+        raise ValueError("PaperOps order economics conflict with active execution policy")
+    signal_date = datetime.fromisoformat(str(row["signal_time"])).date()
+    if date.fromisoformat(str(row["earliest_fill_date"])) <= signal_date:
+        raise ValueError("PaperOps order fill date is not after its signal")
+
+
+def _validate_champion_transaction_target_set(
+    event_rows: list[dict[str, object]],
+    state_updates: dict[str, object],
+    *,
+    pending_target: str,
+    positions_target: str,
+    core_account_target: str,
+) -> None:
+    event_types = {str(row["event_type"]) for row in event_rows}
+    scan_types = {"paper_pick_decision", "paper_no_setup_decision"}
+    enter_types = {"paper_order_created", "paper_order_blocked"}
+    check_types = {
+        "paper_order_blocked",
+        "paper_order_pending_no_fill_data",
+        "paper_fill",
+        "paper_position_opened",
+        "paper_position_checked_no_action",
+        "paper_position_closed",
+    }
+    close_types = {"paper_position_marked_to_market", "paper_position_closed"}
+    is_enter = event_types <= enter_types and all(
+        row["event_type"] != "paper_order_blocked"
+        or not isinstance(row["payload"], dict)
+        or "source_bar" not in row["payload"]
+        for row in event_rows
+    )
+    if event_types <= scan_types:
+        expected: set[str] = set()
+    elif is_enter:
+        expected = {pending_target}
+    elif pending_target in state_updates and event_types <= check_types:
+        expected = {pending_target, positions_target, core_account_target}
+    elif pending_target not in state_updates and event_types <= close_types:
+        expected = {positions_target, core_account_target}
+    else:
+        raise ValueError("PaperOps transaction event phases conflict with producer contract")
+    if set(state_updates) != expected:
+        raise ValueError("PaperOps champion transaction target set conflicts with producer")
+
+
+def _validate_run_and_origin_evidence(
+    paths: PaperOpsPaths,
+    event_rows: list[dict[str, object]],
+    state_updates: dict[str, object],
+) -> None:
+    manifests: dict[str, dict[str, object]] = {}
+    for event in event_rows:
+        run_id = str(event["run_id"])
+        manifest = manifests.get(run_id)
+        if manifest is None:
+            manifest_path = paths.manifests / f"{_safe_filename(run_id)}.json"
+            payload = read_json(manifest_path, None) if manifest_path.is_file() else None
+            if not isinstance(payload, dict):
+                raise ValueError("PaperOps transaction run manifest is missing")
+            claimed_hash = payload.get("manifest_payload_hash")
+            unhashed = dict(payload)
+            unhashed.pop("manifest_payload_hash", None)
+            expected_hash = hashlib.sha256(
+                json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if (
+                payload.get("schema_version") != "v2.paper_ops_manifest.v3"
+                or payload.get("run_id") != run_id
+                or payload.get("mode") != event["mode"]
+                or payload.get("run_date") != event["trade_date"]
+                or payload.get("data_snapshot_id")
+                != run_id.removeprefix(
+                    f"paper_ops:{event['mode']}:{event['trade_date']}:"
+                )
+                or claimed_hash != expected_hash
+            ):
+                raise ValueError("PaperOps transaction run manifest identity conflicts")
+            manifest = payload
+            manifests[run_id] = manifest
+        event_payload = event["payload"]
+        assert isinstance(event_payload, dict)
+        if manifest.get("execution_policy_version") != event_payload.get(
+            "execution_policy_version"
+        ):
+            raise ValueError("PaperOps transaction policy conflicts with run manifest")
+
+    registry = _strategy_registry(paths)
+    registry_identities = {
+        (
+            str(row.get("strategy_id") or ""),
+            str(row.get("strategy_version") or ""),
+            str(row.get("execution_policy_version") or ""),
+            str(row.get("strategy_semantics_fingerprint") or ""),
+        )
+        for row in registry
+    }
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        if (
+            "challenger_id" not in payload
+            and _account_series_identity(payload) not in registry_identities
+        ):
+            raise ValueError("PaperOps transaction strategy is absent from the exact registry")
+
+    existing_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
+    transaction_scan_events = {
+        str(payload["pick_id"]): event
+        for event in event_rows
+        for payload in [event["payload"]]
+        if event["event_type"] == "paper_pick_decision" and isinstance(payload, dict)
+    }
+    persisted_scan_events = {
+        str(payload["pick_id"]): event
+        for event in existing_events
+        for payload in [event.get("payload")]
+        if event.get("event_type") == "paper_pick_decision" and isinstance(payload, dict)
+    }
+    for event in event_rows:
+        if event["event_type"] != "paper_order_created":
+            continue
+        order = event["payload"]
+        assert isinstance(order, dict)
+        pick_id = str(order["pick_id"])
+        is_shadow = "challenger_id" in order
+        origin = (transaction_scan_events if is_shadow else persisted_scan_events).get(pick_id)
+        if origin is None or not isinstance(origin.get("payload"), dict):
+            raise ValueError("PaperOps created order lacks its accepted scan decision")
+        pick = origin["payload"]
+        assert isinstance(pick, dict)
+        _validate_transaction_event_rows([dict(origin)])
+        _validate_order_pick_lineage(order, pick)
+        if not is_shadow:
+            picks_path = (
+                paths.exports
+                / f"picks_{event['mode']}_{event['trade_date']}.json"
+            )
+            picks_payload = read_json(picks_path, None) if picks_path.is_file() else None
+            if not isinstance(picks_payload, list):
+                raise ValueError("PaperOps created order pick artifact is missing")
+            matches = [
+                row
+                for row in picks_payload
+                if isinstance(row, dict) and row.get("pick_id") == pick_id
+            ]
+            if matches != [_model_projection(pick, _PICK_FIELDS)]:
+                raise ValueError("PaperOps created order pick artifact conflicts")
+
+
+def _validate_order_pick_lineage(
+    order: dict[str, object], pick: dict[str, object]
+) -> None:
+    if pick.get("decision") != PaperPickDecision.ACCEPTED.value:
+        raise ValueError("PaperOps created order did not originate from an accepted pick")
+    field_pairs = {
+        "pick_id": "pick_id",
+        "run_id": "run_id",
+        "mode": "mode",
+        "trade_date": "trade_date",
+        "strategy_id": "strategy_id",
+        "strategy_version": "strategy_version",
+        "symbol": "symbol",
+        "direction": "direction",
+        "signal_time": "signal_time",
+        "entry": "entry_reference",
+        "stop": "stop",
+        "target": "target",
+        "reward_per_unit": "reward_per_unit",
+        "reward_risk": "reward_risk",
+        "execution_policy_version": "execution_policy_version",
+        "strategy_semantics_fingerprint": "strategy_semantics_fingerprint",
+        "warnings": "warnings",
+    }
+    if any(
+        order.get(order_field) != pick.get(pick_field)
+        for order_field, pick_field in field_pairs.items()
+    ):
+        raise ValueError("PaperOps created order conflicts with its accepted pick")
+
+
+def _validate_immutable_transaction_outputs(
+    paths: PaperOpsPaths, state_updates: dict[str, object]
+) -> None:
+    for relative_name, proposed in state_updates.items():
+        if not (
+            relative_name.startswith("exports/shadow_")
+            or relative_name.startswith("manifests/shadow_")
+        ):
+            continue
+        target = paths.root.joinpath(*relative_name.split("/"))
+        if target.is_file() and read_json(target, None) != proposed:
+            raise ValueError(
+                "PaperOps immutable transaction output conflicts with persisted evidence"
+            )
+
+
+def _validate_contextual_event_ids(
+    event_rows: list[dict[str, object]],
+    *,
+    challenger_id: str | None,
+    pending_target: str,
+    positions_target: str,
+    core_account_target: str,
+    state_updates: dict[str, object],
+) -> None:
+    del positions_target, core_account_target
+    for event in event_rows:
+        event_type = str(event["event_type"])
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        trade_date = str(event["trade_date"])
+        if event_type == "paper_pick_decision":
+            phase, entity = "scan", str(payload["pick_id"])
+        elif event_type == "paper_no_setup_decision":
+            phase, entity = "scan", str(payload["decision_id"])
+        elif event_type == "paper_order_created":
+            phase, entity = "enter", str(payload["order_id"])
+        elif event_type == "paper_order_blocked":
+            phase = "check" if "source_bar" in payload else "enter"
+            entity = f"{payload['order_id']}:{payload['reason']}"
+        elif event_type == "paper_order_pending_no_fill_data":
+            phase, entity = "check", f"{payload['order_id']}:pending_check:{trade_date}"
+        elif event_type == "paper_fill":
+            phase, entity = "check", str(payload["fill_id"])
+        elif event_type == "paper_position_opened":
+            phase, entity = "check", str(payload["position_id"])
+        elif event_type == "paper_position_checked_no_action":
+            phase, entity = "check", f"{payload['position_id']}:checked:{trade_date}"
+        elif event_type == "paper_position_marked_to_market":
+            phase = "close"
+            marker = "shadow_mark" if challenger_id is not None else "mark"
+            entity = f"{payload['position_id']}:{marker}:{trade_date}"
+        else:
+            phase = (
+                "check"
+                if challenger_id is not None or pending_target in state_updates
+                else "close"
+            )
+            entity = str(payload["close_id"])
+        expected = stable_id(
+            "paper_ops_event",
+            event["mode"],
+            trade_date,
+            phase,
+            event_type,
+            entity,
+        )
+        if event["event_id"] != expected:
+            raise ValueError(
+                "PaperOps transaction event phase identity conflicts with producer context"
+            )
+
+
+def _event_run(event: dict[str, object], payload: dict[str, object]) -> PaperRun:
+    run_id = str(event["run_id"])
+    return PaperRun(
+        run_id=run_id,
+        mode=PaperRunMode(str(event["mode"])),
+        run_date=str(event["trade_date"]),
+        data_snapshot_id=str(payload["data_snapshot_id"]),
+        created_at=str(payload["source_bar"]["timestamp"]),
+    )
+
+
+def _event_source_bar(payload: dict[str, object]) -> MarketBar:
+    row = payload["source_bar"]
+    assert isinstance(row, dict)
+    return MarketBar(
+        symbol=str(row["symbol"]),
+        timestamp=datetime.fromisoformat(str(row["timestamp"])),
+        open=float(row["open"]),
+        high=float(row["high"]),
+        low=float(row["low"]),
+        close=float(row["close"]),
+        volume=int(row["volume"]),
+    )
+
+
+def _validate_fill_against_order(
+    event: dict[str, object], order_row: dict[str, object], config: PaperOpsConfig
+) -> None:
+    payload = event["payload"]
+    assert isinstance(payload, dict)
+    order = _order_from_row(order_row)
+    bar = _event_source_bar(payload)
+    if bar.timestamp <= datetime.fromisoformat(order.signal_time):
+        raise ValueError("PaperOps fill source bar is not after its order signal")
+    expected = _fill_order(order, bar, _event_run(event, payload), config).to_dict()
+    if _model_projection(payload, _FILL_FIELDS) != expected:
+        raise ValueError("PaperOps fill economics conflict with order/source-bar lineage")
+    if (
+        order.direction == Direction.LONG
+        and bar.open <= order.stop
+        or order.direction == Direction.SHORT
+        and bar.open >= order.stop
+        or order.target is not None
+        and (
+            order.direction == Direction.LONG
+            and expected["fill_price"] >= order.target
+            or order.direction == Direction.SHORT
+            and expected["fill_price"] <= order.target
+        )
+    ):
+        raise ValueError("PaperOps fill should have been blocked by entry-price safety")
+
+
+def _validate_open_position_lineage(
+    event: dict[str, object],
+    position_row: dict[str, object],
+    order_row: dict[str, object],
+    fill_row: dict[str, object],
+) -> None:
+    order = _order_from_row(order_row)
+    fill = PaperFill(
+        fill_id=str(fill_row["fill_id"]),
+        order_id=str(fill_row["order_id"]),
+        run_id=str(fill_row["run_id"]),
+        mode=PaperRunMode(str(fill_row["mode"])),
+        strategy_id=str(fill_row["strategy_id"]),
+        strategy_version=str(fill_row["strategy_version"]),
+        symbol=str(fill_row["symbol"]),
+        fill_time=str(fill_row["fill_time"]),
+        fill_price=float(fill_row["fill_price"]),
+        quantity=int(fill_row["quantity"]),
+        fee=float(fill_row["fee"]),
+        slippage=float(fill_row["slippage"]),
+        execution_policy_version=str(fill_row["execution_policy_version"]),
+        strategy_semantics_fingerprint=str(fill_row["strategy_semantics_fingerprint"]),
+    )
+    expected = _position_from_fill(order, fill).to_dict()
+    if position_row != expected:
+        raise ValueError("PaperOps opened position conflicts with exact order/fill lineage")
+    payload = event["payload"]
+    assert isinstance(payload, dict)
+    fill_source = fill_row.get("source_bar")
+    if payload.get("source_bar") != fill_source:
+        raise ValueError("PaperOps fill and opened-position source bars conflict")
+
+
+def _validate_position_lifecycle_event(
+    event: dict[str, object],
+    current_row: dict[str, object],
+    config: PaperOpsConfig,
+    *,
+    expect_close: bool,
+) -> dict[str, object]:
+    payload = event["payload"]
+    assert isinstance(payload, dict)
+    current = _position_from_row(current_row)
+    bar = _event_source_bar(payload)
+    checked, close_record = _check_position(current, bar, _event_run(event, payload), config)
+    if expect_close:
+        if (
+            close_record is None
+            or _model_projection(payload, _CLOSE_FIELDS) != close_record.to_dict()
+        ):
+            raise ValueError(
+                "PaperOps close conflicts with position/source-bar lifecycle semantics"
+            )
+        return current_row
+    if (
+        close_record is not None
+        or _model_projection(payload, _POSITION_FIELDS) != checked.to_dict()
+    ):
+        raise ValueError("PaperOps mark conflicts with position/source-bar lifecycle semantics")
+    return checked.to_dict()
+
+
+def _validate_shadow_account_coherence(
+    state_updates: dict[str, object],
+    *,
+    shadow_account_target: str,
+    core_account_target: str,
+    positions_target: str,
+) -> None:
+    shadow_payload = state_updates[shadow_account_target]
+    core_payload = state_updates[core_account_target]
+    positions = state_updates[positions_target]
+    assert isinstance(shadow_payload, dict)
+    assert isinstance(core_payload, dict)
+    assert isinstance(positions, list)
+    account = shadow_payload["account"]
+    assert isinstance(account, dict)
+    identity = _account_series_identity(account)
+    core_matches = [
+        row
+        for row in core_payload["accounts"]
+        if isinstance(row, dict) and _account_series_identity(row) == identity
+    ]
+    if core_matches != [account]:
+        raise ValueError("PaperOps shadow and core account state conflict")
+    unrealized = sum(
+        float(row["unrealized_pnl"])
+        for row in positions
+        if isinstance(row, dict) and _position_series_identity(row) == identity
+    )
+    if not math.isclose(float(account["unrealized_pnl"]), unrealized, rel_tol=1e-12, abs_tol=1e-9):
+        raise ValueError("PaperOps shadow account unrealized PnL conflicts with positions")
+
+
+def _validate_shadow_evidence_coherence(
+    event_rows: list[dict[str, object]],
+    state_updates: dict[str, object],
+    *,
+    pending_target: str,
+    positions_target: str,
+    shadow_account_target: str,
+    decisions_target: str,
+    picks_target: str,
+    order_decisions_target: str,
+    manifest_target: str,
+) -> None:
+    decisions = state_updates[decisions_target]
+    picks = state_updates[picks_target]
+    order_decisions = state_updates[order_decisions_target]
+    manifest = state_updates[manifest_target]
+    pending = state_updates[pending_target]
+    positions = state_updates[positions_target]
+    shadow_account = state_updates[shadow_account_target]
+    assert isinstance(decisions, list)
+    assert isinstance(picks, list)
+    assert isinstance(order_decisions, list)
+    assert isinstance(manifest, dict)
+    assert isinstance(pending, list)
+    assert isinstance(positions, list)
+    assert isinstance(shadow_account, dict)
+    account = shadow_account["account"]
+    assert isinstance(account, dict)
+
+    expected_decisions: list[dict[str, object]] = []
+    expected_picks: list[dict[str, object]] = []
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        if event["event_type"] == "paper_pick_decision":
+            pick = _model_projection(payload, _PICK_FIELDS)
+            expected_picks.append(pick)
+            expected_decisions.append(
+                {
+                    **pick,
+                    "decision_status": pick["decision"],
+                    "trade_return_eligible": pick["decision"]
+                    == PaperPickDecision.ACCEPTED.value,
+                    "trade_return_pct": None,
+                    "challenger_id": payload["challenger_id"],
+                    "logic_artifact_sha256": payload["logic_artifact_sha256"],
+                }
+            )
+        elif event["event_type"] == "paper_no_setup_decision":
+            expected_decisions.append(dict(payload))
+    if picks != expected_picks or decisions != expected_decisions:
+        raise ValueError("PaperOps shadow scan artifacts conflict with ledger decisions")
+    symbols = [str(row["symbol"]) for row in decisions if isinstance(row, dict)]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("PaperOps shadow decision symbols are duplicated")
+    if manifest["decision_coverage"] != len(decisions):
+        raise ValueError("PaperOps shadow manifest decision coverage conflicts")
+    if manifest["decision_artifact_sha256"] != _transaction_payload_sha256(decisions):
+        raise ValueError("PaperOps shadow manifest decision hash conflicts")
+    if manifest["decision_symbols_sha256"] != _transaction_payload_sha256(sorted(symbols)):
+        raise ValueError("PaperOps shadow manifest decision-symbol hash conflicts")
+    if manifest["transaction_event_count"] != len(event_rows):
+        raise ValueError("PaperOps shadow manifest event count conflicts")
+    if manifest["transaction_event_ids_sha256"] != _transaction_payload_sha256(
+        sorted(str(row["event_id"]) for row in event_rows)
+    ):
+        raise ValueError("PaperOps shadow manifest event-ID hash conflicts")
+    if manifest["transaction_events_sha256"] != _transaction_payload_sha256(event_rows):
+        raise ValueError("PaperOps shadow manifest event hash conflicts")
+    event_count_fields = {
+        "orders_created": "paper_order_created",
+        "orders_blocked": "paper_order_blocked",
+        "fills": "paper_fill",
+        "closes": "paper_position_closed",
+    }
+    for manifest_field, event_type in event_count_fields.items():
+        observed = sum(row["event_type"] == event_type for row in event_rows)
+        if manifest[manifest_field] != observed:
+            raise ValueError("PaperOps shadow manifest lifecycle count conflicts")
+    if manifest["pending_orders"] != len(pending) or manifest["open_positions"] != len(positions):
+        raise ValueError("PaperOps shadow manifest state count conflicts")
+    account_identity = _account_series_identity(account)
+    manifest_identity = (
+        str(manifest["strategy_id"]),
+        str(manifest["strategy_version"]),
+        str(manifest["execution_policy_version"]),
+        str(manifest["strategy_semantics_fingerprint"]),
+    )
+    event_identities = {
+        _account_series_identity(payload)
+        for row in event_rows
+        for payload in [row["payload"]]
+        if isinstance(payload, dict)
+    }
+    if manifest_identity != account_identity or event_identities != {account_identity}:
+        raise ValueError("PaperOps shadow manifest strategy lineage conflicts")
+    logic_hashes = {str(row["logic_artifact_sha256"]) for row in decisions if isinstance(row, dict)}
+    if logic_hashes != {str(manifest["logic_artifact_sha256"])}:
+        raise ValueError("PaperOps shadow manifest logic lineage conflicts")
+    expected_order_decisions: list[dict[str, object]] = []
+    for event in event_rows:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        if event["event_type"] == "paper_order_created":
+            expected_order_decisions.append(
+                {
+                    "decision": "created",
+                    "reason": "risk_checks_passed",
+                    **_model_projection(payload, _ORDER_FIELDS),
+                }
+            )
+        elif event["event_type"] == "paper_order_blocked":
+            expected_order_decisions.append(
+                {key: value for key, value in payload.items() if key != "challenger_id"}
+            )
+    if order_decisions != expected_order_decisions:
+        raise ValueError("PaperOps shadow order-decision artifacts conflict with ledger events")
+
+
+def _transaction_payload_sha256(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _account_series_identity(row: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(row["strategy_id"]),
+        str(row["strategy_version"]),
+        str(row["execution_policy_version"]),
+        str(row["strategy_semantics_fingerprint"]),
+    )
+
+
+def _position_series_identity(row: dict[str, object]) -> tuple[str, str, str, str]:
+    return _account_series_identity(row)
+
+
+def _transaction_target_identity(
+    relative_name: str,
+) -> tuple[str | None, str | None, str | None, str]:
+    match = re.fullmatch(
+        r"state/(?:(replay|demo)_)?(pending_orders|open_positions|paper_accounts)\.json",
+        relative_name,
+    )
+    if match:
+        family = "accounts" if match.group(2) == "paper_accounts" else match.group(2)
+        return match.group(1) or "forward", None, None, family
+    match = re.fullmatch(
+        r"state/shadow/([a-z0-9][a-z0-9_.-]{2,80})/(forward|replay|demo)_(pending_orders|open_positions|account)\.json",
+        relative_name,
+    )
+    if match:
+        return match.group(2), None, match.group(1), match.group(3)
+    match = re.fullmatch(
+        r"(?:exports/shadow_(?:strategy_decisions|picks|order_decisions)|manifests/shadow)_(forward|replay|demo)_(\d{4}-\d{2}-\d{2})_([a-z0-9][a-z0-9_.-]{2,80})\.json",
+        relative_name,
+    )
+    if match:
+        return match.group(1), match.group(2), match.group(3), "evidence"
+    raise ValueError("PaperOps transaction target identity is unsupported")
+
+
+def _model_projection(row: dict[str, object], fields: frozenset[str]) -> dict[str, object]:
+    return {field: row[field] for field in fields}
 
 
 def _paper_transaction_id(

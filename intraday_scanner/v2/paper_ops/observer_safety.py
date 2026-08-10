@@ -268,7 +268,6 @@ def _require_calendar_evidence(path: Path) -> None:
                 "mode",
                 "strategy_id",
                 "strategy_version",
-                "execution_policy_version",
                 "data_snapshot_id",
                 "run_id",
             )
@@ -479,7 +478,6 @@ def _calendar_run_identities(path: Path) -> dict[str, _CalendarRunIdentity]:
                 "mode",
                 "strategy_id",
                 "strategy_version",
-                "execution_policy_version",
                 "data_snapshot_id",
                 "run_id",
             )
