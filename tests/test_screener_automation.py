@@ -84,6 +84,7 @@ def test_normalize_screener_file_command_writes_canonical_snapshot(tmp_path):
             str(db_path),
             "--ai-normalizer",
             "none",
+            "--persist",
         ]
     )
 

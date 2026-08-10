@@ -11,3 +11,4 @@ def test_scheduler_pushes_real_recommendation_notifications():
     assert "notify-test" not in push["command"]
     assert "--provider alpaca" in monitor["command"]
     assert "--continuous" in monitor["command"]
+    assert "--persist" in monitor["command"]

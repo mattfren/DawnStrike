@@ -45,6 +45,32 @@ NON_KEYWORD_OBSERVER_COMMANDS = {
     "attribute-returns": "_run_attribute_returns",
     "alpha-alert-replay": "_run_alpha_alert_replay",
 }
+CONDITIONAL_NO_PERSIST_COMMANDS = {
+    "free-shadow-scan": "_run_free_shadow_scan",
+    "normalize-screener-file": "_run_normalize_screener_file",
+    "auto-shadow-from-screener": "_run_auto_shadow_from_screener",
+    "web-collect-sec-risk": "_run_web_collect_sec_risk",
+    "alpha-capture-outcomes": "_run_alpha_capture_outcomes",
+    "alpha-paper-reconcile": "_run_alpha_paper_reconcile",
+    "live-scan": "_run_live_scan",
+    "monitor-setups": "_run_monitor_setups",
+    "monitor-loop": "_run_monitor_loop",
+    "monitor-open": "_run_monitor_open",
+    "price-observe": "_run_price_observe",
+}
+CONDITIONAL_HANDLER_MARKERS = {
+    "_run_free_shadow_scan": ("args.persist",),
+    "_run_normalize_screener_file": ("args.persist",),
+    "_run_auto_shadow_from_screener": ("persist=args.persist",),
+    "_run_web_collect_sec_risk": ("persist=args.persist",),
+    "_run_alpha_capture_outcomes": ("persist=args.persist",),
+    "_run_alpha_paper_reconcile": ("persist=args.persist",),
+    "_run_live_scan": ("args.persist",),
+    "_run_monitor_setups": ("read_only=not args.persist", "persist=args.persist"),
+    "_run_monitor_loop": ("_run_monitor_setups",),
+    "_run_monitor_open": ("_run_monitor_loop",),
+    "_run_price_observe": ("persist=not args.no_persist",),
+}
 
 
 def _parser_command_literals() -> set[str]:
@@ -87,6 +113,21 @@ def test_non_keyword_observer_handlers_remain_explicitly_read_only() -> None:
     commands = _parser_command_literals()
     assert set(NON_KEYWORD_OBSERVER_COMMANDS) <= commands
     assert set(NON_KEYWORD_OBSERVER_COMMANDS.values()) <= set(handlers)
+
+
+def test_conditional_no_persist_command_registry_is_complete_and_guarded() -> None:
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    handlers = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert set(CONDITIONAL_NO_PERSIST_COMMANDS) <= _parser_command_literals()
+    assert set(CONDITIONAL_NO_PERSIST_COMMANDS.values()) <= set(handlers)
+    for handler, markers in CONDITIONAL_HANDLER_MARKERS.items():
+        for marker in markers:
+            assert marker in handlers[handler], f"{handler} lost no-persist guard {marker!r}"
 
 
 @pytest.mark.parametrize(

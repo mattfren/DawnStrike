@@ -26,7 +26,9 @@ def test_cli_live_scan_missing_keys_records_provider_health(monkeypatch, tmp_pat
     monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
     db_path = tmp_path / "scanner.sqlite"
 
-    status = main(["live-scan", "--symbols", "NOVA", "--db-path", str(db_path)])
+    status = main(
+        ["live-scan", "--symbols", "NOVA", "--db-path", str(db_path), "--persist"]
+    )
 
     captured = capsys.readouterr()
     health = SQLiteScanStore(db_path).load_provider_health()

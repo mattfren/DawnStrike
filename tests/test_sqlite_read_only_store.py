@@ -35,6 +35,22 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _tree(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
+    directories = tuple(
+        sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_dir()
+        )
+    )
+    files = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+    return directories, files
+
+
 def _table_hash(path: Path, table: str) -> str:
     with connect_read_only(path) as connection:
         columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
@@ -82,6 +98,75 @@ def test_missing_database_and_parent_are_never_created(tmp_path: Path) -> None:
         connect_read_only(path)
     assert not path.exists()
     assert not path.parent.exists()
+
+
+def test_connect_read_only_rejects_active_wal_before_connection_without_mutation(
+    tmp_path: Path,
+) -> None:
+    db_root = tmp_path / "db-root"
+    db_root.mkdir()
+    path = db_root / "state.sqlite"
+    writer = sqlite3.connect(path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        writer.execute("INSERT INTO evidence VALUES ('committed')")
+        writer.commit()
+        assert Path(f"{path}-wal").is_file()
+        assert Path(f"{path}-shm").is_file()
+        before = _tree(db_root)
+
+        with pytest.raises(StorageError, match="active SQLite sidecar"):
+            connect_read_only(path)
+
+        assert _tree(db_root) == before
+    finally:
+        writer.close()
+
+
+def test_connect_read_only_rejects_dormant_wal_header_without_mutation(tmp_path: Path) -> None:
+    db_root = tmp_path / "db-root"
+    db_root.mkdir()
+    path = db_root / "state.sqlite"
+    writer = sqlite3.connect(path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        writer.execute("INSERT INTO evidence VALUES ('committed')")
+        writer.commit()
+    finally:
+        writer.close()
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
+    before = _tree(db_root)
+
+    with pytest.raises(StorageError, match="WAL-mode SQLite header"):
+        connect_read_only(path)
+
+    assert _tree(db_root) == before
+
+
+def test_connect_read_only_rejects_existing_rollback_journal_before_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_root = tmp_path / "db-root"
+    db_root.mkdir()
+    path = db_root / "state.sqlite"
+    with sqlite3.connect(path) as writer:
+        writer.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+    Path(f"{path}-journal").write_bytes(b"active rollback journal fixture")
+    before = _tree(db_root)
+
+    def forbidden_connect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("sidecar preflight must run before sqlite3.connect")
+
+    monkeypatch.setattr(sqlite3, "connect", forbidden_connect)
+    with pytest.raises(StorageError, match="state.sqlite-journal"):
+        connect_read_only(path)
+
+    assert _tree(db_root) == before
 
 
 def test_connect_read_only_closes_connection_when_setup_fails(

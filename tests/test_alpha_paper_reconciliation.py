@@ -12,6 +12,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
+from intraday_scanner.cli import main as cli_main
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
@@ -29,6 +30,22 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 DAY = "2026-07-15"
 SIGNAL_ID = "scan-paper:1:NOVA"
 SELECTION_ID = "selection-paper-nova"
+
+
+def _tree(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
+    directories = tuple(
+        sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_dir()
+        )
+    )
+    files = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+    return directories, files
 
 
 def test_paper_reconciliation_preserves_canonical_path_truth_status() -> None:
@@ -145,6 +162,48 @@ def test_complete_sourced_outcome_creates_exact_paper_entry_exit_and_return(
     assert labels["trade_return"]["label_value"] == trade["net_return_pct"]
     assert result["evaluations"][0]["source_bar_hash_sha256"] == "bars-hash"
     assert result["evaluations"][0]["reconciliation_status"] == "resolved"
+
+
+@pytest.mark.parametrize("via_cli", (False, True))
+def test_reconciliation_preview_preserves_existing_database_bytes(
+    tmp_path: Path,
+    via_cli: bool,
+) -> None:
+    db_root = tmp_path / "db-root"
+    db_path = db_root / "alpha.sqlite"
+    store = SQLiteScanStore(db_path)
+    _seed_selection(store)
+    _persist_outcome(store, outcome_status="complete_sourced")
+    before = _tree(db_root)
+    out_dir = tmp_path / "reports"
+
+    if via_cli:
+        assert (
+            cli_main(
+                [
+                    "alpha-paper-reconcile",
+                    "--db-path",
+                    str(db_path),
+                    "--market-date",
+                    DAY,
+                    "--out-dir",
+                    str(out_dir),
+                ]
+            )
+            == 0
+        )
+    else:
+        result = reconcile_alpha_paper_trades(
+            db_path=db_path,
+            market_date=DAY,
+            out_dir=out_dir,
+            persist=False,
+            config=ScannerConfig(slippage_bps=50.0),
+        )
+        assert result["status"] == "complete"
+
+    assert (out_dir / DAY / "reconciliation.json").is_file()
+    assert _tree(db_root) == before
 
 
 def test_reconciliation_correction_atomically_removes_stale_trade_and_return_label(

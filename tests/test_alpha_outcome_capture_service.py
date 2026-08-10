@@ -22,6 +22,22 @@ from intraday_scanner.services.learning_service import run_alpha_learning
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 EASTERN = ZoneInfo("America/New_York")
+
+
+def _tree(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
+    directories = tuple(
+        sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_dir()
+        )
+    )
+    files = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+    return directories, files
 DAY = "2026-07-13"
 
 
@@ -660,6 +676,28 @@ def test_existing_sourced_outcome_repairs_a_missing_audit_event(tmp_path: Path) 
     assert repaired["status"] == "already_captured"
     assert repaired["audit_events"]["inserted"] == 1
     assert len(store.load_signal_events(signal_id="signal-1")) == 1
+
+
+def test_sourced_capture_preview_preserves_existing_database_bytes(tmp_path: Path) -> None:
+    db_root = tmp_path / "db-root"
+    db_path = db_root / "preview.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_selected_signals(store, [_signal()])
+    before = _tree(db_root)
+
+    result = capture_sourced_alpha_outcomes(
+        db_path=db_path,
+        market_date=DAY,
+        requested_at=f"{DAY}T16:05:00-04:00",
+        out_dir=tmp_path / "preview",
+        persist=False,
+        config=ScannerConfig(),
+        fetcher=lambda *_args, **_kwargs: _chart_payload(_contiguous_bars()),
+    )
+
+    assert result["status"] == "complete"
+    assert (tmp_path / "preview" / "alpha_outcome_capture.json").is_file()
+    assert _tree(db_root) == before
 
 
 def test_mixed_repair_and_new_event_accounting_is_aggregated(tmp_path: Path) -> None:
