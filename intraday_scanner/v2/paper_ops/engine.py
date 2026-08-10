@@ -3529,11 +3529,86 @@ def _serialize_transaction_events(events: list[PaperLedgerEvent]) -> list[dict[s
 
 
 def _validate_transaction_event_rows(event_rows: list[dict[str, object]]) -> None:
+    entity_fields = {
+        "paper_pick_decision": "pick_id",
+        "paper_no_setup_decision": "decision_id",
+        "paper_order_created": "order_id",
+        "paper_order_blocked": "order_id",
+        "paper_order_pending_no_fill_data": "order_id",
+        "paper_fill": "fill_id",
+        "paper_position_opened": "position_id",
+        "paper_position_checked_no_action": "position_id",
+        "paper_position_marked_to_market": "position_id",
+        "paper_position_closed": "close_id",
+    }
+    payload_schemas = {
+        "paper_pick_decision": "v2.paper_pick.v2",
+        "paper_no_setup_decision": "v2.paper_strategy_decision.v1",
+        "paper_order_created": "v2.paper_order.v2",
+        "paper_order_blocked": "v2.paper_order.v2",
+        "paper_order_pending_no_fill_data": "v2.paper_order.v2",
+        "paper_fill": "v2.paper_fill.v3",
+        "paper_position_opened": "v2.paper_position.v2",
+        "paper_position_checked_no_action": "v2.paper_position.v2",
+        "paper_position_marked_to_market": "v2.paper_position.v2",
+        "paper_position_closed": "v2.paper_close.v2",
+    }
+    seen_event_ids: set[str] = set()
     for row in event_rows:
-        if not all(str(row.get(field) or "").strip() for field in ("event_id", "event_type")):
+        if row.get("schema_version") != "v2.paper_ledger_event.v1":
             raise ValueError("PaperOps transaction journal events are malformed")
-        if not isinstance(row.get("payload"), dict):
+        required = ("event_id", "event_type", "run_id", "strategy_id", "symbol")
+        if not all(
+            isinstance(row.get(field), str) and str(row[field]).strip()
+            for field in required
+        ):
             raise ValueError("PaperOps transaction journal events are malformed")
+        event_id = str(row["event_id"])
+        if event_id in seen_event_ids:
+            raise ValueError("PaperOps transaction journal has duplicate event IDs")
+        seen_event_ids.add(event_id)
+        mode = row.get("mode")
+        if not isinstance(mode, str) or mode not in {
+            PaperRunMode.FORWARD.value,
+            PaperRunMode.REPLAY.value,
+            PaperRunMode.DEMO.value,
+        }:
+            raise ValueError("PaperOps transaction journal events are malformed")
+        trade_date = row.get("trade_date")
+        if not isinstance(trade_date, str):
+            raise ValueError("PaperOps transaction journal events are malformed")
+        try:
+            date.fromisoformat(trade_date)
+        except ValueError as exc:
+            raise ValueError("PaperOps transaction journal events are malformed") from exc
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("PaperOps transaction journal events are malformed")
+        event_type = str(row["event_type"])
+        entity_field = entity_fields.get(event_type)
+        if entity_field is None:
+            raise ValueError("PaperOps transaction journal event type is unsupported")
+        entity_id = payload.get(entity_field)
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            raise ValueError("PaperOps transaction journal event entity is malformed")
+        payload_schema = payload.get("schema_version")
+        if payload_schema != payload_schemas[event_type]:
+            raise ValueError("PaperOps transaction journal event schema is malformed")
+        policy = payload.get("execution_policy_version")
+        if not isinstance(policy, str) or not policy.strip():
+            raise ValueError("PaperOps transaction journal event policy is malformed")
+        for field in ("mode", "strategy_id", "symbol"):
+            if field in payload and payload[field] != row[field]:
+                raise ValueError("PaperOps transaction journal event identity conflicts")
+        lifecycle_run_id = payload.get("lifecycle_run_id")
+        if lifecycle_run_id is not None:
+            if not isinstance(lifecycle_run_id, str) or lifecycle_run_id != row["run_id"]:
+                raise ValueError("PaperOps transaction journal event identity conflicts")
+        elif "run_id" in payload and payload["run_id"] != row["run_id"]:
+            raise ValueError("PaperOps transaction journal event identity conflicts")
+        if lifecycle_run_id is None and "trade_date" in payload:
+            if payload["trade_date"] != trade_date:
+                raise ValueError("PaperOps transaction journal event identity conflicts")
 
 
 def _paper_transaction_id(

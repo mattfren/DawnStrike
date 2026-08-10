@@ -232,6 +232,7 @@ def _require_calendar_evidence(path: Path) -> None:
         raise PaperOpsObserverBlocked(
             "INVALID_INPUT", "Calendar CSV contains a malformed evidence row"
         )
+    seen_rows: dict[tuple[str, ...], dict[str, str | None]] = {}
     for row in rows:
         try:
             date.fromisoformat(str(row["date"]))
@@ -260,6 +261,25 @@ def _require_calendar_evidence(path: Path) -> None:
                     "INVALID_INPUT",
                     f"Calendar CSV contains invalid count field {field}",
                 )
+        row_identity = tuple(
+            str(row.get(field) or "")
+            for field in (
+                "date",
+                "mode",
+                "strategy_id",
+                "strategy_version",
+                "execution_policy_version",
+                "data_snapshot_id",
+                "run_id",
+            )
+        )
+        existing_row = seen_rows.get(row_identity)
+        if existing_row is not None:
+            label = "duplicate" if existing_row == row else "conflicting duplicate"
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Calendar CSV contains a {label} evidence row"
+            )
+        seen_rows[row_identity] = row
 
 
 def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) -> None:
@@ -267,42 +287,41 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
 
     calendars = _calendar_run_identities(root / "calendar" / "strategy_daily_returns.csv")
     ledgers = _ledger_run_identities(root / "ledger" / "paper_ledger.jsonl")
-    # Never hide one-sided evidence by intersecting the two sources.  A
-    # selected run is an attestation unit and must be present in both places.
-    applicable: dict[str, _ApplicableRunIdentity] = {}
-    all_run_ids = set(calendars) | set(ledgers)
-    for run_id in all_run_ids:
-        calendar = calendars.get(run_id)
-        ledger = ledgers.get(run_id)
-        candidate_modes = {item["mode"] for item in (calendar, ledger) if item is not None}
-        if mode is not None and mode not in candidate_modes:
-            continue
-        if mode is None and not candidate_modes.intersection({"forward", "replay"}):
-            continue
-        if calendar is None or ledger is None:
-            raise PaperOpsObserverBlocked(
-                "INVALID_INPUT", f"calendar/ledger run coverage conflict for run {run_id}"
-            )
-        if calendar["mode"] != ledger["mode"] or calendar["run_date"] != ledger["run_date"]:
-            raise PaperOpsObserverBlocked(
-                "INVALID_INPUT", f"calendar/ledger identity conflict for run {run_id}"
-            )
-        applicable[run_id] = {
-            **calendar,
-            "ledger_policies": ledger["policies"],
-        }
-    selected = {
+    selected_modes = {mode} if mode is not None else {"forward", "replay"}
+    selected_calendars = {
         run_id: identity
-        for run_id, identity in applicable.items()
-        if mode is None or identity["mode"] == mode
+        for run_id, identity in calendars.items()
+        if identity["mode"] in selected_modes
     }
-    if not selected:
+    selected_ledgers = {
+        run_id: identity
+        for run_id, identity in ledgers.items()
+        if identity["mode"] in selected_modes
+    }
+    if not selected_calendars and not selected_ledgers:
         raise PaperOpsObserverBlocked(
             "MISSING_INPUT",
             f"{command} has no calendar/ledger runs for "
             f"{mode or 'forward/replay'} manifest validation",
         )
-    manifests_by_run: dict[str, list[dict[str, object]]] = {run_id: [] for run_id in selected}
+    calendar_ids = set(selected_calendars)
+    ledger_ids = set(selected_ledgers)
+    if calendar_ids != ledger_ids:
+        conflict = sorted(calendar_ids ^ ledger_ids)[0]
+        raise PaperOpsObserverBlocked(
+            "INVALID_INPUT", f"calendar/ledger run coverage conflict for run {conflict}"
+        )
+    selected: dict[str, _ApplicableRunIdentity] = {}
+    for run_id in sorted(calendar_ids):
+        calendar = selected_calendars[run_id]
+        ledger = selected_ledgers[run_id]
+        if calendar["mode"] != ledger["mode"] or calendar["run_date"] != ledger["run_date"]:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"calendar/ledger identity conflict for run {run_id}"
+            )
+        selected[run_id] = {**calendar, "ledger_policies": ledger["policies"]}
+
+    manifests_by_run: dict[str, list[dict[str, object]]] = {}
     for path in sorted((root / "manifests").glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -316,11 +335,30 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
             )
         if payload.get("schema_version") != "v2.paper_ops_manifest.v3":
             continue
+        manifest_mode = payload.get("mode")
+        if manifest_mode == "demo":
+            continue
+        if manifest_mode not in {"forward", "replay"}:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Run manifest has invalid attestable mode: {path.name}"
+            )
+        if manifest_mode not in selected_modes:
+            continue
         run_id = str(payload.get("run_id") or "").strip()
-        if run_id in manifests_by_run:
-            manifests_by_run[run_id].append(payload)
+        if not run_id:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Run manifest has no run identity: {path.name}"
+            )
+        manifests_by_run.setdefault(run_id, []).append(payload)
+    manifest_ids = set(manifests_by_run)
+    if manifest_ids != calendar_ids:
+        conflict = sorted(manifest_ids ^ calendar_ids)[0]
+        raise PaperOpsObserverBlocked(
+            "INVALID_INPUT",
+            f"calendar/ledger/manifest run coverage conflict for run {conflict}",
+        )
     for run_id, identity in selected.items():
-        candidates = manifests_by_run[run_id]
+        candidates = manifests_by_run.get(run_id, [])
         valid = [
             item
             for item in candidates
@@ -418,6 +456,7 @@ def _calendar_run_identities(path: Path) -> dict[str, _CalendarRunIdentity]:
             rows = list(csv.DictReader(handle))
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise PaperOpsObserverBlocked("INVALID_INPUT", "Calendar CSV is not parseable") from exc
+    seen_rows: dict[tuple[str, ...], dict[str, str | None]] = {}
     for row in rows:
         run_id = str(row.get("run_id") or "").strip()
         run_mode = str(row.get("mode") or "").strip()
@@ -433,6 +472,25 @@ def _calendar_run_identities(path: Path) -> dict[str, _CalendarRunIdentity]:
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", "Calendar CSV contains invalid run date"
             ) from exc
+        row_identity = tuple(
+            str(row.get(field) or "")
+            for field in (
+                "date",
+                "mode",
+                "strategy_id",
+                "strategy_version",
+                "execution_policy_version",
+                "data_snapshot_id",
+                "run_id",
+            )
+        )
+        existing_row = seen_rows.get(row_identity)
+        if existing_row is not None:
+            label = "duplicate" if existing_row == row else "conflicting duplicate"
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Calendar CSV contains a {label} evidence row"
+            )
+        seen_rows[row_identity] = row
         identity = result.setdefault(
             run_id,
             {
