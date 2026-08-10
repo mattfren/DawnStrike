@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -154,7 +155,8 @@ def _seed_pending_journal(root, journal_kind):
             },
         )
         return journal
-    config = paper_ops_engine.PaperOpsConfig()
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    config = paper_ops_engine._config(paths)
     catalog = tuple(paper_ops_engine.build_strategy_catalog())
     strategy_config = paper_ops_engine._strategy_configs(config, catalog)[-1]
     strategy = next(
@@ -163,10 +165,45 @@ def _seed_pending_journal(root, journal_kind):
     strategy_id = strategy.strategy_id
     strategy_version = strategy.version
     semantics = paper_ops_engine._strategy_semantics_fingerprint(strategy)
-    snapshot_id = "observer-recovery-snapshot"
-    run_id = paper_ops_engine.stable_id(
-        "paper_ops", "forward", "2026-01-02", snapshot_id
+    symbol = config.universe_symbols[0]
+    raw_dir = root / "recovery_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    source_csv = root / "recovery_source.csv"
+    paper_ops_engine.write_csv(
+        source_csv,
+        [
+            {
+                "symbol": item,
+                "timestamp": "2026-01-02T19:00:00+00:00",
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0,
+                "volume": 1_000,
+            }
+            for item in config.universe_symbols
+        ],
+        ("symbol", "timestamp", "open", "high", "low", "close", "volume"),
     )
+    data_truth_root = root.parent / "v2_data_truth"
+    result = paper_ops_engine.build_data_truth_snapshot(
+        as_of_date=date(2026, 1, 3),
+        output_root=data_truth_root,
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+        allow_fetch=False,
+    )
+    dataset, _ = paper_ops_engine.load_datatruth_snapshot(
+        result.manifest.snapshot_id,
+        data_truth_root,
+    )
+    run = paper_ops_engine._paper_run(
+        run_date=date(2026, 1, 2),
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        data_snapshot_id=result.manifest.snapshot_id,
+    )
+    run_id = run.run_id
     signal_time = "2026-01-02T20:00:00+00:00"
     policy = config.execution_policy_version
     pick_id = paper_ops_engine.stable_id(
@@ -175,16 +212,9 @@ def _seed_pending_journal(root, journal_kind):
         strategy_id,
         strategy_version,
         policy,
-        "TST",
+        symbol,
         signal_time,
         "long",
-    )
-    run = paper_ops_engine.PaperRun(
-        run_id=run_id,
-        mode=paper_ops_engine.PaperRunMode.FORWARD,
-        run_date="2026-01-02",
-        data_snapshot_id=snapshot_id,
-        created_at=signal_time,
     )
     pick_model = paper_ops_engine.PaperPick(
         pick_id=pick_id,
@@ -194,7 +224,7 @@ def _seed_pending_journal(root, journal_kind):
         strategy_id=strategy_id,
         strategy_version=strategy_version,
         strategy_status="shadow",
-        symbol="TST",
+        symbol=symbol,
         signal_time=signal_time,
         direction="long",
         setup_score=1.0,
@@ -215,6 +245,7 @@ def _seed_pending_journal(root, journal_kind):
         pick_model,
         run,
         config,
+        dataset,
         equity_basis=config.starting_equity,
     )
     order_id = order.order_id
@@ -234,32 +265,15 @@ def _seed_pending_journal(root, journal_kind):
         "run_id": run_id,
         "schema_version": "v2.paper_ledger_event.v1",
         "strategy_id": strategy_id,
-        "symbol": "TST",
+        "symbol": symbol,
         "trade_date": "2026-01-02",
     }
-    manifest = paper_ops_engine.PaperOpsManifest(
-        run_id=run_id,
-        mode=paper_ops_engine.PaperRunMode.FORWARD,
-        run_date="2026-01-02",
-        data_snapshot_id=snapshot_id,
-        output_artifacts=(),
-        warnings=(),
-        execution_policy_version=policy,
-        execution_policy_fingerprint="b" * 64,
-        universe_id="observer-recovery-universe",
-        universe_symbols=("TST",),
-    ).to_dict()
-    unhashed_manifest = dict(manifest)
-    unhashed_manifest.pop("manifest_payload_hash", None)
-    manifest["manifest_payload_hash"] = hashlib.sha256(
-        json.dumps(
-            unhashed_manifest, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
-    paths = paper_ops_engine.PaperOpsPaths.create(root)
-    paper_ops_engine.write_json(
-        paths.manifests / f"{paper_ops_engine._safe_filename(run_id)}.json",
-        manifest,
+    paper_ops_engine._ensure_run_manifest(
+        paths,
+        run,
+        config=config,
+        data_manifest=result.manifest,
+        data_truth_root=data_truth_root,
     )
     paper_ops_engine.write_json(
         paths.exports / "picks_forward_2026-01-02.json", [pick]
@@ -278,7 +292,7 @@ def _seed_pending_journal(root, journal_kind):
         mode=paper_ops_engine.PaperRunMode.FORWARD,
         trade_date="2026-01-02",
         strategy_id=strategy_id,
-        symbol="TST",
+        symbol=symbol,
         payload=pick,
     )
     paper_ops_engine._append_events(paths, [scan_event])

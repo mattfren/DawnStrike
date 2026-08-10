@@ -28,7 +28,7 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
 def _canonical_event(
     seed: str = "canonical-event",
     *,
-    symbol: str = "TST",
+    symbol: str = "SPY",
     equity_basis: float | None = None,
     snapshot_id: str = "fixture-snapshot",
 ) -> dict[str, object]:
@@ -152,7 +152,7 @@ def _seed_run_manifest(root: Path, event: dict[str, object]) -> None:
         run_id=run_id,
         mode=paper_ops_engine.PaperRunMode(str(event["mode"])),
         run_date=str(event["trade_date"]),
-        data_snapshot_id="fixture-snapshot",
+        data_snapshot_id=run_id.rsplit(":", 1)[-1],
         output_artifacts=(),
         warnings=(),
         execution_policy_version=str(payload["execution_policy_version"]),
@@ -171,8 +171,17 @@ def _seed_run_manifest(root: Path, event: dict[str, object]) -> None:
 
 
 def _seed_canonical_event_evidence(root: Path, event: dict[str, object]) -> None:
-    _seed_run_manifest(root, event)
     paths = paper_ops_engine.PaperOpsPaths.create(root)
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 2),
+        run_bar=None,
+    )
+    assert bar is None
+    event["run_id"] = run.run_id
+    event_payload = event["payload"]
+    assert isinstance(event_payload, dict)
+    event_payload["run_id"] = run.run_id
     run_id = str(event["run_id"])
     pick = _canonical_pick(event)
     paper_ops_engine.write_json(
@@ -226,6 +235,86 @@ def test_canonical_seeded_order_transaction_applies_exact_ledger_and_state(
     assert paper_ops_engine.read_json(paths.state / "pending_orders.json", None) == [
         event["payload"]
     ]
+
+
+def _invalidate_enter_snapshot_binding(
+    paths: paper_ops_engine.PaperOpsPaths,
+    event: dict[str, object],
+    variant: str,
+) -> None:
+    manifest_path = (
+        paths.manifests
+        / f"{paper_ops_engine._safe_filename(str(event['run_id']))}.json"
+    )
+    if variant == "missing":
+        manifest_path.unlink()
+        return
+    if variant == "incomplete":
+        _seed_run_manifest(paths.root, event)
+        return
+    manifest = paper_ops_engine.read_json(manifest_path, {})
+    assert isinstance(manifest, dict)
+    data_root = (paths.root / str(manifest["data_truth_root_relative"])).resolve()
+    normalized = data_root / str(manifest["data_snapshot_normalized_path"])
+    normalized.write_bytes(normalized.read_bytes() + b"\n")
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ("missing", "incomplete", "tampered", "arbitrary-earliest"),
+)
+def test_new_enter_created_requires_verified_snapshot_and_exact_fill_date(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=root)
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    event = _canonical_event("bound-created")
+    _seed_canonical_event_evidence(root, event)
+    if variant == "arbitrary-earliest":
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        payload["earliest_fill_date"] = "2030-12-31"
+    else:
+        _invalidate_enter_snapshot_binding(paths, event, variant)
+    updates = {"state/pending_orders.json": [event["payload"]]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ("missing", "incomplete", "tampered", "arbitrary-earliest"),
+)
+def test_new_enter_block_requires_verified_snapshot_and_exact_fill_date(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, existing, incoming = _seed_existing_and_incoming_order(root)
+    event = _enter_block_event(incoming, "duplicate_strategy_symbol_exposure")
+    if variant == "arbitrary-earliest":
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        payload["earliest_fill_date"] = "2030-12-31"
+    else:
+        _invalidate_enter_snapshot_binding(paths, event, variant)
+    existing_order = existing["payload"]
+    assert isinstance(existing_order, dict)
+    updates = {"state/pending_orders.json": [existing_order]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root.parent)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root.parent) == before
 
 
 @pytest.mark.parametrize(
@@ -288,7 +377,7 @@ def test_append_events_rejects_malformed_event_without_ledger_or_tree_change(
         mode=paper_ops_engine.PaperRunMode.FORWARD,
         trade_date="2026-01-02",
         strategy_id=str(order_event["strategy_id"]),
-        symbol="TST",
+        symbol=str(order_event["symbol"]),
         payload=pick,
     )
     before = _tree_snapshot(root)
@@ -382,10 +471,10 @@ def test_transaction_recovery_collision_does_not_apply_state_update(
     existing = _canonical_event("collision")
     assert isinstance(existing["payload"], dict)
     _seed_canonical_event_evidence(root, existing)
+    conflicting = copy.deepcopy(existing)
     existing["payload"]["entry"] = 101.0
     append_jsonl_unique(ledger_path, [existing], "event_id")
     ledger_before_recovery = read_jsonl(ledger_path)
-    conflicting = _canonical_event("collision")
     assert isinstance(conflicting["payload"], dict)
     state_updates = {"state/pending_orders.json": [conflicting["payload"]]}
     journal_path = paths.state / "paper_transaction_pending.json"
@@ -1036,7 +1125,7 @@ def test_transaction_rejects_existing_nondirectory_parent_before_any_write(
 def _seed_pending_canonical_order(
     root: Path,
     *,
-    symbol: str = "TST",
+    symbol: str = "SPY",
 ) -> tuple[paper_ops_engine.PaperOpsPaths, dict[str, object]]:
     paper_ops_engine.init(output_root=root)
     paths = paper_ops_engine.PaperOpsPaths.create(root)
@@ -1392,7 +1481,7 @@ def _enter_block_event(
         run_id=str(event["run_id"]),
         mode=paper_ops_engine.PaperRunMode(str(event["mode"])),
         run_date=str(event["trade_date"]),
-        data_snapshot_id="fixture-snapshot",
+        data_snapshot_id=str(event["run_id"]).rsplit(":", 1)[-1],
         created_at="2026-01-02T21:00:00+00:00",
     )
     payload = paper_ops_engine._blocked_order_payload(order, reason, run)
