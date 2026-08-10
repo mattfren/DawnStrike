@@ -152,8 +152,7 @@ def capture_sourced_alpha_outcomes(
     session = _session_window(resolved_date)
     captured_at = utc_now_iso()
     output_dir = Path(out_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
     recover_legacy_alpha_delivery_membership(
         store,
@@ -2175,6 +2174,7 @@ def _write_artifacts(
     source_bars: dict[str, list[dict[str, Any]]],
     capture_attempts: list[dict[str, Any]] | None = None,
 ) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "alpha_outcome_capture.json", summary)
     _write_json(output_dir / "alpha_sourced_outcomes.json", outcomes)
     _write_json(output_dir / "alpha_outcome_capture_diagnostics.json", diagnostics)

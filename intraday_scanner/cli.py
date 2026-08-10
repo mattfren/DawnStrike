@@ -1362,9 +1362,14 @@ def _run_free_shadow_scan(args: argparse.Namespace) -> int:
         database_path=Path(args.db_path) if args.db_path else None,
         top_n=args.top_n,
     )
-    store = SQLiteScanStore(config.database_path)
+    store = SQLiteScanStore(config.database_path) if args.persist else None
     provider = CsvSnapshotProvider(args.snapshot)
-    record_health_check(store, provider="manual_shadow_csv", check=provider.validate_credentials)
+    if store is not None:
+        record_health_check(
+            store,
+            provider="manual_shadow_csv",
+            check=provider.validate_credentials,
+        )
     result = ScanService(provider, store=store).run(config, persist=False)
     result.config.update(
         {
@@ -1376,6 +1381,7 @@ def _run_free_shadow_scan(args: argparse.Namespace) -> int:
         }
     )
     if args.persist:
+        assert store is not None
         store.persist_scan_result(result)
     paths = write_scan_outputs(result, config.output_dir)
     _print_scan_done(paths, result.summary(), args.print_rows)
@@ -1450,7 +1456,11 @@ def _run_normalize_screener_file(args: argparse.Namespace) -> int:
         output_dir=Path(args.out),
         database_path=Path(args.db_path) if args.db_path else None,
     )
-    store = SQLiteScanStore(config.database_path) if args.db_path else None
+    store = (
+        SQLiteScanStore(config.database_path)
+        if args.persist and args.db_path
+        else None
+    )
     result = normalize_screener_file(
         input_path=args.input,
         out_dir=args.out,
@@ -2149,20 +2159,22 @@ def _run_live_scan(args: argparse.Namespace) -> int:
     )
     require_universe(selection.symbols, args.provider)
     provider = AlpacaProvider(config)
-    store = SQLiteScanStore(config.database_path)
-    record_health_check(store, provider="alpaca", check=provider.validate_credentials)
+    store = SQLiteScanStore(config.database_path) if args.persist else None
+    if store is not None:
+        record_health_check(store, provider="alpaca", check=provider.validate_credentials)
     result = ScanService(
         provider, store=store, enrichment_providers=_enrichment_providers(args)
     ).run(config, symbols=selection.symbols, persist=args.persist)
-    record_provider_counts(
-        store,
-        args.provider,
-        provider_count_payload(
-            symbols_requested=selection.symbols,
-            snapshots=[candidate.snapshot for candidate in result.all_candidates],
-            result=result,
-        ),
-    )
+    if store is not None:
+        record_provider_counts(
+            store,
+            args.provider,
+            provider_count_payload(
+                symbols_requested=selection.symbols,
+                snapshots=[candidate.snapshot for candidate in result.all_candidates],
+                result=result,
+            ),
+        )
     paths = write_scan_outputs(result, config.output_dir)
     _print_scan_done(paths, result.summary(), args.print_rows)
     return 0
@@ -2270,7 +2282,7 @@ def _run_backfill_audit(args: argparse.Namespace) -> int:
 
 def _run_monitor_setups(args: argparse.Namespace) -> int:
     config = load_config(database_path=Path(args.db_path) if args.db_path else None)
-    store = SQLiteScanStore(config.database_path)
+    store = SQLiteScanStore(config.database_path, read_only=not args.persist)
     latest = store.load_latest_scan()
     if latest is None:
         print("No persisted scan is available to monitor.", file=sys.stderr)
@@ -2281,7 +2293,13 @@ def _run_monitor_setups(args: argparse.Namespace) -> int:
         return 1
     summary = cast(dict[str, Any], latest.get("summary") or {})
     source_run_id = str(summary.get("run_id") or latest.get("run_id") or "")
-    snapshots = _load_monitor_snapshots(args, config, store, ranked_rows)
+    snapshots = _load_monitor_snapshots(
+        args,
+        config,
+        store,
+        ranked_rows,
+        persist=args.persist,
+    )
     result = run_setup_monitor(
         candidates=ranked_rows,
         snapshots=snapshots,
@@ -2341,27 +2359,32 @@ def _load_monitor_snapshots(
     config: Any,
     store: SQLiteScanStore,
     ranked_rows: list[dict[str, Any]],
+    *,
+    persist: bool,
 ) -> list[Any]:
     provider_name = str(getattr(args, "provider", "csv"))
     symbols = _monitor_symbols(ranked_rows, args, config)
     if provider_name == "alpaca":
         provider = AlpacaProvider(config)
-        record_health_check(store, provider="alpaca", check=provider.validate_credentials)
+        if persist:
+            record_health_check(store, provider="alpaca", check=provider.validate_credentials)
         snapshots = provider.get_premarket_snapshot(symbols, config)
-        record_health_status(
-            store,
-            provider="alpaca",
-            status="ok",
-            detail=f"loaded live monitor snapshot rows={len(snapshots)}",
-        )
+        if persist:
+            record_health_status(
+                store,
+                provider="alpaca",
+                status="ok",
+                detail=f"loaded live monitor snapshot rows={len(snapshots)}",
+            )
         return snapshots
     snapshots = read_snapshot_csv(args.snapshot)
-    record_health_status(
-        store,
-        provider="csv",
-        status="ok",
-        detail=f"loaded monitor snapshot rows={len(snapshots)}",
-    )
+    if persist:
+        record_health_status(
+            store,
+            provider="csv",
+            status="ok",
+            detail=f"loaded monitor snapshot rows={len(snapshots)}",
+        )
     return snapshots
 
 

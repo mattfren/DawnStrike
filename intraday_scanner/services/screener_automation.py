@@ -102,7 +102,6 @@ def normalize_screener_file(
     ai_normalizer: str = "none",
     store: SQLiteScanStore | None = None,
 ) -> dict[str, Any]:
-    ensure_screener_directories()
     source = Path(input_path)
     file_hash = file_sha256(source)
     imported_at = utc_now_iso()
@@ -181,11 +180,12 @@ def auto_shadow_from_screener(
     print_rows: bool = False,
     move_file: bool = True,
 ) -> dict[str, Any]:
-    ensure_screener_directories()
     source = Path(input_path)
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=not persist)
     file_hash = file_sha256(source)
-    if store.has_screener_file_hash(file_hash):
+    is_duplicate = store.has_screener_file_hash(file_hash)
+    ensure_screener_directories()
+    if is_duplicate:
         archive = _archive_file(source, SCREENER_PROCESSED, label="duplicate") if move_file else ""
         result = {
             "run_id": str(uuid.uuid4()),

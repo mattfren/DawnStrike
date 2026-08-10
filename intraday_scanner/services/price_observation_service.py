@@ -58,8 +58,15 @@ def collect_price_observations(
 
     if max_age_seconds <= 0:
         raise SnapshotValidationError("max_age_seconds must be positive.")
-    store = SQLiteScanStore(db_path)
-    store.initialize()
+    store: SQLiteScanStore | None
+    if persist:
+        store = SQLiteScanStore(db_path)
+        store.initialize()
+    elif tickers:
+        store = None
+    else:
+        store = SQLiteScanStore(db_path, read_only=True)
+        store.initialize()
     resolved_source = _resolve_source(source, minute_bars)
     at = parse_requested_at(requested_at, market_date=market_date)
     request_market_date = market_date or at.astimezone(EASTERN).date().isoformat()
@@ -98,11 +105,11 @@ def collect_price_observations(
         )
         for target in targets
     ]
-    persisted = (
-        _persist_price_observations(store, observations, replace=True)
-        if persist
-        else {"inserted": 0, "skipped": 0, "row_count": len(observations)}
-    )
+    if persist:
+        assert store is not None
+        persisted = _persist_price_observations(store, observations, replace=True)
+    else:
+        persisted = {"inserted": 0, "skipped": 0, "row_count": len(observations)}
     usable_count = sum(1 for row in observations if row.get("is_usable"))
     rejected_count = len(observations) - usable_count
     return {
@@ -146,7 +153,7 @@ def _resolve_source(source: str, minute_bars: str | Path | None) -> str:
 
 
 def _price_targets(
-    store: SQLiteScanStore,
+    store: SQLiteScanStore | None,
     *,
     tickers: list[str] | None,
     market_date: str,
@@ -158,6 +165,10 @@ def _price_targets(
                 for ticker in tickers
                 if ticker.strip()
             ]
+        )
+    if store is None:
+        raise SnapshotValidationError(
+            "Price observation without explicit tickers requires an existing SQLite database."
         )
     signals = store.load_historical_signals(market_date=market_date, limit=50)
     if signals:

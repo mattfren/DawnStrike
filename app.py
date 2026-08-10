@@ -379,7 +379,7 @@ def _load_audit(audit_output_dir: str) -> tuple[list[dict[str, Any]], dict[str, 
 
 def _load_monitor_rows(db_path: str, monitor_output_dir: str) -> list[dict[str, Any]]:
     try:
-        rows = SQLiteScanStore(db_path).load_latest_monitor_checks()
+        rows = SQLiteScanStore(db_path, read_only=True).load_latest_monitor_checks()
         if rows:
             return rows
     except (IntradayScannerError, OSError):
@@ -3905,7 +3905,7 @@ def _run_full_web_backtest(
 
 
 def _preview_web_alerts(db_path: str, config: Any) -> dict[str, Any]:
-    latest = SQLiteScanStore(db_path).load_latest_scan()
+    latest = SQLiteScanStore(db_path, read_only=True).load_latest_scan()
     if latest is None:
         raise ValueError("No persisted scan exists yet. Run Scan first.")
     events = scan_events_from_payload(latest, config)

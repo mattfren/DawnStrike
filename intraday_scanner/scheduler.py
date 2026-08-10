@@ -47,7 +47,7 @@ def build_default_schedule() -> list[ScheduledJob]:
             "08:30",
             (
                 "intraday-scan monitor-open --provider alpaca "
-                "--db-path data\\scanner.sqlite --continuous"
+                "--db-path data\\scanner.sqlite --continuous --persist"
             ),
             "Start 1-minute market-open monitoring.",
         ),

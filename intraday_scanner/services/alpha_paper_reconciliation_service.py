@@ -26,6 +26,7 @@ from intraday_scanner.alpha.v5_policy import (
     is_v5_active,
 )
 from intraday_scanner.config import ScannerConfig, load_config
+from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.models import utc_now_iso
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -89,7 +90,7 @@ def reconcile_alpha_paper_trades(
         else EXECUTION_POLICY_VERSION
     )
     scanner_config = config or load_config(database_path=Path(db_path))
-    store = SQLiteScanStore(db_path)
+    store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
     recovery = recover_legacy_alpha_delivery_membership(
         store,
@@ -123,6 +124,16 @@ def reconcile_alpha_paper_trades(
         if no_trade_selections
         else "missing_selection_evidence"
     )
+    if not session_selections and not persist:
+        raise SnapshotValidationError(
+            "Exact AlphaOps session selection evidence is absent; reconciliation "
+            "is blocked before publishing artifacts."
+        )
+    if selections and no_trade_selections:
+        raise SnapshotValidationError(
+            "AlphaOps session selection evidence is contradictory: explicit no-trade "
+            "and selected signals coexist."
+        )
     deliveries = [
         row
         for row in store.load_notification_deliveries(limit=50_000)

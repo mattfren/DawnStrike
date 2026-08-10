@@ -135,9 +135,19 @@ def web_collect_sec_risk(
 ) -> dict[str, Any]:
     config = load_web_sources_config(config_path)
     require_enabled(config)
-    store = SQLiteScanStore(db_path)
+    store: SQLiteScanStore | None
+    if persist:
+        store = SQLiteScanStore(db_path)
+    elif tickers:
+        store = None
+    else:
+        store = SQLiteScanStore(db_path, read_only=True)
     source = get_source(config, "sec_edgar") or WebSourceConfig(name="sec_edgar", type="sec_edgar")
-    selected = tickers or _latest_scan_tickers(store)
+    if tickers:
+        selected = tickers
+    else:
+        assert store is not None
+        selected = _latest_scan_tickers(store)
     return collect_sec_risk(
         source=source,
         config=config,
