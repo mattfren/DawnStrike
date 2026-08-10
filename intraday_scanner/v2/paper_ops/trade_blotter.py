@@ -74,9 +74,26 @@ def build_trade_blotter(
     output_root: Path,
     mode: str | None = None,
     run_date: str | None = None,
-    _writer_authorized: bool = False,
 ) -> dict[str, object]:
-    rows, warnings = _materialize_rows(output_root, observer=not _writer_authorized)
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
+
+    require_observer_command(output_root, "blotter")
+    return _build_trade_blotter_writer(
+        output_root=output_root,
+        mode=mode,
+        run_date=run_date,
+    )
+
+
+def _build_trade_blotter_writer(
+    *,
+    output_root: Path,
+    mode: str | None = None,
+    run_date: str | None = None,
+) -> dict[str, object]:
+    """Write blotter artifacts for an already writer-authorized tree."""
+
+    rows, warnings = _materialize_rows_unchecked(output_root)
     selected = [
         row
         for row in rows
@@ -102,8 +119,8 @@ def verify_trade_blotter(
 ) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_command(output_root, "verify-blotter")
-    rows, warnings = _materialize_rows(output_root)
+    require_observer_command(output_root, "verify-blotter", mode=mode)
+    rows, warnings = _materialize_rows_unchecked(output_root)
     stored = read_json(output_root / "exports" / "paper_trade_blotter.json", {})
     stored_rows = stored.get("rows", []) if isinstance(stored, dict) else []
     mismatches: list[str] = []
@@ -135,14 +152,16 @@ def verify_trade_blotter(
     return result
 
 
-def _materialize_rows(
-    output_root: Path, *, observer: bool = True
-) -> tuple[list[dict[str, object]], list[str]]:
-
+def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    if observer:
-        require_observer_command(output_root, "blotter")
+    require_observer_command(output_root, "blotter")
+    return _materialize_rows_unchecked(output_root)
+
+
+def _materialize_rows_unchecked(
+    output_root: Path,
+) -> tuple[list[dict[str, object]], list[str]]:
     events = read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
     ordered = list(events)
     snapshot_by_run = _snapshot_ids_by_run(output_root)

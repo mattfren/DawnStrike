@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -70,6 +71,7 @@ OBSERVER_COMMAND_SPECS: dict[str, ObserverCommandSpec] = {
             "state/execution_policy_manifest.json",
         ),
         nonempty_files=("ledger/paper_ledger.jsonl",),
+        requires_calendar_evidence=True,
     ),
     "evidence": ObserverCommandSpec(
         required_files=(
@@ -137,7 +139,12 @@ _CALENDAR_COUNT_FIELDS = frozenset(
 )
 
 
-def require_observer_command(output_root: Path, command: str) -> None:
+def require_observer_command(
+    output_root: Path,
+    command: str,
+    *,
+    mode: str | None = None,
+) -> None:
     """Apply the one canonical preflight specification for an observer command."""
 
     try:
@@ -151,8 +158,19 @@ def require_observer_command(output_root: Path, command: str) -> None:
     )
     if spec.requires_calendar_evidence:
         _require_calendar_evidence(Path(output_root) / "calendar" / "strategy_daily_returns.csv")
-    if command in {"verify-source-bars", "evidence"}:
-        _require_run_manifest_candidate(Path(output_root), command)
+    manifest_mode = {
+        "verify-source-bars": mode,
+        "verify-blotter": mode,
+        "evidence": "forward",
+        "readiness": "forward",
+    }.get(command)
+    if command in {"verify-source-bars", "verify-blotter", "evidence", "readiness"}:
+        if manifest_mode is not None and manifest_mode not in {"forward", "replay"}:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT",
+                f"{command} requires an explicit attestable PaperOps mode",
+            )
+        _require_run_manifest_candidate(Path(output_root), command, manifest_mode)
 
 
 def _require_calendar_evidence(path: Path) -> None:
@@ -224,12 +242,25 @@ def _require_calendar_evidence(path: Path) -> None:
                 )
 
 
-def _require_run_manifest_candidate(root: Path, command: str) -> None:
-    """Require a parseable non-shadow PaperOps run manifest before inspection."""
+def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) -> None:
+    """Require a complete canonical manifest bound to the selected observer mode."""
 
-    calendar_run_ids = _calendar_run_ids(root / "calendar" / "strategy_daily_returns.csv")
+    calendar_modes = _calendar_run_modes(root / "calendar" / "strategy_daily_returns.csv")
+    calendar_run_ids = set(calendar_modes)
     ledger_run_ids = _ledger_run_ids(root / "ledger" / "paper_ledger.jsonl")
     applicable_run_ids = calendar_run_ids & ledger_run_ids
+    selected_run_ids = {
+        run_id
+        for run_id in applicable_run_ids
+        if mode is None or calendar_modes[run_id] == mode
+    }
+    if not selected_run_ids:
+        raise PaperOpsObserverBlocked(
+            "MISSING_INPUT",
+            f"{command} has no calendar/ledger runs for "
+            f"{mode or 'forward/replay'} manifest validation",
+        )
+    valid_run_ids: set[str] = set()
     for path in sorted((root / "manifests").glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -237,21 +268,79 @@ def _require_run_manifest_candidate(root: Path, command: str) -> None:
             continue
         if not isinstance(payload, dict):
             continue
-        if (
-            payload.get("schema_version") == "v2.paper_ops_manifest.v3"
-            and str(payload.get("run_id") or "") in applicable_run_ids
-        ):
-            return
+        if _is_complete_manifest(payload, applicable_run_ids, mode):
+            valid_run_ids.add(str(payload["run_id"]))
+    if selected_run_ids <= valid_run_ids:
+        return
     raise PaperOpsObserverBlocked(
         "MISSING_INPUT",
-        f"{command} requires an applicable PaperOps run manifest",
+        f"{command} requires a complete applicable "
+        f"{mode or 'forward/replay'} PaperOps run manifest",
     )
 
 
+def _is_complete_manifest(
+    payload: object,
+    applicable_run_ids: set[str],
+    mode: str | None,
+) -> bool:
+    """Validate the persisted v3 identity binding without accepting partial fixtures."""
+
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("schema_version") != "v2.paper_ops_manifest.v3":
+        return False
+    if str(payload.get("run_id") or "").strip() not in applicable_run_ids:
+        return False
+    if payload.get("mode") not in {"forward", "replay"}:
+        return False
+    if mode is not None and payload.get("mode") != mode:
+        return False
+    try:
+        date.fromisoformat(str(payload.get("run_date") or ""))
+    except ValueError:
+        return False
+    identity_fields = (
+        "run_id",
+        "data_snapshot_id",
+        "execution_policy_version",
+        "execution_policy_fingerprint",
+        "universe_id",
+        "data_snapshot_content_hash",
+        "data_snapshot_manifest_payload_hash",
+        "data_snapshot_normalized_hash",
+        "data_snapshot_normalized_path",
+        "data_truth_root_relative",
+        "manifest_payload_hash",
+    )
+    if not all(
+        isinstance(payload.get(field), str) and payload[field].strip()
+        for field in identity_fields
+    ):
+        return False
+    relative_root = Path(str(payload["data_truth_root_relative"]))
+    if relative_root.is_absolute():
+        return False
+    list_fields = ("output_artifacts", "warnings", "universe_symbols")
+    if not all(isinstance(payload.get(field), list) for field in list_fields):
+        return False
+    symbols = payload["universe_symbols"]
+    if not symbols or not all(isinstance(item, str) and item.strip() for item in symbols):
+        return False
+    hash_payload = dict(payload)
+    observed_hash = hash_payload.pop("manifest_payload_hash")
+    canonical = json.dumps(hash_payload, sort_keys=True, separators=(",", ":"))
+    return observed_hash == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _calendar_run_ids(path: Path) -> set[str]:
+    return set(_calendar_run_modes(path))
+
+
+def _calendar_run_modes(path: Path) -> dict[str, str]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return {
-            str(row.get("run_id") or "").strip()
+            str(row.get("run_id") or "").strip(): str(row.get("mode") or "").strip()
             for row in csv.DictReader(handle)
             if str(row.get("run_id") or "").strip()
         }

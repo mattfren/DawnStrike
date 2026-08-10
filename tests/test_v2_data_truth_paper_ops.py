@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import hashlib
 import json
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -28,6 +29,7 @@ from intraday_scanner.v2.data_truth.reconcile import (
 )
 from intraday_scanner.v2.paper_ops import __main__ as paper_ops_cli
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
+from intraday_scanner.v2.paper_ops import governance as governance_module
 from intraday_scanner.v2.paper_ops import ledger_rebuild as ledger_rebuild_module
 from intraday_scanner.v2.paper_ops import readiness as readiness_module
 from intraday_scanner.v2.paper_ops import strategy_evidence as strategy_evidence_module
@@ -84,13 +86,28 @@ def _seed_observer_ledger(output_root: Path) -> None:
             }
         ],
     )
-    paper_ops_engine.write_json(
-        output_root / "manifests" / "observer-fixture-run.json",
-        {
-            "schema_version": "v2.paper_ops_manifest.v3",
-            "run_id": "observer-fixture-run",
-        },
-    )
+    payload: dict[str, object] = {
+        "schema_version": "v2.paper_ops_manifest.v3",
+        "run_id": "observer-fixture-run",
+        "mode": "forward",
+        "run_date": "2026-01-02",
+        "data_snapshot_id": "fixture-snapshot",
+        "output_artifacts": [],
+        "warnings": [],
+        "execution_policy_version": "fixture-policy-v1",
+        "execution_policy_fingerprint": "fixture-policy-fingerprint",
+        "universe_id": "fixture-universe",
+        "universe_symbols": ["TST"],
+        "data_snapshot_content_hash": "fixture-content-hash",
+        "data_snapshot_manifest_payload_hash": "fixture-manifest-hash",
+        "data_snapshot_normalized_hash": "fixture-normalized-hash",
+        "data_snapshot_normalized_path": "normalized/fixture.csv",
+        "data_truth_root_relative": "../v2_data_truth",
+    }
+    payload["manifest_payload_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    paper_ops_engine.write_json(output_root / "manifests" / "observer-fixture-run.json", payload)
 
 
 def _write_canonical_calendar_rows(
@@ -3053,6 +3070,68 @@ def test_forward_readiness_blocks_unknown_or_future_data_truth() -> None:
         "single_provider_unreconciled",
     ):
         assert readiness_module._hard_block(status, "passed", "passed") is False
+
+
+def test_blocked_strategy_evidence_blocks_readiness_and_preserves_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    _seed_observer_ledger(output_root)
+    _write_canonical_calendar_rows(output_root, [{}])
+    monkeypatch.setattr(readiness_module, "_data_status", lambda _root: "reconciled")
+    monkeypatch.setattr(
+        readiness_module,
+        "rebuild_ledger",
+        lambda **_kwargs: SimpleNamespace(status="passed"),
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "verify_calendar_truth",
+        lambda **_kwargs: SimpleNamespace(status="passed", warnings=()),
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "score_strategy_evidence",
+        lambda **_kwargs: SimpleNamespace(
+            status="blocked", scores=(), warnings=("attestation missing",)
+        ),
+    )
+
+    result = forward_readiness(output_root=output_root)
+
+    assert result.status == "blocked"
+    assert result.strategy_evidence_status == "blocked"
+    assert "attestation missing" in result.warnings
+    assert paper_ops_cli._result_exit_code("readiness", result.to_dict()) == 2
+
+
+def test_blocked_evidence_governance_keeps_existing_overlay_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    overlay = output_root / "state" / "strategy_governance_overlay.json"
+    overlay.write_bytes(b'{"retained":true}\n')
+    monkeypatch.setattr(
+        governance_module,
+        "score_strategy_evidence",
+        lambda **_kwargs: SimpleNamespace(
+            status="blocked", scores=(), warnings=("attestation missing",)
+        ),
+    )
+
+    result = apply_evidence_governance(output_root=output_root)
+
+    assert result == {
+        "status": "blocked",
+        "score_count": 0,
+        "warnings": ["attestation missing"],
+    }
+    assert overlay.read_bytes() == b'{"retained":true}\n'
+    assert paper_ops_cli._result_exit_code("apply-evidence-governance", result) == 2
 
 
 def test_paperops_modules_avoid_live_execution_and_database_paths() -> None:

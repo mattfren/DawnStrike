@@ -24,6 +24,7 @@ _ALLOWED_DATA_STATUSES = frozenset(
 @dataclass(frozen=True)
 class ForwardReadinessResult:
     status: str
+    strategy_evidence_status: str
     data_status: str
     ledger_rebuild_status: str
     calendar_truth_status: str
@@ -34,7 +35,7 @@ class ForwardReadinessResult:
     quarantined_strategies: tuple[str, ...]
     warnings: tuple[str, ...]
     next_commands: tuple[str, ...]
-    schema_version: str = "v2.paper_ops_forward_readiness.v1"
+    schema_version: str = "v2.paper_ops_forward_readiness.v2"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -49,6 +50,7 @@ class ForwardReadinessResult:
             "quarantined_strategies": list(self.quarantined_strategies),
             "schema_version": self.schema_version,
             "status": self.status,
+            "strategy_evidence_status": self.strategy_evidence_status,
             "warnings": list(self.warnings),
         }
 
@@ -87,13 +89,17 @@ def forward_readiness(*, output_root: Path = Path("data/v2_paper_ops")) -> Forwa
     if calendar.status == "failed":
         warnings.append("calendar truth verification failed")
     warnings.extend(calendar.warnings)
+    if evidence.status != "passed":
+        warnings.append(f"strategy evidence status {evidence.status} blocks forward readiness")
+    warnings.extend(evidence.warnings)
     status = (
         "ready_with_warnings"
-        if not _hard_block(data_status, ledger.status, calendar.status)
+        if not _hard_block(data_status, ledger.status, calendar.status, evidence.status)
         else "blocked"
     )
     result = ForwardReadinessResult(
         status=status,
+        strategy_evidence_status=evidence.status,
         data_status=data_status,
         ledger_rebuild_status=ledger.status,
         calendar_truth_status=calendar.status,
@@ -131,11 +137,17 @@ def _list_file(path: Path) -> list[object]:
     return payload if isinstance(payload, list) else []
 
 
-def _hard_block(data_status: str, ledger_status: str, calendar_status: str) -> bool:
+def _hard_block(
+    data_status: str,
+    ledger_status: str,
+    calendar_status: str,
+    strategy_evidence_status: str = "passed",
+) -> bool:
     return (
         data_status not in _ALLOWED_DATA_STATUSES
         or ledger_status != "passed"
         or calendar_status not in {"passed", "passed_with_warnings"}
+        or strategy_evidence_status != "passed"
     )
 
 
@@ -148,6 +160,7 @@ def _write_reports(paths: PaperOpsPaths, result: ForwardReadinessResult) -> None
         f"- Data status: `{result.data_status}`",
         f"- Ledger rebuild: `{result.ledger_rebuild_status}`",
         f"- Calendar truth: `{result.calendar_truth_status}`",
+        f"- Strategy evidence: `{result.strategy_evidence_status}`",
         f"- Pending orders: `{result.pending_orders}`",
         f"- Open positions: `{result.open_positions}`",
         f"- Eligible tomorrow: {', '.join(result.eligible_strategies) or 'none'}",

@@ -24,5 +24,11 @@ def apply_evidence_governance(
     with exclusive_file_lock(paths.state / ".paper_governance.lock"):
         _recover_pending_transaction(paths)
         result = score_strategy_evidence(output_root=output_root)
+        if result.status != "passed":
+            return {
+                "status": "blocked",
+                "score_count": len(result.scores),
+                "warnings": list(result.warnings),
+            }
         _update_governance_overlay(paths, result.scores)
-    return {"status": "applied", "score_count": len(result.scores)}
+    return {"status": "applied", "score_count": len(result.scores), "warnings": []}

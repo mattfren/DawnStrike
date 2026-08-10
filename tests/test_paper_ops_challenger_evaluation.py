@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -29,6 +30,37 @@ from intraday_scanner.v2.paper_ops.trade_blotter import (
     verify_trade_blotter,
 )
 from intraday_scanner.v2.strategies import build_strategy_catalog
+
+
+def _write_complete_forward_manifest(
+    root: Path,
+    *,
+    session_date: str,
+    run_id: str,
+    snapshot: str,
+) -> None:
+    payload: dict[str, object] = {
+        "schema_version": "v2.paper_ops_manifest.v3",
+        "run_id": run_id,
+        "mode": "forward",
+        "run_date": session_date,
+        "data_snapshot_id": snapshot,
+        "output_artifacts": [],
+        "warnings": [],
+        "execution_policy_version": POLICY,
+        "execution_policy_fingerprint": "fixture-policy-fingerprint",
+        "universe_id": "fixture-universe",
+        "universe_symbols": ["AAA"],
+        "data_snapshot_content_hash": "fixture-content-hash",
+        "data_snapshot_manifest_payload_hash": "fixture-manifest-hash",
+        "data_snapshot_normalized_hash": "fixture-normalized-hash",
+        "data_snapshot_normalized_path": "normalized/fixture.csv",
+        "data_truth_root_relative": "../v2_data_truth",
+    }
+    payload["manifest_payload_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    write_json(root / "manifests" / f"forward_{session_date}.json", payload)
 
 STRATEGY_IDS = (
     "ts_momentum_sma_atr",
@@ -684,6 +716,12 @@ def _seed_candidate_evidence(
     for session_date in dates:
         snapshot = f"datatruth_sourced_{session_date.replace('-', '')}_abcdef"
         run_id = f"paper_ops:forward:{session_date}:{snapshot}"
+        _write_complete_forward_manifest(
+            root,
+            session_date=session_date,
+            run_id=run_id,
+            snapshot=snapshot,
+        )
         champion_before = champion_equity
         candidate_before = candidate_equity
         champion_return = 0.0 if no_trades else 0.001
@@ -1048,13 +1086,11 @@ def _seed_same_day_registration_without_candidate_artifacts(
 
     snapshot = f"datatruth_sourced_{session_date.replace('-', '')}_same_day"
     run_id = f"paper_ops:forward:{session_date}:{snapshot}"
-    write_json(
-        root / "manifests" / f"forward_{session_date}.json",
-        {
-            "schema_version": "v2.paper_ops_manifest.v3",
-            "run_id": run_id,
-            "data_snapshot_id": snapshot,
-        },
+    _write_complete_forward_manifest(
+        root,
+        session_date=session_date,
+        run_id=run_id,
+        snapshot=snapshot,
     )
     write_csv(
         root / "calendar" / "strategy_daily_returns.csv",

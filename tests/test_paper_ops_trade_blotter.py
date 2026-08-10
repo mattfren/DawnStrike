@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.engine import init
-from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
+from intraday_scanner.v2.paper_ops.observer_safety import (
+    _CALENDAR_FIELDS,
+    PaperOpsObserverBlocked,
+)
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json, write_jsonl
 from intraday_scanner.v2.paper_ops.trade_blotter import (
     build_trade_blotter,
@@ -194,17 +199,55 @@ def _lifecycle(
 
 
 def _seed_manifests(root: Path) -> None:
-    write_json(
-        root / "manifests" / "entry.json",
-        {"data_snapshot_id": "snapshot-entry", "run_id": "run-entry"},
-    )
-    write_json(
-        root / "manifests" / "fill.json",
-        {"data_snapshot_id": "snapshot-fill", "run_id": "run-fill"},
-    )
-    write_json(
-        root / "manifests" / "close.json",
-        {"data_snapshot_id": "snapshot-close", "run_id": "run-close"},
+    for filename, run_id, snapshot_id, run_date in (
+        ("entry", "run-entry", "snapshot-entry", "2026-01-05"),
+        ("fill", "run-fill", "snapshot-fill", "2026-01-06"),
+        ("close", "run-close", "snapshot-close", "2026-01-07"),
+    ):
+        payload: dict[str, object] = {
+            "schema_version": "v2.paper_ops_manifest.v3",
+            "run_id": run_id,
+            "mode": "forward",
+            "run_date": run_date,
+            "data_snapshot_id": snapshot_id,
+            "output_artifacts": [],
+            "warnings": [],
+            "execution_policy_version": "paperops_execution_v1",
+            "execution_policy_fingerprint": "test-policy",
+            "universe_id": "test-universe",
+            "universe_symbols": ["AAA"],
+            "data_snapshot_content_hash": "test-content-hash",
+            "data_snapshot_manifest_payload_hash": "test-manifest-hash",
+            "data_snapshot_normalized_hash": "test-normalized-hash",
+            "data_snapshot_normalized_path": "normalized/test.csv",
+            "data_truth_root_relative": "../v2_data_truth",
+        }
+        payload["manifest_payload_hash"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        write_json(root / "manifests" / f"{filename}.json", payload)
+    rows: list[str] = [",".join(_CALENDAR_FIELDS)]
+    for run_id, run_date in (
+        ("run-entry", "2026-01-05"),
+        ("run-fill", "2026-01-06"),
+        ("run-close", "2026-01-07"),
+    ):
+        row = {field: "0" for field in _CALENDAR_FIELDS}
+        row.update({
+            "date": run_date,
+            "mode": "forward",
+            "strategy_id": "test-strategy",
+            "strategy_version": "v1",
+            "strategy_status": "active",
+            "execution_policy_version": "paperops_execution_v1",
+            "strategy_semantics_fingerprint": "test-semantics",
+            "data_snapshot_id": f"snapshot-{run_id.split('-')[1]}",
+            "warnings": "",
+            "run_id": run_id,
+        })
+        rows.append(",".join(str(row[field]) for field in _CALENDAR_FIELDS))
+    (root / "calendar" / "strategy_daily_returns.csv").write_text(
+        "\n".join(rows) + "\n", encoding="utf-8"
     )
 
 

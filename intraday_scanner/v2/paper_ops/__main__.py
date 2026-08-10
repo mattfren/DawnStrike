@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if observer_command:
         try:
-            require_observer_command(output_root, args.command)
+            require_observer_command(output_root, args.command, mode=mode.value)
         except PaperOpsObserverBlocked as exc:
             print(f"status: {exc.status}")
             print(f"detail: {exc.detail}")

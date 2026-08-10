@@ -915,10 +915,7 @@ def _run_day_unlocked(
     allow_fetch: bool,
 ) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
-    from intraday_scanner.v2.paper_ops.trade_blotter import (
-        build_trade_blotter,
-        verify_trade_blotter,
-    )
+    from intraday_scanner.v2.paper_ops.trade_blotter import verify_trade_blotter
 
     preflight(run_date=run_date, mode=mode, output_root=output_root, allow_fetch=allow_fetch)
     scan_result = scan(
@@ -953,7 +950,9 @@ def _run_day_unlocked(
     if source_truth.status != "passed":
         details = "; ".join(source_truth.warnings) or "no verifier reason was recorded"
         raise ValueError(f"PaperOps daily immutable source-bar verification failed: {details}")
-    blotter = build_trade_blotter(
+    from intraday_scanner.v2.paper_ops.trade_blotter import _build_trade_blotter_writer
+
+    blotter = _build_trade_blotter_writer(
         output_root=output_root,
         mode=mode.value,
         run_date=run_date.isoformat(),
@@ -964,7 +963,7 @@ def _run_day_unlocked(
     )
     if blotter.get("status") != "passed" or blotter_verification.get("status") != "passed":
         raise ValueError("PaperOps daily trade blotter verification failed")
-    report_result = report(output_root=output_root)
+    report_result = _report_paths(PaperOpsPaths.create(output_root))
     return {
         "calendar": calendar_result,
         "blotter": blotter,
@@ -1050,7 +1049,7 @@ def _verify_replay_staging(staging_root: Path) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
     from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
     from intraday_scanner.v2.paper_ops.trade_blotter import (
-        build_trade_blotter,
+        _build_trade_blotter_writer,
         verify_trade_blotter,
     )
 
@@ -1072,7 +1071,7 @@ def _verify_replay_staging(staging_root: Path) -> dict[str, object]:
         raise ValueError(
             f"PaperOps staged replay immutable source-bar verification failed: {details}"
         )
-    blotter = build_trade_blotter(output_root=staging_root)
+    blotter = _build_trade_blotter_writer(output_root=staging_root)
     blotter_verification = verify_trade_blotter(
         output_root=staging_root,
         mode=PaperRunMode.REPLAY.value,
@@ -1156,7 +1155,9 @@ def _promote_replay_staging(
             from intraday_scanner.v2.paper_ops.source_bar_truth import (
                 verify_source_bar_truth,
             )
-            from intraday_scanner.v2.paper_ops.trade_blotter import build_trade_blotter
+            from intraday_scanner.v2.paper_ops.trade_blotter import (
+                _build_trade_blotter_writer,
+            )
 
             promoted_source_truth = verify_source_bar_truth(
                 output_root=paths.root,
@@ -1169,8 +1170,8 @@ def _promote_replay_staging(
                 raise ValueError(
                     f"PaperOps promoted replay immutable source-bar verification failed: {details}"
                 )
-            build_trade_blotter(output_root=paths.root, _writer_authorized=True)
-            report(output_root=paths.root, _writer_authorized=True)
+            _build_trade_blotter_writer(output_root=paths.root)
+            _report_paths(paths)
         except Exception:
             _restore_replay_promotion_targets(paths, rollback_root)
             raise
@@ -1359,14 +1360,17 @@ def _logical_event_key(event: dict[str, object]) -> str | None:
     )
 
 
-def report(
-    *, output_root: Path = Path("data/v2_paper_ops"), _writer_authorized: bool = False
-) -> dict[str, object]:
+def report(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    if not _writer_authorized:
-        require_observer_command(output_root, "report")
+    require_observer_command(output_root, "report")
     paths = PaperOpsPaths.resolve(output_root)
+    return _report_paths(paths)
+
+
+def _report_paths(paths: PaperOpsPaths) -> dict[str, object]:
+    """Write report artifacts for an already writer-authorized tree."""
+
     rows = _read_calendar_rows(paths)
     lines = [
         "# PaperOps v1 Summary",
@@ -1474,7 +1478,7 @@ def demo(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
     _write_calendar_for_date(paths, run, manifest, manifest.warnings, dataset=dataset)
     calendar(output_root=output_root)
     _reconcile_paths(paths)
-    report(output_root=output_root)
+    _report_paths(paths)
     return {"mode": "demo", "run_id": run.run_id, "snapshot_id": manifest.snapshot_id}
 
 
