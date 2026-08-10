@@ -5056,6 +5056,10 @@ def _validate_transaction_coherence(
             current_pending,
             config,
             positions_target=positions_target,
+            require_complete_outcomes=(
+                positions_target in state_updates
+                and core_account_target in state_updates
+            ),
         )
         expected_pending = _apply_order_event_transition(current_pending, order_events, config)
         if state_updates[pending_target] != expected_pending:
@@ -5081,11 +5085,27 @@ def _validate_transaction_coherence(
     if positions_target in state_updates:
         current_positions = _current_state_rows(paths, positions_target, "position_id")
         expected_positions = _apply_position_event_transition(
+            paths,
             current_positions,
             position_events,
             event_rows,
             lineage_orders,
             config,
+            allowed_outcomes=(
+                frozenset(
+                    {
+                        "paper_position_marked_to_market",
+                        "paper_position_closed",
+                    }
+                )
+                if challenger_id is not None or pending_target not in state_updates
+                else frozenset(
+                    {
+                        "paper_position_checked_no_action",
+                        "paper_position_closed",
+                    }
+                )
+            ),
         )
         if state_updates[positions_target] != expected_positions:
             raise ValueError("PaperOps transaction open-position transition conflicts")
@@ -5307,11 +5327,14 @@ def _apply_order_event_transition(
 
 
 def _apply_position_event_transition(
+    paths: PaperOpsPaths,
     current: list[dict[str, object]],
     event_rows: list[dict[str, object]],
     all_event_rows: list[dict[str, object]],
     lineage_orders: dict[str, dict[str, object]],
     config: PaperOpsConfig,
+    *,
+    allowed_outcomes: frozenset[str],
 ) -> list[dict[str, object]]:
     expected = [dict(row) for row in current]
     fills_by_order: dict[str, dict[str, object]] = {}
@@ -5332,6 +5355,63 @@ def _apply_position_event_transition(
     }
     if set(fills_by_order) != opened_order_ids:
         raise ValueError("PaperOps fill and opened-position evidence is incomplete")
+
+    opened_rows = {
+        str(payload["position_id"]): _model_projection(payload, _POSITION_FIELDS)
+        for event in event_rows
+        for payload in [event["payload"]]
+        if event["event_type"] == "paper_position_opened" and isinstance(payload, dict)
+    }
+    effective_positions = {
+        str(row["position_id"]): dict(row) for row in [*current, *opened_rows.values()]
+    }
+    outcome_events: dict[str, list[dict[str, object]]] = {}
+    for event in event_rows:
+        if event["event_type"] not in {
+            "paper_position_checked_no_action",
+            "paper_position_marked_to_market",
+            "paper_position_closed",
+        }:
+            continue
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        outcome_events.setdefault(str(payload["position_id"]), []).append(event)
+    exact_bars: dict[str, MarketBar] = {}
+    if effective_positions:
+        first = all_event_rows[0]
+        manifest_path = paths.manifests / f"{_safe_filename(str(first['run_id']))}.json"
+        manifest = read_json(manifest_path, None) if manifest_path.is_file() else None
+        if not isinstance(manifest, dict):
+            raise ValueError("PaperOps position transaction run manifest is missing")
+        dataset = _load_bound_run_dataset(paths, manifest, required=True)
+        assert dataset is not None
+        run_date = date.fromisoformat(str(first["trade_date"]))
+        for position_id, position_row in effective_positions.items():
+            bar = _latest_bar_on_or_before(
+                dataset,
+                str(position_row["symbol"]),
+                run_date,
+            )
+            outcomes = outcome_events.get(position_id, [])
+            if bar is None:
+                if outcomes:
+                    raise ValueError(
+                        "PaperOps position outcome has no eligible immutable source bar"
+                    )
+                continue
+            if len(outcomes) != 1:
+                raise ValueError(
+                    "PaperOps transaction must record exactly one outcome for each "
+                    "eligible position"
+                )
+            outcome = outcomes[0]
+            if outcome["event_type"] not in allowed_outcomes:
+                raise ValueError("PaperOps position outcome conflicts with transaction phase")
+            _validate_bound_position_source_bar(outcome, manifest, bar)
+            exact_bars[position_id] = bar
+    if set(outcome_events) - set(effective_positions):
+        raise ValueError("PaperOps position outcome lacks persisted or opened lineage")
+
     for event in event_rows:
         payload = event["payload"]
         assert isinstance(payload, dict)
@@ -5359,12 +5439,22 @@ def _apply_position_event_transition(
             if index is None:
                 raise ValueError("PaperOps marked position is absent from persisted state")
             expected[index] = _validate_position_lifecycle_event(
-                event, expected[index], config, expect_close=False
+                event,
+                expected[index],
+                config,
+                bar=exact_bars[position_id],
+                expect_close=False,
             )
         else:
             if index is None:
                 raise ValueError("PaperOps closed position is absent from open state")
-            _validate_position_lifecycle_event(event, expected[index], config, expect_close=True)
+            _validate_position_lifecycle_event(
+                event,
+                expected[index],
+                config,
+                bar=exact_bars[position_id],
+                expect_close=True,
+            )
             expected.pop(index)
     return expected
 
@@ -5925,9 +6015,11 @@ def _validate_check_order_semantics(
     config: PaperOpsConfig,
     *,
     positions_target: str,
+    require_complete_outcomes: bool,
 ) -> None:
     check_blocks: dict[str, dict[str, object]] = {}
     fills: dict[str, dict[str, object]] = {}
+    pending_checks: dict[str, dict[str, object]] = {}
     created: list[dict[str, object]] = []
     for event in event_rows:
         payload = event["payload"]
@@ -5944,10 +6036,22 @@ def _validate_check_order_semantics(
             if order_id in fills:
                 raise ValueError("PaperOps transaction has duplicate fills for one order")
             fills[order_id] = event
-    if not check_blocks:
+        elif event["event_type"] == "paper_order_pending_no_fill_data":
+            order_id = str(payload["order_id"])
+            if order_id in pending_checks:
+                raise ValueError("PaperOps transaction has duplicate pending checks")
+            pending_checks[order_id] = event
+    effective_orders = [*current_pending, *created]
+    if not effective_orders:
+        return
+    if not check_blocks and not fills and not pending_checks and not require_complete_outcomes:
         return
 
-    first = next(iter(check_blocks.values()))
+    first = next(iter(check_blocks.values()), None)
+    if first is None:
+        first = next(iter(fills.values()), None)
+    if first is None:
+        first = next(iter(pending_checks.values()), event_rows[0])
     manifest_path = paths.manifests / f"{_safe_filename(str(first['run_id']))}.json"
     manifest = read_json(manifest_path, None) if manifest_path.is_file() else None
     if not isinstance(manifest, dict):
@@ -5971,21 +6075,32 @@ def _validate_check_order_semantics(
         ledger_events, run_date.isoformat(), mode
     )
     new_positions: list[dict[str, object]] = []
-    effective_orders = [*current_pending, *created]
-
     for order_row in effective_orders:
         order = _order_from_row(order_row)
         block_event = check_blocks.get(order.order_id)
         fill_event = fills.get(order.order_id)
-        if block_event is None and fill_event is None:
-            continue
-        if block_event is not None and fill_event is not None:
-            raise ValueError("PaperOps order has conflicting fill and blocked decisions")
-        event = block_event if block_event is not None else fill_event
-        assert event is not None
+        pending_event = pending_checks.get(order.order_id)
+        outcomes = [
+            event
+            for event in (block_event, fill_event, pending_event)
+            if event is not None
+        ]
+        if not outcomes:
+            raise ValueError(
+                "PaperOps check transaction omits an outcome for an effective order"
+            )
+        if len(outcomes) != 1:
+            raise ValueError("PaperOps order has conflicting check outcomes")
+        event = outcomes[0]
         payload = event["payload"]
         assert isinstance(payload, dict)
         next_bar = _next_bar_after(dataset, order.symbol, order.signal_time, run_date)
+        if pending_event is not None:
+            if next_bar is not None:
+                raise ValueError(
+                    "PaperOps pending-no-fill order has an eligible immutable source bar"
+                )
+            continue
         if next_bar is None:
             raise ValueError("PaperOps check order outcome has no eligible immutable source bar")
         source_run = PaperRun(
@@ -6210,17 +6325,42 @@ def _validate_open_position_lineage(
         raise ValueError("PaperOps fill and opened-position source bars conflict")
 
 
+def _validate_bound_position_source_bar(
+    event: dict[str, object],
+    manifest: dict[str, object],
+    bar: MarketBar,
+) -> None:
+    payload = event["payload"]
+    assert isinstance(payload, dict)
+    run = PaperRun(
+        run_id=str(event["run_id"]),
+        mode=PaperRunMode(str(event["mode"])),
+        run_date=str(event["trade_date"]),
+        data_snapshot_id=str(manifest["data_snapshot_id"]),
+        created_at=bar.timestamp.isoformat(),
+    )
+    exact_source = _with_source_bar({}, bar, run)
+    if (
+        payload.get("source_bar") != exact_source["source_bar"]
+        or payload.get("source_bar_sha256") != exact_source["source_bar_sha256"]
+        or payload.get("data_snapshot_id") != exact_source["data_snapshot_id"]
+    ):
+        raise ValueError(
+            "PaperOps position source bar is not the latest immutable run-date bar"
+        )
+
+
 def _validate_position_lifecycle_event(
     event: dict[str, object],
     current_row: dict[str, object],
     config: PaperOpsConfig,
     *,
+    bar: MarketBar,
     expect_close: bool,
 ) -> dict[str, object]:
     payload = event["payload"]
     assert isinstance(payload, dict)
     current = _position_from_row(current_row)
-    bar = _event_source_bar(payload)
     checked, close_record = _check_position(current, bar, _event_run(event, payload), config)
     if expect_close:
         if (
