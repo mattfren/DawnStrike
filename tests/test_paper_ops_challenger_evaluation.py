@@ -715,7 +715,7 @@ def _seed_candidate_evidence(
     benchmark_equity = 100_000.0
     for session_date in dates:
         snapshot = f"datatruth_sourced_{session_date.replace('-', '')}_abcdef"
-        run_id = f"paper_ops:forward:{session_date}:{snapshot}"
+        run_id = paper_engine.stable_id("paper_ops", "forward", session_date, snapshot)
         _write_complete_forward_manifest(
             root,
             session_date=session_date,
@@ -806,7 +806,9 @@ def _seed_candidate_evidence(
                 {
                     **_calendar_row(
                         session_date,
-                        run_id,
+                        paper_engine.stable_id(
+                            "paper_ops", "replay", session_date, snapshot
+                        ),
                         snapshot,
                         strategy_id,
                         "v1.0",
@@ -821,7 +823,9 @@ def _seed_candidate_evidence(
                 {
                     **_calendar_row(
                         session_date,
-                        run_id,
+                        paper_engine.stable_id(
+                            "paper_ops", "demo", session_date, snapshot
+                        ),
                         snapshot,
                         strategy_id,
                         "v1.0",
@@ -1085,7 +1089,7 @@ def _seed_same_day_registration_without_candidate_artifacts(
     )
 
     snapshot = f"datatruth_sourced_{session_date.replace('-', '')}_same_day"
-    run_id = f"paper_ops:forward:{session_date}:{snapshot}"
+    run_id = paper_engine.stable_id("paper_ops", "forward", session_date, snapshot)
     _write_complete_forward_manifest(
         root,
         session_date=session_date,

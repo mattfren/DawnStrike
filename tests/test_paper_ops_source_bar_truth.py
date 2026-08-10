@@ -31,6 +31,7 @@ from intraday_scanner.v2.paper_ops.models import (
     PaperRunMode,
     stable_id,
 )
+from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
 from intraday_scanner.v2.paper_ops.source_bar_truth import (
     _expected_close,
     verify_source_bar_truth,
@@ -41,12 +42,13 @@ from intraday_scanner.v2.paper_ops.storage import write_json, write_jsonl
 def _write_canonical_calendar_evidence(
     root: Path,
     snapshots: dict[str, DataTruthManifest],
+    config: PaperOpsConfig,
 ) -> None:
     rows: list[dict[str, object]] = []
     for run_date, manifest in sorted(snapshots.items()):
         dataset, _ = load_datatruth_snapshot(manifest.snapshot_id, root / "data_truth_replay")
         run = PaperRun(
-            run_id=_run_id(date.fromisoformat(run_date)),
+            run_id=_run_id(date.fromisoformat(run_date), manifest.snapshot_id),
             mode=PaperRunMode.REPLAY,
             run_date=run_date,
             data_snapshot_id=manifest.snapshot_id,
@@ -60,6 +62,16 @@ def _write_canonical_calendar_evidence(
         )
         if len(reference_rows) == 2:
             rows.extend(reference_rows)
+            strategy_row = dict(reference_rows[0])
+            strategy_row.update(
+                {
+                    "execution_policy_version": config.execution_policy_version,
+                    "strategy_id": STRATEGY_ID,
+                    "strategy_status": "active",
+                    "strategy_version": STRATEGY_VERSION,
+                }
+            )
+            rows.append(strategy_row)
     with (root / "calendar" / "strategy_daily_returns.csv").open(
         "w", encoding="utf-8", newline=""
     ) as handle:
@@ -250,7 +262,10 @@ def test_unknown_conflicting_manifest_is_not_treated_as_a_shadow_artifact(
     )
 
     assert result.status == "failed"
-    assert "run paper-run-2026-01-07 has conflicting PaperOps manifests" in result.warnings
+    assert (
+        f"run {_run_id(date(2026, 1, 7), scenario.snapshots_by_date['2026-01-07'].snapshot_id)} "
+        "has conflicting PaperOps manifests"
+    ) in result.warnings
     assert result.audited_event_count == 4
 
 
@@ -304,7 +319,8 @@ def test_retained_normalized_snapshot_tamper_invalidates_bound_run(
     assert result.audited_run_count == 3
     assert result.audited_event_count == 3
     assert any(
-        "run paper-run-2026-01-07 immutable snapshot failed verification: "
+        f"run {_run_id(date(2026, 1, 7), mark_manifest.snapshot_id)} "
+        "immutable snapshot failed verification: "
         "DataTruth immutable normalized artifact hash mismatch" in warning
         for warning in result.warnings
     )
@@ -460,7 +476,7 @@ def test_replay_manifest_cannot_escape_the_canonical_data_truth_root(
     result = verify_source_bar_truth(output_root=scenario.output_root)
 
     assert result.status == "failed"
-    assert "run paper-run-2026-01-07 DataTruth root is not canonical for replay" in result.warnings
+    assert "event event-position-marked has no verified immutable run snapshot" in result.warnings
 
 
 @pytest.mark.parametrize(
@@ -481,13 +497,11 @@ def test_event_identity_must_match_its_run_manifest(
     event[field] = tampered_value
     scenario.persist_events()
 
-    result = verify_source_bar_truth(output_root=scenario.output_root)
-
-    assert result.status == "failed"
-    assert (
-        f"event event-position-marked does not match run manifest {manifest_field}"
-        in result.warnings
-    )
+    with pytest.raises(
+        PaperOpsObserverBlocked,
+        match="calendar/ledger identity conflict",
+    ):
+        verify_source_bar_truth(output_root=scenario.output_root)
 
 
 def test_historical_lifecycle_uses_its_frozen_policy_not_the_active_policy(
@@ -537,12 +551,8 @@ def test_run_cannot_rebind_an_event_to_a_later_snapshot_containing_the_same_bar(
     mark["data_snapshot_id"] = later.snapshot_id
     scenario.persist_events()
 
-    result = verify_source_bar_truth(output_root=scenario.output_root)
-
-    assert result.status == "failed"
-    assert (
-        "run paper-run-2026-01-07 DataTruth accepted end does not equal run date" in result.warnings
-    )
+    with pytest.raises(PaperOpsObserverBlocked, match="requires a complete applicable"):
+        verify_source_bar_truth(output_root=scenario.output_root)
 
 
 def test_run_universe_binding_is_exact_membership_not_configuration_order(
@@ -569,7 +579,10 @@ def test_run_universe_binding_rejects_duplicate_manifest_symbols(tmp_path: Path)
     result = verify_source_bar_truth(output_root=scenario.output_root)
 
     assert result.status == "failed"
-    assert "run paper-run-2026-01-07 DataTruth universe binding mismatch" in result.warnings
+    assert (
+        f"run {_run_id(date(2026, 1, 7), scenario.snapshots_by_date['2026-01-07'].snapshot_id)} "
+        "DataTruth universe binding mismatch"
+    ) in result.warnings
 
 
 def _immutable_lifecycle_scenario(
@@ -629,7 +642,7 @@ def _immutable_lifecycle_scenario(
         lifecycle_config=lifecycle_config,
     )
     scenario.persist_events()
-    _write_canonical_calendar_evidence(output_root, snapshots_by_date)
+    _write_canonical_calendar_evidence(output_root, snapshots_by_date, lifecycle_config)
     return scenario
 
 
@@ -707,7 +720,10 @@ def _lifecycle_events(
     order = PaperOrder(
         order_id=order_id,
         pick_id=pick_id,
-        run_id=_run_id(signal_bar.timestamp.date()),
+        run_id=_run_id(
+            signal_bar.timestamp.date(),
+            snapshots[signal_bar.timestamp.date().isoformat()].snapshot_id,
+        ),
         mode=PaperRunMode.REPLAY,
         trade_date=signal_bar.timestamp.date().isoformat(),
         strategy_id=STRATEGY_ID,
@@ -735,7 +751,10 @@ def _lifecycle_events(
     fill = PaperFill(
         fill_id=stable_id("fill", order.order_id, fill_bar.timestamp.isoformat()),
         order_id=order.order_id,
-        run_id=_run_id(fill_bar.timestamp.date()),
+        run_id=_run_id(
+            fill_bar.timestamp.date(),
+            snapshots[fill_bar.timestamp.date().isoformat()].snapshot_id,
+        ),
         mode=PaperRunMode.REPLAY,
         strategy_id=STRATEGY_ID,
         strategy_version=STRATEGY_VERSION,
@@ -782,7 +801,10 @@ def _lifecycle_events(
             PaperCloseReason.TARGET.value,
         ),
         position_id=opened.position_id,
-        run_id=_run_id(close_bar.timestamp.date()),
+        run_id=_run_id(
+            close_bar.timestamp.date(),
+            snapshots[close_bar.timestamp.date().isoformat()].snapshot_id,
+        ),
         mode=PaperRunMode.REPLAY,
         strategy_id=STRATEGY_ID,
         strategy_version=STRATEGY_VERSION,
@@ -805,30 +827,35 @@ def _lifecycle_events(
             "paper_order_created",
             signal_bar,
             order.to_dict(),
+            snapshots,
         ),
         _ledger_event(
             "event-fill",
             "paper_fill",
             fill_bar,
             _with_source_bar(fill.to_dict(), fill_bar, snapshots),
+            snapshots,
         ),
         _ledger_event(
             "event-position-opened",
             "paper_position_opened",
             fill_bar,
             _with_source_bar(opened.to_dict(), fill_bar, snapshots),
+            snapshots,
         ),
         _ledger_event(
             "event-position-marked",
             "paper_position_marked_to_market",
             mark_bar,
             _with_source_bar(marked.to_dict(), mark_bar, snapshots),
+            snapshots,
         ),
         _ledger_event(
             "event-position-closed",
             "paper_position_closed",
             close_bar,
             _with_source_bar(closed.to_dict(), close_bar, snapshots),
+            snapshots,
         ),
     ]
 
@@ -838,11 +865,15 @@ def _ledger_event(
     event_type: str,
     bar: MarketBar,
     payload: dict[str, object],
+    snapshots: dict[str, DataTruthManifest],
 ) -> dict[str, object]:
     return PaperLedgerEvent(
         event_id=event_id,
         event_type=event_type,
-        run_id=_run_id(bar.timestamp.date()),
+        run_id=_run_id(
+            bar.timestamp.date(),
+            snapshots[bar.timestamp.date().isoformat()].snapshot_id,
+        ),
         mode=PaperRunMode.REPLAY,
         trade_date=bar.timestamp.date().isoformat(),
         strategy_id=STRATEGY_ID,
@@ -881,7 +912,7 @@ def _write_paper_manifest(
     config: PaperOpsConfig,
 ) -> None:
     manifest = PaperOpsManifest(
-        run_id=_run_id(run_date),
+        run_id=_run_id(run_date, data_manifest.snapshot_id),
         mode=PaperRunMode.REPLAY,
         run_date=run_date.isoformat(),
         data_snapshot_id=data_manifest.snapshot_id,
@@ -899,7 +930,7 @@ def _write_paper_manifest(
     ).to_dict()
     manifest.pop("manifest_payload_hash")
     manifest["manifest_payload_hash"] = _payload_sha256(manifest)
-    write_json(output_root / "manifests" / f"{_run_id(run_date)}.json", manifest)
+    write_json(output_root / "manifests" / f"replay_{run_date.isoformat()}.json", manifest)
 
 
 def _write_shadow_manifest(
@@ -917,7 +948,7 @@ def _write_shadow_manifest(
             "status": "completed",
             "date": run_date.isoformat(),
             "mode": PaperRunMode.REPLAY.value,
-            "run_id": _run_id(run_date),
+            "run_id": _run_id(run_date, snapshot.snapshot_id),
             "data_snapshot_id": snapshot.snapshot_id,
             "challenger_id": challenger_id,
             "strategy_id": STRATEGY_ID,
@@ -974,7 +1005,7 @@ def _execution_config(
 
 
 def _manifest_path(scenario: _ImmutableLifecycleScenario, run_date: date) -> Path:
-    return scenario.output_root / "manifests" / f"{_run_id(run_date)}.json"
+    return scenario.output_root / "manifests" / f"replay_{run_date.isoformat()}.json"
 
 
 def _rewrite_manifest(path: Path, payload: dict[str, object]) -> None:
@@ -1018,8 +1049,8 @@ def _daily_bar(
     )
 
 
-def _run_id(run_date: date) -> str:
-    return f"paper-run-{run_date.isoformat()}"
+def _run_id(run_date: date, snapshot_id: str) -> str:
+    return stable_id("paper_ops", PaperRunMode.REPLAY.value, run_date.isoformat(), snapshot_id)
 
 
 def _payload_sha256(payload: object) -> str:

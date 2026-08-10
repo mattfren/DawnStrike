@@ -138,12 +138,67 @@ def _write_canonical_calendar_rows(
             }
         )
         row.update(overrides)
+        if "run_id" not in overrides:
+            row["run_id"] = stable_id(
+                "paper_ops",
+                str(row["mode"]),
+                str(row["date"]),
+                str(row["data_snapshot_id"]),
+            )
         canonical_rows.append(row)
     paper_ops_engine.write_csv(
         output_root / "calendar" / "strategy_daily_returns.csv",
         canonical_rows,
         paper_ops_engine.CALENDAR_FIELDNAMES,
     )
+    forward_rows = [row for row in canonical_rows if row["mode"] == "forward"]
+    if not forward_rows:
+        return
+    ledger_rows = paper_ops_engine.read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
+    for row in forward_rows:
+        run_id = str(row["run_id"])
+        run_date = str(row["date"])
+        snapshot = str(row["data_snapshot_id"])
+        policy = str(row["execution_policy_version"])
+        manifest = {
+            "schema_version": "v2.paper_ops_manifest.v3",
+            "run_id": run_id,
+            "mode": "forward",
+            "run_date": run_date,
+            "data_snapshot_id": snapshot,
+            "output_artifacts": [],
+            "warnings": [],
+            "execution_policy_version": policy,
+            "execution_policy_fingerprint": "fixture-policy-fingerprint",
+            "universe_id": "fixture-universe",
+            "universe_symbols": ["TST"],
+            "data_snapshot_content_hash": "fixture-content-hash",
+            "data_snapshot_manifest_payload_hash": "fixture-manifest-hash",
+            "data_snapshot_normalized_hash": "fixture-normalized-hash",
+            "data_snapshot_normalized_path": "normalized/fixture.csv",
+            "data_truth_root_relative": "../v2_data_truth",
+        }
+        manifest["manifest_payload_hash"] = hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        paper_ops_engine.write_json(
+            output_root / "manifests" / f"forward_{run_date}.json", manifest
+        )
+        if not any(item.get("run_id") == run_id for item in ledger_rows):
+            ledger_rows.append(
+                {
+                    "event_id": stable_id("observer-calendar", run_id),
+                    "event_type": "paper_no_setup_decision",
+                    "mode": "forward",
+                    "payload": {"execution_policy_version": policy},
+                    "run_id": run_id,
+                    "schema_version": "test",
+                    "strategy_id": "observer-fixture",
+                    "symbol": "TST",
+                    "trade_date": run_date,
+                }
+            )
+    paper_ops_engine.write_jsonl(output_root / "ledger" / "paper_ledger.jsonl", ledger_rows)
 
 
 def _tree_bytes_and_directories(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
