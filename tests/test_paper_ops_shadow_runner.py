@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -1182,11 +1184,34 @@ def _seed_champion_day(
     *,
     snapshot_id: str | None = None,
 ) -> None:
+    paths = paper_engine.PaperOpsPaths.create(root)
     snapshot = snapshot_id or f"sourced-shadow-{run_date.isoformat()}"
     run = paper_engine._paper_run(
         run_date=run_date,
         mode=PaperRunMode.FORWARD,
         data_snapshot_id=snapshot,
+    )
+    config = paper_engine._config(paths)
+    run_manifest = paper_engine.PaperOpsManifest(
+        run_id=run.run_id,
+        mode=run.mode,
+        run_date=run.run_date,
+        data_snapshot_id=run.data_snapshot_id,
+        output_artifacts=(),
+        warnings=(),
+        execution_policy_version=config.execution_policy_version,
+        execution_policy_fingerprint="a" * 64,
+        universe_id=config.universe_id,
+        universe_symbols=config.universe_symbols,
+    ).to_dict()
+    unhashed = dict(run_manifest)
+    unhashed.pop("manifest_payload_hash", None)
+    run_manifest["manifest_payload_hash"] = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    write_json(
+        paths.manifests / f"{paper_engine._safe_filename(run.run_id)}.json",
+        run_manifest,
     )
     write_json(
         root / "reports" / "daily" / f"forward_{run_date}.json",

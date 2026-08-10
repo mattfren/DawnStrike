@@ -154,38 +154,105 @@ def _seed_pending_journal(root, journal_kind):
             },
         )
         return journal
-    run_id = paper_ops_engine.stable_id(
-        "paper_ops", "forward", "2026-01-02", "observer-recovery-snapshot"
+    config = paper_ops_engine.PaperOpsConfig()
+    catalog = tuple(paper_ops_engine.build_strategy_catalog())
+    strategy_config = paper_ops_engine._strategy_configs(config, catalog)[-1]
+    strategy = next(
+        item for item in catalog if item.strategy_id == strategy_config.strategy_id
     )
+    strategy_id = strategy.strategy_id
+    strategy_version = strategy.version
+    semantics = paper_ops_engine._strategy_semantics_fingerprint(strategy)
+    snapshot_id = "observer-recovery-snapshot"
+    run_id = paper_ops_engine.stable_id(
+        "paper_ops", "forward", "2026-01-02", snapshot_id
+    )
+    signal_time = "2026-01-02T20:00:00+00:00"
+    policy = config.execution_policy_version
+    pick_id = paper_ops_engine.stable_id(
+        "forward",
+        "2026-01-02",
+        strategy_id,
+        strategy_version,
+        policy,
+        "TST",
+        signal_time,
+        "long",
+    )
+    order_id = paper_ops_engine.stable_id("order", pick_id)
+    event_id = paper_ops_engine.stable_id(
+        "paper_ops_event",
+        "forward",
+        "2026-01-02",
+        "enter",
+        "paper_order_created",
+        order_id,
+    )
+    entry = 100.0
+    stop = 95.0
+    slippage_rate = config.slippage_bps / 10_000.0
+    entry_fill = entry * (1 + slippage_rate)
+    stop_fill = stop * (1 - slippage_rate)
+    risk_per_unit = (entry_fill - stop_fill) + (
+        entry_fill + stop_fill
+    ) * config.fee_bps / 10_000.0
+    risk_budget = config.starting_equity * config.risk_per_trade_pct
+    quantity = int(risk_budget / risk_per_unit)
+    pick = {
+        "pick_id": pick_id,
+        "run_id": run_id,
+        "mode": "forward",
+        "trade_date": "2026-01-02",
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "strategy_status": "shadow",
+        "symbol": "TST",
+        "signal_time": signal_time,
+        "direction": "long",
+        "setup_score": 1.0,
+        "entry_reference": entry,
+        "stop": stop,
+        "target": 110.0,
+        "risk_per_unit": entry - stop,
+        "reward_per_unit": 10.0,
+        "reward_risk": 2.0,
+        "decision": "accepted",
+        "reason": "canonical recovery fixture",
+        "evidence": ["canonical recovery evidence"],
+        "warnings": [],
+        "execution_policy_version": policy,
+        "strategy_semantics_fingerprint": semantics,
+        "schema_version": "v2.paper_pick.v2",
+    }
     event = {
-        "event_id": "observer-recovery-probe",
+        "event_id": event_id,
         "event_type": "paper_order_created",
         "mode": "forward",
         "payload": {
             "direction": "long",
             "earliest_fill_date": "2026-01-05",
-            "entry": 100.0,
-            "execution_policy_version": "observer-recovery-policy-v1",
-            "expected_fill_rule": "next_completed_session_open_plus_slippage",
-            "max_loss_estimate": 50.0,
+            "entry": entry,
+            "execution_policy_version": policy,
+            "expected_fill_rule": "daily signal fills no earlier than next valid bar open",
+            "max_loss_estimate": quantity * risk_per_unit,
             "mode": "forward",
-            "notional_exposure": 1_000.0,
-            "order_id": "observer-recovery-order",
+            "notional_exposure": quantity * entry,
+            "order_id": order_id,
             "order_status": "pending",
-            "pick_id": "observer-recovery-pick",
-            "quantity": 10,
+            "pick_id": pick_id,
+            "quantity": quantity,
             "reward_per_unit": 10.0,
             "reward_risk": 2.0,
-            "risk_budget": 500.0,
-            "risk_per_unit": 5.0,
+            "risk_budget": risk_budget,
+            "risk_per_unit": risk_per_unit,
             "run_id": run_id,
             "schema_version": "v2.paper_order.v2",
-            "signal_time": "2026-01-02T20:00:00+00:00",
-            "stop": 95.0,
-            "strategy_id": "observer-recovery-strategy",
-            "strategy_equity_basis": 100_000.0,
-            "strategy_semantics_fingerprint": "a" * 64,
-            "strategy_version": "observer-recovery-v1",
+            "signal_time": signal_time,
+            "stop": stop,
+            "strategy_id": strategy_id,
+            "strategy_equity_basis": config.starting_equity,
+            "strategy_semantics_fingerprint": semantics,
+            "strategy_version": strategy_version,
             "symbol": "TST",
             "target": 110.0,
             "trade_date": "2026-01-02",
@@ -193,10 +260,55 @@ def _seed_pending_journal(root, journal_kind):
         },
         "run_id": run_id,
         "schema_version": "v2.paper_ledger_event.v1",
-        "strategy_id": "observer-recovery-strategy",
+        "strategy_id": strategy_id,
         "symbol": "TST",
         "trade_date": "2026-01-02",
     }
+    manifest = paper_ops_engine.PaperOpsManifest(
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date="2026-01-02",
+        data_snapshot_id=snapshot_id,
+        output_artifacts=(),
+        warnings=(),
+        execution_policy_version=policy,
+        execution_policy_fingerprint="b" * 64,
+        universe_id="observer-recovery-universe",
+        universe_symbols=("TST",),
+    ).to_dict()
+    unhashed_manifest = dict(manifest)
+    unhashed_manifest.pop("manifest_payload_hash", None)
+    manifest["manifest_payload_hash"] = hashlib.sha256(
+        json.dumps(
+            unhashed_manifest, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    paper_ops_engine.write_json(
+        paths.manifests / f"{paper_ops_engine._safe_filename(run_id)}.json",
+        manifest,
+    )
+    paper_ops_engine.write_json(
+        paths.exports / "picks_forward_2026-01-02.json", [pick]
+    )
+    scan_event = paper_ops_engine.PaperLedgerEvent(
+        event_id=paper_ops_engine.stable_id(
+            "paper_ops_event",
+            "forward",
+            "2026-01-02",
+            "scan",
+            "paper_pick_decision",
+            pick_id,
+        ),
+        event_type="paper_pick_decision",
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        trade_date="2026-01-02",
+        strategy_id=strategy_id,
+        symbol="TST",
+        payload=pick,
+    )
+    paper_ops_engine._append_events(paths, [scan_event])
     state_updates = {"state/pending_orders.json": [event["payload"]]}
     write_json(
         journal,
@@ -255,6 +367,8 @@ def _seed_calendar_variant(root, calendar_kind):
             if calendar_kind == "duplicate"
             else [row, {**row, "daily_return_pct": 1.0}]
             if calendar_kind == "conflicting_duplicate"
+            else [row, {**row, "execution_policy_version": "conflicting-policy-v2"}]
+            if calendar_kind == "policy_conflict"
             else [row]
         ),
         paper_ops_engine.CALENDAR_FIELDNAMES,
@@ -301,6 +415,7 @@ def test_paper_ops_observers_fail_closed_without_creating_a_missing_tree(tmp_pat
         "malformed_numeric",
         "duplicate",
         "conflicting_duplicate",
+        "policy_conflict",
     ),
 )
 def test_calendar_observers_reject_invalid_evidence_without_writes(
@@ -434,6 +549,12 @@ def test_init_cli_recovers_canonical_pending_order_transaction(tmp_path) -> None
     root = tmp_path / "paper_ops"
     init(output_root=root)
     journal = _seed_pending_journal(root, "valid")
+    seeded = paper_ops_engine.read_json(journal, None)
+    assert isinstance(seeded, dict)
+    seeded_events = seeded["events"]
+    assert isinstance(seeded_events, list) and len(seeded_events) == 1
+    seeded_event = seeded_events[0]
+    assert isinstance(seeded_event, dict)
 
     status = paper_ops_cli.main(["init", "--output-root", str(root)])
 
@@ -441,12 +562,21 @@ def test_init_cli_recovers_canonical_pending_order_transaction(tmp_path) -> None
     assert not journal.exists()
     pending = paper_ops_engine.read_json(root / "state" / "pending_orders.json", None)
     assert isinstance(pending, list)
-    assert len(pending) == 1
-    assert pending[0]["order_id"] == "observer-recovery-order"
-    assert any(
-        row.get("event_id") == "observer-recovery-probe"
+    expected_pick_id = seeded_event["payload"]["pick_id"]
+    expected_order_id = seeded_event["payload"]["order_id"]
+    expected_event_id = seeded_event["event_id"]
+    recovered = [
+        row
         for row in paper_ops_engine.read_jsonl(root / "ledger" / "paper_ledger.jsonl")
-    )
+        if row.get("event_id") == expected_event_id
+    ]
+    assert len(recovered) == 1
+    assert pending == [recovered[0]["payload"]]
+    assert pending[0]["pick_id"] == expected_pick_id
+    assert pending[0]["order_id"] == expected_order_id
+    recovered_tree = _tree_snapshot(root)
+    assert paper_ops_cli.main(["init", "--output-root", str(root)]) == 0
+    assert _tree_snapshot(root) == recovered_tree
 
 
 def test_paper_ops_cli_returns_nonzero_for_failed_reconciliation(

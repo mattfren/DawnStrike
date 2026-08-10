@@ -37,6 +37,7 @@ from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.governance import apply_evidence_governance
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
 from intraday_scanner.v2.paper_ops.models import (
+    PaperJobPhase,
     PaperOpsConfig,
     PaperPick,
     PaperPickDecision,
@@ -303,12 +304,14 @@ def _accepted_pick(output_root: Path, run_date: date, mode: PaperRunMode) -> Pap
     signal_time = datetime.combine(run_date, time(21, 0), tzinfo=timezone.utc).isoformat()
     strategy_id = str(strategy["strategy_id"])
     strategy_version = str(strategy["strategy_version"])
+    execution_policy_version = str(strategy["execution_policy_version"])
     return PaperPick(
         pick_id=stable_id(
             mode.value,
             run_date.isoformat(),
             strategy_id,
             strategy_version,
+            execution_policy_version,
             "TST",
             signal_time,
             Direction.LONG,
@@ -332,8 +335,66 @@ def _accepted_pick(output_root: Path, run_date: date, mode: PaperRunMode) -> Pap
         decision=PaperPickDecision.ACCEPTED,
         reason="accepted",
         evidence=("fixture accepted pick",),
+        execution_policy_version=execution_policy_version,
         strategy_semantics_fingerprint=str(strategy["strategy_semantics_fingerprint"]),
     )
+
+
+def _write_picks_with_scan_evidence(output_root: Path, picks: list[PaperPick]) -> None:
+    assert picks
+    first = picks[0]
+    assert all(
+        (pick.run_id, pick.mode, pick.trade_date)
+        == (first.run_id, first.mode, first.trade_date)
+        for pick in picks
+    )
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    manifest = _manifest()
+    run = paper_ops_engine._paper_run(
+        run_date=date.fromisoformat(first.trade_date),
+        mode=first.mode,
+        data_snapshot_id=manifest.snapshot_id,
+    )
+    assert run.run_id == first.run_id
+    paper_ops_engine._ensure_run_manifest(
+        paths,
+        run,
+        config=paper_ops_engine._config(paths),
+        data_manifest=manifest,
+        data_truth_root=paper_ops_engine._data_truth_root_for_mode(paths, first.mode),
+    )
+    pick_rows = [pick.to_dict() for pick in picks]
+    decision_rows = [
+        {
+            **pick.to_dict(),
+            "decision_status": pick.decision.value,
+            "trade_return_eligible": pick.decision is PaperPickDecision.ACCEPTED,
+            "trade_return_pct": None,
+        }
+        for pick in picks
+    ]
+    events = [
+        paper_ops_engine._event(
+            run,
+            PaperJobPhase.SCAN,
+            pick.strategy_id,
+            pick.symbol,
+            "paper_pick_decision",
+            pick.pick_id,
+            pick.to_dict(),
+        )
+        for pick in picks
+    ]
+    event_rows = paper_ops_engine._serialize_transaction_events(events)
+    paper_ops_engine._validate_scan_artifact_evidence(event_rows, pick_rows, decision_rows)
+    paper_ops_engine.write_json(
+        paths.exports / f"picks_{first.mode.value}_{first.trade_date}.json", pick_rows
+    )
+    paper_ops_engine.write_json(
+        paths.exports / f"strategy_decisions_{first.mode.value}_{first.trade_date}.json",
+        decision_rows,
+    )
+    paper_ops_engine._append_events(paths, events)
 
 
 def test_datatruth_snapshot_skips_incomplete_and_rejects_bad_rows(tmp_path: Path) -> None:
@@ -676,6 +737,38 @@ def test_paperops_models_have_stable_ids_and_json() -> None:
     assert '"mode":"forward"' in stable_json(left)
 
 
+def test_calendar_writer_rejects_same_series_policy_conflict_without_writes(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=output_root)
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    manifest = _manifest()
+    run = paper_ops_engine._paper_run(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.REPLAY,
+        data_snapshot_id=manifest.snapshot_id,
+    )
+    pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
+    _write_picks_with_scan_evidence(output_root, [pick])
+    paper_ops_engine._write_calendar_for_date(paths, run, manifest, ())
+    calendar_path = paths.calendar / "strategy_daily_returns.csv"
+    with calendar_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    rows[0]["execution_policy_version"] = "conflicting-policy-v2"
+    paper_ops_engine.write_csv(calendar_path, rows, paper_ops_engine.CALENDAR_FIELDNAMES)
+    before = _tree_bytes_and_directories(output_root)
+
+    with pytest.raises(
+        ValueError,
+        match="calendar canonical series conflicts on execution policy",
+    ):
+        paper_ops_engine._write_calendar_for_date(paths, run, manifest, ())
+
+    assert _tree_bytes_and_directories(output_root) == before
+
+
 def test_paperops_daily_fill_is_next_bar_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -702,16 +795,29 @@ def test_paperops_daily_fill_is_next_bar_and_idempotent(
     monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", fake_loader)
     paper_ops_engine.init(output_root=output_root)
     pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.FORWARD)
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_forward_2026-01-02.json",
-        [pick.to_dict()],
-    )
+    _write_picks_with_scan_evidence(output_root, [pick])
 
     first_enter = paper_ops_engine.enter(run_date=date(2026, 1, 2), output_root=output_root)
+    decisions_path = output_root / "exports" / "order_decisions_forward_2026-01-02.json"
+    report_path = output_root / "reports" / "daily" / "forward_2026-01-02.json"
+    decisions_after_first_enter = decisions_path.read_bytes()
+    report_after_first_enter = report_path.read_bytes()
+    tree_after_first_enter = _tree_bytes_and_directories(output_root)
     second_enter = paper_ops_engine.enter(run_date=date(2026, 1, 2), output_root=output_root)
+    assert decisions_path.read_bytes() == decisions_after_first_enter
+    assert report_path.read_bytes() == report_after_first_enter
+    assert _tree_bytes_and_directories(output_root) == tree_after_first_enter
     pending_before_fill = json.loads((output_root / "state" / "pending_orders.json").read_text())
     same_day = paper_ops_engine.check(run_date=date(2026, 1, 2), output_root=output_root)
     next_day = paper_ops_engine.check(run_date=date(2026, 1, 3), output_root=output_root)
+    next_day_report = output_root / "reports" / "daily" / "forward_2026-01-03.json"
+    report_after_first_check = next_day_report.read_bytes()
+    tree_after_first_check = _tree_bytes_and_directories(output_root)
+    repeated_next_day = paper_ops_engine.check(
+        run_date=date(2026, 1, 3), output_root=output_root
+    )
+    assert next_day_report.read_bytes() == report_after_first_check
+    assert _tree_bytes_and_directories(output_root) == tree_after_first_check
 
     assert first_enter["orders_created"] == 1
     assert second_enter["orders_created"] == 0
@@ -719,6 +825,8 @@ def test_paperops_daily_fill_is_next_bar_and_idempotent(
     assert same_day["fills"] == 0
     assert next_day["fills"] == 1
     assert next_day["open_positions"] == 1
+    assert repeated_next_day["fills"] == 0
+    assert repeated_next_day["open_positions"] == 1
     events = paper_ops_engine.read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
     event_ids = [event["event_id"] for event in events]
     assert len(event_ids) == len(set(event_ids))
@@ -753,15 +861,21 @@ def test_paperops_enforces_position_cap_and_persists_block_reason(
     picks = [
         replace(
             base,
-            pick_id=f"pick-{symbol}",
+            pick_id=stable_id(
+                base.mode.value,
+                base.trade_date,
+                base.strategy_id,
+                base.strategy_version,
+                base.execution_policy_version,
+                symbol,
+                base.signal_time,
+                base.direction,
+            ),
             symbol=symbol,
         )
         for symbol in symbols
     ]
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_replay_2026-01-02.json",
-        [pick.to_dict() for pick in picks],
-    )
+    _write_picks_with_scan_evidence(output_root, picks)
 
     result = paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
@@ -805,11 +919,24 @@ def test_paperops_enforces_gross_exposure_cap_and_persists_block_reason(
     paper_ops_engine.write_json(config_path, {"max_gross_exposure_pct": 0.05})
     paper_ops_engine.init(output_root=output_root)
     base = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    picks = [replace(base, pick_id=f"pick-{symbol}", symbol=symbol) for symbol in symbols]
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_replay_2026-01-02.json",
-        [pick.to_dict() for pick in picks],
-    )
+    picks = [
+        replace(
+            base,
+            pick_id=stable_id(
+                base.mode.value,
+                base.trade_date,
+                base.strategy_id,
+                base.strategy_version,
+                base.execution_policy_version,
+                symbol,
+                base.signal_time,
+                base.direction,
+            ),
+            symbol=symbol,
+        )
+        for symbol in symbols
+    ]
+    _write_picks_with_scan_evidence(output_root, picks)
 
     result = paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
@@ -890,6 +1017,61 @@ def test_paperops_persists_explicit_no_setup_decisions(
     assert decisions[0]["trade_return_pct"] is None
 
 
+def test_scan_rerun_is_idempotent_and_conflict_is_exact_tree_no_op(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    dataset = _dataset()
+    strategy = paper_ops_engine.build_strategy_catalog()[0]
+    monkeypatch.setattr(paper_ops_engine, "build_strategy_catalog", lambda: (strategy,))
+    monkeypatch.setattr(
+        paper_ops_engine,
+        "_load_dataset_for_mode",
+        lambda **_kwargs: (dataset, _manifest(), ()),
+    )
+    monkeypatch.setattr(paper_ops_engine, "_backtest_results", lambda *_args: {})
+    monkeypatch.setattr(
+        paper_ops_engine,
+        "run_latest_scan",
+        lambda *_args, **_kwargs: SimpleNamespace(no_setup=()),
+    )
+    paper_ops_engine.init(output_root=output_root)
+    entry_reference = {"value": 10.2}
+
+    def fake_picks(*_args: object, **_kwargs: object) -> tuple[PaperPick, ...]:
+        pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
+        return (replace(pick, entry_reference=entry_reference["value"]),)
+
+    monkeypatch.setattr(paper_ops_engine, "_picks_from_scan", fake_picks)
+    first = paper_ops_engine.scan(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+    after_first = _tree_bytes_and_directories(output_root)
+
+    second = paper_ops_engine.scan(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+
+    assert second == first
+    assert _tree_bytes_and_directories(output_root) == after_first
+
+    entry_reference["value"] = 999.0
+    before_conflict = _tree_bytes_and_directories(output_root)
+    with pytest.raises(ValueError, match="ledger conflict"):
+        paper_ops_engine.scan(
+            run_date=date(2026, 1, 2),
+            mode=PaperRunMode.REPLAY,
+            output_root=output_root,
+        )
+
+    assert _tree_bytes_and_directories(output_root) == before_conflict
+
+
 def test_paperops_net_equity_charges_entry_and_exit_fees(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -914,10 +1096,7 @@ def test_paperops_net_equity_charges_entry_and_exit_fees(
     )
     paper_ops_engine.init(output_root=output_root)
     pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_replay_2026-01-02.json",
-        [pick.to_dict()],
-    )
+    _write_picks_with_scan_evidence(output_root, [pick])
     paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
         mode=PaperRunMode.REPLAY,
@@ -978,10 +1157,7 @@ def test_paperops_blocks_a_new_fill_that_gaps_through_its_stop(
     )
     paper_ops_engine.init(output_root=output_root)
     pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_replay_2026-01-02.json",
-        [pick.to_dict()],
-    )
+    _write_picks_with_scan_evidence(output_root, [pick])
     paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
         mode=PaperRunMode.REPLAY,
@@ -1063,10 +1239,7 @@ def test_paperops_earliest_fill_falls_back_to_next_weekday_when_no_next_bar(
     monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", fake_loader)
     paper_ops_engine.init(output_root=output_root)
     pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.FORWARD)
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_forward_2026-01-02.json",
-        [pick.to_dict()],
-    )
+    _write_picks_with_scan_evidence(output_root, [pick])
 
     paper_ops_engine.enter(run_date=date(2026, 1, 2), output_root=output_root)
     pending = json.loads((output_root / "state" / "pending_orders.json").read_text())
@@ -1089,10 +1262,7 @@ def test_paperops_replay_state_is_isolated_from_forward_state(
     monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", fake_loader)
     paper_ops_engine.init(output_root=output_root)
     pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    paper_ops_engine.write_json(
-        output_root / "exports" / "picks_replay_2026-01-02.json",
-        [pick.to_dict()],
-    )
+    _write_picks_with_scan_evidence(output_root, [pick])
     result = paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
         mode=PaperRunMode.REPLAY,
@@ -1408,43 +1578,33 @@ def test_paperops_recovers_pending_transaction_idempotently(tmp_path: Path) -> N
     output_root = tmp_path / "paper_ops"
     paper_ops_engine.init(output_root=output_root)
     paths = paper_ops_engine.PaperOpsPaths.create(output_root)
-    event = _event_row(
-        "recovered-event",
-        "paper_order_created",
-        {
-            "direction": "long",
-            "earliest_fill_date": "2026-01-05",
-            "entry": 100.0,
-            "execution_policy_version": "fixture-policy-v1",
-            "expected_fill_rule": "next_completed_session_open_plus_slippage",
-            "max_loss_estimate": 50.0,
-            "mode": "forward",
-            "notional_exposure": 1_000.0,
-            "order_id": "recovered-order",
-            "order_status": "pending",
-            "pick_id": "recovered-pick",
-            "quantity": 10,
-            "reward_per_unit": 10.0,
-            "reward_risk": 2.0,
-            "risk_budget": 500.0,
-            "risk_per_unit": 5.0,
-            "run_id": "run",
-            "schema_version": "v2.paper_order.v2",
-            "signal_time": "2026-01-02T20:00:00+00:00",
-            "stop": 95.0,
-            "strategy_id": "fixture-strategy",
-            "strategy_equity_basis": 100_000.0,
-            "strategy_semantics_fingerprint": "a" * 64,
-            "strategy_version": "fixture-v1",
-            "symbol": "TST",
-            "target": 110.0,
-            "trade_date": "2026-01-02",
-            "warnings": [],
-        },
+    pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.FORWARD)
+    _write_picks_with_scan_evidence(output_root, [pick])
+    run = paper_ops_engine._paper_run(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.FORWARD,
+        data_snapshot_id=_manifest().snapshot_id,
     )
+    order = paper_ops_engine._order_from_pick(
+        pick,
+        run,
+        paper_ops_engine._config(paths),
+        equity_basis=paper_ops_engine._config(paths).starting_equity,
+    )
+    event = paper_ops_engine._event(
+        run,
+        PaperJobPhase.ENTER,
+        order.strategy_id,
+        order.symbol,
+        "paper_order_created",
+        order.order_id,
+        order.to_dict(),
+    ).to_dict()
+    event_id = event["event_id"]
+    order_id = order.order_id
     journal_path = paths.state / "paper_transaction_pending.json"
     events = [event]
-    state_updates = {"state/pending_orders.json": []}
+    state_updates = {"state/pending_orders.json": [order.to_dict()]}
     paper_ops_engine.write_json(
         journal_path,
         {
@@ -1464,10 +1624,12 @@ def test_paperops_recovers_pending_transaction_idempotently(tmp_path: Path) -> N
     recovered = [
         row
         for row in paper_ops_engine.read_jsonl(paths.ledger / "paper_ledger.jsonl")
-        if row.get("event_id") == "recovered-event"
+        if row.get("event_id") == event_id
     ]
     assert len(recovered) == 1
-    assert json.loads((paths.state / "pending_orders.json").read_text()) == []
+    pending = json.loads((paths.state / "pending_orders.json").read_text())
+    assert pending == [recovered[0]["payload"]]
+    assert [row["order_id"] for row in pending] == [order_id]
     assert not journal_path.exists()
 
 
