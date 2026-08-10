@@ -79,7 +79,12 @@ def _seed_observer_ledger(output_root: Path) -> None:
                 "event_id": "observer-fixture-event",
                 "event_type": "paper_no_setup_decision",
                 "mode": "forward",
-                "payload": {"decision_id": "observer-fixture-decision", "mode": "forward"},
+                "payload": {
+                    "decision_id": "observer-fixture-decision",
+                    "execution_policy_version": "fixture-policy-v1",
+                    "mode": "forward",
+                    "run_id": run_id,
+                },
                 "run_id": run_id,
                 "schema_version": "test",
                 "strategy_id": "observer-fixture",
@@ -154,7 +159,16 @@ def _write_canonical_calendar_rows(
     forward_rows = [row for row in canonical_rows if row["mode"] == "forward"]
     if not forward_rows:
         return
-    ledger_rows = paper_ops_engine.read_jsonl(output_root / "ledger" / "paper_ledger.jsonl")
+    # This helper owns the observer fixture's retained event identities; reset
+    # its seed so a same-run policy cannot leak into the test's calendar.
+    ledger_rows: list[dict[str, object]] = []
+    for existing_path in (output_root / "manifests").glob("*.json"):
+        existing = paper_ops_engine.read_json(existing_path, {})
+        if (
+            isinstance(existing, dict)
+            and existing.get("schema_version") == "v2.paper_ops_manifest.v3"
+        ):
+            existing_path.unlink()
     for row in forward_rows:
         run_id = str(row["run_id"])
         run_date = str(row["date"])
@@ -190,7 +204,11 @@ def _write_canonical_calendar_rows(
                     "event_id": stable_id("observer-calendar", run_id),
                     "event_type": "paper_no_setup_decision",
                     "mode": "forward",
-                    "payload": {"execution_policy_version": policy},
+                    "payload": {
+                        "execution_policy_version": policy,
+                        "mode": "forward",
+                        "run_id": run_id,
+                    },
                     "run_id": run_id,
                     "schema_version": "test",
                     "strategy_id": "observer-fixture",
