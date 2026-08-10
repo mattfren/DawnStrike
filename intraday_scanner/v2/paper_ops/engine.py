@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -3323,17 +3324,15 @@ def _commit_paper_transaction(
     state_updates: dict[Path, object],
 ) -> None:
     journal_path = paths.state / "paper_transaction_pending.json"
+    # Validate the complete proposed transaction before a lock, recovery, or
+    # journal is materialized.  A bad producer must be observably a no-op.
+    serialized_updates = _serialize_transaction_updates(paths, state_updates)
+    event_rows = _serialize_transaction_events(events)
     with exclusive_file_lock(paths.state / ".paper_transaction.lock"):
         _recover_pending_transaction_unlocked(paths, journal_path)
-        serialized_updates: dict[str, object] = {}
-        for path, payload in state_updates.items():
-            resolved = path.resolve()
-            try:
-                relative = resolved.relative_to(paths.root.resolve())
-            except ValueError as exc:
-                raise ValueError("PaperOps transaction state path escaped its root") from exc
-            serialized_updates[relative.as_posix()] = payload
-        event_rows = [event.to_dict() for event in events]
+        # Revalidate after acquiring the lock: an attacker can replace a path
+        # component with a reparse point between the initial check and write.
+        serialized_updates = _serialize_transaction_updates(paths, state_updates)
         transaction_id = _paper_transaction_id(event_rows, serialized_updates)
         journal = {
             "events": event_rows,
@@ -3383,20 +3382,10 @@ def _apply_transaction_journal(
     expected_transaction_id = _paper_transaction_id(event_rows, updates)
     if transaction_id != expected_transaction_id:
         raise ValueError("PaperOps transaction journal checksum does not match its payload")
+    _validate_transaction_event_rows(event_rows)
     validated_updates: list[tuple[Path, object]] = []
     for relative_name, payload in sorted(updates.items()):
-        if not isinstance(relative_name, str) or not relative_name.strip():
-            raise ValueError("PaperOps transaction journal state path is malformed")
-        target = (paths.root / relative_name).resolve()
-        try:
-            target.relative_to(paths.root.resolve())
-        except ValueError as exc:
-            raise ValueError("PaperOps transaction journal path escaped its root") from exc
-        if not _is_allowed_transaction_target(relative_name):
-            raise ValueError(
-                f"PaperOps transaction journal target is not writer-allowlisted: {relative_name}"
-            )
-        validated_updates.append((target, payload))
+        validated_updates.append((_validated_transaction_target(paths, relative_name), payload))
     append_jsonl_unique(
         paths.ledger / "paper_ledger.jsonl",
         [dict(row) for row in event_rows],
@@ -3413,7 +3402,10 @@ def _is_allowed_transaction_target(relative_name: str) -> bool:
     prevents a checksum-valid journal from becoming a generic root writer.
     """
 
-    normalized = relative_name.replace("\\", "/")
+    parts = _canonical_transaction_path_parts(relative_name)
+    if parts is None:
+        return False
+    normalized = "/".join(parts)
     core = {
         "state/pending_orders.json",
         "state/open_positions.json",
@@ -3427,14 +3419,121 @@ def _is_allowed_transaction_target(relative_name: str) -> bool:
     }
     if normalized in core:
         return True
-    safe = r"[A-Za-z0-9_.-]+"
+    safe_id = r"[a-z0-9][a-z0-9_.-]{2,80}"
     mode = r"(?:forward|replay|demo)"
+    iso_day = r"\d{4}-\d{2}-\d{2}"
     patterns = (
-        rf"state/shadow/{safe}/{mode}_(?:pending_orders|open_positions|account)\.json",
-        rf"exports/shadow_(?:strategy_decisions|picks|order_decisions)_{mode}_\d{{4}}-\d{{2}}-\d{{2}}_{safe}\.json",
-        rf"manifests/shadow_{mode}_\d{{4}}-\d{{2}}-\d{{2}}_{safe}\.json",
+        rf"state/shadow/{safe_id}/{mode}_(?:pending_orders|open_positions|account)\.json",
+        rf"exports/shadow_(?:strategy_decisions|picks|order_decisions)_{mode}_{iso_day}_{safe_id}\.json",
+        rf"manifests/shadow_{mode}_{iso_day}_{safe_id}\.json",
     )
-    return any(re.fullmatch(pattern, normalized) is not None for pattern in patterns)
+    if not any(re.fullmatch(pattern, normalized) is not None for pattern in patterns):
+        return False
+    # Regex shape is not date validation.
+    for value in parts:
+        for token in value.split("_"):
+            if re.fullmatch(iso_day, token):
+                try:
+                    date.fromisoformat(token)
+                except ValueError:
+                    return False
+    return True
+
+
+def _canonical_transaction_path_parts(relative_name: object) -> tuple[str, ...] | None:
+    """Return canonical lexical components for a journal target, if safe."""
+
+    if not isinstance(relative_name, str) or not relative_name:
+        return None
+    if (
+        "\\" in relative_name
+        or "\x00" in relative_name
+        or ":" in relative_name
+        or relative_name.startswith("/")
+        or relative_name.endswith("/")
+        or any(character.isspace() for character in relative_name)
+    ):
+        return None
+    parts = tuple(relative_name.split("/"))
+    if any(not part or part in {".", ".."} or part.endswith(".") for part in parts):
+        return None
+    # Drive-relative spellings are rejected by the colon rule; keep this
+    # explicit so the contract remains clear on non-Windows test hosts.
+    if parts and re.match(r"^[A-Za-z]$", parts[0]):
+        return None
+    return parts
+
+
+def _serialize_transaction_updates(
+    paths: PaperOpsPaths, state_updates: dict[Path, object]
+) -> dict[str, object]:
+    serialized: dict[str, object] = {}
+    for path, payload in state_updates.items():
+        try:
+            relative = path.relative_to(paths.root).as_posix()
+        except ValueError as exc:
+            raise ValueError("PaperOps transaction state path escaped its root") from exc
+        _validated_transaction_target(paths, relative)
+        if relative in serialized:
+            raise ValueError("PaperOps transaction has duplicate state target")
+        serialized[relative] = payload
+    return serialized
+
+
+def _validated_transaction_target(paths: PaperOpsPaths, relative_name: object) -> Path:
+    if not _is_allowed_transaction_target(relative_name if isinstance(relative_name, str) else ""):
+        raise ValueError(
+            f"PaperOps transaction journal target is not writer-allowlisted: {relative_name}"
+        )
+    assert isinstance(relative_name, str)
+    root = paths.root.resolve()
+    target = paths.root.joinpath(*relative_name.split("/"))
+    try:
+        target.relative_to(paths.root)
+    except ValueError as exc:
+        raise ValueError("PaperOps transaction journal path escaped its root") from exc
+    for component in (paths.root, *target.parents):
+        if component == paths.root.parent:
+            break
+        if component.exists() and _is_reparse_component(component):
+            raise ValueError("PaperOps transaction journal target contains a reparse component")
+    if target.exists() and _is_reparse_component(target):
+        raise ValueError("PaperOps transaction journal target is a reparse point")
+    # resolve(strict=False) checks existing parents too, after the explicit
+    # reparse-point scan above, without accepting a different protected path.
+    resolved = target.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("PaperOps transaction journal path escaped its root") from exc
+    return target
+
+
+def _is_reparse_component(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        attributes = path.stat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _serialize_transaction_events(events: list[PaperLedgerEvent]) -> list[dict[str, object]]:
+    rows = [event.to_dict() for event in events]
+    _validate_transaction_event_rows(rows)
+    return rows
+
+
+def _validate_transaction_event_rows(event_rows: list[dict[str, object]]) -> None:
+    for row in event_rows:
+        if not all(str(row.get(field) or "").strip() for field in ("event_id", "event_type")):
+            raise ValueError("PaperOps transaction journal events are malformed")
+        if not isinstance(row.get("payload"), dict):
+            raise ValueError("PaperOps transaction journal events are malformed")
 
 
 def _paper_transaction_id(
