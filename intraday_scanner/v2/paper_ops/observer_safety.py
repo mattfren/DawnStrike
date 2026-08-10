@@ -267,12 +267,22 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
 
     calendars = _calendar_run_identities(root / "calendar" / "strategy_daily_returns.csv")
     ledgers = _ledger_run_identities(root / "ledger" / "paper_ledger.jsonl")
-    # A run is applicable only where both records describe the same identity.
+    # Never hide one-sided evidence by intersecting the two sources.  A
+    # selected run is an attestation unit and must be present in both places.
     applicable: dict[str, _ApplicableRunIdentity] = {}
-    for run_id, calendar in calendars.items():
+    all_run_ids = set(calendars) | set(ledgers)
+    for run_id in all_run_ids:
+        calendar = calendars.get(run_id)
         ledger = ledgers.get(run_id)
-        if ledger is None:
+        candidate_modes = {item["mode"] for item in (calendar, ledger) if item is not None}
+        if mode is not None and mode not in candidate_modes:
             continue
+        if mode is None and not candidate_modes.intersection({"forward", "replay"}):
+            continue
+        if calendar is None or ledger is None:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"calendar/ledger run coverage conflict for run {run_id}"
+            )
         if calendar["mode"] != ledger["mode"] or calendar["run_date"] != ledger["run_date"]:
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", f"calendar/ledger identity conflict for run {run_id}"
@@ -292,7 +302,7 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
             f"{command} has no calendar/ledger runs for "
             f"{mode or 'forward/replay'} manifest validation",
         )
-    valid_run_ids: set[str] = set()
+    manifests_by_run: dict[str, list[dict[str, object]]] = {run_id: [] for run_id in selected}
     for path in sorted((root / "manifests").glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -304,15 +314,25 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", f"Run manifest is not an object: {path.name}"
             )
-        if _is_complete_manifest(payload, selected, mode):
-            valid_run_ids.add(str(payload["run_id"]))
-    if set(selected) <= valid_run_ids:
-        return
-    raise PaperOpsObserverBlocked(
-        "MISSING_INPUT",
-        f"{command} requires a complete applicable "
-        f"{mode or 'forward/replay'} PaperOps run manifest",
-    )
+        if payload.get("schema_version") != "v2.paper_ops_manifest.v3":
+            continue
+        run_id = str(payload.get("run_id") or "").strip()
+        if run_id in manifests_by_run:
+            manifests_by_run[run_id].append(payload)
+    for run_id, identity in selected.items():
+        candidates = manifests_by_run[run_id]
+        valid = [
+            item
+            for item in candidates
+            if _is_complete_manifest(item, {run_id: identity}, mode)
+        ]
+        # A second v3 claim for the same selected run is evidence conflict, even
+        # if the first claim happens to be valid.
+        if len(candidates) != 1 or len(valid) != 1:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT" if candidates else "MISSING_INPUT",
+                f"{command} requires exactly one complete applicable run manifest for {run_id}",
+            )
 
 
 def _is_complete_manifest(
@@ -379,9 +399,9 @@ def _is_complete_manifest(
     ):
         return False
     policy = str(payload.get("execution_policy_version") or "")
-    if policy not in identity["calendar_policies"]:
+    if identity["calendar_policies"] != {policy}:
         return False
-    if identity["ledger_policies"] and policy not in identity["ledger_policies"]:
+    if identity["ledger_policies"] != {policy}:
         return False
     hash_payload = dict(payload)
     observed_hash = hash_payload.pop("manifest_payload_hash")
@@ -438,10 +458,10 @@ def _calendar_run_identities(path: Path) -> dict[str, _CalendarRunIdentity]:
 
 
 def _is_reference_calendar_row(strategy_id: str) -> bool:
-    return (
-        strategy_id in {"benchmark", "cash", "cash_benchmark", "buy_and_hold"}
-        or "benchmark" in strategy_id
-    )
+    return strategy_id in {
+        "benchmark_buy_hold_equal_weight",
+        "cash_no_trade_baseline",
+    }
 
 
 def _ledger_run_identities(path: Path) -> dict[str, _LedgerRunIdentity]:
@@ -465,9 +485,13 @@ def _ledger_run_identities(path: Path) -> dict[str, _LedgerRunIdentity]:
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", f"Ledger JSONL row {line_number} is not an object"
             )
+        event_id = str(row.get("event_id") or "").strip()
+        event_type = str(row.get("event_type") or "").strip()
         run_id = str(row.get("run_id") or "").strip()
-        if not run_id:
-            continue
+        if not event_id or not event_type or not run_id:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger JSONL row {line_number} has malformed event envelope"
+            )
         run_mode = str(row.get("mode") or "").strip()
         run_date = str(row.get("trade_date") or "").strip()
         if run_mode not in {"forward", "replay", "demo"}:
@@ -489,16 +513,21 @@ def _ledger_run_identities(path: Path) -> dict[str, _LedgerRunIdentity]:
                 "INVALID_INPUT", f"conflicting ledger identity for run {run_id}"
             )
         payload = row.get("payload")
-        if isinstance(payload, dict):
-            policy = payload.get("execution_policy_version")
-            if policy is not None:
-                policy_text = str(policy).strip()
-                if not policy_text:
-                    raise PaperOpsObserverBlocked(
-                        "INVALID_INPUT",
-                        f"Ledger has malformed policy identity for run {run_id}",
-                    )
-                identity["policies"].add(policy_text)
+        if not isinstance(payload, dict):
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger JSONL row {line_number} has non-object payload"
+            )
+        policy_text = str(payload.get("execution_policy_version") or "").strip()
+        if not policy_text:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger has malformed policy identity for run {run_id}"
+            )
+        for field, expected in (("mode", run_mode), ("run_id", run_id)):
+            if field in payload and str(payload[field]).strip() != expected:
+                raise PaperOpsObserverBlocked(
+                    "INVALID_INPUT", f"Ledger payload {field} conflicts for run {run_id}"
+                )
+        identity["policies"].add(policy_text)
     return result
 
 
