@@ -38,16 +38,19 @@ def _write_complete_forward_manifest(
     session_date: str,
     run_id: str,
     snapshot: str,
+    execution_policy: str | None = None,
+    name_suffix: str = "",
+    mode: str = "forward",
 ) -> None:
     payload: dict[str, object] = {
         "schema_version": "v2.paper_ops_manifest.v3",
         "run_id": run_id,
-        "mode": "forward",
+        "mode": mode,
         "run_date": session_date,
         "data_snapshot_id": snapshot,
         "output_artifacts": [],
         "warnings": [],
-        "execution_policy_version": POLICY,
+        "execution_policy_version": execution_policy or POLICY,
         "execution_policy_fingerprint": "fixture-policy-fingerprint",
         "universe_id": "fixture-universe",
         "universe_symbols": ["AAA"],
@@ -60,7 +63,9 @@ def _write_complete_forward_manifest(
     payload["manifest_payload_hash"] = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    write_json(root / "manifests" / f"forward_{session_date}.json", payload)
+    write_json(
+        root / "manifests" / f"forward_{session_date}{name_suffix}.json", payload
+    )
 
 STRATEGY_IDS = (
     "ts_momentum_sma_atr",
@@ -789,54 +794,6 @@ def _seed_candidate_evidence(
                     status="baseline",
                     semantics="cash-semantics-v1",
                 ),
-                {
-                    **_calendar_row(
-                        session_date,
-                        run_id,
-                        snapshot,
-                        strategy_id,
-                        "v2.0",
-                        "wrong-policy",
-                        9.0,
-                        100_000.0,
-                        1_000_000.0,
-                        trades=0,
-                    ),
-                },
-                {
-                    **_calendar_row(
-                        session_date,
-                        paper_engine.stable_id(
-                            "paper_ops", "replay", session_date, snapshot
-                        ),
-                        snapshot,
-                        strategy_id,
-                        "v1.0",
-                        POLICY,
-                        8.0,
-                        100_000.0,
-                        900_000.0,
-                        trades=0,
-                    ),
-                    "mode": "replay",
-                },
-                {
-                    **_calendar_row(
-                        session_date,
-                        paper_engine.stable_id(
-                            "paper_ops", "demo", session_date, snapshot
-                        ),
-                        snapshot,
-                        strategy_id,
-                        "v1.0",
-                        POLICY,
-                        7.0,
-                        100_000.0,
-                        800_000.0,
-                        trades=0,
-                    ),
-                    "mode": "demo",
-                },
             ]
         )
         write_json(
@@ -922,6 +879,138 @@ def _seed_candidate_evidence(
         )
         events.extend(champion_run_events)
         events.extend(candidate_run_events)
+        if session_date == dates[0]:
+            # Retain an independently complete wrong-policy series so the
+            # evaluator proves it is excluded without contaminating the
+            # canonical champion/candidate run identity.
+            wrong_snapshot = f"{snapshot}_wrong_policy"
+            wrong_run_id = paper_engine.stable_id(
+                "paper_ops", "forward", session_date, wrong_snapshot
+            )
+            _write_complete_forward_manifest(
+                root,
+                session_date=session_date,
+                run_id=wrong_run_id,
+                snapshot=wrong_snapshot,
+                execution_policy="wrong-policy",
+                name_suffix="_wrong_policy",
+            )
+            rows.append(
+                _calendar_row(
+                    session_date,
+                    wrong_run_id,
+                    wrong_snapshot,
+                    strategy_id,
+                    "v2.0",
+                    "wrong-policy",
+                    9.0,
+                    100_000.0,
+                    1_000_000.0,
+                    trades=0,
+                )
+            )
+            replay_snapshot = f"{snapshot}_replay"
+            replay_run_id = paper_engine.stable_id(
+                "paper_ops", "replay", session_date, replay_snapshot
+            )
+            _write_complete_forward_manifest(
+                root,
+                session_date=session_date,
+                run_id=replay_run_id,
+                snapshot=replay_snapshot,
+                name_suffix="_replay",
+                mode="replay",
+            )
+            rows.append(
+                {
+                    **_calendar_row(
+                        session_date,
+                        replay_run_id,
+                        replay_snapshot,
+                        strategy_id,
+                        "v1.0",
+                        POLICY,
+                        8.0,
+                        100_000.0,
+                        900_000.0,
+                        trades=0,
+                    ),
+                    "mode": "replay",
+                }
+            )
+            events.append(
+                {
+                    "event_id": f"no-setup:replay:{session_date}",
+                    "event_type": "paper_no_setup_decision",
+                    "mode": "replay",
+                    "trade_date": session_date,
+                    "run_id": replay_run_id,
+                    "strategy_id": strategy_id,
+                    "symbol": "AAA",
+                    "payload": {
+                        "data_snapshot_id": replay_snapshot,
+                        "decision": "no_setup",
+                        "decision_status": "no_setup",
+                        "execution_policy_version": POLICY,
+                        "mode": "replay",
+                        "run_id": replay_run_id,
+                        "strategy_id": strategy_id,
+                        "strategy_semantics_fingerprint": str(
+                            registration["champion_strategy_semantics_fingerprint"]
+                        ),
+                        "strategy_version": "v1.0",
+                        "symbol": "AAA",
+                        "trade_date": session_date,
+                    },
+                }
+            )
+            demo_snapshot = f"{snapshot}_demo"
+            demo_run_id = paper_engine.stable_id(
+                "paper_ops", "demo", session_date, demo_snapshot
+            )
+            rows.append(
+                {
+                    **_calendar_row(
+                        session_date,
+                        demo_run_id,
+                        demo_snapshot,
+                        strategy_id,
+                        "v1.0",
+                        POLICY,
+                        7.0,
+                        100_000.0,
+                        800_000.0,
+                        trades=0,
+                    ),
+                    "mode": "demo",
+                }
+            )
+            events.append(
+                {
+                    "event_id": f"no-setup:wrong-policy:{session_date}",
+                    "event_type": "paper_no_setup_decision",
+                    "mode": "forward",
+                    "trade_date": session_date,
+                    "run_id": wrong_run_id,
+                    "strategy_id": strategy_id,
+                    "symbol": "AAA",
+                    "payload": {
+                        "data_snapshot_id": wrong_snapshot,
+                        "decision": "no_setup",
+                        "decision_status": "no_setup",
+                        "execution_policy_version": "wrong-policy",
+                        "mode": "forward",
+                        "run_id": wrong_run_id,
+                        "strategy_id": strategy_id,
+                        "strategy_semantics_fingerprint": str(
+                            registration["candidate_strategy_semantics_fingerprint"]
+                        ),
+                        "strategy_version": "v2.0",
+                        "symbol": "AAA",
+                        "trade_date": session_date,
+                    },
+                }
+            )
         write_json(
             root / "manifests" / f"shadow_forward_{session_date}_{challenger_id}.json",
             {

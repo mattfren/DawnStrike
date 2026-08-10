@@ -60,18 +60,17 @@ def _write_canonical_calendar_evidence(
             manifest=manifest,
             dataset=dataset,
         )
-        if len(reference_rows) == 2:
-            rows.extend(reference_rows)
-            strategy_row = dict(reference_rows[0])
-            strategy_row.update(
-                {
-                    "execution_policy_version": config.execution_policy_version,
-                    "strategy_id": STRATEGY_ID,
-                    "strategy_status": "active",
-                    "strategy_version": STRATEGY_VERSION,
-                }
-            )
-            rows.append(strategy_row)
+        rows.extend(reference_rows)
+        strategy_row = dict(reference_rows[0])
+        strategy_row.update(
+            {
+                "execution_policy_version": config.execution_policy_version,
+                "strategy_id": STRATEGY_ID,
+                "strategy_status": "active",
+                "strategy_version": STRATEGY_VERSION,
+            }
+        )
+        rows.append(strategy_row)
     with (root / "calendar" / "strategy_daily_returns.csv").open(
         "w", encoding="utf-8", newline=""
     ) as handle:
@@ -499,7 +498,7 @@ def test_event_identity_must_match_its_run_manifest(
 
     with pytest.raises(
         PaperOpsObserverBlocked,
-        match="calendar/ledger identity conflict",
+        match="conflicting ledger identity|calendar/ledger identity conflict",
     ):
         verify_source_bar_truth(output_root=scenario.output_root)
 
@@ -551,7 +550,7 @@ def test_run_cannot_rebind_an_event_to_a_later_snapshot_containing_the_same_bar(
     mark["data_snapshot_id"] = later.snapshot_id
     scenario.persist_events()
 
-    with pytest.raises(PaperOpsObserverBlocked, match="requires a complete applicable"):
+    with pytest.raises(PaperOpsObserverBlocked, match="complete applicable run manifest"):
         verify_source_bar_truth(output_root=scenario.output_root)
 
 
@@ -650,6 +649,7 @@ def _daily_source_fixture(
     tmp_path: Path,
     universe_symbols: tuple[str, ...],
 ) -> tuple[Path, Path, dict[date, MarketBar]]:
+    historical_bar = _daily_bar(date(2026, 1, 4), 98.0, 100.0, 97.0, 99.0)
     bars = {
         date(2026, 1, 5): _daily_bar(date(2026, 1, 5), 99.0, 101.0, 98.0, 100.0),
         date(2026, 1, 6): _daily_bar(date(2026, 1, 6), 100.0, 104.0, 98.0, 102.0),
@@ -668,7 +668,7 @@ def _daily_source_fixture(
                 close=bar.close,
                 volume=bar.volume,
             )
-            for bar in bars.values()
+            for bar in (historical_bar, *bars.values())
         )
         for symbol in universe_symbols
     }
@@ -821,7 +821,7 @@ def _lifecycle_events(
         execution_policy_version=config.execution_policy_version,
         strategy_semantics_fingerprint=SEMANTICS_FINGERPRINT,
     )
-    return [
+    events = [
         _ledger_event(
             "event-order-created",
             "paper_order_created",
@@ -858,6 +858,47 @@ def _lifecycle_events(
             snapshots,
         ),
     ]
+    # A daily scan is a canonical run attestation even when that date's
+    # lifecycle event is later deliberately moved by an adversarial test.
+    # Keep a no-setup decision for every run so those tests reach their
+    # intended source-bar check instead of manufacturing one-sided coverage.
+    events.extend(
+        _no_setup_anchor(bar, snapshots, config)
+        for bar in bars.values()
+    )
+    return events
+
+
+def _no_setup_anchor(
+    bar: MarketBar,
+    snapshots: dict[str, DataTruthManifest],
+    config: PaperOpsConfig,
+) -> dict[str, object]:
+    run_date = bar.timestamp.date()
+    manifest = snapshots[run_date.isoformat()]
+    run_id = _run_id(run_date, manifest.snapshot_id)
+    return PaperLedgerEvent(
+        event_id=stable_id("paper_no_setup_decision", run_id, STRATEGY_ID, "TST"),
+        event_type="paper_no_setup_decision",
+        run_id=run_id,
+        mode=PaperRunMode.REPLAY,
+        trade_date=run_date.isoformat(),
+        strategy_id=STRATEGY_ID,
+        symbol="TST",
+        payload={
+            "data_snapshot_id": manifest.snapshot_id,
+            "decision": "no_setup",
+            "decision_status": "no_setup",
+            "execution_policy_version": config.execution_policy_version,
+            "mode": PaperRunMode.REPLAY.value,
+            "run_id": run_id,
+            "strategy_id": STRATEGY_ID,
+            "strategy_semantics_fingerprint": SEMANTICS_FINGERPRINT,
+            "strategy_version": STRATEGY_VERSION,
+            "symbol": "TST",
+            "trade_date": run_date.isoformat(),
+        },
+    ).to_dict()
 
 
 def _ledger_event(
