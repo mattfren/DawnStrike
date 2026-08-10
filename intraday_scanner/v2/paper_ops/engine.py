@@ -5908,9 +5908,10 @@ def _validate_enter_order_semantics(
         run_id = str(event["run_id"])
         if run_id not in dataset_by_run:
             dataset_by_run[run_id] = _load_bound_run_dataset(
-                paths, manifest, required=False
+                paths, manifest, required=True
             )
         dataset = dataset_by_run[run_id]
+        assert dataset is not None
         pick = _pick_from_row(_model_projection(pick_row, _PICK_FIELDS))
         created_at = str(payload.get("blocked_at") or pick.signal_time)
         run = PaperRun(
@@ -5927,11 +5928,6 @@ def _validate_enter_order_semantics(
             dataset,
             equity_basis=account.current_equity,
         )
-        if dataset is None:
-            expected_order = replace(
-                expected_order,
-                earliest_fill_date=str(payload["earliest_fill_date"]),
-            )
         if _model_projection(payload, _ORDER_FIELDS) != expected_order.to_dict():
             raise ValueError(
                 "PaperOps enter order conflicts with accepted pick/account execution semantics"
