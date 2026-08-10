@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,9 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, ...], dict[str, bytes]]:
     )
 
 
-def _canonical_event(seed: str = "canonical-event") -> dict[str, object]:
+def _canonical_event(
+    seed: str = "canonical-event", *, symbol: str = "TST"
+) -> dict[str, object]:
     run_id = "paper_ops:forward:2026-01-02:fixture-snapshot"
     signal_second = 0 if seed == "canonical-event" else sum(seed.encode("utf-8")) % 60
     signal_time = f"2026-01-02T20:00:{signal_second:02d}+00:00"
@@ -43,11 +45,48 @@ def _canonical_event(seed: str = "canonical-event") -> dict[str, object]:
         strategy_id,
         strategy_version,
         policy,
-        "TST",
+        symbol,
         signal_time,
         "long",
     )
-    order_id = paper_ops_engine.stable_id("order", pick_id)
+    run = paper_ops_engine.PaperRun(
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date="2026-01-02",
+        data_snapshot_id="fixture-snapshot",
+        created_at=signal_time,
+    )
+    pick = paper_ops_engine.PaperPick(
+        pick_id=pick_id,
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        trade_date="2026-01-02",
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        strategy_status="shadow",
+        symbol=symbol,
+        signal_time=signal_time,
+        direction="long",
+        setup_score=1.0,
+        entry_reference=100.0,
+        stop=95.0,
+        target=110.0,
+        risk_per_unit=5.0,
+        reward_per_unit=10.0,
+        reward_risk=2.0,
+        decision=paper_ops_engine.PaperPickDecision.ACCEPTED,
+        reason="canonical fixture",
+        evidence=("canonical fixture evidence",),
+        execution_policy_version=policy,
+        strategy_semantics_fingerprint=semantics,
+    )
+    order = paper_ops_engine._order_from_pick(
+        pick,
+        run,
+        config,
+        equity_basis=config.starting_equity,
+    )
+    order_id = order.order_id
     event_id = paper_ops_engine.stable_id(
         "paper_ops_event",
         "forward",
@@ -56,54 +95,15 @@ def _canonical_event(seed: str = "canonical-event") -> dict[str, object]:
         "paper_order_created",
         order_id,
     )
-    entry = 100.0
-    stop = 95.0
-    rate = config.slippage_bps / 10_000.0
-    entry_fill = entry * (1 + rate)
-    stop_fill = stop * (1 - rate)
-    risk_per_unit = (entry_fill - stop_fill) + (
-        entry_fill + stop_fill
-    ) * config.fee_bps / 10_000.0
-    risk_budget = config.starting_equity * config.risk_per_trade_pct
-    quantity = int(risk_budget / risk_per_unit)
     return {
         "event_id": event_id,
         "event_type": "paper_order_created",
         "mode": "forward",
-        "payload": {
-            "direction": "long",
-            "earliest_fill_date": "2026-01-05",
-            "entry": entry,
-            "execution_policy_version": policy,
-            "expected_fill_rule": "daily signal fills no earlier than next valid bar open",
-            "max_loss_estimate": quantity * risk_per_unit,
-            "mode": "forward",
-            "notional_exposure": quantity * entry,
-            "order_id": order_id,
-            "order_status": "pending",
-            "pick_id": pick_id,
-            "quantity": quantity,
-            "reward_per_unit": 10.0,
-            "reward_risk": 2.0,
-            "risk_budget": risk_budget,
-            "risk_per_unit": risk_per_unit,
-            "run_id": run_id,
-            "schema_version": "v2.paper_order.v2",
-            "signal_time": signal_time,
-            "stop": stop,
-            "strategy_id": strategy_id,
-            "strategy_equity_basis": config.starting_equity,
-            "strategy_semantics_fingerprint": semantics,
-            "strategy_version": strategy_version,
-            "symbol": "TST",
-            "target": 110.0,
-            "trade_date": "2026-01-02",
-            "warnings": [],
-        },
+        "payload": order.to_dict(),
         "run_id": run_id,
         "schema_version": "v2.paper_ledger_event.v1",
         "strategy_id": strategy_id,
-        "symbol": "TST",
+        "symbol": symbol,
         "trade_date": "2026-01-02",
     }
 
@@ -850,7 +850,7 @@ def test_order_event_state_transition_conflicts_are_exact_no_ops(
     event = _canonical_event("created")
     _seed_canonical_event_evidence(root, event)
     created = copy.deepcopy(event["payload"])
-    unrelated = copy.deepcopy(_canonical_event("unrelated")["payload"])
+    unrelated = copy.deepcopy(_canonical_event("unrelated", symbol="ALT")["payload"])
     if variant == "unrelated-deletion":
         paper_ops_engine.write_json(paths.state / "pending_orders.json", [unrelated])
     updates = {
@@ -1031,10 +1031,12 @@ def test_transaction_rejects_existing_nondirectory_parent_before_any_write(
 
 def _seed_pending_canonical_order(
     root: Path,
+    *,
+    symbol: str = "TST",
 ) -> tuple[paper_ops_engine.PaperOpsPaths, dict[str, object]]:
     paper_ops_engine.init(output_root=root)
     paths = paper_ops_engine.PaperOpsPaths.create(root)
-    event = _canonical_event("lifecycle")
+    event = _canonical_event("lifecycle", symbol=symbol)
     _seed_canonical_event_evidence(root, event)
     updates = {"state/pending_orders.json": [event["payload"]]}
     paper_ops_engine._apply_transaction_journal(
@@ -1198,6 +1200,525 @@ def _write_checksum_valid_journal(
     }
     paper_ops_engine.write_json(paths.state / "paper_transaction_pending.json", journal)
     return journal
+
+
+def _scan_event(event: dict[str, object]) -> dict[str, object]:
+    pick = _canonical_pick(event)
+    return {
+        "event_id": paper_ops_engine.stable_id(
+            "paper_ops_event",
+            event["mode"],
+            event["trade_date"],
+            "scan",
+            "paper_pick_decision",
+            pick["pick_id"],
+        ),
+        "event_type": "paper_pick_decision",
+        "run_id": event["run_id"],
+        "mode": event["mode"],
+        "trade_date": event["trade_date"],
+        "strategy_id": event["strategy_id"],
+        "symbol": event["symbol"],
+        "payload": pick,
+        "schema_version": "v2.paper_ledger_event.v1",
+    }
+
+
+def _append_scan_event(
+    paths: paper_ops_engine.PaperOpsPaths,
+    event: dict[str, object],
+) -> dict[str, object]:
+    scan = _scan_event(event)
+    paper_ops_engine._validate_transaction_event_rows([scan])
+    paper_ops_engine.append_jsonl_unique(
+        paths.ledger / "paper_ledger.jsonl", [scan], "event_id"
+    )
+    return scan
+
+
+def _enter_block_event(
+    event: dict[str, object],
+    reason: str,
+) -> dict[str, object]:
+    order_row = event["payload"]
+    assert isinstance(order_row, dict)
+    order = paper_ops_engine._order_from_row(order_row)
+    run = paper_ops_engine.PaperRun(
+        run_id=str(event["run_id"]),
+        mode=paper_ops_engine.PaperRunMode(str(event["mode"])),
+        run_date=str(event["trade_date"]),
+        data_snapshot_id="fixture-snapshot",
+        created_at="2026-01-02T21:00:00+00:00",
+    )
+    payload = paper_ops_engine._blocked_order_payload(order, reason, run)
+    return paper_ops_engine._event(
+        run,
+        paper_ops_engine.PaperJobPhase.ENTER,
+        order.strategy_id,
+        order.symbol,
+        "paper_order_blocked",
+        f"{order.order_id}:{reason}",
+        payload,
+    ).to_dict()
+
+
+def _seed_existing_and_incoming_order(
+    root: Path,
+) -> tuple[
+    paper_ops_engine.PaperOpsPaths,
+    dict[str, object],
+    dict[str, object],
+]:
+    paths, existing = _seed_pending_canonical_order(root)
+    incoming = _canonical_event("incoming")
+    _seed_canonical_event_evidence(root, incoming)
+    return paths, existing, incoming
+
+
+def _seed_bound_check_run(
+    paths: paper_ops_engine.PaperOpsPaths,
+    *,
+    run_date: date,
+    run_bar: dict[str, float | int] | None,
+    prior_bar_date: date = date(2026, 1, 2),
+) -> tuple[paper_ops_engine.PaperRun, paper_ops_engine.MarketBar]:
+    config = paper_ops_engine._config(paths)
+    raw_dir = paths.root / "fixture_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    source_csv = paths.root / "fixture_source.csv"
+    rows: list[dict[str, object]] = []
+    for symbol in config.universe_symbols:
+        rows.append(
+            {
+                "symbol": symbol,
+                "timestamp": f"{prior_bar_date.isoformat()}T19:00:00+00:00",
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0,
+                "volume": 1_000,
+            }
+        )
+        if run_bar is not None:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "timestamp": f"{run_date.isoformat()}T21:00:00+00:00",
+                    **run_bar,
+                }
+            )
+    paper_ops_engine.write_csv(
+        source_csv,
+        rows,
+        ("symbol", "timestamp", "open", "high", "low", "close", "volume"),
+    )
+    result = paper_ops_engine.build_data_truth_snapshot(
+        as_of_date=run_date + timedelta(days=1),
+        output_root=paths.root.parent / "v2_data_truth",
+        created_at=datetime.combine(
+            run_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        ),
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+        allow_fetch=False,
+    )
+    run = paper_ops_engine._paper_run(
+        run_date=run_date,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        data_snapshot_id=result.manifest.snapshot_id,
+    )
+    paper_ops_engine._ensure_run_manifest(
+        paths,
+        run,
+        config=config,
+        data_manifest=result.manifest,
+        data_truth_root=paths.root.parent / "v2_data_truth",
+    )
+    dataset, _ = paper_ops_engine.load_datatruth_snapshot(
+        result.manifest.snapshot_id,
+        paths.root.parent / "v2_data_truth",
+    )
+    bar = next(
+        item
+        for item in dataset.bars_by_symbol["SPY"]
+        if item.timestamp > datetime(2026, 1, 2, 20, 0, tzinfo=timezone.utc)
+    )
+    return run, bar
+
+
+def _check_block_event(
+    order_row: dict[str, object],
+    run: paper_ops_engine.PaperRun,
+    bar: paper_ops_engine.MarketBar,
+    reason: str,
+) -> dict[str, object]:
+    order = paper_ops_engine._order_from_row(order_row)
+    payload = paper_ops_engine._blocked_order_payload(
+        order,
+        reason,
+        run,
+        source_bar=bar,
+    )
+    return paper_ops_engine._event(
+        run,
+        paper_ops_engine.PaperJobPhase.CHECK,
+        order.strategy_id,
+        order.symbol,
+        "paper_order_blocked",
+        f"{order.order_id}:{reason}",
+        payload,
+    ).to_dict()
+
+
+def _check_block_updates(
+    paths: paper_ops_engine.PaperOpsPaths,
+) -> dict[str, object]:
+    return {
+        "state/pending_orders.json": [],
+        "state/open_positions.json": paper_ops_engine.read_json(
+            paths.state / "open_positions.json", []
+        ),
+        "state/paper_accounts.json": paper_ops_engine.read_json(
+            paths.state / "paper_accounts.json", {}
+        ),
+    }
+
+
+@pytest.mark.parametrize("variant", ("missing", "malformed", "conflicting"))
+def test_enter_block_requires_exact_accepted_pick_evidence(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, existing = _seed_pending_canonical_order(root)
+    incoming = _canonical_event("incoming")
+    _seed_run_manifest(root, incoming)
+    if variant != "missing":
+        _append_scan_event(paths, incoming)
+        if variant == "malformed":
+            picks: object = {"attacker": "not-an-array"}
+        else:
+            conflicting = _canonical_pick(incoming)
+            conflicting["entry_reference"] = 999.0
+            picks = [conflicting]
+        paper_ops_engine.write_json(
+            paths.exports / "picks_forward_2026-01-02.json", picks
+        )
+    event = _enter_block_event(incoming, "duplicate_strategy_symbol_exposure")
+    existing_order = existing["payload"]
+    assert isinstance(existing_order, dict)
+    updates = {"state/pending_orders.json": [existing_order]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="enter-blocked order"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_enter_created_order_rejects_fabricated_equity_basis(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=root)
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    event = _canonical_event("oversized")
+    _seed_canonical_event_evidence(root, event)
+    pick = paper_ops_engine._pick_from_row(_canonical_pick(event))
+    run = paper_ops_engine.PaperRun(
+        run_id=str(event["run_id"]),
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date=str(event["trade_date"]),
+        data_snapshot_id="fixture-snapshot",
+        created_at=pick.signal_time,
+    )
+    inflated = paper_ops_engine._order_from_pick(
+        pick,
+        run,
+        paper_ops_engine._config(paths),
+        equity_basis=1_000_000_000.0,
+    ).to_dict()
+    event["payload"] = inflated
+    updates = {"state/pending_orders.json": [inflated]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="pick/account execution semantics"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_enter_created_order_rejects_computed_block_reason(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, existing, incoming = _seed_existing_and_incoming_order(root)
+    existing_order = existing["payload"]
+    incoming_order = incoming["payload"]
+    assert isinstance(existing_order, dict) and isinstance(incoming_order, dict)
+    updates = {"state/pending_orders.json": [existing_order, incoming_order]}
+    journal = _write_checksum_valid_journal(paths, [incoming], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="created order should have been blocked"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_enter_created_order_cannot_use_state_only_idempotence_bypass(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=root)
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    event = _canonical_event("state-only-idempotence")
+    _seed_canonical_event_evidence(root, event)
+    order = event["payload"]
+    assert isinstance(order, dict)
+    paper_ops_engine.write_json(paths.state / "pending_orders.json", [order])
+    updates = {"state/pending_orders.json": [order]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="created order should have been blocked"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_enter_block_rejects_order_that_should_be_created(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paper_ops_engine.init(output_root=root)
+    paths = paper_ops_engine.PaperOpsPaths.create(root)
+    incoming = _canonical_event("unnecessary-block")
+    _seed_canonical_event_evidence(root, incoming)
+    event = _enter_block_event(incoming, "max_concurrent_positions")
+    updates = {"state/pending_orders.json": []}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="enter-blocked order should have been created"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_enter_block_rejects_incorrect_computed_reason(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, existing, incoming = _seed_existing_and_incoming_order(root)
+    event = _enter_block_event(incoming, "max_concurrent_positions")
+    existing_order = existing["payload"]
+    assert isinstance(existing_order, dict)
+    updates = {"state/pending_orders.json": [existing_order]}
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="payload conflicts with producer semantics"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_check_block_rejects_safe_fill_bar(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 5),
+        run_bar={
+            "open": 100.0,
+            "high": 105.0,
+            "low": 97.0,
+            "close": 103.0,
+            "volume": 1_000,
+        },
+    )
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _check_block_event(order, run, bar, "gap_through_stop")
+    updates = _check_block_updates(paths)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="check-blocked order should have filled"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_check_block_rejects_incorrect_computed_reason(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 5),
+        run_bar={
+            "open": 94.0,
+            "high": 100.0,
+            "low": 90.0,
+            "close": 96.0,
+            "volume": 1_000,
+        },
+    )
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _check_block_event(order, run, bar, "missed_fill_session")
+    updates = _check_block_updates(paths)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="exact lifecycle decision"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+def test_check_block_rejects_non_next_immutable_source_bar(tmp_path: Path) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, _ = _seed_bound_check_run(
+        paths,
+        run_date=date(2026, 1, 5),
+        run_bar={
+            "open": 94.0,
+            "high": 100.0,
+            "low": 90.0,
+            "close": 96.0,
+            "volume": 1_000,
+        },
+    )
+    forged = paper_ops_engine.MarketBar(
+        symbol="SPY",
+        timestamp=datetime(2026, 1, 5, 22, 0, tzinfo=timezone.utc),
+        open=94.0,
+        high=100.0,
+        low=90.0,
+        close=96.0,
+        volume=1_000,
+    )
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _check_block_event(order, run, forged, "gap_through_stop")
+    updates = _check_block_updates(paths)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises(ValueError, match="not the next immutable bar"):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize("variant", ("missing", "tampered"))
+def test_check_block_requires_verified_bound_snapshot(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    order = created["payload"]
+    assert isinstance(order, dict)
+    if variant == "missing":
+        run = paper_ops_engine._paper_run(
+            run_date=date(2026, 1, 5),
+            mode=paper_ops_engine.PaperRunMode.FORWARD,
+            data_snapshot_id="fixture-snapshot",
+        )
+        bar = paper_ops_engine.MarketBar(
+            symbol="SPY",
+            timestamp=datetime(2026, 1, 5, 21, 0, tzinfo=timezone.utc),
+            open=94.0,
+            high=100.0,
+            low=90.0,
+            close=96.0,
+            volume=1_000,
+        )
+        event = _check_block_event(order, run, bar, "gap_through_stop")
+        _seed_run_manifest(root, event)
+    else:
+        run, bar = _seed_bound_check_run(
+            paths,
+            run_date=date(2026, 1, 5),
+            run_bar={
+                "open": 94.0,
+                "high": 100.0,
+                "low": 90.0,
+                "close": 96.0,
+                "volume": 1_000,
+            },
+        )
+        event = _check_block_event(order, run, bar, "gap_through_stop")
+        manifest = paper_ops_engine.read_json(
+            paths.manifests / f"{paper_ops_engine._safe_filename(run.run_id)}.json", {}
+        )
+        assert isinstance(manifest, dict)
+        normalized = paths.root.parent / "v2_data_truth" / str(
+            manifest["data_snapshot_normalized_path"]
+        )
+        normalized.write_bytes(normalized.read_bytes() + b"\n")
+    updates = _check_block_updates(paths)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+    before = _tree_snapshot(root)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert _tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize(
+    ("run_date", "prior_bar_date", "run_bar", "reason"),
+    (
+        (
+            date(2026, 1, 5),
+            date(2026, 1, 2),
+            {
+                "open": 94.0,
+                "high": 100.0,
+                "low": 90.0,
+                "close": 96.0,
+                "volume": 1_000,
+            },
+            "gap_through_stop",
+        ),
+        (
+            date(2026, 1, 6),
+            date(2026, 1, 5),
+            {
+                "open": 100.0,
+                "high": 105.0,
+                "low": 97.0,
+                "close": 103.0,
+                "volume": 1_000,
+            },
+            "missed_fill_session",
+        ),
+    ),
+)
+def test_canonical_check_block_decision_applies(
+    tmp_path: Path,
+    run_date: date,
+    prior_bar_date: date,
+    run_bar: dict[str, float | int],
+    reason: str,
+) -> None:
+    root = tmp_path / "paper_ops"
+    paths, created = _seed_pending_canonical_order(root, symbol="SPY")
+    run, bar = _seed_bound_check_run(
+        paths,
+        run_date=run_date,
+        run_bar=run_bar,
+        prior_bar_date=prior_bar_date,
+    )
+    order = created["payload"]
+    assert isinstance(order, dict)
+    event = _check_block_event(order, run, bar, reason)
+    updates = _check_block_updates(paths)
+    journal = _write_checksum_valid_journal(paths, [event], updates)
+
+    paper_ops_engine._apply_transaction_journal(paths, journal)
+
+    assert paper_ops_engine.read_json(paths.state / "pending_orders.json", None) == []
+    assert read_jsonl(paths.ledger / "paper_ledger.jsonl")[-1] == event
 
 
 def test_cross_series_fill_open_lineage_is_exact_tree_no_op(tmp_path: Path) -> None:

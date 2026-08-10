@@ -179,7 +179,45 @@ def _seed_pending_journal(root, journal_kind):
         signal_time,
         "long",
     )
-    order_id = paper_ops_engine.stable_id("order", pick_id)
+    run = paper_ops_engine.PaperRun(
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        run_date="2026-01-02",
+        data_snapshot_id=snapshot_id,
+        created_at=signal_time,
+    )
+    pick_model = paper_ops_engine.PaperPick(
+        pick_id=pick_id,
+        run_id=run_id,
+        mode=paper_ops_engine.PaperRunMode.FORWARD,
+        trade_date="2026-01-02",
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        strategy_status="shadow",
+        symbol="TST",
+        signal_time=signal_time,
+        direction="long",
+        setup_score=1.0,
+        entry_reference=100.0,
+        stop=95.0,
+        target=110.0,
+        risk_per_unit=5.0,
+        reward_per_unit=10.0,
+        reward_risk=2.0,
+        decision=paper_ops_engine.PaperPickDecision.ACCEPTED,
+        reason="canonical recovery fixture",
+        evidence=("canonical recovery evidence",),
+        execution_policy_version=policy,
+        strategy_semantics_fingerprint=semantics,
+    )
+    pick = pick_model.to_dict()
+    order = paper_ops_engine._order_from_pick(
+        pick_model,
+        run,
+        config,
+        equity_basis=config.starting_equity,
+    )
+    order_id = order.order_id
     event_id = paper_ops_engine.stable_id(
         "paper_ops_event",
         "forward",
@@ -188,76 +226,11 @@ def _seed_pending_journal(root, journal_kind):
         "paper_order_created",
         order_id,
     )
-    entry = 100.0
-    stop = 95.0
-    slippage_rate = config.slippage_bps / 10_000.0
-    entry_fill = entry * (1 + slippage_rate)
-    stop_fill = stop * (1 - slippage_rate)
-    risk_per_unit = (entry_fill - stop_fill) + (
-        entry_fill + stop_fill
-    ) * config.fee_bps / 10_000.0
-    risk_budget = config.starting_equity * config.risk_per_trade_pct
-    quantity = int(risk_budget / risk_per_unit)
-    pick = {
-        "pick_id": pick_id,
-        "run_id": run_id,
-        "mode": "forward",
-        "trade_date": "2026-01-02",
-        "strategy_id": strategy_id,
-        "strategy_version": strategy_version,
-        "strategy_status": "shadow",
-        "symbol": "TST",
-        "signal_time": signal_time,
-        "direction": "long",
-        "setup_score": 1.0,
-        "entry_reference": entry,
-        "stop": stop,
-        "target": 110.0,
-        "risk_per_unit": entry - stop,
-        "reward_per_unit": 10.0,
-        "reward_risk": 2.0,
-        "decision": "accepted",
-        "reason": "canonical recovery fixture",
-        "evidence": ["canonical recovery evidence"],
-        "warnings": [],
-        "execution_policy_version": policy,
-        "strategy_semantics_fingerprint": semantics,
-        "schema_version": "v2.paper_pick.v2",
-    }
     event = {
         "event_id": event_id,
         "event_type": "paper_order_created",
         "mode": "forward",
-        "payload": {
-            "direction": "long",
-            "earliest_fill_date": "2026-01-05",
-            "entry": entry,
-            "execution_policy_version": policy,
-            "expected_fill_rule": "daily signal fills no earlier than next valid bar open",
-            "max_loss_estimate": quantity * risk_per_unit,
-            "mode": "forward",
-            "notional_exposure": quantity * entry,
-            "order_id": order_id,
-            "order_status": "pending",
-            "pick_id": pick_id,
-            "quantity": quantity,
-            "reward_per_unit": 10.0,
-            "reward_risk": 2.0,
-            "risk_budget": risk_budget,
-            "risk_per_unit": risk_per_unit,
-            "run_id": run_id,
-            "schema_version": "v2.paper_order.v2",
-            "signal_time": signal_time,
-            "stop": stop,
-            "strategy_id": strategy_id,
-            "strategy_equity_basis": config.starting_equity,
-            "strategy_semantics_fingerprint": semantics,
-            "strategy_version": strategy_version,
-            "symbol": "TST",
-            "target": 110.0,
-            "trade_date": "2026-01-02",
-            "warnings": [],
-        },
+        "payload": order.to_dict(),
         "run_id": run_id,
         "schema_version": "v2.paper_ledger_event.v1",
         "strategy_id": strategy_id,

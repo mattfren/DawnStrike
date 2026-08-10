@@ -299,7 +299,13 @@ def _strategy_row(output_root: Path) -> dict[str, object]:
     return row
 
 
-def _accepted_pick(output_root: Path, run_date: date, mode: PaperRunMode) -> PaperPick:
+def _accepted_pick(
+    output_root: Path,
+    run_date: date,
+    mode: PaperRunMode,
+    *,
+    snapshot_id: str = "snapshot-test",
+) -> PaperPick:
     strategy = _strategy_row(output_root)
     signal_time = datetime.combine(run_date, time(21, 0), tzinfo=timezone.utc).isoformat()
     strategy_id = str(strategy["strategy_id"])
@@ -316,7 +322,7 @@ def _accepted_pick(output_root: Path, run_date: date, mode: PaperRunMode) -> Pap
             signal_time,
             Direction.LONG,
         ),
-        run_id=stable_id("paper_ops", mode.value, run_date.isoformat(), "snapshot-test"),
+        run_id=stable_id("paper_ops", mode.value, run_date.isoformat(), snapshot_id),
         mode=mode,
         trade_date=run_date.isoformat(),
         strategy_id=strategy_id,
@@ -340,7 +346,12 @@ def _accepted_pick(output_root: Path, run_date: date, mode: PaperRunMode) -> Pap
     )
 
 
-def _write_picks_with_scan_evidence(output_root: Path, picks: list[PaperPick]) -> None:
+def _write_picks_with_scan_evidence(
+    output_root: Path,
+    picks: list[PaperPick],
+    *,
+    data_manifest: DataTruthManifest | None = None,
+) -> None:
     assert picks
     first = picks[0]
     assert all(
@@ -349,7 +360,7 @@ def _write_picks_with_scan_evidence(output_root: Path, picks: list[PaperPick]) -
         for pick in picks
     )
     paths = paper_ops_engine.PaperOpsPaths.create(output_root)
-    manifest = _manifest()
+    manifest = data_manifest or _manifest()
     run = paper_ops_engine._paper_run(
         run_date=date.fromisoformat(first.trade_date),
         mode=first.mode,
@@ -395,6 +406,36 @@ def _write_picks_with_scan_evidence(output_root: Path, picks: list[PaperPick]) -
         decision_rows,
     )
     paper_ops_engine._append_events(paths, events)
+
+
+def _retained_snapshot_loader_rows(
+    output_root: Path,
+    mode: PaperRunMode,
+    dataset: MarketDataset,
+    run_dates: tuple[date, ...],
+) -> dict[date, tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]]:
+    source_csv = output_root / "fixture_source.csv"
+    raw_dir = output_root / "fixture_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    write_ohlcv_csv(dataset, source_csv)
+    paths = paper_ops_engine.PaperOpsPaths.resolve(output_root)
+    data_truth_root = paper_ops_engine._data_truth_root_for_mode(paths, mode)
+    retained: dict[date, tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]] = {}
+    for run_date in run_dates:
+        built = build_data_truth_snapshot(
+            as_of_date=run_date + timedelta(days=1),
+            output_root=data_truth_root,
+            created_at=datetime.combine(
+                run_date + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            ),
+            source_csv=source_csv,
+            raw_dir=raw_dir,
+            allow_fetch=False,
+        )
+        retained[run_date] = (built.dataset, built.manifest, built.warnings)
+    return retained
 
 
 def test_datatruth_snapshot_skips_incomplete_and_rejects_bad_rows(tmp_path: Path) -> None:
@@ -1146,18 +1187,42 @@ def test_paperops_blocks_a_new_fill_that_gaps_through_its_stop(
         bars_by_symbol={
             "TST": (
                 _bar("TST", date(2026, 1, 2), 10.0, 10.5, 9.8, 10.2),
-                _bar("TST", date(2026, 1, 3), 8.0, 8.5, 7.5, 8.1),
+                _bar("TST", date(2026, 1, 5), 8.0, 8.5, 7.5, 8.1),
             )
         },
     )
-    monkeypatch.setattr(
-        paper_ops_engine,
-        "_load_dataset_for_mode",
-        lambda **_kwargs: (dataset, _manifest(), ()),
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    paper_ops_engine.write_json(
+        paths.state / "paper_ops_config.json", {"universe_symbols": ["TST"]}
     )
     paper_ops_engine.init(output_root=output_root)
-    pick = _accepted_pick(output_root, date(2026, 1, 2), PaperRunMode.REPLAY)
-    _write_picks_with_scan_evidence(output_root, [pick])
+    retained = _retained_snapshot_loader_rows(
+        output_root,
+        PaperRunMode.REPLAY,
+        dataset,
+        (date(2026, 1, 2), date(2026, 1, 5)),
+    )
+
+    def retained_loader(
+        **kwargs: object,
+    ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+        run_date = kwargs["run_date"]
+        assert isinstance(run_date, date)
+        return retained[run_date]
+
+    monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", retained_loader)
+    enter_manifest = retained[date(2026, 1, 2)][1]
+    pick = _accepted_pick(
+        output_root,
+        date(2026, 1, 2),
+        PaperRunMode.REPLAY,
+        snapshot_id=enter_manifest.snapshot_id,
+    )
+    _write_picks_with_scan_evidence(
+        output_root,
+        [pick],
+        data_manifest=enter_manifest,
+    )
     paper_ops_engine.enter(
         run_date=date(2026, 1, 2),
         mode=PaperRunMode.REPLAY,
@@ -1165,7 +1230,7 @@ def test_paperops_blocks_a_new_fill_that_gaps_through_its_stop(
     )
 
     result = paper_ops_engine.check(
-        run_date=date(2026, 1, 3),
+        run_date=date(2026, 1, 5),
         mode=PaperRunMode.REPLAY,
         output_root=output_root,
     )
@@ -1183,6 +1248,79 @@ def test_paperops_blocks_a_new_fill_that_gaps_through_its_stop(
     assert blocked["reason"] == "gap_through_stop"
     assert blocked["origin_run_id"] == pick.run_id
     assert blocked["lifecycle_run_id"] != pick.run_id
+
+
+def test_paperops_check_blocks_missed_fill_session_from_bound_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    dataset = MarketDataset(
+        dataset_id="missed-fill-session",
+        source_kind="fixture",
+        timeframe="1d",
+        bars_by_symbol={
+            "TST": (
+                _bar("TST", date(2026, 1, 2), 10.0, 10.5, 9.8, 10.2),
+                _bar("TST", date(2026, 1, 5), 10.2, 11.0, 9.6, 10.8),
+                _bar("TST", date(2026, 1, 6), 10.8, 11.2, 10.4, 11.0),
+            )
+        },
+    )
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    paper_ops_engine.write_json(
+        paths.state / "paper_ops_config.json", {"universe_symbols": ["TST"]}
+    )
+    paper_ops_engine.init(output_root=output_root)
+    retained = _retained_snapshot_loader_rows(
+        output_root,
+        PaperRunMode.REPLAY,
+        dataset,
+        (date(2026, 1, 2), date(2026, 1, 6)),
+    )
+
+    def retained_loader(
+        **kwargs: object,
+    ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+        run_date = kwargs["run_date"]
+        assert isinstance(run_date, date)
+        return retained[run_date]
+
+    monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", retained_loader)
+    enter_manifest = retained[date(2026, 1, 2)][1]
+    pick = _accepted_pick(
+        output_root,
+        date(2026, 1, 2),
+        PaperRunMode.REPLAY,
+        snapshot_id=enter_manifest.snapshot_id,
+    )
+    _write_picks_with_scan_evidence(
+        output_root,
+        [pick],
+        data_manifest=enter_manifest,
+    )
+    paper_ops_engine.enter(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+
+    result = paper_ops_engine.check(
+        run_date=date(2026, 1, 6),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+
+    assert result["fills"] == 0
+    assert result["orders_blocked"] == 1
+    blocked = next(
+        row["payload"]
+        for row in paper_ops_engine.read_jsonl(paths.ledger / "paper_ledger.jsonl")
+        if row["event_type"] == "paper_order_blocked"
+    )
+    assert blocked["reason"] == "missed_fill_session"
+    assert blocked["source_bar"]["timestamp"].startswith("2026-01-05")
+    assert blocked["lifecycle_run_id"].startswith("paper_ops:replay:2026-01-06:")
 
 
 def test_paperops_existing_position_gap_stop_executes_at_observed_open() -> None:
@@ -3168,6 +3306,78 @@ def test_strategy_governance_pause_is_exact_and_never_auto_promotes(
         {},
     )
     assert retained["entries"][0]["allow_entries"] is False
+
+
+def test_strategy_governance_pause_blocks_real_enter_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "paper_ops"
+    paths = paper_ops_engine.PaperOpsPaths.create(output_root)
+    paper_ops_engine.write_json(
+        paths.state / "paper_ops_config.json", {"universe_symbols": ["TST"]}
+    )
+    paper_ops_engine.init(output_root=output_root)
+    retained = _retained_snapshot_loader_rows(
+        output_root,
+        PaperRunMode.REPLAY,
+        _dataset(),
+        (date(2026, 1, 2),),
+    )
+
+    def retained_loader(
+        **kwargs: object,
+    ) -> tuple[MarketDataset, DataTruthManifest, tuple[str, ...]]:
+        run_date = kwargs["run_date"]
+        assert isinstance(run_date, date)
+        return retained[run_date]
+
+    monkeypatch.setattr(paper_ops_engine, "_load_dataset_for_mode", retained_loader)
+    manifest = retained[date(2026, 1, 2)][1]
+    pick = _accepted_pick(
+        output_root,
+        date(2026, 1, 2),
+        PaperRunMode.REPLAY,
+        snapshot_id=manifest.snapshot_id,
+    )
+    _write_picks_with_scan_evidence(
+        output_root,
+        [pick],
+        data_manifest=manifest,
+    )
+    strategy_row = _strategy_row(output_root)
+    score = {
+        "blockers": "negative after-cost expectancy",
+        "current_series": True,
+        "evidence_status": "quarantined",
+        "execution_policy_version": strategy_row["execution_policy_version"],
+        "forward_closed_trades": 10,
+        "strategy_id": strategy_row["strategy_id"],
+        "strategy_semantics_fingerprint": strategy_row[
+            "strategy_semantics_fingerprint"
+        ],
+        "strategy_version": strategy_row["strategy_version"],
+    }
+    strategy_evidence_module._update_governance_overlay(paths, (score,))
+
+    result = paper_ops_engine.enter(
+        run_date=date(2026, 1, 2),
+        mode=PaperRunMode.REPLAY,
+        output_root=output_root,
+    )
+
+    assert result["orders_created"] == 0
+    assert result["orders_blocked"] == 1
+    assert paper_ops_engine.read_json(paths.state / "replay_pending_orders.json", None) == []
+    blocked = next(
+        row
+        for row in paper_ops_engine.read_jsonl(paths.ledger / "paper_ledger.jsonl")
+        if row["event_type"] == "paper_order_blocked"
+    )
+    assert blocked["payload"]["pick_id"] == pick.pick_id
+    assert blocked["payload"]["reason"] == (
+        "strategy_governance_pause:negative after-cost expectancy"
+    )
 
 
 def test_apply_evidence_governance_is_explicit_and_idempotent(tmp_path: Path) -> None:
