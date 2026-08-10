@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import TypedDict
 
 from intraday_scanner.v2.paper_ops.models import stable_id
 
@@ -31,6 +32,23 @@ class ObserverCommandSpec:
     required_files: tuple[str, ...] = ()
     nonempty_files: tuple[str, ...] = ()
     requires_calendar_evidence: bool = False
+
+
+class _CalendarRunIdentity(TypedDict):
+    mode: str
+    run_date: str
+    data_snapshot_id: str
+    calendar_policies: set[str]
+
+
+class _LedgerRunIdentity(TypedDict):
+    mode: str
+    run_date: str
+    policies: set[str]
+
+
+class _ApplicableRunIdentity(_CalendarRunIdentity):
+    ledger_policies: set[str]
 
 
 OBSERVER_COMMAND_SPECS: dict[str, ObserverCommandSpec] = {
@@ -250,7 +268,7 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
     calendars = _calendar_run_identities(root / "calendar" / "strategy_daily_returns.csv")
     ledgers = _ledger_run_identities(root / "ledger" / "paper_ledger.jsonl")
     # A run is applicable only where both records describe the same identity.
-    applicable: dict[str, dict[str, object]] = {}
+    applicable: dict[str, _ApplicableRunIdentity] = {}
     for run_id, calendar in calendars.items():
         ledger = ledgers.get(run_id)
         if ledger is None:
@@ -259,7 +277,10 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", f"calendar/ledger identity conflict for run {run_id}"
             )
-        applicable[run_id] = {**calendar, "ledger_policies": ledger["policies"]}
+        applicable[run_id] = {
+            **calendar,
+            "ledger_policies": ledger["policies"],
+        }
     selected = {
         run_id: identity
         for run_id, identity in applicable.items()
@@ -276,9 +297,13 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Run manifest is not parseable: {path.name}") from exc
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Run manifest is not parseable: {path.name}"
+            ) from exc
         if not isinstance(payload, dict):
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Run manifest is not an object: {path.name}")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Run manifest is not an object: {path.name}"
+            )
         if _is_complete_manifest(payload, selected, mode):
             valid_run_ids.add(str(payload["run_id"]))
     if set(selected) <= valid_run_ids:
@@ -292,7 +317,7 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
 
 def _is_complete_manifest(
     payload: object,
-    applicable_runs: dict[str, dict[str, object]],
+    applicable_runs: dict[str, _ApplicableRunIdentity],
     mode: str | None,
 ) -> bool:
     """Validate the persisted v3 identity binding without accepting partial fixtures."""
@@ -347,7 +372,10 @@ def _is_complete_manifest(
     ):
         return False
     if run_id != stable_id(
-        "paper_ops", str(payload["mode"]), str(payload["run_date"]), str(payload["data_snapshot_id"])
+        "paper_ops",
+        str(payload["mode"]),
+        str(payload["run_date"]),
+        str(payload["data_snapshot_id"]),
     ):
         return False
     policy = str(payload.get("execution_policy_version") or "")
@@ -361,10 +389,10 @@ def _is_complete_manifest(
     return observed_hash == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _calendar_run_identities(path: Path) -> dict[str, dict[str, object]]:
+def _calendar_run_identities(path: Path) -> dict[str, _CalendarRunIdentity]:
     """Return conflict-free calendar identities, retaining only strategy policies."""
 
-    result: dict[str, dict[str, object]] = {}
+    result: dict[str, _CalendarRunIdentity] = {}
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -376,17 +404,32 @@ def _calendar_run_identities(path: Path) -> dict[str, dict[str, object]]:
         run_date = str(row.get("date") or "").strip()
         snapshot = str(row.get("data_snapshot_id") or "").strip()
         if not run_id or run_mode not in {"forward", "replay", "demo"} or not snapshot:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", "Calendar CSV contains malformed run identity")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", "Calendar CSV contains malformed run identity"
+            )
         try:
             date.fromisoformat(run_date)
         except ValueError as exc:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", "Calendar CSV contains invalid run date") from exc
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", "Calendar CSV contains invalid run date"
+            ) from exc
         identity = result.setdefault(
             run_id,
-            {"mode": run_mode, "run_date": run_date, "data_snapshot_id": snapshot, "calendar_policies": set()},
+            {
+                "mode": run_mode,
+                "run_date": run_date,
+                "data_snapshot_id": snapshot,
+                "calendar_policies": set(),
+            },
         )
-        if (identity["mode"], identity["run_date"], identity["data_snapshot_id"]) != (run_mode, run_date, snapshot):
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"conflicting calendar identity for run {run_id}")
+        if (
+            identity["mode"],
+            identity["run_date"],
+            identity["data_snapshot_id"],
+        ) != (run_mode, run_date, snapshot):
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"conflicting calendar identity for run {run_id}"
+            )
         strategy_id = str(row.get("strategy_id") or "").strip().lower()
         policy = str(row.get("execution_policy_version") or "").strip()
         if policy and not _is_reference_calendar_row(strategy_id):
@@ -395,45 +438,66 @@ def _calendar_run_identities(path: Path) -> dict[str, dict[str, object]]:
 
 
 def _is_reference_calendar_row(strategy_id: str) -> bool:
-    return strategy_id in {"benchmark", "cash", "cash_benchmark", "buy_and_hold"} or "benchmark" in strategy_id
+    return (
+        strategy_id in {"benchmark", "cash", "cash_benchmark", "buy_and_hold"}
+        or "benchmark" in strategy_id
+    )
 
 
-def _ledger_run_identities(path: Path) -> dict[str, dict[str, object]]:
-    result: dict[str, dict[str, object]] = {}
+def _ledger_run_identities(path: Path) -> dict[str, _LedgerRunIdentity]:
+    result: dict[str, _LedgerRunIdentity] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
         raise PaperOpsObserverBlocked("INVALID_INPUT", "Ledger JSONL is not readable") from exc
     for line_number, line in enumerate(lines, 1):
         if not line.strip():
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger JSONL has blank line {line_number}")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger JSONL has blank line {line_number}"
+            )
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger JSONL is malformed at line {line_number}") from exc
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger JSONL is malformed at line {line_number}"
+            ) from exc
         if not isinstance(row, dict):
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger JSONL row {line_number} is not an object")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger JSONL row {line_number} is not an object"
+            )
         run_id = str(row.get("run_id") or "").strip()
         if not run_id:
             continue
         run_mode = str(row.get("mode") or "").strip()
         run_date = str(row.get("trade_date") or "").strip()
         if run_mode not in {"forward", "replay", "demo"}:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger has invalid mode for run {run_id}")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger has invalid mode for run {run_id}"
+            )
         try:
             date.fromisoformat(run_date)
         except ValueError as exc:
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger has invalid trade date for run {run_id}") from exc
-        identity = result.setdefault(run_id, {"mode": run_mode, "run_date": run_date, "policies": set()})
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger has invalid trade date for run {run_id}"
+            ) from exc
+        identity = result.setdefault(
+            run_id,
+            {"mode": run_mode, "run_date": run_date, "policies": set()},
+        )
         if (identity["mode"], identity["run_date"]) != (run_mode, run_date):
-            raise PaperOpsObserverBlocked("INVALID_INPUT", f"conflicting ledger identity for run {run_id}")
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"conflicting ledger identity for run {run_id}"
+            )
         payload = row.get("payload")
         if isinstance(payload, dict):
             policy = payload.get("execution_policy_version")
             if policy is not None:
                 policy_text = str(policy).strip()
                 if not policy_text:
-                    raise PaperOpsObserverBlocked("INVALID_INPUT", f"Ledger has malformed policy identity for run {run_id}")
+                    raise PaperOpsObserverBlocked(
+                        "INVALID_INPUT",
+                        f"Ledger has malformed policy identity for run {run_id}",
+                    )
                 identity["policies"].add(policy_text)
     return result
 
