@@ -119,14 +119,17 @@ def verify_trade_blotter(
 ) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
-    require_observer_command(output_root, "verify-blotter", mode=mode)
+    # The canonical export is global.  Therefore verification is deliberately
+    # all-mode too: selecting forward must never allow unattested replay rows
+    # in that same stored artifact to escape review.
+    require_observer_command(output_root, "verify-blotter", mode=None)
     rows, warnings = _materialize_rows_unchecked(output_root)
     stored = read_json(output_root / "exports" / "paper_trade_blotter.json", {})
     stored_rows = stored.get("rows", []) if isinstance(stored, dict) else []
     mismatches: list[str] = []
     source_truth: dict[str, object]
     try:
-        source_result = verify_source_bar_truth(output_root=output_root, mode=mode)
+        source_result = verify_source_bar_truth(output_root=output_root, mode=None)
         source_truth = source_result.to_dict()
         if source_result.status != "passed":
             mismatches.extend(f"source-bar truth: {warning}" for warning in source_result.warnings)

@@ -70,6 +70,8 @@ def _stub_strategy_evidence_source_truth(monkeypatch: pytest.MonkeyPatch) -> Non
 def _seed_observer_ledger(output_root: Path) -> None:
     """Seed the minimal retained event needed to reach observer semantics."""
 
+    run_id = stable_id("paper_ops", "forward", "2026-01-02", "fixture-snapshot")
+
     paper_ops_engine.write_jsonl(
         output_root / "ledger" / "paper_ledger.jsonl",
         [
@@ -78,7 +80,7 @@ def _seed_observer_ledger(output_root: Path) -> None:
                 "event_type": "paper_no_setup_decision",
                 "mode": "forward",
                 "payload": {"decision_id": "observer-fixture-decision", "mode": "forward"},
-                "run_id": "observer-fixture-run",
+                "run_id": run_id,
                 "schema_version": "test",
                 "strategy_id": "observer-fixture",
                 "symbol": "TST",
@@ -88,7 +90,7 @@ def _seed_observer_ledger(output_root: Path) -> None:
     )
     payload: dict[str, object] = {
         "schema_version": "v2.paper_ops_manifest.v3",
-        "run_id": "observer-fixture-run",
+        "run_id": run_id,
         "mode": "forward",
         "run_date": "2026-01-02",
         "data_snapshot_id": "fixture-snapshot",
@@ -107,6 +109,8 @@ def _seed_observer_ledger(output_root: Path) -> None:
     payload["manifest_payload_hash"] = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    # The run ID contains colons, which are not legal in Windows file names;
+    # manifest identity comes from the payload rather than the fixture name.
     paper_ops_engine.write_json(output_root / "manifests" / "observer-fixture-run.json", payload)
 
 
@@ -130,7 +134,7 @@ def _write_canonical_calendar_rows(
                 "strategy_semantics_fingerprint": "unknown",
                 "data_snapshot_id": "fixture-snapshot",
                 "warnings": "",
-                "run_id": "observer-fixture-run",
+                "run_id": stable_id("paper_ops", "forward", "2026-01-02", "fixture-snapshot"),
             }
         )
         row.update(overrides)
@@ -1337,7 +1341,7 @@ def test_paperops_recovers_pending_transaction_idempotently(tmp_path: Path) -> N
     )
     journal_path = paths.state / "paper_transaction_pending.json"
     events = [event]
-    state_updates = {"state/recovery_probe.json": {"recovered": True}}
+    state_updates = {"state/pending_orders.json": []}
     paper_ops_engine.write_json(
         journal_path,
         {
@@ -1360,7 +1364,7 @@ def test_paperops_recovers_pending_transaction_idempotently(tmp_path: Path) -> N
         if row.get("event_id") == "recovered-event"
     ]
     assert len(recovered) == 1
-    assert json.loads((paths.state / "recovery_probe.json").read_text())["recovered"] is True
+    assert json.loads((paths.state / "pending_orders.json").read_text()) == []
     assert not journal_path.exists()
 
 
@@ -2923,7 +2927,7 @@ def test_apply_evidence_governance_recovers_valid_writer_journal(tmp_path: Path)
             }
         ],
     )
-    state_updates = {"state/governance_recovery_probe.json": {"recovered": True}}
+    state_updates = {"state/pending_orders.json": []}
     journal = output_root / "state" / "paper_transaction_pending.json"
     paper_ops_engine.write_json(
         journal,
@@ -2939,10 +2943,7 @@ def test_apply_evidence_governance_recovers_valid_writer_journal(tmp_path: Path)
 
     assert result["status"] == "applied"
     assert not journal.exists()
-    assert paper_ops_engine.read_json(
-        output_root / "state" / "governance_recovery_probe.json",
-        {},
-    ) == {"recovered": True}
+    assert paper_ops_engine.read_json(output_root / "state" / "pending_orders.json", None) == []
     assert (output_root / "state" / "strategy_governance_overlay.json").is_file()
 
 

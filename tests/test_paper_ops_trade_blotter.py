@@ -41,6 +41,12 @@ def _registry_row(root: Path) -> dict[str, object]:
     return dict(rows[0])
 
 
+def _run_id(name: str) -> str:
+    snapshots = {"entry": "snapshot-entry", "fill": "snapshot-fill", "close": "snapshot-close"}
+    dates = {"entry": "2026-01-05", "fill": "2026-01-06", "close": "2026-01-07"}
+    return paper_ops_engine.stable_id("paper_ops", "forward", dates[name], snapshots[name])
+
+
 def _event(
     event_id: str,
     event_type: str,
@@ -49,12 +55,19 @@ def _event(
     run_id: str = "run-entry",
     trade_date: str = "2026-01-05",
 ) -> dict[str, object]:
+    names_by_date = {"2026-01-05": "entry", "2026-01-06": "fill", "2026-01-07": "close"}
+    canonical_run_id = (
+        _run_id(names_by_date[trade_date]) if run_id in {"run-entry", "run-fill", "run-close"} else run_id
+    )
+    payload = dict(payload)
+    if payload.get("run_id") in {"run-entry", "run-fill", "run-close"}:
+        payload["run_id"] = _run_id(str(payload["run_id"]).removeprefix("run-"))
     return {
         "event_id": event_id,
         "event_type": event_type,
         "mode": "forward",
         "payload": payload,
-        "run_id": run_id,
+        "run_id": canonical_run_id,
         "strategy_id": payload.get("strategy_id"),
         "symbol": payload.get("symbol"),
         "trade_date": trade_date,
@@ -200,9 +213,9 @@ def _lifecycle(
 
 def _seed_manifests(root: Path) -> None:
     for filename, run_id, snapshot_id, run_date in (
-        ("entry", "run-entry", "snapshot-entry", "2026-01-05"),
-        ("fill", "run-fill", "snapshot-fill", "2026-01-06"),
-        ("close", "run-close", "snapshot-close", "2026-01-07"),
+        ("entry", _run_id("entry"), "snapshot-entry", "2026-01-05"),
+        ("fill", _run_id("fill"), "snapshot-fill", "2026-01-06"),
+        ("close", _run_id("close"), "snapshot-close", "2026-01-07"),
     ):
         payload: dict[str, object] = {
             "schema_version": "v2.paper_ops_manifest.v3",
@@ -212,7 +225,7 @@ def _seed_manifests(root: Path) -> None:
             "data_snapshot_id": snapshot_id,
             "output_artifacts": [],
             "warnings": [],
-            "execution_policy_version": "paperops_execution_v1",
+            "execution_policy_version": "paperops_daily_next_open_risk_v2",
             "execution_policy_fingerprint": "test-policy",
             "universe_id": "test-universe",
             "universe_symbols": ["AAA"],
@@ -228,9 +241,9 @@ def _seed_manifests(root: Path) -> None:
         write_json(root / "manifests" / f"{filename}.json", payload)
     rows: list[str] = [",".join(_CALENDAR_FIELDS)]
     for run_id, run_date in (
-        ("run-entry", "2026-01-05"),
-        ("run-fill", "2026-01-06"),
-        ("run-close", "2026-01-07"),
+        (_run_id("entry"), "2026-01-05"),
+        (_run_id("fill"), "2026-01-06"),
+        (_run_id("close"), "2026-01-07"),
     ):
         row = {field: "0" for field in _CALENDAR_FIELDS}
         row.update({
@@ -239,9 +252,9 @@ def _seed_manifests(root: Path) -> None:
             "strategy_id": "test-strategy",
             "strategy_version": "v1",
             "strategy_status": "active",
-            "execution_policy_version": "paperops_execution_v1",
+            "execution_policy_version": "paperops_daily_next_open_risk_v2",
             "strategy_semantics_fingerprint": "test-semantics",
-            "data_snapshot_id": f"snapshot-{run_id.split('-')[1]}",
+            "data_snapshot_id": { _run_id("entry"): "snapshot-entry", _run_id("fill"): "snapshot-fill", _run_id("close"): "snapshot-close" }[run_id],
             "warnings": "",
             "run_id": run_id,
         })
@@ -270,17 +283,17 @@ def test_trade_blotter_joins_exact_round_trip_and_latest_mark(tmp_path: Path) ->
     assert row["net_pnl"] == 9.0
     assert row["trade_return_pct"] == 0.009
     assert result["schema_version"] == "v2.paper_trade_blotter.v2"
-    assert row["run_id"] == "run-entry"
+    assert row["run_id"] == _run_id("entry")
     assert row["data_snapshot_id"] == "snapshot-entry"
-    assert row["fill_run_id"] == "run-fill"
+    assert row["fill_run_id"] == _run_id("fill")
     assert row["fill_data_snapshot_id"] == "snapshot-fill"
-    assert row["close_run_id"] == "run-close"
+    assert row["close_run_id"] == _run_id("close")
     assert row["close_data_snapshot_id"] == "snapshot-close"
     stored = read_json(root / "exports" / "paper_trade_blotter.json", {})
     assert isinstance(stored, dict)
     stored_rows = stored["rows"]
     assert isinstance(stored_rows, list)
-    assert stored_rows[0]["fill_run_id"] == "run-fill"
+    assert stored_rows[0]["fill_run_id"] == _run_id("fill")
     assert stored_rows[0]["fill_data_snapshot_id"] == "snapshot-fill"
     csv_fields = (
         (root / "exports" / "paper_trade_blotter.csv")
@@ -333,7 +346,7 @@ def test_trade_blotter_rejects_fill_envelope_payload_run_mismatch(
     result = build_trade_blotter(output_root=root)
 
     assert result["status"] == "failed"
-    assert result["rows"][0]["run_id"] == "run-entry"
+    assert result["rows"][0]["run_id"] == _run_id("entry")
     assert result["rows"][0]["fill_run_id"] == "run-fill-conflict"
     assert any("envelope/payload run_id mismatch" in warning for warning in result["warnings"])
 
