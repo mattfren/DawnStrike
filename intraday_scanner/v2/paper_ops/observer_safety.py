@@ -578,13 +578,45 @@ def _ledger_run_identities(path: Path) -> dict[str, _LedgerRunIdentity]:
             raise PaperOpsObserverBlocked(
                 "INVALID_INPUT", f"Ledger has malformed policy identity for run {run_id}"
             )
-        for field, expected in (("mode", run_mode), ("run_id", run_id)):
-            if field in payload and str(payload[field]).strip() != expected:
-                raise PaperOpsObserverBlocked(
-                    "INVALID_INPUT", f"Ledger payload {field} conflicts for run {run_id}"
-                )
+        if "mode" in payload and str(payload["mode"]).strip() != run_mode:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger payload mode conflicts for run {run_id}"
+            )
+        _require_ledger_payload_run_identity(
+            event_type=event_type,
+            payload=payload,
+            run_id=run_id,
+        )
         identity["policies"].add(policy_text)
     return result
+
+
+def _require_ledger_payload_run_identity(
+    *,
+    event_type: str,
+    payload: dict[str, object],
+    run_id: str,
+) -> None:
+    """Accept explicit origin/lifecycle lineage without weakening run binding."""
+
+    payload_run_id = str(payload.get("run_id") or "").strip()
+    if event_type not in {"paper_order_blocked", "paper_order_pending_no_fill_data"}:
+        if payload_run_id and payload_run_id != run_id:
+            raise PaperOpsObserverBlocked(
+                "INVALID_INPUT", f"Ledger payload run_id conflicts for run {run_id}"
+            )
+        return
+
+    lifecycle_run_id = str(payload.get("lifecycle_run_id") or "").strip()
+    origin_run_id = str(payload.get("origin_run_id") or "").strip()
+    if lifecycle_run_id != run_id:
+        raise PaperOpsObserverBlocked(
+            "INVALID_INPUT", f"Ledger payload lifecycle_run_id conflicts for run {run_id}"
+        )
+    if not origin_run_id or not payload_run_id or origin_run_id != payload_run_id:
+        raise PaperOpsObserverBlocked(
+            "INVALID_INPUT", f"Ledger payload origin_run_id conflicts for run {run_id}"
+        )
 
 
 def require_observer_tree(

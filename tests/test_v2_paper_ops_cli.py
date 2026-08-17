@@ -10,7 +10,10 @@ from intraday_scanner.v2.paper_ops.calendar_truth import verify_calendar_truth
 from intraday_scanner.v2.paper_ops.calendar_view import write_calendar_view
 from intraday_scanner.v2.paper_ops.engine import calendar, init, reconcile, report
 from intraday_scanner.v2.paper_ops.ledger_rebuild import rebuild_ledger
-from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocked
+from intraday_scanner.v2.paper_ops.observer_safety import (
+    PaperOpsObserverBlocked,
+    _ledger_run_identities,
+)
 from intraday_scanner.v2.paper_ops.readiness import forward_readiness
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import write_json
@@ -28,6 +31,72 @@ def _tree_snapshot(root):
         if path.is_file()
     }
     return directories, files
+
+
+def _lifecycle_order_event(*, event_type="paper_order_blocked"):
+    origin_run_id = "paper_ops:forward:2026-01-05:origin-snapshot"
+    lifecycle_run_id = "paper_ops:forward:2026-01-06:lifecycle-snapshot"
+    return {
+        "event_id": f"fixture-{event_type}",
+        "event_type": event_type,
+        "mode": "forward",
+        "payload": {
+            "execution_policy_version": "fixture-policy-v1",
+            "lifecycle_run_id": lifecycle_run_id,
+            "origin_run_id": origin_run_id,
+            "run_id": origin_run_id,
+        },
+        "run_id": lifecycle_run_id,
+        "schema_version": "v2.paper_ledger_event.v1",
+        "strategy_id": "fixture-strategy",
+        "symbol": "TST",
+        "trade_date": "2026-01-06",
+    }
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ("paper_order_blocked", "paper_order_pending_no_fill_data"),
+)
+def test_observer_accepts_explicit_order_origin_and_lifecycle_run_lineage(
+    tmp_path,
+    event_type,
+) -> None:
+    path = tmp_path / "paper_ledger.jsonl"
+    event = _lifecycle_order_event(event_type=event_type)
+    path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    identities = _ledger_run_identities(path)
+
+    assert identities == {
+        event["run_id"]: {
+            "mode": "forward",
+            "policies": {"fixture-policy-v1"},
+            "run_date": "2026-01-06",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("lifecycle_run_id", "wrong-run", "lifecycle_run_id conflicts"),
+        ("origin_run_id", "wrong-origin", "origin_run_id conflicts"),
+    ),
+)
+def test_observer_rejects_conflicting_order_origin_or_lifecycle_run_lineage(
+    tmp_path,
+    field,
+    value,
+    message,
+) -> None:
+    path = tmp_path / "paper_ledger.jsonl"
+    event = _lifecycle_order_event()
+    event["payload"][field] = value
+    path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    with pytest.raises(PaperOpsObserverBlocked, match=message):
+        _ledger_run_identities(path)
 
 
 def _complete_run_manifest(mode, run_date, snapshot, policy):
