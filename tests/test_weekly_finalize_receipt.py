@@ -21,8 +21,12 @@ def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) ->
     market_date = "2026-08-03"
     release_sha = "a" * 40
     publication_set_sha = "publication-set-1"
+    opportunity_projection_sha = "opportunity-projection-1"
     build_id = hashlib.sha256(
-        f"{release_sha}:{publication_set_sha}:{market_date}".encode()
+        (
+            f"{release_sha}:{publication_set_sha}:"
+            f"{opportunity_projection_sha}:{market_date}"
+        ).encode()
     ).hexdigest()[:20]
 
     with pytest.raises(StorageError, match="does not exist"):
@@ -35,7 +39,7 @@ def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) ->
             db_path=db_path,
             market_date=market_date,
             stage_name=stage,
-            status="COMPLETE",
+            status=("NO_TRADE" if stage == "calendar_build" else "COMPLETE"),
             runtime_root=runtime,
             state_root=state,
             release_sha=release_sha,
@@ -47,6 +51,7 @@ def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) ->
                     "source_sha": release_sha,
                     "build_id": build_id,
                     "publication_set_sha256": publication_set_sha,
+                    "opportunity_projection_sha256": opportunity_projection_sha,
                     "promoted_deployment_id": "deployment-1",
                     "production_deployment_id": "deployment-1",
                 }
@@ -80,6 +85,7 @@ def test_weekly_receipt_requires_complete_exact_release_daily_chain(tmp_path) ->
             "source_sha": release_sha,
             "build_id": "not-the-promoted-build",
             "publication_set_sha256": publication_set_sha,
+            "opportunity_projection_sha256": opportunity_projection_sha,
             "promoted_deployment_id": "deployment-a",
             "production_deployment_id": "deployment-b",
         },

@@ -10,7 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from intraday_scanner.services.daily_run_service import daily_run_snapshot, shared_daily_run_id
+from intraday_scanner.services.daily_run_service import (
+    daily_run_snapshot,
+    shared_daily_run_id,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 FINALIZE_STAGES = (
@@ -19,6 +22,12 @@ FINALIZE_STAGES = (
     "publication",
     "readiness",
 )
+FINALIZE_SUCCESS_STATUSES = {
+    "canonical_performance": frozenset({"COMPLETE"}),
+    "calendar_build": frozenset({"COMPLETE", "NO_TRADE"}),
+    "publication": frozenset({"COMPLETE"}),
+    "readiness": frozenset({"COMPLETE"}),
+}
 
 
 def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str, object]:
@@ -31,25 +40,34 @@ def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str,
     missing_or_failed = [
         stage
         for stage in FINALIZE_STAGES
-        if str((statuses.get(stage) or {}).get("status") or "") != "COMPLETE"
+        if str((statuses.get(stage) or {}).get("status") or "")
+        not in FINALIZE_SUCCESS_STATUSES[stage]
     ]
     latest_rows: dict[str, dict[str, object]] = {}
     for row in snapshot.get("stages") or []:
         stage = str(row.get("stage_name") or "")
-        if int(row.get("attempt_no") or 0) >= int(
-            latest_rows.get(stage, {}).get("attempt_no") or 0
-        ):
+        row_attempt = row.get("attempt_no")
+        latest_attempt = latest_rows.get(stage, {}).get("attempt_no")
+        row_attempt_no = row_attempt if isinstance(row_attempt, int) else 0
+        latest_attempt_no = latest_attempt if isinstance(latest_attempt, int) else 0
+        if row_attempt_no >= latest_attempt_no:
             latest_rows[stage] = row
     publication = latest_rows.get("publication") or {}
     publication_payload = publication.get("payload") or publication.get("payload_json") or {}
     if not isinstance(publication_payload, dict):
         publication_payload = {}
     publication_set_sha = str(publication_payload.get("publication_set_sha256") or "")
+    opportunity_projection_sha = str(
+        publication_payload.get("opportunity_projection_sha256") or ""
+    )
     expected_build_id = (
         hashlib.sha256(
-            f"{release_sha}:{publication_set_sha}:{market_date[:10]}".encode()
+            (
+                f"{release_sha}:{publication_set_sha}:"
+                f"{opportunity_projection_sha}:{market_date[:10]}"
+            ).encode()
         ).hexdigest()[:20]
-        if publication_set_sha
+        if publication_set_sha and opportunity_projection_sha
         else ""
     )
     publication_identity_ready = bool(
