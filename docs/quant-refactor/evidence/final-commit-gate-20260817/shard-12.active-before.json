@@ -1,0 +1,26 @@
+{
+  "after_read": {
+    "length": 203087872,
+    "mtime_ns": 1786989310904187700,
+    "mtime_utc": "2026-08-17T17:55:10.904188+00:00",
+    "sha256": "90b6017357fa9e8465275391cc3c947c92c99cacbe0ad3345fec8006d8ca833c",
+    "sidecars": []
+  },
+  "before_read": {
+    "length": 203087872,
+    "mtime_ns": 1786989310904187700,
+    "mtime_utc": "2026-08-17T17:55:10.904188+00:00",
+    "sha256": "90b6017357fa9e8465275391cc3c947c92c99cacbe0ad3345fec8006d8ca833c",
+    "sidecars": []
+  },
+  "captured_at_utc": "2026-08-17T17:56:30.222164+00:00",
+  "database_schema_version": 26,
+  "identity_unchanged_during_read": true,
+  "path": "C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+  "query_only": 1,
+  "quick_check": "ok",
+  "schema_version": "dawnstrike.final_gate_active_state.v1",
+  "sqlite_immutable": true,
+  "sqlite_uri_mode": "ro",
+  "valid": true
+}

@@ -1,0 +1,14 @@
+{
+  "authorized_evidence_record_count": 234,
+  "branch": "codex/sol-quant-refactor-20260811",
+  "captured_at_utc": "2026-08-17T19:34:11.639295+00:00",
+  "head": "fabca37fdcb61c9a2e7825b903ddd456adf1ec85",
+  "index_clean": true,
+  "parent": "2b5e2d20fe03cdc02005a03ba88c8899a2cdff52",
+  "porcelain_record_count": 234,
+  "schema_version": "dawnstrike.final_commit_git_state.v1",
+  "tracked_worktree_clean": true,
+  "tree": "08d69b9e7d1dc65745c4d7835541f3b093060921",
+  "unexpected_records": [],
+  "valid": true
+}

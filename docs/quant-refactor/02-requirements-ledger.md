@@ -5,9 +5,9 @@ may change a requirement to PASS or EXTERNAL_DATA_BLOCKED after independent
 inspection.
 
 Sol adjudicated all 63 requirements `PASS` on 2026-08-17 from the accepted
-WP001-WP007 audits, the final-repair focused evidence, and the immutable
-3,156-node exact-once gate in
-`docs/quant-refactor/evidence/final-immutable-gate-20260817/`. Requirements
+WP001-WP007 audits, the final-repair focused evidence, and the commit-bound
+3,166-node exact-once gate in
+`docs/quant-refactor/evidence/final-commit-gate-20260817/`. Requirements
 whose proof is software-only remain non-promotional: this ledger does not claim
 empirical edge, real-provider entitlement, holdout success, or production
 trading readiness.

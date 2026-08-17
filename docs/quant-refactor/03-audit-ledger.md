@@ -3,11 +3,19 @@
 Findings are opened and closed only by Sol. Luna reports implementation
 evidence but does not change finding status.
 
-Sol's 2026-08-17 final-repair adjudication closes 13 findings from accepted
-software and immutable-gate evidence. FINDING-011 is retained as
+Sol's 2026-08-17 final adjudication closes 13 findings from accepted software
+and the commit-bound 3,166-node exact-once gate. FINDING-011 is retained as
 `EXTERNAL_DATA_BLOCKED`: the software capability/cost contracts pass, but
 consolidated historical entitlement was intentionally unavailable in this
 offline run. No closed finding represents empirical-edge or promotion proof.
+
+The final gate is bound to source/test commit
+`fabca37fdcb61c9a2e7825b903ddd456adf1ec85`. Changes to the live active-state
+database during the multi-hour gate are classified as
+`AUTHORIZED_EXTERNAL_RUNTIME_DRIFT`: the enabled five-minute research-only
+monitor ran from `C:\r\dawnstrike-runtime`, candidate pytest commands excluded
+the active database and persistence, and every immutable read probe remained
+schema-26, `quick_check=ok`, and sidecar-free.
 
 ## FINDING-001
 

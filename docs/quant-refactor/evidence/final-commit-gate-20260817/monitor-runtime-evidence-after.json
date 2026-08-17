@@ -1,0 +1,169 @@
+{
+  "captured_at_utc": "2026-08-17T19:30:13.243670+00:00",
+  "receipts": [
+    {
+      "length": 767,
+      "mtime_utc": "2026-08-17T19:30:02.612089+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 13,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:02.5513420Z",
+        "duration_ms": 648,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:01.9029261Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stdout.log",
+        "stdout_sha256": "be0aa4ed72491b6b74fed1578a5ee401905a1b8258914b10938bedb503ce4e87"
+      },
+      "sha256": "698c650dba4554ee2b8aa093911470e6bc36f51bac4e4aec7eeecb5695e0de9f"
+    },
+    {
+      "length": 764,
+      "mtime_utc": "2026-08-17T19:30:02.856472+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 4,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:02.8464295Z",
+        "duration_ms": 184,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:02.6619934Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stdout.log",
+        "stdout_sha256": "c06b02a8fd5f29ba5fac2ca44eacf1cf6bfe351a211d740318ee6e53354021d9"
+      },
+      "sha256": "e477e964abbb9287cf7eb5c4472c66c3c30bd4a9f64c18acf66f1ca7468bddfe"
+    },
+    {
+      "length": 746,
+      "mtime_utc": "2026-08-17T19:30:03.708781+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 7,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:03.7036090Z",
+        "duration_ms": 708,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:02.9955630Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stdout.log",
+        "stdout_sha256": "61091032acf7bae3cb3365067e6126ffe90278cc41c92cd8e49ea02b883e57eb"
+      },
+      "sha256": "295472186b13c30323e3a04e7fd0d480574e4dfba35d4eaa6354c2dbbd75b4cb"
+    },
+    {
+      "length": 744,
+      "mtime_utc": "2026-08-17T19:30:05.451167+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 22,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:05.4401630Z",
+        "duration_ms": 1723,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:03.7167466Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stdout.log",
+        "stdout_sha256": "686e13f00d00a6411b1d98cb185ab89745c602a3c4c756c869000bda2f6c9dd0"
+      },
+      "sha256": "7cff62acc7d647faf0a00ccd513edb34defcb89749b9da648c200c8b31372298"
+    },
+    {
+      "length": 779,
+      "mtime_utc": "2026-08-17T19:30:06.096867+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 17,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:06.0908576Z",
+        "duration_ms": 629,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:05.4617548Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stdout.log",
+        "stdout_sha256": "9e1821bc24a57b242ecc637fbacaa5deede0b1069bcc571ff2a0b3fea783e7cd"
+      },
+      "sha256": "f7baa3eefd036da56355a229454dde8699f1c5ba5015ea046583a218bac714cc"
+    },
+    {
+      "length": 754,
+      "mtime_utc": "2026-08-17T19:30:10.380233+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 11,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:10.3496166Z",
+        "duration_ms": 3946,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:06.4034670Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stdout.log",
+        "stdout_sha256": "df5d186692d2150b14ffffa22b30d7c1ccb34cf9c35558ae85f9b006f9bbfb2f"
+      },
+      "sha256": "131abb521cc0c67f761945c4f8adc67b22221dbe9771c3a261023bdf513e48b1"
+    },
+    {
+      "length": 789,
+      "mtime_utc": "2026-08-17T19:30:11.047842+00:00",
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.receipt.json",
+      "payload": {
+        "argument_count": 18,
+        "broker_execution_enabled": false,
+        "completed_at": "2026-08-17T19:30:11.0478423Z",
+        "duration_ms": 645,
+        "exit_code": 0,
+        "process_name": "py.exe",
+        "research_only": true,
+        "schema_version": "dawnstrike.native_process_receipt.v1",
+        "start_error": null,
+        "started_at": "2026-08-17T19:30:10.4028735Z",
+        "stderr_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stdout.log",
+        "stdout_sha256": "379c191e2273cef879666ec7baa3012f81fb2648c62831afeaa7ae2b2fbf6ffa"
+      },
+      "sha256": "9d01371a2ebfa90b3efa25bfb9e760255f4e457fa216086f55ec93f4daf76fff"
+    }
+  ],
+  "runner_path": "C:\\r\\dawnstrike-runtime\\scripts\\run_alphaops_monitor.ps1",
+  "runner_sha256": "624405c335260b76f533252256a188d42037d880b398f294bc7e35b52715bb30",
+  "runtime_root": "C:\\r\\dawnstrike-runtime",
+  "schema_version": "dawnstrike.final_commit_monitor_evidence.v1",
+  "state_root": "C:\\r\\dawnstrike-state",
+  "task_export_exit_code": 0,
+  "task_export_stderr": "",
+  "task_name": "Dawnstrike AlphaOps Monitor 5m",
+  "task_xml_path": "docs/quant-refactor/evidence/final-commit-gate-20260817/scheduled-task-definition.xml",
+  "task_xml_sha256": "8b3596deaeb7b25427311bbda03589197ac39652c0ff92e37b50a63c5979987d"
+}

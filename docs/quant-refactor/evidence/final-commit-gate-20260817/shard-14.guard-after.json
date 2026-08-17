@@ -1,0 +1,9 @@
+{
+  "active_change_classification": "PENDING_EXTERNAL_RUNTIME_ATTRIBUTION",
+  "active_state_changed_during_shard_window": true,
+  "active_state_valid": true,
+  "manifest_exact": true,
+  "schema_version": "dawnstrike.final_commit_gate_shard_guard.v1",
+  "source_valid": true,
+  "valid": true
+}

@@ -1,0 +1,1188 @@
+{
+  "created_at_utc": "2026-08-17T19:34:12.281188+00:00",
+  "entries": [
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/active-state-after.json",
+      "sha256": "5ac6965a25050ac696120a547bf3c45a433f38f285878c145c873789a9878200"
+    },
+    {
+      "length": 12762,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/active-state-attribution.json",
+      "sha256": "79289ada3a31c92153b22788cf1cbd7bce1d47a652afb6fa6042c51e3823a003"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/active-state-before.json",
+      "sha256": "843da8ffcf3e716d2fd45f5045f45f470283286a19a418b344c6f3b8f35fb6da"
+    },
+    {
+      "length": 956,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/audit_processes.ps1",
+      "sha256": "7c20eb3a13b149456daa09c22680af5b14145a4e09e03a32672a11b2ab5c5cc3"
+    },
+    {
+      "length": 392235,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/canonical-pytest-inventory-after.json",
+      "sha256": "26578068c4e9c3ac1783777e8d179a9b0bda75af5251b45269542e3443740e7f"
+    },
+    {
+      "length": 392235,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/canonical-pytest-inventory.json",
+      "sha256": "ad9f911fb9e945f063f39ff4a5783062957537b2c997f19bfe2ce261189092b6"
+    },
+    {
+      "length": 3061,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/capture_monitor_evidence.py",
+      "sha256": "1857acc5abd922efa5967e9402ae67bb87004b3ef301f5bd52e466e7a9026ed8"
+    },
+    {
+      "length": 1795,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/capture_task_state.ps1",
+      "sha256": "94949bb25049e13fd71949f7f04255247dd8c6f093efd3906f7b15e916babc4f"
+    },
+    {
+      "length": 1323,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/evidence-index.md",
+      "sha256": "dbdf812da01ae18baa4bd3fe6dd37e6d1efc3bd54cd1326d98d27538a7a0c0a4"
+    },
+    {
+      "length": 30805,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/final-combined-result.payload.json",
+      "sha256": "ed208bea6d31cfb133ed6abf724dd88aef65813b4598688f2b636d27d9f0c189"
+    },
+    {
+      "length": 525,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/git-state.json",
+      "sha256": "7e8dfbb5d49277f869465742979a287f0968dddc0da040fb48f37f336adaaccb"
+    },
+    {
+      "length": 8413,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/monitor-runtime-evidence-after.json",
+      "sha256": "9a030a4766e35d582b674df597d2802f7419eccf2b78933073d9951479b4c790"
+    },
+    {
+      "length": 190,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/process-audit-after.json",
+      "sha256": "1ed5bc313e573022a28ff1d46e54ff15d652c5a38e203ad70a7900cf6fde031e"
+    },
+    {
+      "length": 190,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/process-audit-before.json",
+      "sha256": "5ce064d1f0a32ad8e9571461c19f50d3d4ec55386ca76db31446b30b0bdd7bce"
+    },
+    {
+      "length": 8458,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/run_gate_shard.py",
+      "sha256": "b6134db7699848add365716d6fddcae61269e280127f678b1a86800e44767b0f"
+    },
+    {
+      "length": 3513,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/run_static_gates.py",
+      "sha256": "c76c717274ab092715897b131cfd5de70d91d37eb842ccf8e63fc5f6ae2a37d6"
+    },
+    {
+      "length": 4452,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/scheduled-task-definition.xml",
+      "sha256": "8b3596deaeb7b25427311bbda03589197ac39652c0ff92e37b50a63c5979987d"
+    },
+    {
+      "length": 27524,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/seal_final_gate.py",
+      "sha256": "977f57640261d64ca524d8788be863be2989e128b455bc5fca5185ac05ce956c"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.active-after.json",
+      "sha256": "bb6f34e3673d8e5030a3b6c0c5583df940cad534aa6d090036d5accf46f98bf8"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.active-before.json",
+      "sha256": "ac676b80b589d3c822462309d591b9fac976bc91a31ca3e2132ca66941fe34c9"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.command.txt",
+      "sha256": "9bb5ab23f08b4bb1f4e19fac216f99710c1358964257b4f9c6b78abb4cfe28e3"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.exit.json",
+      "sha256": "552b5b8365cd57c7188897c62983eccf9bfedad68f6be2cf64ff9b7fcb19920b"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24544,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.manifest.json",
+      "sha256": "0cd3fd515f470eeb5e619a998f259c5a3faa9a06b24e69a1e5460798d4fed621"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.process-contract.json",
+      "sha256": "a01e01a4c878805adc6cf8b19756539160a1a7726569c4819e5926f3a5a7043a"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.source-after.json",
+      "sha256": "a2c3b7144dc4966a49d0d395145823ba3448e13c90995f7a0792849d34169212"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.source-before.json",
+      "sha256": "2abd2f18aa8d8acc049b5a902481c8f56120d6461f6b4d721bc15c43f238510f"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-00.stdout.txt",
+      "sha256": "b000509ca4b38861184cdf0ee81f9e27bdd71e6360cb4281b5aa9f1ede17b6f0"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.active-after.json",
+      "sha256": "165ce2b48ab8f78e58090c05175b1604c4877b67e531dea84d26d7ff3f2ca15c"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.active-before.json",
+      "sha256": "880e4496b768d6734bd5995df52b6cd1cd7627400dc8b7b7bfee2dc07d2fdc78"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.command.txt",
+      "sha256": "3622f7e2929b6ba8b7ae0f1d15bf3fb75ee6d88d2ebb7062dd112ecd4f2d0b19"
+    },
+    {
+      "length": 381,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.exit.json",
+      "sha256": "a69e154bd29a707d97b7df01566bda9879f01108929e4aed4c2963cfe035095a"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24609,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.manifest.json",
+      "sha256": "a7cdc3c02eb09e53f75acac10c741f221281de3796ed7bfe0e2d55ad0f0c8a42"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.process-contract.json",
+      "sha256": "26cf181e5ea328d9828f7641b4b3fe12c0e0c313e5a526b0fdf7c84e5a34d030"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.source-after.json",
+      "sha256": "b215960c95c4afa0c33b7fd23d0c3bd62d9de6fcc23ba193cf659e2c58737ad1"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.source-before.json",
+      "sha256": "ff8d685f12a8bf1b4d665e9f0b52a90de66bdc880f4ab8484e246efb85ee41fd"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-01.stdout.txt",
+      "sha256": "647749fec6487deb5de27981c55a1f0b1efd0c0bb3ddce6c6bd3cb7aca125774"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.active-after.json",
+      "sha256": "dae87b0e1557b020e752a6b22cddcbc8767704db1c3fe0435a81cb0e749841ff"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.active-before.json",
+      "sha256": "5ff220cf63404d8e934ab411b05eddd932d605d010acb41d6a8c94647e8ad959"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.command.txt",
+      "sha256": "5b8d2f056d31a731418cbb6eb2be341ab9f0def5b807ea1f33e3cd63a9165390"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.exit.json",
+      "sha256": "265b4e10eeb66e556da81d5b82891a25441ddd374bba5216d72fc11a9a510e0c"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24462,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.manifest.json",
+      "sha256": "149015021f088b9ed8971f5d6a987e0fda92697053b4613c12121b6602342742"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.process-contract.json",
+      "sha256": "de6dcda8400d9806604a3f343ddf8a3e1c3f4236b30c3f26fba13dbb70fea4b8"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.source-after.json",
+      "sha256": "d6a9a3c61b7754d9d68e4bebb98caa8c83029afd1b6ecf1a81fabf7a940532d8"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.source-before.json",
+      "sha256": "c44f7d3a8308170b849e090aae2c248bba7f51e27890a64ee324ff261cd452c2"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-02.stdout.txt",
+      "sha256": "a6606464e859a185e8e836c925d821f1d4d717754b5c5c8b39e745c7bd00b851"
+    },
+    {
+      "length": 874,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03-attempt-01.active-before.json",
+      "sha256": "db11e952573c3a2340dba1f8540a0babad0c74722b47d16bd5b9a1b2073820d4"
+    },
+    {
+      "length": 184,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03-attempt-01.guard-before.json",
+      "sha256": "a1a9bc7e4fcd47cda750054deb204c595818e476ded1f25a1547c7089c9899a0"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03-attempt-01.source-before.json",
+      "sha256": "defb6c2415a0c8994d3eedae6e8e16ec3ef6cc69c7a8b593e364f411260322b4"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.active-after.json",
+      "sha256": "ea0f4fbeeb66fdcb9dfd2c7a525db6e68f4868b58789014c5e74bcb665f50990"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.active-before.json",
+      "sha256": "e8e5b0d83ee1678d18d81c54968e0b0b99077707ee2e6490a9bf92c05d68e52c"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.command.txt",
+      "sha256": "4caa3a6d51bc850518a22f502c1b751674c493c411c983894abfc27b58070ab7"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.exit.json",
+      "sha256": "d7f137cdacb6c2cf7c873185c1680296ed7ef682027cb893b82f2d8a40060852"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24544,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.manifest.json",
+      "sha256": "f182a43a9b4f44304a6a4d7563c8f0983147441b983ef1b7a564de7886a02bea"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.process-contract.json",
+      "sha256": "02bd5c444849dc6f3f1015d0b8ed81f4e003756279285d866d1cdf7a32e3aa2d"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.source-after.json",
+      "sha256": "eac1168ef0518e6e1520bccd2bcb161dfea34b03592645043321b0e98c94619d"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.source-before.json",
+      "sha256": "9f0b0a3ad41ba2b275f5199224229cd0741a5c80c9356be837c1a3c4350dadf5"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-03.stdout.txt",
+      "sha256": "cf6202477c2b6c0654c1793dcd2b3b1599271d83fa06175d79b6805415a5abce"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.active-after.json",
+      "sha256": "085282610fa9216833b802a4eba065a29bf6e060e44a9af259e4ed279d72c3a1"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.active-before.json",
+      "sha256": "eda84e7e57db2b36a025fdf0101ffd1d08bcdc7d7e7a02875fc84cbea1bddae9"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.command.txt",
+      "sha256": "c1be1d6e70617c6370eb66127cdce08a5cbab732edbcdb54e37aab967dfc9c3b"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.exit.json",
+      "sha256": "b9a7da7db9113870f9e66a2eb99c74177cb83e2ebb379a441d1dcf60356605c3"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24619,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.manifest.json",
+      "sha256": "f5bc2e7f991f070423f45e3eb24708da3bb9d41f03c12a5f13087e821920795e"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.process-contract.json",
+      "sha256": "df554d829c91883710b2ed94085f820ac9236304edf97d485e8b31e9fb8eb17b"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.source-after.json",
+      "sha256": "42d22cc9788add60a947390c19e87925a9b553361b50a079e6da691caecf27ed"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.source-before.json",
+      "sha256": "f759e0542bf44af55ea96b04954e13ee29c799cc5e5d0605304a43b3ce034526"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-04.stdout.txt",
+      "sha256": "ffe45da80fcdaa0b3fcacc4dd787ae1e028ccab651810f81f5e8e97e45f9346b"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.active-after.json",
+      "sha256": "27bec26d624fa3b8b12c65cde3279d06bcbbfe5f60769220737e383862089787"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.active-before.json",
+      "sha256": "7158467c32deec67c941a87ffaadc3f28dce338d07b2918547eb94f6308e3090"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.command.txt",
+      "sha256": "bcf91d6795a6ad24381e7ed362407918a46559b41cab74ac83e459343a6aa373"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.exit.json",
+      "sha256": "a641f27c21f22bb18e3b34a9c543cf9c61da498987be6321db9c7f7650f5c225"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24742,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.manifest.json",
+      "sha256": "e45fa22054c0cfae250883a99e093648e260394e1f777a18094f0615b6d559ab"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.process-contract.json",
+      "sha256": "0d75160bf64836f49c50ed5c4d8ca4dc4fcdada6e85e6c8cc1c50f4f2f03337c"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.source-after.json",
+      "sha256": "d070dfb2ffd6859d9e525f7e3aa6a3b95cf8515b5a5b09948e52a34ad9e045ca"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.source-before.json",
+      "sha256": "b004c788ff8c5ea3b09226622f665580360454fe4e11d32579e5d818fa7067a8"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-05.stdout.txt",
+      "sha256": "78834cd5ee4d2c8e9db0f0383149e3264990f9a79559d240b09eafd0c52c85d2"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.active-after.json",
+      "sha256": "b9667578d23a33edc171fd998dbf6b4872b4d69c00e56ec17119811bab78c8a2"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.active-before.json",
+      "sha256": "d92686dc9c6a6e0776cd6267a4f1f3a14e89b51676455bf46a10585f9c5a96ab"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.command.txt",
+      "sha256": "c873b498497903d812d4c2ba5ccb88742acc66206ae21175212f5ac1ef8709cb"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.exit.json",
+      "sha256": "0262940e42fc2fcb9a859f3a61c0f8b15f4b5a4e0f444997fedc5feb34dbc04a"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24469,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.manifest.json",
+      "sha256": "a470b45f96b5cf8c064895bddefbc393399ffe8f2e5a7eb4efb19a531d35bb23"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.process-contract.json",
+      "sha256": "783a928b0cc93f764e9e3183cd98b4145e5b7f5e49a2512b33e007e769414877"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.source-after.json",
+      "sha256": "bee5240515e88fa4a1c8fbdffb4b572d61c07217564aed8f317b5a8544a82863"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.source-before.json",
+      "sha256": "f3b55e6e6da4306946b63d86de3190a192f457c125c48abcfa9055b0efa47da8"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-06.stdout.txt",
+      "sha256": "e5c06ff794af2d2de7101989ef14a61bb3299b14644c9f1dd19304549ab642cc"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.active-after.json",
+      "sha256": "5e089e1b52d64f4cd4a2cc5ec47b6df00bf27ef83ff8ac0f5c2bbf34f2ca2871"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.active-before.json",
+      "sha256": "b2e94d52a9e9a63b9c38aaba9adcda23c0b58aeb30223a9e3e9510a0a3591b96"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.command.txt",
+      "sha256": "1f1e877134fd8a9aa11be63a952ad1fc229b5dc7a8a6f9e4534e07e23deddfe1"
+    },
+    {
+      "length": 381,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.exit.json",
+      "sha256": "648d3472da303948392ec6f3845e6c4edf6cac30d9b7ed58d710bfe82236b475"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24518,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.manifest.json",
+      "sha256": "612e9f58a9b0afc59e07dbfc8197edbfd3c3f11f933433bb23a4a77c38180cb1"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.process-contract.json",
+      "sha256": "811877de99288b2c251e915c95d1742091c9e26429fe01ad6d4a91abaa70aed4"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.source-after.json",
+      "sha256": "8e38affb366671ad1eae7cac1fbf7941bfd923e9d438130d8abaaa0a4e42c933"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.source-before.json",
+      "sha256": "5c01633a30167cdd1a37c424302cc707a2dc2def1f1a2c3658ece3571f63753c"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-07.stdout.txt",
+      "sha256": "7f7f335223702d48f00c3e184a6ddf69319540857acfcf7b0cdebecac65667db"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.active-after.json",
+      "sha256": "f1b17012c1906a2620a9fdded050c63c58130841453aa9b95c7405383b87bb79"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.active-before.json",
+      "sha256": "65d81b3bc3f0eb0da7d7fc6be86a42ca066bf96c0a17651f216c5ec06ca9056f"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.command.txt",
+      "sha256": "7e24ce2c47f109f673ea2d2e45f97844058b7709c58589260133ca5125eb1b0e"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.exit.json",
+      "sha256": "2f4228325fa8a8b4326559e8ac027487b536ce2a33ee6aef9b3e6f2aafcee635"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24894,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.manifest.json",
+      "sha256": "527ad7e376486461288eaf9efe7173ee8afa9c7518cc9982c159c152a5647e69"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.process-contract.json",
+      "sha256": "f8580acbfc78b8cbf7d4140b6217de76c718fdb7a4b21fb248260a31a667551d"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.source-after.json",
+      "sha256": "2d8816d619c590123966ece784d49941817c6b2770531c9ba70ce40f7bb0f9ba"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.source-before.json",
+      "sha256": "45d850079770f7fa33c1cc453d6b541f3472b1b713776f38f15e9c401bebb032"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-08.stdout.txt",
+      "sha256": "0b5fb71c6c18aa73ff35a37b4cbb368bfc21a7d6f1a84094768ee4e8c3820537"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.active-after.json",
+      "sha256": "238cfd911cacca46ca1aaab4f8e26c050977a5e456eec919e2856b0d03207635"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.active-before.json",
+      "sha256": "004ecf8660d8829c14c11c1af3d303f9d2561b2784d99f851cccd90fbc0c38ee"
+    },
+    {
+      "length": 223,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.command.txt",
+      "sha256": "1a8bc00e0be51d7bcebea03d303bd6b6638a370da7fead13bfb4167484f61254"
+    },
+    {
+      "length": 381,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.exit.json",
+      "sha256": "71100581bf4111072a304afa7565a82ccbba811606bdd3a8c13b637689c03edf"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24840,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.manifest.json",
+      "sha256": "0b380ebfe4e909cdfc5bf2aa3b4744a8e2575699f4a06ccea91590e7b67cd372"
+    },
+    {
+      "length": 642,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.process-contract.json",
+      "sha256": "f1a6298d69e51fc2bbdc8a315880a72edf8aefed7a37c36acc91c699e97c8688"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.source-after.json",
+      "sha256": "e66cc3bedca0beaf23322581952485c76cd26825703f3bff0dd6da61f9fde730"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.source-before.json",
+      "sha256": "d3a57dbff9d1507dcaf72da01ba8af625943d4b960ef84d55198138b66d08b7b"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-09.stdout.txt",
+      "sha256": "d338ce2b5f1e3f6105ccbb811152a4d5cc350053e5c1994c5b21b0f00fdbf271"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.active-after.json",
+      "sha256": "3f61076567a2399042a0a505c356f0c56c385a4959358739e727a6dea749f79d"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.active-before.json",
+      "sha256": "8524a2af0ec1d37fea04165196d777ff4d9b711e1bf125425fe6acd2745f366c"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.command.txt",
+      "sha256": "45d202f7ea7889c756e58eb050439958a6ba35b04fbf88dfa5b93550651c6459"
+    },
+    {
+      "length": 383,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.exit.json",
+      "sha256": "838cee449b83c3ad3fcc492ec3d70a231c70db40706c953586b35f4b4e525e52"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24881,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.manifest.json",
+      "sha256": "af5968a353d8bb885b866dbbfd85003ab8236c43560ca9d85f34c9024f2801cb"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.process-contract.json",
+      "sha256": "c7f13a65aedb819568d9641869103ae7e8a00062b357ebf5b93a8799be8e97cd"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.source-after.json",
+      "sha256": "e47f037f046627c4bfe19e78a4a1591acfc39ccdfa3f8b960265dd203c1e4295"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.source-before.json",
+      "sha256": "0831aa0f2f7e51b8285e39bff44d30433c4d37bc7c62f07ab658a59c536a1ea7"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-10.stdout.txt",
+      "sha256": "37af096ecb441bb5c7940d0fb1f8ddfeda1c0339fa71033d0e90b6426e40134e"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.active-after.json",
+      "sha256": "434707e5d1b78958a1179072459c8f07a8d897eff448822115cdce470b26fa99"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.active-before.json",
+      "sha256": "097e430e8cef85b5bec67d33c59b3c92c36d0729e7848f0794076ea863e4399f"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.command.txt",
+      "sha256": "51b00f1ab138b0b9a45d54954fd123f9b475ca7b90298ebd48116ec946636b2f"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.exit.json",
+      "sha256": "3e79b7a203b7313f7ba23ba6a165230ab5a049dd18eee366b5c65ed8915b008f"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24810,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.manifest.json",
+      "sha256": "cfa0d21f4748133f22834ee9296752d1f1328e892677e36748344418e541ec19"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.process-contract.json",
+      "sha256": "4e422f324b01b12faeb0b54f22300763ad68573bc771176d6bb65ca3137aa8a2"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.source-after.json",
+      "sha256": "b329bbce5da049321090d8a61e3e178e84ebcc4bd8886d72410a0f8c32f798c9"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.source-before.json",
+      "sha256": "0eedf135bbfed3858cdd35fdb02ad9ab506682393cb4f2bc4444dfd7aff3be23"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-11.stdout.txt",
+      "sha256": "d848600b1e84a11a69c8d35e0963af4020590e82d19865f5e3bf430c289526b4"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.active-after.json",
+      "sha256": "50157e1fa7b51ad270116761f74da2cdab0adc404493a145cf162a8bf8d7b66d"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.active-before.json",
+      "sha256": "1c8c4274abd5f1e853ca8c42c5eb21f32bc2de467f3ab523bb6b9a2131e0727c"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.command.txt",
+      "sha256": "b0384344d8f2d3bae32fcd2bddc6a8ba586cbd00dcf90c5c09854069cfceb506"
+    },
+    {
+      "length": 383,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.exit.json",
+      "sha256": "a8f9936f702158af8264f89ec4b257a29c4e3d7ab149bf6dcac68b62d62b5e17"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24917,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.manifest.json",
+      "sha256": "300ee1011fd9949144bbac9e8340d4f9f84c0d7d06e558f7dcfbe19fb5233b3a"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.process-contract.json",
+      "sha256": "f2c02796a68fb5d26470a528a3135a661ac8cbee4aaa78e6cd6a47899fc4f02f"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.source-after.json",
+      "sha256": "dd2657e07e2986ca5437071734615c0806e27650f7b7595b03def3fdb026b4d1"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.source-before.json",
+      "sha256": "25cb215687b79168c2f347e083f1fbb57cb304775e5524fb034ad5452851e8a1"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-12.stdout.txt",
+      "sha256": "99ac2a451caaea1f38705986904bc05cb4922965aa8f028a26e2d3d9c44e3402"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.active-after.json",
+      "sha256": "81e43e8e8eb9c9e2eac81d4a510fbd0571dacf56490f105caeb9739737003417"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.active-before.json",
+      "sha256": "0ed89bfbc33dbfac143954c1f724508acfa6c9f37bff38e3930176c4ab39b352"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.command.txt",
+      "sha256": "94ea8509cc5bbcb4bec12e5e577bb28b97fdb24e5bc3e785fa25cbfa37cf42b2"
+    },
+    {
+      "length": 382,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.exit.json",
+      "sha256": "30c6cc6c6eb7384056066ebde4bf22b45ce0103d4ba3677b1313195d1731c295"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.guard-before.json",
+      "sha256": "2a2d2149feca16640152492fcb5a85bdf5f71e53f593da10be120490d9075675"
+    },
+    {
+      "length": 24729,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.manifest.json",
+      "sha256": "4b280333c7d26df4cffabd546cb97feabeaf1fe0d2c2e24e7a8955d7150d894d"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.process-contract.json",
+      "sha256": "767865c2e47c68c75e54369a7944377bf656772f57f9569ea477329ab1bb388e"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.source-after.json",
+      "sha256": "37eca2084bcfa39297875d1228d1664beb53dba98b9aa9418168767d259d1965"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.source-before.json",
+      "sha256": "c1346f85505cc453dd0de204389e13fc4a61ad11de0158b3a317f1f681b55fe1"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-13.stdout.txt",
+      "sha256": "3d831d75c7619d2cf82c914670fb325d162ba440debaf5b3b30ea8ac68e32e50"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.active-after.json",
+      "sha256": "192d14c76eaabf0787c4034f69eeedb6b8cb06bdc348d131e96fd4408d8a8301"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.active-before.json",
+      "sha256": "bf29cfddc9b0519c70739dda56d3324e9da2c20eb705cedddac5cea8547b75be"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.command.txt",
+      "sha256": "2623086c267ad9d317a49fccb03a418ee8a9c14761ca6f83265850a9d001f6e7"
+    },
+    {
+      "length": 383,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.exit.json",
+      "sha256": "c4a07a0662577106f98dc37c886fa23b35009967db230d7fc54a8fc60807704e"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.guard-before.json",
+      "sha256": "535413c5d2b60a2a31343ce52e25b95c89e08fb3a87c1670b994e9e1d846781f"
+    },
+    {
+      "length": 24571,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.manifest.json",
+      "sha256": "6b927e05598392c4bea9ee55ff045547ac526cd2015e24eb104629bfc7fa3a2e"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.process-contract.json",
+      "sha256": "22f8e32cb9aeffcd57970ed34d7656b8d0e9a07dc4ac6aaec863e81c7ae696d3"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.source-after.json",
+      "sha256": "de271453c236f7d1adbb50b32267ddb88697bc564e3bce26f58613803d840983"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.source-before.json",
+      "sha256": "703415f060ba7c2fe5f2022c8a70b62bcdb14238652f2145d0b08d941efa04ac"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-14.stdout.txt",
+      "sha256": "e7a1d3d11ee5cdf9fb67487af4b3f6ddc8069274e0f4293d3301507fd2100cb8"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.active-after.json",
+      "sha256": "4eed140194a286d9f0f6f56adb3ad5abce4c86a422d202051a59daab6fa74698"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.active-before.json",
+      "sha256": "283ce954eb81d2a98431f9a9e688d6c9aa1f07977815fbaa8067ed10fc5b95a4"
+    },
+    {
+      "length": 224,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.command.txt",
+      "sha256": "6a52453dfbc57a72307bb898e51649018f1851ef3c2fd3b2d0c218a549795f26"
+    },
+    {
+      "length": 383,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.exit.json",
+      "sha256": "8d2a473397ce3e0b9ac99da6f01e21a178010be42871f5422a0f6e373992c623"
+    },
+    {
+      "length": 302,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.guard-after.json",
+      "sha256": "a97875a4d52eaed1f7d6bd4e9038877579da205a78567d2b417fed9dbe175129"
+    },
+    {
+      "length": 182,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.guard-before.json",
+      "sha256": "535413c5d2b60a2a31343ce52e25b95c89e08fb3a87c1670b994e9e1d846781f"
+    },
+    {
+      "length": 24670,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.manifest.json",
+      "sha256": "597bbb27e0d2e9c97c3be3e698130f4e4e1461a830b71d24a4551421ccc16af4"
+    },
+    {
+      "length": 643,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.process-contract.json",
+      "sha256": "99a84ec99cb977ac17bf6e424c6604395829ddf31cfc29c7da6d8a5e1b59bc4f"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.source-after.json",
+      "sha256": "4ba00e067b27adc77eaed660ee87f8fae9154e150aad7b844f0a3c2a7fcd7405"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.source-before.json",
+      "sha256": "53690d74fda939fcd099d4f3eeb232d5576a113f3247bdb2681b865873274725"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-15.stdout.txt",
+      "sha256": "ed89a52b9cae902bfdacd36cab7046d57da396ca40047e11ee852c0fe9b9be7e"
+    },
+    {
+      "length": 51571,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/shard-validation.json",
+      "sha256": "c3201e7be719eb3f4680a458926b019a5d93d3a195bacf5c1430fdb7f42dbfc9"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/source-test-identity-after.json",
+      "sha256": "c5c95022ca7d03f98ac81a6d5fa64d5e8599993dd3aab1f0d6e69d05ee4df053"
+    },
+    {
+      "length": 231491,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/source-test-identity-before.json",
+      "sha256": "7015bf49afa978facd2849a4b19a6cf70be7a5e779aa54c6e3339bd8e05807bc"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-compileall.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-compileall.stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-detect-secrets-tracked.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-detect-secrets-tracked.stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 4803,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-gates.json",
+      "sha256": "093314e8c736109229fad0450203189381661867dd9403a4dcbf996d535fc991"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-git-diff-check.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-git-diff-check.stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-mypy.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 601,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-mypy.stdout.txt",
+      "sha256": "24341c39db9d545a8eb63449f4afef3082c97762496f89be46d2552a291ae390"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-node-check.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-node-check.stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-pip-check.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 31,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-pip-check.stdout.txt",
+      "sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-powershell-parse.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 15,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-powershell-parse.stdout.txt",
+      "sha256": "2b01059ea2f589cc055876eefe46f1ce9ec0285f52a31b7152a5c21188916b54"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-ruff.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 20,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/static-ruff.stdout.txt",
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+    },
+    {
+      "length": 4575,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/task-state-after.json",
+      "sha256": "69bb9be49cac2f691871e6a67c8ce0c0c60c4037b81521366b68b6e2c03bda71"
+    },
+    {
+      "length": 4573,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/task-state-before.json",
+      "sha256": "8e7fbbb6c6dce715b2a3a6dde9fb8c8f401f28a325d74c3e274e98c8f82f5430"
+    },
+    {
+      "length": 4575,
+      "path": "docs/quant-refactor/evidence/final-commit-gate-20260817/task-state-shard-03-preflight-collision.json",
+      "sha256": "6e43a194254194cfbe5c3a8e68eb94c329177bf4a476cb24018207cb05dbc071"
+    }
+  ],
+  "entry_count": 236,
+  "schema_version": "dawnstrike.final_commit_gate_manifest.v1",
+  "terminal_event": "PASS"
+}

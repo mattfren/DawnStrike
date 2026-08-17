@@ -1,0 +1,1 @@
+C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe scripts/run_pytest_shard.py --shard-index 15 --shard-count 16 --manifest docs\quant-refactor\evidence\final-commit-gate-20260817\shard-15.manifest.json

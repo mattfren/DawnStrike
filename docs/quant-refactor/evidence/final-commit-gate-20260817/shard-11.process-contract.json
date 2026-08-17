@@ -1,0 +1,18 @@
+{
+  "active_database": "C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+  "active_database_in_command": false,
+  "active_state_environment": {},
+  "candidate_persistence_authority": "none",
+  "command": [
+    "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "scripts/run_pytest_shard.py",
+    "--shard-index",
+    "11",
+    "--shard-count",
+    "16",
+    "--manifest",
+    "docs\\quant-refactor\\evidence\\final-commit-gate-20260817\\shard-11.manifest.json"
+  ],
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "schema_version": "dawnstrike.final_commit_gate_process_contract.v1"
+}

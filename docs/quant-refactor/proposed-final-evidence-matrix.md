@@ -1,7 +1,7 @@
 # Final repair evidence matrix
 
 This is Sol's final software-evidence adjudication matrix as of 2026-08-17. It
-binds accepted WP001-WP007 audits and the immutable 3,156-node final gate to
+binds accepted WP001-WP007 audits and the commit-bound 3,166-node final gate to
 the requirements and prior findings. `PASS_SOFTWARE_ONLY` means the contract
 and deterministic proof pass without claiming empirical edge, promotion
 eligibility, or production trading readiness.
@@ -52,11 +52,11 @@ eligibility, or production trading readiness.
 | REQ-RISK-002 | Fixed-fractional and concentration | PASS | docs/quant-refactor/05-wp001-sol-audit.md through 12-wp003-increment-c-sol-audit.md; tests/test_opportunity_pipeline.py; tests/test_opportunity_contracts.py |
 | REQ-OUT-001 | Capture all evaluated pairs | PASS | docs/quant-refactor/10-wp003-increment-a-sol-audit.md through 15-wp004-increment-c-sol-audit.md; opportunity outcome/miss/metric tests |
 | REQ-OUT-002 | Future-label isolation | PASS | docs/quant-refactor/10-wp003-increment-a-sol-audit.md through 15-wp004-increment-c-sol-audit.md; opportunity outcome/miss/metric tests |
-| REQ-OUT-003 | Ambiguous path honesty | PASS | strict canonical return classifier; mounted capture/label/reconciliation collections; final immutable 3,156-node gate |
+| REQ-OUT-003 | Ambiguous path honesty | PASS | strict canonical return classifier; mounted capture/label/reconciliation collections; final commit-bound 3,166-node gate |
 | REQ-MISS-001 | First-class miss engine | PASS | docs/quant-refactor/10-wp003-increment-a-sol-audit.md through 15-wp004-increment-c-sol-audit.md; opportunity outcome/miss/metric tests |
 | REQ-MISS-002 | Required miss taxonomy | PASS | docs/quant-refactor/10-wp003-increment-a-sol-audit.md through 15-wp004-increment-c-sol-audit.md; opportunity outcome/miss/metric tests |
 | REQ-METRIC-001 | Discovery metrics | PASS | docs/quant-refactor/10-wp003-increment-a-sol-audit.md through 15-wp004-increment-c-sol-audit.md; opportunity outcome/miss/metric tests |
-| REQ-BT-001 | Causal replay engine | PASS | strict canonical replay and return-truth suites; final immutable 3,156-node gate |
+| REQ-BT-001 | Causal replay engine | PASS | strict canonical replay and return-truth suites; final commit-bound 3,166-node gate |
 | REQ-BT-002 | Chronological partitions | PASS_SOFTWARE_ONLY | docs/quant-refactor/19-wp005-increment-c-sol-audit.md; docs/quant-refactor/21-wp006-sol-audit.md; synthetic proof only; empirical status remains unavailable |
 | REQ-BT-003 | Trading metrics | PASS_SOFTWARE_ONLY | docs/quant-refactor/19-wp005-increment-c-sol-audit.md; docs/quant-refactor/21-wp006-sol-audit.md; synthetic proof only; empirical status remains unavailable |
 | REQ-BT-004 | Execution stress | PASS_SOFTWARE_ONLY | docs/quant-refactor/19-wp005-increment-c-sol-audit.md; docs/quant-refactor/21-wp006-sol-audit.md; synthetic proof only; empirical status remains unavailable |
@@ -71,7 +71,7 @@ eligibility, or production trading readiness.
 | REQ-PERF-001 | Incremental/cached computation | PASS | tests/test_final_repair_opportunity_mission.py; intraday_scanner/v2/opportunity/producer.py; intraday_scanner/v2/opportunity/catalyst.py |
 | REQ-PERSIST-001 | Schema and migrations | PASS_SOFTWARE_ONLY | docs/quant-refactor/19-wp005-increment-c-sol-audit.md; docs/quant-refactor/21-wp006-sol-audit.md; synthetic proof only; empirical status remains unavailable |
 | REQ-TEST-001 | Deterministic core coverage | PASS | accepted Sol audits 05-23 and mapped deterministic tests |
-| REQ-TEST-002 | Repository gates | PASS | docs/quant-refactor/evidence/final-repair-20260816/ |
+| REQ-TEST-002 | Repository gates | PASS | docs/quant-refactor/evidence/final-commit-gate-20260817/ |
 | REQ-DOC-001 | Living documentation | PASS | docs/quant-refactor/25-final-repair-capsule.md; docs/quant-refactor/evidence/wp006-20260816/evidence-packet.md; docs/quant-refactor/26-final-repair-luna-handoff.md |
 
 ## Prior findings (14)
@@ -86,7 +86,7 @@ eligibility, or production trading readiness.
 | FINDING-006 | PASS | WP001-WP002 accepted audits; quality-gate and risk tests |
 | FINDING-007 | PASS | WP003 accepted audits; opportunity outcome persistence tests |
 | FINDING-008 | PASS | WP004 accepted audits; miss and discovery metric tests |
-| FINDING-009 | PASS | strict classifier plus mounted watcher/capture/reconciliation/label integration; final immutable 3,156-node gate |
+| FINDING-009 | PASS | strict classifier plus mounted watcher/capture/reconciliation/label integration; final commit-bound 3,166-node gate |
 | FINDING-010 | PASS_SOFTWARE_ONLY | WP005-C/WP006 accepted audits; real empirical data remains unavailable and non-promotional |
 | FINDING-011 | EXTERNAL_DATA_BLOCKED | capability/cost stress contracts pass; consolidated historical entitlement remains external |
 | FINDING-012 | PASS | DecisionTrace v2 tests plus structured producer telemetry tests |
@@ -98,7 +98,13 @@ eligibility, or production trading readiness.
 The original independent-audit implementation findings C-00, C-01, H-02,
 H-03, H-05, H-06, M-01, and M-02 have repair evidence in
 `docs/quant-refactor/27-final-repair-sol-escalation.md`,
-`docs/quant-refactor/28-final-repair-post-automation-recovery.md`, and
-`docs/quant-refactor/evidence/final-immutable-gate-20260817/`. H-04 is closed
-by this exact matrix and the two Sol-owned ledgers. H-01 remains open only until
-the complete candidate is committed and independently reverified.
+`docs/quant-refactor/28-final-repair-post-automation-recovery.md`,
+`docs/quant-refactor/30-post-commit-high-repair-luna-handoff.md`, and
+`docs/quant-refactor/evidence/final-commit-gate-20260817/`. H-01 is closed by
+portable checkout-to-HEAD blob equality at commit `fabca37f`; H-02/H-03 are
+closed by the mounted disabled-by-default research CLI/service path; H-04 by
+this exact matrix and the two Sol-owned ledgers; H-05 by whole-repo static and
+Windows-safe tracked secret gates. C-00 is closed by candidate
+non-interference plus exact attribution of live-state changes to the separate
+five-minute research monitor. No critical or high implementation finding
+remains open.

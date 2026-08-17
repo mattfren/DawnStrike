@@ -1,0 +1,745 @@
+{
+  "active_state": {
+    "active_database_frozen_claim": false,
+    "all_observed_mtimes_align_five_minute_task": true,
+    "all_read_only_captures_valid_and_sidecar_free": true,
+    "candidate_hash_drift": false,
+    "candidate_non_interference_proven": true,
+    "candidate_process_contract_count": 16,
+    "candidate_process_contracts_exclude_active_db_and_persistence": true,
+    "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+    "classified_at_utc": "2026-08-17T19:34:12.055396+00:00",
+    "final_runtime_receipts": {
+      "all_exit_zero_research_only_no_broker": true,
+      "count": 7,
+      "entries": [
+        {
+          "length": 767,
+          "mtime_utc": "2026-08-17T19:30:02.612089+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 13,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:02.5513420Z",
+            "duration_ms": 648,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:01.9029261Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stdout.log",
+            "stdout_sha256": "be0aa4ed72491b6b74fed1578a5ee401905a1b8258914b10938bedb503ce4e87"
+          },
+          "sha256": "698c650dba4554ee2b8aa093911470e6bc36f51bac4e4aec7eeecb5695e0de9f"
+        },
+        {
+          "length": 764,
+          "mtime_utc": "2026-08-17T19:30:02.856472+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 4,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:02.8464295Z",
+            "duration_ms": 184,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:02.6619934Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stdout.log",
+            "stdout_sha256": "c06b02a8fd5f29ba5fac2ca44eacf1cf6bfe351a211d740318ee6e53354021d9"
+          },
+          "sha256": "e477e964abbb9287cf7eb5c4472c66c3c30bd4a9f64c18acf66f1ca7468bddfe"
+        },
+        {
+          "length": 746,
+          "mtime_utc": "2026-08-17T19:30:03.708781+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 7,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:03.7036090Z",
+            "duration_ms": 708,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:02.9955630Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stdout.log",
+            "stdout_sha256": "61091032acf7bae3cb3365067e6126ffe90278cc41c92cd8e49ea02b883e57eb"
+          },
+          "sha256": "295472186b13c30323e3a04e7fd0d480574e4dfba35d4eaa6354c2dbbd75b4cb"
+        },
+        {
+          "length": 744,
+          "mtime_utc": "2026-08-17T19:30:05.451167+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 22,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:05.4401630Z",
+            "duration_ms": 1723,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:03.7167466Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stdout.log",
+            "stdout_sha256": "686e13f00d00a6411b1d98cb185ab89745c602a3c4c756c869000bda2f6c9dd0"
+          },
+          "sha256": "7cff62acc7d647faf0a00ccd513edb34defcb89749b9da648c200c8b31372298"
+        },
+        {
+          "length": 779,
+          "mtime_utc": "2026-08-17T19:30:06.096867+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 17,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:06.0908576Z",
+            "duration_ms": 629,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:05.4617548Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stdout.log",
+            "stdout_sha256": "9e1821bc24a57b242ecc637fbacaa5deede0b1069bcc571ff2a0b3fea783e7cd"
+          },
+          "sha256": "f7baa3eefd036da56355a229454dde8699f1c5ba5015ea046583a218bac714cc"
+        },
+        {
+          "length": 754,
+          "mtime_utc": "2026-08-17T19:30:10.380233+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 11,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:10.3496166Z",
+            "duration_ms": 3946,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:06.4034670Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stdout.log",
+            "stdout_sha256": "df5d186692d2150b14ffffa22b30d7c1ccb34cf9c35558ae85f9b006f9bbfb2f"
+          },
+          "sha256": "131abb521cc0c67f761945c4f8adc67b22221dbe9771c3a261023bdf513e48b1"
+        },
+        {
+          "length": 789,
+          "mtime_utc": "2026-08-17T19:30:11.047842+00:00",
+          "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.receipt.json",
+          "payload": {
+            "argument_count": 18,
+            "broker_execution_enabled": false,
+            "completed_at": "2026-08-17T19:30:11.0478423Z",
+            "duration_ms": 645,
+            "exit_code": 0,
+            "process_name": "py.exe",
+            "research_only": true,
+            "schema_version": "dawnstrike.native_process_receipt.v1",
+            "start_error": null,
+            "started_at": "2026-08-17T19:30:10.4028735Z",
+            "stderr_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stderr.log",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stdout.log",
+            "stdout_sha256": "379c191e2273cef879666ec7baa3012f81fb2648c62831afeaa7ae2b2fbf6ffa"
+          },
+          "sha256": "9d01371a2ebfa90b3efa25bfb9e760255f4e457fa216086f55ec93f4daf76fff"
+        }
+      ]
+    },
+    "observed_mtime_count": 21,
+    "observed_unique_identity_count": 21,
+    "post_gate_identity": {
+      "length": 203345920,
+      "mtime_ns": 1786994709948520800,
+      "mtime_utc": "2026-08-17T19:25:09.948521+00:00",
+      "sha256": "311b45f9f48d125355a3b2a4ff3a9bc7b1491b098e765d79d514ca5ba620b71c",
+      "sidecars": []
+    },
+    "pre_gate_identity": {
+      "length": 202600448,
+      "mtime_ns": 1786980011429416200,
+      "mtime_utc": "2026-08-17T15:20:11.429416+00:00",
+      "sha256": "6f11d9b094a06e9a366f2fb793223aa5b171e5334291fa28e9304756531913c1",
+      "sidecars": []
+    },
+    "preflight_collision": {
+      "after_identity": {
+        "length": 202870784,
+        "mtime_ns": 1786986007449981400,
+        "mtime_utc": "2026-08-17T17:00:07.449981+00:00",
+        "sha256": "8b32fdd6bc537dc7dfdd995909ec981f01fc535a25a9321e96c236c39472f3dc",
+        "sidecars": []
+      },
+      "before_identity": {
+        "length": 202862592,
+        "mtime_ns": 1786985709777660500,
+        "mtime_utc": "2026-08-17T16:55:09.777661+00:00",
+        "sha256": "3a5a6e442ef530e4fae0f2da85380c18ce964bfe3af265bb1b4b22769e7d2164",
+        "sidecars": []
+      },
+      "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+      "matching_runtime_log_count": 21,
+      "preserved_evidence_prefix": "shard-03-attempt-01",
+      "pytest_started": false,
+      "scheduled_task_last_run_utc": "2026-08-17T17:00:01.0000000Z",
+      "scheduled_task_result": 0,
+      "shard_index": 3
+    },
+    "scheduled_task": {
+      "definition_sha256": "8b3596deaeb7b25427311bbda03589197ac39652c0ff92e37b50a63c5979987d",
+      "enabled_after": true,
+      "enabled_before": true,
+      "five_minute_interval_verified": true,
+      "last_result_after": 0,
+      "last_result_before": 0,
+      "last_run_after_utc": "2026-08-17T19:25:01.0000000Z",
+      "last_run_before_utc": "2026-08-17T15:20:01.0000000Z",
+      "name": "Dawnstrike AlphaOps Monitor 5m",
+      "runner_sha256": "624405c335260b76f533252256a188d42037d880b398f294bc7e35b52715bb30",
+      "state_after": "Ready"
+    },
+    "schema_version": "dawnstrike.final_commit_active_state_attribution.v1",
+    "shard_change_classifications": [
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 0
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 1
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 2
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 3
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 4
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 5
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 6
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 7
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 8
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 9
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 10
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 11
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 12
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 13
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 14
+      },
+      {
+        "changed": true,
+        "classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "shard_index": 15
+      }
+    ],
+    "valid": true
+  },
+  "branch": "codex/sol-quant-refactor-20260811",
+  "commands": {
+    "inventory": "py scripts/capture_pytest_inventory.py --output <artifact>",
+    "shard": "py docs/quant-refactor/evidence/final-commit-gate-20260817/run_gate_shard.py --shard-index <00-15> --active-database C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+    "source_identity": "py scripts/capture_source_test_identity.py --output <artifact>",
+    "tracked_detect_secrets": "py scripts/run_detect_secrets_tracked.py --baseline .secrets.baseline"
+  },
+  "git_state": {
+    "authorized_evidence_record_count": 234,
+    "branch": "codex/sol-quant-refactor-20260811",
+    "captured_at_utc": "2026-08-17T19:34:11.639295+00:00",
+    "head": "fabca37fdcb61c9a2e7825b903ddd456adf1ec85",
+    "index_clean": true,
+    "parent": "2b5e2d20fe03cdc02005a03ba88c8899a2cdff52",
+    "porcelain_record_count": 234,
+    "schema_version": "dawnstrike.final_commit_git_state.v1",
+    "tracked_worktree_clean": true,
+    "tree": "08d69b9e7d1dc65745c4d7835541f3b093060921",
+    "unexpected_records": [],
+    "valid": true
+  },
+  "head": "fabca37fdcb61c9a2e7825b903ddd456adf1ec85",
+  "parent": "2b5e2d20fe03cdc02005a03ba88c8899a2cdff52",
+  "process_audit": {
+    "after_unauthorized_process_count": 0,
+    "before_unauthorized_process_count": 0
+  },
+  "pytest_inventory": {
+    "active_state_isolation_no_persist_contract_node_count": 51,
+    "before_after_exact": true,
+    "inventory_sha256": "90360b41:ba6b42d5:b8317fe9:7ff95703:7d251a59:f8174e5d:76799f51:b218b781",
+    "node_count": 3166,
+    "unique_node_count": 3166
+  },
+  "schema_version": "dawnstrike.final_commit_gate_result.v1",
+  "scope_controls": {
+    "active_state_globally_frozen_claimed": false,
+    "active_state_opened_writable_or_mutated_by_candidate": false,
+    "delegated_lane_count": 1,
+    "delegated_lane_shards": [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "external_monitor_drift_classified": true,
+    "git_stage_commit_push_used": false,
+    "installed_task_modified_disabled_or_run_by_gate": false,
+    "owner_lane_shards": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "provider_broker_live_order_deploy_publish_promote_used": false,
+    "source_or_test_edited_during_gate": false
+  },
+  "sealed_at_utc": "2026-08-17T19:34:12.056723+00:00",
+  "shard_result": {
+    "artifact_count": 192,
+    "duplicate_count": 0,
+    "failed_count": 0,
+    "missing_count": 0,
+    "passed_count": 3166,
+    "selected_node_count": 3166,
+    "shard_count": 16,
+    "shards": [
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1472.2055131000234,
+        "ended_at_utc": "2026-08-17T15:52:43.747399+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 0,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T15:28:14.409065+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 2203.430703799997,
+        "ended_at_utc": "2026-08-17T16:29:39.742841+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 1,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T15:53:07.429478+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1774.0132226000424,
+        "ended_at_utc": "2026-08-17T16:59:45.877791+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 2,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T16:30:15.075620+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1944.2092814999633,
+        "ended_at_utc": "2026-08-17T17:33:28.153972+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 3,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T17:01:06.773321+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1746.7056784000015,
+        "ended_at_utc": "2026-08-17T18:02:54.197877+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 4,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T17:33:50.964696+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1830.1703594000428,
+        "ended_at_utc": "2026-08-17T18:33:44.106759+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 5,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T18:03:17.027127+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1331.5201424999977,
+        "ended_at_utc": "2026-08-17T18:56:14.774535+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 6,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T18:34:06.413560+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1383.746394900023,
+        "ended_at_utc": "2026-08-17T19:19:49.207181+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 7,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T18:56:48.359845+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1564.3726105999667,
+        "ended_at_utc": "2026-08-17T15:52:08.540160+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 8,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T15:26:07.169199+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 4957.372367199976,
+        "ended_at_utc": "2026-08-17T17:15:14.790438+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 9,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T15:52:40.329680+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1447.0900851999759,
+        "ended_at_utc": "2026-08-17T17:40:02.004226+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 10,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T17:15:57.935501+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 938.2060752999969,
+        "ended_at_utc": "2026-08-17T17:56:03.400862+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 11,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T17:40:28.064334+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1823.2808801999781,
+        "ended_at_utc": "2026-08-17T18:26:50.549277+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 12,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T17:56:30.256295+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1059.313799800002,
+        "ended_at_utc": "2026-08-17T18:44:54.097251+00:00",
+        "failed_count": 0,
+        "passed_count": 198,
+        "pytest_exit_code": 0,
+        "selected_count": 198,
+        "shard_index": 13,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T18:27:17.868229+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1221.4353836999508,
+        "ended_at_utc": "2026-08-17T19:05:38.639784+00:00",
+        "failed_count": 0,
+        "passed_count": 197,
+        "pytest_exit_code": 0,
+        "selected_count": 197,
+        "shard_index": 14,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T18:45:20.581202+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      },
+      {
+        "active_change_classification": "AUTHORIZED_EXTERNAL_RUNTIME_DRIFT",
+        "active_state_changed": true,
+        "elapsed_seconds": 1228.0558693999774,
+        "ended_at_utc": "2026-08-17T19:26:29.836409+00:00",
+        "failed_count": 0,
+        "passed_count": 197,
+        "pytest_exit_code": 0,
+        "selected_count": 197,
+        "shard_index": 15,
+        "skipped_count": 0,
+        "started_at_utc": "2026-08-17T19:06:04.721153+00:00",
+        "valid": true,
+        "xfailed_count": 0,
+        "xpassed_count": 0
+      }
+    ],
+    "skipped_count": 0,
+    "unique_selected_node_count": 3166,
+    "xfailed_count": 0,
+    "xpassed_count": 0
+  },
+  "source_test_identity": {
+    "all_checkout_paths_match_head": true,
+    "before_after_exact": true,
+    "checkout_byte_aggregate_sha256": "83bf62c2:5a9d8fa6:616a4992:b5faae95:dd9c71a0:ba59d817:f972788a:236d07de",
+    "checkout_git_blob_aggregate_sha256": "8ca0cf1c:266529db:88536bca:9fdf2d69:897fb557:5d9621cb:587b5bdf:45110a4a",
+    "head_git_blob_aggregate_sha256": "8ca0cf1c:266529db:88536bca:9fdf2d69:897fb557:5d9621cb:587b5bdf:45110a4a",
+    "path_count": 580
+  },
+  "static_gates": {
+    "all_passed": true,
+    "captured_at_utc": "2026-08-17T15:28:05.516865+00:00",
+    "exit_code": 0,
+    "gate_count": 8,
+    "results": [
+      {
+        "command": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m ruff check .",
+        "elapsed_seconds": 0.1708744000061415,
+        "ended_at_utc": "2026-08-17T15:26:33.965316+00:00",
+        "exit_code": 0,
+        "name": "ruff",
+        "started_at_utc": "2026-08-17T15:26:33.795651+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+      },
+      {
+        "command": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m mypy intraday_scanner",
+        "elapsed_seconds": 1.834111199947074,
+        "ended_at_utc": "2026-08-17T15:26:35.811208+00:00",
+        "exit_code": 0,
+        "name": "mypy",
+        "started_at_utc": "2026-08-17T15:26:33.978425+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "24341c39db9d545a8eb63449f4afef3082c97762496f89be46d2552a291ae390"
+      },
+      {
+        "command": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m compileall -q intraday_scanner scripts",
+        "elapsed_seconds": 0.3089602999971248,
+        "ended_at_utc": "2026-08-17T15:26:36.132903+00:00",
+        "exit_code": 0,
+        "name": "compileall",
+        "started_at_utc": "2026-08-17T15:26:35.824992+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "command": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pip check",
+        "elapsed_seconds": 1.0235955999814905,
+        "ended_at_utc": "2026-08-17T15:26:37.156746+00:00",
+        "exit_code": 0,
+        "name": "pip-check",
+        "started_at_utc": "2026-08-17T15:26:36.134320+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
+      },
+      {
+        "command": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe scripts/run_detect_secrets_tracked.py --baseline .secrets.baseline",
+        "elapsed_seconds": 87.50477390002925,
+        "ended_at_utc": "2026-08-17T15:28:04.671429+00:00",
+        "exit_code": 0,
+        "name": "detect-secrets-tracked",
+        "started_at_utc": "2026-08-17T15:26:37.167576+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "command": "node --check web/assets/dawnstrike.js",
+        "elapsed_seconds": 0.08751000004122034,
+        "ended_at_utc": "2026-08-17T15:28:04.760992+00:00",
+        "exit_code": 0,
+        "name": "node-check",
+        "started_at_utc": "2026-08-17T15:28:04.674515+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "command": "powershell.exe -NoProfile -Command \"$ErrorActionPreference='Stop'; $errors=@(); $paths=@(git ls-files '*.ps1'); foreach($relative in $paths){$tokens=$null;$parseErrors=$null;[void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) $relative),[ref]$tokens,[ref]$parseErrors);if($parseErrors){$errors += $parseErrors}}; if($errors.Count){$errors | Format-List | Out-String | Write-Error; exit 2}; Write-Output ('parsed_ps1=' + $paths.Count)\"",
+        "elapsed_seconds": 0.6647692999686114,
+        "ended_at_utc": "2026-08-17T15:28:05.425651+00:00",
+        "exit_code": 0,
+        "name": "powershell-parse",
+        "started_at_utc": "2026-08-17T15:28:04.762357+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "2b01059ea2f589cc055876eefe46f1ce9ec0285f52a31b7152a5c21188916b54"
+      },
+      {
+        "command": "git diff --check",
+        "elapsed_seconds": 0.07808030000887811,
+        "ended_at_utc": "2026-08-17T15:28:05.515381+00:00",
+        "exit_code": 0,
+        "name": "git-diff-check",
+        "started_at_utc": "2026-08-17T15:28:05.438404+00:00",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "schema_version": "dawnstrike.final_commit_static_gates.v1"
+  },
+  "terminal_event": "PASS",
+  "tree": "08d69b9e7d1dc65745c4d7835541f3b093060921"
+}

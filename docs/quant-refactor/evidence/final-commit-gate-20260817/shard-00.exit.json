@@ -1,0 +1,12 @@
+{
+  "active_state_changed": true,
+  "elapsed_seconds": 1472.2055131000234,
+  "ended_at_utc": "2026-08-17T15:52:43.747399+00:00",
+  "exit_code": 0,
+  "post_guard_valid": true,
+  "pre_guard_valid": true,
+  "pytest_exit_code": 0,
+  "schema_version": "dawnstrike.final_commit_gate_shard_exit.v1",
+  "shard_index": 0,
+  "started_at_utc": "2026-08-17T15:28:14.409065+00:00"
+}

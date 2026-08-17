@@ -1,0 +1,125 @@
+{
+  "schema_version": "dawnstrike.final_commit_gate_task_state.v1",
+  "captured_at_utc": "2026-08-17T17:00:36.4050060+00:00",
+  "task_name": "Dawnstrike AlphaOps Monitor 5m",
+  "task_path": "\\",
+  "enabled": true,
+  "state": "Ready",
+  "last_run_time_utc": "2026-08-17T17:00:01.0000000Z",
+  "last_task_result": 0,
+  "next_run_time_utc": "2026-08-17T17:05:00.0000000Z",
+  "actions": [
+    {
+      "execute": "powershell.exe",
+      "arguments": "-NoProfile -ExecutionPolicy Bypass -File \"C:\\r\\dawnstrike-runtime\\scripts\\run_alphaops_monitor.ps1\" -RuntimeRoot \"C:\\r\\dawnstrike-runtime\" -StateRoot \"C:\\r\\dawnstrike-state\"",
+      "working_directory": "C:\\r\\dawnstrike-runtime"
+    }
+  ],
+  "matching_runtime_log_files": [
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.receipt.json",
+      "length": 764,
+      "mtime_utc": "2026-08-17T17:00:03.5143143Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:02.9186206Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_calendar-2026-08-17.stdout.log",
+      "length": 1096,
+      "mtime_utc": "2026-08-17T17:00:03.4743092Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.receipt.json",
+      "length": 767,
+      "mtime_utc": "2026-08-17T17:00:02.8372435Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:02.0508178Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor_heartbeat-2026-08-17.stdout.log",
+      "length": 772,
+      "mtime_utc": "2026-08-17T17:00:02.6732014Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.receipt.json",
+      "length": 746,
+      "mtime_utc": "2026-08-17T17:00:04.5736785Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:03.6481421Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\alpha_monitor-2026-08-17.stdout.log",
+      "length": 2096,
+      "mtime_utc": "2026-08-17T17:00:04.5329431Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.receipt.json",
+      "length": 779,
+      "mtime_utc": "2026-08-17T17:00:07.6261605Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:06.9905568Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-intraday_monitor-2026-08-17.stdout.log",
+      "length": 146136,
+      "mtime_utc": "2026-08-17T17:00:07.6211602Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.receipt.json",
+      "length": 789,
+      "mtime_utc": "2026-08-17T17:00:17.7526110Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:16.8464167Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\record_stage-scenario_intelligence-2026-08-17.stdout.log",
+      "length": 147528,
+      "mtime_utc": "2026-08-17T17:00:17.7291778Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.receipt.json",
+      "length": 754,
+      "mtime_utc": "2026-08-17T17:00:16.7247924Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:07.8565477Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\scenario_monitor-2026-08-17.stdout.log",
+      "length": 1364,
+      "mtime_utc": "2026-08-17T17:00:16.6237286Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.receipt.json",
+      "length": 744,
+      "mtime_utc": "2026-08-17T17:00:06.9700686Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stderr.log",
+      "length": 0,
+      "mtime_utc": "2026-08-17T17:00:04.5948609Z"
+    },
+    {
+      "path": "C:\\r\\dawnstrike-state\\logs\\trade_watch-2026-08-17.stdout.log",
+      "length": 2630,
+      "mtime_utc": "2026-08-17T17:00:06.9071499Z"
+    }
+  ]
+}
