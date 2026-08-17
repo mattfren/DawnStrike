@@ -74,6 +74,12 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
         assert f'id="{element_id}"' in html
     assert 'loadJson("/data/calendar.json")' in script
     assert "record?.eligible_for_return" in script
+    assert 'id="calendar-history-summary"' in html
+    assert "Historical Calendar" in html
+    assert 'cohort: ""' in script
+    assert "research_return_pct" in script
+    assert "Official and research-only returns are never blended" in script
+    assert "Published contract records" in script
     assert "calendarCellStatus(day, matches)" in script
     assert 'records.length === 1' in script
     assert 'market_session_status === "closed" ? "UNAVAILABLE" : "MISSING"' in script

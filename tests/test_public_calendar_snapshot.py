@@ -77,6 +77,30 @@ def test_calendar_keeps_pending_null_and_counts_it_in_denominator() -> None:
     assert monthly["net_return_pct"] == 0.0
 
 
+def test_calendar_publishes_research_return_without_promoting_it_to_official() -> None:
+    historical = _daily("2026-07-06", return_pct=1.25, status="PARTIAL")
+    historical["cohort"] = "historical_backtest"
+    historical["account_id"] = "historical_replay"
+    historical["opening_equity_cents"] = None
+    historical["ending_equity_cents"] = None
+    performance = _performance([historical], as_of="2026-07-06")
+
+    payload = build_calendar_payload(performance, as_of_market_date="2026-07-06")
+
+    record = _record(payload, "2026-07-06")
+    assert record["eligible_for_return"] is False
+    assert record["net_return_pct"] is None
+    assert record["research_return_pct"] == 1.25
+    assert record["return_display_state"] == "research_only_observed"
+    monthly = _month(payload, "2026-07")
+    assert monthly["net_return_pct"] is None
+    assert monthly["research_observed_return_pct"] == 1.25
+    assert monthly["research_observed_day_count"] == 1
+    assert monthly["research_observed_coverage_pct"] == 100.0
+    assert monthly["research_missing_day_count"] == 0
+    assert monthly["return_scope"] == "research_only"
+
+
 def test_calendar_closed_day_is_unavailable_and_never_observed() -> None:
     payload = build_calendar_payload(
         _performance([], as_of="2026-08-02"),

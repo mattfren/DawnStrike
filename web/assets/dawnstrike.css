@@ -297,6 +297,7 @@ td strong { color:var(--ink); font-weight:700; }
 .bad { color:var(--danger); }
 
 .calendar-controls { display:grid; grid-template-columns:auto minmax(0,1fr); gap:1.1rem; align-items:end; margin-bottom:.75rem; }
+.calendar-history-summary { margin:0 0 .75rem; padding:.65rem .8rem; border:1px solid rgba(95,218,255,.2); border-radius:7px; color:var(--muted); background:rgba(95,218,255,.035); font:.62rem/1.5 var(--mono); }
 .month-switcher { display:grid; grid-template-columns:38px minmax(150px,1fr) 38px; gap:.55rem; align-items:center; }
 .month-switcher > div { text-align:center; }
 .month-switcher strong { display:block; margin-top:.1rem; font:680 1rem/1.2 var(--mono); }
@@ -318,6 +319,7 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-legend .legend-complete { background:var(--signal); }
 .calendar-legend .legend-no-trade { background:var(--cyan); }
 .calendar-legend .legend-pending { background:var(--warning); }
+.calendar-legend .legend-research { border:1px solid var(--cyan); background:transparent; box-shadow:0 0 7px rgba(95,218,255,.25); }
 .calendar-legend .legend-missing { border:1px solid var(--danger); background:transparent; }
 .calendar-legend .legend-unavailable { background:#485467; }
 .calendar-workspace { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(300px,.72fr); gap:.8rem; align-items:start; }
@@ -343,6 +345,7 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-cell.status-missing i { border:1px solid var(--danger); background:transparent; }
 .calendar-cell.status-unavailable { background:rgba(72,84,103,.035); }
 .calendar-cell.status-unavailable i { background:#485467; }
+.calendar-cell.research-only { border-color:rgba(95,218,255,.24); }
 .calendar-empty { grid-column:1/-1; min-height:260px; display:grid; place-items:center; color:var(--muted); text-align:center; }
 .calendar-detail { position:sticky; top:5.6rem; min-height:430px; }
 .calendar-detail-metrics { display:grid; grid-template-columns:1fr 1.25fr; gap:.55rem 1rem; margin:1rem 0; padding:1rem 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); font-size:.72rem; }

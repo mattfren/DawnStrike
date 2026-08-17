@@ -79,6 +79,11 @@ document.getElementById("calendar-next-month")?.addEventListener("click", () => 
 ].forEach(([id, key]) => {
   document.getElementById(id)?.addEventListener("change", (event) => {
     state.calendarFilters[key] = event.target.value;
+    const filterOrder = ["cohort", "strategy_id", "strategy_version", "execution_policy_version", "account_id"];
+    filterOrder.slice(filterOrder.indexOf(key) + 1).forEach((dependent) => {
+      state.calendarFilters[dependent] = "";
+    });
+    syncCalendarMonthToFilters();
     state.calendarSelectedDate = null;
     renderCalendar();
   });
@@ -627,18 +632,12 @@ function renderResearch(rows) {
 }
 
 function initializeCalendarFilters() {
-  const records = calendarRecords();
-  if (!records.length) return;
-  const official = records.filter((record) => record.cohort === "official_forward_paper");
-  const cohortPool = official.length ? official : records;
-  const v5 = cohortPool.filter((record) => record.strategy_id === "alphaops_v5");
-  const preferred = v5.at(-1) || cohortPool.at(-1);
   state.calendarFilters = {
-    cohort: preferred?.cohort || "",
-    strategy_id: preferred?.strategy_id || "",
-    strategy_version: preferred?.strategy_version || "",
-    execution_policy_version: preferred?.execution_policy_version || "",
-    account_id: preferred?.account_id || "",
+    cohort: "",
+    strategy_id: "",
+    strategy_version: "",
+    execution_policy_version: "",
+    account_id: "",
   };
 }
 
@@ -646,6 +645,24 @@ function calendarRecords() {
   return Array.isArray(state.calendar?.days)
     ? state.calendar.days.flatMap((day) => Array.isArray(day.records) ? day.records : [])
     : [];
+}
+
+function calendarRecordMatches(record) {
+  return Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record?.[key] || "") === value);
+}
+
+function calendarAvailableMonths() {
+  const days = Array.isArray(state.calendar?.days) ? state.calendar.days : [];
+  const matched = days
+    .filter((day) => Array.isArray(day.records) && day.records.some(calendarRecordMatches))
+    .map((day) => String(day.month || ""));
+  const fallback = days.map((day) => String(day.month || ""));
+  return [...new Set((matched.length ? matched : fallback).filter(Boolean))].sort();
+}
+
+function syncCalendarMonthToFilters() {
+  const available = calendarAvailableMonths();
+  if (available.length) state.calendarMonth = available.at(-1);
 }
 
 function populateCalendarFilters() {
@@ -692,7 +709,10 @@ function renderCalendar() {
   const integrity = calendarIntegrity();
   setStatus("calendar-integrity", integrity.label, integrity.ok ? "COMPLETE" : "DEGRADED");
   label.textContent = monthLabel(state.calendarMonth);
-  const availableMonths = [...new Set(allDays.map((day) => String(day.month || "")))].filter(Boolean).sort();
+  const availableMonths = calendarAvailableMonths();
+  if (!availableMonths.includes(state.calendarMonth)) state.calendarMonth = availableMonths.at(-1);
+  renderCalendarHistorySummary(allDays);
+  label.textContent = monthLabel(state.calendarMonth);
   document.getElementById("calendar-previous-month").disabled = state.calendarMonth <= availableMonths[0];
   document.getElementById("calendar-next-month").disabled = state.calendarMonth >= availableMonths.at(-1);
   const lookup = new Map(allDays.map((day) => [day.date, day]));
@@ -704,13 +724,15 @@ function renderCalendar() {
     const matches = filteredCalendarRecords(day);
     const record = matches.length === 1 ? matches[0] : null;
     const status = calendarCellStatus(day, matches);
-    const value = record?.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
+    const presentation = record ? calendarReturnPresentation(record) : null;
+    const value = presentation?.value ?? null;
     const selected = dateKey === state.calendarSelectedDate;
     const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
-    const returnText = value == null ? "—" : formatPercentText(value);
-    const statusText = matches.length > 1 ? "Refine filters" : calendarStatusLabel(status);
-    const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `Net return ${returnText}`}`;
-    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-pressed="${selected}">
+    const returnText = matches.length > 1 ? `${matches.length} rows` : value == null ? "—" : formatPercentText(value);
+    const statusText = matches.length > 1 ? "Published history" : calendarStatusLabel(status);
+    const ariaReturn = matches.length > 1 ? "Returns are not blended" : value == null ? "Return not reported" : `${presentation.label} ${formatPercentText(value)}`;
+    const researchClass = presentation?.scope === "research" ? "research-only" : "";
+    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${researchClass} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(`${dateKey}. ${statusText}. ${ariaReturn}`)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
       <strong>${escapeHtml(returnText)}</strong>
       <small>${escapeHtml(statusText)}</small>
@@ -728,7 +750,7 @@ function renderCalendar() {
   const currentRecords = currentDays.flatMap((day) => filteredCalendarRecords(day));
   renderCalendarSummary(currentRecords);
   if (!state.calendarSelectedDate || !state.calendarSelectedDate.startsWith(state.calendarMonth)) {
-    const preferred = currentDays.slice().reverse().find((day) => filteredCalendarRecords(day).length === 1)
+    const preferred = currentDays.slice().reverse().find((day) => filteredCalendarRecords(day).length > 0)
       || currentDays.at(-1);
     state.calendarSelectedDate = preferred?.date || null;
     if (state.calendarSelectedDate) {
@@ -743,7 +765,31 @@ function renderCalendar() {
 
 function filteredCalendarRecords(day) {
   if (!day || !Array.isArray(day.records)) return [];
-  return day.records.filter((record) => Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record[key] || "") === value));
+  return day.records.filter(calendarRecordMatches);
+}
+
+function calendarReturnPresentation(record) {
+  if (record?.return_display_state === "research_only_observed" && numberOrNull(record.research_return_pct) != null) {
+    return { value: numberOrNull(record.research_return_pct), label: "Research-only observed return", scope: "research" };
+  }
+  if (record?.eligible_for_return && numberOrNull(record.net_return_pct) != null) {
+    return { value: numberOrNull(record.net_return_pct), label: "Eligible canonical net return", scope: "canonical" };
+  }
+  return { value: null, label: "Return not reported", scope: "withheld" };
+}
+
+function renderCalendarHistorySummary(days) {
+  const node = document.getElementById("calendar-history-summary");
+  if (!node) return;
+  const observedDays = days.filter((day) => Array.isArray(day.records) && day.records.length);
+  const records = observedDays.flatMap((day) => day.records);
+  if (!records.length) {
+    node.textContent = "No canonical history is published. Missing history is not being inferred.";
+    return;
+  }
+  const dates = observedDays.map((day) => day.date).sort();
+  const cohorts = new Set(records.map((record) => record.cohort).filter(Boolean));
+  node.textContent = `All ${records.length} published canonical records · ${formatCalendarDate(dates[0])} through ${formatCalendarDate(dates.at(-1))} · ${cohorts.size} cohort${cohorts.size === 1 ? "" : "s"}. Official and research-only returns are never blended.`;
 }
 
 function calendarCellStatus(day, records) {
@@ -756,12 +802,35 @@ function renderCalendarSummary(records) {
   const months = Array.isArray(state.calendar?.months) ? state.calendar.months : [];
   const summaries = months.filter((row) => row.month === state.calendarMonth && Object.entries(state.calendarFilters).every(([key, value]) => !value || String(row[key] || "") === value));
   const summary = summaries.length === 1 ? summaries[0] : null;
-  document.getElementById("calendar-summary-return").innerHTML = summary ? formatPercent(summary.net_return_pct) : '<span class="value-muted">Not reported</span>';
+  const researchSummary = summary?.return_scope === "research_only" && numberOrNull(summary.research_observed_return_pct) != null;
+  document.getElementById("calendar-summary-return").innerHTML = summary
+    ? formatPercent(researchSummary ? summary.research_observed_return_pct : summary.net_return_pct)
+    : summaries.length > 1
+    ? '<span class="value-muted">Not blended</span>'
+    : '<span class="value-muted">Not reported</span>';
+  document.getElementById("calendar-summary-return-note").textContent = researchSummary
+    ? `Research-only observed · ${summary.research_observed_day_count} day${summary.research_observed_day_count === 1 ? "" : "s"}`
+    : summary
+    ? "Compounded eligible canonical account days"
+    : summaries.length > 1
+    ? `${summaries.length} contract summaries stay separate; refine filters for a return`
+    : "No exact monthly return";
   document.getElementById("calendar-summary-excess").innerHTML = summary ? formatPercent(summary.excess_return_pct) : '<span class="value-muted">Not reported</span>';
   document.getElementById("calendar-summary-benchmark").textContent = summary?.benchmark_return_pct == null ? "Benchmark not reported" : `Benchmark ${formatPercentText(summary.benchmark_return_pct)}`;
-  document.getElementById("calendar-summary-coverage").textContent = summary?.coverage_pct == null ? "Not reported" : `${Number(summary.coverage_pct).toFixed(1)}%`;
-  document.getElementById("calendar-summary-denominator").textContent = summary ? `${summary.eligible_day_count} eligible / ${summary.expected_market_day_count} expected market days` : summaries.length > 1 ? "Refine filters to one exact contract" : "No exact monthly denominator";
-  document.getElementById("calendar-summary-days").textContent = summary ? `${summary.eligible_day_count} / ${summary.expected_market_day_count}` : records.length ? `${records.length} observed rows` : "Not reported";
+  const coverage = researchSummary ? summary.research_observed_coverage_pct : summary?.coverage_pct;
+  document.getElementById("calendar-summary-coverage").textContent = coverage == null ? "Not reported" : `${Number(coverage).toFixed(1)}%`;
+  document.getElementById("calendar-summary-denominator").textContent = researchSummary
+    ? `${summary.research_observed_day_count} research observed / ${summary.expected_market_day_count} expected market days`
+    : summary
+    ? `${summary.eligible_day_count} eligible / ${summary.expected_market_day_count} expected market days`
+    : summaries.length > 1
+    ? "Refine filters to one exact contract"
+    : "No exact monthly denominator";
+  document.getElementById("calendar-summary-days").textContent = summary
+    ? `${researchSummary ? summary.research_observed_day_count : summary.eligible_day_count} / ${summary.expected_market_day_count}`
+    : records.length
+    ? `${records.length} observed rows`
+    : "Not reported";
   document.getElementById("calendar-summary-no-trades").textContent = summary ? `${summary.no_trade_day_count} explicit no-trade day${summary.no_trade_day_count === 1 ? "" : "s"}` : "No-trade days not reported";
 }
 
@@ -782,11 +851,29 @@ function renderCalendarDetail(day, records) {
   }
   title.textContent = formatCalendarDate(day.date);
   if (records.length > 1) {
-    setStatus("calendar-detail-status", "Refine filters", "PARTIAL");
-    note.textContent = `${records.length} canonical contracts match. Choose one cohort, strategy, version, policy, and account; Dawnstrike will not blend them.`;
-    metrics.innerHTML = "";
+    const researchCount = records.filter((record) => calendarReturnPresentation(record).scope === "research").length;
+    const canonicalCount = records.filter((record) => calendarReturnPresentation(record).scope === "canonical").length;
+    setStatus("calendar-detail-status", `${records.length} records`, "PARTIAL");
+    note.textContent = `${records.length} canonical contracts match this date. Every record is listed below; returns remain separate and are never blended.`;
+    metrics.innerHTML = detailRows([
+      ["Published contracts", String(records.length), true],
+      ["Eligible canonical returns", String(canonicalCount), true],
+      ["Research-only observed", String(researchCount), true],
+      ["Withheld returns", String(records.length - canonicalCount - researchCount), true],
+    ]);
     reasons.innerHTML = "";
-    trades.innerHTML = "";
+    trades.innerHTML = `<h4>Published contract records</h4>${records.map((record) => {
+      const presentation = calendarReturnPresentation(record);
+      return `<article class="calendar-trade-card">
+        <div><strong>${escapeHtml(calendarFilterLabel("strategy_id", record.strategy_id || "Unknown strategy"))}</strong><span>${escapeHtml(COHORTS[record.cohort] || humanizeIdentifier(record.cohort || "Unknown cohort"))}</span></div>
+        <dl>
+          <dt>Status</dt><dd>${escapeHtml(calendarStatusLabel(record.status))}</dd>
+          <dt>Return</dt><dd>${presentation.value == null ? "Not reported" : `${escapeHtml(presentation.label)} · ${formatPercentText(presentation.value)}`}</dd>
+          <dt>Account</dt><dd>${escapeHtml(calendarFilterLabel("account_id", record.account_id || "Not reported"))}</dd>
+          <dt>Policy</dt><dd>${escapeHtml(record.execution_policy_version || "Not reported")}</dd>
+        </dl>
+      </article>`;
+    }).join("")}`;
     return;
   }
   const record = records[0];
@@ -804,11 +891,14 @@ function renderCalendarDetail(day, records) {
     return;
   }
   setStatus("calendar-detail-status", calendarStatusLabel(record.status), record.status);
-  note.textContent = record.eligible_for_return
+  const presentation = calendarReturnPresentation(record);
+  note.textContent = presentation.scope === "research"
+    ? `This is a research-only observed return under ${record.execution_policy_version}; it is not an official forward-paper result.`
+    : presentation.scope === "canonical"
     ? `${record.return_basis === "account_equity_identity_after_external_flows" ? "Account return" : "Canonical return"} is eligible under ${record.execution_policy_version}.`
     : "The return is withheld until the required outcome, account, and source evidence is complete.";
   metrics.innerHTML = detailRows([
-    ["Net return", formatPercentText(record.net_return_pct), record.net_return_pct != null],
+    [presentation.scope === "research" ? "Research-only return" : "Net return", formatPercentText(presentation.value), presentation.value != null],
     ["Gross observed", formatPercentText(record.gross_return_pct), record.gross_return_pct != null],
     ["Benchmark", formatPercentText(record.benchmark_return_pct), record.benchmark_return_pct != null],
     ["Excess", formatPercentText(record.excess_return_pct), record.excess_return_pct != null],
@@ -837,7 +927,7 @@ function renderCalendarDetail(day, records) {
 
 function changeCalendarMonth(direction) {
   if (!state.calendarMonth || ![-1, 1].includes(direction)) return;
-  const available = [...new Set((state.calendar?.days || []).map((day) => day.month))].filter(Boolean).sort();
+  const available = calendarAvailableMonths();
   const index = available.indexOf(state.calendarMonth);
   const next = available[index + direction];
   if (!next) return;

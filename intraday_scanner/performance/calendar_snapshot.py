@@ -32,6 +32,14 @@ DISPLAY_STATUSES = frozenset(
         "UNREALIZED",
     }
 )
+RESEARCH_ONLY_COHORTS = frozenset(
+    {
+        "alphaops_research",
+        "alphaops_signal_research",
+        "historical_backtest",
+        "shadow_challenger",
+    }
+)
 
 
 def write_public_calendar(
@@ -281,7 +289,8 @@ def build_calendar_payload(
         "return_contract": (
             "Daily values are copied from canonical performance. Monthly returns "
             "compound only eligible numeric daily values; null days are excluded "
-            "and remain in the denominator."
+            "and remain in the denominator. Research-only observed returns are "
+            "published in separate fields and never promoted to official returns."
         ),
         "status_definitions": {
             "COMPLETE": "Realized after-cost evidence and account basis are complete.",
@@ -320,6 +329,7 @@ def _calendar_record(
     ledger_row: dict[str, Any] | None,
 ) -> dict[str, Any]:
     status = _display_status(row)
+    cohort = str(row.get("cohort") or "")
     numeric_return = safe_float(row.get("return_pct"))
     numeric_gross = safe_float(row.get("gross_return_pct"))
     benchmark = safe_float(row.get("benchmark_return_pct"))
@@ -330,6 +340,14 @@ def _calendar_record(
     if status == "NO_TRADE" and numeric_return == 0.0:
         explicit_observed_zero = True
     eligible = status in {"COMPLETE", "NO_TRADE"} and numeric_return is not None
+    research_return = numeric_return if cohort in RESEARCH_ONLY_COHORTS else None
+    return_display_state = (
+        "research_only_observed"
+        if research_return is not None
+        else "eligible_canonical"
+        if eligible
+        else "withheld"
+    )
     details = [
         _calendar_detail(detail, selection_context.get(str(detail.get("signal_id") or "")))
         for detail in detail_rows[:20]
@@ -338,7 +356,7 @@ def _calendar_record(
     return {
         "performance_id": row.get("performance_id"),
         "date": str(row.get("market_date") or ""),
-        "cohort": str(row.get("cohort") or ""),
+        "cohort": cohort,
         "strategy_id": str(row.get("strategy_id") or ""),
         "strategy_version": str(row.get("strategy_version") or ""),
         "execution_policy_version": str(
@@ -348,11 +366,13 @@ def _calendar_record(
         "status": status,
         "evidence_state": row.get("evidence_state"),
         "eligible_for_return": eligible,
+        "return_display_state": return_display_state,
         "observed_zero": explicit_observed_zero,
         "gross_return_pct": numeric_gross if eligible else None,
         "net_return_pct": numeric_return if eligible else None,
         "benchmark_return_pct": benchmark if eligible else None,
         "excess_return_pct": excess if eligible else None,
+        "research_return_pct": research_return,
         "cumulative_return_pct": safe_float(row.get("cumulative_return_pct")),
         "drawdown_pct": safe_float(row.get("drawdown_pct")),
         "gross_pnl_cents": row.get("gross_pnl_cents"),
@@ -459,6 +479,11 @@ def _monthly_aggregates(
             if record.get("eligible_for_return") is True
             and safe_float(record.get("net_return_pct")) is not None
         ]
+        research_observed = [
+            record
+            for record in records
+            if safe_float(record.get("research_return_pct")) is not None
+        ]
         net_return = _compound(safe_float(record.get("net_return_pct")) for record in eligible)
         gross_return = _compound(safe_float(record.get("gross_return_pct")) for record in eligible)
         benchmark_return = _compound_complete(
@@ -480,9 +505,16 @@ def _monthly_aggregates(
                     else "PARTIAL"
                 ),
                 "eligible_day_count": eligible_count,
+                "research_observed_day_count": len(research_observed),
+                "research_observed_coverage_pct": (
+                    round(len(research_observed) / expected_count * 100.0, 4)
+                    if expected_count
+                    else None
+                ),
                 "observed_day_count": len(records),
                 "expected_market_day_count": expected_count,
                 "missing_or_ineligible_day_count": max(expected_count - eligible_count, 0),
+                "research_missing_day_count": max(expected_count - len(research_observed), 0),
                 "coverage_pct": (
                     round(eligible_count / expected_count * 100.0, 4) if expected_count else None
                 ),
@@ -490,6 +522,10 @@ def _monthly_aggregates(
                     1 for record in eligible if record.get("status") == "NO_TRADE"
                 ),
                 "net_return_pct": net_return,
+                "research_observed_return_pct": _compound(
+                    safe_float(record.get("research_return_pct"))
+                    for record in research_observed
+                ),
                 "gross_return_pct": gross_return,
                 "benchmark_return_pct": benchmark_return,
                 "excess_return_pct": (
@@ -499,6 +535,14 @@ def _monthly_aggregates(
                 ),
                 "net_pnl_cents": _sum_complete(record.get("net_pnl_cents") for record in eligible),
                 "return_method": "compounded_eligible_daily_account_returns",
+                "research_return_method": (
+                    "compounded_research_only_observed_returns"
+                    if research_observed
+                    else None
+                ),
+                "return_scope": (
+                    "research_only" if cohort in RESEARCH_ONLY_COHORTS else "canonical"
+                ),
             }
         )
     return output

@@ -113,8 +113,8 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">Canonical return record</p>
-            <h2 id="calendar-title">Calendar</h2>
-            <p class="muted">One account, cohort, strategy, version, and policy at a time. Missing days never become zero.</p>
+            <h2 id="calendar-title">Historical Calendar</h2>
+            <p class="muted">All available canonical history is shown by default. Filters isolate one contract; missing days never become zero.</p>
           </div>
           <span class="section-pill" id="calendar-integrity">Loading canonical data</span>
         </div>
@@ -137,17 +137,20 @@
           </div>
         </div>
 
+        <p id="calendar-history-summary" class="calendar-history-summary" role="status" aria-live="polite">Loading published history…</p>
+
         <div class="calendar-summary-grid" role="group" aria-label="Selected month summary">
-          <article class="calendar-summary-card"><span>Net return</span><strong id="calendar-summary-return">Not reported</strong><small>Compounded eligible account days</small></article>
+          <article class="calendar-summary-card"><span>Return</span><strong id="calendar-summary-return">Not reported</strong><small id="calendar-summary-return-note">Eligible official and research-only results stay separate</small></article>
           <article class="calendar-summary-card"><span>Against benchmark</span><strong id="calendar-summary-excess">Not reported</strong><small id="calendar-summary-benchmark">Benchmark not reported</small></article>
           <article class="calendar-summary-card"><span>Coverage</span><strong id="calendar-summary-coverage">Not reported</strong><small id="calendar-summary-denominator">Eligible / expected market days</small></article>
-          <article class="calendar-summary-card"><span>Paper activity</span><strong id="calendar-summary-days">Not reported</strong><small id="calendar-summary-no-trades">No-trade days not reported</small></article>
+          <article class="calendar-summary-card"><span>Activity</span><strong id="calendar-summary-days">Not reported</strong><small id="calendar-summary-no-trades">No-trade days not reported</small></article>
         </div>
 
         <div class="calendar-legend" role="group" aria-label="Calendar status legend">
           <span><i class="legend-complete"></i>Complete</span>
           <span><i class="legend-no-trade"></i>No trade</span>
           <span><i class="legend-pending"></i>Pending / unrealized</span>
+          <span><i class="legend-research"></i>Research-only observed return</span>
           <span><i class="legend-missing"></i>Missing</span>
           <span><i class="legend-unavailable"></i>Market closed / unavailable</span>
         </div>
