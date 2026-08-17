@@ -1,0 +1,11 @@
+{
+  "gate": "todo-scan-final",
+  "command": "pwsh -NoProfile -File docs/quant-refactor/evidence/final-audit-20260816/scan_todos.ps1",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T13:14:00.0695320+00:00",
+  "ended_at_utc": "2026-08-16T13:14:00.7504786+00:00",
+  "elapsed_seconds": 0.67888,
+  "exit_code": 0,
+  "stdout_bytes": 4513,
+  "stderr_bytes": 0
+}

@@ -1,0 +1,1 @@
+py -m pytest -q -p no:cacheprovider tests/test_network_safety.py tests/test_sql_safety.py tests/test_opportunity_contracts.py tests/test_opportunity_validation_robustness.py

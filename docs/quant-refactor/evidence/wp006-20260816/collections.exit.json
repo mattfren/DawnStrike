@@ -1,0 +1,12 @@
+{
+  "started_at": "2026-08-16T06:04:33.2323765Z",
+  "ended_at": "2026-08-16T06:04:48.4059263Z",
+  "focused_exit": 0,
+  "robustness_exit": 0,
+  "main_exit": 0,
+  "affected_exit": 0,
+  "focused_count": 15,
+  "robustness_count": 19,
+  "main_count": 656,
+  "affected_count": 139
+}

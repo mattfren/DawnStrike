@@ -1,0 +1,1 @@
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\quant-refactor\evidence\final-repair-completion-20260816\audit_recovery_processes.ps1

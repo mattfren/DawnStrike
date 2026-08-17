@@ -1,0 +1,11 @@
+{
+  "gate": "node-check",
+  "command": "node --check web/assets/dawnstrike.js",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:19:59.2982758+00:00",
+  "ended_at_utc": "2026-08-16T10:19:59.4405740+00:00",
+  "elapsed_seconds": 0.140416,
+  "exit_code": 0,
+  "stdout_bytes": 0,
+  "stderr_bytes": 0
+}

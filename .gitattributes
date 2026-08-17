@@ -1,0 +1,8 @@
+# Markdown uses two trailing spaces for intentional hard line breaks.
+*.md whitespace=-trailing-space
+
+# Sealed evidence artifacts must retain the exact audited bytes.
+docs/quant-refactor/evidence/** -whitespace
+
+# Preserve this frozen fixture's accepted EOF bytes from the immutable gate.
+tests/test_active_state_isolation.py -whitespace

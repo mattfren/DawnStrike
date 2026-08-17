@@ -1,0 +1,11 @@
+{
+  "gate": "safety-contracts",
+  "command": "py -m pytest -q -p no:cacheprovider tests/test_network_safety.py tests/test_sql_safety.py tests/test_opportunity_contracts.py tests/test_opportunity_validation_robustness.py",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:26:05.0994806+00:00",
+  "ended_at_utc": "2026-08-16T10:33:18.8837836+00:00",
+  "elapsed_seconds": 433.777096,
+  "exit_code": 0,
+  "stdout_bytes": 81,
+  "stderr_bytes": 0
+}

@@ -1,0 +1,11 @@
+{
+  "gate": "full-pytest",
+  "command": "py -m pytest -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T09:38:00.7073085+00:00",
+  "ended_at_utc": "2026-08-16T13:07:38.2022903+00:00",
+  "elapsed_seconds": 12577.279045,
+  "exit_code": -1,
+  "stdout_bytes": 1262,
+  "stderr_bytes": 0
+}

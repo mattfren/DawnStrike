@@ -1,0 +1,8 @@
+{
+  "exit_code": 0,
+  "started_at": "2026-08-16T06:03:37.5754533Z",
+  "ended_at": "2026-08-16T06:03:38.4611546Z",
+  "elapsed_seconds": 0.875,
+  "repair_cycle": 1,
+  "repaired": "evidence script sys.path only"
+}

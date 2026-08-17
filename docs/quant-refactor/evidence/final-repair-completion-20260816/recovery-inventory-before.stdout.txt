@@ -1,0 +1,10 @@
+{
+  "actual_inventory_sha256": "2fd3ff0b4fb5c965d1fb3fbc4efd6789e66b54d84364484fb86764e1b229b8d9",
+  "actual_node_count": 3156,
+  "expected_inventory_sha256": "2fd3ff0b4fb5c965d1fb3fbc4efd6789e66b54d84364484fb86764e1b229b8d9",
+  "expected_node_count": 3156,
+  "nodes_exactly_equal": true,
+  "schema_version": "dawnstrike.pytest_inventory_validation.v1",
+  "valid": true,
+  "validated_at_utc": "2026-08-16T23:49:41.985189+00:00"
+}

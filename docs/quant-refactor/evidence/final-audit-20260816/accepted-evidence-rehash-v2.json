@@ -1,0 +1,53 @@
+{
+  "captured_at_utc": "2026-08-16T10:36:20.1213366+00:00",
+  "manifests": [
+    {
+      "manifest": "docs/quant-refactor/evidence/wp005-b-20260815/evidence-manifest.json",
+      "manifest_sha256": "ac81934c3e34b67e88b4f3cb2a3f3a0f3fb13a2675211afcfd616c8ec356804f",
+      "entry_count": 36,
+      "mismatch_count": 0,
+      "mismatches": [],
+      "external_seal": {
+        "expected": "ac81934c3e34b67e88b4f3cb2a3f3a0f3fb13a2675211afcfd616c8ec356804f",
+        "actual": "ac81934c3e34b67e88b4f3cb2a3f3a0f3fb13a2675211afcfd616c8ec356804f",
+        "match": true
+      }
+    },
+    {
+      "manifest": "docs/quant-refactor/evidence/wp005-c-20260815/evidence-manifest.json",
+      "manifest_sha256": "4a4b307291a979a443539d76160b434efb9fe9577fc7f33a34a4cbbda7c2b9a4",
+      "entry_count": 45,
+      "mismatch_count": 0,
+      "mismatches": [],
+      "external_seal": null
+    },
+    {
+      "manifest": "docs/quant-refactor/evidence/wp006-20260816/evidence-manifest.json",
+      "manifest_sha256": "6d519bd28f467dcf87952b2c9558f6b7180e48529c884d99f175cde398d9c511",
+      "entry_count": 49,
+      "mismatch_count": 0,
+      "mismatches": [],
+      "external_seal": {
+        "expected": "6d519bd28f467dcf87952b2c9558f6b7180e48529c884d99f175cde398d9c511",
+        "actual": "6d519bd28f467dcf87952b2c9558f6b7180e48529c884d99f175cde398d9c511",
+        "match": true
+      }
+    },
+    {
+      "manifest": "docs/quant-refactor/evidence/wp007-20260816/evidence-manifest.json",
+      "manifest_sha256": "e61c25051b77106613f292c3b24a51af1802c5d6a159fcee0e15f08e43108843",
+      "entry_count": 100,
+      "mismatch_count": 0,
+      "mismatches": [],
+      "external_seal": {
+        "expected": "e61c25051b77106613f292c3b24a51af1802c5d6a159fcee0e15f08e43108843",
+        "actual": "e61c25051b77106613f292c3b24a51af1802c5d6a159fcee0e15f08e43108843",
+        "match": true
+      }
+    }
+  ],
+  "total_entries": 230,
+  "total_mismatches": 0,
+  "all_entries_match": true,
+  "all_external_seals_match": true
+}

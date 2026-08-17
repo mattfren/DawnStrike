@@ -1,0 +1,254 @@
+{
+  "manifest_version": 1,
+  "generated_at": "2026-08-16T06:11:00.6417359Z",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "evidence_file_count": 49,
+  "entries": [
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/active-state-after.json",
+      "length": 256,
+      "sha256": "73bdbda06be02c2315e0204cb25169c04e5980a7b9dc061e2205188cef2caca7"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/active-state-before.json",
+      "length": 256,
+      "sha256": "852e1be0c1cea61dd891fe8bfcb30953bd4ffcf9a3e57f877705d9de1fb1740e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/active-state-invariance.json",
+      "length": 409,
+      "sha256": "4217ef4f64131735ae9075f6fcdd880c616df28826438a5a05a2f1b5f2270cc1"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/active-state-readonly.exit.json",
+      "length": 74,
+      "sha256": "224c83f7205970113ef8f944805a8fa381ab1931bf155e8ff7e5c7bd82fc1d82"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/active-state-readonly.stdout.txt",
+      "length": 126,
+      "sha256": "df7af0fdfaff3ae6eb7ce5d7e1837418662fe5773ab9f331585b83a45e5addc2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/affected.collection.txt",
+      "length": 134,
+      "sha256": "539b94009db84aa0bc9bbad588477f26f6305e961980b7638e1f838ae4c5dbbc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/affected.command.txt",
+      "length": 153,
+      "sha256": "3414ba598770b092148ebef6653346ebac5d4d37e4f1d8d251cb205cffb031a2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/affected.exit.json",
+      "length": 151,
+      "sha256": "4a676b93f00ada029d691a1afdaec93a02dfc4bd10811922ef8ad4ee6fd1069e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/affected.stdout.txt",
+      "length": 162,
+      "sha256": "165cc1f8f89ac01d3d4e553d1a917f4eecd72a284b646d0031b97026a03a4a66"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/build-evidence-manifest.ps1",
+      "length": 8771,
+      "sha256": "163a88779e2a97b09a96ff3c76074e756978b1eb960f1d1e7da9b21df7656c4f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/collections.command.txt",
+      "length": 972,
+      "sha256": "6882a8b8e775420477378f04e2b82a1f2cb5ad94482ec7871bd51d3f738f44a6"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/collections.exit.json",
+      "length": 289,
+      "sha256": "b3e0c3033fc81600c41355fca165c131b63472e7e4446436363a8b0a9e824be8"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/compileall.command.txt",
+      "length": 45,
+      "sha256": "6b970f94e55e836b51aab06fb2300fbb1af39fed946dccec24c97781e19925b4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/compileall.exit.json",
+      "length": 149,
+      "sha256": "64e7f6fe32b07333e19b07d256e9d09a7e2f2cec85c3376893ac33eda1cf3cd2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/diff-check.command.txt",
+      "length": 17,
+      "sha256": "d9ef3d1695645413cdc098707c0b447cc19275eb61556bf9d84a09633cf075a6"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/diff-check.exit.json",
+      "length": 149,
+      "sha256": "80226be498c5c8d3e7a9d2957418495a8b9bb0120b67b54751a45f63f03b633a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/diff-check.stdout.txt",
+      "length": 749,
+      "sha256": "b9bdac439258d0d21bde672c0954c74547c730a950cd0a54201f00862b9532ef"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/focused.collection.txt",
+      "length": 56,
+      "sha256": "9c5c93d6cfbbdc7cb24a3cd13ceb031908e2b930436c0ba45d64ed69e629bc16"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/focused.command.txt",
+      "length": 85,
+      "sha256": "9cc625cc04eacf94291d70bf6ad1d6bfb4fd962a8a2c0c161384ae31d06f2eb4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/focused.exit.json",
+      "length": 152,
+      "sha256": "f96a21ba3d341194390edfe2a77389b42b301d3b6366fe2c678548438164222f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/focused.stdout.txt",
+      "length": 81,
+      "sha256": "1c4e0c4945ea268c3bc11a7a613907555ed512b9eeaf46afe02b9e771b929bcc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/import_firewall.py",
+      "length": 1875,
+      "sha256": "e43d489a677bebae735144f7204925ff00493d2c4a066515f869eb3c835db7cc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/import-firewall.command.txt",
+      "length": 66,
+      "sha256": "7cb6af9112bf024962c6667c28ead4f03a6c1b34bed5d3e42a6ce0016f94688d"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/import-firewall.exit.json",
+      "length": 219,
+      "sha256": "a9750a829dc7b41ae11172e301c35493f50839f24cfaf487d0a015e1a73305aa"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/import-firewall.stdout.txt",
+      "length": 104,
+      "sha256": "12606a01e3f07fe9a0d3e11a581514b0cdbdc16e0b0a766ced453e9d470e280e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/main.collection.txt",
+      "length": 625,
+      "sha256": "e5d83e262d29082de3e57099318094d561f00863e16630cbf4fb39d71779ef47"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/main.command.txt",
+      "length": 590,
+      "sha256": "7f511766ccd5fabaaa9e14b79230268ae6bd15299b340260ddc1c94f2237fa65"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/main.exit.json",
+      "length": 152,
+      "sha256": "644bd11cb08c10eb5c041a5427ce95fc9049ebe53e194f8b338c119f0bb45d22"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/main.stdout.txt",
+      "length": 810,
+      "sha256": "c3a094c7145142311bbc6adb59ef59aa520b80ea67eb225c047712c2d54674fd"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/modification-inventory.json",
+      "length": 1580,
+      "sha256": "61f1bd45263592f0305c6190061ab8dec0431ad8edf55481039b22a92e61defc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/mypy.command.txt",
+      "length": 28,
+      "sha256": "d7e48e34d098c23a3f720b04d7c23f2e4a8aef588032da060e432b7d20fde2f9"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/mypy.exit.json",
+      "length": 149,
+      "sha256": "7b9cacc4712223a3bfa85707ef93454a2bba197bdb564069045761f6bcfd1262"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/mypy.stdout.txt",
+      "length": 601,
+      "sha256": "7b690e9f2ee06afac6a6251c80f54deabffa891f4877e37a36f1fd5757a21295"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/processes.post.json",
+      "length": 100,
+      "sha256": "faff1e6e74882b05391c4bd0e3f7848b76949ca8f5fb0e6e6d5b029de19ff3a5"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/repository-state.json",
+      "length": 470,
+      "sha256": "08f91ab486c334390b99d999fffb0d7b78280604c093da3c92578febab8a3ccb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/robustness.collection.txt",
+      "length": 55,
+      "sha256": "17ad4ca35adba8c4a1a9d25497c0f7ae164a55d2d47a7ebfcfffc99fc7a65691"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/robustness.command.txt",
+      "length": 84,
+      "sha256": "aef6d367b8fdd3287549c60d5fbae2e4beb6529e2bb40440cbf46c4b5b2d965d"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/robustness.exit.json",
+      "length": 150,
+      "sha256": "3fdf7ef39dec19571076974139c8b3a680f303d12b48420b6701863ea343771a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/robustness.stdout.txt",
+      "length": 81,
+      "sha256": "dda0df2a5159d1af76b6e0acce4b10db8872d11cd8f72f1ac9177341e2a17886"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/ruff.command.txt",
+      "length": 19,
+      "sha256": "3a860fde662c93cde2d24a7410abaeb7634d60f9966c6f7190c3e13e532ebe4b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/ruff.exit.json",
+      "length": 149,
+      "sha256": "d1c055145dc12ca3b5911d976f7717a1d9271ae210cdec6a291e6a702a9a6bfd"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/ruff.stdout.txt",
+      "length": 20,
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/run-summary.json",
+      "length": 1953,
+      "sha256": "ccb51bbb4cd9174a43207df35d86f426a739b016dfc3be07678a68993819df19"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/schema_evidence.py",
+      "length": 3127,
+      "sha256": "82eb4e3955fafb8c6f43a78f21a1b264544021515b478f30f0d6d5ef34651b53"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/schema.command.txt",
+      "length": 66,
+      "sha256": "1b62724221e3db7ae21ab8e668861d286519cb52dd84668655682e4fcaeefba2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/schema.exit.json",
+      "length": 261,
+      "sha256": "9beefbc005b8cee7b7821db80255e268aab72645f887af026619f301d51ab12c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/schema.stdout.json",
+      "length": 30071,
+      "sha256": "c58abe0a1fd2caf92e18a7bacee9faf45285e63653360e5b7f3761cb066b94e4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/source-hashes.json",
+      "length": 3450,
+      "sha256": "fa0af00cabd11d05b61fc88f3df5468798e0bf75c301676e03142f48affdad46"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp006-20260816/status.post.txt",
+      "length": 2124,
+      "sha256": "8cdbb2853494d8a1bbc58e66b1e85d51d3dbe19506b022e68413df8d86e66a03"
+    }
+  ]
+}

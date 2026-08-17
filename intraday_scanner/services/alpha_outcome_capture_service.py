@@ -18,7 +18,23 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from intraday_scanner.alpha.path_replay import PathTruthStatus, resolve_path
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+    CURRENT_CENSORED_PATH,
+    CURRENT_RETURN_TRUTH,
+    build_canonical_path_entry_receipt,
+    build_canonical_return_truth,
+    canonical_paper_enter_intent_context,
+    canonical_paper_selection_context,
+    canonical_replay_binding,
+    canonical_return_truth_projection,
+    classify_canonical_return_truth,
+)
+from intraday_scanner.alpha.path_replay import (
+    ENTRY_MODE_ALREADY_ENTERED,
+    PathTruthStatus,
+    resolve_path,
+)
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
@@ -37,8 +53,8 @@ from intraday_scanner.providers.yahoo_chart_provider import (
     fetch_yahoo_chart,
     yahoo_chart_url,
 )
-from intraday_scanner.services.alpha_paper_reconciliation_service import (
-    recover_legacy_alpha_delivery_membership,
+from intraday_scanner.services.alpha_official_cohort_service import (
+    validate_or_recover_official_cohort,
 )
 from intraday_scanner.services.benchmark_service import (
     PRIMARY_BENCHMARK,
@@ -57,9 +73,9 @@ MAX_BAR_GAP_SECONDS = 60
 CONCLUSIVE_STATUSES = {
     "complete_sourced",
     "not_triggered",
-    "captured_ineligible_missing_plan",
-    "not_entered_plan_dislocated",
+    "captured_ineligible",
 }
+FUTURE_EVIDENCE_SCHEMA_VERSION = "dawnstrike.future_evidence_receipt.v1"
 
 FetchChart = Callable[..., dict[str, Any]]
 FetchNormalizedBars = Callable[..., list[dict[str, Any]]]
@@ -146,28 +162,27 @@ def capture_sourced_alpha_outcomes(
         raise SnapshotValidationError("max_close_staleness_seconds must be positive.")
     at = parse_requested_at(requested_at, market_date=market_date)
     resolved_date = market_date or at.astimezone(EASTERN).date().isoformat()
-    strategy_id = alphaops_strategy_contract(
+    strategy_id, strategy_version = alphaops_strategy_contract(
         f"{resolved_date}T12:00:00-04:00"
-    )[0]
+    )
     session = _session_window(resolved_date)
     captured_at = utc_now_iso()
     output_dir = Path(out_dir)
     store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
-    recover_legacy_alpha_delivery_membership(
+    official = validate_or_recover_official_cohort(
         store,
         market_date=resolved_date,
-        persist=persist,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        persist_recovery=False,
     )
-    selection_rows = [
-        row
-        for row in store.load_signal_selections(
-            strategy_id=strategy_id,
-            cohort="official_telegram",
-            limit=50_000,
+    if official.errors:
+        raise SnapshotValidationError(
+            "Exact AlphaOps official cohort is invalid: "
+            + "; ".join(official.errors)
         )
-        if str(row.get("selected_at") or "")[:10] == resolved_date
-    ]
+    selection_rows = list(official.selections)
     _validate_exact_session_selections(selection_rows, market_date=resolved_date)
     no_trade_rows = [
         row
@@ -191,6 +206,50 @@ def capture_sourced_alpha_outcomes(
             "AlphaOps session selection evidence is contradictory: explicit no-trade "
             "and selected signals coexist."
         )
+    delivery_rows = store.load_notification_deliveries(
+        channel="telegram",
+        cohort="official_telegram",
+        limit=50_000,
+    )
+    delivery_by_selection: dict[str, list[dict[str, Any]]] = {}
+    for row in delivery_rows:
+        selection_id = str(row.get("selection_id") or "")
+        if selection_id:
+            delivery_by_selection.setdefault(selection_id, []).append(row)
+    paper_context_by_signal: dict[str, dict[str, object]] = {}
+    for row in selection_rows:
+        signal_id = str(row.get("signal_id") or "")
+        selection_id = str(row.get("selection_id") or "")
+        matches = delivery_by_selection.get(selection_id, [])
+        if len(matches) != 1:
+            raise SnapshotValidationError(
+                "Exact AlphaOps selection lacks one unambiguous Telegram delivery "
+                f"row: {selection_id or signal_id}"
+            )
+        try:
+            context = canonical_paper_selection_context(
+                row,
+                delivery=matches[0],
+            )
+        except ValueError as exc:
+            raise SnapshotValidationError(
+                f"AlphaOps selection context is not canonical for {signal_id}: {exc}"
+            ) from exc
+        if signal_id in selected_ids:
+            paper_context_by_signal[signal_id] = context
+    if persist:
+        frozen_official = validate_or_recover_official_cohort(
+            store,
+            market_date=resolved_date,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            persist_recovery=True,
+        )
+        if frozen_official.errors:
+            raise SnapshotValidationError(
+                "Exact AlphaOps official cohort could not be frozen: "
+                + "; ".join(frozen_official.errors)
+            )
     historical_signals = store.load_historical_signals(
         market_date=resolved_date, limit=50_000
     )
@@ -198,6 +257,22 @@ def capture_sourced_alpha_outcomes(
         historical_signals,
         selected_signal_ids=selected_ids,
     )
+    for signal in signals:
+        signal_id = str(signal.get("signal_id") or "")
+        selection_context = paper_context_by_signal.get(signal_id)
+        if selection_context is None:
+            raise SnapshotValidationError(
+                f"Canonical paper selection context is absent for {signal_id}"
+            )
+        authoritative_signal = selection_context.get("authoritative_signal")
+        if not isinstance(authoritative_signal, dict):
+            raise SnapshotValidationError(
+                f"Canonical paper selection plan is absent for {signal_id}"
+            )
+        signal.clear()
+        signal.update(authoritative_signal)
+        signal["_canonical_return_decision"] = selection_context
+        signal["_canonical_return_decision_kind"] = "alpha_paper_selection"
     signals.extend(
         _v6_shadow_outcome_targets(
             store,
@@ -221,21 +296,50 @@ def capture_sourced_alpha_outcomes(
         )
         if str(row.get("signal_id") or "")
     }
+    current_existing: dict[str, dict[str, Any]] = {}
+    legacy_existing: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        signal_id = str(signal.get("signal_id") or "")
+        existing_row = existing.get(signal_id)
+        if existing_row is None:
+            continue
+        decision = signal.get("_canonical_return_decision")
+        classification = classify_canonical_return_truth(
+            existing_row, decision=decision
+        )
+        if classification in {
+            CURRENT_RETURN_TRUTH,
+            CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+            CURRENT_CENSORED_PATH,
+        }:
+            current_existing[signal_id] = existing_row
+        else:
+            legacy_existing[signal_id] = existing_row
     pending = [
         signal
         for signal in signals
-        if replace or str(signal.get("signal_id") or "") not in existing
+        if replace
+        or str(signal.get("signal_id") or "") not in current_existing
     ]
     diagnostics: list[dict[str, Any]] = [
-        _existing_diagnostic(signal, existing[str(signal.get("signal_id") or "")])
+        _existing_diagnostic(
+            signal,
+            current_existing[str(signal.get("signal_id") or "")],
+        )
         for signal in signals
-        if not replace and str(signal.get("signal_id") or "") in existing
+        if not replace
+        and str(signal.get("signal_id") or "") in current_existing
     ]
+    revision_summary = {
+        "legacy_outcome_quarantined_count": len(legacy_existing),
+        "outcome_revision_required": bool(legacy_existing),
+        "canonical_source_available_revision_deferred_count": 0,
+    }
     source_bars: dict[str, list[dict[str, Any]]] = {}
     source_requests: list[dict[str, Any]] = []
     repairable_events = [
         _outcome_event(row)
-        for row in existing.values()
+        for row in current_existing.values()
         if not replace
         and row.get("automatic_sourced_data") is True
         and str(row.get("outcome_status") or "") in CONCLUSIVE_STATUSES
@@ -268,6 +372,7 @@ def capture_sourced_alpha_outcomes(
             market_session=session.calendar,
             audit_events=audit_event_stats,
         )
+        summary.update(revision_summary)
         _write_artifacts(output_dir, summary, [], diagnostics, source_bars)
         return {**summary, "outcomes": [], "diagnostics": diagnostics, "out_dir": str(output_dir)}
 
@@ -285,6 +390,7 @@ def capture_sourced_alpha_outcomes(
             market_session=session.calendar,
             audit_events=audit_event_stats,
         )
+        summary.update(revision_summary)
         _write_artifacts(output_dir, summary, [], diagnostics, source_bars)
         return {**summary, "outcomes": [], "diagnostics": diagnostics, "out_dir": str(output_dir)}
 
@@ -303,6 +409,7 @@ def capture_sourced_alpha_outcomes(
             market_session=session.calendar,
             audit_events=audit_event_stats,
         )
+        summary.update(revision_summary)
         _write_artifacts(output_dir, summary, [], diagnostics, source_bars)
         return {**summary, "outcomes": [], "diagnostics": diagnostics, "out_dir": str(output_dir)}
 
@@ -346,15 +453,69 @@ def capture_sourced_alpha_outcomes(
             errors_by_ticker[ticker] = error
 
     entry_intents: dict[str, dict[str, Any]] = {}
-    for row in store.load_trade_intents(market_date=resolved_date, limit=50_000):
-        signal_id = str(row.get("signal_id") or "")
-        if (
-            signal_id
-            and signal_id not in entry_intents
-            and str(row.get("action") or "").upper() == "ENTER_LONG"
-            and row.get("official_paper_eligible") is True
-        ):
-            entry_intents[signal_id] = row
+    raw_entry_intents: dict[str, list[dict[str, Any]]] = {}
+    for record in store.load_trade_intent_records(
+        market_date=resolved_date,
+        action="ENTER_LONG",
+        limit=50_000,
+    ):
+        columns = record.get("columns")
+        payload = record.get("payload_json")
+        signal_id = str(
+            (columns.get("signal_id") if isinstance(columns, dict) else None)
+            or (payload.get("signal_id") if isinstance(payload, dict) else None)
+            or ""
+        )
+        if signal_id:
+            raw_entry_intents.setdefault(signal_id, []).append(record)
+    for signal in signals:
+        signal_id = str(signal.get("signal_id") or "")
+        records = raw_entry_intents.get(signal_id, [])
+        if not records:
+            continue
+        if len(records) != 1:
+            signal["_canonical_entry_error"] = (
+                "exactly one authenticated ENTER_LONG intent is required"
+            )
+            continue
+        record = records[0]
+        columns = record.get("columns")
+        payload = record.get("payload_json")
+        source_observation_id = str(
+            (columns.get("source_observation_id") if isinstance(columns, dict) else None)
+            or (
+                payload.get("source_observation_id")
+                if isinstance(payload, dict)
+                else None
+            )
+            or ""
+        )
+        observations = store.load_price_observation_records(
+            observation_id=source_observation_id,
+            limit=2,
+        )
+        if len(observations) != 1:
+            signal["_canonical_entry_error"] = (
+                "entry intent lacks one exact source observation"
+            )
+            continue
+        selection_context = signal.get("_canonical_return_decision")
+        if not isinstance(selection_context, dict):
+            signal["_canonical_entry_error"] = "canonical selection context is absent"
+            continue
+        try:
+            composite = canonical_paper_enter_intent_context(
+                selection_context,
+                intent_record=record,
+                source_observation_record=observations[0],
+            )
+        except ValueError as exc:
+            signal["_canonical_entry_error"] = str(exc)
+            continue
+        signal["_canonical_return_decision"] = composite
+        signal["_canonical_return_decision_kind"] = "alpha_paper_enter_intent"
+        if isinstance(payload, dict):
+            entry_intents[signal_id] = dict(payload)
     fills_by_signal: dict[str, list[dict[str, Any]]] = {}
     for row in store.load_paper_trade_fills(market_date=resolved_date, limit=50_000):
         signal_id = str(row.get("signal_id") or "")
@@ -362,6 +523,7 @@ def capture_sourced_alpha_outcomes(
             fills_by_signal.setdefault(signal_id, []).append(row)
 
     outcomes: list[dict[str, Any]] = []
+    deferred_revision_candidates: list[dict[str, Any]] = []
     capture_attempts: list[dict[str, Any]] = []
     for signal in pending:
         ticker = str(signal.get("ticker") or "").upper()
@@ -402,7 +564,7 @@ def capture_sourced_alpha_outcomes(
                 ),
             )
         else:
-            outcome = _derive_outcome(
+            outcome = _derive_canonical_outcome(
                 signal,
                 bars_by_ticker.get(ticker, []),
                 session=session,
@@ -420,7 +582,18 @@ def capture_sourced_alpha_outcomes(
                 entry_intent=entry_intents.get(str(signal.get("signal_id") or "")),
                 paper_fills=fills_by_signal.get(str(signal.get("signal_id") or ""), []),
             )
-        diagnostic = _diagnostic_from_outcome(outcome)
+        signal_id = str(signal.get("signal_id") or "")
+        conclusive = str(outcome.get("outcome_status") or "") in CONCLUSIVE_STATUSES
+        if signal_id in legacy_existing and conclusive:
+            deferred_revision_candidates.append(outcome)
+            diagnostic = _diagnostic(
+                signal,
+                "canonical_source_available_revision_deferred",
+                "Canonical source truth is available, but the legacy outcome remains "
+                "immutable until additive outcome revisions are introduced.",
+            )
+        else:
+            diagnostic = _diagnostic_from_outcome(outcome)
         diagnostics.append(diagnostic)
         capture_attempts.append(
             _capture_attempt(
@@ -434,7 +607,7 @@ def capture_sourced_alpha_outcomes(
                 outcome=outcome,
             )
         )
-        if str(outcome.get("outcome_status") or "") in CONCLUSIVE_STATUSES:
+        if conclusive and signal_id not in legacy_existing:
             outcomes.append(outcome)
 
     if persist and outcomes:
@@ -479,6 +652,10 @@ def capture_sourced_alpha_outcomes(
         capture_attempts=capture_attempts,
         capture_attempt_persistence=attempt_persisted,
     )
+    revision_summary["canonical_source_available_revision_deferred_count"] = len(
+        deferred_revision_candidates
+    )
+    summary.update(revision_summary)
     _write_artifacts(
         output_dir,
         summary,
@@ -556,7 +733,16 @@ def _v6_shadow_outcome_targets(
             and sampling_data.get("included") is True
         )
         if action == "SHADOW_TRACK" and source is not None:
-            target = dict(source)
+            facts = decision.get("signal_facts")
+            if not isinstance(facts, dict):
+                continue
+            target = {
+                **facts,
+                "signal_id": source_signal_id,
+                "scan_id": decision.get("scan_id"),
+                "market_date": decision.get("market_date"),
+                "generated_at": decision.get("decision_at"),
+            }
         elif sampled_reject:
             raw = decision.get("raw_facts")
             facts = raw if isinstance(raw, dict) else {}
@@ -585,6 +771,8 @@ def _v6_shadow_outcome_targets(
             ),
             "research_only": True,
             "broker_execution_enabled": False,
+            "_canonical_return_decision": dict(decision),
+            "_canonical_return_decision_kind": "alpha_v6_shadow_decision",
         })
     return targets
 
@@ -883,6 +1071,7 @@ def _provider_request(
         expected_start_at=session.opened_at,
         expected_end_at=session.closed_at - timedelta(minutes=1),
     )
+    source_bar_hash = _bars_hash(bars)
     return {
         "ticker": ticker,
         "status": "ok" if coverage.is_complete else coverage.status,
@@ -893,7 +1082,11 @@ def _provider_request(
         "bar_count": len(bars),
         "first_bar_at": _iso_utc(bars[0].observed_at) if bars else None,
         "last_bar_at": _iso_utc(bars[-1].observed_at) if bars else None,
-        "source_bar_hash_sha256": _bars_hash(bars),
+        "source_bar_hash_sha256": source_bar_hash,
+        "source_artifact_identity": (
+            f"market-bars:{source}:{ticker}:{session.market_date}:"
+            f"{BAR_INTERVAL}:{source_bar_hash}"
+        ),
         "source_coverage_complete": coverage.is_complete,
         "coverage_status": coverage.status,
         "coverage_detail": coverage.detail,
@@ -909,6 +1102,7 @@ def _selected_source_evidence(
     return {
         "source": selected.get("source"),
         "source_url": selected.get("source_url"),
+        "source_artifact_identity": selected.get("source_artifact_identity"),
         "source_fetched_at": selected.get("fetched_at"),
         "source_bar_hash_sha256": selected.get("source_bar_hash_sha256"),
         "source_coverage_complete": selected.get("source_coverage_complete"),
@@ -916,6 +1110,15 @@ def _selected_source_evidence(
         "provider_chain_exhausted": selected.get("source_coverage_complete") is not True,
         "independent_reconciliation": reconciliation,
         "independent_reconciliation_status": reconciliation["status"],
+        "source_conflict": reconciliation["status"] == "DISAGREEMENT",
+        "corporate_action_unresolved": False,
+        "halt_intervals": (),
+        "ordered_events": (),
+        "ordered_evidence_complete": False,
+        "ordered_evidence_identity": None,
+        "ordered_evidence_hash_sha256": None,
+        "ordered_evidence_start": None,
+        "ordered_evidence_end": None,
     }
 
 
@@ -999,6 +1202,324 @@ def _source_choice_key(bars: list[OutcomeBar]) -> tuple[int, int, int]:
         sum(_bar_completeness(bar) for bar in bars),
         int(bars[-1].observed_at.timestamp()) if bars else 0,
     )
+
+
+def _derive_canonical_outcome(
+    signal: dict[str, Any],
+    bars: list[OutcomeBar],
+    *,
+    session: SessionWindow,
+    requested_at: datetime,
+    captured_at: str,
+    max_close_staleness_seconds: int,
+    strategy_id: str,
+    source_evidence: dict[str, Any],
+    benchmark_bars: list[OutcomeBar],
+    benchmark_evidence: dict[str, Any],
+    secondary_benchmark_bars: list[OutcomeBar],
+    secondary_benchmark_evidence: dict[str, Any],
+    entry_intent: dict[str, Any] | None,
+    paper_fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build one outcome from the canonical replay receipt, without repricing."""
+
+    del entry_intent, paper_fills
+    base = _outcome_base(
+        signal,
+        bars,
+        session=session,
+        requested_at=requested_at,
+        captured_at=captured_at,
+        strategy_id=strategy_id,
+        source_evidence=source_evidence,
+    )
+    if not bars:
+        return _ineligible(base, "ineligible_no_regular_session_bars")
+    decision = signal.get("_canonical_return_decision")
+    decision_kind = signal.get("_canonical_return_decision_kind")
+    if not isinstance(decision, dict) or decision_kind not in {
+        "alpha_paper_selection",
+        "alpha_paper_enter_intent",
+        "alpha_v6_shadow_decision",
+    }:
+        return _ineligible(base, "ineligible_missing_causal_decision")
+    entry_error = signal.get("_canonical_entry_error")
+    if isinstance(entry_error, str) and entry_error:
+        return _ineligible(
+            base,
+            "ineligible_ambiguous_canonical_entry_intent",
+            entry_error,
+        )
+    decision_at = _parse_datetime(
+        str(
+            decision.get(
+                "selected_at"
+                if decision_kind == "alpha_paper_selection"
+                else "decision_at"
+            )
+            or ""
+        )
+    )
+    if decision_at is None:
+        return _ineligible(base, "ineligible_missing_recommendation_timestamp")
+    first_eligible_at = max(session.opened_at, _ceil_minute(decision_at))
+    eligible_bars = [
+        bar
+        for bar in bars
+        if first_eligible_at <= bar.observed_at < session.closed_at
+    ]
+    if not eligible_bars:
+        return _ineligible(base, "ineligible_no_post_recommendation_bars")
+    coverage = _validate_bar_coverage(
+        eligible_bars,
+        expected_start_at=first_eligible_at,
+        expected_end_at=session.closed_at - timedelta(minutes=1),
+    )
+    base.update(coverage.to_dict())
+    if not coverage.is_complete:
+        return _ineligible(base, coverage.status, coverage.detail)
+    if any(
+        bar.open is None or bar.high is None or bar.low is None
+        for bar in eligible_bars
+    ):
+        return _ineligible(base, "ineligible_incomplete_source_bars")
+    malformed_ohlc = _malformed_ohlc_detail(eligible_bars)
+    if malformed_ohlc:
+        return _ineligible(base, "ineligible_malformed_ohlc", malformed_ohlc)
+    close_age = max(
+        0,
+        int((session.closed_at - eligible_bars[-1].observed_at).total_seconds()),
+    )
+    base["close_observation_age_seconds"] = close_age
+    if close_age > max_close_staleness_seconds:
+        return _ineligible(
+            base,
+            "ineligible_stale_close",
+            f"last regular bar was {close_age} seconds before the session close",
+        )
+    trigger = _first_float(
+        signal.get("entry_watch_level"),
+        _raw_signal(signal).get("entry_trigger"),
+        _raw_signal(signal).get("breakout_trigger"),
+    )
+    target = _first_float(
+        signal.get("target_1"),
+        _raw_signal(signal).get("first_target"),
+    )
+    invalidation = _first_float(
+        signal.get("invalidation_level"),
+        signal.get("exit_line"),
+        _raw_signal(signal).get("invalidation_level"),
+    )
+    if trigger is None or trigger <= 0:
+        return _ineligible(base, "ineligible_missing_entry_trigger")
+    if target is None or invalidation is None:
+        return _ineligible(base, "ineligible_missing_plan")
+    if target <= trigger or invalidation >= trigger or invalidation <= 0:
+        return _ineligible(base, "ineligible_plan_geometry")
+    path_entry_receipt: dict[str, object] | None = None
+    if decision_kind == "alpha_paper_enter_intent":
+        intent_receipt = decision.get("entry_intent_receipt")
+        if not isinstance(intent_receipt, dict):
+            return _ineligible(base, "ineligible_missing_canonical_entry_receipt")
+        intent_trigger = _float(intent_receipt.get("trigger_price"))
+        intent_target = _float(intent_receipt.get("target_price"))
+        intent_stop = _float(intent_receipt.get("stop_price"))
+        if not (
+            intent_trigger == trigger
+            and intent_target == target
+            and intent_stop == invalidation
+        ):
+            return _ineligible(
+                base,
+                "ineligible_canonical_entry_plan_mismatch",
+            )
+        try:
+            path_entry_receipt = build_canonical_path_entry_receipt(decision)
+        except ValueError as exc:
+            return _ineligible(
+                base,
+                "ineligible_missing_canonical_entry_receipt",
+                str(exc),
+            )
+    raw_artifact_identity = source_evidence.get("source_artifact_identity")
+    if not isinstance(raw_artifact_identity, str) or not raw_artifact_identity.strip():
+        return _ineligible(base, "ineligible_missing_source_artifact_identity")
+    try:
+        replay_binding = canonical_replay_binding(
+            decision,
+            kind=str(decision_kind),
+        )
+        future_receipt = _future_evidence_receipt(
+            eligible_bars,
+            symbol=str(signal.get("ticker") or "").upper(),
+            market_date=session.market_date,
+            raw_artifact_identity=raw_artifact_identity,
+            coverage_start=first_eligible_at,
+            coverage_end=session.closed_at,
+            coverage_complete=coverage.is_complete,
+        )
+    except ValueError as exc:
+        return _ineligible(base, "ineligible_canonical_path_context", str(exc))
+    path_replay = resolve_path(
+        eligible_bars,
+        decision_at=first_eligible_at,
+        trigger=trigger,
+        target=target,
+        stop=invalidation,
+        halt_intervals=source_evidence.get("halt_intervals") or (),
+        session_close=session.closed_at,
+        source_conflict=source_evidence.get("source_conflict") is True,
+        corporate_action_unresolved=(
+            source_evidence.get("corporate_action_unresolved") is True
+        ),
+        source_artifact_identity=future_receipt["receipt_id"],
+        source_artifact_hash_sha256=future_receipt["receipt_hash_sha256"],
+        source_coverage_complete=coverage.is_complete,
+        ordered_events=source_evidence.get("ordered_events") or (),
+        ordered_evidence_complete=(
+            source_evidence.get("ordered_evidence_complete") is True
+        ),
+        ordered_evidence_identity=source_evidence.get(
+            "ordered_evidence_identity"
+        ),
+        ordered_evidence_hash_sha256=source_evidence.get(
+            "ordered_evidence_hash_sha256"
+        ),
+        ordered_evidence_start=source_evidence.get("ordered_evidence_start"),
+        ordered_evidence_end=source_evidence.get("ordered_evidence_end"),
+        replay_binding=replay_binding,
+        future_evidence_receipt=future_receipt,
+        entry_mode=(
+            ENTRY_MODE_ALREADY_ENTERED if path_entry_receipt is not None else None
+        ),
+        entry_receipt=path_entry_receipt,
+    )
+    path_receipt = path_replay.to_dict()
+    base.update(path_receipt)
+    entry_at = _parse_datetime(str(path_receipt.get("entry_time") or ""))
+    exit_at = _parse_datetime(str(path_receipt.get("exit_time") or ""))
+    benchmark_return = (
+        _benchmark_return(benchmark_bars, entry_at=entry_at, exit_at=exit_at)
+        if entry_at is not None and exit_at is not None
+        else None
+    )
+    secondary_benchmark_return = (
+        _benchmark_return(
+            secondary_benchmark_bars,
+            entry_at=entry_at,
+            exit_at=exit_at,
+        )
+        if entry_at is not None and exit_at is not None
+        else None
+    )
+    estimated_v6_cost = _float(decision.get("estimated_round_trip_cost_bps"))
+    if decision_kind == "alpha_v6_shadow_decision":
+        if estimated_v6_cost is None or estimated_v6_cost <= 0.0:
+            return _ineligible(
+                base,
+                "ineligible_incomplete_canonical_return_truth",
+                "V6 decision lacks a finite positive round-trip cost estimate",
+            )
+        entry_slippage_bps = estimated_v6_cost / 2.0
+        exit_slippage_bps = estimated_v6_cost / 2.0
+        fee_bps_per_side = 0.0
+        commission_per_share_per_side = 0.0
+        modeled_cost_identity = str(decision.get("cost_model_version") or "")
+    else:
+        if not (
+            decision.get("strategy_id") == DEFAULT_V5_POLICY.strategy_id
+            and decision.get("strategy_version") == DEFAULT_V5_POLICY.strategy_version
+        ):
+            return _ineligible(
+                base,
+                "ineligible_unsupported_paper_cost_contract",
+                "paper decision predates the authenticated V5 cost contract",
+            )
+        entry_slippage_bps = DEFAULT_V5_POLICY.entry_slippage_bps
+        exit_slippage_bps = DEFAULT_V5_POLICY.exit_slippage_bps
+        fee_bps_per_side = 0.0
+        commission_per_share_per_side = (
+            DEFAULT_V5_POLICY.commission_per_share_per_side
+        )
+        modeled_cost_identity = DEFAULT_V5_POLICY.cost_model_version
+    canonical_notional = 1_000.0
+    if decision_kind == "alpha_paper_enter_intent":
+        intent_receipt = decision.get("entry_intent_receipt")
+        parsed_notional = _float(
+            intent_receipt.get("notional")
+            if isinstance(intent_receipt, dict)
+            else None
+        )
+        canonical_notional = parsed_notional if parsed_notional is not None else 0.0
+        if canonical_notional <= 0.0:
+            return _ineligible(
+                base,
+                "ineligible_invalid_paper_notional",
+                "authenticated paper entry lacks a positive notional",
+            )
+    try:
+        canonical = build_canonical_return_truth(
+            path_replay_receipt=path_receipt,
+            decision=decision,
+            decision_kind=str(decision_kind),
+            notional_per_trade=canonical_notional,
+            entry_slippage_bps=entry_slippage_bps,
+            exit_slippage_bps=exit_slippage_bps,
+            fee_bps_per_side=fee_bps_per_side,
+            commission_per_share_per_side=commission_per_share_per_side,
+            observed_cost_model_identity="alpha-outcome-capture-observed-bars.v2",
+            modeled_cost_model_identity=modeled_cost_identity,
+            benchmark_return_pct=benchmark_return,
+            benchmark_source_bar_hash_sha256=benchmark_evidence.get(
+                "source_bar_hash_sha256"
+            ),
+            benchmark_independent_reconciliation_status=str(
+                benchmark_evidence.get("independent_reconciliation_status") or ""
+            ),
+            secondary_benchmark_return_pct=secondary_benchmark_return,
+            secondary_benchmark_source_bar_hash_sha256=(
+                secondary_benchmark_evidence.get("source_bar_hash_sha256")
+            ),
+            secondary_benchmark_independent_reconciliation_status=str(
+                secondary_benchmark_evidence.get(
+                    "independent_reconciliation_status"
+                )
+                or ""
+            ),
+            prospective_promotion_eligible=True,
+        )
+    except ValueError as exc:
+        return _ineligible(
+            base,
+            "ineligible_incomplete_canonical_return_truth",
+            str(exc),
+        )
+    classification = classify_canonical_return_truth(canonical, decision=decision)
+    projection = canonical_return_truth_projection(canonical, decision=decision)
+    if not projection or classification not in {
+        CURRENT_RETURN_TRUTH,
+        CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+        CURRENT_CENSORED_PATH,
+    }:
+        return _ineligible(
+            base,
+            "ineligible_invalid_canonical_return_truth",
+        )
+    base.update(projection)
+    base.update(
+        _canonical_compatibility_projection(
+            projection,
+            trigger=trigger,
+            target=target,
+            invalidation=invalidation,
+            benchmark_evidence=benchmark_evidence,
+            secondary_benchmark_evidence=secondary_benchmark_evidence,
+            classification=classification,
+        )
+    )
+    base["payload_json"] = dict(base)
+    return base
 
 
 def _derive_outcome(
@@ -2409,6 +2930,144 @@ def _bars_hash(bars: list[OutcomeBar]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _future_evidence_receipt(
+    bars: list[OutcomeBar],
+    *,
+    symbol: str,
+    market_date: str,
+    raw_artifact_identity: str,
+    coverage_start: datetime,
+    coverage_end: datetime,
+    coverage_complete: bool,
+) -> dict[str, object]:
+    canonical_bars = [
+        {
+            "observed_at": bar.observed_at.astimezone(UTC).isoformat(),
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "close": float(bar.close),
+        }
+        for bar in sorted(bars, key=lambda item: item.observed_at)
+        if bar.open is not None and bar.high is not None and bar.low is not None
+    ]
+    if len(canonical_bars) != len(bars) or not canonical_bars:
+        raise ValueError("future evidence bars are incomplete")
+    body: dict[str, object] = {
+        "schema_version": FUTURE_EVIDENCE_SCHEMA_VERSION,
+        "subject": {"symbol": symbol, "market_date": market_date},
+        "raw_artifact_identity": raw_artifact_identity,
+        "raw_bar_hash_sha256": _canonical_payload_hash(canonical_bars),
+        "bar_count": len(canonical_bars),
+        "first_bar_at": canonical_bars[0]["observed_at"],
+        "last_bar_at": canonical_bars[-1]["observed_at"],
+        "coverage_start": coverage_start.astimezone(UTC).isoformat(),
+        "coverage_end": coverage_end.astimezone(UTC).isoformat(),
+        "coverage_complete": coverage_complete,
+    }
+    digest = _canonical_payload_hash(body)
+    return {
+        **body,
+        "receipt_id": f"future-evidence-v1-{digest}",
+        "receipt_hash_sha256": digest,
+    }
+
+
+def _canonical_payload_hash(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_compatibility_projection(
+    projection: dict[str, Any],
+    *,
+    trigger: float,
+    target: float,
+    invalidation: float,
+    benchmark_evidence: dict[str, Any],
+    secondary_benchmark_evidence: dict[str, Any],
+    classification: str,
+) -> dict[str, Any]:
+    entry_at = _parse_datetime(str(projection.get("entry_time") or ""))
+    exit_at = _parse_datetime(str(projection.get("exit_time") or ""))
+    mfe_at = _parse_datetime(str(projection.get("mfe_at") or ""))
+    mae_at = _parse_datetime(str(projection.get("mae_at") or ""))
+    path_event = str(projection.get("path_event") or "")
+    exit_reason = {
+        "TARGET": "target_1",
+        "STOP": "invalidation",
+        "TIMEOUT": "session_close",
+    }.get(path_event)
+    activated = projection.get("entry_price") is not None
+    return {
+        "entry_opportunity": activated,
+        "entry_trigger": trigger,
+        "entry_price_policy": "canonical_path_replay_v2",
+        "fill_status": (
+            "canonical_path_activated"
+            if activated
+            else "not_filled_no_trigger"
+            if classification == CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED
+            else "not_filled_censored"
+        ),
+        "non_fill_reason": None if activated else projection.get("path_truth_status"),
+        "target_price": target,
+        "invalidation_price": invalidation,
+        "target_touched_at": projection.get("target_touched_at"),
+        "invalidation_touched_at": projection.get("stop_touched_at"),
+        "planned_first_touch_outcome": (
+            "target" if path_event == "TARGET" else "invalidation" if path_event == "STOP" else None
+        ),
+        "exit_reason": exit_reason,
+        "holding_duration_minutes": (
+            _elapsed_minutes(entry_at, exit_at)
+            if entry_at is not None and exit_at is not None
+            else None
+        ),
+        "close_price": projection.get("exit_price"),
+        "close_price_observed_at": projection.get("exit_time"),
+        "high_after_entry": projection.get("mfe_price"),
+        "high_after_entry_observed_at": projection.get("mfe_at"),
+        "low_after_entry": projection.get("mae_price"),
+        "low_after_entry_observed_at": projection.get("mae_at"),
+        "time_to_mfe_minutes": (
+            _elapsed_minutes(entry_at, mfe_at)
+            if entry_at is not None and mfe_at is not None
+            else None
+        ),
+        "time_to_mae_minutes": (
+            _elapsed_minutes(entry_at, mae_at)
+            if entry_at is not None and mae_at is not None
+            else None
+        ),
+        "price_1m": None,
+        "price_1m_observed_at": None,
+        "price_5m": None,
+        "price_5m_observed_at": None,
+        "price_15m": None,
+        "price_15m_observed_at": None,
+        "lunch_price": None,
+        "lunch_price_observed_at": None,
+        "excess_return_pct": projection.get("net_excess_return_pct"),
+        "benchmark_source": benchmark_evidence.get("source"),
+        "benchmark_source_url": benchmark_evidence.get("source_url"),
+        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
+            "source_url"
+        ),
+        "attribution_complete": classification == CURRENT_RETURN_TRUTH,
+        "benchmark_contract_complete": classification == CURRENT_RETURN_TRUTH,
+        "first_touch_precision": projection.get("event_time_precision"),
+        "return_learning_eligible": classification == CURRENT_RETURN_TRUTH,
+        "learning_contract": "canonical_return_truth_v2",
+    }
 
 
 def _bar_completeness(bar: OutcomeBar) -> int:

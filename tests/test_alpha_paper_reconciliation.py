@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.alpha.canonical_return_truth import canonical_paper_selection_context
 from intraday_scanner.alpha.path_replay import PathTruthStatus
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
@@ -26,6 +27,13 @@ from intraday_scanner.services.learning_service import (
     run_alpha_learning,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from tests._alpha_path_truth import (
+    canonical_ineligible_outcome,
+    canonical_return_outcome,
+    canonical_v6_decision,
+    causal_identity_from,
+    replay_binding_from,
+)
 
 DAY = "2026-07-15"
 SIGNAL_ID = "scan-paper:1:NOVA"
@@ -79,7 +87,359 @@ def test_paper_reconciliation_preserves_canonical_path_truth_status() -> None:
     assert evaluation["reconciliation_status"] == "unresolved"
 
 
-def test_not_triggered_is_resolved_activation_evidence_with_no_trade_return(
+@pytest.mark.parametrize(
+    "missing_key",
+    (
+        "path_replay_schema_version",
+        "path_replay_id",
+        "path_replay_policy_version",
+        "path_replay_policy_hash_sha256",
+        "path_replay_receipt",
+        "replay_input_manifest",
+        "replay_input_hash_sha256",
+        "replay_truth_hash_sha256",
+        "replay_receipt_hash_sha256",
+        "path_truth_status",
+        "path_event",
+        "source_bar_hash_sha256",
+        "source_coverage_complete",
+        "sequence_complete_through_exit",
+        "after_cost_return_pct",
+        "return_truth_schema_version",
+        "return_truth_hash_sha256",
+        "cost_schema_version",
+        "cost_receipt_id",
+        "cost_receipt_hash_sha256",
+        "cost_receipt",
+        "observed_cost_model_identity",
+        "modeled_cost_model_identity",
+        "cost_components",
+        "benchmark_return_pct",
+        "benchmark_symbol",
+        "benchmark_source_bar_hash_sha256",
+        "benchmark_independent_reconciliation_status",
+        "secondary_benchmark_return_pct",
+        "secondary_benchmark_symbol",
+        "secondary_benchmark_source_bar_hash_sha256",
+        "secondary_benchmark_independent_reconciliation_status",
+        "independent_reconciliation_status",
+        "reconciliation_schema_version",
+        "reconciliation_receipt_id",
+        "reconciliation_receipt_hash_sha256",
+        "reconciliation_receipt",
+        "causal_decision_identity",
+        "eligibility_policy_version",
+        "retrospective_research_eligible",
+        "prospective_promotion_eligible",
+    ),
+)
+def test_paper_reconciliation_requires_complete_canonical_return_truth(
+    missing_key: str,
+) -> None:
+    outcome = _canonical_reconciliation_outcome()
+    outcome.pop(missing_key)
+
+    evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at="2026-07-15T20:00:00+00:00",
+        notional_per_trade=1_000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is None
+    assert labels == []
+    assert evaluation["reconciliation_status"] == (
+        "unresolved" if missing_key == "source_coverage_complete" else "invalid"
+    )
+    assert evaluation["trade_return_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    ("key", "blank"),
+    (
+        ("path_replay_schema_version", ""),
+        ("path_replay_id", " "),
+        ("path_replay_policy_version", ""),
+        ("path_replay_policy_hash_sha256", "not-a-hash"),
+        ("path_replay_receipt", {}),
+        ("replay_input_manifest", {}),
+        ("replay_input_hash_sha256", ""),
+        ("replay_truth_hash_sha256", ""),
+        ("replay_receipt_hash_sha256", ""),
+        ("path_truth_status", ""),
+        ("path_event", ""),
+        ("source_bar_hash_sha256", ""),
+        ("source_coverage_complete", None),
+        ("sequence_complete_through_exit", None),
+        ("return_truth_schema_version", ""),
+        ("return_truth_hash_sha256", ""),
+        ("cost_schema_version", ""),
+        ("cost_receipt_id", ""),
+        ("cost_receipt_hash_sha256", ""),
+        ("cost_receipt", {}),
+        ("observed_cost_model_identity", ""),
+        ("modeled_cost_model_identity", ""),
+        ("cost_components", {}),
+        ("benchmark_symbol", ""),
+        ("benchmark_return_pct", None),
+        ("benchmark_source_bar_hash_sha256", ""),
+        ("benchmark_independent_reconciliation_status", ""),
+        ("secondary_benchmark_symbol", ""),
+        ("secondary_benchmark_return_pct", None),
+        ("secondary_benchmark_source_bar_hash_sha256", ""),
+        ("secondary_benchmark_independent_reconciliation_status", ""),
+        ("reconciliation_schema_version", ""),
+        ("independent_reconciliation_status", ""),
+        ("reconciliation_receipt_id", ""),
+        ("reconciliation_receipt_hash_sha256", ""),
+        ("reconciliation_receipt", {}),
+        ("causal_decision_identity", None),
+        ("eligibility_policy_version", ""),
+        ("retrospective_research_eligible", None),
+        ("prospective_promotion_eligible", None),
+    ),
+)
+def test_paper_reconciliation_rejects_blank_current_truth(
+    key: str,
+    blank: object,
+) -> None:
+    outcome = {**_canonical_reconciliation_outcome(), key: blank}
+
+    evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at="2026-07-15T20:00:00+00:00",
+        notional_per_trade=1_000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is None
+    assert labels == []
+    assert evaluation["reconciliation_status"] == (
+        "unresolved" if key == "source_coverage_complete" else "invalid"
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "entry_censored",
+        "same_censored",
+        "missing_interval",
+        "halt",
+        "source_conflict",
+        "corporate_action",
+    ),
+)
+def test_paper_reconciliation_never_turns_censored_path_into_trade(case: str) -> None:
+    outcome = canonical_ineligible_outcome(
+        market_date=DAY,
+        case=case,
+        causal_identity=_paper_causal_identity(),
+    )
+
+    evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at="2026-07-15T20:00:00+00:00",
+        notional_per_trade=1_000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is None
+    assert labels == []
+    assert evaluation["reconciliation_status"] == "unresolved"
+
+
+def test_paper_reconciliation_uses_only_canonical_pre_exit_excursions() -> None:
+    outcome = {
+        **_canonical_reconciliation_outcome(),
+        "high_after_entry": 99.0,
+        "low_after_entry": 1.0,
+    }
+
+    _evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at="2026-07-15T20:00:00+00:00",
+        notional_per_trade=1_000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is not None
+    assert trade["max_favorable_excursion_pct"] == outcome["mfe_pct"]
+    assert trade["max_adverse_excursion_pct"] == outcome["mae_pct"]
+    assert {row["label_family"] for row in labels} == {"activation", "trade_return"}
+
+
+@pytest.mark.parametrize("case", ("ordered_target", "ordered_stop", "timeout"))
+def test_paper_reconciliation_copies_canonical_return_truth_without_replay(
+    case: str,
+) -> None:
+    outcome = canonical_return_outcome(
+        market_date=DAY,
+        case=case,
+        causal_identity=_paper_causal_identity(),
+    )
+
+    evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at=f"{DAY}T20:00:00+00:00",
+        notional_per_trade=99_999.0,
+        fee_bps=999.0,
+        slippage_bps=999.0,
+    )
+
+    assert trade is not None
+    assert trade["raw_entry_price"] == outcome["entry_price"]
+    assert trade["entry_time"] == outcome["entry_time"]
+    assert trade["raw_exit_price"] == outcome["exit_price"]
+    assert trade["exit_time"] == outcome["exit_time"]
+    assert trade["net_return_pct"] == outcome["after_cost_return_pct"]
+    assert trade["max_favorable_excursion_pct"] == outcome["mfe_pct"]
+    assert trade["max_adverse_excursion_pct"] == outcome["mae_pct"]
+    assert trade["notional"] == outcome["cost_components"]["notional_per_trade"]
+    for key in (
+        "path_replay_id",
+        "path_replay_receipt",
+        "return_truth_schema_version",
+        "return_truth_hash_sha256",
+        "cost_schema_version",
+        "cost_receipt_id",
+        "cost_receipt_hash_sha256",
+        "cost_receipt",
+        "observed_cost_model_identity",
+        "modeled_cost_model_identity",
+        "cost_components",
+        "gross_return_pct",
+        "after_cost_return_pct",
+        "benchmark_symbol",
+        "benchmark_return_pct",
+        "benchmark_source_bar_hash_sha256",
+        "secondary_benchmark_symbol",
+        "secondary_benchmark_return_pct",
+        "secondary_benchmark_source_bar_hash_sha256",
+        "reconciliation_schema_version",
+        "reconciliation_receipt_id",
+        "reconciliation_receipt_hash_sha256",
+        "reconciliation_receipt",
+        "causal_decision_identity",
+        "eligibility_policy_version",
+        "evidence_cohort",
+    ):
+        assert trade[key] == outcome[key]
+    assert evaluation["path_replay_id"] == outcome["path_replay_id"]
+    assert evaluation["trade_return_eligible"] is True
+    assert {row["label_family"] for row in labels} == {"activation", "trade_return"}
+
+
+@pytest.mark.parametrize(
+    ("key", "wrong"),
+    (
+        ("path_replay_schema_version", "dawnstrike.path_truth.v999"),
+        ("path_replay_policy_version", "attacker-policy"),
+        ("path_replay_policy_hash_sha256", "f" * 64),
+        ("path_truth_status", "RESOLVED_STOP_FIRST"),
+        ("path_event", "STOP"),
+        ("return_truth_schema_version", "attacker-return-v9"),
+        ("return_truth_hash_sha256", "f" * 64),
+        ("cost_schema_version", "attacker-cost-v9"),
+        ("cost_receipt_hash_sha256", "f" * 64),
+        ("benchmark_symbol", "QQQ"),
+        ("benchmark_return_pct", 99.0),
+        ("benchmark_source_bar_hash_sha256", "f" * 64),
+        ("benchmark_independent_reconciliation_status", "FAILED"),
+        ("secondary_benchmark_symbol", "QQQ"),
+        ("secondary_benchmark_return_pct", 99.0),
+        ("secondary_benchmark_source_bar_hash_sha256", "f" * 64),
+        ("secondary_benchmark_independent_reconciliation_status", "PENDING"),
+        ("reconciliation_schema_version", "attacker-recon-v9"),
+        ("reconciliation_receipt_hash_sha256", "f" * 64),
+        ("independent_reconciliation_status", "FAILED"),
+        ("eligibility_policy_version", "attacker-eligibility-v9"),
+        ("causal_decision_identity", {"kind": "fabricated"}),
+    ),
+)
+def test_paper_reconciliation_rejects_wrong_nonblank_current_truth(
+    key: str,
+    wrong: object,
+) -> None:
+    outcome = {**_canonical_reconciliation_outcome(), key: wrong}
+
+    evaluation, trade, labels = _reconcile_selection(
+        selection=_direct_selection(),
+        signal=_direct_signal(),
+        outcome=outcome,
+        delivery=None,
+        reconciled_at=f"{DAY}T20:00:00+00:00",
+        notional_per_trade=1_000.0,
+        fee_bps=1.0,
+        slippage_bps=50.0,
+    )
+
+    assert trade is None
+    assert labels == []
+    assert evaluation["reconciliation_status"] == "invalid"
+
+
+def test_paper_reconciliation_rejects_120_pathless_boolean_outcomes() -> None:
+    trades = []
+    labels = []
+    for index in range(120):
+        outcome = {
+            "outcome_id": f"legacy-outcome-{index}",
+            "outcome_status": "complete_sourced",
+            "source_coverage_complete": True,
+            "source_bar_hash_sha256": "a" * 64,
+            "entry_time": f"{DAY}T14:30:00+00:00",
+            "entry_price": 10.0,
+            "planned_first_touch_outcome": "target_1",
+            "target_touched_at": f"{DAY}T15:00:00+00:00",
+            "target_price": 11.0,
+            "learning_eligible": True,
+            "retrospective_research_eligible": True,
+            "prospective_promotion_eligible": True,
+            "net_return_pct": 99.0,
+        }
+        evaluation, trade, emitted = _reconcile_selection(
+            selection={
+                **_direct_selection(),
+                "selection_id": f"legacy-selection-{index}",
+                "signal_id": f"legacy-signal-{index}",
+            },
+            signal={**_direct_signal(), "signal_id": f"legacy-signal-{index}"},
+            outcome=outcome,
+            delivery=None,
+            reconciled_at=f"{DAY}T20:00:00+00:00",
+            notional_per_trade=1_000.0,
+            fee_bps=1.0,
+            slippage_bps=50.0,
+        )
+        assert evaluation["trade_return_eligible"] is False
+        trades.append(trade)
+        labels.extend(emitted)
+
+    assert trades == [None] * 120
+    assert labels == []
+
+
+def test_legacy_not_triggered_is_quarantined_without_activation_learning(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "alpha.sqlite"
@@ -104,28 +464,29 @@ def test_not_triggered_is_resolved_activation_evidence_with_no_trade_return(
 
     labels = store.load_strategy_learning_labels()
     scorecards = store.load_daily_strategy_scorecards()
-    assert first["status"] == "complete"
+    assert first["status"] == "failed"
     assert first["closed_trade_count"] == 0
-    assert first["not_triggered_count"] == 1
+    assert first["not_triggered_count"] == 0
     assert first["unresolved_count"] == 0
-    assert first["evaluations"][0]["terminal_state"] == "not_triggered"
+    assert first["invalid_count"] == 1
+    assert first["evaluations"][0]["terminal_state"] == (
+        "invalid_canonical_activation_truth"
+    )
     assert first["evaluations"][0]["net_return_pct"] is None
     assert store.load_strategy_paper_trades() == []
-    assert [(row["label_family"], row["label_value"]) for row in labels] == [
-        ("activation", 0.0)
-    ]
+    assert labels == []
     official = next(row for row in scorecards if row["cohort"] == DELIVERED_COHORT)
     assert official["delivered_count"] == 1
-    assert official["resolved_count"] == 1
-    assert official["not_triggered_count"] == 1
+    assert official["resolved_count"] == 0
+    assert official["not_triggered_count"] == 0
     assert official["closed_count"] == 0
     assert official["average_net_return_pct"] is None
     assert official["return_on_allocated_capital_pct"] is None
     assert second["persistence"]["evaluations"]["updated"] == 1
-    assert second["persistence"]["learning_labels"]["updated"] == 1
+    assert second["persistence"]["learning_labels"]["updated"] == 0
 
 
-def test_complete_sourced_outcome_creates_exact_paper_entry_exit_and_return(
+def test_legacy_complete_sourced_outcome_cannot_create_paper_return(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "alpha.sqlite"
@@ -143,25 +504,51 @@ def test_complete_sourced_outcome_creates_exact_paper_entry_exit_and_return(
         config=ScannerConfig(slippage_bps=50.0),
     )
 
-    trade = store.load_strategy_paper_trades()[0]
-    labels = {row["label_family"]: row for row in store.load_strategy_learning_labels()}
-    assert result["status"] == "complete"
+    assert store.load_strategy_paper_trades() == []
+    assert store.load_strategy_learning_labels() == []
+    assert result["status"] == "failed"
     assert result["triggered_count"] == 1
-    assert result["closed_trade_count"] == 1
-    assert trade["entry_time"] == f"{DAY}T13:31:00Z"
-    assert trade["exit_time"] == f"{DAY}T14:04:00Z"
-    assert trade["exit_reason"] == "target_1"
-    assert trade["entry_fill_price"] == pytest.approx(10.05)
-    assert trade["exit_fill_price"] == pytest.approx(10.945)
-    expected_quantity = 1_000.0 / 10.05
-    expected_fees = (10.05 * expected_quantity + 10.945 * expected_quantity) / 10_000
-    expected_net = (10.945 - 10.05) * expected_quantity - expected_fees
-    assert trade["net_pnl"] == pytest.approx(expected_net, abs=0.0001)
-    assert trade["net_return_pct"] == pytest.approx(expected_net / 10, abs=0.0001)
-    assert labels["activation"]["label_value"] == 1.0
-    assert labels["trade_return"]["label_value"] == trade["net_return_pct"]
-    assert result["evaluations"][0]["source_bar_hash_sha256"] == "bars-hash"
-    assert result["evaluations"][0]["reconciliation_status"] == "resolved"
+    assert result["closed_trade_count"] == 0
+    assert result["invalid_count"] == 1
+    assert result["evaluations"][0]["reconciliation_status"] == "invalid"
+    assert result["evaluations"][0]["trade_return_eligible"] is False
+
+
+def test_reconciliation_never_rewrites_legacy_paper_positions(tmp_path: Path) -> None:
+    db_path = tmp_path / "alpha.sqlite"
+    store = SQLiteScanStore(db_path)
+    _seed_selection(store)
+    _persist_outcome(store, outcome_status="complete_sourced")
+    store.persist_paper_positions(
+        [
+            {
+                "position_id": "legacy-position-1",
+                "signal_id": SIGNAL_ID,
+                "market_date": DAY,
+                "ticker": "NOVA",
+                "status": "closed",
+                "quantity": 100.0,
+                "opened_at": f"{DAY}T14:30:00+00:00",
+                "closed_at": f"{DAY}T15:00:00+00:00",
+                "entry_price": 10.0,
+                "exit_price": 10.5,
+                "realized_return_pct": 5.0,
+                "updated_at": f"{DAY}T15:00:00+00:00",
+                "payload_json": {"schema_version": "legacy.paper_position.v1"},
+            }
+        ]
+    )
+    before = store.load_paper_positions()
+
+    reconcile_alpha_paper_trades(
+        db_path=db_path,
+        market_date=DAY,
+        out_dir=tmp_path / "reports",
+        persist=True,
+        config=ScannerConfig(slippage_bps=50.0),
+    )
+
+    assert store.load_paper_positions() == before
 
 
 @pytest.mark.parametrize("via_cli", (False, True))
@@ -190,7 +577,7 @@ def test_reconciliation_preview_preserves_existing_database_bytes(
                     str(out_dir),
                 ]
             )
-            == 0
+            == 1
         )
     else:
         result = reconcile_alpha_paper_trades(
@@ -200,7 +587,7 @@ def test_reconciliation_preview_preserves_existing_database_bytes(
             persist=False,
             config=ScannerConfig(slippage_bps=50.0),
         )
-        assert result["status"] == "complete"
+        assert result["status"] == "failed"
 
     assert (out_dir / DAY / "reconciliation.json").is_file()
     assert _tree(db_root) == before
@@ -209,13 +596,13 @@ def test_reconciliation_preview_preserves_existing_database_bytes(
 def test_reconciliation_correction_atomically_removes_stale_trade_and_return_label(
     tmp_path: Path,
 ) -> None:
+    day = "2026-08-03"
     db_path = tmp_path / "alpha.sqlite"
     store = SQLiteScanStore(db_path)
-    _seed_selection(store)
-    _persist_outcome(store, outcome_status="complete_sourced")
+    _seed_v5_reconciliation(store, day=day, with_entry_intent=True)
     reconcile_alpha_paper_trades(
         db_path=db_path,
-        market_date=DAY,
+        market_date=day,
         out_dir=tmp_path / "reports",
         config=ScannerConfig(slippage_bps=50.0),
     )
@@ -223,11 +610,11 @@ def test_reconciliation_correction_atomically_removes_stale_trade_and_return_lab
         [
             {
                 "outcome_key": "manual-must-not-learn",
-                "scan_id": "scan-paper",
-                "signal_id": SIGNAL_ID,
+                "scan_id": "scan-1",
+                "signal_id": "signal-1",
                 "ticker": "NOVA",
-                "recommendation_timestamp": f"{DAY}T13:10:00Z",
-                "uploaded_at": f"{DAY}T21:00:00Z",
+                "recommendation_timestamp": f"{day}T13:10:00Z",
+                "uploaded_at": f"{day}T21:00:00Z",
                 "source": "manual_upload",
                 "entry": 10.0,
                 "high": 999.0,
@@ -250,21 +637,21 @@ def test_reconciliation_correction_atomically_removes_stale_trade_and_return_lab
         for row in store.load_strategy_learning_labels()
     )
 
-    _persist_outcome(store, outcome_status="not_triggered")
+    corrected_outcome = store.load_signal_outcomes(signal_id="signal-1")[0]
+    corrected_outcome.pop("path_replay_receipt", None)
+    store.persist_signal_outcomes([corrected_outcome], replace=True)
     corrected = reconcile_alpha_paper_trades(
         db_path=db_path,
-        market_date=DAY,
+        market_date=day,
         out_dir=tmp_path / "reports",
         config=ScannerConfig(slippage_bps=50.0),
     )
     second_learning = run_alpha_learning(store)
 
     assert corrected["persistence"]["trades"]["deleted"] == 1
-    assert corrected["persistence"]["learning_labels"]["deleted"] == 1
+    assert corrected["persistence"]["learning_labels"]["deleted"] == 2
     assert store.load_strategy_paper_trades() == []
-    assert [
-        row["label_family"] for row in store.load_strategy_learning_labels()
-    ] == ["activation"]
+    assert store.load_strategy_learning_labels() == []
     assert second_learning["total_return_labels"] == 0
     assert second_learning["return_learning_eligible"] is False
     assert store.load_alpha_outcome_labels() == []
@@ -273,13 +660,13 @@ def test_reconciliation_correction_atomically_removes_stale_trade_and_return_lab
 def test_reconciliation_stale_cleanup_rolls_back_with_failed_batch(
     tmp_path: Path,
 ) -> None:
+    day = "2026-08-03"
     db_path = tmp_path / "alpha.sqlite"
     store = SQLiteScanStore(db_path)
-    _seed_selection(store)
-    _persist_outcome(store, outcome_status="complete_sourced")
+    _seed_v5_reconciliation(store, day=day, with_entry_intent=True)
     reconcile_alpha_paper_trades(
         db_path=db_path,
-        market_date=DAY,
+        market_date=day,
         out_dir=tmp_path / "reports",
     )
     original_evaluation = store.load_strategy_evaluations()[0]
@@ -305,7 +692,7 @@ def test_reconciliation_stale_cleanup_rolls_back_with_failed_batch(
         "label_value": 0.0,
         "eligible": True,
         "source_bar_hash_sha256": "bars-hash",
-        "created_at": f"{DAY}T21:00:00Z",
+        "created_at": f"{day}T21:00:00Z",
         "not_json_serializable": object(),
     }
 
@@ -371,10 +758,10 @@ def test_official_cohort_ignores_delivered_non_telegram_channel(
     assert official["delivered_count"] == 0
     assert official["closed_count"] == 0
     assert selected["selected_count"] == 1
-    assert selected["closed_count"] == 1
+    assert selected["closed_count"] == 0
     learning = run_alpha_learning(store)
     assert learning["total_return_labels"] == 0
-    assert learning["canonical_return_label_diagnostics"]["excluded_not_delivered"] == 1
+    assert learning["return_learning_eligible"] is False
 
 
 def test_explicit_no_trade_day_is_complete_and_distinct_from_a_missed_run(
@@ -487,7 +874,7 @@ def test_v5_selection_without_allowed_entry_remains_research_only(
 def test_v5_reconciliation_uses_risk_sized_entry_not_fixed_notional(
     tmp_path: Path,
 ) -> None:
-    day = "2026-07-31"
+    day = "2026-08-03"
     db_path = tmp_path / "v5-allowed.sqlite"
     store = SQLiteScanStore(db_path)
     _seed_v5_reconciliation(store, day=day, with_entry_intent=True)
@@ -509,7 +896,8 @@ def test_v5_reconciliation_uses_risk_sized_entry_not_fixed_notional(
     assert trade["notional"] == pytest.approx(10.10025 * 216, abs=0.0001)
     assert trade["notional"] != 1_000
     assert trade["execution_policy_version"] == ALPHAOPS_V5_POLICY_VERSION
-    assert trade["decision_fingerprint"] == "f" * 64
+    intent = store.load_trade_intents(market_date=day, action="ENTER_LONG")[0]
+    assert trade["decision_fingerprint"] == intent["decision_fingerprint"]
     learning = run_alpha_learning(store)
     assert learning["total_return_labels"] == 1
     assert learning["return_learning_eligible"] is True
@@ -543,24 +931,29 @@ def _seed_selection(
         ]
     )
     body_hash = hashlib.sha256(b"1) NOVA - Opportunity").hexdigest()
-    store.persist_signal_selections(
-        [
-            {
-                "selection_id": SELECTION_ID,
-                "scan_id": "scan-paper",
-                "signal_id": SIGNAL_ID,
-                "ticker": "NOVA",
-                "rank": 1,
-                "strategy_id": ALPHAOPS_STRATEGY_ID,
-                "strategy_version": ALPHAOPS_STRATEGY_VERSION,
-                "cohort": DELIVERED_COHORT,
-                "decision": "probability_fallback",
-                "selected_at": f"{DAY}T13:10:00+00:00",
-                "event_key": "alphaops:scan-paper:alpha_morning_watch",
-                "body_sha256": body_hash,
-            }
-        ]
-    )
+    selection = {
+        **_direct_selection(),
+        "scan_id": "scan-paper",
+        "rank": 1,
+        "decision": "probability_fallback",
+        "event_key": "alphaops:scan-paper:alpha_morning_watch",
+        "body_sha256": body_hash,
+    }
+    selection["payload_json"] = {
+        **selection,
+        "signal": {
+            "signal_id": SIGNAL_ID,
+            "scan_id": "scan-paper",
+            "ticker": "NOVA",
+            "market_date": DAY,
+        },
+        "decision_payload": {
+            "decision": "probability_fallback",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
+    }
+    store.persist_signal_selections([selection])
     if not persist_delivery:
         return
     store.persist_notification_deliveries(
@@ -587,8 +980,61 @@ def _seed_selection(
     )
 
 
+def _direct_selection() -> dict[str, object]:
+    return {
+        **canonical_v6_decision(
+            "paper",
+            market_date=DAY,
+        ),
+        "selection_id": SELECTION_ID,
+        "scan_id": "scan-paper",
+        "signal_id": SIGNAL_ID,
+        "ticker": "NOVA",
+        "market_date": DAY,
+        "strategy_id": ALPHAOPS_STRATEGY_ID,
+        "strategy_version": ALPHAOPS_STRATEGY_VERSION,
+        "cohort": DELIVERED_COHORT,
+        "selected_at": f"{DAY}T13:10:00+00:00",
+        "input_hash_sha256": "8" * 64,
+        "source_lineage_hash_sha256": "9" * 64,
+        "delivery_identity": {
+            "channel": "telegram",
+            "event_key": "alphaops:scan-paper:alpha_morning_watch",
+            "delivery_status": "delivered",
+        },
+        "source_artifact_identity": f"alpha-paper-selection:{DAY}:{SELECTION_ID}",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _direct_signal() -> dict[str, object]:
+    return {
+        "signal_id": SIGNAL_ID,
+        "ticker": "NOVA",
+        "market_date": DAY,
+        "entry_watch_level": 10.0,
+        "target_1": 11.0,
+        "invalidation_level": 9.0,
+    }
+
+
+def _canonical_reconciliation_outcome() -> dict[str, object]:
+    return canonical_return_outcome(
+        market_date=DAY,
+        causal_identity=_paper_causal_identity(),
+    )
+
+
+def _paper_causal_identity() -> dict[str, object]:
+    return causal_identity_from(
+        _direct_selection(),
+        kind="alpha_v6_shadow_decision",
+    )
+
+
 def _persist_outcome(store: SQLiteScanStore, *, outcome_status: str) -> None:
-    row = {
+    row: dict[str, object] = {
         "signal_id": SIGNAL_ID,
         "market_date": DAY,
         "ticker": "NOVA",
@@ -606,26 +1052,41 @@ def _persist_outcome(store: SQLiteScanStore, *, outcome_status: str) -> None:
     if outcome_status == "complete_sourced":
         row.update(
             {
-                "entry_time": f"{DAY}T13:31:00Z",
-                "entry_price": 10.0,
-                "target_price": 11.0,
-                "invalidation_price": 9.0,
-                "target_touched_at": f"{DAY}T14:04:00Z",
-                "invalidation_touched_at": None,
-                "planned_first_touch_outcome": "target_1",
-                "close_price": 10.8,
-                "close_price_observed_at": f"{DAY}T19:59:00Z",
-                "high_after_entry": 11.2,
-                "low_after_entry": 9.8,
-                "learning_eligible": True,
+                **canonical_return_outcome(
+                    market_date=DAY,
+                    causal_identity=_paper_causal_identity(),
+                ),
+                "signal_id": SIGNAL_ID,
+                "market_date": DAY,
+                "ticker": "NOVA",
             }
         )
     else:
+        selection_context = canonical_paper_selection_context(
+            store.load_signal_selections(signal_id=SIGNAL_ID)[0],
+            delivery=store.load_notification_deliveries(signal_id=SIGNAL_ID)[0],
+        )
+        selection_causal = causal_identity_from(
+            selection_context,
+            kind="alpha_paper_selection",
+            id_key="selection_id",
+            time_key="selected_at",
+        )
         row.update(
             {
-                "entry_time": None,
-                "entry_price": None,
-                "learning_eligible": False,
+                **canonical_ineligible_outcome(
+                    market_date=DAY,
+                    case="not_triggered",
+                    causal_identity=selection_causal,
+                    replay_binding=replay_binding_from(
+                        selection_context,
+                        kind="alpha_paper_selection",
+                        id_key="selection_id",
+                    ),
+                ),
+                "signal_id": SIGNAL_ID,
+                "market_date": DAY,
+                "ticker": "NOVA",
             }
         )
     store.persist_signal_outcomes([row], replace=True)
@@ -637,6 +1098,38 @@ def _seed_v5_reconciliation(
     day: str,
     with_entry_intent: bool,
 ) -> None:
+    if with_entry_intent:
+        from intraday_scanner.services.alpha_outcome_capture_service import (
+            capture_sourced_alpha_outcomes,
+        )
+        from tests.test_alpha_outcome_capture_service import (
+            _canonical_signal,
+            _chart_payload,
+            _contiguous_bars,
+            _persist_selected_signals,
+            _two_source_config,
+        )
+
+        _persist_selected_signals(
+            store,
+            [_canonical_signal(day)],
+            authenticated_entry=True,
+        )
+        rows = _contiguous_bars(
+            day=day,
+            overrides={"10:01": (12.50, 13.00, 12.40, 12.80)},
+        )
+        capture_sourced_alpha_outcomes(
+            db_path=store.db_path,
+            market_date=day,
+            requested_at=f"{day}T16:05:00-04:00",
+            out_dir=store.db_path.parent / "capture",
+            persist=True,
+            config=_two_source_config(),
+            fetcher=lambda *_args, **_kwargs: _chart_payload(rows),
+            fallback_fetcher=lambda *_args, **_kwargs: rows,
+        )
+        return
     signal_id = "scan-v5:1:NOVA"
     selection_id = "selection-v5-nova"
     store.persist_historical_signals(

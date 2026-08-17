@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+    CURRENT_CENSORED_PATH,
+    CURRENT_RETURN_TRUTH,
+    LEGACY_OR_INCOMPLETE,
+    classify_canonical_return_truth,
+)
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, utc_now
 from intraday_scanner.alpha.v6.models import evidence_lineage
 
@@ -39,11 +46,18 @@ def build_label_families(
     prospective_eligible = outcome.get("prospective_promotion_eligible") is True
     lineage = evidence_lineage({**outcome, **decision})
     return_truth = _return_truth_contract(decision=decision, outcome=outcome)
+    classification = return_truth["classification"]
+    current_return = classification == CURRENT_RETURN_TRUTH
+    current_not_triggered = classification == CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED
+    current_censored = classification == CURRENT_CENSORED_PATH
+    current_path = current_return or current_not_triggered or current_censored
+    activation_conclusive = conclusive or current_not_triggered
     eligible_return = bool(
         outcome.get("learning_eligible") is True
         and source_hash
         and path_replay_available
         and retrospective_eligible
+        and current_return
         and return_truth["eligible"]
     )
     observed_at = str(outcome.get("observed_at") or utc_now())
@@ -68,18 +82,33 @@ def build_label_families(
         "return_truth_status": return_truth["status"],
         "return_label_eligible": eligible_return,
         "label_schema_version": LABEL_SCHEMA_VERSION,
+        "eligibility_policy_version": outcome.get("eligibility_policy_version"),
         "no_lookahead": outcome.get("no_lookahead") is True,
         "missing_truth_is_zero": False,
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    truth_lineage = _truth_lineage(outcome)
+    base["truth_lineage_hash_sha256"] = canonical_hash(truth_lineage)
     labels = [
         _label(
             base,
             family="activation",
-            value=1.0 if activated else 0.0 if conclusive else None,
-            eligible=conclusive and bool(source_hash),
-            exclusion=None if conclusive and source_hash else "activation_truth_missing",
+            value=1.0 if activated else 0.0 if activation_conclusive else None,
+            eligible=(
+                activation_conclusive
+                and bool(source_hash)
+                and current_path
+                and not current_censored
+            ),
+            exclusion=(
+                None
+                if activation_conclusive
+                and source_hash
+                and current_path
+                and not current_censored
+                else "activation_truth_missing"
+            ),
         ),
         _label(
             base,
@@ -91,23 +120,25 @@ def build_label_families(
     ]
     values = {
         "simulated_fill_feasibility": 1.0 if activated else 0.0 if conclusive else None,
-        "net_return_after_cost": _number(
-            outcome.get("after_cost_return_pct")
-            if outcome.get("after_cost_return_pct") is not None
-            else outcome.get("net_return_pct")
-        ),
+        "net_return_after_cost": _number(outcome.get("after_cost_return_pct")),
         "benchmark_relative_excess_return": _number(outcome.get("net_excess_return_pct")),
         "stop_first_target_first": _first_touch_label(outcome),
-        "mfe_pct": _number(outcome.get("mfe_pct")),
-        "mae_pct": _number(outcome.get("mae_pct")),
+        "mfe_pct": (
+            _number(outcome.get("mfe_pct"))
+            if outcome.get("excursion_exact") is True
+            else None
+        ),
+        "mae_pct": (
+            _number(outcome.get("mae_pct"))
+            if outcome.get("excursion_exact") is True
+            else None
+        ),
         "tail_loss_event": _tail_loss_label(outcome),
     }
     for family in _RETURN_FAMILIES:
         value = values[family]
         allowed = conclusive and bool(source_hash) and (not activated or value is not None)
-        eligible = allowed and (
-            eligible_return or family == "simulated_fill_feasibility"
-        )
+        eligible = allowed and eligible_return
         labels.append(
             _label(
                 base,
@@ -151,14 +182,17 @@ def _label(
         "learning_eligible": eligible,
         "exclusion_reason": exclusion,
     }
-    payload["label_id"] = "v6l-" + canonical_hash(
-        {
-            "decision_id": payload["decision_id"],
-            "family": family,
-            "source_outcome_id": payload["source_outcome_id"],
-            "value": value,
-        }
-    )[:28]
+    identity = {
+        "schema_version": payload["label_schema_version"],
+        "decision_id": payload["decision_id"],
+        "family": family,
+        "value": value,
+        "truth_lineage_hash_sha256": payload["truth_lineage_hash_sha256"],
+    }
+    payload["label_id"] = "v6l-v2-" + canonical_hash(identity)
+    payload["label_payload_hash_sha256"] = canonical_hash(
+        {**identity, "label_id": payload["label_id"]}
+    )
     return payload
 
 
@@ -188,7 +222,24 @@ def _tail_loss_label(outcome: dict[str, Any]) -> float | None:
 def _return_truth_contract(
     *, decision: dict[str, Any], outcome: dict[str, Any]
 ) -> dict[str, Any]:
-    """Check the additive complete-return contract when its fields are present."""
+    """Require the authenticated canonical return contract for return labels."""
+
+    classification = classify_canonical_return_truth(outcome, decision=decision)
+    if classification != CURRENT_RETURN_TRUTH:
+        return {
+            "contract_present": classification != LEGACY_OR_INCOMPLETE,
+            "eligible": False,
+            "status": (
+                "MISSING_CURRENT_CONTRACT"
+                if classification == LEGACY_OR_INCOMPLETE
+                else "CURRENT_NONRETURN_CONTRACT"
+                if classification
+                in {CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED, CURRENT_CENSORED_PATH}
+                else "INVALID_CURRENT_CONTRACT"
+            ),
+            "classification": classification,
+            "missing_requirements": ["authenticated_canonical_return_truth"],
+        }
 
     contract_keys = {
         "after_cost_return_pct",
@@ -200,7 +251,12 @@ def _return_truth_contract(
     }
     contract_present = bool(contract_keys.intersection(outcome))
     if not contract_present:
-        return {"contract_present": False, "eligible": True, "status": "LEGACY_CONTRACT"}
+        return {
+            "contract_present": False,
+            "eligible": False,
+            "status": "CANONICAL_RETURN_TRUTH_REQUIRED",
+            "missing_requirements": ["authenticated_canonical_return_truth"],
+        }
 
     after_cost = _number(
         outcome.get("after_cost_return_pct")
@@ -250,7 +306,71 @@ def _return_truth_contract(
         "contract_present": True,
         "eligible": not missing,
         "status": "COMPLETE" if not missing else "INCOMPLETE",
+        "classification": classification,
         "missing_requirements": missing,
+    }
+
+
+_TRUTH_LINEAGE_FIELDS = (
+    "path_replay_schema_version",
+    "path_replay_id",
+    "path_replay_policy_version",
+    "path_replay_policy_hash_sha256",
+    "replay_input_hash_sha256",
+    "replay_truth_hash_sha256",
+    "replay_receipt_hash_sha256",
+    "source_artifact_identity",
+    "source_artifact_hash_sha256",
+    "source_bar_hash_sha256",
+    "source_coverage_complete",
+    "source_conflict",
+    "corporate_action_unresolved",
+    "sequence_complete_through_exit",
+    "path_truth_status",
+    "path_event",
+    "entry_price",
+    "exit_price",
+    "return_truth_schema_version",
+    "return_truth_hash_sha256",
+    "cost_schema_version",
+    "cost_receipt_id",
+    "cost_receipt_hash_sha256",
+    "cost_receipt",
+    "observed_cost_model_identity",
+    "modeled_cost_model_identity",
+    "cost_components",
+    "after_cost_return_pct",
+    "benchmark_symbol",
+    "benchmark_return_pct",
+    "benchmark_source_bar_hash_sha256",
+    "benchmark_independent_reconciliation_status",
+    "secondary_benchmark_symbol",
+    "secondary_benchmark_return_pct",
+    "secondary_benchmark_source_bar_hash_sha256",
+    "secondary_benchmark_independent_reconciliation_status",
+    "reconciliation_schema_version",
+    "reconciliation_receipt_id",
+    "reconciliation_receipt_hash_sha256",
+    "reconciliation_receipt",
+    "independent_reconciliation_status",
+    "causal_decision_identity",
+    "eligibility_policy_version",
+    "retrospective_research_eligible",
+    "prospective_promotion_eligible",
+    "evidence_cohort",
+    "no_lookahead",
+    "validated_against_signal_timestamp",
+    "research_only",
+    "broker_execution_enabled",
+)
+
+
+def _truth_lineage(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Bind label identity to every current return-truth dimension."""
+
+    return {
+        "label_schema_version": LABEL_SCHEMA_VERSION,
+        **{field: outcome.get(field) for field in _TRUTH_LINEAGE_FIELDS},
     }
 
 

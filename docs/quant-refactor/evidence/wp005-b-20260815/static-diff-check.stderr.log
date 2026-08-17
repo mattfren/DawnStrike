@@ -1,0 +1,6 @@
+warning: in the working copy of 'app.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'intraday_scanner/storage/__init__.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'intraday_scanner/storage/migrations.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_intraday_evidence_migration.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_paper_ops_trade_blotter.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_streamlit_app.py', LF will be replaced by CRLF the next time Git touches it

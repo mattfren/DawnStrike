@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from statistics import mean, pstdev
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_RETURN_TRUTH,
+    canonical_return_truth_projection,
+    classify_canonical_return_truth,
+)
 from intraday_scanner.alpha.v6.contracts import (
     ALPHAOPS_V6_MODEL_VERSION,
     ALPHAOPS_V6_STRATEGY_VERSION,
@@ -189,6 +194,7 @@ def build_v6_shadow_decisions(
             "universe_membership": membership,
             "signal_facts": _safe_signal_facts(signal),
             "source_summary": source_summary,
+            "evidence_cohort": "forward-current-v2",
             "safety_vetoes": vetoes,
             "estimated_round_trip_cost_bps": _estimated_cost_bps(feature),
             "cost_model_version": V6_COST_MODEL_VERSION,
@@ -286,12 +292,18 @@ def strict_walk_forward_evaluation(
     """Evaluate only against future dates; no random or same-date leakage."""
 
     decision_by_id = {str(row.get("decision_id") or ""): row for row in decisions}
-    rows = [
-        {**outcome, "decision": decision_by_id.get(str(outcome.get("decision_id") or ""))}
-        for outcome in outcomes
-        if outcome.get("learning_eligible") is True
-        and decision_by_id.get(str(outcome.get("decision_id") or "")) is not None
-    ]
+    rows: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        decision = decision_by_id.get(str(outcome.get("decision_id") or ""))
+        if decision is None:
+            continue
+        if (
+            classify_canonical_return_truth(outcome, decision=decision)
+            != CURRENT_RETURN_TRUTH
+            or outcome.get("learning_eligible") is not True
+        ):
+            continue
+        rows.append({**outcome, "decision": decision})
     dates = sorted({str(row.get("market_date") or "")[:10] for row in rows})
     predictions: list[dict[str, Any]] = []
     for date in dates:
@@ -344,7 +356,20 @@ def promotion_readiness(
 ) -> dict[str, Any]:
     """Evaluate every frozen promotion gate; absent proof always fails closed."""
 
-    valid = [row for row in outcomes if row.get("learning_eligible") is True]
+    decision_by_id = {
+        str(row.get("decision_id") or ""): row for row in (decisions or [])
+    }
+    valid = []
+    for row in outcomes:
+        decision = decision_by_id.get(str(row.get("decision_id") or ""))
+        if (
+            decision is not None
+            and classify_canonical_return_truth(row, decision=decision)
+            == CURRENT_RETURN_TRUTH
+            and row.get("learning_eligible") is True
+            and row.get("prospective_promotion_eligible") is True
+        ):
+            valid.append(row)
     benchmark = benchmark_coverage(valid)
     sessions = {str(row.get("market_date") or "")[:10] for row in valid}
     returns: list[float] = []
@@ -546,107 +571,45 @@ def _v6_outcome_from_source(
         or (source or attempt or {}).get("attempted_at")
         or _utc_now()
     )
-    activated = bool((source or {}).get("entry_opportunity"))
-    gross_return = _number((source or {}).get("gross_return_pct"))
-    benchmark = _number((source or {}).get("benchmark_return_pct"))
-    secondary_benchmark = _number(
-        (source or {}).get("secondary_benchmark_return_pct")
+    projection = (
+        canonical_return_truth_projection(source, decision=decision)
+        if source is not None
+        else {}
     )
-    cost_bps = _number(decision.get("estimated_round_trip_cost_bps"))
-    net_return = (
-        gross_return - (cost_bps / 100.0)
-        if gross_return is not None and cost_bps is not None
-        else None
+    current_return = bool(
+        source is not None
+        and classify_canonical_return_truth(source, decision=decision)
+        == CURRENT_RETURN_TRUTH
+        and projection
     )
-    net_excess = (
-        net_return - benchmark
-        if net_return is not None and benchmark is not None
-        else None
-    )
-    source_hash = str((source or attempt or {}).get("source_bar_hash_sha256") or "")
-    conclusive = source is not None and str(source.get("outcome_status") or "") in {
-        "complete_sourced",
-        "not_triggered",
-    }
-    independent_reconciliation_passed = bool(
-        (source or {}).get("independent_reconciliation_status") == "PASSED"
-        and (
-            not activated
-            or (
-                (source or {}).get("benchmark_independent_reconciliation_status")
-                == "PASSED"
-                and (
-                    source or {}
-                ).get("secondary_benchmark_independent_reconciliation_status")
-                == "PASSED"
-            )
-        )
-    )
-    learning_eligible = bool(
-        conclusive
-        and source_hash
-        and independent_reconciliation_passed
-        and (source or {}).get("validated_against_signal_timestamp") is True
-        and (source or {}).get("no_lookahead") is True
-        and (
-            not activated
-            or (
-                net_excess is not None
-                and secondary_benchmark is not None
-                and bool((source or {}).get("secondary_benchmark_source_bar_hash_sha256"))
-            )
-        )
-    )
-    payload = {
+    payload: dict[str, Any] = {
+        **projection,
         "decision_id": decision["decision_id"],
         "shadow_signal_id": decision["shadow_signal_id"],
         "market_date": decision["market_date"],
         "observed_at": observed_at,
-        "activation_status": (
-            "ACTIVATED"
-            if activated
-            else "NOT_TRIGGERED"
-            if conclusive
-            else "MISSING"
+        "activation_status": projection.get("activation_status", "MISSING"),
+        "outcome_status": projection.get("outcome_status", "TERMINAL_MISSING"),
+        # V6's compatibility alias is a projection of authenticated after-cost
+        # truth.  It is never recomputed from gross or expected prices.
+        "net_return_pct": (
+            _number(projection.get("after_cost_return_pct"))
+            if current_return
+            else None
         ),
-        "outcome_status": "COMPLETE_SOURCED" if conclusive else "TERMINAL_MISSING",
-        "net_return_pct": _round(net_return),
-        "benchmark_return_pct": _round(benchmark),
-        "benchmark_symbol": str((source or {}).get("benchmark_symbol") or "SPY"),
-        "benchmark_source_bar_hash_sha256": _text_or_none(
-            (source or {}).get("benchmark_source_bar_hash_sha256")
-        ),
-        "secondary_benchmark_symbol": str(
-            (source or {}).get("secondary_benchmark_symbol") or "IWM"
-        ),
-        "secondary_benchmark_return_pct": _number(
-            (source or {}).get("secondary_benchmark_return_pct")
-        ),
-        "secondary_benchmark_source_bar_hash_sha256": _text_or_none(
-            (source or {}).get("secondary_benchmark_source_bar_hash_sha256")
-        ),
-        "net_excess_return_pct": _round(net_excess),
-        "mfe_pct": _number((source or {}).get("max_favorable_excursion_pct")),
-        "mae_pct": _number((source or {}).get("max_adverse_excursion_pct")),
-        "first_touch": (source or {}).get("planned_first_touch_outcome"),
+        "first_touch": projection.get("path_event"),
         "counterfactual_rejected_candidate": bool(
             (source or {}).get("counterfactual_rejected_candidate")
         ),
         "counterfactual_policy": (source or {}).get("counterfactual_policy"),
-        "source_bar_hash_sha256": source_hash or None,
-        "independent_reconciliation_status": (source or {}).get(
-            "independent_reconciliation_status"
+        "learning_eligible": bool(
+            current_return and projection.get("learning_eligible") is True
         ),
-        "benchmark_independent_reconciliation_status": (source or {}).get(
-            "benchmark_independent_reconciliation_status"
-        ),
-        "secondary_benchmark_independent_reconciliation_status": (source or {}).get(
-            "secondary_benchmark_independent_reconciliation_status"
-        ),
-        "learning_eligible": learning_eligible,
-        "no_lookahead": bool((source or {}).get("no_lookahead")),
+        "no_lookahead": bool(projection.get("no_lookahead")),
         "cost_model_version": decision.get("cost_model_version"),
-        "estimated_round_trip_cost_bps": cost_bps,
+        "estimated_round_trip_cost_bps": _number(
+            decision.get("estimated_round_trip_cost_bps")
+        ),
         "source_outcome_status": (
             source_or_attempt.get("outcome_status")
             or (attempt or {}).get("status")
@@ -655,11 +618,12 @@ def _v6_outcome_from_source(
         "research_only": True,
         "broker_execution_enabled": False,
     }
-    payload["outcome_id"] = "v6o-" + _hash({
-        "decision_id": payload["decision_id"],
-        "source_bar_hash_sha256": source_hash,
-        "outcome_status": payload["outcome_status"],
-    })[:28]
+    if not current_return:
+        payload["outcome_id"] = "v6o-" + _hash({
+            "decision_id": payload["decision_id"],
+            "source_status": payload["source_outcome_status"],
+            "outcome_status": payload["outcome_status"],
+        })[:28]
     return payload
 
 

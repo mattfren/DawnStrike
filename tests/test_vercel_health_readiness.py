@@ -79,6 +79,34 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         ),
         encoding="utf-8",
     )
+    opportunity = data_root / "opportunity-projection.json"
+    opportunity.write_text(
+        json.dumps(
+            {
+                "state": "DISABLED",
+                "rows": [],
+                "row_count": 0,
+                "research_only": True,
+                "order_execution_enabled": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    opportunity_hash = hashlib.sha256(opportunity.read_bytes()).hexdigest()
+    opportunity_manifest = data_root / "opportunity-projection.json.manifest.json"
+    opportunity_manifest.write_text(
+        json.dumps(
+            {
+                "payload_sha256": opportunity_hash,
+                "byte_count": opportunity.stat().st_size,
+                "state": "DISABLED",
+                "row_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
     publication_set_hash = hashlib.sha256(
         f"{snapshot_hash}:{calendar_hash}".encode()
     ).hexdigest()
@@ -110,6 +138,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
                     "source_clean": True,
                     "data_hash_sha256": snapshot_hash,
                     "publication_set_sha256": publication_set_hash,
+                    "opportunity_projection_sha256": opportunity_hash,
                     "file_hashes": required_hashes,
             }
         ),
@@ -133,6 +162,8 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     monkeypatch.setattr(readiness, "CALENDAR_MANIFEST_PATH", calendar_manifest)
     monkeypatch.setattr(readiness, "SCENARIO_PATH", scenario)
     monkeypatch.setattr(readiness, "SCENARIO_MANIFEST_PATH", scenario_manifest)
+    monkeypatch.setattr(readiness, "OPPORTUNITY_PATH", opportunity)
+    monkeypatch.setattr(readiness, "OPPORTUNITY_MANIFEST_PATH", opportunity_manifest)
     monkeypatch.setattr(readiness, "PUBLICATION_SET_PATH", publication_set)
     monkeypatch.setattr(readiness, "BUILD_MANIFEST_PATH", build_manifest)
     assert readiness._validate_public_state(readiness_payload) == []

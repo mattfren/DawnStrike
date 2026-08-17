@@ -1,0 +1,116 @@
+{
+  "active_state": {
+    "baseline_identity": {
+      "length": 198836224,
+      "mtime_ns": 1786923184753168200,
+      "mtime_utc": "2026-08-16T23:33:04.753168+00:00",
+      "sha256": "733298401a4f3d1d57d459a2a28db45b2242bb2161a0b4f62dabef5289ada1fa",
+      "sidecars": []
+    },
+    "database_schema_version": 26,
+    "path": "C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+    "post_run_identity": {
+      "length": 198836224,
+      "mtime_ns": 1786923184753168200,
+      "mtime_utc": "2026-08-16T23:33:04.753168+00:00",
+      "sha256": "733298401a4f3d1d57d459a2a28db45b2242bb2161a0b4f62dabef5289ada1fa",
+      "sidecars": []
+    },
+    "query_only": 1,
+    "quick_check": "ok",
+    "sqlite_immutable": true,
+    "sqlite_uri_mode": "ro",
+    "unchanged": true
+  },
+  "branch": "codex/sol-quant-refactor-20260811",
+  "evidence_index": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-evidence-index.md",
+  "evidence_manifest": {
+    "entry_count": 128,
+    "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-evidence-manifest.json",
+    "payload_sha256": "7d1f5e3d6879cbec3f508003d857e2aca6b083d3922a44041d6e1a150105e27b",
+    "sha256": "af8f8bda24b6deb0451318f7fa639cebde1bdb34ffe1f769a09b364728772959"
+  },
+  "frozen_pytest_inventory": {
+    "after_nodes_exactly_equal": true,
+    "after_valid": true,
+    "before_nodes_exactly_equal": true,
+    "before_valid": true,
+    "inventory_sha256": "2fd3ff0b4fb5c965d1fb3fbc4efd6789e66b54d84364484fb86764e1b229b8d9",
+    "node_count": 3156
+  },
+  "frozen_source_test": {
+    "after_mismatch_count": 0,
+    "after_valid": true,
+    "aggregate_sha256": "f6802f805f42af1414973ffdc69c61402199b04f6444a479af1c78510265eae0",
+    "before_mismatch_count": 0,
+    "before_valid": true,
+    "file_count": 572
+  },
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "process_audit": {
+    "after_unauthorized_process_count": 0,
+    "before_unauthorized_process_count": 0
+  },
+  "schema_version": "dawnstrike.final_repair_recovery_result.v1",
+  "scope_controls": {
+    "active_state_mutated_or_restored": false,
+    "git_stage_commit_push_used": false,
+    "operator_marker_used": false,
+    "provider_broker_deploy_publish_promote_used": false,
+    "shards_06_07_skipped_due_to_terminal_failure": true,
+    "source_or_test_edited": false
+  },
+  "sealed_at_utc": "2026-08-17T00:47:39.642702+00:00",
+  "shard_result": {
+    "duplicate_count": 0,
+    "failed_count": 1,
+    "failure_exception": "ValueError: outcome horizon session does not match symbol source series",
+    "failure_node": "tests/test_opportunity_discovery_metrics.py::test_multi_session_recall_is_exact_micro_aggregate[1-0.333333333333]",
+    "failure_source": "intraday_scanner/v2/opportunity/outcome_replay.py:185",
+    "fresh_executed_shards": [
+      5
+    ],
+    "missing_count": 394,
+    "not_run_after_terminal_failure": [
+      6,
+      7
+    ],
+    "passed_count": 2761,
+    "sealed_passing_shard_count": 13,
+    "sealed_passing_shards": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "selected_node_count_with_manifests": 2762,
+    "shard_05": {
+      "exit_code": 1,
+      "failed_count": 1,
+      "passed_count": 196,
+      "selected_count": 197,
+      "shard_index": 5,
+      "skipped_count": 0,
+      "status": "failed",
+      "valid": false,
+      "xfailed_count": 0,
+      "xpassed_count": 0
+    },
+    "shard_05_elapsed_seconds": 3289.7802357000182,
+    "shard_05_stdout_sha256": "c55bc1b215e959a02c5a9cf0f2d660156cdc46009863b45e540335d44fa50359",
+    "skipped_count": 0,
+    "xfailed_count": 0,
+    "xpassed_count": 0
+  },
+  "terminal_event": "REPAIR_REQUIRED",
+  "terminal_reason": "shard_test_failure"
+}

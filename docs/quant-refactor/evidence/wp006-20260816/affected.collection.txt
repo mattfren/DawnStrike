@@ -1,0 +1,4 @@
+tests/test_no_persist_sqlite_semantics.py: 46
+tests/test_sqlite_read_only_store.py: 10
+tests/test_v2_data_truth_paper_ops.py: 83
+

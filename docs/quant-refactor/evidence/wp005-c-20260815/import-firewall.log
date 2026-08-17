@@ -1,0 +1,5 @@
+core_modules_imported=15
+robustness_modules_scanned=6
+eager_robustness_modules=0
+forbidden_dependencies=0
+package_root_exports=0

@@ -1,0 +1,11 @@
+{
+  "gate": "cyclonedx",
+  "command": "py -m cyclonedx_py environment --pyproject pyproject.toml --output-reproducible --output-file docs/quant-refactor/evidence/final-audit-20260816/sbom.cdx.json",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:24:12.9140593+00:00",
+  "ended_at_utc": "2026-08-16T10:24:29.9403724+00:00",
+  "elapsed_seconds": 17.023718,
+  "exit_code": 0,
+  "stdout_bytes": 0,
+  "stderr_bytes": 0
+}

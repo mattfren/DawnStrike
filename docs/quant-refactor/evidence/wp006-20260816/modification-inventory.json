@@ -1,0 +1,32 @@
+{
+  "wp006_owned_file_count": 19,
+  "new_validation_storage_modules": [
+    "intraday_scanner/storage/opportunity_validation_contracts.py",
+    "intraday_scanner/storage/opportunity_validation_errors.py",
+    "intraday_scanner/storage/opportunity_validation_rows.py",
+    "intraday_scanner/storage/opportunity_validation_schema.py",
+    "intraday_scanner/storage/opportunity_validation_store.py"
+  ],
+  "narrow_schema_export_compatibility_files": [
+    "intraday_scanner/storage/migrations.py",
+    "intraday_scanner/storage/__init__.py",
+    "intraday_scanner/storage/opportunity_store.py",
+    "intraday_scanner/storage/opportunity_outcome_schema.py",
+    "intraday_scanner/storage/opportunity_outcome_store.py",
+    "intraday_scanner/storage/opportunity_miss_schema.py",
+    "intraday_scanner/storage/opportunity_miss_store.py",
+    "intraday_scanner/storage/opportunity_metric_schema.py"
+  ],
+  "narrow_test_files": [
+    "tests/test_intraday_evidence_migration.py",
+    "tests/test_opportunity_persistence.py",
+    "tests/test_opportunity_outcome_persistence.py",
+    "tests/test_opportunity_validation_persistence.py"
+  ],
+  "documentation_files": [
+    "docs/quant-refactor/04-execution-log.md",
+    "docs/quant-refactor/luna/006-durable-validation-persistence-handoff.md"
+  ],
+  "evidence_root": "docs/quant-refactor/evidence/wp006-20260816",
+  "note": "The shared isolated worktree already contains accepted WP001-WP005-C dirty and untracked artifacts; this inventory declares only WP006-owned additions and narrow compatibility edits."
+}

@@ -1,0 +1,643 @@
+{
+  "created_at_utc": "2026-08-17T05:36:56.457102+00:00",
+  "entries": [
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/active-state-after.json",
+      "sha256": "9257dd5e7f3ea1bc1c9d72ab4af079d9c25fb4d910f9d72f3c4ecab80916453b"
+    },
+    {
+      "length": 872,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/active-state-before.json",
+      "sha256": "f64da7f08b570d8bf197f827ba9b671cc62662f3cd598072bc77f868de5002a3"
+    },
+    {
+      "length": 917,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/audit_processes.ps1",
+      "sha256": "2669224c6529b01a92d6861e181a231c792ca5302828bbef69704d4ffe46bf2b"
+    },
+    {
+      "length": 2854,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/capture_active_state.py",
+      "sha256": "4c6816c55ee51d7ceb905179e053057b18eb74b5324bc07d20a29eb9d4340270"
+    },
+    {
+      "length": 813,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/evidence-index.md",
+      "sha256": "7416bc3983ae8bbc48ea5dec0acdbb1128ab9e3935bf8a199e0e18c22a58d2cd"
+    },
+    {
+      "length": 8215,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/final-combined-result.payload.json",
+      "sha256": "a2c055cf55eec96fbde2153927fe81292e6c7420692dee025e7f2b604a2041af"
+    },
+    {
+      "length": 866,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/freeze-inventory-after.json",
+      "sha256": "7c11823976be842863d95c59bf9b494a9f551fe7a9bdfe3edf35d80ab8e2e4f1"
+    },
+    {
+      "length": 866,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/freeze-inventory-before.json",
+      "sha256": "98a52aba55a0cf0d617daa5d576566df8a77a074337d79ed5719419265101ab6"
+    },
+    {
+      "length": 183,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/process-audit-after.json",
+      "sha256": "041bc2eb32adb9f0890bb4d1213957116a24f8298b1bebee547521e275dc115e"
+    },
+    {
+      "length": 183,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/process-audit-before.json",
+      "sha256": "75a3d3e68764483b059098ccb5925a08d19b7b0925ffd93e7a3bfe5b874917ea"
+    },
+    {
+      "length": 6085,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/run_gate_shard.py",
+      "sha256": "b9f5047b7107c16b473c6d6a7dab51f917c4428d9305eb793a5baf11b4783254"
+    },
+    {
+      "length": 8848,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/seal_final_gate.py",
+      "sha256": "d64f373128530860a9b9f0a0afd4bfc4bca17a08212a30c4a38e4bb94e0db82e"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.command.txt",
+      "sha256": "87a97fd412627e98c9ceb03a12054a30f33c5d97816d27807c78978890d1574c"
+    },
+    {
+      "length": 341,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.exit.json",
+      "sha256": "20b2bec444610a6107464020ce8afe20d72d33a78afa2d766d5b0b8bec2bf1bd"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.guard-after.json",
+      "sha256": "cef33ef804e1ec6dd8da32c5f0574f8e6c95cdc40e4a88caae9e94b173bb9158"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.guard-before.json",
+      "sha256": "96ddbca9c26037051c23b1b69a5e22628d59b4070f6d945978d9212bb748266b"
+    },
+    {
+      "length": 24436,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.manifest.json",
+      "sha256": "330b7e5fef0d5caf7180648a4ec48235645bad5105d5ce1db0404a44fd8ff450"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-00.stdout.txt",
+      "sha256": "00af25b97398b3934ba21051db961726824147332bc5af71f5be9323b834b168"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.command.txt",
+      "sha256": "a2e0c530d2692c8bcf0efbbf11c7f85e4726a767fefa9573eb2151b36de4bdcb"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.exit.json",
+      "sha256": "e1840ee97de9521558cad5697b725c5290c1f555534c3fe2c86e7b9e3bb7d497"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.guard-after.json",
+      "sha256": "ef570e5e005491b0164c42f40e5483616f7b582f891c7be7ed24bf3d8e464826"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.guard-before.json",
+      "sha256": "e851e213c6c5e21a90daa999d7ee5deaf273c14915550e551c5585b136b84ce3"
+    },
+    {
+      "length": 24245,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.manifest.json",
+      "sha256": "cebf03b4e4da5ee38cfa551b06162da41f55d3b91bc178c3add3f92a0ede90f3"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-01.stdout.txt",
+      "sha256": "c0b33c27752b8a2ec75b9cacf503188eb8e6eb6c9e3c2eb1fcafcff8a37ac514"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.command.txt",
+      "sha256": "f79338569d21b6c5d074ecada587b35b78ae4951f0fefadbf9a49d1967da72ed"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.exit.json",
+      "sha256": "b9fcb8284455e09698f2abf4905ddca3ee42a92606e62d119a4582c6857f0edd"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.guard-after.json",
+      "sha256": "006d0e6848fd63d875db001763c9e37a01a548e94d04e1a78cfa88b1ac3d8af2"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.guard-before.json",
+      "sha256": "af3f150030a3be714c61035f21e75494a0cee50e3d217afde98acb0b5937b9f1"
+    },
+    {
+      "length": 24010,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.manifest.json",
+      "sha256": "b526ba19d50d647df5d5d908b0ea5ae486336577cbbfd5d87bc618452b12a867"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-02.stdout.txt",
+      "sha256": "559d2bcfe91306de434801f0b8e343ac3e8e4455ecbdce9d5d9000b1bc054173"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.command.txt",
+      "sha256": "fd683049fa8db2b1f12908df3943c60cc3ba78b217b13995349b966a7127d354"
+    },
+    {
+      "length": 341,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.exit.json",
+      "sha256": "5e9c0a87775f944ed0bc51c3ae24bf93f2c587b3400d69ac4390d95afe2953e4"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.guard-after.json",
+      "sha256": "e9a8b8dadd60d2cc4a032e3483572c38debda63e628537fe3df34bdcd6e7c562"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.guard-before.json",
+      "sha256": "1f0b0466e3cf88abc11b89051605990c1a954989aef4d7345b17e38adb173870"
+    },
+    {
+      "length": 24271,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.manifest.json",
+      "sha256": "08849f8114ba6c5f48eac4272e5d42920b88846bde638cad0c33157d88b45209"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-03.stdout.txt",
+      "sha256": "412aeb77c11ce3ad50eae2cb625987188344ca55c2ab6b7afc1347959ed7f89d"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.command.txt",
+      "sha256": "d2aeee4ab41c10f14db5bcc34623a502a3fa77fe9cca494139af921ba9c8e358"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.exit.json",
+      "sha256": "0c2d69f85f66f2a3a30f6128ac5627e5652413470eea5b9c83d29f1b7aa39542"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.guard-after.json",
+      "sha256": "f879fe03609e9597af969a3f5073e8646bdf784fe7d187d541d597afabe3fd8e"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.guard-before.json",
+      "sha256": "0f65e3192d115f17637c2ddc2a6bbd7a5bde5e643e6ed5b36fe4f403ce21e1cc"
+    },
+    {
+      "length": 24572,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.manifest.json",
+      "sha256": "57fb0f2f21de3818e0087e2f86f271a88dd9c872e5a3dce13f5009270738bca8"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-04.stdout.txt",
+      "sha256": "2173c4b3c656097206dcdc825f6e9d48bc9f2966b61a177ec470a2f51face275"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.command.txt",
+      "sha256": "450c41c5863e7932e7de49f45b117fc35c5bb2e544cf06a4f048a01657920be2"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.exit.json",
+      "sha256": "91de298fdcd9c4a6ae187e4608753ff4f9fac5585f87a98ad4384602a552ff56"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.guard-after.json",
+      "sha256": "24768cec67e56a857749d539c0935f7de1aff0c02ebe0984c71feeb42b625356"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.guard-before.json",
+      "sha256": "e477e76d189088c00319ca1f3d02b463d08311b9d47c89df9d1c0b1ec5d6fbd7"
+    },
+    {
+      "length": 24827,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.manifest.json",
+      "sha256": "3af0ca82f4094d3aa29c2bd8512df3610d50ebf4d70306e56cdfe65f7833aa0e"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-05.stdout.txt",
+      "sha256": "853c60866ffec74785a1259097afc9c0f73e6a1e4b85b9e2ea744144ba5ca3b5"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.command.txt",
+      "sha256": "73bea8b4225c7db357ac64b2faac4f03114b4a1a262c375a334fa6d35698b185"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.exit.json",
+      "sha256": "f77243e36fb98b91e1112f0cdf7e08b0d9e95ae7a796d43027f249211b284aa1"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.guard-after.json",
+      "sha256": "fef3016def55853c77b0503b64b4d90243ead1e483800fc7c26f45cfe0e6e6f3"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.guard-before.json",
+      "sha256": "01dff68caef47388eac198543276b9f9a611ad221e7efe1063a8ce86518722a8"
+    },
+    {
+      "length": 24836,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.manifest.json",
+      "sha256": "7a0e3c5f57b86a7e1fbacaaa38b0fbdd435bbda760b154f5c373d5c7f3275ec1"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-06.stdout.txt",
+      "sha256": "47a4679f433b72f0f04d3da63acdddab84e62281064b19e269689bb15f3e0919"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.command.txt",
+      "sha256": "ca78971879e6da96f6398aaaea1333440b1b6bb4fe1cb04247503f1dc5ac2882"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.exit.json",
+      "sha256": "23fde9ce7ef2322435fa462519f9c99913d4389919af1e033f5e78580fc6fc20"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.guard-after.json",
+      "sha256": "23c96f3c5ed254e3c982bbe6400a3447646174bbe3baba1ce0070c73004c3778"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.guard-before.json",
+      "sha256": "89e471b2da7de51b557ffca940bcbfb712b10f4656a9a93323f3d36ef94617b5"
+    },
+    {
+      "length": 24761,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.manifest.json",
+      "sha256": "3fd5f09cd83c264fb5daa35f27b9ef2912c35bb33fdb5896111960c7f4ffc865"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-07.stdout.txt",
+      "sha256": "0f04f3b82ba77a77b7c54e579a0c0b079f32056f77bc5623945861646ac111af"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.command.txt",
+      "sha256": "4b72414987c1a02a8182b865da8a8950997f9af0c0475258fe17f7cfeac1626b"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.exit.json",
+      "sha256": "c96d95be209fe794941ab8352a2f20975126b790aa35de95461fb18908c9d463"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.guard-after.json",
+      "sha256": "a49cf6b2783d33a04b88975e4f671b2a9c24b7521f7b69180ce0177f546acf85"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.guard-before.json",
+      "sha256": "2ddc417158227eed13de76222d1947f078f7676609d0cfdb97190f9fc5bff7be"
+    },
+    {
+      "length": 24732,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.manifest.json",
+      "sha256": "f651647f83534d4a85bef7036ec95b618a1f20cdcfcd91efb23a1e5472f9d28b"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-08.stdout.txt",
+      "sha256": "b59574131aba28cf11cbeaa2da2effa87346110ba3e53425b1710587374bf45e"
+    },
+    {
+      "length": 226,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.command.txt",
+      "sha256": "229b82d4d2c5ef43e6743e1a9a5c992c82867719b040a0b62f676078fdbda12f"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.exit.json",
+      "sha256": "f10ead671c41543bc214eba4a63c219edf9f82dbf9450a51c4412693f48b0478"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.guard-after.json",
+      "sha256": "f078d3da965c85bc184d27fdbcf19ce74e49c3fd958686abad4317777704be68"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.guard-before.json",
+      "sha256": "15e8a12ba8f42c63a56e60dbc9be8aa29b36cf8ca3f9719cbb525883f40f1c5d"
+    },
+    {
+      "length": 24681,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.manifest.json",
+      "sha256": "afea441486db7db35dfeba76be3073346e0ef2dd139b2746989ac823546dcf89"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-09.stdout.txt",
+      "sha256": "fd0427765287e2215b7bb7171096b4eb090381992869204f2e489ef219ba450c"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.command.txt",
+      "sha256": "82a7c513044788e8339a051727e05d3becf8ed6d46d185dab815de4851bab1ef"
+    },
+    {
+      "length": 343,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.exit.json",
+      "sha256": "14df512b39a7e26f2d365e8ff9c60eaaf4e9767f98d39e4b659a6a68534377f3"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.guard-after.json",
+      "sha256": "1e076298d2cabec53ce84aebcd9e8c94047dafd4c6618fa767aac2f0bf396230"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.guard-before.json",
+      "sha256": "9c7eccc221bb4ef3d0c62ffefda8c32a06de02ed3a727d572a7b41494f2f205a"
+    },
+    {
+      "length": 24568,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.manifest.json",
+      "sha256": "5495e967acab865ce2484e7c5933a615163eacd61be83daf0871c6bc24c7351a"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-10.stdout.txt",
+      "sha256": "2b4a335ac74513283a05920d9e85cc29d3fc73287fbf00eae097f6e44117e76c"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.command.txt",
+      "sha256": "fd9eb2154aab203a3701f6b08e4ea5f346e97c8860b365b17598018d18136f9b"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.exit.json",
+      "sha256": "139683151cad4f13554aa4fb0628355c5a569dc21fbb4814a06c6096091cb9b3"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.guard-after.json",
+      "sha256": "6bac34cb0338c224a48ce38a49cc1461956457102fb71947906d8008acb074d2"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.guard-before.json",
+      "sha256": "9f958567287a6489ea7b5daff767ab5ee153a8649b3e5ba5fdeec5e5c508a176"
+    },
+    {
+      "length": 24601,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.manifest.json",
+      "sha256": "caf589a82a2200b3b444474616e3092da4505cf7b3e8cd025291ddeb91c0a723"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-11.stdout.txt",
+      "sha256": "22d5999039c5b651c52269007f1830a365e83b12b38efff6e0b92f23e21947e8"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.command.txt",
+      "sha256": "22c42262a8419bd9912935527be23c3fb675079fa413e057730cc19a7e6c3350"
+    },
+    {
+      "length": 343,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.exit.json",
+      "sha256": "d810777a4d39be50d2d865ab4ca9c180fc731ac782194d2870f9e0b26c31d066"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.guard-after.json",
+      "sha256": "03b74eaa40922dba800e4bc263a447d5c3efc0b3c52c05cea23394f1e559a66e"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.guard-before.json",
+      "sha256": "5273192a8c4be395c4f4a5464f00372be3d221309fec6eb2a32768cdfd365032"
+    },
+    {
+      "length": 25002,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.manifest.json",
+      "sha256": "6d8763c441be645618d79f387414332c390484602103db36ec91a983a9884aec"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-12.stdout.txt",
+      "sha256": "1e3b20164b3468e6fdc3bd64212c437043dfb0c57c7b4f1c5df3dfbcf2494196"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.command.txt",
+      "sha256": "c010591e3efa723d07f06448e94cc8b10f5c99f7d8fc7b7c9fe98ba31dacc6d7"
+    },
+    {
+      "length": 343,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.exit.json",
+      "sha256": "16ffbfd79244264ee2443cc72e9637d8b076a6e69372b0ff771e3b4cc2dd476b"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.guard-after.json",
+      "sha256": "cc729ea8fd25700a8065ac7502e01180227aff2ea827d56ec7b80fa06324a19c"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.guard-before.json",
+      "sha256": "7e6cf99de30bec2c76b9dcd21e0ce6bb1dd0e0026bab1c15441f9c2686a1ed3c"
+    },
+    {
+      "length": 24735,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.manifest.json",
+      "sha256": "3c1a5912453bee1d9a84847b95357ae7761bf9eeaad4711472ad68e02ff1c03d"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-13.stdout.txt",
+      "sha256": "72210e333e8da1dd4c9395efb1b445692052f6cf867fa5b654160a848031f572"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.command.txt",
+      "sha256": "ec28cf043ec187a7c835442a46454b1d6c1b0074ca92be72db73c775299fd748"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.exit.json",
+      "sha256": "3d829c8c90374951e902301e92ef7e87771847f11eaa9bcb534fda6125691383"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.guard-after.json",
+      "sha256": "c8d6a8dbadaba530a2ce320eb6d42933dd284b9d8545a06aa1dd6f95c2259468"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.guard-before.json",
+      "sha256": "c86c4dbcda2af98c3616a4003e3ee42c5df21ee51983c7852e56783d7de43c58"
+    },
+    {
+      "length": 24589,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.manifest.json",
+      "sha256": "d4b1856aeead5bb856922cfcf46e46e19433f983344d6df2943161ffa801db1d"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-14.stdout.txt",
+      "sha256": "dcab98e2f1ff8907aa9ac99820ee18bd98c7604751044341a03da753426a052a"
+    },
+    {
+      "length": 227,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.command.txt",
+      "sha256": "83a5d84369040c70d7b335ae4baa7f22aebcf62143148d950df8b2b77b395ca6"
+    },
+    {
+      "length": 342,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.exit.json",
+      "sha256": "be0b811c96d25b7f2cd9f533cb74e292aee7b14ef8ffc1dc803007c94abd9f78"
+    },
+    {
+      "length": 1335,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.guard-after.json",
+      "sha256": "4840c8718305a2c0c3d44f9004d67c3deafcadfa570b04a29fbfb460f4e025ca"
+    },
+    {
+      "length": 1308,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.guard-before.json",
+      "sha256": "d4ceaec44eb16a4a6420f7049f14e71007a112b63c795e7efc4a03bad97fd7dd"
+    },
+    {
+      "length": 24782,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.manifest.json",
+      "sha256": "f4f8e8f008f064443d5ac6d3aec16a21624cb3d6effa5f518857481720138e84"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-15.stdout.txt",
+      "sha256": "d02a060adb7f44c5d1e0f7b97dc7fa96fefdb6d4863376c266a061ea2cd4e075"
+    },
+    {
+      "length": 30216,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/shard-validation.json",
+      "sha256": "a0266aae4d3e7be1b1d3845ca5f3efa57e2e7d59d11401b50e766ffbb1c2e3dd"
+    },
+    {
+      "length": 6654,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/validate_final_gate.py",
+      "sha256": "d64672e60e33e35ce8c41621efb8389e8ba902991553865d463bb1dff8322881"
+    },
+    {
+      "length": 3966,
+      "path": "docs/quant-refactor/evidence/final-immutable-gate-20260817/validate_source_inventory.py",
+      "sha256": "3ded7552662343d0baff8317c46593b652465adf7c9466b9ccbe3640412f6229"
+    }
+  ],
+  "entry_count": 127,
+  "schema_version": "dawnstrike.final_immutable_gate_manifest.v1",
+  "terminal_event": "PASS"
+}

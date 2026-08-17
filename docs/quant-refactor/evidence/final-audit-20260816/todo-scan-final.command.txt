@@ -1,0 +1,1 @@
+pwsh -NoProfile -File docs/quant-refactor/evidence/final-audit-20260816/scan_todos.ps1

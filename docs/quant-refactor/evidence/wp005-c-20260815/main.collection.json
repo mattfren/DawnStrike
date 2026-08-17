@@ -1,0 +1,9 @@
+{
+  "command": "py -m pytest tests/test_opportunity_validation_metrics.py tests/test_opportunity_validation.py tests/test_opportunity_metric_persistence.py tests/test_opportunity_discovery_metrics.py tests/test_opportunity_miss_persistence.py tests/test_opportunity_missed.py tests/test_opportunity_outcomes.py tests/test_opportunity_outcome_persistence.py tests/test_opportunity_persistence.py tests/test_intraday_evidence_migration.py tests/test_opportunity_contracts.py tests/test_opportunity_features.py tests/test_opportunity_pipeline.py tests/test_opportunity_universe_risk.py --collect-only -q -p no:cacheprovider",
+  "exit_code": 0,
+  "expected_count": 656,
+  "collected_count": 656,
+  "started_at": "2026-08-15T21:11:55.6719900+00:00",
+  "ended_at": "2026-08-15T21:11:57.9376583+00:00",
+  "duration_seconds": 2.26
+}

@@ -1,0 +1,1 @@
+py -m pytest tests/test_rendered_dashboard_regression.py tests/test_simple_dashboard.py tests/test_dashboard_data_loader.py tests/test_snapshot_builder.py -q -p no:cacheprovider

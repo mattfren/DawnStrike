@@ -1,0 +1,10 @@
+{
+  "actual_aggregate_sha256": "f6802f805f42af1414973ffdc69c61402199b04f6444a479af1c78510265eae0",
+  "expected_aggregate_sha256": "f6802f805f42af1414973ffdc69c61402199b04f6444a479af1c78510265eae0",
+  "file_count": 572,
+  "mismatch_count": 0,
+  "mismatches": [],
+  "schema_version": "dawnstrike.source_test_freeze_validation.v1",
+  "valid": true,
+  "validated_at_utc": "2026-08-16T23:49:28.067852+00:00"
+}

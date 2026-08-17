@@ -1,0 +1,531 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import socket
+import subprocess
+import sys
+import time
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[4]
+EVIDENCE_DIR = Path(__file__).resolve().parent
+EXPECTED_BRANCH = "codex/sol-quant-refactor-20260811"
+EXPECTED_HEAD = "bec32fe752b91f4e1357236a538a6dfea5da56bf"
+EXPECTED_MAIN_COLLECTION = 656
+
+FROZEN_HASHES = {
+    "intraday_scanner/v2/opportunity/validation_metric_contracts.py": "3089A58805778152AB8328662BA1859E76096734D052B0609A03BC105B4897B5",
+    "intraday_scanner/v2/opportunity/validation_metric_math.py": "C8FDB06D24090F24FFE87AD1CEF9AF3448B49993EAC9A646D71AB04F80F88CF3",
+    "intraday_scanner/v2/opportunity/validation_metric_population.py": "980986F188EEE1287E00D6E8A09E3CA5E585A8A9F5377AC941CF01CDCC938A85",
+    "intraday_scanner/v2/opportunity/validation_metric_calculations.py": "7663B6590843D72CD3309277C4A15826062524C69BFD3BE976EDE14CFE0B037B",
+    "intraday_scanner/v2/opportunity/validation_metric_segments.py": "1C40E84BE6A185EDC1BC659ABD17FAE8EA93207CA59192F14648427CA0639BEF",
+    "intraday_scanner/v2/opportunity/validation_metric_report.py": "AF421120BD19D3717EF6DA4D68281F06614E37CB4FA8820E6CA3D4E21FD7C931",
+    "intraday_scanner/v2/opportunity/validation_metrics.py": "44E1A8D94A25654EFA935B3C8B223B80667C8D26CB040B93B79503A2C485301D",
+    "tests/test_opportunity_validation_metrics.py": "95578F45C28541DA1896044DDDE05439C3F9C5F4C2871CE10FD0A3B038F6A7D1",
+}
+
+MAIN_TESTS = [
+    "tests/test_opportunity_validation_metrics.py",
+    "tests/test_opportunity_validation.py",
+    "tests/test_opportunity_metric_persistence.py",
+    "tests/test_opportunity_discovery_metrics.py",
+    "tests/test_opportunity_miss_persistence.py",
+    "tests/test_opportunity_missed.py",
+    "tests/test_opportunity_outcomes.py",
+    "tests/test_opportunity_outcome_persistence.py",
+    "tests/test_opportunity_persistence.py",
+    "tests/test_intraday_evidence_migration.py",
+    "tests/test_opportunity_contracts.py",
+    "tests/test_opportunity_features.py",
+    "tests/test_opportunity_pipeline.py",
+    "tests/test_opportunity_universe_risk.py",
+]
+
+AFFECTED_TESTS = [
+    "tests/test_sqlite_read_only_store.py",
+    "tests/test_no_persist_sqlite_semantics.py",
+    "tests/test_v2_data_truth_paper_ops.py",
+]
+
+COMMANDS = {
+    "main": ["py", "-m", "pytest", *MAIN_TESTS, "-q", "-p", "no:cacheprovider"],
+    "affected": ["py", "-m", "pytest", *AFFECTED_TESTS, "-q", "-p", "no:cacheprovider"],
+    "static-ruff": ["py", "-m", "ruff", "check", "."],
+    "static-mypy": ["py", "-m", "mypy", "intraday_scanner"],
+    "static-compileall": ["py", "-m", "compileall", "-q", "intraday_scanner", "scripts"],
+    "static-diff-check": ["git", "diff", "--check"],
+}
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest().upper()
+
+
+def atomic_json(path: Path, payload: Any) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def atomic_text(path: Path, payload: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(payload, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def command_text(argv: list[str]) -> str:
+    return subprocess.list2cmdline(argv)
+
+
+def check_output(argv: list[str]) -> str:
+    return subprocess.check_output(argv, cwd=ROOT, text=True, encoding="utf-8").strip()
+
+
+def current_hashes() -> dict[str, str]:
+    return {relative: sha256_file(ROOT / relative) for relative in FROZEN_HASHES}
+
+
+def status_snapshot() -> list[str]:
+    raw = check_output(["git", "status", "--porcelain=v1", "-uall"])
+    return raw.splitlines() if raw else []
+
+
+def conflicting_gate_processes(exclude_pids: set[int] | None = None) -> list[dict[str, Any]]:
+    excluded = sorted((exclude_pids or set()) | {os.getpid()})
+    exclusions = ",".join(str(value) for value in excluded)
+    script = (
+        "$items=Get-CimInstance Win32_Process | Where-Object { "
+        f"$_.ProcessId -notin @({exclusions}) -and "
+        "$_.Name -match '^python(?:w)?(?:\\.exe)?$' -and $_.CommandLine -and "
+        "($_.CommandLine -match 'pytest' -or $_.CommandLine -match 'gate_runner\\.py\\.txt') }; "
+        "$items | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        cwd=ROOT,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"process inspection failed: {completed.stderr.strip()}")
+    output = completed.stdout.strip()
+    if not output:
+        return []
+    parsed = json.loads(output)
+    return parsed if isinstance(parsed, list) else [parsed]
+
+
+def parse_pytest(text: str) -> dict[str, int | bool | None]:
+    counts: dict[str, int] = {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+        "errors": 0,
+        "deselected": 0,
+    }
+    pattern = re.compile(
+        r"(?P<count>\d+)\s+(?P<label>passed|failed|skipped|xfailed|xpassed|errors?|deselected)(?=,|\s+in\b|\s*$)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in pattern.finditer(text):
+        label = match.group("label").lower()
+        if label == "error":
+            label = "errors"
+        counts[label] = int(match.group("count"))
+    counts["progress_100"] = "[100%]" in text
+    progress_symbols: Counter[str] = Counter()
+    for line in text.splitlines():
+        without_progress = re.sub(r"\[\s*\d+%\]", "", line).strip()
+        if without_progress and re.fullmatch(r"[.FEsxX]+", without_progress):
+            progress_symbols.update(without_progress)
+    if counts["progress_100"] and progress_symbols:
+        counts["passed"] = progress_symbols["."]
+        counts["failed"] = progress_symbols["F"]
+        counts["errors"] = progress_symbols["E"]
+        counts["skipped"] = progress_symbols["s"]
+        counts["xfailed"] = progress_symbols["x"]
+        counts["xpassed"] = progress_symbols["X"]
+    collected = re.findall(r"(\d+)\s+(?:tests?|items?)\s+collected", text, re.IGNORECASE)
+    grouped_collection = re.findall(r"^tests[/\\].+?\.py:\s*(\d+)\s*$", text, re.MULTILINE)
+    counts["collected"] = (
+        int(collected[-1])
+        if collected
+        else sum(int(value) for value in grouped_collection) or None
+    )
+    return counts
+
+
+def run_command(label: str, argv: list[str]) -> dict[str, Any]:
+    stdout_path = EVIDENCE_DIR / f"{label}.stdout.log"
+    stderr_path = EVIDENCE_DIR / f"{label}.stderr.log"
+    command_path = EVIDENCE_DIR / f"{label}.command.txt"
+    exit_path = EVIDENCE_DIR / f"{label}.exit.json"
+    atomic_text(command_path, command_text(argv) + "\n")
+
+    pre_hashes = current_hashes()
+    pre_status = status_snapshot()
+    conflicts = conflicting_gate_processes()
+    if conflicts:
+        payload = {
+            "label": label,
+            "command": command_text(argv),
+            "blocked": True,
+            "reason": "conflicting gate process",
+            "conflicting_processes": conflicts,
+            "observed_at_utc": utc_now(),
+        }
+        atomic_json(exit_path, payload)
+        return payload
+
+    started_utc = utc_now()
+    started_monotonic = time.monotonic()
+    lease = {
+        "state": "launching",
+        "label": label,
+        "owner": "/root/luna_wp005b_gate",
+        "host": socket.gethostname(),
+        "runner_pid": os.getpid(),
+        "command": command_text(argv),
+        "started_utc": started_utc,
+    }
+    atomic_json(EVIDENCE_DIR / "gate-lease.json", lease)
+
+    with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+        process = subprocess.Popen(argv, cwd=ROOT, stdout=stdout_handle, stderr=stderr_handle)
+        lease["state"] = "active"
+        lease["child_pid"] = process.pid
+        atomic_json(EVIDENCE_DIR / "gate-lease.json", lease)
+        exit_code = process.wait()
+
+    ended_utc = utc_now()
+    duration_seconds = round(time.monotonic() - started_monotonic, 6)
+    post_hashes = current_hashes()
+    post_status = status_snapshot()
+    survivors = conflicting_gate_processes()
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    result: dict[str, Any] = {
+        "label": label,
+        "command": command_text(argv),
+        "argv": argv,
+        "cwd": str(ROOT),
+        "started_utc": started_utc,
+        "ended_utc": ended_utc,
+        "duration_seconds": duration_seconds,
+        "exit_code": exit_code,
+        "stdout_path": stdout_path.relative_to(ROOT).as_posix(),
+        "stderr_path": stderr_path.relative_to(ROOT).as_posix(),
+        "stdout_sha256": sha256_file(stdout_path),
+        "stderr_sha256": sha256_file(stderr_path),
+        "pre_hashes": pre_hashes,
+        "post_hashes": post_hashes,
+        "frozen_hashes_identical": pre_hashes == post_hashes,
+        "pre_status": pre_status,
+        "post_status": post_status,
+        "surviving_gate_processes": survivors,
+    }
+    if "pytest" in argv:
+        result["pytest"] = parse_pytest(stdout_text + "\n" + stderr_text)
+    atomic_json(exit_path, result)
+    lease.update(
+        {
+            "state": "released",
+            "ended_utc": ended_utc,
+            "exit_code": exit_code,
+            "surviving_gate_processes": survivors,
+        }
+    )
+    atomic_json(EVIDENCE_DIR / "gate-lease.json", lease)
+    return result
+
+
+def preflight() -> int:
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    branch = check_output(["git", "branch", "--show-current"])
+    head = check_output(["git", "rev-parse", "HEAD"])
+    hashes = current_hashes()
+    conflicts = conflicting_gate_processes()
+    environment = {
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "python_full_version": sys.version.replace("\n", " "),
+        "pytest_version": check_output(["py", "-m", "pytest", "--version"]),
+        "platform": platform.platform(),
+        "host": socket.gethostname(),
+    }
+    identity_ok = branch == EXPECTED_BRANCH and head == EXPECTED_HEAD
+    hashes_ok = hashes == FROZEN_HASHES
+    initial_ok = identity_ok and hashes_ok and not conflicts
+    payload: dict[str, Any] = {
+        "work_package": "WP005-B",
+        "observed_at_utc": utc_now(),
+        "evidence_directory": EVIDENCE_DIR.relative_to(ROOT).as_posix(),
+        "evidence_directory_absolute": str(EVIDENCE_DIR),
+        "branch": branch,
+        "expected_branch": EXPECTED_BRANCH,
+        "head": head,
+        "expected_head": EXPECTED_HEAD,
+        "identity_ok": identity_ok,
+        "frozen_hashes": hashes,
+        "expected_frozen_hashes": FROZEN_HASHES,
+        "hashes_ok": hashes_ok,
+        "main_command": command_text(COMMANDS["main"]),
+        "affected_command": command_text(COMMANDS["affected"]),
+        "static_commands": [command_text(COMMANDS[name]) for name in ("static-ruff", "static-mypy", "static-compileall", "static-diff-check")],
+        "expected_main_collection": EXPECTED_MAIN_COLLECTION,
+        "environment": environment,
+        "conflicting_gate_processes": conflicts,
+        "status_snapshot": status_snapshot(),
+        "initial_checks_ok": initial_ok,
+    }
+    atomic_json(EVIDENCE_DIR / "preflight.json", payload)
+    if not initial_ok:
+        return 20
+
+    collection_argv = [*COMMANDS["main"], "--collect-only"]
+    collection_result = run_command("preflight-collection", collection_argv)
+    collection_stdout = (EVIDENCE_DIR / "preflight-collection.stdout.log").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    inventory: Counter[str] = Counter()
+    for line in collection_stdout.splitlines():
+        normalized = line.strip().replace("\\", "/")
+        if normalized.startswith("tests/") and "::" in normalized:
+            inventory[normalized.split("::", 1)[0]] += 1
+            continue
+        grouped = re.fullmatch(r"(tests/.+?\.py):\s*(\d+)", normalized)
+        if grouped:
+            inventory[grouped.group(1)] += int(grouped.group(2))
+    collected = collection_result.get("pytest", {}).get("collected")
+    if collected is None:
+        collected = sum(inventory.values())
+    payload.update(
+        {
+            "collection_command": command_text(collection_argv),
+            "collection_exit_code": collection_result.get("exit_code"),
+            "collection_count": collected,
+            "collection_inventory": dict(sorted(inventory.items())),
+            "collection_exit_artifact": "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection.exit.json",
+            "post_collection_conflicting_gate_processes": conflicting_gate_processes(),
+        }
+    )
+    payload["passed"] = (
+        collection_result.get("exit_code") == 0
+        and collected == EXPECTED_MAIN_COLLECTION
+        and collection_result.get("frozen_hashes_identical") is True
+        and not payload["post_collection_conflicting_gate_processes"]
+    )
+    payload["completed_at_utc"] = utc_now()
+    atomic_json(EVIDENCE_DIR / "preflight.json", payload)
+    return 0 if payload["passed"] else 21
+
+
+def run_suite(label: str) -> int:
+    preflight_path = EVIDENCE_DIR / "preflight.json"
+    if not preflight_path.exists():
+        raise SystemExit("preflight.json is missing")
+    preflight_payload = json.loads(preflight_path.read_text(encoding="utf-8"))
+    if preflight_payload.get("passed") is not True:
+        raise SystemExit("preflight did not pass")
+    if current_hashes() != FROZEN_HASHES:
+        payload = {
+            "label": label,
+            "blocked": True,
+            "reason": "frozen hash drift before launch",
+            "observed_hashes": current_hashes(),
+            "expected_hashes": FROZEN_HASHES,
+            "observed_at_utc": utc_now(),
+        }
+        atomic_json(EVIDENCE_DIR / f"{label}.exit.json", payload)
+        return 23
+    result = run_command(label, COMMANDS[label])
+    if result.get("blocked"):
+        return 22
+    return int(result["exit_code"])
+
+
+def reconcile(label: str) -> int:
+    exit_path = EVIDENCE_DIR / f"{label}.exit.json"
+    stdout_path = EVIDENCE_DIR / f"{label}.stdout.log"
+    stderr_path = EVIDENCE_DIR / f"{label}.stderr.log"
+    record = json.loads(exit_path.read_text(encoding="utf-8"))
+    if sha256_file(stdout_path) != record["stdout_sha256"]:
+        raise SystemExit(f"stdout hash mismatch for {label}")
+    if sha256_file(stderr_path) != record["stderr_sha256"]:
+        raise SystemExit(f"stderr hash mismatch for {label}")
+    combined = stdout_path.read_text(encoding="utf-8", errors="replace")
+    combined += "\n" + stderr_path.read_text(encoding="utf-8", errors="replace")
+    record["pytest"] = parse_pytest(combined)
+    record["count_reconciliation"] = {
+        "method": "pytest terminal progress symbols from hash-verified raw logs",
+        "reconciled_at_utc": utc_now(),
+    }
+    atomic_json(exit_path, record)
+    return 0
+
+
+def final_packet() -> int:
+    labels = [
+        "main",
+        "affected",
+        "static-ruff",
+        "static-mypy",
+        "static-compileall",
+        "static-diff-check",
+    ]
+    records: dict[str, Any] = {}
+    for label in labels:
+        path = EVIDENCE_DIR / f"{label}.exit.json"
+        if not path.exists():
+            raise SystemExit(f"missing terminal artifact: {path.name}")
+        records[label] = json.loads(path.read_text(encoding="utf-8"))
+
+    main_counts = records["main"].get("pytest", {})
+    affected_counts = records["affected"].get("pytest", {})
+    excluded_markers = {
+        key: main_counts.get(key, 0)
+        for key in ("failed", "skipped", "xfailed", "xpassed", "errors", "deselected")
+    }
+    pass_conditions = [
+        all(records[label].get("exit_code") == 0 for label in labels),
+        main_counts.get("passed") == EXPECTED_MAIN_COLLECTION,
+        not any(excluded_markers.values()),
+        all(records[label].get("frozen_hashes_identical") is True for label in labels),
+        not any(records[label].get("surviving_gate_processes") for label in labels),
+        current_hashes() == FROZEN_HASHES,
+        not conflicting_gate_processes(),
+    ]
+    terminal_delta = "PASS" if all(pass_conditions) else "BLOCKED"
+    packet_lines = [
+        "# WP005-B Repository-Durable Verification Evidence",
+        "",
+        f"- Terminal material delta: `{terminal_delta}`",
+        "- Work package: `WP005-B`",
+        f"- Worktree: `{ROOT}`",
+        f"- Branch: `{check_output(['git', 'branch', '--show-current'])}`",
+        f"- HEAD: `{check_output(['git', 'rev-parse', 'HEAD'])}`",
+        "- Current durable-run repair cycles: `0`",
+        "- Gate-time WP005-B implementation/test modifications: `none`",
+        "- Adjudication: not performed by this packet",
+        "",
+        "## Commands and terminal results",
+        "",
+        "| Gate | Exact command | Exit | Passed | Failed | Skipped | Xfailed | Xpassed | Start UTC | End UTC | Duration seconds |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|",
+    ]
+    for label in labels:
+        record = records[label]
+        counts = record.get("pytest", {})
+        packet_lines.append(
+            "| {label} | `{command}` | {exit_code} | {passed} | {failed} | {skipped} | {xfailed} | {xpassed} | {start} | {end} | {duration} |".format(
+                label=label,
+                command=record["command"].replace("|", "\\|"),
+                exit_code=record["exit_code"],
+                passed=counts.get("passed", "n/a"),
+                failed=counts.get("failed", "n/a"),
+                skipped=counts.get("skipped", "n/a"),
+                xfailed=counts.get("xfailed", "n/a"),
+                xpassed=counts.get("xpassed", "n/a"),
+                start=record["started_utc"],
+                end=record["ended_utc"],
+                duration=record["duration_seconds"],
+            )
+        )
+    packet_lines.extend(
+        [
+            "",
+            "## Collection and source integrity",
+            "",
+            f"- Preflight collection: `{EXPECTED_MAIN_COLLECTION}` items; required `{EXPECTED_MAIN_COLLECTION}`.",
+            f"- Main excluded result markers: `{json.dumps(excluded_markers, sort_keys=True)}`.",
+            "- Every pre/post frozen source hash matched, and the final hashes equal the controlling frozen values.",
+            "- No surviving gate process was found before lease release.",
+            "- The pre-existing shared dirty worktree is not represented as clean or immutable.",
+            "",
+            "## Durable artifacts",
+            "",
+        ]
+    )
+    for label in labels:
+        packet_lines.append(
+            f"- `{label}`: `{records[label]['stdout_path']}`, `{records[label]['stderr_path']}`, `docs/quant-refactor/evidence/wp005-b-20260815/{label}.command.txt`, `docs/quant-refactor/evidence/wp005-b-20260815/{label}.exit.json`."
+        )
+    packet_lines.extend(
+        [
+            "- Preflight: `docs/quant-refactor/evidence/wp005-b-20260815/preflight.json` and `preflight-collection.*`.",
+            "- Lease record: `docs/quant-refactor/evidence/wp005-b-20260815/gate-lease.json`.",
+            "- This packet records verification evidence only; it does not self-adjudicate the work package.",
+            "",
+        ]
+    )
+    atomic_text(EVIDENCE_DIR / "evidence-packet.md", "\n".join(packet_lines))
+
+    excluded_from_manifest = {"evidence-manifest.json", "evidence-manifest.sha256"}
+    artifact_hashes = {
+        path.relative_to(ROOT).as_posix(): {
+            "sha256": sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+        for path in sorted(EVIDENCE_DIR.iterdir())
+        if path.is_file() and path.name not in excluded_from_manifest and not path.name.endswith(".tmp")
+    }
+    manifest = {
+        "schema": "dawnstrike.wp005_b.durable_evidence_manifest.v1",
+        "generated_at_utc": utc_now(),
+        "work_package": "WP005-B",
+        "terminal_material_delta": terminal_delta,
+        "root": str(ROOT),
+        "branch": check_output(["git", "branch", "--show-current"]),
+        "head": check_output(["git", "rev-parse", "HEAD"]),
+        "artifacts": artifact_hashes,
+        "manifest_self_hash": "external companion and terminal return; self-excluded to avoid recursive hashing",
+    }
+    manifest_path = EVIDENCE_DIR / "evidence-manifest.json"
+    atomic_json(manifest_path, manifest)
+    manifest_hash = sha256_file(manifest_path)
+    atomic_text(EVIDENCE_DIR / "evidence-manifest.sha256", f"{manifest_hash}  evidence-manifest.json\n")
+    return 0 if terminal_delta == "PASS" else 24
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("preflight")
+    suite_parser = subparsers.add_parser("run-suite")
+    suite_parser.add_argument("label", choices=sorted(COMMANDS))
+    reconcile_parser = subparsers.add_parser("reconcile")
+    reconcile_parser.add_argument("label", choices=sorted(COMMANDS))
+    subparsers.add_parser("finalize")
+    args = parser.parse_args()
+    if args.action == "preflight":
+        return preflight()
+    if args.action == "run-suite":
+        return run_suite(args.label)
+    if args.action == "reconcile":
+        return reconcile(args.label)
+    return final_packet()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

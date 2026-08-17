@@ -1,0 +1,1 @@
+py -m pytest tests/test_opportunity_projection.py tests/test_opportunity_projection_public.py tests/test_opportunity_projection_streamlit.py --collect-only -q -p no:cacheprovider

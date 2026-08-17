@@ -6,6 +6,10 @@ import math
 from collections import defaultdict
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_RETURN_TRUTH,
+    classify_canonical_return_truth,
+)
 from intraday_scanner.alpha.v6.registry import record_untouched_holdout_evaluation
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -83,7 +87,7 @@ def evaluate_registered_holdout(
         if assignment.get("configuration_hash_sha256") != expected_hash:
             blockers.add(f"{arm}_configuration_hash_mismatch")
             continue
-        if not _eligible_outcome(outcome):
+        if not _eligible_outcome(outcome, decision=decision):
             blockers.add("incomplete_or_unsourced_holdout_outcome")
             continue
         value = _number(outcome.get("net_excess_return_pct"))
@@ -166,10 +170,14 @@ def _expected_hash(experiment: dict[str, Any], arm: str) -> str:
     return str(experiment.get("baseline_configuration_hash_sha256") or "")
 
 
-def _eligible_outcome(outcome: dict[str, Any]) -> bool:
+def _eligible_outcome(
+    outcome: dict[str, Any], *, decision: dict[str, Any]
+) -> bool:
     return bool(
-        outcome.get("learning_eligible") is True
-        and str(outcome.get("outcome_status") or "") == "COMPLETE_SOURCED"
+        classify_canonical_return_truth(outcome, decision=decision)
+        == CURRENT_RETURN_TRUTH
+        and outcome.get("learning_eligible") is True
+        and outcome.get("prospective_promotion_eligible") is True
         and outcome.get("no_lookahead") is True
         and str(outcome.get("source_bar_hash_sha256") or "")
     )

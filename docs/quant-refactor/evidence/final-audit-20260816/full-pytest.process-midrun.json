@@ -1,0 +1,29 @@
+{
+  "captured_at_utc": "2026-08-16T10:45:19.6122522+00:00",
+  "processes": [
+    {
+      "process_id": 7696,
+      "parent_process_id": 16984,
+      "creation_date": "08/16/2026 04:38:00",
+      "command_line": "\"C:\\Users\\MattFields\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe\" -Command \"try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n& 'docs/quant-refactor/evidence/final-audit-20260816/run_gate.ps1' -Gate full-pytest\"",
+      "cpu_seconds": 1.15625,
+      "responding": true
+    },
+    {
+      "process_id": 13300,
+      "parent_process_id": 7696,
+      "creation_date": "08/16/2026 04:38:00",
+      "command_line": "\"py\" -m pytest -q -p no:cacheprovider",
+      "cpu_seconds": 0.03125,
+      "responding": true
+    },
+    {
+      "process_id": 25464,
+      "parent_process_id": 13300,
+      "creation_date": "08/16/2026 04:38:00",
+      "command_line": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q -p no:cacheprovider",
+      "cpu_seconds": 3533.703125,
+      "responding": true
+    }
+  ]
+}

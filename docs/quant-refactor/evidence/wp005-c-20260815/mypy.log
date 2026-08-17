@@ -1,0 +1,4 @@
+intraday_scanner\storage\opportunity_metric_store.py:528: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+intraday_scanner\storage\opportunity_metric_store.py:557: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+intraday_scanner\storage\opportunity_metric_store.py:635: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+Success: no issues found in 310 source files

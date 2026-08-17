@@ -17,11 +17,17 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+    CURRENT_RETURN_TRUTH,
+    canonical_paper_enter_intent_context,
+    canonical_paper_selection_context,
+    classify_canonical_return_truth,
+)
 from intraday_scanner.alpha.path_replay import PathTruthStatus
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_POLICY_VERSION,
     ALPHAOPS_V5_STRATEGY_ID,
-    DEFAULT_V5_POLICY,
     alphaops_strategy_contract,
     is_v5_active,
 )
@@ -45,6 +51,37 @@ _DELIVERED_STATUSES = {
     "delivered",
     "delivered_legacy",
 }
+_CANONICAL_TRADE_TRUTH_FIELDS = (
+    "path_replay_id",
+    "path_replay_receipt",
+    "return_truth_schema_version",
+    "return_truth_hash_sha256",
+    "cost_schema_version",
+    "cost_receipt_id",
+    "cost_receipt_hash_sha256",
+    "cost_receipt",
+    "observed_cost_model_identity",
+    "modeled_cost_model_identity",
+    "cost_components",
+    "gross_return_pct",
+    "after_cost_return_pct",
+    "benchmark_symbol",
+    "benchmark_return_pct",
+    "benchmark_source_bar_hash_sha256",
+    "benchmark_independent_reconciliation_status",
+    "secondary_benchmark_symbol",
+    "secondary_benchmark_return_pct",
+    "secondary_benchmark_source_bar_hash_sha256",
+    "secondary_benchmark_independent_reconciliation_status",
+    "reconciliation_schema_version",
+    "reconciliation_receipt_id",
+    "reconciliation_receipt_hash_sha256",
+    "reconciliation_receipt",
+    "independent_reconciliation_status",
+    "causal_decision_identity",
+    "eligibility_policy_version",
+    "evidence_cohort",
+)
 
 
 def _is_official_telegram_delivery(
@@ -154,6 +191,30 @@ def reconcile_alpha_paper_trades(
         if str(row.get("strategy_id") or "") == strategy_id
         and row.get("official_paper_eligible") is True
     }
+    raw_entry_by_signal: dict[str, list[dict[str, Any]]] = {}
+    for row in store.load_trade_intent_records(
+        market_date=day,
+        action="ENTER_LONG",
+        limit=50_000,
+    ):
+        payload = row.get("payload_json")
+        signal_id = str(
+            payload.get("signal_id") if isinstance(payload, dict) else ""
+        )
+        if signal_id:
+            raw_entry_by_signal.setdefault(signal_id, []).append(row)
+    raw_observations = store.load_price_observation_records(
+        market_date=day,
+        limit=50_000,
+    )
+    observation_by_id: dict[str, dict[str, Any]] = {}
+    for row in raw_observations:
+        columns = row.get("columns")
+        observation_id = str(
+            columns.get("observation_id") if isinstance(columns, dict) else ""
+        )
+        if observation_id:
+            observation_by_id[observation_id] = row
     historical = {
         str(row.get("signal_id") or ""): row
         for row in store.load_historical_signals(market_date=day, limit=50_000)
@@ -171,6 +232,35 @@ def reconcile_alpha_paper_trades(
         signal = historical.get(signal_id, {})
         outcome = outcomes.get(signal_id)
         delivery = delivery_by_signal.get(signal_id)
+        decision_context: dict[str, Any] | None = None
+        if delivery is not None:
+            try:
+                selection_context = canonical_paper_selection_context(
+                    selection,
+                    delivery=delivery,
+                )
+                raw_entries = raw_entry_by_signal.get(signal_id, [])
+                if len(raw_entries) == 1:
+                    intent_payload = raw_entries[0].get("payload_json")
+                    source_id = str(
+                        intent_payload.get("source_observation_id")
+                        if isinstance(intent_payload, dict)
+                        else raw_entries[0].get("source_observation_id")
+                        or ""
+                    )
+                    source_record = observation_by_id.get(source_id)
+                    if source_record is not None:
+                        decision_context = canonical_paper_enter_intent_context(
+                            selection_context,
+                            intent_record=raw_entries[0],
+                            source_observation_record=source_record,
+                        )
+                elif outcome is not None and str(
+                    outcome.get("outcome_status") or ""
+                ) == "not_triggered":
+                    decision_context = selection_context
+            except ValueError:
+                decision_context = None
         evaluation, trade, labels = _reconcile_selection(
             selection=selection,
             signal=signal,
@@ -181,6 +271,7 @@ def reconcile_alpha_paper_trades(
             fee_bps=fee_bps,
             slippage_bps=scanner_config.slippage_bps,
             entry_intent=allowed_entry_by_signal.get(signal_id),
+            decision_context=decision_context,
             execution_policy_version=execution_policy_version,
         )
         evaluations.append(evaluation)
@@ -399,8 +490,10 @@ def _reconcile_selection(
     fee_bps: float,
     slippage_bps: float,
     entry_intent: dict[str, Any] | None = None,
+    decision_context: dict[str, Any] | None = None,
     execution_policy_version: str = EXECUTION_POLICY_VERSION,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
+    decision_context = decision_context or selection
     signal_id = str(selection.get("signal_id") or "")
     selection_id = str(selection.get("selection_id") or "")
     ticker = str(selection.get("ticker") or signal.get("ticker") or "").upper()
@@ -525,6 +618,28 @@ def _reconcile_selection(
             [],
         )
     if outcome_status == "not_triggered" and source_complete:
+        if (
+            classify_canonical_return_truth(
+                outcome,
+                decision=decision_context,
+            )
+            != CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED
+        ):
+            return (
+                {
+                    **evidence,
+                    "terminal_state": "invalid_canonical_activation_truth",
+                    "reconciliation_status": "invalid",
+                    "activated": None,
+                    "filled": False,
+                    "closed": False,
+                    "trade_return_eligible": False,
+                    "net_return_pct": None,
+                    "reason": "Not-triggered evidence is not bound to a canonical decision.",
+                },
+                None,
+                [],
+            )
         evaluation = {
             **evidence,
             "terminal_state": "not_triggered",
@@ -562,6 +677,28 @@ def _reconcile_selection(
                 "trade_return_eligible": False,
                 "net_return_pct": None,
                 "reason": "Outcome is not complete sourced execution evidence.",
+            },
+            None,
+            [],
+        )
+    if (
+        classify_canonical_return_truth(
+            outcome,
+            decision=decision_context,
+        )
+        != CURRENT_RETURN_TRUTH
+    ):
+        return (
+            {
+                **evidence,
+                "terminal_state": "invalid_canonical_return_truth",
+                "reconciliation_status": "invalid",
+                "activated": True,
+                "filled": False,
+                "closed": False,
+                "trade_return_eligible": False,
+                "net_return_pct": None,
+                "reason": "Return evidence is not authenticated canonical return truth.",
             },
             None,
             [],
@@ -629,78 +766,64 @@ def _paper_trade_from_outcome(
     entry_intent: dict[str, Any] | None = None,
     execution_policy_version: str = EXECUTION_POLICY_VERSION,
 ) -> dict[str, Any] | None:
-    v5_entry = (
-        entry_intent
-        if base.get("strategy_id") == ALPHAOPS_V5_STRATEGY_ID
-        else None
-    )
-    raw_entry = _number(
-        v5_entry.get("decision_price") if v5_entry else outcome.get("entry_price")
-    )
-    entry_time = str(
-        v5_entry.get("decision_time") if v5_entry else outcome.get("entry_time")
-    )
-    first_touch = str(outcome.get("planned_first_touch_outcome") or "")
-    if first_touch == "target_1":
-        exit_reason = "target_1"
-        raw_exit = _number(outcome.get("target_price") or signal.get("target_1"))
-        exit_time = str(outcome.get("target_touched_at") or "")
-    elif first_touch == "invalidation" or first_touch.startswith("ambiguous_"):
-        exit_reason = first_touch or "invalidation"
-        raw_exit = _number(
-            outcome.get("invalidation_price")
-            or signal.get("invalidation_level")
-            or signal.get("exit_line")
-        )
-        exit_time = str(outcome.get("invalidation_touched_at") or "")
-    elif first_touch == "close":
-        exit_reason = "eod_close"
-        raw_exit = _number(outcome.get("close_price"))
-        exit_time = str(outcome.get("close_price_observed_at") or "")
-    else:
+    v5_entry = entry_intent if base.get("strategy_id") == ALPHAOPS_V5_STRATEGY_ID else None
+    cost = outcome.get("cost_receipt")
+    if not isinstance(cost, dict):
         return None
-    stop = _number(
-        outcome.get("invalidation_price")
-        or signal.get("invalidation_level")
-        or signal.get("exit_line")
-    )
+    components = cost.get("components")
+    if not isinstance(components, dict):
+        return None
+    raw_entry = _number(cost.get("raw_entry_price"))
+    raw_exit = _number(cost.get("raw_exit_price"))
+    entry_time = str(outcome.get("entry_time") or "")
+    exit_time = str(outcome.get("exit_time") or "")
+    exit_reason = {
+        "TARGET": "target_1",
+        "STOP": "invalidation",
+        "TIMEOUT": "eod_close",
+    }.get(str(outcome.get("path_event") or ""))
+    stop = _number(outcome.get("stop_price"))
+    if exit_reason is None:
+        return None
     if not entry_time or not exit_time or raw_entry is None or raw_exit is None:
         return None
     if raw_entry <= 0 or raw_exit <= 0:
         return None
     if not _strictly_after(exit_time, entry_time):
         return None
-    if v5_entry:
-        trace = dict(v5_entry.get("decision_trace") or {})
-        computed = dict(trace.get("computed") or {})
-        entry_fill = _number(computed.get("expected_entry_price"))
-        quantity = _number(v5_entry.get("quantity"))
-        if entry_fill is None or quantity is None or entry_fill <= 0 or quantity <= 0:
-            return None
-        exit_fill = raw_exit * (
-            1.0 - DEFAULT_V5_POLICY.exit_slippage_bps / 10_000.0
-        )
-        notional = entry_fill * quantity
-        fees = quantity * DEFAULT_V5_POLICY.commission_per_share_per_side * 2
-        applied_slippage_bps = DEFAULT_V5_POLICY.exit_slippage_bps
-        applied_fee_bps = None
-    else:
-        entry_fill = raw_entry * (1.0 + slippage_bps / 10_000.0)
-        exit_fill = raw_exit * (1.0 - slippage_bps / 10_000.0)
-        quantity = notional_per_trade / entry_fill
-        notional = notional_per_trade
-        entry_fee = entry_fill * quantity * fee_bps / 10_000.0
-        exit_fee = exit_fill * quantity * fee_bps / 10_000.0
-        fees = entry_fee + exit_fee
-        applied_slippage_bps = slippage_bps
-        applied_fee_bps = fee_bps
+    notional = _number(components.get("notional_per_trade"))
+    entry_slippage = _number(components.get("entry_slippage_bps"))
+    exit_slippage = _number(components.get("exit_slippage_bps"))
+    applied_fee_bps = _number(components.get("fee_bps_per_side"))
+    commission = _number(components.get("commission_per_share_per_side"))
+    if None in {notional, entry_slippage, exit_slippage, applied_fee_bps, commission}:
+        return None
+    assert notional is not None
+    assert entry_slippage is not None
+    assert exit_slippage is not None
+    assert applied_fee_bps is not None
+    assert commission is not None
+    entry_fill = raw_entry * (1.0 + entry_slippage / 10_000.0)
+    exit_fill = raw_exit * (1.0 - exit_slippage / 10_000.0)
+    quantity = notional / entry_fill
+    fees = (
+        entry_fill * quantity * applied_fee_bps / 10_000.0
+        + exit_fill * quantity * applied_fee_bps / 10_000.0
+        + quantity * commission * 2.0
+    )
+    applied_slippage_bps = exit_slippage
     gross_pnl = (raw_exit - raw_entry) * quantity
     fill_pnl = (exit_fill - entry_fill) * quantity
     net_pnl = fill_pnl - fees
+    canonical_after_cost = _number(outcome.get("after_cost_return_pct"))
+    if (
+        canonical_after_cost is None
+        or abs((net_pnl / notional) * 100.0 - canonical_after_cost) > 1e-9
+    ):
+        return None
     risk_amount = (entry_fill - stop) * quantity if stop is not None and stop < entry_fill else None
-    high = _number(outcome.get("high_after_entry"))
-    low = _number(outcome.get("low_after_entry"))
     return {
+        **{field: outcome.get(field) for field in _CANONICAL_TRADE_TRUTH_FIELDS},
         "trade_id": _stable_id(
             "paper_trade",
             base["selection_id"],
@@ -726,17 +849,17 @@ def _paper_trade_from_outcome(
         "quantity": round(quantity, 8),
         "notional": round(notional, 4),
         "gross_pnl": round(gross_pnl, 4),
-        "gross_return_pct": round(((raw_exit - raw_entry) / raw_entry) * 100.0, 4),
+        "gross_return_pct": outcome.get("gross_return_pct"),
         "slippage_cost": round(gross_pnl - fill_pnl, 4),
         "fees": round(fees, 4),
-        "net_pnl": round(net_pnl, 4),
-        "net_return_pct": round((net_pnl / notional) * 100.0, 4),
+        "net_pnl": round(notional * canonical_after_cost / 100.0, 4),
+        "net_return_pct": canonical_after_cost,
         "risk_amount": round(risk_amount, 4) if risk_amount and risk_amount > 0 else None,
         "r_multiple": round(net_pnl / risk_amount, 4)
         if risk_amount and risk_amount > 0
         else None,
-        "max_favorable_excursion_pct": _return_pct(high, entry_fill),
-        "max_adverse_excursion_pct": _return_pct(low, entry_fill),
+        "max_favorable_excursion_pct": _number(outcome.get("mfe_pct")),
+        "max_adverse_excursion_pct": _number(outcome.get("mae_pct")),
         "source": outcome.get("outcome_source") or outcome.get("source"),
         "source_url": outcome.get("source_url"),
         "source_bar_hash_sha256": outcome.get("source_bar_hash_sha256"),
@@ -751,9 +874,7 @@ def _paper_trade_from_outcome(
         "slippage_bps": applied_slippage_bps,
         "fee_bps": applied_fee_bps,
         "commission_per_share_per_side": (
-            DEFAULT_V5_POLICY.commission_per_share_per_side
-            if v5_entry
-            else None
+            commission
         ),
         "reconstruction_mode": "sourced_eod_one_minute_replay",
         "same_bar_policy": "stop_first_conservative",

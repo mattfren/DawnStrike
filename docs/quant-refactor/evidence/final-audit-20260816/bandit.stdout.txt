@@ -1,0 +1,155 @@
+Working... ---------------------------------------- 100% 0:00:16
+Run started:2026-08-16 10:20:29.321323+00:00
+
+Test results:
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_metric_store.py:462:14
+461	        connection.execute(
+462	            f"INSERT INTO opportunity_metric_receipts ({','.join(RECEIPT_INSERT_ORDER)}) "
+463	            f"VALUES ({','.join('?' for _ in RECEIPT_INSERT_ORDER)})",
+464	            values,
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_metric_store.py:469:14
+468	        sql = (
+469	            f"INSERT INTO opportunity_metric_session_bindings "
+470	            f"({','.join(BINDING_INSERT_ORDER)}) "
+471	            f"VALUES ({','.join('?' for _ in BINDING_INSERT_ORDER)})"
+472	        )
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_miss_store.py:348:14
+347	        connection.execute(
+348	            f"INSERT INTO opportunity_miss_receipts "
+349	            f"({','.join(RECEIPT_INSERT_ORDER)}) VALUES ({placeholders})",
+350	            values,
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_miss_store.py::
+
+-- Candidate Issues --
+          >> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+             Severity: Medium   Confidence: Low
+             CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+             More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+             Location: intraday_scanner\storage\opportunity_miss_store.py:361:14
+          360	        sql = (
+          361	            f"INSERT INTO opportunity_miss_records "
+          362	            f"({','.join(RECORD_INSERT_ORDER)}) VALUES ({placeholders})"
+          363	        )
+          
+
+
+          >> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+             Severity: Medium   Confidence: Low
+             CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+             More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+             Location: intraday_scanner\storage\opportunity_miss_store.py:385:14
+          384	        sql = (
+          385	            f"INSERT INTO opportunity_miss_run_bindings "
+          386	            f"({','.join(BINDING_INSERT_ORDER)}) VALUES ({placeholders})"
+          387	        )
+          
+
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_miss_store.py::
+
+-- Candidate Issues --
+          >> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+             Severity: Medium   Confidence: Low
+             CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+             More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+             Location: intraday_scanner\storage\opportunity_miss_store.py:361:14
+          360	        sql = (
+          361	            f"INSERT INTO opportunity_miss_records "
+          362	            f"({','.join(RECORD_INSERT_ORDER)}) VALUES ({placeholders})"
+          363	        )
+          
+
+
+          >> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+             Severity: Medium   Confidence: Low
+             CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+             More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+             Location: intraday_scanner\storage\opportunity_miss_store.py:385:14
+          384	        sql = (
+          385	            f"INSERT INTO opportunity_miss_run_bindings "
+          386	            f"({','.join(BINDING_INSERT_ORDER)}) VALUES ({placeholders})"
+          387	        )
+          
+
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_validation_schema.py:184:12
+183	        for row in connection.execute(
+184	            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL "
+185	            f"AND tbl_name IN ({placeholders})",
+186	            VALIDATION_TABLES,
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_validation_store.py:296:14
+295	        connection.execute(
+296	            f"INSERT INTO opportunity_validation_receipts "
+297	            f"({','.join(RECEIPT_INSERT_ORDER)}) VALUES "
+298	            f"({','.join('?' for _ in RECEIPT_INSERT_ORDER)})",
+299	            values,
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: intraday_scanner\storage\opportunity_validation_store.py:308:12
+307	        sql = (
+308	            "INSERT INTO opportunity_validation_oos_sessions "
+309	            f"({','.join(SESSION_INSERT_ORDER)}) VALUES "
+310	            f"({','.join('?' for _ in SESSION_INSERT_ORDER)})"
+311	        )
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 126221
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 15
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 165
+		Medium: 8
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 4
+		Medium: 13
+		High: 156
+Files skipped (0):

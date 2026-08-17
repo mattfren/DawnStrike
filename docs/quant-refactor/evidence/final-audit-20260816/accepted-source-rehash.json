@@ -1,0 +1,55 @@
+{
+  "captured_at_utc": "2026-08-16T09:54:34.1830665+00:00",
+  "sets": [
+    {
+      "name": "wp005-b",
+      "source": "docs/quant-refactor/evidence/wp005-b-20260815/preflight.json",
+      "entry_count": 8,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "name": "wp005-c-pre",
+      "source": "docs/quant-refactor/evidence/wp005-c-20260815/source-hashes.pre.json",
+      "entry_count": 7,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "name": "wp005-c-post",
+      "source": "docs/quant-refactor/evidence/wp005-c-20260815/source-hashes.post.json",
+      "entry_count": 7,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "name": "wp006",
+      "source": "docs/quant-refactor/evidence/wp006-20260816/source-hashes.json",
+      "entry_count": 19,
+      "mismatch_count": 2,
+      "mismatches": [
+        {
+          "path": "docs/quant-refactor/04-execution-log.md",
+          "kind": "sha256",
+          "expected": "9c59b06948dcad6592dae8211321eab072958027490453f529b3bf9d72adf23e",
+          "actual": "30552507451b1ac0652e7cedf514d38eb22272630222266dc59f69fe8c52af64"
+        },
+        {
+          "path": "docs/quant-refactor/04-execution-log.md",
+          "kind": "length",
+          "expected": 27561,
+          "actual": 32634
+        }
+      ]
+    },
+    {
+      "name": "wp007",
+      "source": "docs/quant-refactor/evidence/wp007-20260816/source-hashes.json",
+      "entry_count": 17,
+      "mismatch_count": 0,
+      "mismatches": []
+    }
+  ],
+  "total_entries": 58,
+  "total_mismatches": 2
+}

@@ -1,0 +1,90 @@
+{
+  "captured_at_utc": "2026-08-16T09:27:02.311075+00:00",
+  "files": [
+    {
+      "length": 23838,
+      "path": "api/readiness.py",
+      "sha256": "595465bab879c97599a93cdd297bf92130a9c062269cab57199d769460473ce3"
+    },
+    {
+      "length": 172861,
+      "path": "app.py",
+      "sha256": "b0cd61f9c744aa7037777b5e3d522b222daf5422854097804f8b3222f72e87ed"
+    },
+    {
+      "length": 20063,
+      "path": "intraday_scanner/dashboard/opportunity_projection.py",
+      "sha256": "b5c263e38f9cd57b041332814477728066074752b98edabc3313fca4787e71d1"
+    },
+    {
+      "length": 3380,
+      "path": "intraday_scanner/dashboard/opportunity_projection_render.py",
+      "sha256": "56192ebfedea9c05e217e0b309d28b2eb64f9cb09c467316fa7da1fb64b19ed0"
+    },
+    {
+      "length": 5229,
+      "path": "intraday_scanner/dashboard/opportunity_projection_store.py",
+      "sha256": "55db223392341c6f152f0d2a0578fe860a9372664ca624451564258d31546cc9"
+    },
+    {
+      "length": 15576,
+      "path": "scripts/build_public.py",
+      "sha256": "b1ae1d91300093e1c432ebae25cab8ed76c16b7fd00c37ae621dbbbf09259fc2"
+    },
+    {
+      "length": 7515,
+      "path": "scripts/build_vercel_public_stage.ps1",
+      "sha256": "f3fdcc2f84cc1064d7806913c10c95740ffe2dca59c531db16a2f71efb09da40"
+    },
+    {
+      "length": 13802,
+      "path": "scripts/verify_public_artifact.py",
+      "sha256": "02a782a4d92e17a46e032f7da18628708357c7768646149e45868dacc8c67e44"
+    },
+    {
+      "length": 14608,
+      "path": "tests/test_opportunity_projection.py",
+      "sha256": "18e68bd4610f5a0b7ffefd3fc1b5805c7b915c824cf3e65fbdae4cbbcfa13f10"
+    },
+    {
+      "length": 5292,
+      "path": "tests/test_opportunity_projection_public.py",
+      "sha256": "816b70ee8143b9f1e0b28c4ea7d77afaed06da51e225aaf3e8170346e3bcdf73"
+    },
+    {
+      "length": 1423,
+      "path": "tests/test_opportunity_projection_streamlit.py",
+      "sha256": "43c8b69f14fdc409a3b951097d1a0ddad2c7c9edaccf80461e5662c9e0e1d86a"
+    },
+    {
+      "length": 2536,
+      "path": "tests/test_public_build_notifications.py",
+      "sha256": "f020f7b82bbd19def7464fc22979ed3e2b995202cd73b1dad80c74b116fdcd4e"
+    },
+    {
+      "length": 8816,
+      "path": "tests/test_vercel_health_readiness.py",
+      "sha256": "eee2c8c04a2a857637ae3671aaa2d86918992b6721fc35140295998d49bcc656"
+    },
+    {
+      "length": 5254,
+      "path": "tests/test_vercel_public_stage.py",
+      "sha256": "97502d4acfb24c358864ac5f50490a882877bea76eabd9033fcb558ff177beea"
+    },
+    {
+      "length": 34346,
+      "path": "web/assets/dawnstrike.css",
+      "sha256": "9308bb0bfff878a7e846920bd3802b54fe0c4d2f4ca53900c134caed2df56ef8"
+    },
+    {
+      "length": 72091,
+      "path": "web/assets/dawnstrike.js",
+      "sha256": "f5ea6687b65d2251887c839978cc20997caeb3dc656293dd65eeada12f63cf99"
+    },
+    {
+      "length": 26212,
+      "path": "web/index.html",
+      "sha256": "0c8622162b35e4ee8fe3d8fcdde2f604be4f0e4330586f367d89999faafd46f1"
+    }
+  ]
+}

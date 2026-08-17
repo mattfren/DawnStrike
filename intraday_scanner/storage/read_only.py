@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from intraday_scanner.errors import StorageError
+from intraday_scanner.storage.test_isolation import assert_test_database_isolated
 
 
 def connect_read_only(
@@ -15,6 +16,7 @@ def connect_read_only(
     row_factory: type[sqlite3.Row] | None = None,
 ) -> sqlite3.Connection:
     """Open an existing SQLite database with URI read-only and query_only enforcement."""
+    assert_test_database_isolated(db_path)
     path = Path(db_path)
     if not path.is_file():
         raise StorageError(f"Read-only SQLite database does not exist or is not a file: {path}")

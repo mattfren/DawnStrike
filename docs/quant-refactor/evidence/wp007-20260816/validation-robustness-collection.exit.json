@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_opportunity_validation_robustness.py --collect-only -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 2.095,
+  "ended_at_utc": "2026-08-16T06:49:34.594375+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:49:32.498897+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 53
+}

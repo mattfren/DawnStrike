@@ -426,6 +426,14 @@ td strong { color:var(--ink); font-weight:700; }
   .calendar-cell strong { font-size:.58rem; }
   .hero-actions .button { flex:1 1 auto; }
 }
+.opportunity-projection { margin-top:1rem; }
+.opportunity-grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); margin-top:1rem; }
+.opportunity-card { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:1rem; min-width:0; }
+.opportunity-card h4 { font-size:1rem; line-height:1.35; margin:0 0 .8rem; overflow-wrap:anywhere; }
+.opportunity-field { border-top:1px solid var(--line); display:grid; gap:.2rem; padding:.58rem 0; }
+.opportunity-field strong { color:var(--muted); font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; }
+.opportunity-field span { font-size:.82rem; line-height:1.4; overflow-wrap:anywhere; }
+.opportunity-guard { color:var(--muted); font-size:.74rem; line-height:1.4; margin:.8rem 0 0; }
 @media (prefers-reduced-motion:reduce) {
   html { scroll-behavior:auto; }
   *,*::before,*::after { animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; }

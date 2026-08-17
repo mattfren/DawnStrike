@@ -1074,7 +1074,22 @@ def _intent(
     signal_id = _signal_id(signal)
     ticker = str(signal.get("ticker") or "").upper()
     market_date = str(signal.get("market_date") or observation.get("market_date") or "")[:10]
-    decision_time = str(observation.get("observed_at") or observation.get("requested_at") or "")
+    trace = dict(decision_trace or {})
+    computed = trace.get("computed")
+    trace_decision_time = (
+        str(computed.get("decision_time") or "")
+        if isinstance(computed, dict)
+        else ""
+    )
+    requested_at = str(observation.get("requested_at") or "")
+    decision_time = (
+        trace_decision_time
+        or str(observation.get("observed_at") or requested_at)
+    )
+    if trace_decision_time and trace_decision_time != requested_at:
+        raise SnapshotValidationError(
+            "AlphaOps v5 decision trace does not match its requested evidence time."
+        )
     price = _number(observation.get("price"))
     intent_id = _intent_id(
         mode=mode,
@@ -1087,7 +1102,6 @@ def _intent(
         blocked_reason=blocked_reason,
         stable_block=stable_block,
     )
-    trace = dict(decision_trace or {})
     raw_signal_payload = signal.get("raw_payload_json")
     if not isinstance(raw_signal_payload, dict):
         raw_signal_payload = {}
@@ -1111,6 +1125,8 @@ def _intent(
         "blocked_reason": blocked_reason,
         "source_observation_id": str(observation.get("observation_id") or ""),
         "source_bar_hash_sha256": str(observation.get("source_bar_hash_sha256") or ""),
+        "source_observed_at": str(observation.get("observed_at") or ""),
+        "source_bar_completed_at": str(observation.get("bar_completed_at") or ""),
         "selection_id": str(signal.get("selection_id") or ""),
         "strategy_id": str(signal.get("strategy_id") or ALPHAOPS_STRATEGY_ID),
         "strategy_version": str(

@@ -1,0 +1,81 @@
+........................................................................ [ 36%]
+...................................F.................................... [ 73%]
+.....................................................                    [100%]
+================================== FAILURES ===================================
+____ test_multi_session_recall_is_exact_micro_aggregate[1-0.333333333333] _____
+
+caught_count = 1, expected = '0.333333333333'
+
+    @pytest.mark.parametrize(
+        ("caught_count", "expected"),
+        ((1, "0.333333333333"), (2, "0.666666666667")),
+    )
+    def test_multi_session_recall_is_exact_micro_aggregate(caught_count, expected) -> None:
+>       batches = tuple(
+            _session_miss_batch(
+                f"XNYS-2026-08-11-METRIC-{index}",
+                caught=index < caught_count,
+            )
+            for index in range(3)
+        )
+
+tests\test_opportunity_discovery_metrics.py:1265: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\test_opportunity_discovery_metrics.py:1266: in <genexpr>
+    _session_miss_batch(
+tests\test_opportunity_discovery_metrics.py:113: in _session_miss_batch
+    (_current_outcome_replay(), _watch_current_outcome_replay())
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_opportunity_missed.py:368: in _watch_current_outcome_replay
+    return _stored_replay_for_batch(_label_pipeline_result(_watch_pipeline_result()))
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_opportunity_missed.py:208: in _label_pipeline_result
+    return label_pipeline_outcomes(
+intraday_scanner\v2\opportunity\outcome_replay.py:122: in label_pipeline_outcomes
+    outcomes = _resolve_outcomes(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+result = PipelineResult(run_id='opportunity-run:ef332e25eba44f88df1670de', decision_at=datetime.datetime(2026, 8, 11, 9, 34, tz...execution_broker_network_or_persistence_path'), research_only=True, schema_version='v2.opportunity.pipeline_result.v2')
+receipt = OpportunityPersistenceReceipt(receipt_id='opportunity-persistence-receipt:4776e1cdbba28c5cbd0a726d', run_id='opportuni....timezone.utc), database_schema_version=28, research_only=True, schema_version='v2.opportunity.persistence_receipt.v2')
+source_dataset = OutcomeObservationDataset(source_dataset_id='outcome-source-dataset:10b41cc887842350fa813607', decision_at=datetime.da...0dc2639ee5a57589'), limitations=(), research_only=True, schema_version='v2.opportunity.outcome_observation_dataset.v1')
+policy = OutcomeLabelPolicy(policy_id='outcome-label-policy:89d13be5d59f01e6250b1410', policy_version='wp004-multi-run-fixture-...risk_evidence'>, research_only=True, promotion_eligible=False, schema_version='v2.opportunity.outcome_label_policy.v1')
+horizons = (OutcomeHorizon(horizon_id='outcome-horizon:6bb4d1a214561e210709b005', decision_at=datetime.datetime(2026, 8, 11, 9, 3...1, 13, 39, 1, tzinfo=datetime.timezone.utc), elapsed_seconds=301, schema_version='v2.opportunity.outcome_horizon.v1'),)
+recorded_at = datetime.datetime(2026, 8, 11, 13, 39, 2, tzinfo=datetime.timezone.utc)
+
+    def _resolve_outcomes(
+        *,
+        result: PipelineResult,
+        receipt: OpportunityPersistenceReceipt,
+        source_dataset: OutcomeObservationDataset,
+        policy: OutcomeLabelPolicy,
+        horizons: tuple[OutcomeHorizon, ...],
+        recorded_at: datetime,
+    ) -> tuple[OutcomeRecord, ...]:
+        _require_utc(recorded_at, "recorded_at")
+        _validate_receipt_result_binding(result, receipt)
+        if recorded_at < receipt.recorded_at:
+            raise ValueError("outcome batch cannot precede persistence receipt")
+        if source_dataset.decision_at != result.decision_at:
+            raise ValueError("outcome source dataset decision_at does not match pipeline")
+        if result.evaluations and not horizons:
+            raise ValueError("nonempty evaluations require at least one outcome horizon")
+        ordered_horizons = tuple(sorted(horizons, key=lambda item: (item.end_at, item.horizon_id)))
+        if horizons != ordered_horizons:
+            raise ValueError("outcome horizons must use canonical order")
+        decision_map = {item.evaluation_id: item for item in result.decisions}
+        risk_map = {item.evaluation_id: item for item in result.risk_evidence}
+        series_map = {item.symbol: item for item in source_dataset.series}
+        if set(series_map) != {item.symbol for item in result.evaluations}:
+            raise ValueError("outcome source series must exactly match evaluation symbols")
+        if any(
+            horizon.exchange_session_id != series_map[evaluation.symbol].exchange_session_id
+            for evaluation in result.evaluations
+            for horizon in horizons
+        ):
+>           raise ValueError("outcome horizon session does not match symbol source series")
+E           ValueError: outcome horizon session does not match symbol source series
+
+intraday_scanner\v2\opportunity\outcome_replay.py:185: ValueError
+=========================== short test summary info ===========================
+FAILED tests/test_opportunity_discovery_metrics.py::test_multi_session_recall_is_exact_micro_aggregate[1-0.333333333333]
+{"collected_count": 3156, "schema_version": "dawnstrike.pytest_shard.v1", "selected_count": 197, "shard_count": 16, "shard_index": 5}

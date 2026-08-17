@@ -1,0 +1,55 @@
+FF.                                                                      [100%]
+================================== FAILURES ===================================
+_________ test_artifact_gate_accepts_clean_explicit_no_trade_fixture __________
+
+tmp_path = WindowsPath('C:/Users/MattFields/AppData/Local/Temp/pytest-of-MattFields/pytest-2365/test_artifact_gate_accepts_cle0')
+
+    def test_artifact_gate_accepts_clean_explicit_no_trade_fixture(tmp_path: Path) -> None:
+        root = _write_publishable_fixture(
+            tmp_path,
+            snapshot_status="no_trade",
+            readiness_status="ready",
+            readiness_http_status=200,
+        )
+    
+        result = verify(root)
+    
+>       assert result["status"] == "PASS"
+E       AssertionError: assert 'FAIL' == 'PASS'
+E         
+E         - PASS
+E         + FAIL
+
+tests\test_daily_publish_gate.py:150: AssertionError
+____ test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture _____
+
+tmp_path = WindowsPath('C:/Users/MattFields/AppData/Local/Temp/pytest-of-MattFields/pytest-2365/test_artifact_gate_accepts_onl0')
+
+    def test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture(
+        tmp_path: Path,
+    ) -> None:
+        root = _write_publishable_fixture(
+            tmp_path,
+            snapshot_status="degraded",
+            readiness_status="not_ready",
+            readiness_http_status=503,
+        )
+    
+        blocked = verify(root)
+        approved = verify(root, allow_degraded=True)
+    
+        assert blocked["status"] == "FAIL"
+>       assert blocked["errors"] == [
+            "snapshot_not_publishable",
+            "readiness_not_publishable",
+        ]
+E       AssertionError: assert ['missing:dat..._publishable'] == ['snapshot_no..._publishable']
+E         
+E         At index 0 diff: 'missing:data/opportunity-projection.json' != 'snapshot_not_publishable'
+E         Left contains 4 more items, first extra item: 'snapshot_not_publishable'
+E         Use -v to get more diff
+
+tests\test_daily_publish_gate.py:168: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_daily_publish_gate.py::test_artifact_gate_accepts_clean_explicit_no_trade_fixture
+FAILED tests/test_daily_publish_gate.py::test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture

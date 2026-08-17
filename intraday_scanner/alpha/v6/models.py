@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from intraday_scanner.alpha.v6.contracts import canonical_hash
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_RETURN_TRUTH,
+    classify_canonical_return_truth,
+)
+from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
+from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash
 
 MIN_RETURN_MODEL_LABELS = 100
 MIN_GRADIENT_BOOSTING_LABELS = 500
@@ -41,13 +46,20 @@ class ModelEligibility:
 def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
     """Select only research model families whose data threshold is met."""
 
-    labels = len(dataset_rows)
-    dates = len({str(row.get("market_date") or "")[:10] for row in dataset_rows})
+    eligible_rows = current_training_rows(dataset_rows)
+    labels = len(eligible_rows)
+    dates = len({str(row.get("market_date") or "")[:10] for row in eligible_rows})
     research_rows = sum(
-        1 for row in dataset_rows if row.get("retrospective_research_eligible") is True
+        1 for row in eligible_rows if row.get("retrospective_research_eligible") is True
     )
     promotion_rows = sum(
-        1 for row in dataset_rows if row.get("prospective_promotion_eligible") is True
+        1 for row in eligible_rows if row.get("prospective_promotion_eligible") is True
+    )
+    quarantine = len(dataset_rows) - labels
+    quarantine_reasons = (
+        ("legacy_or_incomplete_contract_rows_quarantined",)
+        if quarantine
+        else ()
     )
     if labels < MIN_RETURN_MODEL_LABELS:
         return ModelEligibility(
@@ -59,6 +71,7 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
             retrospective_research_eligible_count=research_rows,
             prospective_promotion_eligible_count=promotion_rows,
             exact_exclusions=(
+                *quarantine_reasons,
                 "return_model_minimum_100_eligible_rows_not_met",
                 "insufficient_labels_are_not_imputed_or_subsampled",
             ),
@@ -73,6 +86,7 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
             retrospective_research_eligible_count=research_rows,
             prospective_promotion_eligible_count=promotion_rows,
             exact_exclusions=(
+                *quarantine_reasons,
                 "gradient_boosting_minimum_500_labels_or_60_dates_not_met",
             ),
         )
@@ -90,6 +104,46 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
         retrospective_research_eligible_count=research_rows,
         prospective_promotion_eligible_count=promotion_rows,
     )
+
+
+def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return rows independently authenticated against source label and decision."""
+
+    accepted: list[dict[str, Any]] = []
+    for row in dataset_rows:
+        label_value = row.get("source_label")
+        decision_value = row.get("source_decision")
+        label = label_value if isinstance(label_value, dict) else row
+        decision = decision_value if isinstance(decision_value, dict) else None
+        if decision is None:
+            continue
+        if not (
+            label.get("label_schema_version") == LABEL_SCHEMA_VERSION
+            and label.get("eligibility_policy_version")
+            == ELIGIBILITY_POLICY_VERSION
+            and classify_canonical_return_truth(label, decision=decision)
+            == CURRENT_RETURN_TRUTH
+            and label.get("learning_eligible") is True
+            and label.get("return_label_eligible") is True
+            and row.get("retrospective_research_eligible") is True
+            and str(row.get("decision_id") or "")
+            == str(label.get("decision_id") or "")
+            == str(decision.get("decision_id") or "")
+            and _same_number(
+                row.get("target_net_excess_return_pct"),
+                label.get("label_value"),
+            )
+        ):
+            continue
+        accepted.append(row)
+    return accepted
+
+
+def _same_number(left: object, right: object) -> bool:
+    try:
+        return float(str(left)) == float(str(right))
+    except (TypeError, ValueError):
+        return False
 
 
 def evidence_lineage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -163,5 +217,6 @@ __all__ = [
     "MIN_RETURN_MODEL_LABELS",
     "ModelEligibility",
     "evidence_lineage",
+    "current_training_rows",
     "model_eligibility",
 ]

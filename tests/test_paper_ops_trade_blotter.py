@@ -57,7 +57,9 @@ def _event(
 ) -> dict[str, object]:
     names_by_date = {"2026-01-05": "entry", "2026-01-06": "fill", "2026-01-07": "close"}
     canonical_run_id = (
-        _run_id(names_by_date[trade_date]) if run_id in {"run-entry", "run-fill", "run-close"} else run_id
+        _run_id(names_by_date[trade_date])
+        if run_id in {"run-entry", "run-fill", "run-close"}
+        else run_id
     )
     payload = dict(payload)
     if payload.get("run_id") in {"run-entry", "run-fill", "run-close"}:
@@ -254,7 +256,11 @@ def _seed_manifests(root: Path) -> None:
             "strategy_status": "active",
             "execution_policy_version": "paperops_daily_next_open_risk_v2",
             "strategy_semantics_fingerprint": "test-semantics",
-            "data_snapshot_id": { _run_id("entry"): "snapshot-entry", _run_id("fill"): "snapshot-fill", _run_id("close"): "snapshot-close" }[run_id],
+            "data_snapshot_id": {
+                _run_id("entry"): "snapshot-entry",
+                _run_id("fill"): "snapshot-fill",
+                _run_id("close"): "snapshot-close",
+            }[run_id],
             "warnings": "",
             "run_id": run_id,
         })

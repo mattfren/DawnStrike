@@ -1,0 +1,9 @@
+{
+  "command": "py -m pytest tests/test_opportunity_validation_robustness.py --collect-only -q -p no:cacheprovider",
+  "exit_code": 0,
+  "expected_count": 19,
+  "collected_count": 19,
+  "started_at": "2026-08-15T21:11:54.3809244+00:00",
+  "ended_at": "2026-08-15T21:11:55.6600187+00:00",
+  "duration_seconds": 1.248
+}

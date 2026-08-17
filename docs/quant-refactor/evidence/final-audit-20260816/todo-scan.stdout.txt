@@ -1,0 +1,29 @@
+docs/quant-refactor\02-requirements-ledger.md:71:| REQ-DOC-001 | Living documentation | Keep audit, architecture, ledger, findings, log, runbook, data limitations, and commands aligned with code. | Reproducibility and handoff. | `docs/quant-refactor` | all work | No certification until docs match implementation. | doc-contract tests where useful | No required TODO/placeholder or unsupported claim. | Cross-check paths/interfaces/statuses. | OPEN |
+docs/quant-refactor\00-current-state-audit.md:197:not implemented end to end.
+docs/quant-refactor\16-wp005-increment-a-sol-audit.md:195:and persistence are not implemented. Acceptance still depends on exact trading
+scripts\register_alphaops_tasks.ps1:22:    throw "Durable AlphaOps source configuration still contains REQUIRED placeholders."
+intraday_scanner\public_data\nasdaq_historical_fetcher.py:152:                    f"{symbol}: skipped Nasdaq placeholder volume row {market_date.isoformat()}"
+intraday_scanner\providers\web_source_base.py:200:        if not normalized or "REQUIRED" in normalized or "PLACEHOLDER" in normalized:
+intraday_scanner\dashboard\components.py:106:        state = "done" if step.get("done") else "todo"
+tests\test_opportunity_validation_persistence.py:208:        placeholders = ",".join("?" for _ in columns)
+tests\test_opportunity_validation_persistence.py:212:                f"({','.join(columns)}) VALUES ({placeholders})",
+tests\test_opportunity_validation_persistence.py:224:                f"({','.join(columns)}) VALUES ({placeholders})",
+intraday_scanner\v2\opportunity\features.py:152:                method="point_in_time_catalyst_adapter_not_in_package_001",
+intraday_scanner\storage\opportunity_miss_store.py:346:        placeholders = ",".join("?" for _ in RECEIPT_INSERT_ORDER)
+intraday_scanner\storage\opportunity_miss_store.py:349:            f"({','.join(RECEIPT_INSERT_ORDER)}) VALUES ({placeholders})",
+intraday_scanner\storage\opportunity_miss_store.py:359:        placeholders = ",".join("?" for _ in RECORD_INSERT_ORDER)
+intraday_scanner\storage\opportunity_miss_store.py:362:            f"({','.join(RECORD_INSERT_ORDER)}) VALUES ({placeholders})"
+intraday_scanner\storage\opportunity_miss_store.py:383:        placeholders = ",".join("?" for _ in BINDING_INSERT_ORDER)
+intraday_scanner\storage\opportunity_miss_store.py:386:            f"({','.join(BINDING_INSERT_ORDER)}) VALUES ({placeholders})"
+intraday_scanner\storage\opportunity_validation_schema.py:180:    placeholders = ",".join("?" for _ in VALIDATION_TABLES)
+intraday_scanner\storage\opportunity_validation_schema.py:185:            f"AND tbl_name IN ({placeholders})",
+tests\test_scheduler_fail_closed.py:36:        (scripts / name).write_text("placeholder", encoding="utf-8")
+tests\test_scheduler_doctor.py:21:        (scripts / name).write_text("placeholder", encoding="utf-8")
+intraday_scanner\storage\sqlite_store.py:4098:                    placeholders = ",".join("?" for _ in selected_ids)
+intraday_scanner\storage\sqlite_store.py:4103:                        WHERE scan_id = ? AND signal_id IN ({placeholders})
+intraday_scanner\storage\sqlite_store.py:6564:        placeholders = ", ".join("?" for _ in normalized)
+intraday_scanner\storage\sqlite_store.py:6583:                    WHERE universe_id = ? AND ticker IN ({placeholders})
+intraday_scanner\storage\sqlite_store.py:6648:        placeholders = ", ".join("?" for _ in names)
+intraday_scanner\storage\sqlite_store.py:6657:                    # Table and columns are allowlisted; placeholders contain only question marks.
+intraday_scanner\storage\sqlite_store.py:6658:                    f"INSERT OR IGNORE INTO {table_sql} ({names_sql}) VALUES ({placeholders})",
+tests\test_web_source_contract_mode.py:39:def test_forward_research_template_placeholder_fails_closed():

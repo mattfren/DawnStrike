@@ -1,0 +1,1 @@
+pwsh -NoProfile -File docs/quant-refactor/evidence/final-audit-20260816/verify_powershell_parse.ps1

@@ -75,6 +75,36 @@ def _write_publishable_fixture(
         encoding="utf-8",
     )
     scenario_hash = hashlib.sha256(scenarios.read_bytes()).hexdigest()
+    opportunity = root / "data" / "opportunity-projection.json"
+    opportunity.write_text(
+        json.dumps(
+            {
+                "schema_version": "dawnstrike.opportunity_projection.v1",
+                "state": "DISABLED",
+                "message": "",
+                "source_run_id": None,
+                "as_of": None,
+                "rows": [],
+                "row_count": 0,
+                "research_only": True,
+                "order_execution_enabled": False,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    opportunity_hash = hashlib.sha256(opportunity.read_bytes()).hexdigest()
+    (root / "data" / "opportunity-projection.json.manifest.json").write_text(
+        json.dumps(
+            {
+                "payload_sha256": opportunity_hash,
+                "byte_count": opportunity.stat().st_size,
+                "state": "DISABLED",
+                "row_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
     calendar = root / "data" / "calendar.json"
     calendar.write_bytes(b'{"days":[]}')
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
@@ -116,6 +146,10 @@ def _write_publishable_fixture(
                 root / "data" / "scenarios.json.manifest.json"
             ).read_bytes(),
             "release-manifest.json": (root / "release-manifest.json").read_bytes(),
+            "data/opportunity-projection.json": opportunity.read_bytes(),
+            "data/opportunity-projection.json.manifest.json": (
+                root / "data" / "opportunity-projection.json.manifest.json"
+            ).read_bytes(),
         }
     )
     file_hashes = {
@@ -129,6 +163,7 @@ def _write_publishable_fixture(
                 "build_id": "fixture-build",
                 "data_hash_sha256": snapshot_hash,
                 "publication_set_sha256": publication_set_hash,
+                "opportunity_projection_sha256": opportunity_hash,
                 "file_hashes": file_hashes,
             }
         ),

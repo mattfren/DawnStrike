@@ -37,6 +37,7 @@ const state = {
   calendarManifest: null,
   publicationSet: null,
   scenarios: null,
+  opportunityProjection: null,
   v6: null,
   stage: null,
   calendarMonth: null,
@@ -116,7 +117,7 @@ async function loadJson(path) {
 
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios] = await Promise.all([
+    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection] = await Promise.all([
       loadJson("/data/performance.json"),
       loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
@@ -126,6 +127,7 @@ async function init() {
       loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/v6-learning.json").catch(() => ({ payload: {}, status: 0 })),
       loadJson("/data/scenarios.json").catch(() => ({ payload: {}, status: 0 })),
+      loadJson("/data/opportunity-projection.json").catch(() => ({ payload: { state: "DISABLED", rows: [] }, status: 0 })),
     ]);
     state.data = snapshot.payload;
     state.readiness = readiness;
@@ -135,6 +137,7 @@ async function init() {
     state.publicationSet = publicationSet.payload;
     state.v6 = v6.payload;
     state.scenarios = scenarios.payload;
+    state.opportunityProjection = opportunityProjection.payload;
     state.stage = stage.payload;
     state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
     initializeCalendarFilters();
@@ -177,6 +180,7 @@ function render() {
   document.getElementById("kpi-system-note").textContent = state.readiness?.payload?.http_status ? `Readiness HTTP ${state.readiness.payload.http_status}` : "Readiness is separate from liveness";
   document.getElementById("kpi-context").textContent = latest ? returnContext(latest) : "Official paper context pending: cohort, period, denominator, cost treatment, coverage, and as-of time will appear with the latest record.";
   renderOverview(official, latest);
+  renderOpportunityProjection();
   renderPerformance(daily);
   renderResearch(rows);
   renderToday(rows, latest);
@@ -326,6 +330,85 @@ function renderOverview(official, latest) {
     const label = `${shortDate(item.market_date)}: ${formatPercentText(item.gross_return_pct)}`;
     return `<div class="mini-bar"><span class="mini-bar-fill ${value < 0 ? "negative" : ""}" style="height:${height}px" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span><span class="mini-bar-label">${escapeHtml(shortDate(item.market_date))}</span></div>`;
   }).join("") : "<span class=\"muted\">No official paper days yet.</span>";
+}
+
+function renderOpportunityProjection() {
+  const panel = document.getElementById("opportunity-projection");
+  const stateLabel = document.getElementById("opportunity-projection-state");
+  const message = document.getElementById("opportunity-projection-message");
+  const rowsRegion = document.getElementById("opportunity-projection-rows");
+  const payload = state.opportunityProjection || { state: "DISABLED", rows: [] };
+  if (!panel || !stateLabel || !message || !rowsRegion) return;
+  rowsRegion.replaceChildren();
+  if (payload.state === "DISABLED") {
+    panel.hidden = true;
+    message.textContent = "";
+    return;
+  }
+  panel.hidden = false;
+  stateLabel.textContent = opportunityStateLabel(payload.state);
+  if (payload.state === "DATA_UNAVAILABLE") {
+    message.textContent = typeof payload.message === "string" ? payload.message : "Opportunity data is unavailable.";
+    return;
+  }
+  if (payload.state === "NO_QUALIFYING") {
+    message.textContent = "NO QUALIFYING TRADE CURRENTLY EXISTS.";
+    return;
+  }
+  if (payload.state !== "QUALIFYING" || !Array.isArray(payload.rows)) {
+    stateLabel.textContent = "Data unavailable";
+    message.textContent = "Opportunity data is unavailable because the published payload did not verify.";
+    return;
+  }
+  message.textContent = typeof payload.message === "string" ? payload.message : "Persisted research opportunities only.";
+  payload.rows.slice(0, 5).forEach((row) => {
+    const card = document.createElement("article");
+    card.className = "opportunity-card";
+    const heading = document.createElement("h4");
+    heading.textContent = `#${projectionValue(row.rank)} ${projectionValue(row.symbol)} · ${projectionValue(row.strategy_id)} ${projectionValue(row.strategy_version)}`;
+    card.appendChild(heading);
+    appendOpportunityField(card, "Direction / decision", `${projectionValue(row.direction).toUpperCase()} / ${projectionValue(row.decision).toUpperCase()}`);
+    appendOpportunityField(card, "Lifecycle", projectionValue(row.lifecycle));
+    appendOpportunityField(card, "Evidence kind", projectionValue(row.evidence_kind));
+    appendOpportunityField(card, "Validation", projectionValue(row.validation_wording));
+    appendOpportunityField(card, "Market regime", `${projectionValue(row.market_regime)} (${projectionValue(row.market_regime_evidence_kind)})`);
+    appendOpportunityField(card, "Security regime", `${projectionValue(row.security_regime)} (${projectionValue(row.security_regime_evidence_kind)})`);
+    appendOpportunityField(card, "Triggered anomalies", projectionList(row.triggered_anomalies, (item) => `${projectionValue(item.name)}: ${projectionValue(item.strength)} (${projectionValue(item.evidence_kind)})`));
+    appendOpportunityField(card, "Liquidity", `${projectionValue(row.liquidity_score)} (${projectionValue(row.liquidity_evidence_kind)})`);
+    appendOpportunityField(card, "Why", projectionList(row.why));
+    appendOpportunityField(card, "Risks", projectionList(row.risks));
+    appendOpportunityField(card, "Vetoes", projectionList(row.vetoes));
+    appendOpportunityField(card, "Entry / invalidation / target", `${projectionValue(row.entry_price)} / ${projectionValue(row.invalidation_price)} / ${projectionValue(row.target_price)}`);
+    appendOpportunityField(card, "Limitations", projectionList(row.limitations));
+    const guard = document.createElement("p");
+    guard.className = "opportunity-guard";
+    guard.textContent = "Persisted decision only; no TAKE authorization, broker route, or lifecycle control.";
+    card.appendChild(guard);
+    rowsRegion.appendChild(card);
+  });
+}
+
+function appendOpportunityField(card, label, value) {
+  const row = document.createElement("div");
+  row.className = "opportunity-field";
+  const term = document.createElement("strong");
+  term.textContent = label;
+  const detail = document.createElement("span");
+  detail.textContent = value;
+  row.append(term, detail);
+  card.appendChild(row);
+}
+
+function opportunityStateLabel(value) {
+  return ({ DATA_UNAVAILABLE: "Data unavailable", NO_QUALIFYING: "No qualifying trade", QUALIFYING: "Verified research" }[value] || "Data unavailable");
+}
+
+function projectionValue(value) {
+  return value == null || value === "" ? "Not available" : String(value);
+}
+
+function projectionList(value, formatter = projectionValue) {
+  return Array.isArray(value) && value.length ? value.map(formatter).join(" · ") : "Not available";
 }
 
 function renderPerformance(daily) {

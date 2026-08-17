@@ -1,0 +1,11 @@
+{
+  "gate": "collect-only",
+  "command": "py -m pytest --collect-only -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T13:08:15.3728237+00:00",
+  "ended_at_utc": "2026-08-16T13:08:32.5208669+00:00",
+  "elapsed_seconds": 17.145971,
+  "exit_code": 0,
+  "stdout_bytes": 6809,
+  "stderr_bytes": 0
+}

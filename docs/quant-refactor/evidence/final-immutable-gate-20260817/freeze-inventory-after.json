@@ -1,0 +1,23 @@
+{
+  "pytest_inventory": {
+    "actual_inventory_sha256": "2fd3ff0b4fb5c965d1fb3fbc4efd6789e66b54d84364484fb86764e1b229b8d9",
+    "collect_exit_code": 0,
+    "expected_inventory_sha256": "2fd3ff0b4fb5c965d1fb3fbc4efd6789e66b54d84364484fb86764e1b229b8d9",
+    "node_count": 3156,
+    "nodes_exactly_equal": true,
+    "stderr": "",
+    "valid": true
+  },
+  "schema_version": "dawnstrike.final_gate_freeze_validation.v1",
+  "source_test": {
+    "actual_aggregate_sha256": "1a37b90920ec480a16a6b453575f1a46841324243cc84c529b3c9331db3a0f07",
+    "expected_aggregate_sha256": "1a37b90920ec480a16a6b453575f1a46841324243cc84c529b3c9331db3a0f07",
+    "file_count": 572,
+    "frozen_path_order_exact": true,
+    "mismatch_count": 0,
+    "mismatches": [],
+    "valid": true
+  },
+  "valid": true,
+  "validated_at_utc": "2026-08-17T05:35:52.420109+00:00"
+}

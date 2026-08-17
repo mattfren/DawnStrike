@@ -1,0 +1,17 @@
+{
+  "gate": "full-pytest",
+  "captured_at_utc": "2026-08-16T12:35:10.2629912+00:00",
+  "process_id": 25464,
+  "start_time": "2026-08-16T09:38:00.7853867Z",
+  "elapsed_seconds": 10629.504001,
+  "responding": true,
+  "cpu_seconds_before": 9971.96875,
+  "cpu_seconds_after": 9986.796875,
+  "sample_seconds": 15.038118,
+  "cpu_delta_seconds": 14.828125,
+  "making_cpu_progress": true,
+  "working_set_bytes": 479506432,
+  "stdout_artifact_exists_during_run": false,
+  "output_note": "run_gate.ps1 buffers redirected stdout in memory and writes the raw artifact only after child termination",
+  "bounded_remaining_window_seconds": 1800
+}

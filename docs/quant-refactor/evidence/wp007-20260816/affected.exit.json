@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_sqlite_read_only_store.py tests/test_no_persist_sqlite_semantics.py tests/test_v2_data_truth_paper_ops.py -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 123.948,
+  "ended_at_utc": "2026-08-16T06:42:24.881386+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:40:20.931660+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 160
+}

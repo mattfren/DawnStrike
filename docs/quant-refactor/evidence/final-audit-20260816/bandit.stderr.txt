@@ -1,0 +1,22 @@
+[main]	INFO	profile include tests: None
+[main]	INFO	profile exclude tests: None
+[main]	INFO	cli include tests: None
+[main]	INFO	cli exclude tests: None
+[main]	INFO	running on Python 3.13.14
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\dashboard\data_loader.py:2237
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\dashboard\data_loader.py:2241
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\calendar_snapshot.py:581
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\calendar_snapshot.py:586
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\calendar_snapshot.py:590
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\service.py:973
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\service.py:979
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\performance\service.py:983
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:4103
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:6583
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:6677
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:6677
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:6752
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:7477
+[tester]	WARNING	nosec encountered (B608), but no failed test on file intraday_scanner\storage\sqlite_store.py:7477
+[manager]	WARNING	Test in comment: validated is not a test name or id, ignoring
+[manager]	WARNING	Test in comment: identifier is not a test name or id, ignoring

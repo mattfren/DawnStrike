@@ -1,0 +1,1 @@
+py docs\quant-refactor\evidence\wp007-20260816\capture_active_state.py C:\r\dawnstrike-state\shadow_real.sqlite

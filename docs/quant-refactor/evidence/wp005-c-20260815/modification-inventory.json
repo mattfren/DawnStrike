@@ -1,0 +1,25 @@
+{
+  "schema_version": "wp005-c-modification-inventory.v1",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "added_product_files": [
+    "intraday_scanner/v2/opportunity/validation_robustness.py",
+    "intraday_scanner/v2/opportunity/validation_robustness_contracts.py",
+    "intraday_scanner/v2/opportunity/validation_robustness_controls.py",
+    "intraday_scanner/v2/opportunity/validation_robustness_math.py",
+    "intraday_scanner/v2/opportunity/validation_robustness_population.py",
+    "intraday_scanner/v2/opportunity/validation_robustness_report.py",
+    "tests/test_opportunity_validation_robustness.py"
+  ],
+  "updated_handoff_files": [
+    "docs/quant-refactor/luna/005-chronological-validation-and-execution-stress.md",
+    "docs/quant-refactor/luna/005-c-overfitting-stability-controls-handoff.md",
+    "docs/quant-refactor/04-execution-log.md"
+  ],
+  "evidence_root": "docs/quant-refactor/evidence/wp005-c-20260815/",
+  "accepted_wp005_a_b_source_modifications": 0,
+  "active_database_modifications": 0,
+  "runtime_or_ui_modifications": 0,
+  "network_or_broker_actions": 0,
+  "git_stage_commit_push_actions": 0
+}

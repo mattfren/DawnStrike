@@ -12,6 +12,7 @@ from intraday_scanner.errors import StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
 from intraday_scanner.storage.read_only import connect_read_only
+from intraday_scanner.storage.test_isolation import assert_test_database_isolated
 
 _V6_PAYLOAD_TABLE_ORDERS = {
     "alpha_v6_experiments": "created_at",
@@ -45,6 +46,7 @@ _V6_SINGLE_PAYLOAD_COLUMNS = {
 
 class SQLiteScanStore:
     def __init__(self, db_path: str | Path, *, read_only: bool = False):
+        assert_test_database_isolated(db_path)
         self.db_path = Path(db_path)
         self.read_only = read_only
 
@@ -4564,6 +4566,44 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load price observations: {exc}") from exc
 
+    def load_price_observation_records(
+        self,
+        *,
+        observation_id: str | None = None,
+        market_date: str | None = None,
+        ticker: str | None = None,
+        signal_id: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """Load immutable columns and JSON payload without merge precedence."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("observation_id", observation_id),
+            ("market_date", market_date[:10] if market_date else None),
+            ("ticker", ticker.upper() if ticker else None),
+            ("signal_id", signal_id),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        query = "SELECT * FROM price_observations"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY observed_at DESC, requested_at DESC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_raw_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not load raw price observations: {exc}"
+            ) from exc
+
     def persist_trade_intents(
         self,
         rows: list[dict[str, Any]],
@@ -4844,6 +4884,44 @@ class SQLiteScanStore:
                 return [_json_row(row) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load trade intents: {exc}") from exc
+
+    def load_trade_intent_records(
+        self,
+        *,
+        intent_id: str | None = None,
+        market_date: str | None = None,
+        ticker: str | None = None,
+        signal_id: str | None = None,
+        action: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """Load immutable intent columns and JSON without payload overwrite."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("intent_id", intent_id),
+            ("market_date", market_date[:10] if market_date else None),
+            ("ticker", ticker.upper() if ticker else None),
+            ("signal_id", signal_id),
+            ("action", action),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        query = "SELECT * FROM trade_intents"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY decision_time DESC, ticker ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+                return [_raw_json_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load raw trade intents: {exc}") from exc
 
     def persist_paper_positions(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         self.initialize()
@@ -6064,6 +6142,19 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 for row in rows:
+                    payload_json = json.dumps(row, sort_keys=True)
+                    identity = str(row.get("outcome_id") or "")
+                    existing = connection.execute(
+                        "SELECT payload_json FROM alpha_v6_outcomes WHERE outcome_id = ?",
+                        (identity,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[0]) != payload_json:
+                            raise StorageError(
+                                f"immutable V6 outcome conflict: {identity}"
+                            )
+                        skipped += 1
+                        continue
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO alpha_v6_outcomes
@@ -6087,7 +6178,7 @@ class SQLiteScanStore:
                             _float_or_none(row.get("net_excess_return_pct")),
                             str(row.get("source_bar_hash_sha256") or ""),
                             1 if row.get("learning_eligible") else 0,
-                            json.dumps(row, sort_keys=True),
+                            payload_json,
                         ),
                     )
                     if cursor.rowcount:
@@ -6286,6 +6377,19 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 for row in rows:
+                    payload_json = json.dumps(row, sort_keys=True)
+                    identity = str(row.get("label_id") or "")
+                    existing = connection.execute(
+                        "SELECT payload_json FROM alpha_v6_labels WHERE label_id = ?",
+                        (identity,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[0]) != payload_json:
+                            raise StorageError(
+                                f"immutable V6 label conflict: {identity}"
+                            )
+                        skipped += 1
+                        continue
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO alpha_v6_labels
@@ -6304,7 +6408,7 @@ class SQLiteScanStore:
                             1 if row.get("learning_eligible") is True else 0,
                             str(row.get("exclusion_reason") or "") or None,
                             str(row.get("source_bar_hash_sha256") or "") or None,
-                            json.dumps(row, sort_keys=True),
+                            payload_json,
                         ),
                     )
                     if cursor.rowcount:
@@ -6350,6 +6454,23 @@ class SQLiteScanStore:
         self.initialize()
         try:
             with self._connect() as connection:
+                payload_json = json.dumps(row, sort_keys=True)
+                identity = str(row.get("dataset_id") or "")
+                existing = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_datasets WHERE dataset_id = ?",
+                    (identity,),
+                ).fetchone()
+                if existing is not None:
+                    existing_payload = _json_value(existing[0])
+                    if (
+                        not isinstance(existing_payload, dict)
+                        or _immutable_semantics(existing_payload)
+                        != _immutable_semantics(row)
+                    ):
+                        raise StorageError(
+                            f"immutable V6 dataset conflict: {identity}"
+                        )
+                    return False
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO alpha_v6_datasets
@@ -6363,7 +6484,7 @@ class SQLiteScanStore:
                         str(row.get("training_cutoff") or "") or None,
                         int(row.get("row_count") or 0),
                         str(row.get("dataset_hash_sha256") or ""),
-                        json.dumps(row, sort_keys=True),
+                        payload_json,
                     ),
                 )
                 return bool(cursor.rowcount)
@@ -7515,6 +7636,20 @@ def _json_row(row: sqlite3.Row) -> dict[str, Any]:
     if isinstance(payload, dict):
         merged.update(payload)
     return merged
+
+
+def _raw_json_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Keep database columns distinct from an untrusted JSON projection."""
+
+    payload = _json_value(row["payload_json"])
+    return {
+        "columns": {
+            key: row[key]
+            for key in row.keys()
+            if key != "payload_json"
+        },
+        "payload_json": payload,
+    }
 
 
 def _prediction_run_row(row: sqlite3.Row) -> dict[str, Any]:

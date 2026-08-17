@@ -1,0 +1,1 @@
+py -m pytest tests/test_sqlite_read_only_store.py tests/test_no_persist_sqlite_semantics.py tests/test_v2_data_truth_paper_ops.py --collect-only -q -p no:cacheprovider

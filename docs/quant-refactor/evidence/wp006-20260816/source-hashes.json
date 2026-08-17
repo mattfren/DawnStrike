@@ -1,0 +1,97 @@
+[
+  {
+    "path": "intraday_scanner/storage/opportunity_validation_contracts.py",
+    "length": 27839,
+    "sha256": "71ef11c6be3daf3dcacceecf11e464157d5b04f5f6c243940232d477700865ef"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_validation_errors.py",
+    "length": 607,
+    "sha256": "187899e94b7bdd8fe8dbadd38ec1b7bb72be6c8d8d92c2ac21ea09d69ddd7b6f"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_validation_rows.py",
+    "length": 3500,
+    "sha256": "64908c90b0a3458491346addc470482d46150067f017138763778bf302cfed20"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_validation_schema.py",
+    "length": 8629,
+    "sha256": "fd8041322d1dca25eee807d2de288f8c1c926dbbff041fcae68a75e7eb2102a2"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_validation_store.py",
+    "length": 19244,
+    "sha256": "2925faeebd409079ebe21b86a9b171cea1a9a377a8ee618e7c21582e8902e33a"
+  },
+  {
+    "path": "intraday_scanner/storage/migrations.py",
+    "length": 99679,
+    "sha256": "43a5045f874b430792774ba348228c80216f4dedcaf9079340c8c4223d9ae24e"
+  },
+  {
+    "path": "intraday_scanner/storage/__init__.py",
+    "length": 2082,
+    "sha256": "80ebea34f058a5795b0b62b95eafd4d1eb7f79d0639af55a80a6dc75b35d3980"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_store.py",
+    "length": 45984,
+    "sha256": "7e9900da90111bc6f6d6c94bda88c8866491ca524c72218a289ad4cdc01f5e4a"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_outcome_schema.py",
+    "length": 13767,
+    "sha256": "2f25829de47cf313aceb59d6cea07343a13a81e78e2bcdb9cb9c5b1d1c97a43d"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_outcome_store.py",
+    "length": 37261,
+    "sha256": "85c7fd09233018cadc28968c69a6e3142ff5e5aa76a635f9581ac6349e0449a0"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_miss_schema.py",
+    "length": 9681,
+    "sha256": "4a28e41a19491174b446a0904fcdffb8ba8db02143ada969ff5bb1d79e5dc7e6"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_miss_store.py",
+    "length": 30406,
+    "sha256": "26163bc0f3f51c0606e6e1347f6f74c3186091584cd66d7b088f8124398c66e7"
+  },
+  {
+    "path": "intraday_scanner/storage/opportunity_metric_schema.py",
+    "length": 7257,
+    "sha256": "f2492014db4ddb47d34b95171e722e884d9dac5e78ccb2ab8acdc722ed49873b"
+  },
+  {
+    "path": "tests/test_intraday_evidence_migration.py",
+    "length": 29822,
+    "sha256": "2f2fb343019c5f7da32f3f0bff58266ccf7ecd594ded299e85219577ec2f076f"
+  },
+  {
+    "path": "tests/test_opportunity_persistence.py",
+    "length": 26126,
+    "sha256": "f8764ad6ca4e54b41777f915e5f8aa983d2e84e7b015a4a1e9e518944d9fa950"
+  },
+  {
+    "path": "tests/test_opportunity_outcome_persistence.py",
+    "length": 52034,
+    "sha256": "0fc39b213dc2a965179ec64d674712b689e1ca94135becb1455613419bf2a9e7"
+  },
+  {
+    "path": "tests/test_opportunity_validation_persistence.py",
+    "length": 20121,
+    "sha256": "ad092c0f87cdd773144609ebb0fe8023cf54ad32d5c1daed10ea5746472c4d21"
+  },
+  {
+    "path": "docs/quant-refactor/04-execution-log.md",
+    "length": 27561,
+    "sha256": "9c59b06948dcad6592dae8211321eab072958027490453f529b3bf9d72adf23e"
+  },
+  {
+    "path": "docs/quant-refactor/luna/006-durable-validation-persistence-handoff.md",
+    "length": 7913,
+    "sha256": "12aa2fd5e7e0461cbd19c8fc4f2e13d6b2ac020a18b7604234c6d40d9fab2e38"
+  }
+]

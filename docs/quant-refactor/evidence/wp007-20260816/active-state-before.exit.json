@@ -1,0 +1,10 @@
+{
+  "command": "py docs\\quant-refactor\\evidence\\wp007-20260816\\capture_active_state.py C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 1.854,
+  "ended_at_utc": "2026-08-16T06:40:02.060006+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:40:00.206054+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 731
+}

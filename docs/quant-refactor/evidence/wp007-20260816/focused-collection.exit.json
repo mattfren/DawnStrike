@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_opportunity_projection.py tests/test_opportunity_projection_public.py tests/test_opportunity_projection_streamlit.py --collect-only -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 3.207,
+  "ended_at_utc": "2026-08-16T06:49:35.591607+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:49:32.384186+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 139
+}

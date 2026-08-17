@@ -278,6 +278,7 @@ def run_alpha_v6_learning(
     result = run_alpha_v6_weekly_training(store, code_sha=code_sha)
     return {
         **result,
+        "model_run": result["training"],
         "deprecated_command": "alpha-v6-learn; use alpha-v6-train-weekly",
     }
 

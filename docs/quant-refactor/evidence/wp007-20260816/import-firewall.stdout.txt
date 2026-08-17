@@ -1,0 +1,8 @@
+{
+  "adapter_product_modules_loaded": [],
+  "ast_file_count": 77,
+  "ast_violations": [],
+  "core_dashboard_modules_loaded": [],
+  "projection_forbidden_modules_loaded": [],
+  "renderer_loaded_streamlit": false
+}

@@ -50,6 +50,10 @@ SCENARIO_MANIFEST_PATH = _artifact_path(
     PUBLIC_ROOT / "data" / "scenarios.json.manifest.json",
     PUBLIC_ROOT / "data" / "scenarios.json.manifest.json",
 )
+OPPORTUNITY_PATH = PUBLIC_ROOT / "data" / "opportunity-projection.json"
+OPPORTUNITY_MANIFEST_PATH = (
+    PUBLIC_ROOT / "data" / "opportunity-projection.json.manifest.json"
+)
 PUBLICATION_SET_PATH = PUBLIC_ROOT / "data" / "publication-set.json"
 BUILD_MANIFEST_PATH = PUBLIC_ROOT / "build-manifest.json"
 REQUIRED_HASHED_FILES = {
@@ -65,6 +69,8 @@ REQUIRED_HASHED_FILES = {
     "data/calendar.json.manifest.json",
     "data/scenarios.json",
     "data/scenarios.json.manifest.json",
+    "data/opportunity-projection.json",
+    "data/opportunity-projection.json.manifest.json",
     "data/publication-set.json",
     "release-manifest.json",
 }
@@ -165,6 +171,17 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         except (ValueError, TypeError):
             failures.append("scenario_unreadable")
             scenario_bytes = b""
+    opportunity_manifest = _object_dict(PUBLIC_STATE.get("opportunity_manifest"))
+    encoded_opportunity = PUBLIC_STATE.get("opportunity_b64")
+    if not isinstance(encoded_opportunity, str):
+        failures.append("opportunity_missing")
+        opportunity_bytes = b""
+    else:
+        try:
+            opportunity_bytes = base64.b64decode(encoded_opportunity, validate=True)
+        except (ValueError, TypeError):
+            failures.append("opportunity_unreadable")
+            opportunity_bytes = b""
     if not snapshot_manifest:
         failures.append("snapshot_manifest_missing")
     else:
@@ -212,6 +229,7 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         != scenario_manifest.get("payload_sha256")
     ):
         failures.append("publication_set_scenario_hash_mismatch")
+    failures.extend(_opportunity_failures(opportunity_bytes, opportunity_manifest))
     if not build_manifest:
         failures.append("build_manifest_missing")
     if not build_manifest.get("source_sha"):
@@ -227,6 +245,11 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
         != publication_set.get("publication_set_sha256")
     ):
         failures.append("build_publication_set_hash_mismatch")
+    if (
+        build_manifest.get("opportunity_projection_sha256")
+        != opportunity_manifest.get("payload_sha256")
+    ):
+        failures.append("build_opportunity_projection_hash_mismatch")
     file_hashes = build_manifest.get("file_hashes")
     if not isinstance(file_hashes, dict):
         failures.append("file_hashes_missing")
@@ -263,12 +286,17 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("scenario_missing")
     if not SCENARIO_MANIFEST_PATH.is_file():
         failures.append("scenario_manifest_missing")
+    if not OPPORTUNITY_PATH.is_file():
+        failures.append("opportunity_missing")
+    if not OPPORTUNITY_MANIFEST_PATH.is_file():
+        failures.append("opportunity_manifest_missing")
     if not BUILD_MANIFEST_PATH.is_file():
         failures.append("build_manifest_missing")
     snapshot_manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
     calendar_manifest: dict[str, object] = {}
     scenario_manifest: dict[str, object] = {}
+    opportunity_manifest: dict[str, object] = {}
     publication_set: dict[str, object] = {}
     if SNAPSHOT_PATH.is_file() and SNAPSHOT_MANIFEST_PATH.is_file():
         try:
@@ -326,6 +354,15 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
                 failures.append("scenario_calibration_disclosure_missing")
         except OSError:
             failures.append("scenario_unreadable")
+    if OPPORTUNITY_PATH.is_file() and OPPORTUNITY_MANIFEST_PATH.is_file():
+        try:
+            opportunity_bytes = OPPORTUNITY_PATH.read_bytes()
+            opportunity_manifest = _read_object(OPPORTUNITY_MANIFEST_PATH)
+            failures.extend(
+                _opportunity_failures(opportunity_bytes, opportunity_manifest)
+            )
+        except OSError:
+            failures.append("opportunity_unreadable")
     publication_set = _read_object(PUBLICATION_SET_PATH)
     if (
         publication_set.get("performance_payload_sha256")
@@ -355,6 +392,11 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         != publication_set.get("publication_set_sha256")
     ):
         failures.append("build_publication_set_hash_mismatch")
+    if (
+        build_manifest.get("opportunity_projection_sha256")
+        != opportunity_manifest.get("payload_sha256")
+    ):
+        failures.append("build_opportunity_projection_hash_mismatch")
     file_hashes = build_manifest.get("file_hashes")
     if not isinstance(file_hashes, dict):
         failures.append("file_hashes_missing")
@@ -383,6 +425,52 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("pipeline_not_ready")
     failures.extend(_freshness_failures(readiness.get("market_date")))
     return list(dict.fromkeys(failures))
+
+
+def _opportunity_failures(
+    payload_bytes: bytes,
+    manifest: dict[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    if not manifest:
+        failures.append("opportunity_manifest_missing")
+        return failures
+    if manifest.get("payload_sha256") != hashlib.sha256(payload_bytes).hexdigest():
+        failures.append("opportunity_hash_mismatch")
+    if manifest.get("byte_count") != len(payload_bytes):
+        failures.append("opportunity_byte_count_mismatch")
+    try:
+        parsed = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        failures.append("opportunity_unreadable")
+        return failures
+    if not isinstance(parsed, dict):
+        failures.append("opportunity_payload_invalid")
+        return failures
+    rows = parsed.get("rows")
+    if not isinstance(rows, list):
+        failures.append("opportunity_rows_invalid")
+        rows = []
+    if len(rows) > 5:
+        failures.append("opportunity_row_limit_exceeded")
+    if parsed.get("row_count") != len(rows):
+        failures.append("opportunity_row_count_mismatch")
+    if parsed.get("state") not in {
+        "DISABLED",
+        "DATA_UNAVAILABLE",
+        "NO_QUALIFYING",
+        "QUALIFYING",
+    }:
+        failures.append("opportunity_state_invalid")
+    if parsed.get("research_only") is not True:
+        failures.append("opportunity_research_only_missing")
+    if parsed.get("order_execution_enabled") is not False:
+        failures.append("opportunity_execution_boundary_invalid")
+    if manifest.get("state") != parsed.get("state"):
+        failures.append("opportunity_manifest_state_mismatch")
+    if manifest.get("row_count") != parsed.get("row_count"):
+        failures.append("opportunity_manifest_row_count_mismatch")
+    return failures
 
 
 def _freshness_failures(value: object) -> list[str]:

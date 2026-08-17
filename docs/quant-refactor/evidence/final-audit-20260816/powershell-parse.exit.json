@@ -1,0 +1,11 @@
+{
+  "gate": "powershell-parse",
+  "command": "pwsh -NoProfile -File docs/quant-refactor/evidence/final-audit-20260816/verify_powershell_parse.ps1",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:20:04.4805811+00:00",
+  "ended_at_utc": "2026-08-16T10:20:05.3388188+00:00",
+  "elapsed_seconds": 0.856132,
+  "exit_code": 0,
+  "stdout_bytes": 23,
+  "stderr_bytes": 0
+}

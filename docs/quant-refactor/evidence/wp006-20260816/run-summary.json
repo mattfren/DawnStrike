@@ -1,0 +1,75 @@
+{
+  "terminal": "PASS_CANDIDATE_FOR_SOL_ADJUDICATION",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "implementation_repair_cycles": 0,
+  "evidence_script_correction_cycles": 2,
+  "gates": {
+    "focused": {
+      "collected": 15,
+      "passed": 15,
+      "exit": 0,
+      "elapsed_seconds": 2459.471
+    },
+    "robustness": {
+      "collected": 19,
+      "passed": 19,
+      "exit": 0,
+      "elapsed_seconds": 393.32
+    },
+    "main": {
+      "collected": 656,
+      "passed": 656,
+      "exit": 0,
+      "elapsed_seconds": 9734.464
+    },
+    "affected": {
+      "collected": 139,
+      "passed": 139,
+      "exit": 0,
+      "elapsed_seconds": 128.315
+    },
+    "ruff": {
+      "exit": 0,
+      "elapsed_seconds": 0.294
+    },
+    "mypy": {
+      "exit": 0,
+      "elapsed_seconds": 2.536
+    },
+    "compileall": {
+      "exit": 0,
+      "elapsed_seconds": 0.363
+    },
+    "diff_check": {
+      "exit": 0,
+      "elapsed_seconds": 0.253
+    },
+    "import_firewall": {
+      "exit": 0,
+      "elapsed_seconds": 0.875
+    },
+    "schema": {
+      "exit": 0,
+      "elapsed_seconds": 4.319
+    }
+  },
+  "active_state": {
+    "before_sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+    "after_sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+    "hash_unchanged": true,
+    "before_length": 198836224,
+    "after_length": 198836224,
+    "length_unchanged": true,
+    "before_sidecars": [],
+    "after_sidecars": [],
+    "no_sidecars_before": true,
+    "no_sidecars_after": true
+  },
+  "limitations": [
+    "No real locked-OOS result was run or invented.",
+    "No requirement or finding was closed.",
+    "No active-state migration or write was attempted.",
+    "No promotion, TAKE authorization, production action, commit, stage, or push occurred."
+  ]
+}

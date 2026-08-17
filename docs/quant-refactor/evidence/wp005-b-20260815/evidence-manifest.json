@@ -1,0 +1,156 @@
+{
+  "artifacts": {
+    "docs/quant-refactor/evidence/wp005-b-20260815/affected.command.txt": {
+      "sha256": "E0A825B636D162F42FA78FE644019890A9B76AE1E3B2FA0A58AED91D61FD2846",
+      "size_bytes": 154
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/affected.exit.json": {
+      "sha256": "D4CD7EE0A99C56DC4206952756D75940DF32EF1A607F5519D70F7F641D693417",
+      "size_bytes": 19351
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/affected.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/affected.stdout.log": {
+      "sha256": "165CC1F8F89AC01D3D4E553D1A917F4EECD72A284B646D0031B97026A03A4A66",
+      "size_bytes": 162
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/evidence-packet.md": {
+      "sha256": "364205C0F01860689C5A42412273009C3430A586350740A091AFC7F0F42FDA2F",
+      "size_bytes": 4855
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/gate-lease.json": {
+      "sha256": "267E60716F326D6AD9B7A46B2D643E275FF55525CE9FB2EE0430F72DC58873DA",
+      "size_bytes": 359
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/gate_runner.py.txt": {
+      "sha256": "9C83E524AC2A1EB2305008FBAABBF04D5CCA8F85655DB87F51156AF02B5E5AE4",
+      "size_bytes": 21975
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/main.command.txt": {
+      "sha256": "84381F8519EB28CB909EB195B0B52B2C2A0726A127D2FD59BAED114D923F05F1",
+      "size_bytes": 591
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/main.exit.json": {
+      "sha256": "317BE9D6CC58113746B58064C3C139B5C4C76B4CAC580108E4328B26295D701C",
+      "size_bytes": 19873
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/main.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/main.stdout.log": {
+      "sha256": "C3A094C7145142311BBC6ADB59EF59AA520B80EA67EB225C047712C2D54674FD",
+      "size_bytes": 810
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-attempt1.json": {
+      "sha256": "CF202972CB9673339099BC52D3C8C554AA37656C4DB72C4BD80913614403AEDA",
+      "size_bytes": 11823
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection-attempt1.exit.json": {
+      "sha256": "67F12412C0A69176362827D26F2B6F28BF80ABF14B97A1ED4AD973FA69317F23",
+      "size_bytes": 18316
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection-attempt1.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection-attempt1.stdout.log": {
+      "sha256": "E5D83E262D29082DE3E57099318094D561F00863E16630CBF4FB39D71779EF47",
+      "size_bytes": 625
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection.command.txt": {
+      "sha256": "0655C8608FA170D9EBB0EC6E3703CF6151DF4716D3D77CE40B143B4DEF8637BB",
+      "size_bytes": 606
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection.exit.json": {
+      "sha256": "E41C0D7F433B057A084E3835493D519C00CE40E0420983C1E076160E913EA860",
+      "size_bytes": 19490
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight-collection.stdout.log": {
+      "sha256": "E5D83E262D29082DE3E57099318094D561F00863E16630CBF4FB39D71779EF47",
+      "size_bytes": 625
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/preflight.json": {
+      "sha256": "22E391EB143A549E11B631A2878E59AEFE03C4D7FB362FC82C1F3936394C6EDE",
+      "size_bytes": 13423
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-compileall.command.txt": {
+      "sha256": "A48095E6E4F962E4CE5AE2510749E3FC920300CA1EF036F9EB4303ABB9796B5C",
+      "size_bytes": 46
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-compileall.exit.json": {
+      "sha256": "C214600C93DD2ADAD2916FB98E7A8363ADD28E4251E17B0DD1E790AFD1DCB9AC",
+      "size_bytes": 20863
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-compileall.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-compileall.stdout.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-diff-check.command.txt": {
+      "sha256": "ACD638462A00B8A4D4D56C54E192A91F6841EF9B734FA45B0276206862AE3830",
+      "size_bytes": 18
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-diff-check.exit.json": {
+      "sha256": "2B66321B969D38352AA98C99864495FF23C558A7F24CCABBD4128B2ED466FEFC",
+      "size_bytes": 21471
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-diff-check.stderr.log": {
+      "sha256": "EA28BC10C9EB94218BCEDC4E73FFB7CBE1129EC8038AAA739BCF4BA9BA7AB1E9",
+      "size_bytes": 743
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-diff-check.stdout.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-mypy.command.txt": {
+      "sha256": "6790C72EB1A187317ECA86319C6745B63B6E05EB02CE9C12C0F3CADC28116223",
+      "size_bytes": 29
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-mypy.exit.json": {
+      "sha256": "C79CFB6E5829741B76EFC14C417A6C2F5C15F020BCE65B758D781E637CE2E04A",
+      "size_bytes": 20131
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-mypy.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-mypy.stdout.log": {
+      "sha256": "503D0E0625C0A4B0C6726D357A34AE125B618A5F8E3774F13CF7CFFBC6D9B386",
+      "size_bytes": 601
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-ruff.command.txt": {
+      "sha256": "1E347DE8F07F4314EE93E610565272D2A48B7DC261D6BBFCD355C14F13C91A8D",
+      "size_bytes": 20
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-ruff.exit.json": {
+      "sha256": "3181161FAEF38E6EE54FBFC2B8735D1C10D33FC9099CE499951034BC9BBB73DD",
+      "size_bytes": 19480
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-ruff.stderr.log": {
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "size_bytes": 0
+    },
+    "docs/quant-refactor/evidence/wp005-b-20260815/static-ruff.stdout.log": {
+      "sha256": "82B3E6A6C090A57601D22943BD23FCA9218D1031DBE5A7B754092F9A156B4F18",
+      "size_bytes": 19
+    }
+  },
+  "branch": "codex/sol-quant-refactor-20260811",
+  "generated_at_utc": "2026-08-15T19:51:08.982455Z",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "manifest_self_hash": "external companion and terminal return; self-excluded to avoid recursive hashing",
+  "root": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "schema": "dawnstrike.wp005_b.durable_evidence_manifest.v1",
+  "terminal_material_delta": "PASS",
+  "work_package": "WP005-B"
+}

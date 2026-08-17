@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_opportunity_validation_metrics.py tests/test_opportunity_validation.py tests/test_opportunity_metric_persistence.py tests/test_opportunity_discovery_metrics.py tests/test_opportunity_miss_persistence.py tests/test_opportunity_missed.py tests/test_opportunity_outcomes.py tests/test_opportunity_outcome_persistence.py tests/test_opportunity_persistence.py tests/test_intraday_evidence_migration.py tests/test_opportunity_contracts.py tests/test_opportunity_features.py tests/test_opportunity_pipeline.py tests/test_opportunity_universe_risk.py -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 9811.088,
+  "ended_at_utc": "2026-08-16T09:23:52.129202+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:40:20.859726+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 800
+}

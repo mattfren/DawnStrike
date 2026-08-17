@@ -1,0 +1,11 @@
+{
+  "gate": "pip-check",
+  "command": "py -m pip check",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:19:45.2651617+00:00",
+  "ended_at_utc": "2026-08-16T10:19:54.1056682+00:00",
+  "elapsed_seconds": 8.838522,
+  "exit_code": 0,
+  "stdout_bytes": 31,
+  "stderr_bytes": 0
+}

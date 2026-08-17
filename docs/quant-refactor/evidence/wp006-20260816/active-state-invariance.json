@@ -1,0 +1,12 @@
+{
+  "before_sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+  "after_sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+  "hash_unchanged": true,
+  "before_length": 198836224,
+  "after_length": 198836224,
+  "length_unchanged": true,
+  "before_sidecars": [],
+  "after_sidecars": [],
+  "no_sidecars_before": true,
+  "no_sidecars_after": true
+}

@@ -1,0 +1,648 @@
+{
+  "created_at_utc": "2026-08-17T00:47:40.158037+00:00",
+  "entries": [
+    {
+      "length": 888,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/audit_recovery_processes.ps1",
+      "sha256": "01ea7c5a6fb0fea8f57839bbbd16e7e16b21383bbd81351def4f9d10ce50f536"
+    },
+    {
+      "length": 188,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-collection.command.txt",
+      "sha256": "2a3ee816c1f48cb99162ee228d6a54213bf9b7b88d067626ea50d6afa331b784"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-collection.exit.json",
+      "sha256": "321920a1a3d0aa2a82680b833bf75afb3b3fe642e0614af8a375330f2ad14bc9"
+    },
+    {
+      "length": 24436,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-collection.manifest.json",
+      "sha256": "330b7e5fef0d5caf7180648a4ec48235645bad5105d5ce1db0404a44fd8ff450"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-collection.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 135,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-collection.stdout.txt",
+      "sha256": "eb7fc6594ec41f93dc8134be5e77d9b6a8a6fe44a162f72e2dd4ec88c7db5a15"
+    },
+    {
+      "length": 87,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-inventory.command.txt",
+      "sha256": "97ec0b71c773f2652bcbcd520f2f60a39ed9a44878697b16930fcc27b7ed7f4e"
+    },
+    {
+      "length": 229,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-inventory.exit.json",
+      "sha256": "0e9582c85b78813956a70d15c51ce5a31c7e25f9e1b87ef5b2971f124de4b352"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-inventory.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 110,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-inventory.stdout.txt",
+      "sha256": "b370cc9c511526fb2365bca4b4f293866cfedcf10be6a59b5ee79a5b5662c8c5"
+    },
+    {
+      "length": 390997,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/canonical-pytest-inventory.json",
+      "sha256": "fea912fd072e9b59223b0e9dc549b2004bceff62f7789d43f57fdd90d80defc9"
+    },
+    {
+      "length": 1821,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/capture_freeze.py",
+      "sha256": "de8d727c80a455576a4350410dd31c8bc5496cd6ad956d6424d4fd7f8506cd2a"
+    },
+    {
+      "length": 1065,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/capture_inventory.py",
+      "sha256": "8d61fcafd42a810128ab2c18c3e6d444b47d96906b0e8b188bfe0824396dc4ce"
+    },
+    {
+      "length": 2603,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/capture_recovery_active_state.py",
+      "sha256": "7f24d167ede767fad22819c350a7b662b61c3447b27cd9441b1e6fac8e898058"
+    },
+    {
+      "length": 140,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-after.command.txt",
+      "sha256": "aec6ce2758d042d5b5afd5d4fff50fbde98289113488216ca51aa5cfcea1d46b"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-after.exit.json",
+      "sha256": "f6dde0f3ee9b5b727f3a1a1927d4ddeec758c7e7583ef7eaa2ff348110be974d"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-after.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 852,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-after.stdout.txt",
+      "sha256": "7a24a9cfb404364e51d741c5e7f92e40acfc7f8df25d72493acbc6f4734c484a"
+    },
+    {
+      "length": 140,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-before.command.txt",
+      "sha256": "aec6ce2758d042d5b5afd5d4fff50fbde98289113488216ca51aa5cfcea1d46b"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-before.exit.json",
+      "sha256": "b88d41d4da0a1ceacd159d35894f0ef8a0e64f83cd92dfe6244bc1cbd9f1039c"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-before.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 852,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-active-state-before.stdout.txt",
+      "sha256": "3f96d4dc5bba0ac0daa4538f832cee21557e9c05c071a85259276c2cd7a3a108"
+    },
+    {
+      "length": 3433,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-combined-result.payload.json",
+      "sha256": "7d1f5e3d6879cbec3f508003d857e2aca6b083d3922a44041d6e1a150105e27b"
+    },
+    {
+      "length": 1108,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-evidence-index.md",
+      "sha256": "09815ee48c8cb286e68860b9d67c41db04f331a5be18480c22297e6a24d27c05"
+    },
+    {
+      "length": 96,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-after.command.txt",
+      "sha256": "8ea6c488b70b5c5f4991cd36d0f8398d2d344a8444f598a8092d0e48daa73c5c"
+    },
+    {
+      "length": 229,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-after.exit.json",
+      "sha256": "89da6c9739e0bfe48abe7d047cfe90019f1979a8a736b13bb842a59c4068d613"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-after.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 440,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-after.stdout.txt",
+      "sha256": "f0050c0f78b3ed62c40bf61cec7c891da62fefa94798ac24060eef5a44eb2049"
+    },
+    {
+      "length": 96,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-before.command.txt",
+      "sha256": "8ea6c488b70b5c5f4991cd36d0f8398d2d344a8444f598a8092d0e48daa73c5c"
+    },
+    {
+      "length": 229,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-before.exit.json",
+      "sha256": "b9786a33c9bd8a37088a90e43bd84f3b8162f6f95228045a1c55095963ce6bf3"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-before.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 440,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-inventory-before.stdout.txt",
+      "sha256": "9017a9dc3615c32f5cb46eccd414245e6747a53c28f54ba9f8f2236a58f43240"
+    },
+    {
+      "length": 144,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-after.command.txt",
+      "sha256": "ffd19b086edebb7b7427970c01a3bd1991d4011ba48d9ac913fdac3fca866083"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-after.exit.json",
+      "sha256": "29875fe03ad5bf287cb4fa478dbe9d44179b9513c323967fb322dd192425dd12"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-after.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 278,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-after.stdout.txt",
+      "sha256": "c4206ef44261eecd5b42ad83d4b4e95f052274cd6371b3d6aa92a9df9e68cbe0"
+    },
+    {
+      "length": 144,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-before.command.txt",
+      "sha256": "ffd19b086edebb7b7427970c01a3bd1991d4011ba48d9ac913fdac3fca866083"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-before.exit.json",
+      "sha256": "150d8891b8a072dc8720f7c080cdde08e75a7e7afa97ed46cd42f1f2605d9abf"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-before.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 278,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-process-audit-before.stdout.txt",
+      "sha256": "61cc712a1c28e1da0224cd1d919f8a143990fda33d93af33f6b98a363a2384c0"
+    },
+    {
+      "length": 93,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-shard-validation.command.txt",
+      "sha256": "4cd4f45898be0a9218994e4c419d67f0ea2e7a780d95ff1e780a9e847b5c2bae"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-shard-validation.exit.json",
+      "sha256": "a4bcbba759caf59878c77590aca9ccfa395e828a251a0fae83d0f05142aa26d6"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-shard-validation.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 54376,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-shard-validation.stdout.txt",
+      "sha256": "cf39aa498b672c81ade0c283823355c46fb7ec39259b5a7ee87bba61bedfb871"
+    },
+    {
+      "length": 97,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-after.command.txt",
+      "sha256": "72291863fa32c74a51101b00bf3fbad8e391c20acfdb87794f723a7e06e5d4ce"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-after.exit.json",
+      "sha256": "1e582d11f00a6840a652cda0052cce48cf054e2efbc228c32496a56a11c31c99"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-after.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 415,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-after.stdout.txt",
+      "sha256": "0d357a04ae177e21a6ebe8ffcb0098cea3257d2e5c83c161c7ff508b7d5dd90e"
+    },
+    {
+      "length": 97,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-before.command.txt",
+      "sha256": "72291863fa32c74a51101b00bf3fbad8e391c20acfdb87794f723a7e06e5d4ce"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-before.exit.json",
+      "sha256": "39dac3ef1e9cf8c881cc24d1833c644fe3f90f5de5e942a63e7047645b9ac03e"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-before.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 415,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/recovery-source-freeze-before.stdout.txt",
+      "sha256": "1660adbb0b2b1ba7bcb7fab9b86f867e88468decbbf8f8edd9cf33e48c35e14c"
+    },
+    {
+      "length": 1922,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/run_evidence_command.py",
+      "sha256": "33e2bbc9e22b146d26e42a53d24c593c5cb1765f767326d65005e792f2d9cd11"
+    },
+    {
+      "length": 9551,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/seal_recovery_terminal.py",
+      "sha256": "c35e49df6f0edd25b0a5dc6fe7cc9f52d77fad0ba25b755e7f98058f5a282244"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-00.command.txt",
+      "sha256": "8da43b220dd15f8786f25262eddeac2d0af5e78f844733c240012892e27b1b61"
+    },
+    {
+      "length": 229,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-00.exit.json",
+      "sha256": "20bab5010d77250dae5b8c956eb4d6a4a86a1003f14f9250a421eb099a1bf642"
+    },
+    {
+      "length": 24436,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-00.manifest.json",
+      "sha256": "330b7e5fef0d5caf7180648a4ec48235645bad5105d5ce1db0404a44fd8ff450"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-00.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-00.stdout.txt",
+      "sha256": "00af25b97398b3934ba21051db961726824147332bc5af71f5be9323b834b168"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-01.command.txt",
+      "sha256": "0cd3da124710f5446f2e93eaa70a86d3af717abd12d98fc061295db1033f2780"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-01.exit.json",
+      "sha256": "138311c5a174c98714bf7ac00026a09ae0b55e1a267feec61e07075362f09182"
+    },
+    {
+      "length": 24245,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-01.manifest.json",
+      "sha256": "cebf03b4e4da5ee38cfa551b06162da41f55d3b91bc178c3add3f92a0ede90f3"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-01.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-01.stdout.txt",
+      "sha256": "c0b33c27752b8a2ec75b9cacf503188eb8e6eb6c9e3c2eb1fcafcff8a37ac514"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-02.command.txt",
+      "sha256": "2134f4c20fcaf78bb076658d535eed77e5f1d3c61a5ed1767f5f2b9c06a01633"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-02.exit.json",
+      "sha256": "5eea3a9ae41f3f13c202ded52da2d0ba6ff0147b69f6c7a0679b66384b5b3c10"
+    },
+    {
+      "length": 24010,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-02.manifest.json",
+      "sha256": "b526ba19d50d647df5d5d908b0ea5ae486336577cbbfd5d87bc618452b12a867"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-02.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-02.stdout.txt",
+      "sha256": "559d2bcfe91306de434801f0b8e343ac3e8e4455ecbdce9d5d9000b1bc054173"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-03.command.txt",
+      "sha256": "f6c48d7390749c203ba94cacf281e8289f35f72626f0d5cdfb4eb2f2966f518f"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-03.exit.json",
+      "sha256": "0560667a650c03db727a466146dea0c134de3706aeb445c9db83cd2e902f1e2a"
+    },
+    {
+      "length": 24271,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-03.manifest.json",
+      "sha256": "08849f8114ba6c5f48eac4272e5d42920b88846bde638cad0c33157d88b45209"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-03.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-03.stdout.txt",
+      "sha256": "412aeb77c11ce3ad50eae2cb625987188344ca55c2ab6b7afc1347959ed7f89d"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-04.command.txt",
+      "sha256": "e28ea41ffb0fc56cdb4d8284f7290146b82519b9fb14bcd1567866d978b3cf9f"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-04.exit.json",
+      "sha256": "631c627ce363d3091a66046efe8f10b1faae1a12c17603b0ce2230bab1c7d483"
+    },
+    {
+      "length": 24572,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-04.manifest.json",
+      "sha256": "57fb0f2f21de3818e0087e2f86f271a88dd9c872e5a3dce13f5009270738bca8"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-04.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-04.stdout.txt",
+      "sha256": "2173c4b3c656097206dcdc825f6e9d48bc9f2966b61a177ec470a2f51face275"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-05.command.txt",
+      "sha256": "4eca9deed695bd7d7152ae5a8710dba560a1cfd46df57c13b0b611b9de325368"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-05.exit.json",
+      "sha256": "548aa1cc1912cdb4b66a2beb6747e046ffc300dc38112091aee19333d6f1a1d2"
+    },
+    {
+      "length": 24827,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-05.manifest.json",
+      "sha256": "3af0ca82f4094d3aa29c2bd8512df3610d50ebf4d70306e56cdfe65f7833aa0e"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-05.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 5512,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-05.stdout.txt",
+      "sha256": "c55bc1b215e959a02c5a9cf0f2d660156cdc46009863b45e540335d44fa50359"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-08.command.txt",
+      "sha256": "ec57471fc0aba666301a3069b04ea1d538ff008ebc1c84ca1f7559e233233f78"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-08.exit.json",
+      "sha256": "fe58717e2e36b2fc8cafda9b479b71fd81dfc7aaa1f69e4b6f75fe65087a5efc"
+    },
+    {
+      "length": 24732,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-08.manifest.json",
+      "sha256": "f651647f83534d4a85bef7036ec95b618a1f20cdcfcd91efb23a1e5472f9d28b"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-08.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-08.stdout.txt",
+      "sha256": "b59574131aba28cf11cbeaa2da2effa87346110ba3e53425b1710587374bf45e"
+    },
+    {
+      "length": 161,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-09.command.txt",
+      "sha256": "07fbc88d4ec703013c618083a38d8cb3116605e962d974e83dfee241c36dc14a"
+    },
+    {
+      "length": 229,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-09.exit.json",
+      "sha256": "7431506bab161f171a284cf9028a00bcafa1360bef0c76dde78da73ac8a0bf3c"
+    },
+    {
+      "length": 24681,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-09.manifest.json",
+      "sha256": "afea441486db7db35dfeba76be3073346e0ef2dd139b2746989ac823546dcf89"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-09.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 378,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-09.stdout.txt",
+      "sha256": "fd0427765287e2215b7bb7171096b4eb090381992869204f2e489ef219ba450c"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-10.command.txt",
+      "sha256": "8186bcfeb67ebbf72f930d74373f82192c97eb335197cd68a711539b02f89793"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-10.exit.json",
+      "sha256": "61cb44afc23b8dd9962f8a8709996a97c20e356260ca2057ec3f91a385b2732a"
+    },
+    {
+      "length": 24568,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-10.manifest.json",
+      "sha256": "5495e967acab865ce2484e7c5933a615163eacd61be83daf0871c6bc24c7351a"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-10.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-10.stdout.txt",
+      "sha256": "2b4a335ac74513283a05920d9e85cc29d3fc73287fbf00eae097f6e44117e76c"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-11.command.txt",
+      "sha256": "0581b2af678c4a380f36aa23d6e45828e0c6496aa7831c46f51eb130f58a1eb1"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-11.exit.json",
+      "sha256": "697d00fbafbce50362b7292612b68f545cb9d1bf9a17015e1cba44004a9b27de"
+    },
+    {
+      "length": 24601,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-11.manifest.json",
+      "sha256": "caf589a82a2200b3b444474616e3092da4505cf7b3e8cd025291ddeb91c0a723"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-11.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-11.stdout.txt",
+      "sha256": "22d5999039c5b651c52269007f1830a365e83b12b38efff6e0b92f23e21947e8"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-12.command.txt",
+      "sha256": "915e3b2ca2e9586da0fc32d71928e44fb79ff9d16aa80965cf120676068ce925"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-12.exit.json",
+      "sha256": "88aa5a3a829cfdbe6bdbcd3d46407fbbde98bcdeb8ee3c0432e7da1798eba026"
+    },
+    {
+      "length": 25002,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-12.manifest.json",
+      "sha256": "6d8763c441be645618d79f387414332c390484602103db36ec91a983a9884aec"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-12.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-12.stdout.txt",
+      "sha256": "1e3b20164b3468e6fdc3bd64212c437043dfb0c57c7b4f1c5df3dfbcf2494196"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-13.command.txt",
+      "sha256": "e6b160bdeee899d695cd34dc0f4860b9c7c734d4eb04b6bb9fe6bf1fb0377351"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-13.exit.json",
+      "sha256": "a372700a36a2bd1db1934c9c490ec82f77138984c33baf61c55fb409f1d5fddd"
+    },
+    {
+      "length": 24735,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-13.manifest.json",
+      "sha256": "3c1a5912453bee1d9a84847b95357ae7761bf9eeaad4711472ad68e02ff1c03d"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-13.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-13.stdout.txt",
+      "sha256": "72210e333e8da1dd4c9395efb1b445692052f6cf867fa5b654160a848031f572"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-14.command.txt",
+      "sha256": "7c038d04202d6e309f7c253b2af9e65f4385268598f361e43a28cf3db5780f48"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-14.exit.json",
+      "sha256": "a24c269d52dd4044bcc8dbfa8c6337caf9825ca8d225df0c8ecfcb6c8eac8e31"
+    },
+    {
+      "length": 24589,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-14.manifest.json",
+      "sha256": "d4b1856aeead5bb856922cfcf46e46e19433f983344d6df2943161ffa801db1d"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-14.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-14.stdout.txt",
+      "sha256": "dcab98e2f1ff8907aa9ac99820ee18bd98c7604751044341a03da753426a052a"
+    },
+    {
+      "length": 162,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-15.command.txt",
+      "sha256": "303817c70ccccb0622e062ef8f6590bdcb4477927a08b9f823ace89fa420eb7b"
+    },
+    {
+      "length": 230,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-15.exit.json",
+      "sha256": "79e6b2ebc062d5db58312d95df1e6d6371f2f05f6fb81fa8ac7b2dc0269374a1"
+    },
+    {
+      "length": 24782,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-15.manifest.json",
+      "sha256": "f4f8e8f008f064443d5ac6d3aec16a21624cb3d6effa5f518857481720138e84"
+    },
+    {
+      "length": 0,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-15.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "length": 379,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/shard-15.stdout.txt",
+      "sha256": "d02a060adb7f44c5d1e0f7b97dc7fa96fefdb6d4863376c266a061ea2cd4e075"
+    },
+    {
+      "length": 104474,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/source-test-freeze.json",
+      "sha256": "81d26471427db3d04cece70259fcb677b7a78fc97537bbbbd3f1f6647d8e60b3"
+    },
+    {
+      "length": 1444,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/validate_current_inventory.py",
+      "sha256": "342f33c208229cf6831053f7dd8f70585886dd349e08051a66265ce4053af25d"
+    },
+    {
+      "length": 4660,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/validate_shard_evidence.py",
+      "sha256": "55df98a55d10f17356e620650e45cf817fa7a9ced826d671eaf4d392a6934457"
+    },
+    {
+      "length": 2181,
+      "path": "docs/quant-refactor/evidence/final-repair-completion-20260816/validate_source_test_freeze.py",
+      "sha256": "a6971e5b2ecd30a51426d8feeb1e2d0fc51fbbf60cf4d9a91d49348a86489a1c"
+    }
+  ],
+  "entry_count": 128,
+  "schema_version": "dawnstrike.final_repair_recovery_manifest.v1",
+  "terminal_event": "REPAIR_REQUIRED"
+}

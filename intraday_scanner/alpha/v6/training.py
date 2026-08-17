@@ -11,7 +11,11 @@ from intraday_scanner.alpha.v6.contracts import (
     canonical_hash,
     utc_now,
 )
-from intraday_scanner.alpha.v6.models import evidence_lineage, model_eligibility
+from intraday_scanner.alpha.v6.models import (
+    current_training_rows,
+    evidence_lineage,
+    model_eligibility,
+)
 from intraday_scanner.alpha.v6.scoring import conservative_utility
 from intraday_scanner.alpha.v6.validation import expanding_purged_splits
 
@@ -47,9 +51,17 @@ def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[
     it is never selected merely because its in-sample fit is better.
     """
 
-    rows = list(dataset.get("rows") or [])
-    activation_rows = list(dataset.get("activation_rows") or [])
-    eligibility = model_eligibility(rows).to_dict()
+    raw_rows = list(dataset.get("rows") or [])
+    rows = current_training_rows(raw_rows)
+    accepted_decision_ids = {
+        str(row.get("decision_id") or "") for row in rows
+    }
+    activation_rows = [
+        row
+        for row in list(dataset.get("activation_rows") or [])
+        if str(row.get("decision_id") or "") in accepted_decision_ids
+    ]
+    eligibility = model_eligibility(raw_rows).to_dict()
     base = {
         "model_version": ALPHAOPS_V6_MODEL_VERSION,
         "trained_at": utc_now(),
@@ -60,7 +72,7 @@ def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[
         "feature_schema_version": dataset.get("feature_schema_version"),
         "code_sha": code_sha,
         "eligibility": eligibility,
-        "evidence_lineage": _lineage_summary(rows),
+        "evidence_lineage": _lineage_summary(raw_rows),
         "eligibility_dimensions": {
             "research_training": {
                 "eligible": eligibility["eligible_label_count"] >= 100,
@@ -124,8 +136,15 @@ def walk_forward_challenger_predictions(
 ) -> list[dict[str, Any]]:
     """Generate only purged, date-forward predictions for persisted evaluation."""
 
-    rows = list(dataset.get("rows") or [])
-    activation_rows = list(dataset.get("activation_rows") or [])
+    rows = current_training_rows(list(dataset.get("rows") or []))
+    accepted_decision_ids = {
+        str(row.get("decision_id") or "") for row in rows
+    }
+    activation_rows = [
+        row
+        for row in list(dataset.get("activation_rows") or [])
+        if str(row.get("decision_id") or "") in accepted_decision_ids
+    ]
     if _research_dependency() is None:
         return []
     predictions: list[dict[str, Any]] = []
@@ -364,20 +383,29 @@ def _fit_model_suite(
         else:
             activation_constant = _beta_rate(activation_y.tolist())
 
+    tail_rows = [
+        row
+        for row in rows
+        if _finite(row.get("tail_loss_label")) in {0.0, 1.0}
+    ]
     tail_y = np.asarray(
-        [float(row.get("tail_loss_label") or 0.0) for row in rows], dtype=float
+        [float(row["tail_loss_label"]) for row in tail_rows], dtype=float
     )
     tail_model = None
     tail_constant = None
-    if len(rows) >= _MIN_BINARY_LABELS:
+    if len(tail_rows) >= _MIN_BINARY_LABELS:
         if len(set(tail_y.tolist())) >= 2:
-            tail_model = _fit_logistic(return_x, tail_y, return_weights)
+            tail_model = _fit_logistic(
+                _matrix(tail_rows, feature_names),
+                tail_y,
+                _weights(tail_rows),
+            )
         else:
             tail_constant = _beta_rate(tail_y.tolist())
     tail_returns = [
         float(row["target_net_excess_return_pct"])
-        for row in rows
-        if float(row.get("tail_loss_label") or 0.0) == 1.0
+        for row in tail_rows
+        if float(row["tail_loss_label"]) == 1.0
     ]
     tail_severity = sum(tail_returns) / len(tail_returns) if tail_returns else None
 

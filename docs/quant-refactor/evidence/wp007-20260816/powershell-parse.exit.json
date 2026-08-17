@@ -1,0 +1,10 @@
+{
+  "command": "powershell -NoProfile -NonInteractive -Command \"$tokens = $null; $parseErrors = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path \\\"scripts\\build_vercel_public_stage.ps1\\\"), [ref]$tokens, [ref]$parseErrors) | Out-Null; if ($parseErrors.Count -ne 0) { $parseErrors | ForEach-Object { Write-Error $_.Message }; exit 1 }; Write-Output \\\"PowerShell parse PASS\\\"\"",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 0.377,
+  "ended_at_utc": "2026-08-16T07:00:44.647688+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T07:00:44.270393+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 22
+}

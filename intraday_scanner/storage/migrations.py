@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 30
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -1374,6 +1374,877 @@ def _migration_026_trade_attribution_evidence(
     )
 
 
+def _migration_027_opportunity_pipeline_runs(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add append-only canonical opportunity-run persistence."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_pipeline_runs (
+            run_id TEXT PRIMARY KEY,
+            result_content_hash_sha256 TEXT NOT NULL,
+            preparation_id TEXT NOT NULL,
+            preparation_content_hash_sha256 TEXT NOT NULL,
+            decision_context_id TEXT,
+            decision_context_content_hash_sha256 TEXT,
+            dataset_id TEXT NOT NULL,
+            dataset_content_id TEXT NOT NULL,
+            universe_snapshot_id TEXT NOT NULL,
+            universe_snapshot_content_hash_sha256 TEXT NOT NULL,
+            decision_at TEXT NOT NULL,
+            result_schema_version TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            artifact_count INTEGER NOT NULL CHECK (artifact_count >= 0),
+            artifact_inventory_hash_sha256 TEXT NOT NULL,
+            receipt_id TEXT NOT NULL UNIQUE,
+            receipt_json TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            first_recorded_at TEXT NOT NULL,
+            CHECK (
+                (decision_context_id IS NULL AND decision_context_content_hash_sha256 IS NULL)
+                OR
+                (decision_context_id IS NOT NULL
+                 AND decision_context_content_hash_sha256 IS NOT NULL)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_pipeline_runs_decision
+        ON opportunity_pipeline_runs(decision_at, run_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_pipeline_runs_dataset
+        ON opportunity_pipeline_runs(dataset_id, dataset_content_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_pipeline_runs_universe
+        ON opportunity_pipeline_runs(universe_snapshot_id,
+                                     universe_snapshot_content_hash_sha256);
+
+        CREATE TABLE IF NOT EXISTS opportunity_run_artifacts (
+            run_id TEXT NOT NULL,
+            inventory_ordinal INTEGER NOT NULL CHECK (inventory_ordinal >= 0),
+            artifact_family TEXT NOT NULL CHECK (artifact_family IN (
+                'universe_snapshot',
+                'prepared_pipeline',
+                'strategy_expectancy_binding',
+                'cheap_feature_snapshot',
+                'rich_feature_snapshot',
+                'benchmark_feature_snapshot',
+                'opportunity_candidate',
+                'market_regime',
+                'security_regime',
+                'strategy_evaluation',
+                'ranked_opportunity',
+                'pipeline_risk_policy',
+                'execution_risk_evidence',
+                'decision_run_context',
+                'trade_decision',
+                'decision_trace'
+            )),
+            family_ordinal INTEGER NOT NULL CHECK (family_ordinal >= 0),
+            artifact_id TEXT NOT NULL,
+            evaluation_id TEXT,
+            decision_id TEXT,
+            artifact_schema_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash_sha256 TEXT NOT NULL,
+            first_recorded_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, inventory_ordinal),
+            UNIQUE (run_id, artifact_family, family_ordinal),
+            UNIQUE (run_id, artifact_family, artifact_id),
+            FOREIGN KEY (run_id) REFERENCES opportunity_pipeline_runs(run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_artifacts_identity
+        ON opportunity_run_artifacts(artifact_family, artifact_id,
+                                     content_hash_sha256);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_artifacts_evaluation
+        ON opportunity_run_artifacts(run_id, evaluation_id, artifact_family,
+                                     family_ordinal);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_artifacts_decision
+        ON opportunity_run_artifacts(run_id, decision_id, artifact_family,
+                                     family_ordinal);
+
+        CREATE TRIGGER IF NOT EXISTS opportunity_pipeline_runs_no_update
+        BEFORE UPDATE ON opportunity_pipeline_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_pipeline_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_pipeline_runs_no_delete
+        BEFORE DELETE ON opportunity_pipeline_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_pipeline_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_run_artifacts_no_update
+        BEFORE UPDATE ON opportunity_run_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_run_artifacts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_run_artifacts_no_delete
+        BEFORE DELETE ON opportunity_run_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_run_artifacts is append-only');
+        END;
+        """
+    )
+
+
+def _migration_028_opportunity_outcomes(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add append-only outcome batches, records, and supersession lineage."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_outcome_receipts (
+            outcome_receipt_id TEXT PRIMARY KEY,
+            receipt_content_hash_sha256 TEXT NOT NULL,
+            receipt_kind TEXT NOT NULL CHECK (receipt_kind IN ('initial', 'correction')),
+            batch_id TEXT NOT NULL UNIQUE,
+            batch_content_hash_sha256 TEXT NOT NULL,
+            batch_schema_version TEXT NOT NULL CHECK (
+                batch_schema_version = 'v2.opportunity.outcome_label_batch.v2'
+            ),
+            batch_json TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            run_content_hash_sha256 TEXT NOT NULL,
+            run_persistence_receipt_id TEXT NOT NULL,
+            run_persistence_receipt_content_hash_sha256 TEXT NOT NULL,
+            source_dataset_id TEXT NOT NULL,
+            source_dataset_content_hash_sha256 TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_content_hash_sha256 TEXT NOT NULL,
+            decision_at TEXT NOT NULL,
+            batch_recorded_at TEXT NOT NULL,
+            persisted_at TEXT NOT NULL,
+            supersedes_outcome_receipt_id TEXT,
+            supersedes_outcome_receipt_content_hash_sha256 TEXT,
+            record_count INTEGER NOT NULL CHECK (record_count >= 0),
+            artifact_count INTEGER NOT NULL CHECK (artifact_count >= 1),
+            artifact_inventory_hash_sha256 TEXT NOT NULL,
+            receipt_schema_version TEXT NOT NULL CHECK (
+                receipt_schema_version = 'v2.opportunity.outcome_persistence_receipt.v1'
+            ),
+            receipt_json TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            database_schema_version INTEGER NOT NULL CHECK (database_schema_version = 28),
+            UNIQUE (run_id, outcome_receipt_id),
+            UNIQUE (
+                run_id, outcome_receipt_id, receipt_content_hash_sha256
+            ),
+            CHECK (artifact_count = record_count + 1),
+            CHECK (
+                (receipt_kind = 'initial'
+                 AND supersedes_outcome_receipt_id IS NULL
+                 AND supersedes_outcome_receipt_content_hash_sha256 IS NULL)
+                OR
+                (receipt_kind = 'correction'
+                 AND supersedes_outcome_receipt_id IS NOT NULL
+                 AND supersedes_outcome_receipt_content_hash_sha256 IS NOT NULL)
+            ),
+            FOREIGN KEY (run_id) REFERENCES opportunity_pipeline_runs(run_id),
+            FOREIGN KEY (
+                run_id, supersedes_outcome_receipt_id,
+                supersedes_outcome_receipt_content_hash_sha256
+            ) REFERENCES opportunity_outcome_receipts(
+                run_id, outcome_receipt_id, receipt_content_hash_sha256
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_outcome_receipt_root
+        ON opportunity_outcome_receipts(run_id)
+        WHERE supersedes_outcome_receipt_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_outcome_receipt_successor
+        ON opportunity_outcome_receipts(supersedes_outcome_receipt_id)
+        WHERE supersedes_outcome_receipt_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_receipts_run
+        ON opportunity_outcome_receipts(run_id, persisted_at, outcome_receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_receipts_batch
+        ON opportunity_outcome_receipts(batch_id, batch_content_hash_sha256);
+
+        CREATE TABLE IF NOT EXISTS opportunity_outcome_records (
+            outcome_receipt_id TEXT NOT NULL,
+            record_ordinal INTEGER NOT NULL CHECK (record_ordinal >= 0),
+            run_id TEXT NOT NULL,
+            evaluation_id TEXT NOT NULL,
+            horizon_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            outcome_id TEXT NOT NULL,
+            outcome_content_hash_sha256 TEXT NOT NULL,
+            outcome_schema_version TEXT NOT NULL CHECK (
+                outcome_schema_version = 'v2.opportunity.outcome_record.v3'
+            ),
+            outcome_json TEXT NOT NULL,
+            completeness TEXT NOT NULL CHECK (completeness IN (
+                'complete', 'partial', 'pending', 'censored', 'unavailable'
+            )),
+            entry_status TEXT NOT NULL CHECK (entry_status IN (
+                'filled', 'no_entry', 'not_applicable', 'pending',
+                'entry_bar_ambiguous', 'gap_through_ambiguous',
+                'unattainable', 'unsupported'
+            )),
+            path_status TEXT NOT NULL CHECK (path_status IN (
+                'target_first', 'stop_first', 'horizon_exit', 'no_entry',
+                'entry_bar_ambiguous', 'same_bar_ambiguous',
+                'gap_through_ambiguous', 'pending_horizon',
+                'missing_bars', 'halt_censored', 'corporate_action_censored',
+                'unsupported_evidence', 'unattainable_fill', 'not_applicable'
+            )),
+            supersedes_outcome_receipt_id TEXT,
+            supersedes_outcome_id TEXT,
+            supersedes_outcome_content_hash_sha256 TEXT,
+            first_persisted_at TEXT NOT NULL,
+            PRIMARY KEY (outcome_receipt_id, record_ordinal),
+            UNIQUE (outcome_receipt_id, evaluation_id, horizon_id),
+            UNIQUE (outcome_receipt_id, outcome_id),
+            UNIQUE (
+                run_id, outcome_receipt_id, outcome_id,
+                outcome_content_hash_sha256
+            ),
+            CHECK (
+                (supersedes_outcome_receipt_id IS NULL
+                 AND supersedes_outcome_id IS NULL
+                 AND supersedes_outcome_content_hash_sha256 IS NULL)
+                OR
+                (supersedes_outcome_receipt_id IS NOT NULL
+                 AND supersedes_outcome_id IS NOT NULL
+                 AND supersedes_outcome_content_hash_sha256 IS NOT NULL)
+            ),
+            FOREIGN KEY (run_id, outcome_receipt_id)
+                REFERENCES opportunity_outcome_receipts(run_id, outcome_receipt_id),
+            FOREIGN KEY (
+                run_id, supersedes_outcome_receipt_id, supersedes_outcome_id,
+                supersedes_outcome_content_hash_sha256
+            ) REFERENCES opportunity_outcome_records(
+                run_id, outcome_receipt_id, outcome_id,
+                outcome_content_hash_sha256
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_outcome_record_root
+        ON opportunity_outcome_records(run_id, evaluation_id, horizon_id)
+        WHERE supersedes_outcome_receipt_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_outcome_record_successor
+        ON opportunity_outcome_records(
+            run_id, supersedes_outcome_receipt_id, supersedes_outcome_id,
+            supersedes_outcome_content_hash_sha256
+        )
+        WHERE supersedes_outcome_receipt_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_records_pair
+        ON opportunity_outcome_records(
+            run_id, evaluation_id, horizon_id, outcome_receipt_id, record_ordinal
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_records_identity
+        ON opportunity_outcome_records(
+            outcome_id, outcome_content_hash_sha256, outcome_schema_version
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_records_decision
+        ON opportunity_outcome_records(run_id, decision_id, outcome_receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_outcome_records_status
+        ON opportunity_outcome_records(run_id, completeness, path_status);
+
+        CREATE TRIGGER IF NOT EXISTS opportunity_outcome_receipts_no_update
+        BEFORE UPDATE ON opportunity_outcome_receipts
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_outcome_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_outcome_receipts_no_delete
+        BEFORE DELETE ON opportunity_outcome_receipts
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_outcome_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_outcome_records_no_update
+        BEFORE UPDATE ON opportunity_outcome_records
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_outcome_records is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_outcome_records_no_delete
+        BEFORE DELETE ON opportunity_outcome_records
+        BEGIN
+            SELECT RAISE(ABORT, 'opportunity_outcome_records is append-only');
+        END;
+        """
+    )
+
+
+def _migration_029_opportunity_research(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add append-only missed-opportunity and discovery-metric storage."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_miss_receipts (
+            miss_receipt_id TEXT PRIMARY KEY,
+            receipt_content_hash_sha256 TEXT NOT NULL,
+            receipt_kind TEXT NOT NULL CHECK (receipt_kind IN ('initial', 'correction')),
+            analysis_key TEXT NOT NULL,
+            batch_id TEXT NOT NULL UNIQUE,
+            batch_content_hash_sha256 TEXT NOT NULL,
+            batch_schema_version TEXT NOT NULL CHECK (
+                batch_schema_version = 'v2.opportunity.miss_reconciliation_batch.v1'
+            ),
+            batch_json TEXT NOT NULL,
+            exchange_session_id TEXT NOT NULL,
+            session_open_at TEXT NOT NULL,
+            session_close_at TEXT NOT NULL,
+            membership_as_of_at TEXT NOT NULL,
+            requested_query_start_at TEXT NOT NULL,
+            requested_through_at TEXT NOT NULL,
+            requested_symbols_json TEXT NOT NULL,
+            requested_symbol_count INTEGER NOT NULL CHECK (requested_symbol_count >= 0),
+            empty_eligible_universe INTEGER NOT NULL CHECK (
+                empty_eligible_universe IN (0, 1)
+            ),
+            authority_claim TEXT NOT NULL CHECK (authority_claim IN (
+                'market_complete', 'bounded_cohort', 'no_authority'
+            )),
+            source_scope_status TEXT NOT NULL CHECK (source_scope_status IN (
+                'complete_market', 'complete_bounded', 'partial',
+                'pending', 'unavailable'
+            )),
+            inventory_status TEXT NOT NULL CHECK (inventory_status IN (
+                'complete_authoritative', 'complete_bounded', 'partial',
+                'pending', 'unavailable'
+            )),
+            qualification_policy_id TEXT NOT NULL,
+            qualification_policy_content_hash_sha256 TEXT NOT NULL,
+            qualification_batch_id TEXT NOT NULL,
+            qualification_batch_content_hash_sha256 TEXT NOT NULL,
+            session_replay_id TEXT NOT NULL,
+            session_replay_content_hash_sha256 TEXT NOT NULL,
+            session_disposition TEXT NOT NULL CHECK (session_disposition IN (
+                'correct_no_trade', 'false_positive', 'caught', 'missed',
+                'too_late', 'mixed', 'pending', 'censored', 'unavailable', 'unknown'
+            )),
+            batch_recorded_at TEXT NOT NULL,
+            persisted_at TEXT NOT NULL,
+            supersedes_miss_receipt_id TEXT,
+            supersedes_miss_receipt_content_hash_sha256 TEXT,
+            record_count INTEGER NOT NULL CHECK (record_count >= 0),
+            run_binding_count INTEGER NOT NULL CHECK (run_binding_count >= 0),
+            artifact_count INTEGER NOT NULL CHECK (artifact_count >= 1),
+            artifact_inventory_hash_sha256 TEXT NOT NULL,
+            receipt_schema_version TEXT NOT NULL CHECK (
+                receipt_schema_version = 'v2.opportunity.miss_persistence_receipt.v1'
+            ),
+            receipt_json TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            promotion_eligible INTEGER NOT NULL CHECK (promotion_eligible = 0),
+            database_schema_version INTEGER NOT NULL CHECK (database_schema_version = 29),
+            UNIQUE (analysis_key, miss_receipt_id, receipt_content_hash_sha256),
+            UNIQUE (analysis_key, miss_receipt_id),
+            UNIQUE (miss_receipt_id, receipt_content_hash_sha256),
+            CHECK (session_open_at < session_close_at),
+            CHECK (membership_as_of_at <= session_open_at),
+            CHECK (requested_query_start_at <= session_open_at),
+            CHECK (requested_query_start_at <= requested_through_at),
+            CHECK (requested_through_at = session_close_at),
+            CHECK (
+                (requested_symbol_count > 0 AND empty_eligible_universe = 0)
+                OR
+                (requested_symbol_count = 0
+                 AND empty_eligible_universe = 1
+                 AND authority_claim = 'market_complete'
+                 AND source_scope_status = 'complete_market'
+                 AND inventory_status = 'complete_authoritative')
+            ),
+            CHECK (artifact_count = 1 + record_count + run_binding_count),
+            CHECK (
+                (receipt_kind = 'initial'
+                 AND supersedes_miss_receipt_id IS NULL
+                 AND supersedes_miss_receipt_content_hash_sha256 IS NULL)
+                OR
+                (receipt_kind = 'correction'
+                 AND supersedes_miss_receipt_id IS NOT NULL
+                 AND supersedes_miss_receipt_content_hash_sha256 IS NOT NULL)
+            ),
+            FOREIGN KEY (
+                analysis_key, supersedes_miss_receipt_id,
+                supersedes_miss_receipt_content_hash_sha256
+            ) REFERENCES opportunity_miss_receipts(
+                analysis_key, miss_receipt_id, receipt_content_hash_sha256
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_miss_receipt_root
+        ON opportunity_miss_receipts(analysis_key)
+        WHERE supersedes_miss_receipt_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_miss_receipt_successor
+        ON opportunity_miss_receipts(
+            analysis_key, supersedes_miss_receipt_id,
+            supersedes_miss_receipt_content_hash_sha256
+        )
+        WHERE supersedes_miss_receipt_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_receipts_scope
+        ON opportunity_miss_receipts(analysis_key, persisted_at, miss_receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_receipts_batch
+        ON opportunity_miss_receipts(batch_id, batch_content_hash_sha256);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_receipts_session_policy
+        ON opportunity_miss_receipts(
+            exchange_session_id, qualification_policy_id, persisted_at
+        );
+
+        CREATE TABLE IF NOT EXISTS opportunity_miss_records (
+            miss_receipt_id TEXT NOT NULL,
+            record_ordinal INTEGER NOT NULL CHECK (record_ordinal >= 0),
+            analysis_key TEXT NOT NULL,
+            session_opportunity_key TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('long', 'short')),
+            horizon_id TEXT NOT NULL,
+            opportunity_id TEXT NOT NULL,
+            opportunity_content_hash_sha256 TEXT NOT NULL,
+            miss_record_id TEXT NOT NULL,
+            miss_record_content_hash_sha256 TEXT NOT NULL,
+            miss_record_schema_version TEXT NOT NULL CHECK (
+                miss_record_schema_version = 'v2.opportunity.missed_opportunity_record.v1'
+            ),
+            miss_record_json TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK (disposition IN (
+                'caught', 'missed', 'too_late', 'unknown'
+            )),
+            category TEXT CHECK (category IS NULL OR category IN (
+                'universe_miss', 'data_miss', 'feature_miss', 'anomaly_miss',
+                'regime_misclassification', 'strategy_miss', 'scoring_miss',
+                'quality_gate_miss', 'execution_filter', 'unknown'
+            )),
+            first_persisted_at TEXT NOT NULL,
+            PRIMARY KEY (miss_receipt_id, record_ordinal),
+            UNIQUE (miss_receipt_id, session_opportunity_key),
+            UNIQUE (miss_receipt_id, miss_record_id),
+            CHECK (
+                (disposition = 'caught' AND category IS NULL)
+                OR
+                (disposition <> 'caught' AND category IS NOT NULL)
+            ),
+            FOREIGN KEY (analysis_key, miss_receipt_id)
+                REFERENCES opportunity_miss_receipts(analysis_key, miss_receipt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_records_stable_key
+        ON opportunity_miss_records(
+            analysis_key, session_opportunity_key, miss_receipt_id
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_records_identity
+        ON opportunity_miss_records(
+            miss_record_id, miss_record_content_hash_sha256,
+            miss_record_schema_version
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_records_status
+        ON opportunity_miss_records(analysis_key, disposition, category);
+
+        CREATE TABLE IF NOT EXISTS opportunity_miss_run_bindings (
+            miss_receipt_id TEXT NOT NULL,
+            binding_ordinal INTEGER NOT NULL CHECK (binding_ordinal >= 0),
+            binding_id TEXT NOT NULL,
+            binding_content_hash_sha256 TEXT NOT NULL,
+            binding_schema_version TEXT NOT NULL CHECK (
+                binding_schema_version = 'v2.opportunity.session_run_binding.v1'
+            ),
+            binding_json TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            run_content_hash_sha256 TEXT NOT NULL,
+            run_persistence_receipt_id TEXT NOT NULL,
+            run_persistence_receipt_content_hash_sha256 TEXT NOT NULL,
+            outcome_replay_id TEXT NOT NULL,
+            outcome_replay_content_hash_sha256 TEXT NOT NULL,
+            outcome_head_receipt_id TEXT NOT NULL,
+            outcome_head_receipt_content_hash_sha256 TEXT NOT NULL,
+            decision_at TEXT NOT NULL,
+            PRIMARY KEY (miss_receipt_id, binding_ordinal),
+            UNIQUE (miss_receipt_id, run_id),
+            UNIQUE (miss_receipt_id, binding_id),
+            FOREIGN KEY (miss_receipt_id)
+                REFERENCES opportunity_miss_receipts(miss_receipt_id),
+            FOREIGN KEY (run_id) REFERENCES opportunity_pipeline_runs(run_id),
+            FOREIGN KEY (
+                run_id, outcome_head_receipt_id,
+                outcome_head_receipt_content_hash_sha256
+            ) REFERENCES opportunity_outcome_receipts(
+                run_id, outcome_receipt_id, receipt_content_hash_sha256
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_run_bindings_parent
+        ON opportunity_miss_run_bindings(
+            run_id, outcome_head_receipt_id,
+            outcome_head_receipt_content_hash_sha256
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_run_bindings_order
+        ON opportunity_miss_run_bindings(miss_receipt_id, decision_at, run_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_miss_run_bindings_identity
+        ON opportunity_miss_run_bindings(
+            binding_id, binding_content_hash_sha256, binding_schema_version
+        );
+
+        CREATE TABLE IF NOT EXISTS opportunity_metric_receipts (
+            metric_receipt_id TEXT PRIMARY KEY,
+            receipt_content_hash_sha256 TEXT NOT NULL,
+            receipt_kind TEXT NOT NULL CHECK (receipt_kind IN ('initial', 'correction')),
+            report_kind TEXT NOT NULL CHECK (report_kind IN ('session', 'multi_session')),
+            scope_key TEXT NOT NULL,
+            report_id TEXT NOT NULL UNIQUE,
+            report_content_hash_sha256 TEXT NOT NULL,
+            report_schema_version TEXT NOT NULL CHECK (report_schema_version IN (
+                'v2.opportunity.session_discovery_metric_report.v1',
+                'v2.opportunity.discovery_metric_report.v1'
+            )),
+            report_json TEXT NOT NULL,
+            metric_policy_id TEXT NOT NULL,
+            metric_policy_content_hash_sha256 TEXT NOT NULL,
+            exchange_session_id TEXT,
+            session_open_at TEXT,
+            session_close_at TEXT,
+            parent_miss_receipt_id TEXT,
+            parent_miss_receipt_content_hash_sha256 TEXT,
+            cohort_id TEXT,
+            report_recorded_at TEXT,
+            persisted_at TEXT NOT NULL,
+            supersedes_metric_receipt_id TEXT,
+            supersedes_metric_receipt_content_hash_sha256 TEXT,
+            session_binding_count INTEGER NOT NULL CHECK (session_binding_count >= 0),
+            metric_value_count INTEGER NOT NULL CHECK (metric_value_count = 9),
+            artifact_count INTEGER NOT NULL CHECK (artifact_count >= 1),
+            artifact_inventory_hash_sha256 TEXT NOT NULL,
+            receipt_schema_version TEXT NOT NULL CHECK (
+                receipt_schema_version = 'v2.opportunity.metric_persistence_receipt.v1'
+            ),
+            receipt_json TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            promotion_eligible INTEGER NOT NULL CHECK (promotion_eligible = 0),
+            database_schema_version INTEGER NOT NULL CHECK (database_schema_version = 29),
+            UNIQUE (scope_key, metric_receipt_id, receipt_content_hash_sha256),
+            UNIQUE (metric_receipt_id, receipt_content_hash_sha256),
+            UNIQUE (
+                metric_receipt_id, receipt_content_hash_sha256, scope_key,
+                report_id, report_content_hash_sha256
+            ),
+            CHECK (
+                (receipt_kind = 'initial'
+                 AND supersedes_metric_receipt_id IS NULL
+                 AND supersedes_metric_receipt_content_hash_sha256 IS NULL)
+                OR
+                (receipt_kind = 'correction'
+                 AND supersedes_metric_receipt_id IS NOT NULL
+                 AND supersedes_metric_receipt_content_hash_sha256 IS NOT NULL)
+            ),
+            CHECK (
+                (report_kind = 'session'
+                 AND report_schema_version =
+                    'v2.opportunity.session_discovery_metric_report.v1'
+                 AND exchange_session_id IS NOT NULL
+                 AND session_open_at IS NOT NULL
+                 AND session_close_at IS NOT NULL
+                 AND parent_miss_receipt_id IS NOT NULL
+                 AND parent_miss_receipt_content_hash_sha256 IS NOT NULL
+                 AND cohort_id IS NULL
+                 AND session_binding_count = 0
+                 AND report_recorded_at IS NOT NULL
+                 AND session_open_at < session_close_at
+                 AND artifact_count = 1)
+                OR
+                (report_kind = 'multi_session'
+                 AND report_schema_version =
+                    'v2.opportunity.discovery_metric_report.v1'
+                 AND exchange_session_id IS NULL
+                 AND session_open_at IS NULL
+                 AND session_close_at IS NULL
+                 AND parent_miss_receipt_id IS NULL
+                 AND parent_miss_receipt_content_hash_sha256 IS NULL
+                 AND cohort_id IS NOT NULL
+                 AND ((session_binding_count = 0 AND report_recorded_at IS NULL)
+                      OR (session_binding_count > 0 AND report_recorded_at IS NOT NULL))
+                 AND artifact_count = 1 + session_binding_count)
+            ),
+            FOREIGN KEY (
+                scope_key, supersedes_metric_receipt_id,
+                supersedes_metric_receipt_content_hash_sha256
+            ) REFERENCES opportunity_metric_receipts(
+                scope_key, metric_receipt_id, receipt_content_hash_sha256
+            ),
+            FOREIGN KEY (
+                parent_miss_receipt_id,
+                parent_miss_receipt_content_hash_sha256
+            ) REFERENCES opportunity_miss_receipts(
+                miss_receipt_id, receipt_content_hash_sha256
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_metric_receipt_root
+        ON opportunity_metric_receipts(scope_key)
+        WHERE supersedes_metric_receipt_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_metric_receipt_successor
+        ON opportunity_metric_receipts(
+            scope_key, supersedes_metric_receipt_id,
+            supersedes_metric_receipt_content_hash_sha256
+        )
+        WHERE supersedes_metric_receipt_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_receipts_scope
+        ON opportunity_metric_receipts(scope_key, persisted_at, metric_receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_receipts_policy_kind
+        ON opportunity_metric_receipts(metric_policy_id, report_kind, persisted_at);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_receipts_parent_miss
+        ON opportunity_metric_receipts(
+            parent_miss_receipt_id, parent_miss_receipt_content_hash_sha256
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_receipts_cohort
+        ON opportunity_metric_receipts(cohort_id, report_id);
+
+        CREATE TABLE IF NOT EXISTS opportunity_metric_session_bindings (
+            metric_receipt_id TEXT NOT NULL,
+            session_ordinal INTEGER NOT NULL CHECK (session_ordinal >= 0),
+            binding_id TEXT NOT NULL,
+            binding_content_hash_sha256 TEXT NOT NULL,
+            binding_schema_version TEXT NOT NULL CHECK (
+                binding_schema_version =
+                    'v2.opportunity.metric_session_report_binding.v1'
+            ),
+            binding_json TEXT NOT NULL,
+            exchange_session_id TEXT NOT NULL,
+            child_metric_receipt_id TEXT NOT NULL,
+            child_metric_receipt_content_hash_sha256 TEXT NOT NULL,
+            child_metric_scope_key TEXT NOT NULL,
+            child_session_report_id TEXT NOT NULL,
+            child_session_report_content_hash_sha256 TEXT NOT NULL,
+            child_miss_receipt_id TEXT NOT NULL,
+            child_miss_receipt_content_hash_sha256 TEXT NOT NULL,
+            PRIMARY KEY (metric_receipt_id, session_ordinal),
+            UNIQUE (metric_receipt_id, exchange_session_id),
+            UNIQUE (metric_receipt_id, child_metric_receipt_id),
+            UNIQUE (metric_receipt_id, binding_id),
+            CHECK (child_metric_receipt_id <> metric_receipt_id),
+            FOREIGN KEY (metric_receipt_id)
+                REFERENCES opportunity_metric_receipts(metric_receipt_id),
+            FOREIGN KEY (
+                child_metric_receipt_id,
+                child_metric_receipt_content_hash_sha256,
+                child_metric_scope_key,
+                child_session_report_id,
+                child_session_report_content_hash_sha256
+            ) REFERENCES opportunity_metric_receipts(
+                metric_receipt_id, receipt_content_hash_sha256,
+                scope_key,
+                report_id, report_content_hash_sha256
+            ),
+            FOREIGN KEY (
+                child_miss_receipt_id,
+                child_miss_receipt_content_hash_sha256
+            ) REFERENCES opportunity_miss_receipts(
+                miss_receipt_id, receipt_content_hash_sha256
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_bindings_child_metric
+        ON opportunity_metric_session_bindings(
+            child_metric_receipt_id, child_metric_receipt_content_hash_sha256
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_bindings_child_miss
+        ON opportunity_metric_session_bindings(
+            child_miss_receipt_id, child_miss_receipt_content_hash_sha256
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_metric_bindings_order
+        ON opportunity_metric_session_bindings(
+            metric_receipt_id, session_ordinal, exchange_session_id
+        );
+
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_receipts_no_update
+        BEFORE UPDATE ON opportunity_miss_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_receipts_no_delete
+        BEFORE DELETE ON opportunity_miss_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_records_no_update
+        BEFORE UPDATE ON opportunity_miss_records BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_records is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_records_no_delete
+        BEFORE DELETE ON opportunity_miss_records BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_records is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_run_bindings_no_update
+        BEFORE UPDATE ON opportunity_miss_run_bindings BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_run_bindings is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_miss_run_bindings_no_delete
+        BEFORE DELETE ON opportunity_miss_run_bindings BEGIN
+            SELECT RAISE(ABORT, 'opportunity_miss_run_bindings is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_metric_receipts_no_update
+        BEFORE UPDATE ON opportunity_metric_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_metric_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_metric_receipts_no_delete
+        BEFORE DELETE ON opportunity_metric_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_metric_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_metric_session_bindings_no_update
+        BEFORE UPDATE ON opportunity_metric_session_bindings BEGIN
+            SELECT RAISE(ABORT, 'opportunity_metric_session_bindings is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_metric_session_bindings_no_delete
+        BEFORE DELETE ON opportunity_metric_session_bindings BEGIN
+            SELECT RAISE(ABORT, 'opportunity_metric_session_bindings is append-only');
+        END;
+        """
+    )
+
+
+def _migration_030_opportunity_validation(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add immutable validation bundles and database-owned locked-OOS use."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_validation_receipts (
+            validation_receipt_id TEXT PRIMARY KEY,
+            receipt_content_hash_sha256 TEXT NOT NULL,
+            semantic_lock_key TEXT NOT NULL,
+            lock_authority_key TEXT NOT NULL,
+            holdout_inventory_key TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'research_evidence', 'locked_oos_consumed', 'invalid_lock',
+                'retrospective', 'reused', 'missing_evidence',
+                'non_predeclared'
+            )),
+            fresh_lock_eligible INTEGER NOT NULL CHECK (
+                fresh_lock_eligible IN (0, 1)
+            ),
+            preparation_id TEXT NOT NULL,
+            preparation_content_hash_sha256 TEXT NOT NULL,
+            preparation_schema_version TEXT NOT NULL CHECK (
+                preparation_schema_version =
+                    'v2.opportunity.chronological_validation_preparation.v1'
+            ),
+            preparation_json TEXT NOT NULL,
+            metric_report_id TEXT NOT NULL,
+            metric_report_content_hash_sha256 TEXT NOT NULL,
+            metric_report_schema_version TEXT NOT NULL CHECK (
+                metric_report_schema_version =
+                    'v2.opportunity.validation_trading_metric_report.v1'
+            ),
+            metric_report_json TEXT NOT NULL,
+            robustness_report_id TEXT NOT NULL,
+            robustness_report_content_hash_sha256 TEXT NOT NULL,
+            robustness_report_schema_version TEXT NOT NULL CHECK (
+                robustness_report_schema_version =
+                    'v2.opportunity.validation_robustness_report.v1'
+            ),
+            robustness_report_json TEXT NOT NULL,
+            holdout_access_evidence_id TEXT NOT NULL,
+            holdout_access_content_hash_sha256 TEXT NOT NULL,
+            holdout_access_schema_version TEXT NOT NULL CHECK (
+                holdout_access_schema_version =
+                    'v2.opportunity.validation_holdout_access_evidence.v1'
+            ),
+            holdout_access_json TEXT NOT NULL,
+            corpus_id TEXT NOT NULL,
+            split_plan_id TEXT NOT NULL,
+            split_policy_id TEXT NOT NULL,
+            split_policy_content_hash_sha256 TEXT NOT NULL,
+            split_policy_declared_at TEXT NOT NULL,
+            code_identity TEXT NOT NULL,
+            code_content_hash_sha256 TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            confirmatory_unit_id TEXT NOT NULL,
+            confirmatory_unit_content_hash_sha256 TEXT NOT NULL,
+            corpus_policy_id TEXT NOT NULL,
+            corpus_policy_content_hash_sha256 TEXT NOT NULL,
+            metric_policy_id TEXT NOT NULL,
+            metric_policy_content_hash_sha256 TEXT NOT NULL,
+            robustness_policy_id TEXT NOT NULL,
+            robustness_policy_content_hash_sha256 TEXT NOT NULL,
+            oos_session_count INTEGER NOT NULL CHECK (oos_session_count >= 0),
+            oos_session_inventory_hash_sha256 TEXT NOT NULL,
+            result_set_hash_sha256 TEXT NOT NULL,
+            persisted_at TEXT NOT NULL,
+            lifecycle_mutation_count INTEGER NOT NULL CHECK (
+                lifecycle_mutation_count = 0
+            ),
+            take_authorization INTEGER NOT NULL CHECK (take_authorization = 0),
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            promotion_eligible INTEGER NOT NULL CHECK (promotion_eligible = 0),
+            database_schema_version INTEGER NOT NULL CHECK (
+                database_schema_version = 30
+            ),
+            receipt_schema_version TEXT NOT NULL CHECK (
+                receipt_schema_version =
+                    'v2.opportunity.validation_persistence_receipt.v1'
+            ),
+            receipt_json TEXT NOT NULL,
+            UNIQUE (validation_receipt_id, receipt_content_hash_sha256),
+            CHECK (
+                (status = 'locked_oos_consumed'
+                 AND fresh_lock_eligible = 1
+                 AND oos_session_count > 0)
+                OR status <> 'locked_oos_consumed'
+            ),
+            CHECK (
+                status NOT IN (
+                    'invalid_lock', 'retrospective', 'reused',
+                    'missing_evidence', 'non_predeclared'
+                ) OR fresh_lock_eligible = 0
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_validation_consumed_lock
+        ON opportunity_validation_receipts(semantic_lock_key)
+        WHERE status = 'locked_oos_consumed';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_validation_consumed_authority
+        ON opportunity_validation_receipts(lock_authority_key)
+        WHERE status = 'locked_oos_consumed';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_opportunity_validation_consumed_inventory
+        ON opportunity_validation_receipts(holdout_inventory_key)
+        WHERE status = 'locked_oos_consumed';
+        CREATE INDEX IF NOT EXISTS idx_opportunity_validation_receipts_preparation
+        ON opportunity_validation_receipts(
+            preparation_id, preparation_content_hash_sha256
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_validation_receipts_result
+        ON opportunity_validation_receipts(
+            metric_report_id, robustness_report_id, persisted_at
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_validation_receipts_policy
+        ON opportunity_validation_receipts(
+            robustness_policy_id, strategy_id, persisted_at
+        );
+
+        CREATE TABLE IF NOT EXISTS opportunity_validation_oos_sessions (
+            validation_receipt_id TEXT NOT NULL,
+            session_ordinal INTEGER NOT NULL CHECK (session_ordinal >= 0),
+            session_source_id TEXT NOT NULL,
+            session_content_hash_sha256 TEXT NOT NULL,
+            exchange_session_id TEXT NOT NULL,
+            session_open_at TEXT NOT NULL,
+            session_close_at TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role = 'locked_oos'),
+            PRIMARY KEY (validation_receipt_id, session_ordinal),
+            UNIQUE (validation_receipt_id, session_source_id),
+            CHECK (session_open_at < session_close_at),
+            FOREIGN KEY (validation_receipt_id)
+                REFERENCES opportunity_validation_receipts(validation_receipt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_validation_oos_inventory
+        ON opportunity_validation_oos_sessions(
+            session_source_id, session_content_hash_sha256,
+            validation_receipt_id
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_validation_oos_order
+        ON opportunity_validation_oos_sessions(
+            validation_receipt_id, session_ordinal, session_open_at
+        );
+
+        CREATE TRIGGER IF NOT EXISTS opportunity_validation_receipts_no_update
+        BEFORE UPDATE ON opportunity_validation_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_validation_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_validation_receipts_no_delete
+        BEFORE DELETE ON opportunity_validation_receipts BEGIN
+            SELECT RAISE(ABORT, 'opportunity_validation_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_validation_oos_sessions_no_update
+        BEFORE UPDATE ON opportunity_validation_oos_sessions BEGIN
+            SELECT RAISE(ABORT, 'opportunity_validation_oos_sessions is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS opportunity_validation_oos_sessions_no_delete
+        BEFORE DELETE ON opportunity_validation_oos_sessions BEGIN
+            SELECT RAISE(ABORT, 'opportunity_validation_oos_sessions is append-only');
+        END;
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -1410,4 +2281,8 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (24, _migration_024_catalyst_evidence),
     (25, _migration_025_v6_evidence_lineage),
     (26, _migration_026_trade_attribution_evidence),
+    (27, _migration_027_opportunity_pipeline_runs),
+    (28, _migration_028_opportunity_outcomes),
+    (29, _migration_029_opportunity_research),
+    (30, _migration_030_opportunity_validation),
 )

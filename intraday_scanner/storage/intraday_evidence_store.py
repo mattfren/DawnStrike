@@ -8,11 +8,15 @@ import json
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from intraday_scanner.alpha.path_replay import (
+    canonical_path_contract_valid,
+    canonical_path_return_eligible,
+)
 from intraday_scanner.errors import StorageError
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from intraday_scanner.v2.data_truth.intraday import (
@@ -37,6 +41,7 @@ class SourceConflictError(EvidenceStoreError):
 
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class IntradayEvidenceStore:
@@ -378,7 +383,146 @@ class IntradayEvidenceStore:
     def persist_path_replay(self, replay: dict[str, Any]) -> dict[str, int]:
         """Append one immutable path replay and return its insert status."""
 
+        if not canonical_path_contract_valid(replay):
+            raise EvidenceStoreError("canonical path replay contract validation failed")
+        if any(
+            not isinstance(replay.get(key), str)
+            or not str(replay[key])
+            or str(replay[key]) != str(replay[key]).strip()
+            for key in ("cohort", "selection_id", "market_date")
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay envelope fields must be nonblank strings"
+            )
+        try:
+            parsed_market_date = date.fromisoformat(str(replay["market_date"]))
+        except ValueError as exc:
+            raise EvidenceStoreError(
+                "canonical path replay market_date must be ISO formatted"
+            ) from exc
+        if parsed_market_date.isoformat() != replay["market_date"]:
+            raise EvidenceStoreError(
+                "canonical path replay market_date must be canonical ISO"
+            )
+        manifest = replay.get("replay_input_manifest")
+        replay_binding = manifest.get("replay_binding") if isinstance(manifest, dict) else None
+        origin = replay_binding.get("origin") if isinstance(replay_binding, dict) else None
+        subject = replay_binding.get("subject") if isinstance(replay_binding, dict) else None
+        lineage = origin.get("lineage") if isinstance(origin, dict) else None
+        if not (
+            isinstance(origin, dict)
+            and origin.get("kind") == "alpha_paper_selection"
+            and isinstance(lineage, dict)
+            and isinstance(subject, dict)
+            and replay.get("selection_id") == lineage.get("selection_id")
+            and replay.get("signal_id") == lineage.get("signal_id")
+            and replay.get("market_date") == subject.get("market_date")
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay market_date/identity paper selection "
+                "replay binding conflicts with the required envelope"
+            )
+        decision_at = manifest.get("decision_at") if isinstance(manifest, dict) else None
+        if not isinstance(decision_at, str):
+            raise EvidenceStoreError(
+                "canonical path replay market_date requires a bound decision date"
+            )
+        try:
+            parsed_decision_at = datetime.fromisoformat(decision_at)
+        except ValueError as exc:
+            raise EvidenceStoreError(
+                "canonical path replay market_date requires a bound decision date"
+            ) from exc
+        decision_offset = parsed_decision_at.utcoffset()
+        if not (
+            parsed_decision_at.tzinfo is not None
+            and decision_offset is not None
+            and decision_offset.total_seconds() == 0.0
+            and parsed_decision_at.isoformat() == decision_at
+            and parsed_decision_at.date() == parsed_market_date
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay market_date conflicts with decision date"
+            )
+        signal_id = replay.get("signal_id")
+        if signal_id is not None and (
+            not isinstance(signal_id, str)
+            or not signal_id
+            or signal_id != signal_id.strip()
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay signal_id must be null or a nonblank string"
+            )
+        if "created_at" in replay:
+            created_at = replay["created_at"]
+            if not isinstance(created_at, str):
+                raise EvidenceStoreError(
+                    "canonical path replay created_at must be canonical UTC ISO"
+                )
+            try:
+                parsed_created_at = datetime.fromisoformat(created_at)
+            except ValueError as exc:
+                raise EvidenceStoreError(
+                    "canonical path replay created_at must be canonical UTC ISO"
+                ) from exc
+            created_at_offset = parsed_created_at.utcoffset()
+            if not (
+                parsed_created_at.tzinfo is not None
+                and created_at_offset is not None
+                and created_at_offset.total_seconds() == 0.0
+                and parsed_created_at.isoformat() == created_at
+            ):
+                raise EvidenceStoreError(
+                    "canonical path replay created_at must be canonical UTC ISO"
+                )
+        if any(
+            type(replay.get(key)) is not bool
+            for key in (
+                "retrospective_research_eligible",
+                "prospective_promotion_eligible",
+            )
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay eligibility fields must be exact booleans"
+            )
+        if replay["prospective_promotion_eligible"] and not replay[
+            "retrospective_research_eligible"
+        ]:
+            raise EvidenceStoreError(
+                "canonical path replay prospective eligibility requires retrospective eligibility"
+            )
+        source_identity = replay.get("source_artifact_identity")
+        source_hash = replay.get("source_artifact_hash_sha256")
+        if not (
+            isinstance(source_identity, str)
+            and source_identity.strip()
+            and isinstance(source_hash, str)
+            and _SHA256.fullmatch(source_hash)
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay source identity and SHA256 are required"
+            )
+        if not (
+            replay.get("artifact_identity") == source_identity
+            and replay.get("artifact_hash_sha256") == source_hash
+        ):
+            raise EvidenceStoreError(
+                "canonical path replay envelope conflicts with source identity"
+            )
+        if (
+            replay["retrospective_research_eligible"]
+            or replay["prospective_promotion_eligible"]
+        ) and not canonical_path_return_eligible(replay):
+            raise EvidenceStoreError(
+                "canonical path replay eligibility conflicts with path truth"
+            )
         self.initialize()
+        policy_version = str(
+            replay.get("path_replay_policy_version")
+            or replay.get("policy_version")
+            or ""
+        )
+        payload_json = _stable_json(replay)
         with self._sqlite_store._connect() as connection:
             cursor = connection.execute(
                 """
@@ -401,7 +545,7 @@ class IntradayEvidenceStore:
                     replay["selection_id"],
                     replay.get("signal_id"),
                     replay["market_date"],
-                    replay["policy_version"],
+                    policy_version,
                     replay["artifact_identity"],
                     replay["artifact_hash_sha256"],
                     replay["path_truth_status"],
@@ -418,10 +562,20 @@ class IntradayEvidenceStore:
                     replay.get("mae_at"),
                     int(bool(replay.get("retrospective_research_eligible", False))),
                     int(bool(replay.get("prospective_promotion_eligible", False))),
-                    _stable_json(replay),
+                    payload_json,
                     replay.get("created_at", datetime.now(timezone.utc).isoformat()),
                 ),
             )
+            if not cursor.rowcount:
+                existing = connection.execute(
+                    "SELECT payload_json FROM alpha_path_replays WHERE path_replay_id = ?",
+                    (replay["path_replay_id"],),
+                ).fetchone()
+                if existing is None or str(existing[0]) != payload_json:
+                    raise EvidenceStoreError(
+                        "immutable path replay conflict for existing path_replay_id"
+                    )
+                return {"inserted": 0, "row_count": 1}
             row = connection.execute(
                 "SELECT COUNT(*) FROM alpha_path_replays WHERE path_replay_id = ?",
                 (replay["path_replay_id"],),

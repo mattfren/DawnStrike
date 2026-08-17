@@ -14,6 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.dashboard.opportunity_projection_store import (
+    load_latest_opportunity_projection,
+    write_public_opportunity_projection,
+)
 from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
 from intraday_scanner.services.daily_run_service import release_manifest_payload
 from intraday_scanner.services.scenario_intelligence_service import scenario_public_snapshot
@@ -116,14 +120,26 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copy2(root / "web" / "index.html", output_root / "index.html")
     shutil.copy2(root / "web" / "favicon.svg", output_root / "favicon.svg")
     shutil.copytree(root / "web" / "assets", output_root / "assets", dirs_exist_ok=True)
+    opportunity_projection = load_latest_opportunity_projection(db_path)
+    opportunity_projection_manifest = write_public_opportunity_projection(
+        output_root / "data",
+        opportunity_projection,
+    )
+    result["opportunity_projection"] = opportunity_projection_manifest
     readiness_value = result.get("readiness")
     if not isinstance(readiness_value, dict):
         raise RuntimeError("Daily Finalize did not return a readiness object.")
     readiness: dict[str, object] = dict(readiness_value)
     performance_hash = str(readiness.get("payload_sha256") or "")
     publication_set_hash = str(readiness.get("publication_set_sha256") or performance_hash)
+    opportunity_projection_hash = str(
+        opportunity_projection_manifest.get("payload_sha256") or ""
+    )
     build_sha = hashlib.sha256(
-        (f"{source.get('source_sha')}:{publication_set_hash}:{market_date}").encode()
+        (
+            f"{source.get('source_sha')}:{publication_set_hash}:"
+            f"{opportunity_projection_hash}:{market_date}"
+        ).encode()
     ).hexdigest()
     build_id = build_sha[:20]
     scheduler = scheduler_doctor(root, state_root=state_root)
@@ -189,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
                 "build_sha": build_sha,
                 "data_hash_sha256": performance_hash,
                 "publication_set_sha256": publication_set_hash,
+                "opportunity_projection_sha256": opportunity_projection_hash,
                 "release_manifest_sha256": release_manifest.get("release_manifest_sha256"),
                 "market_date": market_date,
                 "generated_at": generated_at,

@@ -5,9 +5,15 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_RETURN_TRUTH,
+    classify_canonical_return_truth,
+)
+from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.v6.contracts import (
     DATASET_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION,
+    LABEL_SCHEMA_VERSION,
     canonical_hash,
     point_in_time_valid,
     utc_now,
@@ -23,11 +29,22 @@ def build_return_dataset(
 
     decisions_by_id = {str(row.get("decision_id") or ""): row for row in decisions}
     grouped: dict[str, dict[str, Any]] = defaultdict(dict)
+    exclusions: dict[str, int] = defaultdict(int)
     for label in labels:
-        grouped[str(label.get("decision_id") or "")][str(label.get("label_family") or "")] = label
+        decision_id = str(label.get("decision_id") or "")
+        decision = decisions_by_id.get(decision_id)
+        if decision is None or not _current_label(label, decision=decision):
+            exclusions["legacy_or_incomplete_label_quarantined"] += 1
+            continue
+        family = str(label.get("label_family") or "")
+        existing = grouped[decision_id].get(family)
+        if existing is not None and canonical_hash(existing) != canonical_hash(label):
+            raise ValueError(
+                f"conflicting current V6 labels for {decision_id}:{family}"
+            )
+        grouped[decision_id][family] = label
     rows: list[dict[str, Any]] = []
     activation_rows: list[dict[str, Any]] = []
-    exclusions: dict[str, int] = defaultdict(int)
     for decision_id, families in sorted(grouped.items()):
         decision = decisions_by_id.get(decision_id)
         target = families.get("benchmark_relative_excess_return")
@@ -64,10 +81,31 @@ def build_return_dataset(
         (str(row["market_date"]) for row in [*rows, *activation_rows]),
         default=None,
     )
+    ordered_labels = sorted(
+        (
+            label
+            for families in grouped.values()
+            for label in families.values()
+        ),
+        key=lambda row: (
+            str(row.get("decision_id") or ""),
+            str(row.get("label_family") or ""),
+            str(row.get("label_id") or ""),
+        ),
+    )
+    ordered_label_ids = [str(row.get("label_id") or "") for row in ordered_labels]
+    ordered_label_hashes = [
+        str(row.get("label_payload_hash_sha256") or canonical_hash(row))
+        for row in ordered_labels
+    ]
     content = {
         "rows": rows,
         "activation_rows": activation_rows,
         "exclusions": dict(sorted(exclusions.items())),
+        "schema_version": DATASET_SCHEMA_VERSION,
+        "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
+        "ordered_label_ids": ordered_label_ids,
+        "ordered_label_hashes": ordered_label_hashes,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "target": "benchmark_relative_excess_return",
         "training_cutoff": cutoff,
@@ -81,16 +119,20 @@ def build_return_dataset(
             ),
         },
     }
+    dataset_hash = canonical_hash(content)
     return {
-        "dataset_id": "v6ds-" + canonical_hash(content)[:28],
+        "dataset_id": "v6ds-v2-" + dataset_hash,
         "schema_version": DATASET_SCHEMA_VERSION,
+        "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
         "created_at": utc_now(),
         "training_cutoff": cutoff,
         "row_count": len(rows),
         "activation_row_count": len(activation_rows),
         "exclusion_counts": dict(sorted(exclusions.items())),
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "dataset_hash_sha256": canonical_hash(content),
+        "dataset_hash_sha256": dataset_hash,
+        "ordered_label_ids": ordered_label_ids,
+        "ordered_label_hashes": ordered_label_hashes,
         "rows": rows,
         "activation_rows": activation_rows,
         "research_only": True,
@@ -108,6 +150,27 @@ def build_return_dataset(
     }
 
 
+def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
+    """Accept only labels projected from authenticated current return truth."""
+
+    truth = dict(label)
+    # Label-family eligibility is narrower than the underlying return receipt.
+    # Restore only the receipt's bound eligibility bit for classification; no
+    # return value, path, cost, benchmark, or causal field is inferred.
+    truth["learning_eligible"] = (
+        truth.get("retrospective_research_eligible") is True
+    )
+    return bool(
+        label.get("label_schema_version") == LABEL_SCHEMA_VERSION
+        and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
+        and classify_canonical_return_truth(truth, decision=decision)
+        == CURRENT_RETURN_TRUTH
+        and str(label.get("label_id") or "").startswith("v6l-v2-")
+        and str(label.get("truth_lineage_hash_sha256") or "")
+        and str(label.get("label_payload_hash_sha256") or "")
+    )
+
+
 def _dataset_row(
     decision_id: str,
     decision: dict[str, Any],
@@ -122,6 +185,8 @@ def _dataset_row(
     catalyst = _catalyst_features(raw)
     return {
         "decision_id": decision_id,
+        "source_decision": decision,
+        "source_label": target,
         "market_date": str(decision.get("market_date") or "")[:10],
         "ticker": decision.get("ticker"),
         "action": decision.get("action"),

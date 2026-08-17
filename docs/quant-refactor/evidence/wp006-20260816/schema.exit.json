@@ -1,0 +1,8 @@
+{
+  "exit_code": 0,
+  "started_at": "2026-08-16T06:06:29.6165337Z",
+  "ended_at": "2026-08-16T06:06:33.9470714Z",
+  "elapsed_seconds": 4.319,
+  "repair_cycle": 2,
+  "repaired": "evidence script closed SQLite handles and passed static import ordering"
+}

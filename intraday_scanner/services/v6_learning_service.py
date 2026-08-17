@@ -8,6 +8,12 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
+from intraday_scanner.alpha.canonical_return_truth import (
+    CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+    CURRENT_CENSORED_PATH,
+    CURRENT_RETURN_TRUTH,
+    classify_canonical_return_truth,
+)
 from intraday_scanner.alpha.v6_shadow import (
     ALPHAOPS_V6_MODEL_VERSION,
     build_v6_outcomes,
@@ -32,11 +38,72 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
             and row["rejected_sampling"].get("included") is True
         )
     ]
-    existing = {str(row.get("decision_id") or "") for row in store.load_alpha_v6_outcomes()}
-    pending = [row for row in decisions if str(row.get("decision_id") or "") not in existing]
+    existing_rows = store.load_alpha_v6_outcomes()
+    decision_by_id = {
+        str(row.get("decision_id") or ""): row for row in decisions
+    }
+    existing = {str(row.get("decision_id") or "") for row in existing_rows}
+    blocked_legacy = sum(
+        1
+        for row in existing_rows
+        if (
+            (decision := decision_by_id.get(str(row.get("decision_id") or "")))
+            is not None
+            and classify_canonical_return_truth(row, decision=decision)
+            not in {
+                CURRENT_RETURN_TRUTH,
+                CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+                CURRENT_CENSORED_PATH,
+            }
+        )
+    )
+    pending = [
+        row for row in decisions if str(row.get("decision_id") or "") not in existing
+    ]
+    all_sources = store.load_signal_outcomes(limit=50_000)
+    sources_by_signal: dict[str, list[dict[str, Any]]] = {}
+    for source in all_sources:
+        sources_by_signal.setdefault(str(source.get("signal_id") or ""), []).append(source)
+    safe_sources: list[dict[str, Any]] = []
+    blocked_current_source_conflicts = 0
+    blocked_decision_ids: set[str] = set()
+    for decision in pending:
+        candidates = sources_by_signal.get(str(decision.get("shadow_signal_id") or ""), [])
+        current = [
+            row
+            for row in candidates
+            if classify_canonical_return_truth(row, decision=decision)
+            in {
+                CURRENT_RETURN_TRUTH,
+                CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
+                CURRENT_CENSORED_PATH,
+            }
+        ]
+        signatures = {
+            _hash(
+                {
+                    "return_truth_hash_sha256": row.get("return_truth_hash_sha256"),
+                    "replay_receipt_hash_sha256": row.get("replay_receipt_hash_sha256"),
+                    "path_replay_id": row.get("path_replay_id"),
+                    "outcome_status": row.get("outcome_status"),
+                }
+            )
+            for row in current
+        }
+        if len(signatures) > 1:
+            blocked_current_source_conflicts += 1
+            blocked_decision_ids.add(str(decision.get("decision_id") or ""))
+            continue
+        if current:
+            safe_sources.append(current[0])
+    generatable = [
+        row
+        for row in pending
+        if str(row.get("decision_id") or "") not in blocked_decision_ids
+    ]
     generated = build_v6_outcomes(
-        decisions=pending,
-        sourced_outcomes=store.load_signal_outcomes(limit=50_000),
+        decisions=generatable,
+        sourced_outcomes=safe_sources,
         capture_attempts=store.load_outcome_capture_attempts(limit=50_000),
     )
     outcome_stats = (
@@ -53,6 +120,9 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
         "status": "COMPLETE",
         "decision_count": len(decisions),
         "pending_outcome_count": len(pending),
+        "blocked_legacy_outcome_count": blocked_legacy,
+        "blocked_current_source_conflict_count": blocked_current_source_conflicts,
+        "outcome_revision_required": blocked_legacy > 0,
         "outcome_generation": outcome_stats,
         "outcome_count": len(outcomes),
         "missing_truth_is_zero": False,

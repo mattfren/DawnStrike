@@ -26,6 +26,8 @@ REQUIRED_FILES = (
     "data/v6-learning.json",
     "data/scenarios.json",
     "data/scenarios.json.manifest.json",
+    "data/opportunity-projection.json",
+    "data/opportunity-projection.json.manifest.json",
     "release-manifest.json",
 )
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
@@ -72,12 +74,16 @@ def verify(
     publication_set_path = root / "data" / "publication-set.json"
     scenarios_path = root / "data" / "scenarios.json"
     scenarios_manifest_path = root / "data" / "scenarios.json.manifest.json"
+    opportunity_path = root / "data" / "opportunity-projection.json"
+    opportunity_manifest_path = root / "data" / "opportunity-projection.json.manifest.json"
     snapshot: dict[str, object] = {}
     manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
     calendar_manifest: dict[str, object] = {}
     publication_set: dict[str, object] = {}
     scenarios_manifest: dict[str, object] = {}
+    opportunity: dict[str, object] = {}
+    opportunity_manifest: dict[str, object] = {}
     snapshot_row_count = 0
     compressed_byte_count: int | None = None
     if snapshot_path.is_file():
@@ -145,6 +151,55 @@ def verify(
             != scenarios_manifest.get("payload_sha256")
         ):
             errors.append("publication_set_scenario_hash_mismatch")
+    if opportunity_path.is_file():
+        opportunity_bytes = opportunity_path.read_bytes()
+        opportunity = json.loads(opportunity_bytes)
+        rows = opportunity.get("rows")
+        opportunity_rows = rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            errors.append("opportunity_rows_invalid")
+        if len(opportunity_rows) > 5:
+            errors.append("opportunity_row_limit_exceeded")
+        if opportunity.get("row_count") != len(opportunity_rows):
+            errors.append("opportunity_row_count_mismatch")
+        if opportunity.get("state") not in {
+            "DISABLED",
+            "DATA_UNAVAILABLE",
+            "NO_QUALIFYING",
+            "QUALIFYING",
+        }:
+            errors.append("opportunity_state_invalid")
+        if opportunity.get("research_only") is not True:
+            errors.append("opportunity_research_only_missing")
+        if opportunity.get("order_execution_enabled") is not False:
+            errors.append("opportunity_execution_boundary_invalid")
+        if opportunity.get("state") == "DISABLED" and opportunity_rows:
+            errors.append("disabled_opportunity_rows_present")
+        if opportunity.get("state") == "DATA_UNAVAILABLE" and (
+            opportunity_rows
+            or opportunity.get("source_run_id") is not None
+            or opportunity.get("as_of") is not None
+        ):
+            errors.append("unavailable_opportunity_exposes_source")
+        if opportunity.get("state") == "NO_QUALIFYING" and opportunity.get("message") != (
+            "NO QUALIFYING TRADE CURRENTLY EXISTS."
+        ):
+            errors.append("opportunity_no_qualifying_message_invalid")
+    if opportunity_manifest_path.is_file():
+        opportunity_manifest = json.loads(
+            opportunity_manifest_path.read_text(encoding="utf-8")
+        )
+        if opportunity_path.is_file():
+            if opportunity_manifest.get("payload_sha256") != hashlib.sha256(
+                opportunity_path.read_bytes()
+            ).hexdigest():
+                errors.append("opportunity_hash_mismatch")
+            if opportunity_manifest.get("byte_count") != opportunity_path.stat().st_size:
+                errors.append("opportunity_byte_count_mismatch")
+            if opportunity_manifest.get("state") != opportunity.get("state"):
+                errors.append("opportunity_manifest_state_mismatch")
+            if opportunity_manifest.get("row_count") != opportunity.get("row_count"):
+                errors.append("opportunity_manifest_row_count_mismatch")
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):
@@ -161,6 +216,10 @@ def verify(
             "publication_set_sha256"
         ):
             errors.append("build_publication_set_hash_mismatch")
+        if build_manifest.get("opportunity_projection_sha256") != (
+            opportunity_manifest.get("payload_sha256")
+        ):
+            errors.append("build_opportunity_projection_hash_mismatch")
         recorded_hashes = build_manifest.get("file_hashes")
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")

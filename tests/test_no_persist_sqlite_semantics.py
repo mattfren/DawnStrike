@@ -793,8 +793,10 @@ def test_alpha_capture_invalid_existing_evidence_is_exact_tree_no_op(
         )
         assert status == 1
     else:
-        message = "absent" if evidence == "absent" else "contradictory"
-        with pytest.raises(SnapshotValidationError, match=message):
+        with pytest.raises(
+            SnapshotValidationError,
+            match="frozen official cohort is absent or ambiguous",
+        ):
             capture_sourced_alpha_outcomes(
                 db_path=db_path,
                 market_date="2026-06-22",

@@ -3,37 +3,47 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from intraday_scanner.alpha.v6 import training as training_module
+from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
 from intraday_scanner.alpha.v6.training import (
     predict_from_frozen_model_run,
     train_shadow_challengers,
     walk_forward_challenger_predictions,
 )
 from intraday_scanner.alpha.v6.validation import evaluate_return_predictions
+from tests._alpha_path_truth import canonical_v6_decision, canonical_v6_label
 
 
-def _dataset() -> dict[str, object]:
-    rows = []
-    activation_rows = []
+def _dataset(
+    *,
+    day_count: int = 30,
+    rows_per_day: int = 5,
+) -> dict[str, object]:
+    decisions = []
+    labels = []
     start = date(2026, 1, 2)
-    for day_index in range(30):
+    for day_index in range(day_count):
         market_date = (start + timedelta(days=day_index)).isoformat()
-        for row_index in range(5):
+        for row_index in range(rows_per_day):
             decision_id = f"d-{day_index:02d}-{row_index}"
             signal = float(day_index + row_index)
             activation = float((day_index + row_index) % 2)
             realized = 0.08 * signal - (3.5 if (day_index + row_index) % 13 == 0 else 0.4)
-            common = {
-                "decision_id": decision_id,
-                "market_date": market_date,
+            decision = {
+                **canonical_v6_decision(decision_id, market_date=market_date),
                 "setup_key": "breakout" if row_index % 2 else "reversal",
                 "regime_key": "RISK_ON" if day_index % 2 else "RISK_OFF",
-                "source_key": "licensed-primary",
-                "liquidity_bucket": "5m_to_20m",
-                "catalyst_bucket": "sourced",
                 "feature_vector": {
                     "feature_json": {
                         "signal_strength": signal,
                         "spread_pct": 0.4 + row_index / 100.0,
+                        "liquidity_execution": {
+                            "premarket_dollar_volume": 10_000_000.0,
+                        },
+                        "catalyst": {
+                            "confirmed": True,
+                            "event_type": "EARNINGS",
+                            "evidence_hashes": ["b" * 64],
+                        },
                         "rank": 999 - row_index,
                         "future_high": 10_000 + signal,
                         "selected": row_index == 0,
@@ -42,23 +52,23 @@ def _dataset() -> dict[str, object]:
                 "estimated_round_trip_cost_bps": 25.0,
                 "inverse_probability_weight": 1.0,
             }
-            activation_rows.append({**common, "activation_label": activation})
-            rows.append(
-                {
-                    **common,
-                    "target_net_excess_return_pct": realized,
-                    "activation_label": activation,
-                    "tail_loss_label": float(realized <= -3.0),
-                }
+            decisions.append(decision)
+            labels.extend(
+                (
+                    canonical_v6_label(decision, value=realized),
+                    canonical_v6_label(
+                        decision,
+                        family="activation",
+                        value=activation,
+                    ),
+                    canonical_v6_label(
+                        decision,
+                        family="tail_loss_event",
+                        value=float(realized <= -3.0),
+                    ),
+                )
             )
-    return {
-        "dataset_id": "v6ds-test",
-        "dataset_hash_sha256": "a" * 64,
-        "feature_schema_version": "v6-features",
-        "training_cutoff": "2026-01-31",
-        "rows": rows,
-        "activation_rows": activation_rows,
-    }
+    return build_return_dataset(decisions=decisions, labels=labels)
 
 
 def test_training_fits_real_models_and_excludes_prohibited_features() -> None:
@@ -90,40 +100,11 @@ def test_walk_forward_predictions_never_see_same_or_future_date() -> None:
 def test_walk_forward_evaluates_permitted_gradient_on_its_own_exact_fold(
     monkeypatch,
 ) -> None:
-    rows = []
-    activation_rows = []
-    start = date(2026, 1, 2)
-    for day_index in range(61):
-        market_date = (start + timedelta(days=day_index)).isoformat()
-        for row_index in range(9):
-            signal = float(day_index + row_index)
-            common = {
-                "decision_id": f"g-{day_index:02d}-{row_index}",
-                "market_date": market_date,
-                "setup_key": "breakout",
-                "regime_key": "RISK_ON",
-                "source_key": "licensed-primary",
-                "liquidity_bucket": "5m_to_20m",
-                "catalyst_bucket": "sourced",
-                "feature_vector": {
-                    "feature_json": {"signal_strength": signal, "spread_pct": 0.4}
-                },
-                "estimated_round_trip_cost_bps": 25.0,
-                "inverse_probability_weight": 1.0,
-            }
-            activation = float((day_index + row_index) % 2)
-            realized = 0.03 * signal - (3.5 if row_index == 0 else 0.4)
-            activation_rows.append({**common, "activation_label": activation})
-            rows.append(
-                {
-                    **common,
-                    "target_net_excess_return_pct": realized,
-                    "activation_label": activation,
-                    "tail_loss_label": float(realized <= -3.0),
-                }
-            )
+    dataset = _dataset(day_count=61, rows_per_day=9)
+    rows = dataset["rows"]
+    assert isinstance(rows, list)
     training_dates = sorted({str(row["market_date"]) for row in rows})[:60]
-    test_date = (start + timedelta(days=60)).isoformat()
+    test_date = (date(2026, 1, 2) + timedelta(days=60)).isoformat()
     monkeypatch.setattr(
         training_module,
         "expanding_purged_splits",
@@ -139,10 +120,7 @@ def test_walk_forward_evaluates_permitted_gradient_on_its_own_exact_fold(
     )
 
     predictions = walk_forward_challenger_predictions(
-        {
-            "rows": rows,
-            "activation_rows": activation_rows,
-        },
+        dataset,
         model_run_id="v6m-gradient-test",
     )
 
@@ -165,7 +143,7 @@ def test_frozen_artifact_scores_only_later_matching_schema_decisions() -> None:
     receipt = train_shadow_challengers(_dataset(), code_sha="c" * 40)
     decision = {
         "market_date": "2026-02-02",
-        "feature_schema_version": "v6-features",
+        "feature_schema_version": receipt["feature_schema_version"],
         "feature_vector": {
             "feature_json": {"signal_strength": 12.0, "spread_pct": 0.44}
         },

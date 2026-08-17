@@ -154,6 +154,74 @@ def test_v5_trade_watcher_risk_sizes_an_official_entry(tmp_path: Path) -> None:
     assert intents[0]["decision_trace"]["feasibility_score"] == 100
 
 
+def test_v5_trade_watcher_intent_uses_authenticated_decision_boundary(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "decision-boundary.sqlite"
+    bars = _write_minute_bars(
+        tmp_path / "decision-boundary-bars.csv",
+        [_bar("2026-07-31T09:59:00-04:00", 10.05)],
+    )
+    _persist_v5_signal(SQLiteScanStore(db_path))
+
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-07-31",
+        requested_at="10:00",
+        minute_bars=bars,
+        dry_run=True,
+        simulated_equity=100_000,
+    )
+
+    store = SQLiteScanStore(db_path)
+    intent = store.load_trade_intents(market_date="2026-07-31")[0]
+    observation = store.load_price_observations(market_date="2026-07-31")[0]
+    trace = intent["decision_trace"]
+    assert intent["decision_time"] == "2026-07-31T14:00:00+00:00"
+    assert intent["decision_time"] == trace["computed"]["decision_time"]
+    assert intent["decision_time"] == observation["requested_at"]
+    assert intent["source_observed_at"] == observation["observed_at"]
+    assert intent["source_bar_completed_at"] == observation["bar_completed_at"]
+    assert intent["source_bar_completed_at"] == intent["decision_time"]
+    assert intent["source_observation_id"] == observation["observation_id"]
+    assert intent["source_bar_hash_sha256"] == observation[
+        "source_bar_hash_sha256"
+    ]
+
+
+def test_v5_trade_watcher_preserves_subminute_causal_decision_time(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "subminute-decision.sqlite"
+    bars = _write_minute_bars(
+        tmp_path / "subminute-decision-bars.csv",
+        [_bar("2026-07-31T09:59:00-04:00", 10.05)],
+    )
+    _persist_v5_signal(SQLiteScanStore(db_path))
+
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-07-31",
+        requested_at="10:00:30",
+        minute_bars=bars,
+        dry_run=True,
+        simulated_equity=100_000,
+    )
+
+    store = SQLiteScanStore(db_path)
+    intent = store.load_trade_intents(market_date="2026-07-31")[0]
+    observation = store.load_price_observations(market_date="2026-07-31")[0]
+    assert intent["decision_time"] == "2026-07-31T14:00:30+00:00"
+    assert intent["decision_time"] == intent["decision_trace"]["computed"][
+        "decision_time"
+    ]
+    assert intent["source_observed_at"] == "2026-07-31T13:59:00+00:00"
+    assert intent["source_bar_completed_at"] == "2026-07-31T14:00:00+00:00"
+    assert observation["requested_at"] == intent["decision_time"]
+
+
 def test_v5_trade_watcher_never_fills_a_watch_only_selection(
     tmp_path: Path,
 ) -> None:

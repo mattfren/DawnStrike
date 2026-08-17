@@ -1,0 +1,31 @@
+{
+  "captured_at_utc": "2026-08-16T13:11:27.8073239+00:00",
+  "collected_test_count": 1909,
+  "observed_marker_count_before_bounded_termination": 1127,
+  "observed_progress_fraction": 0.590361,
+  "failure_marker_count": 3,
+  "failures": [
+    {
+      "marker_position": 252,
+      "file": "tests/test_daily_publish_gate.py",
+      "file_ordinal": 2,
+      "node": "test_artifact_gate_accepts_clean_explicit_no_trade_fixture",
+      "isolated_rerun_result": "FAILED"
+    },
+    {
+      "marker_position": 253,
+      "file": "tests/test_daily_publish_gate.py",
+      "file_ordinal": 3,
+      "node": "test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture",
+      "isolated_rerun_result": "FAILED"
+    },
+    {
+      "marker_position": 1120,
+      "file": "tests/test_opportunity_validation_persistence.py",
+      "file_ordinal": 4,
+      "node": "test_invalid_retrospective_reused_missing_and_nonpredeclared_fail_closed[no_durable_evidence-True-True-retrospective]",
+      "isolated_rerun_result": "PASSED"
+    }
+  ],
+  "interpretation": "Two daily publish failures reproduce in isolation; the validation-persistence marker passes in isolation and remains an order-dependent or cross-test-interference proof gap."
+}

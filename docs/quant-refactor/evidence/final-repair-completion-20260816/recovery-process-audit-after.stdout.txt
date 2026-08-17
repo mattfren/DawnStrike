@@ -1,0 +1,9 @@
+{
+    "schema_version":  "dawnstrike.recovery_process_audit.v1",
+    "captured_at_utc":  "2026-08-17T00:45:37.1887139+00:00",
+    "worktree":  "C:\\r\\dawnstrike-quant-refactor-20260811",
+    "unauthorized_process_count":  0,
+    "processes":  [
+
+                  ]
+}

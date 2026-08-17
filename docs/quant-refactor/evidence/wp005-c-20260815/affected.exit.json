@@ -1,0 +1,7 @@
+{
+  "command": "py -m pytest tests/test_sqlite_read_only_store.py tests/test_no_persist_sqlite_semantics.py tests/test_v2_data_truth_paper_ops.py -q -p no:cacheprovider",
+  "exit_code": 0,
+  "started_at": "2026-08-15T23:49:04.0846544+00:00",
+  "ended_at": "2026-08-15T23:50:58.4563742+00:00",
+  "duration_seconds": 114.37
+}

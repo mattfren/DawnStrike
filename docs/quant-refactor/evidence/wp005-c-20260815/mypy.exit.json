@@ -1,0 +1,7 @@
+{
+  "command": "py -m mypy intraday_scanner",
+  "exit_code": 0,
+  "started_at": "2026-08-15T23:53:05.7667832+00:00",
+  "ended_at": "2026-08-15T23:53:07.3698386+00:00",
+  "duration_seconds": 1.603
+}

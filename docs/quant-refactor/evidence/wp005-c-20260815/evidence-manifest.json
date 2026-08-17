@@ -1,0 +1,232 @@
+{
+  "schema_version": "wp005-c-evidence-manifest.v1",
+  "generated_at": "2026-08-15T23:55:17.8039980+00:00",
+  "artifact_count": 45,
+  "artifacts": [
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/affected.collection.json",
+      "bytes": 398,
+      "sha256": "a41084f3bbc17ed1eafa23a25977ae21e8798a588cf55365b9ca5182a991b480"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/affected.collection.log",
+      "bytes": 134,
+      "sha256": "539b94009db84aa0bc9bbad588477f26f6305e961980b7638e1f838ae4c5dbbc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/affected.command.txt",
+      "bytes": 154,
+      "sha256": "e0a825b636d162f42fa78fe644019890a9b76ae1e3b2fa0a58aed91d61fd2846"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/affected.exit.json",
+      "bytes": 331,
+      "sha256": "d39372301e121573bf4f2498e04f2ebb3e996e6116c17399979d210dbb908118"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/affected.log",
+      "bytes": 162,
+      "sha256": "165cc1f8f89ac01d3d4e553d1a917f4eecd72a284b646d0031b97026a03a4a66"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/branch.txt",
+      "bytes": 35,
+      "sha256": "b62fd738dcd82834cea0633314a68ee6145b58e4753f0eabf0bfa8ffdbf9142e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/build-manifest.ps1",
+      "bytes": 884,
+      "sha256": "b859f6457678efe49d62eb43730bb451d49425f75431b0d50a892a159e46417f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/compileall.command.txt",
+      "bytes": 46,
+      "sha256": "a48095e6e4f962e4ce5ae2510749e3fc920300ca1ef036f9eb4303abb9796b5c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/compileall.exit.json",
+      "bytes": 222,
+      "sha256": "dbef5439065099a3b7014ff14a6ae1ddd821a2bdf9ce010888b962e7e0372ed3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/diff-check.command.txt",
+      "bytes": 18,
+      "sha256": "acd638462a00b8a4d4d56c54e192a91f6841ef9b734fa45b0276206862ae3830"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/diff-check.exit.json",
+      "bytes": 194,
+      "sha256": "0a26d5d59c052e8781c84c746a2674a54a00d4f874c834ebe58e357333123c5a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/diff-check.log",
+      "bytes": 749,
+      "sha256": "b9bdac439258d0d21bde672c0954c74547c730a950cd0a54201f00862b9532ef"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/evidence-packet.md",
+      "bytes": 3946,
+      "sha256": "66044f3cf9cfcfa62fcfe10a3fcb85c0a991dbe922d713db64008960409318d2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/focused.collection.json",
+      "bytes": 327,
+      "sha256": "f595fee23b050c5b6278f004a2f9b640653c676566e1b70eff9bb28cb94d8cdb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/focused.collection.log",
+      "bytes": 55,
+      "sha256": "17ad4ca35adba8c4a1a9d25497c0f7ae164a55d2d47a7ebfcfffc99fc7a65691"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/focused.command.txt",
+      "bytes": 85,
+      "sha256": "50893ce9177328da4251f1a158bb90cafb4f3bd9d52f4ce9ac61fa005e13b34b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/focused.exit.json",
+      "bytes": 263,
+      "sha256": "caf08a940664d727d93edb44912d9519c9f6f7eb9d566ea03896c594c821f8d0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/focused.log",
+      "bytes": 81,
+      "sha256": "dda0df2a5159d1af76b6e0acce4b10db8872d11cd8f72f1ac9177341e2a17886"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/head.txt",
+      "bytes": 42,
+      "sha256": "4d5bcc9e25fe8409d14b57e1a95980b49e9cf573f6411100c68f194292ad7de8"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/import-firewall.command.txt",
+      "bytes": 69,
+      "sha256": "9b06f08988b749da983fd91940993479ab089e7b1366afbcf328ac3c0dcaad0f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/import-firewall.exit.json",
+      "bytes": 245,
+      "sha256": "d1ebddfb032cfab259549b8697dd7725001249995016a7fd450d72c53c356dd0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/import-firewall.log",
+      "bytes": 134,
+      "sha256": "2ce5118f8654a011354bbbf09f8f1284cd2c1010fa2a51d61e6b52d2931b0a58"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/import-firewall.py",
+      "bytes": 2503,
+      "sha256": "8b41934105bd7b4d33b4b8ef2c827ccfd9994213fc15b03816d50649700a80d2"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/main.collection.json",
+      "bytes": 834,
+      "sha256": "8a0c4215c05ed626676da53d38607306a7f7e0af6f7ec2afd6c15c9d1cf941ef"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/main.collection.log",
+      "bytes": 625,
+      "sha256": "e5d83e262d29082de3e57099318094d561f00863e16630cbf4fb39d71779ef47"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/main.command.txt",
+      "bytes": 591,
+      "sha256": "84381f8519eb28cb909eb195b0b52b2c2a0726a127d2fd59baed114d923f05f1"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/main.exit.json",
+      "bytes": 770,
+      "sha256": "0fb88464a173f1f0c7906a7a87de0c70a5686fdb6216966e1098b5b4216a00f4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/main.log",
+      "bytes": 810,
+      "sha256": "c3a094c7145142311bbc6adb59ef59aa520b80ea67eb225c047712c2d54674fd"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/modification-inventory.json",
+      "bytes": 1183,
+      "sha256": "973146ea661a557adc0fe645efbb68893e17b74dbb14712a020476bc2bd3b328"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/mypy.command.txt",
+      "bytes": 29,
+      "sha256": "6790c72eb1a187317eca86319c6745b63b6e05eb02ce9c12c0f3cadc28116223"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/mypy.exit.json",
+      "bytes": 205,
+      "sha256": "eac9c006a638ae88683ea240d89899f20e6ef552c8be3e7e75e5c6f275ad5a56"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/mypy.log",
+      "bytes": 601,
+      "sha256": "fb333471dfbf52fc9f723dad6ec0c1928e8b785abeb46e3dcb962656648a330f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/processes.post.json",
+      "bytes": 108,
+      "sha256": "d5e1d97c22f632c9835ccee79dc18938a598601f55a8be312696056287fec75e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/resume-static.ps1",
+      "bytes": 4246,
+      "sha256": "de5c90d3631b410cbec58da2dc7fdae755c25efca896d329d39198ccd64bef84"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/ruff.command.txt",
+      "bytes": 20,
+      "sha256": "1e347de8f07f4314ee93e610565272d2a48b7dc261d6bbfcd355c14f13c91a8d"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/ruff.exit.json",
+      "bytes": 196,
+      "sha256": "c1d1388491337eddb146b0e7769fb3ab3a205c4232fc37fb4003f5ffc7e19685"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/ruff.log",
+      "bytes": 20,
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/run-evidence.ps1",
+      "bytes": 7656,
+      "sha256": "4fb39d5ca33da38ecc6aead98dabf2b715266488dacfcb0dd87a2aac740153ed"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/run-summary.json",
+      "bytes": 385,
+      "sha256": "8d61c01bce5a2daea6dfa6f1a55997ab533c4991863a179132ff60739845cd2b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/run.started-at.txt",
+      "bytes": 35,
+      "sha256": "c1207dee233ebea70f3d02946f1225fc45453655711235a598a04d47501510d1"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/source-hash-verification.json",
+      "bytes": 45,
+      "sha256": "4e3ba8ef3f6a4331eaf07e54370303a407d43a386d763978a35f6f000b58a82a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/source-hashes.post.json",
+      "bytes": 1345,
+      "sha256": "77bbf8659538c28463e6f2858dee92c655ed28b4cda67569771d81a5ec05d7d4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/source-hashes.pre.json",
+      "bytes": 1345,
+      "sha256": "77bbf8659538c28463e6f2858dee92c655ed28b4cda67569771d81a5ec05d7d4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/status.post.txt",
+      "bytes": 1824,
+      "sha256": "73f5b9045d6f1d9c2e289d8a54d92454b8a8ceb6d7ec7f8d92efed75982ff9fc"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/wp005-c-20260815/status.pre.txt",
+      "bytes": 1824,
+      "sha256": "73f5b9045d6f1d9c2e289d8a54d92454b8a8ceb6d7ec7f8d92efed75982ff9fc"
+    }
+  ]
+}

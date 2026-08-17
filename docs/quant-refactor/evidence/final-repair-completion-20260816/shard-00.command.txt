@@ -1,0 +1,1 @@
+py scripts\run_pytest_shard.py --shard-index 0 --shard-count 16 --manifest docs\quant-refactor\evidence\final-repair-completion-20260816\shard-00.manifest.json

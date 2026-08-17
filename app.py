@@ -39,6 +39,12 @@ from intraday_scanner.dashboard.data_loader import (
     load_sample_scan,
     load_sqlite,
 )
+from intraday_scanner.dashboard.opportunity_projection_render import (
+    render_streamlit_opportunity_projection,
+)
+from intraday_scanner.dashboard.opportunity_projection_store import (
+    load_latest_opportunity_projection,
+)
 from intraday_scanner.errors import IntradayScannerError
 from intraday_scanner.expectancy import estimate_expectancy
 from intraday_scanner.notifiers import scan_events_from_payload
@@ -254,6 +260,20 @@ def _load_data(settings: dict[str, Any], config: Any) -> dict[str, Any] | None:
             return load_sample_scan(settings["snapshot_path"], config)
         if settings["data_source"] == "latest output":
             return load_output_dir(settings["scan_output_dir"])
+        db_path = Path(settings["db_path"])
+        if not db_path.is_file():
+            st.warning(
+                f"SQLite database not found at {db_path}. "
+                "The dashboard is showing an empty, read-only state."
+            )
+            return {
+                "data_source_kind": "sqlite_missing",
+                "summary": {},
+                "ranked_candidates": [],
+                "top_explosive": [],
+                "avoid_list": [],
+                "scan_history": [],
+            }
         return load_sqlite(settings["db_path"])
     except (IntradayScannerError, OSError, ValueError) as exc:
         st.error(str(exc))
@@ -1656,6 +1676,10 @@ def _today(state: dict[str, Any]) -> None:
         st.markdown('<div class="ds-simple-section">Risk Summary</div>', unsafe_allow_html=True)
         risk_html = risk_summary_panel(dict(state.get("risk_summary") or {}))
         st.markdown(risk_html, unsafe_allow_html=True)
+    render_streamlit_opportunity_projection(
+        st,
+        load_latest_opportunity_projection(state["settings"]["db_path"]),
+    )
     st.markdown(
         '<div class="ds-research-footer">Dawnstrike does not place trades. '
         "You decide manually. No orders placed.</div>",

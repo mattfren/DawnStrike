@@ -1,0 +1,11 @@
+{
+  "worktree": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "expected_branch": "codex/sol-quant-refactor-20260811",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "expected_head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "branch_matches": true,
+  "head_matches": true,
+  "inherited_dirty_state_preserved": true,
+  "status_path": "docs/quant-refactor/evidence/wp006-20260816/status.post.txt"
+}

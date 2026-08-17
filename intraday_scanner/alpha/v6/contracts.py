@@ -11,8 +11,8 @@ ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
 ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-research-suite-v2"
 V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
 FEATURE_SCHEMA_VERSION = "dawnstrike-alphaops-v6-feature-schema-v1"
-LABEL_SCHEMA_VERSION = "dawnstrike-alphaops-v6-label-schema-v1"
-DATASET_SCHEMA_VERSION = "dawnstrike-alphaops-v6-dataset-v1"
+LABEL_SCHEMA_VERSION = "dawnstrike-alphaops-v6-label-schema-v2"
+DATASET_SCHEMA_VERSION = "dawnstrike-alphaops-v6-dataset-v2"
 ALLOWED_DECISION_ACTIONS = frozenset(
     {"SHADOW_TRACK", "SHADOW_REJECT_VETO", "SHADOW_REJECTED_POLICY", "SHADOW_NO_TRADE"}
 )

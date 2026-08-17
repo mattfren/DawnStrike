@@ -4,9 +4,11 @@ from pathlib import Path
 
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts import build_public
+from scripts.verify_public_artifact import verify
 
 
 def test_public_build_records_auditable_finalize_notification(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("DAWNSTRIKE_OPPORTUNITY_PROJECTION_ENABLED", raising=False)
     monkeypatch.setattr(
         build_public,
         "_source_metadata",
@@ -54,3 +56,18 @@ def test_public_build_records_auditable_finalize_notification(tmp_path: Path, mo
     assert payload["deployment_url"] == "https://preview.example.test"
     assert "coverage" in payload
     assert "next_action" in payload
+    projection = json.loads(
+        (output / "data" / "opportunity-projection.json").read_text(encoding="utf-8")
+    )
+    assert projection["state"] == "DISABLED"
+    assert projection["rows"] == []
+    assert projection["order_execution_enabled"] is False
+    verification = verify(output, allow_degraded=True)
+    assert not any("opportunity" in error for error in verification["errors"])
+
+    (output / "data" / "opportunity-projection.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    tampered = verify(output, allow_degraded=True)
+    assert "opportunity_hash_mismatch" in tampered["errors"]

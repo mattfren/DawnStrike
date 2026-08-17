@@ -1,0 +1,11 @@
+{
+  "gate": "observed-failures",
+  "command": "py -m pytest -q -p no:cacheprovider tests/test_daily_publish_gate.py::test_artifact_gate_accepts_clean_explicit_no_trade_fixture tests/test_daily_publish_gate.py::test_artifact_gate_accepts_only_explicitly_approved_degraded_fixture tests/test_opportunity_validation_persistence.py::test_invalid_retrospective_reused_missing_and_nonpredeclared_fail_closed[no_durable_evidence-True-True-retrospective]",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T13:09:23.4465631+00:00",
+  "ended_at_utc": "2026-08-16T13:10:34.4270248+00:00",
+  "elapsed_seconds": 70.977339,
+  "exit_code": 1,
+  "stdout_bytes": 2399,
+  "stderr_bytes": 0
+}

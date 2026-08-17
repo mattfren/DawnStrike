@@ -1,0 +1,53 @@
+{
+  "after": {
+    "after_read": {
+      "length": 198836224,
+      "mtime_ns": 1786836849687280500,
+      "mtime_utc": "2026-08-15T23:34:09.687280+00:00",
+      "sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+      "sidecars": []
+    },
+    "before_read": {
+      "length": 198836224,
+      "mtime_ns": 1786836849687280500,
+      "mtime_utc": "2026-08-15T23:34:09.687280+00:00",
+      "sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+      "sidecars": []
+    },
+    "captured_at_utc": "2026-08-16T09:24:14.001260+00:00",
+    "identity_unchanged_during_read": true,
+    "path": "C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+    "query_only": 1,
+    "quick_check": "ok",
+    "schema_version": 26,
+    "sqlite_uri_mode": "ro"
+  },
+  "before": {
+    "after_read": {
+      "length": 198836224,
+      "mtime_ns": 1786836849687280500,
+      "mtime_utc": "2026-08-15T23:34:09.687280+00:00",
+      "sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+      "sidecars": []
+    },
+    "before_read": {
+      "length": 198836224,
+      "mtime_ns": 1786836849687280500,
+      "mtime_utc": "2026-08-15T23:34:09.687280+00:00",
+      "sha256": "78f4a39fb31f389c05ef7ab626a74f89f840243fa79ff678ac05bad8379f93e6",
+      "sidecars": []
+    },
+    "captured_at_utc": "2026-08-16T06:40:02.045059+00:00",
+    "identity_unchanged_during_read": true,
+    "path": "C:\\r\\dawnstrike-state\\shadow_real.sqlite",
+    "query_only": 1,
+    "quick_check": "ok",
+    "schema_version": 26,
+    "sqlite_uri_mode": "ro"
+  },
+  "file_identity_unchanged": true,
+  "query_only_enforced": true,
+  "quick_check_ok": true,
+  "schema_unchanged": true,
+  "sidecars_absent": true
+}

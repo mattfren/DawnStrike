@@ -1,0 +1,11 @@
+{
+  "elapsed_seconds": 1656.355577600014,
+  "ended_at_utc": "2026-08-17T04:43:41.928475+00:00",
+  "exit_code": 0,
+  "post_guard_valid": true,
+  "pre_guard_valid": true,
+  "pytest_exit_code": 0,
+  "schema_version": "dawnstrike.final_gate_shard_exit.v1",
+  "shard_index": 15,
+  "started_at_utc": "2026-08-17T04:16:07.475937+00:00"
+}

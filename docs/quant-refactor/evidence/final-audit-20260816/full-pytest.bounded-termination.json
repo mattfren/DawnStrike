@@ -1,0 +1,21 @@
+{
+  "gate": "full-pytest",
+  "reason": "bounded_remaining_window_exhausted_after_healthy_threshold_check",
+  "classification": "INFRA_FAILURE",
+  "process_id": 25464,
+  "parent_process_id": 13300,
+  "command_line": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q -p no:cacheprovider",
+  "started_at_utc": "2026-08-16T09:38:00.7853867Z",
+  "captured_before_termination_at_utc": "2026-08-16T13:07:38.0029096+00:00",
+  "elapsed_seconds_before_termination": 12577.253878,
+  "cpu_seconds_before_termination": 11908.359375,
+  "responding_before_termination": true,
+  "working_set_bytes_before_termination": 570916864,
+  "stdout_artifact_exists_before_termination": false,
+  "output_tail": null,
+  "output_note": "run_gate.ps1 buffers redirected stdout in memory and writes the raw artifact only after child termination; no live output tail was available",
+  "termination_method": "Stop-Process -Id 25464 -Force",
+  "termination_target_verified": true,
+  "terminated": true,
+  "terminated_at_utc": "2026-08-16T13:07:41.1157799+00:00"
+}

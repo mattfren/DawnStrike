@@ -1,0 +1,11 @@
+{
+  "gate": "mypy",
+  "command": "py -m mypy intraday_scanner",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:19:29.4479921+00:00",
+  "ended_at_utc": "2026-08-16T10:19:32.3919258+00:00",
+  "elapsed_seconds": 2.941863,
+  "exit_code": 0,
+  "stdout_bytes": 601,
+  "stderr_bytes": 0
+}

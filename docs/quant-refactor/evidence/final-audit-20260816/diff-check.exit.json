@@ -1,0 +1,11 @@
+{
+  "gate": "diff-check",
+  "command": "git diff --check",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:21:49.0348833+00:00",
+  "ended_at_utc": "2026-08-16T10:21:49.2066900+00:00",
+  "elapsed_seconds": 0.169864,
+  "exit_code": 0,
+  "stdout_bytes": 0,
+  "stderr_bytes": 1955
+}

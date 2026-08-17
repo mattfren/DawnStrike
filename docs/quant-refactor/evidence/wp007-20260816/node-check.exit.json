@@ -1,0 +1,10 @@
+{
+  "command": "node --check web\\assets\\dawnstrike.js",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 0.114,
+  "ended_at_utc": "2026-08-16T09:24:12.125473+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T09:24:12.011686+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 0
+}

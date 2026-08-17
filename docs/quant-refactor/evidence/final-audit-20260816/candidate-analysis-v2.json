@@ -1,0 +1,29 @@
+{
+  "captured_at_utc": "2026-08-16T10:38:18.1042595+00:00",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "tracked_change_count": 16,
+  "untracked_candidate_count": 367,
+  "untracked_non_quant_docs_count": 95,
+  "requirement_count": 63,
+  "requirement_open_count": 63,
+  "audit_open_count": 14,
+  "audit_severity_counts": {
+    "BLOCKER": 1,
+    "CRITICAL": 1,
+    "HIGH": 9,
+    "MEDIUM": 3,
+    "LOW": 0
+  },
+  "canonical_return_truth_module_exists": false,
+  "wp006_evidence_packet_exists": false,
+  "reachability": {
+    "prepare_opportunity_pipeline\\(": [
+      "intraday_scanner\\v2\\opportunity\\pipeline.py:207:def prepare_opportunity_pipeline("
+    ],
+    "run_opportunity_pipeline\\(": [
+      "intraday_scanner\\v2\\opportunity\\pipeline.py:920:def run_opportunity_pipeline("
+    ],
+    "\\.append_run\\(": []
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "compared_at_utc": "2026-08-16T13:12:54.2142229+00:00",
+  "excluded_paths": [
+    "docs/quant-refactor/evidence/final-audit-20260816/*",
+    "docs/quant-refactor/24-final-independent-audit.md"
+  ],
+  "branch_unchanged": true,
+  "head_unchanged": true,
+  "origin_main_unchanged": true,
+  "added_count": 0,
+  "removed_count": 0,
+  "changed_count": 0,
+  "added": [],
+  "removed": [],
+  "changed": [],
+  "invariant": true
+}

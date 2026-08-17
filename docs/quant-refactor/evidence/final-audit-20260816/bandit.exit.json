@@ -1,0 +1,11 @@
+{
+  "gate": "bandit",
+  "command": "py -m bandit -r intraday_scanner scripts -ll -b config/security/bandit-baseline.json",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "started_at_utc": "2026-08-16T10:20:10.0129010+00:00",
+  "ended_at_utc": "2026-08-16T10:20:29.6463450+00:00",
+  "elapsed_seconds": 19.630656,
+  "exit_code": 1,
+  "stdout_bytes": 8166,
+  "stderr_bytes": 2133
+}

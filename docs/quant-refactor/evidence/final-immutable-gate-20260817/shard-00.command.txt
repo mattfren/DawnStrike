@@ -1,0 +1,1 @@
+C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe scripts/run_pytest_shard.py --shard-index 0 --shard-count 16 --manifest docs\quant-refactor\evidence\final-immutable-gate-20260817\shard-00.manifest.json

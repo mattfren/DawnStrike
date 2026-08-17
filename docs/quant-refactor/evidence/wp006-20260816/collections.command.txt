@@ -1,0 +1,4 @@
+py -m pytest tests/test_opportunity_validation_persistence.py --collect-only -q -p no:cacheprovider
+py -m pytest tests/test_opportunity_validation_robustness.py --collect-only -q -p no:cacheprovider
+py -m pytest tests/test_opportunity_validation_metrics.py tests/test_opportunity_validation.py tests/test_opportunity_metric_persistence.py tests/test_opportunity_discovery_metrics.py tests/test_opportunity_miss_persistence.py tests/test_opportunity_missed.py tests/test_opportunity_outcomes.py tests/test_opportunity_outcome_persistence.py tests/test_opportunity_persistence.py tests/test_intraday_evidence_migration.py tests/test_opportunity_contracts.py tests/test_opportunity_features.py tests/test_opportunity_pipeline.py tests/test_opportunity_universe_risk.py --collect-only -q -p no:cacheprovider
+py -m pytest tests/test_sqlite_read_only_store.py tests/test_no_persist_sqlite_semantics.py tests/test_v2_data_truth_paper_ops.py --collect-only -q -p no:cacheprovider

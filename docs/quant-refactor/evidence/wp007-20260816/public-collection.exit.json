@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_streamlit_app.py tests/test_public_dashboard_contract.py tests/test_public_dashboard_semantics.py tests/test_public_dom_safety.py tests/test_public_build_safety.py tests/test_public_build_notifications.py tests/test_public_artifact_security.py tests/test_static_dashboard_contract.py tests/test_public_performance_snapshot.py tests/test_public_calendar_snapshot.py tests/test_vercel_public_stage.py --collect-only -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 3.862,
+  "ended_at_utc": "2026-08-16T06:49:36.263186+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:49:32.400931+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 444
+}

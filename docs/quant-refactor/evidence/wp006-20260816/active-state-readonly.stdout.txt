@@ -1,0 +1,1 @@
+{"query_only": 1, "quick_check": "ok", "schema_version": 26, "uri": "file:C:/r/dawnstrike-state/shadow_real.sqlite?mode=ro"}

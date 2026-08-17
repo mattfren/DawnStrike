@@ -1,0 +1,7 @@
+{
+  "command": "py -m compileall -q intraday_scanner scripts",
+  "exit_code": 0,
+  "started_at": "2026-08-15T23:53:07.3726416+00:00",
+  "ended_at": "2026-08-15T23:53:07.6917692+00:00",
+  "duration_seconds": 0.319
+}

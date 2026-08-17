@@ -1,0 +1,570 @@
+{
+  "schema_version": "dawnstrike.quant_refactor.final_audit_manifest.v1",
+  "created_at_utc": "2026-08-16T13:17:13.2968727+00:00",
+  "verdict": "HASH_DRIFT",
+  "branch": "codex/sol-quant-refactor-20260811",
+  "head": "bec32fe752b91f4e1357236a538a6dfea5da56bf",
+  "entry_count": 112,
+  "entries": [
+    {
+      "path": "docs/quant-refactor/24-final-independent-audit.md",
+      "length": 22457,
+      "sha256": "39d4571a320091a23c984b3743d61d4f220f3215785668bff5359325210775f0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/accepted-evidence-rehash-v2.json",
+      "length": 2048,
+      "sha256": "634df8081f0825f8a62fb485b27c89205b1fc41bcdabcfc690058a595958db59"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/accepted-source-rehash.json",
+      "length": 1625,
+      "sha256": "5336e1bee6ea8db4198cd23990a7f195834f621bc5e705e648588e6d1833f7c7"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/active-state-after.json",
+      "length": 731,
+      "sha256": "df37db2580dd265c72aa2c50a27a0a8f23bb1f9f32c5a3d25cccd76a02d21c13"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/active-state-before.json",
+      "length": 731,
+      "sha256": "8308802c926d23664f3f366e5c8b73af5cf05ca3f47e5c8470bbada30981019c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/active-state-invariance.json",
+      "length": 827,
+      "sha256": "a7f77f72287cc599227c11c9461cc672271ef90f0f9cb4f8de3f80b61691bd26"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/analyze_candidate.ps1",
+      "length": 2636,
+      "sha256": "121d127ee946ab5b209fdb33d89d039ee322542c0adb30a533a2c7a87ff079bb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/bandit.command.txt",
+      "length": 85,
+      "sha256": "b62830d7d53dbcf6b96f8bc36cb8adae6e4a04e50dc7ec732a131ddad8b5052a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/bandit.exit.json",
+      "length": 398,
+      "sha256": "3fa85593a70e42897632975a1737df749f91ffecce9ab0c233706852e56e4d9b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/bandit.stderr.txt",
+      "length": 2133,
+      "sha256": "d27261b220bc039b86e3a1c44a1e3a33e25cbb63e12167cf0482a16fcf4359ac"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/bandit.stdout.txt",
+      "length": 8166,
+      "sha256": "1a8f69216028d1ea4a588a6661fcd2dfdb913152b28176b8864badeefed6237d"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/build_gate_summary.ps1",
+      "length": 1951,
+      "sha256": "6f86dd8f73f5e5edfe8bd692dbd6eb9662e8d8d5d121042404cce5127229e573"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/candidate-analysis-v2.json",
+      "length": 915,
+      "sha256": "9fae62d009e050f9bcffaa8d80c0cb7b28a4fd73ca94f8097e86e8174719a1f0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/capture_active_state_after.ps1",
+      "length": 531,
+      "sha256": "0f9514c9d60ed726796d1b72cbcf0cefc91366c5b2159fc34de88add0dd6380c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/capture_gate_process.ps1",
+      "length": 1068,
+      "sha256": "5de5082199ea4b2d62529fb4ff4b25c4009ac7ce8411f90fb12ca122e529e92e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/capture_repository_state.ps1",
+      "length": 2468,
+      "sha256": "60e7a74eb7156cc48332c71966de3baa087f9d92ec36144430582dd89e2c9b13"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/capture_threshold_liveness.ps1",
+      "length": 1618,
+      "sha256": "4d7561d90a8ebcd0732066dbccbdd20a80bc65e9e20147f4fdddb95ef6328672"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/collect-only.command.txt",
+      "length": 51,
+      "sha256": "19c544b284eebd8e6e6cbaacbffb82f72ad0ca4775ec9a64b687db0735d00fbd"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/collect-only.exit.json",
+      "length": 367,
+      "sha256": "077874930d48b42caa42a282340830e0bff941dadc24abda21e8bb973f174dad"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/collect-only.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/collect-only.stdout.txt",
+      "length": 6809,
+      "sha256": "8aefb712386121a507b7b9735420bb82747fc313693719df7f6a795ef91c9f69"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/compare_state.ps1",
+      "length": 3728,
+      "sha256": "20e826743a367e64c6370fa3f311a50e8f7b6f976a69616a6a130a64d1c057d7"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/compileall.command.txt",
+      "length": 45,
+      "sha256": "6b970f94e55e836b51aab06fb2300fbb1af39fed946dccec24c97781e19925b4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/compileall.exit.json",
+      "length": 354,
+      "sha256": "47104c45d748d4e320d3b831e3f2dad1615ee17ae243490395d610e87fbdf1aa"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/compileall.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/compileall.stdout.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/cyclonedx.command.txt",
+      "length": 158,
+      "sha256": "0254abf8f1f97e61ea26972633f4f63d258185a8eed1483667aff065fc95a0ad"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/cyclonedx.exit.json",
+      "length": 468,
+      "sha256": "c593da6c2930e4e60d1b5caa6d813ace380cd7e89e5bb86f1adfaa860703f0c1"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/cyclonedx.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/cyclonedx.stdout.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate-2.command.txt",
+      "length": 108,
+      "sha256": "8843187844a69fb76bcaa707d4df276b858116829ffede42d314b41d1a835ccb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate-2.exit.json",
+      "length": 443,
+      "sha256": "13665cbc2fb584ed0779faf776a997b1d9b932846ae1e693334059176efd7db3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate-2.stderr.txt",
+      "length": 21505,
+      "sha256": "55b1f41d98fe095141526251040adf504eb337a040b39c237c2f2583afcc3812"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate-2.stdout.txt",
+      "length": 54714,
+      "sha256": "e7ab9b71d132103b8e7745adb90df36f2f79b7a34fe459c4c8e9b60cbea71418"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate.command.txt",
+      "length": 108,
+      "sha256": "8843187844a69fb76bcaa707d4df276b858116829ffede42d314b41d1a835ccb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate.exit.json",
+      "length": 433,
+      "sha256": "3dd51521a64eb2b1021d8d7a8f8a5238d400b4c2f621069a356dc2ebcbeb6bab"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate.stderr.txt",
+      "length": 883,
+      "sha256": "4f7f285a30cbfa4f0921771d6f9fe75b12d696dd5e71142107a86e922e0d929a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-candidate.stdout.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-changed.command.txt",
+      "length": 106,
+      "sha256": "53e79141c9fe7d3eb347dd00297850b40de8c625a76d55f7a98cfca0c63007f1"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-changed.exit.json",
+      "length": 433,
+      "sha256": "b785fbc214ef6c632ebb86ca4d9b8d1c1fdcc8c4a4be18e73cb462f1d96004a3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-changed.stderr.txt",
+      "length": 5865,
+      "sha256": "dc3e412a30965160476766e33caa2bd9e109f4dd19125c917a78c76f6cbae666"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets-changed.stdout.txt",
+      "length": 38,
+      "sha256": "932cff26bd32582a36d2ab22cb5f5c6596acd93b91b0b25f066f736db051628c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets.command.txt",
+      "length": 98,
+      "sha256": "66dbf885c38c2bfda104c7d217f7838aa2576e8ca06ca7973882a64f49793057"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets.exit.json",
+      "length": 419,
+      "sha256": "7c1805760377ab1683be84ecb3d552aeeac49fd1560c5ffd875dc8629a2180fb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets.stderr.txt",
+      "length": 1955,
+      "sha256": "a6ef4c9d4eadb0a0fead6153ffb67bf2c4bc711ec123e847d6f860c8a8989c02"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/detect-secrets.stdout.txt",
+      "length": 6149,
+      "sha256": "5f0a0e621b6f9d703c76ed6d69eb229ecafe909d465ad2cb4ba6a94532d79e74"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/diff-check.command.txt",
+      "length": 17,
+      "sha256": "d9ef3d1695645413cdc098707c0b447cc19275eb61556bf9d84a09633cf075a6"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/diff-check.exit.json",
+      "length": 330,
+      "sha256": "bb00441180d3a90ae5d46b98d764216997618bdefac7072e1cdf9de44eb2aee4"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/diff-check.stderr.txt",
+      "length": 1955,
+      "sha256": "a6ef4c9d4eadb0a0fead6153ffb67bf2c4bc711ec123e847d6f860c8a8989c02"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/diff-check.stdout.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/evidence-index.md",
+      "length": 1745,
+      "sha256": "fa845fc124243e6ae7f3f17ec9196f70a68861fe270b61f94094a45adfaf8eb5"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.bounded-termination.json",
+      "length": 1094,
+      "sha256": "f134b94b2238ef79fea64e6c72ce506c6f3aeab8317123de2287e08aec4bf6bb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.command.txt",
+      "length": 36,
+      "sha256": "c1c88bdfb5c0a813c41de5c318050586fb31fb962b8647739bf1227e136bdc77"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.exit.json",
+      "length": 355,
+      "sha256": "201a3694f08275fc3601d63dafd996d63853aa15c5d4c27abcb224f689d95358"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.partial-failure-map.json",
+      "length": 1259,
+      "sha256": "15f30f2d25057444a441d77caf7ee8265d70aa13b5eb524250c3f9597f188739"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.process-after.json",
+      "length": 83,
+      "sha256": "9aac38fc0c1462a2f704932df72a97c9d01a9fb5cae0bbc28bcc4adb46883154"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.process-midrun.json",
+      "length": 1111,
+      "sha256": "3b814e03056020a9ec893ccb65bcb8943abffb6b4a7794e16fe5b8d69d43c77c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.stdout.txt",
+      "length": 1262,
+      "sha256": "87e1ae83a3b1fb793d29a4d344efa280aa453c9e5ccdb1053686a727f5f4e25b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/full-pytest.threshold-liveness.json",
+      "length": 648,
+      "sha256": "87d215f5653a481fc13da0a64462aac1bb9698356caab3c35ecd4fc9577b8989"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/gate-summary.json",
+      "length": 13702,
+      "sha256": "3f4f3ef6e9524c2a6b411886a9d1f496ad6addd91c610bbdbe176ac7bdab7f16"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/map_partial_failures.ps1",
+      "length": 2579,
+      "sha256": "5f743c65f4cdc5b80aaa981af0c42ee187a98871d2de7bcc07d5d39f3318f640"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/mypy.command.txt",
+      "length": 28,
+      "sha256": "d7e48e34d098c23a3f720b04d7c23f2e4a8aef588032da060e432b7d20fde2f9"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/mypy.exit.json",
+      "length": 334,
+      "sha256": "c4ac2168881e422a002b966b30462d19ffa7ec343e3251f4c9e17ea38236594b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/mypy.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/mypy.stdout.txt",
+      "length": 601,
+      "sha256": "4a76dec7f1b457ff076cd66c93f4145242311d1bc33cc8da00f7c3d85612e65e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/node-check.command.txt",
+      "length": 38,
+      "sha256": "bde717ef73ccc94bf2557379e5a5a1471b9b279b4dadb691079bfcd7d6ea514a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/node-check.exit.json",
+      "length": 348,
+      "sha256": "8f5ab8f9e42fe9993f94f449f1c3bffe6c9e2eab491eca4fcbba50c352616cf3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/node-check.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/node-check.stdout.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/observed-failures.command.txt",
+      "length": 400,
+      "sha256": "0bde5fbee96c0a33c719ceef078ea048d2fda8b76f7055edd2304bd082aebbf7"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/observed-failures.exit.json",
+      "length": 721,
+      "sha256": "3ef2755312f4d438ec4e36e61056afabaccb0b466605ecd93a02554b18adf1de"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/observed-failures.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/observed-failures.stdout.txt",
+      "length": 2399,
+      "sha256": "292d85f4feb0a6ecc9afc71fe271151f215eaded545a9c07b3216e58c6c0ed29"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/pip-check.command.txt",
+      "length": 16,
+      "sha256": "56f794080048940a1662bcf54c60ec1990f9e162e37a7108c91b9b2a0d0bd444"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/pip-check.exit.json",
+      "length": 326,
+      "sha256": "f2c77bcaefa4d1b7e104d55c1612ead638cef6301ae65f1abefe02917bea5a55"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/pip-check.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/pip-check.stdout.txt",
+      "length": 31,
+      "sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/powershell-parse.command.txt",
+      "length": 100,
+      "sha256": "65833c900dfb765fb938abb87fb5e8ade6fa9b8adedc5f44d85cb2743358c3e3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/powershell-parse.exit.json",
+      "length": 417,
+      "sha256": "c1b487aae1f6cb71a59f1ca3fc104cba3bfa75596b4743963cd773c5f0ba4070"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/powershell-parse.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/powershell-parse.stdout.txt",
+      "length": 23,
+      "sha256": "6144ec2a7f58b2b14e27154536a22bca26a45b4c4e35ada775748afd18820056"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/repository-state-after.json",
+      "length": 197004,
+      "sha256": "91ef5b7c143380a2d81d150188524f0fb2ddb6fb5107a2d8a9a7e11bef7b21ec"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/repository-state-before.json",
+      "length": 197005,
+      "sha256": "7df60d136cb20194b2693a22adcf233344dfb7e34b87325adb1a85da44c87c76"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/repository-state-invariance.json",
+      "length": 440,
+      "sha256": "05c2a051c9bf904cc4bf7d4d7e8b4ec39948bc1847aca0a319654c4180c6a092"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/ruff.command.txt",
+      "length": 19,
+      "sha256": "3a860fde662c93cde2d24a7410abaeb7634d60f9966c6f7190c3e13e532ebe4b"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/ruff.exit.json",
+      "length": 324,
+      "sha256": "cd4b1d44558a2840f9aae94edd666c315cf93d7af64a61ed52a79c13d88cd63e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/ruff.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/ruff.stdout.txt",
+      "length": 19,
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/run_gate.ps1",
+      "length": 8369,
+      "sha256": "07661f82ba5e9f36269882a9e6e2426b60ebb305901f88eb6e852c9a7a9c6039"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/safety-contracts.command.txt",
+      "length": 174,
+      "sha256": "dfdb9b7866864ffafc895f6aa72be9ec17987c482f0f3ece042716e3dcaab78e"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/safety-contracts.exit.json",
+      "length": 493,
+      "sha256": "021985a9c7ee6018c3578ff2c293a5921813038964cd0b90966df6e7fe30b68a"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/safety-contracts.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/safety-contracts.stdout.txt",
+      "length": 81,
+      "sha256": "274c5f96d23bb491757fef3a15033b56f272126823a4bde2519699708c5ec9f0"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/sbom.cdx.json",
+      "length": 156425,
+      "sha256": "eb753c8b94f59e97fdc62ee53e757a4a9679e2a4cef0de282d6623c5af2450d6"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/scan_todos.ps1",
+      "length": 512,
+      "sha256": "c655dc4c4924e5198e0fac63485a914e3f649b5ef792b797bdc680035a1842d5"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/seal_evidence.ps1",
+      "length": 1858,
+      "sha256": "13b050db784917122ffa15488b74ff3b54ce03d9f36e6f558aef0618d2e60a93"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/terminate_bounded_full_pytest.ps1",
+      "length": 2351,
+      "sha256": "1de5f1448f986af054d517aa42b8c663292a1b8b852651fdae1d7e8abcdeb157"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan-final.command.txt",
+      "length": 87,
+      "sha256": "a297f388bcca73a21c274aafddb1a7abb14706ee395908de1c8a8e91ab15b08f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan-final.exit.json",
+      "length": 404,
+      "sha256": "b961ece6e2755f8d5b62ea7b8978e680b2e873108aa3158844688217aaa60db3"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan-final.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan-final.stdout.txt",
+      "length": 4513,
+      "sha256": "19becfecb809506a4e1dc993079f4cf23727661b86ab3af6e0d5b0d2c8428d8c"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan.command.txt",
+      "length": 87,
+      "sha256": "a297f388bcca73a21c274aafddb1a7abb14706ee395908de1c8a8e91ab15b08f"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan.exit.json",
+      "length": 399,
+      "sha256": "1ed64cc782539fd3214e19cd7713854982016997460ebf3cf1caa204c0a5a12d"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan.stderr.txt",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/todo-scan.stdout.txt",
+      "length": 3820,
+      "sha256": "f22ef5d978b399e51834cc50b0cabf690df40a8ff6a204bce480d9bf9d71fa75"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_accepted_evidence.ps1",
+      "length": 4786,
+      "sha256": "0c32371f7a1cff3bbee3b0cb933f2d8b2514e7d186611edf490c88a688bfe854"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_detect_secrets_candidate.ps1",
+      "length": 892,
+      "sha256": "af814a6a3a8fe6c4be808d58fffcd4267bc49ff37f974b304e1a3842d70a38e7"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_detect_secrets_changed.ps1",
+      "length": 950,
+      "sha256": "5e423a27b166fdf3043d8827e26a83725469c03e30120056a0d136a594ebc3e8"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_detect_secrets.ps1",
+      "length": 299,
+      "sha256": "6364b70dc505c7cb30ba1a3c8e9a5059e35bc0265dab01d3dc76d6e42c6d82eb"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_powershell_parse.ps1",
+      "length": 653,
+      "sha256": "5bb7d3865d22096483609afa4d070c7d98d7358cfccb6c0dc8749be3d9f980ed"
+    },
+    {
+      "path": "docs/quant-refactor/evidence/final-audit-20260816/verify_source_hashes.ps1",
+      "length": 3656,
+      "sha256": "324b630f75460af9fba6071d00de7e42bf3d3c56d7c6b0041921ce0d47498508"
+    }
+  ]
+}

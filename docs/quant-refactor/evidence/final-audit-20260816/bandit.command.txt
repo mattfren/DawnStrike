@@ -1,0 +1,1 @@
+py -m bandit -r intraday_scanner scripts -ll -b config/security/bandit-baseline.json

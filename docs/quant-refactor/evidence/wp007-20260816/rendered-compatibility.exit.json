@@ -1,0 +1,10 @@
+{
+  "command": "py -m pytest tests/test_rendered_dashboard_regression.py tests/test_simple_dashboard.py tests/test_dashboard_data_loader.py tests/test_snapshot_builder.py -q -p no:cacheprovider",
+  "cwd": "C:\\r\\dawnstrike-quant-refactor-20260811",
+  "elapsed_seconds": 8.551,
+  "ended_at_utc": "2026-08-16T06:44:51.612930+00:00",
+  "exit_code": 0,
+  "started_at_utc": "2026-08-16T06:44:43.061853+00:00",
+  "stderr_bytes": 0,
+  "stdout_bytes": 80
+}
