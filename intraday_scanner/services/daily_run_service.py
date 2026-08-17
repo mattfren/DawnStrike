@@ -16,6 +16,16 @@ from intraday_scanner.alpha.v5_policy import (
 from intraday_scanner.alpha.v6_shadow import ALPHAOPS_V6_STRATEGY_VERSION
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
+
+def _active_strategy_versions(*, paperops_version: str) -> dict[str, str]:
+    """Return only strategies that can participate in the current release."""
+
+    return {
+        "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
+        "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
+        "paperops": paperops_version,
+    }
+
 DAILY_RUN_SCHEMA = "dawnstrike.daily_run.v1"
 SCHEDULER_VERSION = "dawnstrike-scheduler-v6"
 DAILY_STAGE_ORDER = (
@@ -131,12 +141,9 @@ def record_daily_stage(
             "runtime_root": str(root),
             "state_root": str(durable_state),
             "scheduler_version": SCHEDULER_VERSION,
-            "strategy_versions": {
-                "alphaops_v4": "dawnstrike-alphaops-v4",
-                "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
-                "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
-                "paperops": "registered-strategy-manifest",
-            },
+            "strategy_versions": _active_strategy_versions(
+                paperops_version="registered-strategy-manifest"
+            ),
             "status": "IN_PROGRESS",
             "current_stage": stage_name,
             "started_at": start,
@@ -197,12 +204,9 @@ def record_daily_stage(
         "runtime_root": str(root),
         "state_root": str(durable_state),
         "scheduler_version": SCHEDULER_VERSION,
-        "strategy_versions": {
-            "alphaops_v4": "dawnstrike-alphaops-v4",
-            "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
-            "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
-            "paperops": "registered-strategy-manifest",
-        },
+        "strategy_versions": _active_strategy_versions(
+            paperops_version="registered-strategy-manifest"
+        ),
         "status": run_status,
         "current_stage": stage_name,
         "started_at": str(prior.get("started_at") or start),
@@ -429,12 +433,9 @@ def release_manifest_payload(
         ).hexdigest(),
         "database_schema_version": schema_version,
         "data_watermark": data_watermark,
-        "strategy_versions": {
-            "alphaops_v4": "dawnstrike-alphaops-v4",
-            "alphaops_v5": ALPHAOPS_V5_STRATEGY_VERSION,
-            "alphaops_v6_shadow": ALPHAOPS_V6_STRATEGY_VERSION,
-            "paperops": "immutable-strategy-semantics-manifest",
-        },
+        "strategy_versions": _active_strategy_versions(
+            paperops_version="immutable-strategy-semantics-manifest"
+        ),
         "scheduler_version": SCHEDULER_VERSION,
         "artifact_hashes": dict(sorted(artifact_hashes.items())),
         "created_at": _utc_now(),

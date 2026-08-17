@@ -12,8 +12,7 @@ from intraday_scanner.models import utc_now_iso
 from intraday_scanner.services.source_reliability_service import reliability_score
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
-ALPHAOPS_STRATEGY_ID = "alphaops_v4"
-ALPHAOPS_STRATEGY_IDS = ("alphaops_v4", "alphaops_v5")
+HISTORICAL_ALPHAOPS_STRATEGY_IDS = ("alphaops_v4", "alphaops_v5")
 ALPHAOPS_OFFICIAL_COHORT = "official_telegram"
 ACTIVATION_OUTCOME_STATUSES = frozenset({"complete_sourced", "not_triggered"})
 _NON_ACTIONABLE_SELECTION_DECISIONS = frozenset({
@@ -171,7 +170,7 @@ def _canonical_return_labels(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     strategy_labels = [
         row
-        for strategy_id in ALPHAOPS_STRATEGY_IDS
+        for strategy_id in HISTORICAL_ALPHAOPS_STRATEGY_IDS
         for row in store.load_strategy_learning_labels(
             strategy_id=strategy_id,
             cohort=ALPHAOPS_OFFICIAL_COHORT,
@@ -180,7 +179,7 @@ def _canonical_return_labels(
     ]
     evaluations = [
         row
-        for strategy_id in ALPHAOPS_STRATEGY_IDS
+        for strategy_id in HISTORICAL_ALPHAOPS_STRATEGY_IDS
         for row in store.load_strategy_evaluations(
             strategy_id=strategy_id,
             cohort=ALPHAOPS_OFFICIAL_COHORT,
@@ -189,7 +188,7 @@ def _canonical_return_labels(
     ]
     trades = [
         row
-        for strategy_id in ALPHAOPS_STRATEGY_IDS
+        for strategy_id in HISTORICAL_ALPHAOPS_STRATEGY_IDS
         for row in store.load_strategy_paper_trades(
             strategy_id=strategy_id,
             cohort=ALPHAOPS_OFFICIAL_COHORT,
@@ -346,7 +345,7 @@ def _load_exact_alpha_selections(
     try:
         rows = [
             row
-            for strategy_id in ALPHAOPS_STRATEGY_IDS
+            for strategy_id in HISTORICAL_ALPHAOPS_STRATEGY_IDS
             for row in loader(
                 strategy_id=strategy_id,
                 cohort=ALPHAOPS_OFFICIAL_COHORT,
@@ -358,7 +357,7 @@ def _load_exact_alpha_selections(
         rows = loader(limit=50_000)
     selected: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if str(row.get("strategy_id") or "") not in ALPHAOPS_STRATEGY_IDS:
+        if str(row.get("strategy_id") or "") not in HISTORICAL_ALPHAOPS_STRATEGY_IDS:
             continue
         if str(row.get("cohort") or "") != ALPHAOPS_OFFICIAL_COHORT:
             continue

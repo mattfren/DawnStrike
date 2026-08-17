@@ -206,5 +206,9 @@ def test_release_manifest_binds_runtime_state_schema_and_artifacts(
     assert manifest["strategy_versions"]["alphaops_v6_shadow"] == (
         "dawnstrike-alphaops-v6-shadow"
     )
+    assert manifest["strategy_versions"]["alphaops_v5"] == (
+        "dawnstrike-alphaops-v5.0.0"
+    )
+    assert "alphaops_v4" not in manifest["strategy_versions"]
     assert len(manifest["release_manifest_sha256"]) == 64
     assert manifest["broker_execution_enabled"] is False

@@ -687,7 +687,11 @@ function populateCalendarFilters() {
 
 function calendarFilterLabel(key, value) {
   if (key === "cohort") return COHORTS[value] || humanizeIdentifier(value);
-  if (key === "strategy_id") return value === "alphaops_v5" ? "AlphaOps V5" : humanizeIdentifier(value);
+  if (key === "strategy_id") {
+    if (value === "alphaops_v5") return "AlphaOps V5 · current";
+    if (value === "alphaops_v4") return "AlphaOps V4 · legacy history";
+    return humanizeIdentifier(value);
+  }
   if (key === "account_id") return value === "alphaops_v5_simulated" ? "V5 · $100k simulated" : humanizeIdentifier(value);
   return value;
 }
@@ -717,24 +721,28 @@ function renderCalendar() {
   document.getElementById("calendar-next-month").disabled = state.calendarMonth >= availableMonths.at(-1);
   const lookup = new Map(allDays.map((day) => [day.date, day]));
   const monthDateKeys = datesForMonth(state.calendarMonth);
-  const leading = monthDateKeys.length ? mondayOffset(monthDateKeys[0]) : 0;
+  const leading = monthDateKeys.length ? sundayOffset(monthDateKeys[0]) : 0;
   const cells = Array.from({ length: leading }, () => '<span class="calendar-spacer" aria-hidden="true"></span>');
   monthDateKeys.forEach((dateKey) => {
     const day = lookup.get(dateKey);
     const matches = filteredCalendarRecords(day);
-    const record = matches.length === 1 ? matches[0] : null;
     const status = calendarCellStatus(day, matches);
-    const presentation = record ? calendarReturnPresentation(record) : null;
-    const value = presentation?.value ?? null;
+    const summary = calendarDayReturnSummary(matches);
+    const value = summary?.bestReturnPct ?? null;
     const selected = dateKey === state.calendarSelectedDate;
     const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
-    const returnText = matches.length > 1 ? `${matches.length} rows` : value == null ? "—" : formatPercentText(value);
-    const statusText = matches.length > 1 ? "Published history" : calendarStatusLabel(status);
-    const ariaReturn = matches.length > 1 ? "Returns are not blended" : value == null ? "Return not reported" : `${presentation.label} ${formatPercentText(value)}`;
-    const researchClass = presentation?.scope === "research" ? "research-only" : "";
+    const bestText = value == null ? "Best —" : `Best ${formatPercentText(value)}`;
+    const cumulativeText = summary?.cumulativeReturnPct == null
+      ? "Cum. —"
+      : `Cum. ${formatPercentText(summary.cumulativeReturnPct)}`;
+    const statusText = matches.length > 1 ? `${matches.length} records · ${summary?.strategyLabel || "no return"}` : calendarStatusLabel(status);
+    const ariaReturn = summary
+      ? `Best ${summary.presentation.label} ${formatPercentText(summary.bestReturnPct)}. Same-strategy cumulative return ${formatPercentText(summary.cumulativeReturnPct)}.`
+      : "Return not reported";
+    const researchClass = summary?.presentation.scope === "research" ? "research-only" : "";
     cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${researchClass} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(`${dateKey}. ${statusText}. ${ariaReturn}`)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
-      <strong>${escapeHtml(returnText)}</strong>
+      <span class="calendar-cell-values"><strong>${escapeHtml(bestText)}</strong><span>${escapeHtml(cumulativeText)}</span></span>
       <small>${escapeHtml(statusText)}</small>
       <i aria-hidden="true"></i>
     </button>`);
@@ -778,6 +786,27 @@ function calendarReturnPresentation(record) {
   return { value: null, label: "Return not reported", scope: "withheld" };
 }
 
+function calendarDayReturnSummary(records) {
+  const candidates = records.map((record) => ({
+    record,
+    presentation: calendarReturnPresentation(record),
+  })).filter((item) => item.presentation.value != null);
+  if (!candidates.length) return null;
+  candidates.sort((left, right) =>
+    right.presentation.value - left.presentation.value
+    || String(left.record.strategy_id || "").localeCompare(String(right.record.strategy_id || ""))
+    || String(left.record.strategy_version || "").localeCompare(String(right.record.strategy_version || ""))
+  );
+  const best = candidates[0];
+  return {
+    bestReturnPct: best.presentation.value,
+    cumulativeReturnPct: numberOrNull(best.record.cumulative_return_pct),
+    presentation: best.presentation,
+    strategyLabel: calendarFilterLabel("strategy_id", best.record.strategy_id || "Unknown strategy"),
+    lifecycle: best.record.strategy_lifecycle || "research_observation",
+  };
+}
+
 function renderCalendarHistorySummary(days) {
   const node = document.getElementById("calendar-history-summary");
   if (!node) return;
@@ -793,7 +822,12 @@ function renderCalendarHistorySummary(days) {
 }
 
 function calendarCellStatus(day, records) {
-  if (records.length > 1) return "PARTIAL";
+  if (records.length > 1) {
+    const statuses = records.map((record) => record?.status || "MISSING");
+    if (statuses.every((status) => status === "NO_TRADE")) return "NO_TRADE";
+    if (statuses.every((status) => ["COMPLETE", "NO_TRADE"].includes(status))) return "COMPLETE";
+    return "PARTIAL";
+  }
   if (records.length === 1) return records[0]?.status || "MISSING";
   return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
 }
@@ -853,9 +887,13 @@ function renderCalendarDetail(day, records) {
   if (records.length > 1) {
     const researchCount = records.filter((record) => calendarReturnPresentation(record).scope === "research").length;
     const canonicalCount = records.filter((record) => calendarReturnPresentation(record).scope === "canonical").length;
+    const summary = calendarDayReturnSummary(records);
     setStatus("calendar-detail-status", `${records.length} records`, "PARTIAL");
-    note.textContent = `${records.length} canonical contracts match this date. Every record is listed below; returns remain separate and are never blended.`;
+    note.textContent = `${records.length} canonical contracts match this date. Best and cumulative values come from the same published strategy; official and research scopes are never blended.`;
     metrics.innerHTML = detailRows([
+      ["Best reported return", formatPercentText(summary?.bestReturnPct), summary?.bestReturnPct != null],
+      ["Its cumulative return", formatPercentText(summary?.cumulativeReturnPct), summary?.cumulativeReturnPct != null],
+      ["Best strategy", summary?.strategyLabel || "Not reported", Boolean(summary)],
       ["Published contracts", String(records.length), true],
       ["Eligible canonical returns", String(canonicalCount), true],
       ["Research-only observed", String(researchCount), true],
@@ -869,6 +907,8 @@ function renderCalendarDetail(day, records) {
         <dl>
           <dt>Status</dt><dd>${escapeHtml(calendarStatusLabel(record.status))}</dd>
           <dt>Return</dt><dd>${presentation.value == null ? "Not reported" : `${escapeHtml(presentation.label)} · ${formatPercentText(presentation.value)}`}</dd>
+          <dt>Cumulative</dt><dd>${formatPercentText(record.cumulative_return_pct)}</dd>
+          <dt>Lifecycle</dt><dd>${escapeHtml(strategyLifecycleLabel(record.strategy_lifecycle))}</dd>
           <dt>Account</dt><dd>${escapeHtml(calendarFilterLabel("account_id", record.account_id || "Not reported"))}</dd>
           <dt>Policy</dt><dd>${escapeHtml(record.execution_policy_version || "Not reported")}</dd>
         </dl>
@@ -899,6 +939,8 @@ function renderCalendarDetail(day, records) {
     : "The return is withheld until the required outcome, account, and source evidence is complete.";
   metrics.innerHTML = detailRows([
     [presentation.scope === "research" ? "Research-only return" : "Net return", formatPercentText(presentation.value), presentation.value != null],
+    ["Cumulative return", formatPercentText(record.cumulative_return_pct), record.cumulative_return_pct != null],
+    ["Strategy lifecycle", strategyLifecycleLabel(record.strategy_lifecycle), true],
     ["Gross observed", formatPercentText(record.gross_return_pct), record.gross_return_pct != null],
     ["Benchmark", formatPercentText(record.benchmark_return_pct), record.benchmark_return_pct != null],
     ["Excess", formatPercentText(record.excess_return_pct), record.excess_return_pct != null],
@@ -957,9 +999,20 @@ function datesForMonth(month) {
   return Array.from({ length: count }, (_, index) => `${year}-${String(monthNumber).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`);
 }
 
-function mondayOffset(dateKey) {
+function sundayOffset(dateKey) {
   const day = new Date(`${dateKey}T12:00:00Z`).getUTCDay();
-  return (day + 6) % 7;
+  return day;
+}
+
+function strategyLifecycleLabel(value) {
+  return ({
+    current_champion: "Current champion",
+    legacy_evidence_only: "Legacy evidence only",
+    baseline_control: "Baseline control",
+    shadow_challenger: "Shadow challenger",
+    historical_research: "Historical research",
+    research_observation: "Research observation",
+  }[value] || "Research observation");
 }
 
 function monthLabel(month) {

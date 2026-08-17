@@ -304,10 +304,13 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-arrow { width:38px; height:38px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--surface-2); cursor:pointer; }
 .calendar-arrow:hover,.calendar-arrow:focus-visible { border-color:var(--signal); outline:2px solid rgba(185,255,102,.1); outline-offset:1px; }
 .calendar-arrow:disabled { cursor:not-allowed; opacity:.32; }
-.calendar-filters { display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)); gap:.55rem; }
+.calendar-filters { display:grid; grid-template-columns:repeat(2,minmax(160px,1fr)); gap:.55rem; }
 .calendar-filters label { display:grid; gap:.3rem; color:var(--faint); font:680 .56rem/1.2 var(--mono); letter-spacing:.08em; text-transform:uppercase; }
 .calendar-filters select { width:100%; min-width:0; border:1px solid var(--line); border-radius:7px; padding:.56rem 1.8rem .56rem .62rem; color:var(--ink-soft); background:var(--surface-2); font:540 .69rem/1.2 var(--sans); text-transform:none; letter-spacing:0; }
 .calendar-filters select:focus-visible { border-color:var(--signal); outline:2px solid rgba(185,255,102,.1); }
+.calendar-advanced-filters { grid-column:1/-1; border-top:1px solid var(--line); padding-top:.55rem; }
+.calendar-advanced-filters summary { width:max-content; color:var(--muted); cursor:pointer; font:650 .57rem/1.2 var(--mono); letter-spacing:.07em; text-transform:uppercase; }
+.calendar-advanced-filters > div { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:.55rem; margin-top:.55rem; }
 .calendar-summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; margin-bottom:.75rem; overflow:hidden; border:1px solid var(--line); border-radius:9px; background:var(--line); }
 .calendar-summary-card { min-height:98px; padding:.85rem 1rem; background:var(--surface); }
 .calendar-summary-card span,.calendar-summary-card small { display:block; color:var(--muted); font-size:.65rem; }
@@ -336,6 +339,8 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-cell.negative { background:linear-gradient(rgba(255,111,125,calc(.025 + var(--heat) * .16)),rgba(255,111,125,.012)); }
 .calendar-date-number { color:var(--muted); font:650 .6rem/1 var(--mono); }
 .calendar-cell strong { font:700 .82rem/1.1 var(--mono); letter-spacing:-.03em; }
+.calendar-cell-values { display:grid; gap:.18rem; }
+.calendar-cell-values > span { color:var(--ink-soft); font:620 .63rem/1.1 var(--mono); }
 .calendar-cell small { width:100%; overflow:hidden; color:var(--faint); font-size:.55rem; text-overflow:ellipsis; white-space:nowrap; }
 .calendar-cell i { position:absolute; top:.54rem; right:.54rem; width:5px; height:5px; border-radius:50%; background:var(--faint); }
 .calendar-cell.status-complete i { background:var(--signal); box-shadow:0 0 8px rgba(185,255,102,.35); }
@@ -413,17 +418,19 @@ td strong { color:var(--ink); font-weight:700; }
   .table-toolbar { align-items:flex-start; flex-direction:column; }
   .methodology-grid,.decision-replay-list,.gate-grid { grid-template-columns:1fr; gap:.4rem; }
   .calendar-filters { grid-template-columns:1fr 1fr; }
+  .calendar-advanced-filters > div { grid-template-columns:1fr 1fr; }
   .calendar-panel { padding:.6rem; }
   .calendar-weekdays,.calendar-grid { gap:.2rem; }
   .calendar-cell { min-height:58px; aspect-ratio:auto; padding:.36rem; border-radius:6px; }
   .calendar-cell strong { font-size:.65rem; }
+  .calendar-cell-values > span { font-size:.54rem; }
   .calendar-cell small { display:none; }
   .calendar-cell i { top:.38rem; right:.38rem; width:4px; height:4px; }
   .calendar-date-number { font-size:.53rem; }
   .site-footer { flex-direction:column; gap:.3rem; }
 }
 @media (max-width:390px) {
-  .calendar-filters,.calendar-summary-grid { grid-template-columns:1fr; }
+  .calendar-filters,.calendar-summary-grid,.calendar-advanced-filters > div { grid-template-columns:1fr; }
   .scenario-metric-grid { grid-template-columns:1fr; }
   .calendar-cell { min-height:50px; }
   .calendar-cell strong { font-size:.58rem; }

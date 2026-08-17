@@ -36,7 +36,9 @@ from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.models import utc_now_iso
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
-ALPHAOPS_STRATEGY_ID = "alphaops_v4"
+LEGACY_ALPHAOPS_STRATEGY_ID = "alphaops_v4"
+# Public compatibility name for pre-V5 recovery and watcher imports.
+ALPHAOPS_STRATEGY_ID = LEGACY_ALPHAOPS_STRATEGY_ID
 ALPHAOPS_STRATEGY_VERSION = "dawnstrike-alphaops-v4"
 SELECTED_COHORT = "algorithm_selected"
 DELIVERED_COHORT = "official_telegram"
@@ -376,7 +378,7 @@ def recover_legacy_alpha_delivery_membership(
             "recovered": 0,
         }
     existing = store.load_signal_selections(
-        strategy_id=ALPHAOPS_STRATEGY_ID,
+        strategy_id=LEGACY_ALPHAOPS_STRATEGY_ID,
         limit=50_000,
     )
     existing = [
@@ -428,7 +430,7 @@ def recover_legacy_alpha_delivery_membership(
                 "signal_id": signal_id,
                 "scan_id": scan_id,
                 "market_date": market_date,
-                "strategy_id": ALPHAOPS_STRATEGY_ID,
+                "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
                 "strategy_version": str(
                     signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
                 ),
@@ -452,7 +454,7 @@ def recover_legacy_alpha_delivery_membership(
                 "signal_id": signal_id,
                 "scan_id": scan_id,
                 "market_date": market_date,
-                "strategy_id": ALPHAOPS_STRATEGY_ID,
+                "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
                 "strategy_version": str(
                     signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
                 ),
@@ -498,7 +500,7 @@ def _reconcile_selection(
     selection_id = str(selection.get("selection_id") or "")
     ticker = str(selection.get("ticker") or signal.get("ticker") or "").upper()
     market_date = str(selection.get("market_date") or signal.get("market_date") or "")[:10]
-    strategy_id = str(selection.get("strategy_id") or ALPHAOPS_STRATEGY_ID)
+    strategy_id = str(selection.get("strategy_id") or LEGACY_ALPHAOPS_STRATEGY_ID)
     delivered = bool(
         delivery
         and _is_official_telegram_delivery(
@@ -932,7 +934,7 @@ def _daily_scorecards(
     evaluations: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     reconciled_at: str,
-    strategy_id: str = ALPHAOPS_STRATEGY_ID,
+    strategy_id: str = LEGACY_ALPHAOPS_STRATEGY_ID,
     strategy_version: str = ALPHAOPS_STRATEGY_VERSION,
     execution_policy_version: str = EXECUTION_POLICY_VERSION,
 ) -> list[dict[str, Any]]:

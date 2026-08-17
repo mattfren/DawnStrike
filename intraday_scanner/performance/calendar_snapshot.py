@@ -40,6 +40,12 @@ RESEARCH_ONLY_COHORTS = frozenset(
         "shadow_challenger",
     }
 )
+BASELINE_STRATEGY_IDS = frozenset(
+    {
+        "benchmark_buy_hold_equal_weight",
+        "cash_no_trade_baseline",
+    }
+)
 
 
 def write_public_calendar(
@@ -316,6 +322,7 @@ def build_calendar_payload(
                 }
             ),
         },
+        "strategy_catalog": _strategy_catalog(days),
         "days": days,
         "months": months,
     }
@@ -359,6 +366,14 @@ def _calendar_record(
         "cohort": cohort,
         "strategy_id": str(row.get("strategy_id") or ""),
         "strategy_version": str(row.get("strategy_version") or ""),
+        "strategy_lifecycle": _strategy_lifecycle(
+            str(row.get("strategy_id") or ""),
+            cohort,
+        ),
+        "strategy_purpose": _strategy_purpose(
+            str(row.get("strategy_id") or ""),
+            cohort,
+        ),
         "execution_policy_version": str(
             row.get("execution_policy_version") or "unregistered-policy"
         ),
@@ -399,6 +414,100 @@ def _calendar_record(
         "return_basis": row.get("return_basis"),
         "cost_status": row.get("cost_status"),
     }
+
+
+def _strategy_lifecycle(strategy_id: str, cohort: str) -> str:
+    """Classify strategy purpose without rewriting or deleting historical rows."""
+
+    if strategy_id == "alphaops_v4":
+        return "legacy_evidence_only"
+    if strategy_id == "alphaops_v5":
+        return "current_champion"
+    if strategy_id in BASELINE_STRATEGY_IDS:
+        return "baseline_control"
+    if cohort == "shadow_challenger":
+        return "shadow_challenger"
+    if cohort == "historical_backtest":
+        return "historical_research"
+    return "research_observation"
+
+
+def _strategy_purpose(strategy_id: str, cohort: str) -> str:
+    lifecycle = _strategy_lifecycle(strategy_id, cohort)
+    return {
+        "legacy_evidence_only": (
+            "Immutable pre-V5 evidence and exact legacy recovery only; never active."
+        ),
+        "current_champion": (
+            "Current authenticated AlphaOps paper/research strategy."
+        ),
+        "baseline_control": "Non-promotional comparison control.",
+        "shadow_challenger": "Forward-only research challenger; never auto-promoted.",
+        "historical_research": "Historical research comparison; not an official return.",
+        "research_observation": "Research observation; not an official return.",
+    }[lifecycle]
+
+
+def _strategy_catalog(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for day in days:
+        for record in day.get("records") or []:
+            grouped[
+                (
+                    str(record.get("strategy_id") or ""),
+                    str(record.get("strategy_version") or ""),
+                )
+            ].append(record)
+    order = {
+        "current_champion": 0,
+        "shadow_challenger": 1,
+        "baseline_control": 2,
+        "historical_research": 3,
+        "research_observation": 4,
+        "legacy_evidence_only": 5,
+    }
+    catalog: list[dict[str, Any]] = []
+    for (strategy_id, strategy_version), records in grouped.items():
+        lifecycle = str(records[0].get("strategy_lifecycle") or "research_observation")
+        dates = sorted(str(record.get("date") or "") for record in records)
+        catalog.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "lifecycle": lifecycle,
+                "purpose": str(records[0].get("strategy_purpose") or ""),
+                "record_count": len(records),
+                "reported_return_count": sum(
+                    1
+                    for record in records
+                    if safe_float(record.get("net_return_pct")) is not None
+                    or safe_float(record.get("research_return_pct")) is not None
+                ),
+                "first_observed_date": dates[0] if dates else None,
+                "last_observed_date": dates[-1] if dates else None,
+                "cohorts": sorted(
+                    {
+                        str(record.get("cohort") or "")
+                        for record in records
+                        if str(record.get("cohort") or "")
+                    }
+                ),
+                "active": lifecycle == "current_champion",
+                "research_only": all(
+                    str(record.get("cohort") or "") in RESEARCH_ONLY_COHORTS
+                    for record in records
+                ),
+                "broker_execution_enabled": False,
+            }
+        )
+    return sorted(
+        catalog,
+        key=lambda item: (
+            order.get(str(item["lifecycle"]), 99),
+            str(item["strategy_id"]),
+            str(item["strategy_version"]),
+        ),
+    )
 
 
 def _calendar_detail(

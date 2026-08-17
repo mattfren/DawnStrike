@@ -77,7 +77,9 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 DEFAULT_DB_PATH = "data/shadow_real.sqlite"
 DEFAULT_WEB_CONFIG = "config/web_sources.yaml"
-ALPHAOPS_STRATEGY_ID = "alphaops_v4"
+LEGACY_ALPHAOPS_STRATEGY_ID = "alphaops_v4"
+# Public compatibility name for pre-V5 evidence/recovery callers.
+ALPHAOPS_STRATEGY_ID = LEGACY_ALPHAOPS_STRATEGY_ID
 ALPHAOPS_OFFICIAL_COHORT = "official_telegram"
 ALPHAOPS_RADAR_COHORT = "research_radar"
 ALPHAOPS_RADAR_VERSION = "dawnstrike-research-radar-v1"
@@ -1449,7 +1451,7 @@ def _notification_event(
         channel_hint=hint,
         payload={
             "run_id": run_id,
-            "source": "alphaops_v4",
+            "source": "alphaops",
             "telegram_compact_message": body,
             **dict(payload or {}),
         },
@@ -1864,7 +1866,7 @@ def recover_legacy_alpha_notification_memberships(
             channel_hint=hint,
             payload={
                 "run_id": run_id,
-                "source": ALPHAOPS_STRATEGY_ID,
+                "source": LEGACY_ALPHAOPS_STRATEGY_ID,
                 "signals": recovered_signals,
                 "legacy_recovery": "exact_rendered_body",
             },
@@ -2017,7 +2019,7 @@ def _link_notification_events(
                             "was_alerted": was_alerted,
                             "signal_id": signal_id,
                             "strategy_id": delivery_by_signal.get(signal_id, {}).get(
-                                "strategy_id", ALPHAOPS_STRATEGY_ID
+                                "strategy_id", LEGACY_ALPHAOPS_STRATEGY_ID
                             ),
                             "strategy_version": delivery_by_signal.get(signal_id, {}).get(
                                 "strategy_version", ALPHA_MODEL_VERSION

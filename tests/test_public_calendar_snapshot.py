@@ -39,11 +39,57 @@ def test_calendar_copies_canonical_values_and_compounds_monthly_returns() -> Non
     assert august_third["net_return_pct"] == 10.0
     assert august_third["gross_return_pct"] == 10.2
     assert august_third["benchmark_return_pct"] == 0.5
+    assert august_third["strategy_lifecycle"] == "current_champion"
+    assert august_third["strategy_purpose"] == (
+        "Current authenticated AlphaOps paper/research strategy."
+    )
     monthly = _month(payload, "2026-08")
     assert monthly["eligible_day_count"] == 2
     assert monthly["expected_market_day_count"] == 2
     assert monthly["coverage_pct"] == 100.0
     assert monthly["net_return_pct"] == pytest.approx(-1.0)
+
+
+def test_calendar_keeps_v4_only_as_explicit_legacy_evidence() -> None:
+    legacy = _daily("2026-07-30", return_pct=None, status="PARTIAL")
+    legacy.update(
+        {
+            "cohort": "alphaops_signal_research",
+            "strategy_id": "alphaops_v4",
+            "strategy_version": "dawnstrike-alphaops-v4",
+            "account_id": None,
+            "opening_equity_cents": None,
+            "ending_equity_cents": None,
+        }
+    )
+
+    payload = build_calendar_payload(
+        _performance([legacy], as_of="2026-07-30"),
+        as_of_market_date="2026-07-30",
+    )
+
+    record = _record(payload, "2026-07-30")
+    assert record["strategy_lifecycle"] == "legacy_evidence_only"
+    assert record["eligible_for_return"] is False
+    catalog = payload["strategy_catalog"]
+    assert catalog == [
+        {
+            "strategy_id": "alphaops_v4",
+            "strategy_version": "dawnstrike-alphaops-v4",
+            "lifecycle": "legacy_evidence_only",
+            "purpose": (
+                "Immutable pre-V5 evidence and exact legacy recovery only; never active."
+            ),
+            "record_count": 1,
+            "reported_return_count": 0,
+            "first_observed_date": "2026-07-30",
+            "last_observed_date": "2026-07-30",
+            "cohorts": ["alphaops_signal_research"],
+            "active": False,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+    ]
 
 
 def test_calendar_keeps_pending_null_and_counts_it_in_denominator() -> None:

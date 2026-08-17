@@ -81,6 +81,18 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
     assert "Official and research-only returns are never blended" in script
     assert "Published contract records" in script
     assert "calendarCellStatus(day, matches)" in script
+    assert "calendarDayReturnSummary(matches)" in script
+    assert "Best ${formatPercentText(value)}" in script
+    assert "Cum. ${formatPercentText(summary.cumulativeReturnPct)}" in script
+    assert "sundayOffset(monthDateKeys[0])" in script
+    assert "mondayOffset" not in script
+    assert (
+        "<span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span>"
+        '<span>Thu</span><span>Fri</span><span>Sat</span>'
+    ) in html
+    assert "Advanced filters" in html
+    assert "AlphaOps V4 · legacy history" in script
+    assert "AlphaOps V5 · current" in script
     assert 'records.length === 1' in script
     assert 'market_session_status === "closed" ? "UNAVAILABLE" : "MISSING"' in script
     assert "record?.status || day?.status" not in script

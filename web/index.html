@@ -131,9 +131,14 @@
           <div class="calendar-filters">
             <label>Cohort<select id="calendar-cohort-filter"></select></label>
             <label>Strategy<select id="calendar-strategy-filter"></select></label>
-            <label>Version<select id="calendar-version-filter"></select></label>
-            <label>Policy<select id="calendar-policy-filter"></select></label>
-            <label>Account<select id="calendar-account-filter"></select></label>
+            <details class="calendar-advanced-filters">
+              <summary>Advanced filters</summary>
+              <div>
+                <label>Version<select id="calendar-version-filter"></select></label>
+                <label>Policy<select id="calendar-policy-filter"></select></label>
+                <label>Account<select id="calendar-account-filter"></select></label>
+              </div>
+            </details>
           </div>
         </div>
 
@@ -157,7 +162,7 @@
 
         <div class="calendar-workspace">
           <article class="panel calendar-panel">
-            <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+            <div class="calendar-weekdays" aria-hidden="true"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
             <div id="calendar-grid" class="calendar-grid" role="group" aria-label="Monthly performance calendar"></div>
           </article>
           <aside class="panel calendar-detail" aria-live="polite" aria-labelledby="calendar-detail-title">
