@@ -141,7 +141,4 @@ jobs:
           if ($failures.Count -gt 0) { throw ($failures -join [Environment]::NewLine) }
       - name: Reject new secrets against the reviewed baseline
         shell: pwsh
-        run: |
-          $trackedFiles = git ls-files
-          & python -m detect_secrets.pre_commit_hook --baseline .secrets.baseline @trackedFiles
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: python scripts/run_detect_secrets_tracked.py --baseline .secrets.baseline

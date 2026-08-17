@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import timezone
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from intraday_scanner.v2.opportunity.producer import (
     EvidenceIdentityCache,
     HistoricalOpportunityAdapter,
     OpportunityAdapterRequest,
+    OpportunityProducerError,
     OpportunityResearchProducer,
     ProducerFailureCode,
     StageStatus,
@@ -153,12 +155,15 @@ def test_stage_duration_is_observational_not_decision_identity() -> None:
 def test_disabled_producer_rejects_active_path_and_mounts_append_replay(tmp_path: Path) -> None:
     request = _request()
     disabled = OpportunityResearchProducer()
-    with pytest.raises(RuntimeError, match=ProducerFailureCode.DISABLED.value):
+    with pytest.raises(OpportunityProducerError) as disabled_error:
         disabled.run(request, database_path=tmp_path / "research.sqlite", recorded_at=NOW)
+    assert disabled_error.value.receipt.failure_code is ProducerFailureCode.DISABLED
+    assert disabled_error.value.__cause__ is not None
 
     enabled = OpportunityResearchProducer(enabled=True)
-    with pytest.raises(ValueError, match=ProducerFailureCode.ACTIVE_PATH_FORBIDDEN.value):
+    with pytest.raises(OpportunityProducerError) as active_error:
         enabled.run(request, database_path=ACTIVE_DATABASE, recorded_at=NOW)
+    assert active_error.value.receipt.failure_code is ProducerFailureCode.ACTIVE_PATH_FORBIDDEN
 
     database = (tmp_path / "research-schema-30.sqlite").resolve()
     _initialize_schema_through(database, 30)
@@ -204,3 +209,92 @@ def test_alphaops_v5_adapter_delegates_frozen_policy_with_byte_semantics() -> No
     assert adapter.strategy_id == "alphaops_v5"
     assert adapter.parameters["broker_execution_enabled"] is False
     assert alphaops_v5_adapter_parity(point) is True
+
+
+def test_default_registry_mounts_v5_as_non_promotional_experimental_adapter() -> None:
+    registry = build_default_registry()
+    adapter = registry.experimental_adapters[0]
+
+    assert adapter.strategy_id == "alphaops_v5"
+    assert adapter.status.startswith("research_only")
+    assert adapter.parameters["broker_execution_enabled"] is False
+    assert adapter.parameters["promotion_authority"] is False
+    assert adapter.parameters["take_authority"] is False
+
+
+def test_producer_cache_is_in_real_run_path_and_identity_change_invalidates(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    producer = OpportunityResearchProducer(enabled=True)
+    calls = 0
+
+    def load_request() -> OpportunityAdapterRequest:
+        nonlocal calls
+        calls += 1
+        return request
+
+    database = (tmp_path / "cached.sqlite").resolve()
+    _initialize_schema_through(database, 30)
+    base = EvidenceCacheIdentity(
+        provider_identity="retained-provider",
+        source_identity="retained-source-a",
+        payload_hash_sha256="a" * 64,
+        observed_at=NOW,
+        available_at=NOW,
+        decision_cutoff=NOW,
+    )
+    first = producer.run_cached(
+        base,
+        load_request,
+        database_path=database,
+        recorded_at=NOW.astimezone(timezone.utc),
+    )
+    second = producer.run_cached(
+        base,
+        load_request,
+        database_path=database,
+        recorded_at=NOW.astimezone(timezone.utc),
+    )
+    changed = replace(base, source_identity="retained-source-b")
+    producer.run_cached(
+        changed,
+        load_request,
+        database_path=database,
+        recorded_at=NOW.astimezone(timezone.utc),
+    )
+
+    assert calls == 2
+    assert first.telemetry[0].status is StageStatus.COMPLETE
+    assert second.telemetry[0].status is StageStatus.CACHE_HIT
+
+
+def test_pipeline_and_persistence_failures_preserve_cause_and_safe_receipt(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+
+    def fail_pipeline(_prepared):
+        raise LookupError("sensitive provider detail must not enter the receipt")
+
+    producer = OpportunityResearchProducer(enabled=True)
+    with pytest.raises(OpportunityProducerError) as pipeline_error:
+        producer.run(
+            replace(request, risk_factory=fail_pipeline),
+            database_path=(tmp_path / "unused.sqlite").resolve(),
+            recorded_at=NOW,
+        )
+    pipeline_receipt = pipeline_error.value.receipt
+    assert pipeline_receipt.failure_code is ProducerFailureCode.PIPELINE_FAILED
+    assert pipeline_receipt.exception_type == "LookupError"
+    assert "sensitive" not in str(pipeline_receipt.deterministic_payload())
+    assert isinstance(pipeline_error.value.__cause__, LookupError)
+
+    invalid_database = (tmp_path / "wrong-schema.sqlite").resolve()
+    sqlite3.connect(invalid_database).close()
+    with pytest.raises(OpportunityProducerError) as persistence_error:
+        producer.run(request, database_path=invalid_database, recorded_at=NOW)
+    persistence_receipt = persistence_error.value.receipt
+    assert persistence_receipt.failure_code is ProducerFailureCode.PERSISTENCE_FAILED
+    assert persistence_receipt.telemetry[-1].status is StageStatus.FAILED
+    assert persistence_error.value.__cause__ is not None

@@ -48,6 +48,20 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+# Historical gate scripts are byte-sealed evidence. Keep their exact audited
+# bytes while confining legacy style exceptions to the ten named artifacts.
+[tool.ruff.lint.per-file-ignores]
+"docs/quant-refactor/evidence/final-immutable-gate-20260817/run_gate_shard.py" = ["E402", "I001"]
+"docs/quant-refactor/evidence/final-immutable-gate-20260817/seal_final_gate.py" = ["E501", "I001"]
+"docs/quant-refactor/evidence/final-immutable-gate-20260817/validate_final_gate.py" = ["I001"]
+"docs/quant-refactor/evidence/final-immutable-gate-20260817/validate_source_inventory.py" = ["I001"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/capture_freeze.py" = ["E501", "I001"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/capture_inventory.py" = ["E402", "E501"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/seal_recovery_terminal.py" = ["E501", "I001"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/validate_current_inventory.py" = ["E402", "I001"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/validate_shard_evidence.py" = ["I001"]
+"docs/quant-refactor/evidence/final-repair-completion-20260816/validate_source_test_freeze.py" = ["I001"]
+
 [tool.mypy]
 python_version = "3.13"
 ignore_missing_imports = true

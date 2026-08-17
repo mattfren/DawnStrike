@@ -6,7 +6,7 @@ Last updated: 2026-08-17
 
 - Worktree: `C:\r\dawnstrike-quant-refactor-20260811`
 - Branch: `codex/sol-quant-refactor-20260811`
-- HEAD: `bec32fe752b91f4e1357236a538a6dfea5da56bf`
+- Repair base HEAD: `2b5e2d20fe03cdc02005a03ba88c8899a2cdff52`
 - This ledger records recovery state only. It does not replace Sol adjudication or certify completion.
 
 ## Accepted audit history
@@ -126,3 +126,36 @@ No final audit or certification is claimed complete.
   across 127 validated entries.
 - Recovery status: `PASS`. Commit binding and a fresh independent post-commit
   audit remain the only certification steps.
+
+## Post-commit HIGH repair candidate - 2026-08-17
+
+- A fresh independent audit of commit
+  `2b5e2d20fe03cdc02005a03ba88c8899a2cdff52` reopened portable H-01 binding
+  and the locally repairable H-02, H-03, and H-05 seams.
+- The source/test repair changes the old 572-file candidate. The 3,156-test
+  final immutable gate above is preserved as historical evidence and is not a
+  gate for the new candidate.
+- The new candidate contains 580 source/test paths. Its checkout-byte aggregate
+  is
+  `83bf62c2:5a9d8fa6:616a4992:b5faae95:dd9c71a0:ba59d817:f972788a:236d07de`,
+  and its Git-blob aggregate is
+  `8ca0cf1c:266529db:88536bca:9fdf2d69:897fb557:5d9621cb:587b5bdf:45110a4a`.
+- Canonical pytest collection is 3,166 unique nodes with inventory SHA-256
+  `90360b41:ba6b42d5:b8317fe9:7ff95703:7d251a59:f8174e5d:76799f51:b218b781`.
+- Candidate identity:
+  `docs/quant-refactor/evidence/post-commit-high-repair-20260817/source-test-identity.json`.
+  Canonical inventory:
+  `docs/quant-refactor/evidence/post-commit-high-repair-20260817/canonical-pytest-inventory.json`.
+- Focused mounted-opportunity, safety, firewall, catalyst, V5, CLI, cache,
+  telemetry, and persistence selection: 367 passed, exit 0.
+- Whole-repository Ruff, mypy, compileall, pip check, exact Bandit, Node syntax,
+  PowerShell parse, and diff checks pass.
+- The current candidate intentionally does not match the base HEAD: 15
+  source/test blobs differ or are new. Sol must stage and commit the accepted
+  candidate, rerun the binding tool, and require
+  `all_checkout_bytes_match_head=true` before H-01 adjudication.
+- No active database was inspected or mutated. No provider, network, broker,
+  scheduled task, deployment, publication, promotion, or operator marker was
+  used.
+- Luna does not close the independent findings. A fresh full immutable gate and
+  Sol adjudication remain pending after repair acceptance.

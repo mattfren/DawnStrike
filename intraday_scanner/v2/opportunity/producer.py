@@ -53,6 +53,7 @@ class ProducerFailureCode(str, Enum):
     DISABLED = "producer_disabled"
     ACTIVE_PATH_FORBIDDEN = "active_database_forbidden"
     EXPLICIT_PATH_REQUIRED = "explicit_non_active_database_required"
+    INPUT_EVIDENCE_FAILED = "input_evidence_failed"
     PIPELINE_FAILED = "pipeline_failed"
     PERSISTENCE_FAILED = "persistence_failed"
 
@@ -86,6 +87,46 @@ class StageTelemetry:
             "input_count": self.input_count,
             "output_count": self.output_count,
         }
+
+
+@dataclass(frozen=True)
+class ProducerFailureReceipt:
+    failure_code: ProducerFailureCode
+    failed_stage: str
+    exception_type: str
+    telemetry: tuple[StageTelemetry, ...]
+    research_only: bool = True
+    broker_execution_enabled: bool = False
+    promotion_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.failed_stage.strip() or not self.exception_type.strip():
+            raise ValueError("producer failure receipt requires bounded stage and type")
+        if not self.telemetry or self.telemetry[-1].status is not StageStatus.FAILED:
+            raise ValueError("producer failure receipt requires terminal failed telemetry")
+        if self.telemetry[-1].failure_code is not self.failure_code:
+            raise ValueError("producer failure receipt code does not match terminal telemetry")
+        if not self.research_only or self.broker_execution_enabled or self.promotion_authority:
+            raise ValueError("producer failure receipts must remain research-only")
+
+    def deterministic_payload(self) -> dict[str, object]:
+        return {
+            "failure_code": self.failure_code.value,
+            "failed_stage": self.failed_stage,
+            "exception_type": self.exception_type,
+            "telemetry": tuple(item.deterministic_payload() for item in self.telemetry),
+            "research_only": self.research_only,
+            "broker_execution_enabled": self.broker_execution_enabled,
+            "promotion_authority": self.promotion_authority,
+        }
+
+
+class OpportunityProducerError(RuntimeError):
+    """Typed failure that preserves the original cause and safe telemetry."""
+
+    def __init__(self, receipt: ProducerFailureReceipt) -> None:
+        super().__init__(receipt.failure_code.value)
+        self.receipt = receipt
 
 
 @dataclass(frozen=True)
@@ -203,8 +244,59 @@ class ProducerReceipt:
 
 
 class OpportunityResearchProducer:
-    def __init__(self, *, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        evidence_cache: EvidenceIdentityCache[OpportunityAdapterRequest] | None = None,
+    ) -> None:
         self.enabled = enabled
+        self.evidence_cache = evidence_cache or EvidenceIdentityCache()
+
+    def run_cached(
+        self,
+        identity: EvidenceCacheIdentity,
+        loader: Callable[[], OpportunityAdapterRequest],
+        *,
+        database_path: str | Path,
+        recorded_at: datetime,
+        adapter: CurrentOpportunityAdapter | HistoricalOpportunityAdapter | None = None,
+    ) -> ProducerReceipt:
+        """Load exact retained evidence through the producer-owned identity cache."""
+
+        self._require_enabled()
+        started = time.perf_counter()
+        try:
+            request, cache_hit = self.evidence_cache.get_or_load(identity, loader)
+        except Exception as exc:
+            telemetry = (
+                _failed_stage(
+                    "retained_input_evidence",
+                    ProducerFailureCode.INPUT_EVIDENCE_FAILED,
+                    started,
+                ),
+            )
+            raise _producer_error(
+                ProducerFailureCode.INPUT_EVIDENCE_FAILED,
+                "retained_input_evidence",
+                exc,
+                telemetry,
+            ) from exc
+        input_telemetry = StageTelemetry(
+            stage_name="retained_input_evidence",
+            status=StageStatus.CACHE_HIT if cache_hit else StageStatus.COMPLETE,
+            failure_code=None,
+            input_count=1,
+            output_count=1,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        return self._run_loaded(
+            request,
+            database_path=database_path,
+            recorded_at=recorded_at,
+            adapter=adapter,
+            initial_telemetry=(input_telemetry,),
+        )
 
     def run(
         self,
@@ -214,18 +306,104 @@ class OpportunityResearchProducer:
         recorded_at: datetime,
         adapter: CurrentOpportunityAdapter | HistoricalOpportunityAdapter | None = None,
     ) -> ProducerReceipt:
-        if not self.enabled:
-            raise RuntimeError(ProducerFailureCode.DISABLED.value)
+        self._require_enabled()
+        return self._run_loaded(
+            request,
+            database_path=database_path,
+            recorded_at=recorded_at,
+            adapter=adapter,
+        )
+
+    def _require_enabled(self) -> None:
+        if self.enabled:
+            return
+        cause = RuntimeError(ProducerFailureCode.DISABLED.value)
+        telemetry = (
+            StageTelemetry(
+                stage_name="research_only_boundary",
+                status=StageStatus.FAILED,
+                failure_code=ProducerFailureCode.DISABLED,
+                input_count=0,
+                output_count=0,
+                duration_ms=0.0,
+            ),
+        )
+        raise _producer_error(
+            ProducerFailureCode.DISABLED,
+            "research_only_boundary",
+            cause,
+            telemetry,
+        ) from cause
+
+    def _run_loaded(
+        self,
+        request: OpportunityAdapterRequest,
+        *,
+        database_path: str | Path,
+        recorded_at: datetime,
+        adapter: CurrentOpportunityAdapter | HistoricalOpportunityAdapter | None = None,
+        initial_telemetry: tuple[StageTelemetry, ...] = (),
+    ) -> ProducerReceipt:
         path = Path(database_path)
         if not path.is_absolute():
-            raise ValueError(ProducerFailureCode.EXPLICIT_PATH_REQUIRED.value)
+            cause = ValueError(ProducerFailureCode.EXPLICIT_PATH_REQUIRED.value)
+            telemetry = (
+                *initial_telemetry,
+                StageTelemetry(
+                    stage_name="research_database_boundary",
+                    status=StageStatus.FAILED,
+                    failure_code=ProducerFailureCode.EXPLICIT_PATH_REQUIRED,
+                    input_count=1,
+                    output_count=0,
+                    duration_ms=0.0,
+                ),
+            )
+            raise _producer_error(
+                ProducerFailureCode.EXPLICIT_PATH_REQUIRED,
+                "research_database_boundary",
+                cause,
+                telemetry,
+            ) from cause
         resolved = path.resolve(strict=False)
         if os.path.normcase(str(resolved)) == os.path.normcase(str(ACTIVE_DATABASE)):
-            raise ValueError(ProducerFailureCode.ACTIVE_PATH_FORBIDDEN.value)
-        telemetry: list[StageTelemetry] = []
+            cause = ValueError(ProducerFailureCode.ACTIVE_PATH_FORBIDDEN.value)
+            telemetry = (
+                *initial_telemetry,
+                StageTelemetry(
+                    stage_name="research_database_boundary",
+                    status=StageStatus.FAILED,
+                    failure_code=ProducerFailureCode.ACTIVE_PATH_FORBIDDEN,
+                    input_count=1,
+                    output_count=0,
+                    duration_ms=0.0,
+                ),
+            )
+            raise _producer_error(
+                ProducerFailureCode.ACTIVE_PATH_FORBIDDEN,
+                "research_database_boundary",
+                cause,
+                telemetry,
+            ) from cause
+        stage_telemetry = list(initial_telemetry)
         started = time.perf_counter()
-        result = (adapter or CurrentOpportunityAdapter()).evaluate(request)
-        telemetry.append(
+        try:
+            result = (adapter or CurrentOpportunityAdapter()).evaluate(request)
+        except Exception as exc:
+            stage_telemetry.append(
+                _failed_stage(
+                    "shared_opportunity_pipeline",
+                    ProducerFailureCode.PIPELINE_FAILED,
+                    started,
+                    input_count=request.universe_snapshot.requested_count,
+                )
+            )
+            raise _producer_error(
+                ProducerFailureCode.PIPELINE_FAILED,
+                "shared_opportunity_pipeline",
+                exc,
+                tuple(stage_telemetry),
+            ) from exc
+        stage_telemetry.append(
             StageTelemetry(
                 stage_name="shared_opportunity_pipeline",
                 status=StageStatus.COMPLETE,
@@ -236,12 +414,28 @@ class OpportunityResearchProducer:
             )
         )
         started = time.perf_counter()
-        store = OpportunityStore(resolved)
-        persistence = store.append_run(result, recorded_at=recorded_at)
-        replay = OpportunityStore(resolved, read_only=True).load_run(result.run_id)
-        if replay is None:
-            raise RuntimeError(ProducerFailureCode.PERSISTENCE_FAILED.value)
-        telemetry.append(
+        try:
+            store = OpportunityStore(resolved)
+            persistence = store.append_run(result, recorded_at=recorded_at)
+            replay = OpportunityStore(resolved, read_only=True).load_run(result.run_id)
+            if replay is None:
+                raise RuntimeError(ProducerFailureCode.PERSISTENCE_FAILED.value)
+        except Exception as exc:
+            stage_telemetry.append(
+                _failed_stage(
+                    "immutable_append_and_read_only_replay",
+                    ProducerFailureCode.PERSISTENCE_FAILED,
+                    started,
+                    input_count=1,
+                )
+            )
+            raise _producer_error(
+                ProducerFailureCode.PERSISTENCE_FAILED,
+                "immutable_append_and_read_only_replay",
+                exc,
+                tuple(stage_telemetry),
+            ) from exc
+        stage_telemetry.append(
             StageTelemetry(
                 stage_name="immutable_append_and_read_only_replay",
                 status=StageStatus.COMPLETE,
@@ -255,10 +449,44 @@ class OpportunityResearchProducer:
             pipeline_result=result,
             persistence_receipt=persistence,
             replay=replay,
-            telemetry=tuple(telemetry),
+            telemetry=tuple(stage_telemetry),
         )
 
 
+def _failed_stage(
+    stage_name: str,
+    failure_code: ProducerFailureCode,
+    started: float,
+    *,
+    input_count: int = 1,
+) -> StageTelemetry:
+    return StageTelemetry(
+        stage_name=stage_name,
+        status=StageStatus.FAILED,
+        failure_code=failure_code,
+        input_count=input_count,
+        output_count=0,
+        duration_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
+def _producer_error(
+    failure_code: ProducerFailureCode,
+    failed_stage: str,
+    cause: Exception,
+    telemetry: tuple[StageTelemetry, ...],
+) -> OpportunityProducerError:
+    exception_type = type(cause).__name__
+    if not exception_type.isidentifier():
+        exception_type = "Exception"
+    return OpportunityProducerError(
+        ProducerFailureReceipt(
+            failure_code=failure_code,
+            failed_stage=failed_stage,
+            exception_type=exception_type,
+            telemetry=telemetry,
+        )
+    )
 def run_opportunity_research(
     request: OpportunityAdapterRequest,
     *,
@@ -281,8 +509,10 @@ __all__ = [
     "EvidenceIdentityCache",
     "HistoricalOpportunityAdapter",
     "OpportunityAdapterRequest",
+    "OpportunityProducerError",
     "OpportunityResearchProducer",
     "ProducerFailureCode",
+    "ProducerFailureReceipt",
     "ProducerReceipt",
     "StageStatus",
     "StageTelemetry",

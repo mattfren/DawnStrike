@@ -219,6 +219,8 @@ def build_alphaops_intraday_strategy(
             "policy_version": policy.policy_version,
             "cost_model_version": policy.cost_model_version,
             "broker_execution_enabled": False,
+            "promotion_authority": False,
+            "take_authority": False,
         },
         indicators=(),
         entry_logic="delegate to frozen AlphaOps V5 official-paper policy",

@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -128,6 +129,11 @@ from intraday_scanner.services.mover_discovery_service import (
     record_provider_counts,
     require_universe,
     resolve_universe,
+)
+from intraday_scanner.services.opportunity_research_service import (
+    LocalResearchStatus,
+    OpportunityResearchMode,
+    run_local_opportunity_research,
 )
 from intraday_scanner.services.outcome_gap_service import outcome_gap_report
 from intraday_scanner.services.performance_service import (
@@ -1084,6 +1090,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     dashboard_doctor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     dashboard_doctor_parser.add_argument("--root", default=".")
     dashboard_doctor_parser.add_argument("--print", action="store_true", dest="print_result")
+
+    opportunity_research = subparsers.add_parser(
+        "opportunity-research",
+        help="Run disabled-by-default research over retained local evidence only",
+    )
+    opportunity_research.add_argument("--enable-research", action="store_true")
+    opportunity_research.add_argument(
+        "--mode",
+        choices=[item.value for item in OpportunityResearchMode],
+        default=OpportunityResearchMode.CURRENT.value,
+    )
+    opportunity_research.add_argument("--data-truth-root", default=None)
+    opportunity_research.add_argument("--snapshot-id", default=None)
+    opportunity_research.add_argument("--database-path", default=None)
+    opportunity_research.add_argument("--decision-at", default=None)
+    opportunity_research.add_argument("--recorded-at", default=None)
+    opportunity_research.add_argument("--universe-evidence", default=None)
+    opportunity_research.add_argument("--catalyst-database", default=None)
+    opportunity_research.add_argument("--alphaops-v5-candidates", default=None)
     return parser
 
 
@@ -1094,6 +1119,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "scan":
             return _run_scan(args)
+        if args.command == "opportunity-research":
+            return _run_opportunity_research(args)
         if args.command == "print-upload-prompt":
             return _run_print_upload_prompt(args)
         if args.command == "import-manual-snapshot":
@@ -1309,6 +1336,44 @@ def main(argv: list[str] | None = None) -> int:
     except IntradayScannerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def _run_opportunity_research(args: argparse.Namespace) -> int:
+    try:
+        decision_at = _optional_iso_datetime(args.decision_at)
+        recorded_at = _optional_iso_datetime(args.recorded_at)
+    except ValueError:
+        decision_at = None
+        recorded_at = None
+    report = run_local_opportunity_research(
+        enabled=bool(args.enable_research),
+        mode=OpportunityResearchMode(args.mode),
+        data_truth_root=Path(args.data_truth_root) if args.data_truth_root else None,
+        snapshot_id=args.snapshot_id,
+        database_path=Path(args.database_path) if args.database_path else None,
+        decision_at=decision_at,
+        recorded_at=recorded_at,
+        universe_evidence_path=(
+            Path(args.universe_evidence) if args.universe_evidence else None
+        ),
+        catalyst_database_path=(
+            Path(args.catalyst_database) if args.catalyst_database else None
+        ),
+        alphaops_v5_candidates_path=(
+            Path(args.alphaops_v5_candidates) if args.alphaops_v5_candidates else None
+        ),
+    )
+    print(json.dumps(report.deterministic_payload(), sort_keys=True))
+    return 1 if report.status is LocalResearchStatus.FAILED else 0
+
+
+def _optional_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return parsed
 
 
 def _run_scan(args: argparse.Namespace) -> int:

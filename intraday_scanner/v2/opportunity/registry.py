@@ -63,6 +63,7 @@ Evaluator = Callable[
 @dataclass(frozen=True)
 class StrategyRegistry:
     definitions: tuple[StrategyDefinition, ...]
+    experimental_adapters: tuple[StrategySpec, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [(item.strategy_id, item.version) for item in self.definitions]
@@ -82,6 +83,20 @@ class StrategyRegistry:
                 continue
             if definition.evaluator_code_hash != evaluator_behavior_hash(definition.evaluator_id):
                 raise ValueError("strategy evaluator code hash does not match implementation")
+        adapter_identities = tuple(
+            (item.strategy_id, item.version) for item in self.experimental_adapters
+        )
+        if len(adapter_identities) != len(set(adapter_identities)):
+            raise ValueError("duplicate experimental strategy adapter ID/version")
+        for adapter in self.experimental_adapters:
+            if not adapter.status.startswith("research_only"):
+                raise ValueError("experimental strategy adapters must remain research-only")
+            if adapter.parameters.get("broker_execution_enabled") is not False:
+                raise ValueError("experimental strategy adapters cannot enable broker execution")
+            if adapter.parameters.get("promotion_authority") is not False:
+                raise ValueError("experimental strategy adapters cannot hold promotion authority")
+            if adapter.parameters.get("take_authority") is not False:
+                raise ValueError("experimental strategy adapters cannot emit TAKE authority")
 
     def get(self, strategy_id: str, version: str = STRATEGY_VERSION) -> StrategyDefinition:
         for definition in self.definitions:
@@ -111,7 +126,10 @@ class StrategyRegistry:
         )
 
 
-def build_default_registry() -> StrategyRegistry:
+def build_default_registry(
+    *,
+    alphaops_v5_candidates: dict[str, dict[str, Any]] | None = None,
+) -> StrategyRegistry:
     """Register all required DS families with heuristic and disabled truth labels."""
 
     trend_regimes = (
@@ -242,7 +260,12 @@ def build_default_registry() -> StrategyRegistry:
         _order_flow_definition("DS-OF-001", "True CVD divergence reversal"),
         _order_flow_definition("DS-OF-002", "Aggressor imbalance continuation"),
     )
-    return StrategyRegistry(definitions=definitions)
+    return StrategyRegistry(
+        definitions=definitions,
+        experimental_adapters=(
+            build_alphaops_v5_adapter(alphaops_v5_candidates or {}),
+        ),
+    )
 
 
 def build_alphaops_v5_adapter(
