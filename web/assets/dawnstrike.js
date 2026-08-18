@@ -735,14 +735,15 @@ function renderCalendar() {
     const cumulativeText = summary?.cumulativeReturnPct == null
       ? "Cum. —"
       : `Cum. ${formatPercentText(summary.cumulativeReturnPct)}`;
+    const cumulativeState = calendarCumulativeState(summary?.cumulativeReturnPct);
     const statusText = matches.length > 1 ? `${matches.length} records · ${summary?.strategyLabel || "no return"}` : calendarStatusLabel(status);
     const ariaReturn = summary
       ? `Best ${summary.presentation.label} ${formatPercentText(summary.bestReturnPct)}. Same-strategy cumulative return ${formatPercentText(summary.cumulativeReturnPct)}.`
       : "Return not reported";
     const researchClass = summary?.presentation.scope === "research" ? "research-only" : "";
-    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${researchClass} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(`${dateKey}. ${statusText}. ${ariaReturn}`)}" aria-pressed="${selected}">
+    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${researchClass} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} cumulative-${cumulativeState.key} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(`${dateKey}. ${statusText}. ${ariaReturn}`)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
-      <span class="calendar-cell-values"><strong>${escapeHtml(bestText)}</strong><span>${escapeHtml(cumulativeText)}</span></span>
+      <span class="calendar-cell-values"><strong>${escapeHtml(bestText)}</strong><span>${escapeHtml(cumulativeText)}</span><em>${escapeHtml(cumulativeState.label)}</em></span>
       <small>${escapeHtml(statusText)}</small>
       <i aria-hidden="true"></i>
     </button>`);
@@ -755,8 +756,7 @@ function renderCalendar() {
     });
   });
   const currentDays = allDays.filter((day) => day.month === state.calendarMonth);
-  const currentRecords = currentDays.flatMap((day) => filteredCalendarRecords(day));
-  renderCalendarSummary(currentRecords);
+  renderCalendarSummary(currentDays);
   if (!state.calendarSelectedDate || !state.calendarSelectedDate.startsWith(state.calendarMonth)) {
     const preferred = currentDays.slice().reverse().find((day) => filteredCalendarRecords(day).length > 0)
       || currentDays.at(-1);
@@ -807,6 +807,77 @@ function calendarDayReturnSummary(records) {
   };
 }
 
+function calendarCumulativeState(value) {
+  const numeric = numberOrNull(value);
+  if (numeric == null) return { key: "missing", label: "No cumulative basis" };
+  if (numeric > 0) return { key: "positive", label: "Winning path" };
+  if (numeric < 0) return { key: "negative", label: "Losing path" };
+  return { key: "flat", label: "Flat path" };
+}
+
+function calendarDailyRecap(day, records) {
+  if (!day) return "";
+  if (!records.length) {
+    const closed = day.market_session_status === "closed";
+    return `<div class="calendar-recap-heading"><span>Daily recap</span><strong>${closed ? "Market closed" : "No observation"}</strong></div><p>${escapeHtml(closed ? (day.market_session_reason || "The market was closed.") : "No canonical result was published. This day is unknown, not a zero or a loss.")}</p>`;
+  }
+  const presented = records.map((record) => ({ record, presentation: calendarReturnPresentation(record) }));
+  const reported = presented.filter((item) => item.presentation.value != null);
+  const positiveCount = reported.filter((item) => item.presentation.value > 0).length;
+  const negativeCount = reported.filter((item) => item.presentation.value < 0).length;
+  const flatCount = reported.filter((item) => item.presentation.value === 0).length;
+  const withheldCount = records.length - reported.length;
+  const summary = calendarDayReturnSummary(records);
+  const allNoTrade = records.every((record) => record.status === "NO_TRADE");
+  const cumulativeState = calendarCumulativeState(summary?.cumulativeReturnPct);
+  const resultLabel = allNoTrade
+    ? "No trade"
+    : summary?.bestReturnPct > 0
+    ? "Best result won"
+    : summary?.bestReturnPct < 0
+    ? "Best result lost"
+    : summary
+    ? "Best result flat"
+    : "Outcome withheld";
+  const resultClass = allNoTrade || summary?.bestReturnPct === 0
+    ? "flat"
+    : summary?.bestReturnPct > 0
+    ? "positive"
+    : summary?.bestReturnPct < 0
+    ? "negative"
+    : "missing";
+  const bullets = [];
+  if (allNoTrade) {
+    bullets.push("No position was entered. The published zero is an explicit no-trade result, not missing data.");
+  } else if (summary) {
+    bullets.push(`${summary.strategyLabel} led the displayed set at ${formatPercentText(summary.bestReturnPct)} (${summary.presentation.label.toLowerCase()}).`);
+  } else {
+    bullets.push("No matched contract has enough evidence to publish a return.");
+  }
+  if (summary?.cumulativeReturnPct != null) {
+    bullets.push(`That same strategy's cumulative path is ${formatPercentText(summary.cumulativeReturnPct)} — ${cumulativeState.label.toLowerCase()}.`);
+  } else {
+    bullets.push("A cumulative path is not reportable for the displayed result; the dashboard does not substitute zero.");
+  }
+  bullets.push(`Displayed contracts: ${positiveCount} positive · ${negativeCount} negative · ${flatCount} flat · ${withheldCount} withheld.`);
+  const entries = records.reduce((total, record) => total + (numberOrNull(record.entries) || 0), 0);
+  const exits = records.reduce((total, record) => total + (numberOrNull(record.exits) || 0), 0);
+  const open = records.reduce((total, record) => total + (numberOrNull(record.open_positions) || 0), 0);
+  bullets.push(`Recorded activity: ${entries} entered · ${exits} exited · ${open} still open.`);
+  const details = records.flatMap((record) => Array.isArray(record.details) ? record.details : []);
+  const fees = details.reduce((total, detail) => total + (numberOrNull(detail.fees_cents) || 0), 0);
+  const slippage = details.reduce((total, detail) => total + (numberOrNull(detail.slippage_cents) || 0), 0);
+  if (fees || slippage) bullets.push(`Published costs: ${formatMoneyText(fees)} fees · ${formatMoneyText(slippage)} slippage.`);
+  const reasons = [...new Set(records.flatMap((record) => Array.isArray(record.missing_reasons) ? record.missing_reasons : []).filter(Boolean))];
+  if (reasons.length) bullets.push(`Evidence limits: ${reasons.slice(0, 3).join("; ")}.`);
+  const blocks = [...new Set(details.flatMap((detail) => Array.isArray(detail.block_or_veto_reasons) ? detail.block_or_veto_reasons : []).flatMap((reason) => String(reason).split(";")).map((reason) => reason.trim()).filter(Boolean))];
+  if (blocks.length) bullets.push(`Published block or veto evidence: ${blocks.slice(0, 3).map(humanizeIdentifier).join("; ")}.`);
+  if (allNoTrade && !blocks.length) bullets.push("No block or veto cause was published, so this recap does not invent one.");
+  return `<div class="calendar-recap-heading"><span>Daily recap</span><strong class="${resultClass}">${escapeHtml(resultLabel)}</strong></div>
+    <div class="calendar-recap-path"><span>Same-strategy cumulative state</span><strong class="${escapeHtml(cumulativeState.key)}">${escapeHtml(cumulativeState.label)}${summary?.cumulativeReturnPct == null ? "" : ` · ${escapeHtml(formatPercentText(summary.cumulativeReturnPct))}`}</strong></div>
+    <ul>${bullets.map((bullet) => `<li>${escapeHtml(bullet)}</li>`).join("")}</ul>`;
+}
+
 function renderCalendarHistorySummary(days) {
   const node = document.getElementById("calendar-history-summary");
   if (!node) return;
@@ -832,7 +903,9 @@ function calendarCellStatus(day, records) {
   return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
 }
 
-function renderCalendarSummary(records) {
+function renderCalendarSummary(days) {
+  const matchedDays = days.map((day) => ({ day, records: filteredCalendarRecords(day) })).filter((item) => item.records.length);
+  const records = matchedDays.flatMap((item) => item.records);
   const months = Array.isArray(state.calendar?.months) ? state.calendar.months : [];
   const summaries = months.filter((row) => row.month === state.calendarMonth && Object.entries(state.calendarFilters).every(([key, value]) => !value || String(row[key] || "") === value));
   const summary = summaries.length === 1 ? summaries[0] : null;
@@ -866,17 +939,30 @@ function renderCalendarSummary(records) {
     ? `${records.length} observed rows`
     : "Not reported";
   document.getElementById("calendar-summary-no-trades").textContent = summary ? `${summary.no_trade_day_count} explicit no-trade day${summary.no_trade_day_count === 1 ? "" : "s"}` : "No-trade days not reported";
+  const cumulativeStates = matchedDays.map((item) => calendarCumulativeState(calendarDayReturnSummary(item.records)?.cumulativeReturnPct));
+  const cumulativeWins = cumulativeStates.filter((item) => item.key === "positive").length;
+  const cumulativeLosses = cumulativeStates.filter((item) => item.key === "negative").length;
+  const cumulativeFlat = cumulativeStates.filter((item) => item.key === "flat").length;
+  const cumulativeMissing = cumulativeStates.filter((item) => item.key === "missing").length;
+  document.getElementById("calendar-summary-cumulative-days").textContent = matchedDays.length
+    ? `${cumulativeWins} winning · ${cumulativeLosses} losing`
+    : "Not reported";
+  document.getElementById("calendar-summary-cumulative-note").textContent = matchedDays.length
+    ? `${cumulativeFlat} flat · ${cumulativeMissing} without a cumulative basis`
+    : "No displayed strategy paths";
 }
 
 function renderCalendarDetail(day, records) {
   const title = document.getElementById("calendar-detail-title");
   const note = document.getElementById("calendar-detail-note");
+  const recap = document.getElementById("calendar-daily-recap");
   const metrics = document.getElementById("calendar-detail-metrics");
   const reasons = document.getElementById("calendar-detail-reasons");
   const trades = document.getElementById("calendar-detail-trades");
   if (!day) {
     title.textContent = "Choose a date";
     note.textContent = "Select a calendar day to inspect its return basis, account equation, selections, and source lineage.";
+    recap.innerHTML = "";
     metrics.innerHTML = "";
     reasons.innerHTML = "";
     trades.innerHTML = "";
@@ -890,6 +976,7 @@ function renderCalendarDetail(day, records) {
     const summary = calendarDayReturnSummary(records);
     setStatus("calendar-detail-status", `${records.length} records`, "PARTIAL");
     note.textContent = `${records.length} canonical contracts match this date. Best and cumulative values come from the same published strategy; official and research scopes are never blended.`;
+    recap.innerHTML = calendarDailyRecap(day, records);
     metrics.innerHTML = detailRows([
       ["Best reported return", formatPercentText(summary?.bestReturnPct), summary?.bestReturnPct != null],
       ["Its cumulative return", formatPercentText(summary?.cumulativeReturnPct), summary?.cumulativeReturnPct != null],
@@ -921,6 +1008,7 @@ function renderCalendarDetail(day, records) {
     const closed = day.market_session_status === "closed";
     setStatus("calendar-detail-status", closed ? "Market closed" : "Missing", closed ? "" : "PARTIAL");
     note.textContent = closed ? day.market_session_reason || "The market was closed." : "No canonical observation exists for this market day. It is not a zero-return day.";
+    recap.innerHTML = calendarDailyRecap(day, records);
     metrics.innerHTML = detailRows([
       ["Market session", closed ? "Closed" : day.market_session_status || "Not reported", closed],
       ["Return", "Not reported", false],
@@ -937,6 +1025,7 @@ function renderCalendarDetail(day, records) {
     : presentation.scope === "canonical"
     ? `${record.return_basis === "account_equity_identity_after_external_flows" ? "Account return" : "Canonical return"} is eligible under ${record.execution_policy_version}.`
     : "The return is withheld until the required outcome, account, and source evidence is complete.";
+  recap.innerHTML = calendarDailyRecap(day, records);
   metrics.innerHTML = detailRows([
     [presentation.scope === "research" ? "Research-only return" : "Net return", formatPercentText(presentation.value), presentation.value != null],
     ["Cumulative return", formatPercentText(record.cumulative_return_pct), record.cumulative_return_pct != null],

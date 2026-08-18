@@ -68,6 +68,9 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
         "calendar-version-filter",
         "calendar-policy-filter",
         "calendar-account-filter",
+        "calendar-summary-cumulative-days",
+        "calendar-summary-cumulative-note",
+        "calendar-daily-recap",
         "calendar-detail-metrics",
         "calendar-detail-trades",
     ):
@@ -82,8 +85,13 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
     assert "Published contract records" in script
     assert "calendarCellStatus(day, matches)" in script
     assert "calendarDayReturnSummary(matches)" in script
+    assert "calendarDailyRecap(day, records)" in script
+    assert "calendarCumulativeState(summary?.cumulativeReturnPct)" in script
     assert "Best ${formatPercentText(value)}" in script
     assert "Cum. ${formatPercentText(summary.cumulativeReturnPct)}" in script
+    assert "Winning path" in script
+    assert "No block or veto cause was published" in script
+    assert "the dashboard does not substitute zero" in script
     assert "sundayOffset(monthDateKeys[0])" in script
     assert "mondayOffset" not in script
     assert (
@@ -99,5 +107,7 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
     assert "numberOrZero" not in script
     assert "No canonical observation exists for this market day" in script
     assert ".calendar-workspace > * { min-width:0; }" in stylesheet
+    assert ".calendar-daily-recap {" in stylesheet
+    assert ".calendar-cell.cumulative-positive" in stylesheet
     assert ".calendar-trade-card p {" in stylesheet
     assert "overflow-wrap:anywhere;" in stylesheet
