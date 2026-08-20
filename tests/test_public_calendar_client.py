@@ -41,12 +41,19 @@ def test_calendar_client_distinguishes_historical_missing_from_unpublished_and_f
         _javascript_function(source, name)
         for name in (
             "calendarPublicationDate",
+            "calendarFreshness",
+            "calendarTimestampIsPast",
+            "calendarFreshnessPublicationStatus",
+            "calendarFallbackSessionStatus",
+            "calendarContractPublicationStatus",
             "calendarPublicationStatus",
             "calendarCellStatus",
         )
     )
     probe = f"""
+const CALENDAR_CLOSED_DATES = new Set(["2026-08-01"]);
 const state = {{ calendar: {{ as_of_market_date: "2026-08-19" }} }};
+function calendarNow() {{ return new Date("2026-08-20T12:00:00Z"); }}
 function calendarCurrentDateChicago() {{ return "2026-08-20"; }}
 {helpers}
 console.log(JSON.stringify({{
@@ -68,4 +75,63 @@ console.log(JSON.stringify({{
         "unpublished": "NOT_PUBLISHED",
         "future": "FUTURE",
         "closed": "UNAVAILABLE",
+    }
+
+
+def test_calendar_client_prefers_contract_fields_and_marks_overdue_publication() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for the public calendar client contract"
+    source = Path("web/assets/dawnstrike.js").read_text(encoding="utf-8")
+    helpers = "\n".join(
+        _javascript_function(source, name)
+        for name in (
+            "calendarPublicationDate",
+            "calendarCurrentDateChicago",
+            "calendarFreshness",
+            "calendarTimestampIsPast",
+            "calendarFreshnessPublicationStatus",
+            "calendarFallbackSessionStatus",
+            "calendarContractPublicationStatus",
+            "calendarPublicationStatus",
+            "calendarCellStatus",
+        )
+    )
+    probe = f"""
+const CALENDAR_CLOSED_DATES = new Set();
+const state = {{ calendar: {{
+  as_of_market_date: "2026-08-18",
+  freshness: {{
+    status: "stale",
+    authoritative_as_of_market_date: "2026-08-18",
+    next_publication_market_date: "2026-08-20",
+    next_publication_at: "2026-08-20T22:30:00+00:00",
+    next_stale_after: "2026-08-20T23:30:00+00:00",
+  }},
+}} }};
+let now = new Date("2026-08-20T22:00:00+00:00");
+function calendarNow() {{ return now; }}
+{helpers}
+const preDeadline = calendarCellStatus({{
+  date: "2026-08-20", status: "PENDING",
+  publication_state: "awaiting_publication", authoritative: false,
+  publication_due_at: "2026-08-20T22:30:00+00:00",
+}}, []);
+const future = calendarCellStatus({{
+  date: "2026-08-21", status: "PENDING", publication_state: "future", authoritative: false,
+}}, []);
+const closedWeekend = calendarCellStatus({{ date: "2026-08-22" }}, []);
+now = new Date("2026-08-20T23:45:00+00:00");
+const overdue = calendarCellStatus({{ date: "2026-08-19" }}, []);
+const overdueCurrent = calendarCellStatus({{ date: "2026-08-20" }}, []);
+console.log(JSON.stringify({{ preDeadline, future, closedWeekend, overdue, overdueCurrent }}));
+"""
+    completed = subprocess.run(
+        [node, "-e", probe], check=True, capture_output=True, text=True
+    )
+    assert json.loads(completed.stdout) == {
+        "preDeadline": "NOT_PUBLISHED",
+        "future": "FUTURE",
+        "closedWeekend": "UNAVAILABLE",
+        "overdue": "STALE",
+        "overdueCurrent": "STALE",
     }

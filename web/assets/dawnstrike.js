@@ -31,6 +31,11 @@ const V6_GATE_LABELS = {
 const PAGE_SIZE = 10;
 const DASHBOARD_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const DASHBOARD_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
+const CALENDAR_CLOSED_DATES = new Set([
+  "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+  "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
+]);
 const state = {
   data: null,
   readiness: null,
@@ -872,7 +877,10 @@ function calendarCumulativeState(value) {
 function calendarDailyRecap(day, records) {
   if (!day) return "";
   if (!records.length) {
-    const publicationStatus = calendarPublicationStatus(day.date);
+    const publicationStatus = calendarPublicationStatus(day.date, day);
+    if (publicationStatus === "UNAVAILABLE") {
+      return `<div class="calendar-recap-heading"><span>Daily recap</span><strong>Market closed</strong></div><p>${escapeHtml(day.market_session_reason || "The market was closed. No observation is expected or inferred.")}</p>`;
+    }
     if (publicationStatus === "FUTURE") {
       return '<div class="calendar-recap-heading"><span>Daily recap</span><strong>Future</strong></div><p>This date is in the future. No observation is expected or inferred.</p>';
     }
@@ -954,8 +962,6 @@ function renderCalendarHistorySummary(days) {
 }
 
 function calendarCellStatus(day, records) {
-  const publicationStatus = calendarPublicationStatus(day?.date);
-  if (publicationStatus) return publicationStatus;
   if (records.length > 1) {
     const statuses = records.map((record) => record?.status || "MISSING");
     if (statuses.every((status) => status === "NO_TRADE")) return "NO_TRADE";
@@ -963,15 +969,24 @@ function calendarCellStatus(day, records) {
     return "PARTIAL";
   }
   if (records.length === 1) return records[0]?.status || "MISSING";
+  const publicationStatus = calendarPublicationStatus(day?.date, day);
+  if (publicationStatus) return publicationStatus;
   return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
 }
 
 function calendarPublicationDate() {
-  const value = state.calendar?.as_of_market_date;
+  const freshness = state.calendar?.freshness || {};
+  const value = freshness.authoritative_as_of_market_date
+    || state.calendar?.authoritative_as_of_market_date
+    || state.calendar?.as_of_market_date;
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : null;
 }
 
-function calendarCurrentDateChicago(now = new Date()) {
+function calendarNow() {
+  return new Date();
+}
+
+function calendarCurrentDateChicago(now = calendarNow()) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
     year: "numeric",
@@ -982,10 +997,57 @@ function calendarCurrentDateChicago(now = new Date()) {
   return values.year && values.month && values.day ? `${values.year}-${values.month}-${values.day}` : null;
 }
 
-function calendarPublicationStatus(dateKey) {
+function calendarFreshness() {
+  return state.calendar?.freshness && typeof state.calendar.freshness === "object" ? state.calendar.freshness : {};
+}
+
+function calendarTimestampIsPast(value) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) && calendarNow().getTime() >= timestamp;
+}
+
+function calendarFreshnessPublicationStatus(dateKey) {
+  const freshness = calendarFreshness();
+  const status = String(freshness.status || "").toLowerCase();
+  if (status !== "stale") return null;
+  const nextDate = String(freshness.next_publication_market_date || "");
+  if (!nextDate || String(dateKey) < nextDate) return "STALE";
+  if (String(dateKey) === nextDate && freshness.next_publication_at && !calendarTimestampIsPast(freshness.next_publication_at)) return null;
+  if (String(dateKey) === nextDate && calendarTimestampIsPast(freshness.next_stale_after)) return "STALE";
+  return null;
+}
+
+function calendarFallbackSessionStatus(dateKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) return null;
+  if (CALENDAR_CLOSED_DATES.has(String(dateKey))) return "UNAVAILABLE";
+  const date = new Date(`${dateKey}T12:00:00Z`);
+  const weekday = date.getUTCDay();
+  return weekday === 0 || weekday === 6 ? "UNAVAILABLE" : null;
+}
+
+function calendarContractPublicationStatus(dateKey, day) {
+  if (!day || !day.publication_state) return null;
+  const publicationState = String(day.publication_state).toLowerCase();
+  if (publicationState === "not_applicable") return "UNAVAILABLE";
+  if (publicationState === "future") return "FUTURE";
+  if (["awaiting_publication", "publication_due"].includes(publicationState)) {
+    if (day.publication_due_at && !calendarTimestampIsPast(day.publication_due_at)) return "NOT_PUBLISHED";
+    return calendarFreshnessPublicationStatus(dateKey) || "NOT_PUBLISHED";
+  }
+  if (publicationState === "published" && day.status && day.authoritative !== false) return String(day.status).toUpperCase();
+  return null;
+}
+
+function calendarPublicationStatus(dateKey, day = null) {
+  const contractStatus = calendarContractPublicationStatus(dateKey, day);
+  if (contractStatus) return contractStatus;
+  const fallbackSessionStatus = calendarFallbackSessionStatus(dateKey);
+  if (fallbackSessionStatus) return fallbackSessionStatus;
   const asOf = calendarPublicationDate();
   if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || "")) || String(dateKey) <= asOf) return null;
   const today = calendarCurrentDateChicago();
+  const overdueStatus = calendarFreshnessPublicationStatus(dateKey);
+  if (overdueStatus) return overdueStatus;
   return today && String(dateKey) > today ? "FUTURE" : "NOT_PUBLISHED";
 }
 
@@ -1091,16 +1153,32 @@ function renderCalendarDetail(day, records) {
   }
   const record = records[0];
   if (!record) {
-    const publicationStatus = calendarPublicationStatus(day.date);
-    if (publicationStatus) {
+    const publicationStatus = calendarPublicationStatus(day.date, day);
+    if (["UNAVAILABLE", "FUTURE", "NOT_PUBLISHED", "STALE"].includes(publicationStatus)) {
+      if (publicationStatus === "UNAVAILABLE") {
+        setStatus("calendar-detail-status", "Market closed", "UNAVAILABLE");
+        note.textContent = day.market_session_reason || "The market was closed. No observation is expected or inferred.";
+        recap.innerHTML = calendarDailyRecap(day, records);
+        metrics.innerHTML = detailRows([
+          ["Market session", "Closed", false],
+          ["Return", "Not reported", false],
+          ["Observed zero", "No", true],
+        ]);
+        reasons.innerHTML = "";
+        trades.innerHTML = "";
+        return;
+      }
       const future = publicationStatus === "FUTURE";
-      setStatus("calendar-detail-status", future ? "Future" : "Not yet published", "PENDING");
+      const stale = publicationStatus === "STALE";
+      setStatus("calendar-detail-status", future ? "Future" : stale ? "Stale / overdue" : "Not yet published", stale ? "STALE" : "PENDING");
       note.textContent = future
         ? "This date is in the future. No observation is expected or inferred."
+        : stale
+        ? "The scheduled publication deadline and grace period passed without an authoritative calendar. The result remains unknown."
         : "The canonical payload ends before this date. It is pending publication, not a zero-return day.";
       recap.innerHTML = calendarDailyRecap(day, records);
       metrics.innerHTML = detailRows([
-        ["Publication", future ? "Future" : "Not yet published", false],
+        ["Publication", future ? "Future" : stale ? "Stale / overdue" : "Not yet published", false],
         ["Return", "Not reported", false],
         ["Observed zero", "No", true],
       ]);
@@ -1309,9 +1387,9 @@ function renderSystem(readiness, manifest, stage, data) {
 function stageClass(status) { return ["LOCAL_VERIFIED", "COMPLETE"].includes(String(status)) ? "good" : ["FAILED", "DEGRADED"].includes(String(status)) ? "bad" : "warn"; }
 
 function detailRows(rows) { return rows.map(([label, value, good]) => `<dt>${escapeHtml(label)}</dt><dd class="${good ? "good" : "bad"}">${escapeHtml(String(value))}</dd>`).join(""); }
-function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE", "realized"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE"].includes(String(status))); }
-function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
-function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", NOT_PUBLISHED: "Not yet published", FUTURE: "Future", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
+function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE", "realized"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE", "STALE"].includes(String(status))); }
+function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE", "STALE", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
+function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", NOT_PUBLISHED: "Not yet published", FUTURE: "Future", STALE: "Stale / overdue", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
 function formatPercent(value) { return numberOrNull(value) == null ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
 function formatPercentText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`; }
 function formatPrice(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `$${numeric.toFixed(2)}`; }

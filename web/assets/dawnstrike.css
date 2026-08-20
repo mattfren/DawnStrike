@@ -325,6 +325,7 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-legend .legend-research { border:1px solid var(--cyan); background:transparent; box-shadow:0 0 7px rgba(95,218,255,.25); }
 .calendar-legend .legend-missing { border:1px solid var(--danger); background:transparent; }
 .calendar-legend .legend-not-published { background:var(--warning); }
+.calendar-legend .legend-stale { background:var(--danger); }
 .calendar-legend .legend-future { background:var(--cyan); }
 .calendar-legend .legend-unavailable { background:#485467; }
 .calendar-workspace { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(300px,.72fr); gap:.8rem; align-items:start; }
@@ -360,6 +361,8 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-cell.status-missing i { border:1px solid var(--danger); background:transparent; }
 .calendar-cell.status-not-published { border-style:dotted; border-color:rgba(255,196,91,.52); background:rgba(255,196,91,.035); }
 .calendar-cell.status-not-published i { background:var(--warning); }
+.calendar-cell.status-stale { border-style:dashed; border-color:rgba(255,111,125,.7); background:rgba(255,111,125,.055); }
+.calendar-cell.status-stale i { background:var(--danger); box-shadow:0 0 8px rgba(255,111,125,.35); }
 .calendar-cell.status-future { border-style:dotted; border-color:rgba(95,218,255,.34); background:rgba(95,218,255,.025); }
 .calendar-cell.status-future i { background:var(--cyan); }
 .calendar-cell.status-unavailable { background:rgba(72,84,103,.035); }
