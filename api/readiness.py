@@ -207,6 +207,9 @@ def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
             != snapshot_manifest.get("payload_sha256")
         ):
             failures.append("calendar_performance_hash_mismatch")
+        failures.extend(
+            _calendar_contract_failures(calendar_bytes, calendar_manifest, readiness)
+        )
     if (
         publication_set.get("performance_payload_sha256")
         != snapshot_manifest.get("payload_sha256")
@@ -337,6 +340,9 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
                 != snapshot_manifest.get("payload_sha256")
             ):
                 failures.append("calendar_performance_hash_mismatch")
+            failures.extend(
+                _calendar_contract_failures(calendar_bytes, calendar_manifest, readiness)
+            )
         except OSError:
             failures.append("calendar_unreadable")
     else:
@@ -425,6 +431,99 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("pipeline_not_ready")
     failures.extend(_freshness_failures(readiness.get("market_date")))
     return list(dict.fromkeys(failures))
+
+
+def _calendar_contract_failures(
+    calendar_bytes: bytes,
+    manifest: dict[str, object],
+    readiness: dict[str, object],
+) -> list[str]:
+    """Validate freshness metadata independently of Calendar rendering."""
+
+    authoritative: date | None = None
+    try:
+        payload = json.loads(calendar_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ["calendar_contract_unreadable"]
+    if not isinstance(payload, dict):
+        return ["calendar_contract_invalid"]
+    freshness = payload.get("freshness")
+    if not isinstance(freshness, dict):
+        return ["calendar_freshness_missing"]
+    failures: list[str] = []
+    manifest_freshness = manifest.get("freshness")
+    readiness_freshness = readiness.get("calendar_freshness")
+    if not isinstance(manifest_freshness, dict):
+        failures.append("calendar_manifest_freshness_missing")
+    elif manifest_freshness != freshness:
+        failures.append("calendar_freshness_manifest_mismatch")
+    if not isinstance(readiness_freshness, dict):
+        failures.append("readiness_calendar_freshness_missing")
+    elif readiness_freshness != freshness:
+        failures.append("readiness_calendar_freshness_mismatch")
+    required = {
+        "schema_version",
+        "status",
+        "generated_at",
+        "timezone",
+        "authoritative_as_of_market_date",
+        "latest_expected_market_date",
+        "next_publication_market_date",
+        "next_publication_at",
+        "next_stale_after",
+        "fail_closed",
+    }
+    failures.extend(
+        f"calendar_freshness_field_missing:{name}"
+        for name in sorted(required - set(freshness))
+    )
+    if freshness.get("schema_version") != "dawnstrike.calendar_freshness.v1":
+        failures.append("calendar_freshness_schema_invalid")
+    if freshness.get("timezone") != "America/Chicago":
+        failures.append("calendar_freshness_timezone_invalid")
+    if freshness.get("fail_closed") is not True:
+        failures.append("calendar_freshness_fail_closed_missing")
+    if freshness.get("status") in {"stale", "future", "unknown"}:
+        failures.append(f"calendar_freshness_{freshness.get('status')}")
+    try:
+        timestamp = datetime.fromisoformat(
+            str(freshness.get("generated_at") or "").replace("Z", "+00:00")
+        )
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            failures.append("calendar_freshness_generated_at_naive")
+    except ValueError:
+        failures.append("calendar_freshness_generated_at_invalid")
+    try:
+        authoritative = date.fromisoformat(
+            str(freshness.get("authoritative_as_of_market_date") or "")
+        )
+        latest = date.fromisoformat(
+            str(freshness.get("latest_expected_market_date") or "")
+        )
+        if authoritative > latest:
+            failures.append("calendar_freshness_authoritative_date_ahead")
+    except ValueError:
+        failures.append("calendar_freshness_market_date_invalid")
+    try:
+        next_market_date = date.fromisoformat(
+            str(freshness.get("next_publication_market_date") or "")
+        )
+        next_stale_after = datetime.fromisoformat(
+            str(freshness.get("next_stale_after") or "").replace("Z", "+00:00")
+        )
+        if (
+            next_stale_after.tzinfo is not None
+            and datetime.now(next_stale_after.tzinfo) >= next_stale_after
+            and authoritative is not None
+            and authoritative < next_market_date
+        ):
+            failures.append("calendar_freshness_stale_by_clock")
+    except (TypeError, ValueError):
+        # Missing optional timestamp is already covered by the required-field
+        # check; malformed values remain a contract failure, not a fresh claim.
+        if freshness.get("next_stale_after") not in {None, ""}:
+            failures.append("calendar_freshness_next_stale_after_invalid")
+    return failures
 
 
 def _opportunity_failures(

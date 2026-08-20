@@ -318,6 +318,16 @@ def _public_scheduler_status(value: dict[str, object]) -> dict[str, object]:
         "status": value.get("status"),
         "failed_task_count": value.get("failed_task_count"),
         "next_scheduled_run": value.get("next_scheduled_run"),
+        "publication_contract": value.get("publication_contract")
+        or {
+            "schema_version": "dawnstrike.publication_schedule.v1",
+            "timezone": "America/Chicago",
+            "market_day_only": True,
+            "scheduled_time_local": "17:30",
+            "task_name": "Dawnstrike 10of10 Daily Finalize",
+            "research_only": True,
+            "live_trading_enabled": False,
+        },
         "runtime_boundary": "configured",
         "state_boundary": "configured",
         "scheduled_tasks": [

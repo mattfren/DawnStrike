@@ -9,9 +9,10 @@ import math
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.market_calendar import MarketSessionStatus, market_session
 from intraday_scanner.performance.contracts import safe_float, stable_hash
@@ -21,6 +22,11 @@ from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.read_only import connect_read_only
 
 MAX_CALENDAR_BYTES = 500 * 1024
+CALENDAR_FRESHNESS_SCHEMA = "dawnstrike.calendar_freshness.v1"
+PUBLICATION_TIMEZONE_NAME = "America/Chicago"
+PUBLICATION_TIMEZONE = ZoneInfo(PUBLICATION_TIMEZONE_NAME)
+PUBLICATION_TIME_LOCAL = time(17, 30)
+PUBLICATION_GRACE_SECONDS = 60 * 60
 DISPLAY_STATUSES = frozenset(
     {
         "COMPLETE",
@@ -61,11 +67,12 @@ def write_public_calendar(
 ) -> dict[str, Any]:
     """Write one bounded calendar and manifest with atomic per-file replacement."""
 
+    effective_generated_at = generated_at or _utc_now()
     performance = CanonicalPerformanceService(db_path).load_public_data(
         days=max(1, days),
         row_limit=max(1, row_limit),
         market_date=market_date,
-        generated_at=generated_at,
+        generated_at=effective_generated_at,
     )
     selection_context = _load_selection_context(Path(db_path), market_date=market_date)
     canonical_hash = canonical_input_hash_sha256 or stable_hash(
@@ -82,7 +89,7 @@ def write_public_calendar(
         selection_context=selection_context,
         canonical_input_hash_sha256=canonical_hash,
         performance_payload_sha256=performance_payload_sha256,
-        generated_at=generated_at,
+        generated_at=effective_generated_at,
     )
     encoded = json.dumps(
         payload,
@@ -99,7 +106,8 @@ def write_public_calendar(
     _atomic_write(path, encoded)
     payload_sha = hashlib.sha256(encoded).hexdigest()
     effective_date = str(payload.get("as_of_market_date") or market_date or "unknown")
-    generated_at = generated_at or _utc_now()
+    generated_at = effective_generated_at
+    freshness = dict(payload.get("freshness") or {})
     manifest = {
         "schema_version": "dawnstrike.public_calendar_manifest.v1",
         "manifest_id": hashlib.sha256(
@@ -108,6 +116,7 @@ def write_public_calendar(
         "market_date": effective_date,
         "status": _calendar_status(payload, effective_date),
         "generated_at": generated_at,
+        "freshness": freshness,
         "canonical_input_hash_sha256": canonical_hash,
         "performance_payload_sha256": performance_payload_sha256,
         "payload_sha256": payload_sha,
@@ -186,6 +195,16 @@ def build_calendar_payload(
 ) -> dict[str, Any]:
     """Map canonical daily rows into filterable day and month records."""
 
+    effective_generated_at = generated_at or _utc_now()
+    freshness = calendar_freshness_contract(
+        as_of_market_date=as_of_market_date
+        or performance.get("as_of_market_date")
+        or max(
+            (str(row.get("market_date") or "") for row in performance.get("daily") or []),
+            default=datetime.now(timezone.utc).date().isoformat(),
+        ),
+        generated_at=effective_generated_at,
+    )
     daily = [dict(row) for row in performance.get("daily") or [] if isinstance(row, dict)]
     detail_rows = [dict(row) for row in performance.get("rows") or [] if isinstance(row, dict)]
     ledger = [dict(row) for row in performance.get("account_ledger") or [] if isinstance(row, dict)]
@@ -242,9 +261,15 @@ def build_calendar_payload(
             MarketSessionStatus.EARLY_CLOSE,
         }
         primary = records[0] if records else None
+        publication_state = _day_publication_state(
+            current,
+            generated_at=effective_generated_at,
+        )
         day_status = (
             str(primary["status"])
             if primary is not None
+            else "PENDING"
+            if publication_state in {"future", "awaiting_publication", "publication_due"}
             else "MISSING"
             if market_open
             else "UNAVAILABLE"
@@ -260,6 +285,9 @@ def build_calendar_payload(
                 "market_close_time_et": session.close_time_et,
                 "calendar_id": session.calendar_id,
                 "status": day_status,
+                "publication_state": publication_state,
+                "publication_due_at": _publication_due_at(current),
+                "authoritative": publication_state == "published",
                 "observed": bool(records),
                 "observed_zero": any(bool(record.get("observed_zero")) for record in records),
                 "records": records,
@@ -284,9 +312,12 @@ def build_calendar_payload(
     )
     return {
         "schema_version": "dawnstrike.public_calendar.v1",
-        "generated_at": generated_at or _utc_now(),
+        "generated_at": effective_generated_at,
         "as_of_market_date": as_of.isoformat(),
+        "authoritative_as_of_market_date": freshness["authoritative_as_of_market_date"],
+        "requested_as_of_market_date": as_of.isoformat(),
         "timezone": "America/New_York",
+        "freshness": freshness,
         "canonical_input_hash_sha256": canonical_hash,
         "performance_payload_sha256": performance_payload_sha256,
         "research_only": True,
@@ -797,7 +828,158 @@ def _cohort_priority(value: str) -> int:
     }.get(value, 4)
 
 
+def calendar_freshness_contract(
+    *,
+    as_of_market_date: object,
+    generated_at: str,
+) -> dict[str, Any]:
+    """Return the signed-by-hash publication timing contract for a calendar.
+
+    ``as_of_market_date`` is the requested read-model boundary, not an assertion
+    that the current session has already been finalized.  The explicit timing
+    fields let consumers distinguish a future/pre-publication day from a real
+    missing observation while keeping stale publication fail-closed.
+    """
+
+    as_of = _parse_date(as_of_market_date)
+    if as_of is None:
+        raise ValueError("calendar as-of market date must be YYYY-MM-DD")
+    generated = _parse_aware_timestamp(generated_at)
+    local = generated.astimezone(PUBLICATION_TIMEZONE)
+    today = local.date()
+    today_session = market_session(today)
+    today_due = _publication_due_datetime(today)
+    before_today_publication = bool(
+        today_session.is_trading_day and today_due is not None and local < today_due
+    )
+    latest_published = (
+        _previous_market_day(today)
+        if before_today_publication or not today_session.is_trading_day
+        else today
+    )
+    expected_due = _publication_due_datetime(latest_published)
+    stale_after = (
+        expected_due + timedelta(seconds=PUBLICATION_GRACE_SECONDS)
+        if expected_due is not None
+        else None
+    )
+    next_market_date = (
+        today
+        if before_today_publication
+        else _next_market_day(today + timedelta(days=1))
+    )
+    next_due = _publication_due_datetime(next_market_date)
+    next_stale_after = (
+        next_due + timedelta(seconds=PUBLICATION_GRACE_SECONDS)
+        if next_due is not None
+        else None
+    )
+    if as_of > today:
+        status = "future"
+    elif as_of == today and before_today_publication:
+        status = "awaiting_publication"
+    elif as_of < latest_published:
+        status = (
+            "publication_due"
+            if stale_after is not None and generated < stale_after
+            else "stale"
+        )
+    elif as_of > latest_published:
+        # A current-session request is a preview until the scheduled boundary.
+        status = "awaiting_publication" if before_today_publication else "publication_due"
+    else:
+        status = "current"
+    authoritative = min(as_of, latest_published)
+    return {
+        "schema_version": CALENDAR_FRESHNESS_SCHEMA,
+        "status": status,
+        "generated_at": generated.isoformat(),
+        "timezone": PUBLICATION_TIMEZONE_NAME,
+        "publication_time_local": "17:30",
+        "publication_cadence": "market_days",
+        "authoritative_as_of_market_date": authoritative.isoformat(),
+        "latest_expected_market_date": latest_published.isoformat(),
+        "expected_publication_at": (
+            expected_due.astimezone(timezone.utc).isoformat() if expected_due else None
+        ),
+        "stale_after": (
+            stale_after.astimezone(timezone.utc).isoformat() if stale_after else None
+        ),
+        "next_publication_market_date": next_market_date.isoformat(),
+        "next_publication_at": (
+            next_due.astimezone(timezone.utc).isoformat() if next_due else None
+        ),
+        "next_stale_after": (
+            next_stale_after.astimezone(timezone.utc).isoformat()
+            if next_stale_after
+            else None
+        ),
+        "grace_period_seconds": PUBLICATION_GRACE_SECONDS,
+        "fail_closed": True,
+        "research_only": True,
+        "live_trading_enabled": False,
+    }
+
+
+def _day_publication_state(value: date, *, generated_at: str) -> str:
+    """Classify one day without converting pre-publication absence to missing."""
+
+    session = market_session(value)
+    if not session.is_trading_day:
+        return "not_applicable"
+    generated = _parse_aware_timestamp(generated_at).astimezone(PUBLICATION_TIMEZONE)
+    due = _publication_due_datetime(value)
+    if value > generated.date():
+        return "future"
+    if value == generated.date() and due is not None and generated < due:
+        return "awaiting_publication"
+    if due is not None and generated < due + timedelta(seconds=PUBLICATION_GRACE_SECONDS):
+        return "publication_due"
+    return "published"
+
+
+def _publication_due_at(value: date) -> str | None:
+    due = _publication_due_datetime(value)
+    return due.astimezone(timezone.utc).isoformat() if due else None
+
+
+def _publication_due_datetime(value: date) -> datetime | None:
+    if not market_session(value).is_trading_day:
+        return None
+    return datetime.combine(value, PUBLICATION_TIME_LOCAL, tzinfo=PUBLICATION_TIMEZONE)
+
+
+def _previous_market_day(value: date) -> date:
+    current = value - timedelta(days=1)
+    while not market_session(current).is_trading_day:
+        current -= timedelta(days=1)
+    return current
+
+
+def _next_market_day(value: date) -> date:
+    current = value
+    while not market_session(current).is_trading_day:
+        current += timedelta(days=1)
+    return current
+
+
+def _parse_aware_timestamp(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("calendar generated_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("calendar generated_at must include a timezone")
+    return parsed
+
+
 def _calendar_status(payload: dict[str, Any], effective_date: str) -> str:
+    freshness = payload.get("freshness")
+    if isinstance(freshness, dict) and str(freshness.get("status") or "") in {
+        "stale",
+        "future",
+    }:
+        return "degraded"
     day = next(
         (
             item
@@ -807,6 +989,12 @@ def _calendar_status(payload: dict[str, Any], effective_date: str) -> str:
         None,
     )
     if not day or not day.get("records"):
+        if str((day or {}).get("publication_state") or "") in {
+            "future",
+            "awaiting_publication",
+            "publication_due",
+        }:
+            return "pending_publication"
         return "no_data"
     official = [
         record

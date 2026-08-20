@@ -524,6 +524,14 @@ class DailyFinalizeService:
         calendar_status = str(
             calendar_publication["manifest"].get("status") or "degraded"
         )
+        calendar_freshness = calendar_publication["manifest"].get("freshness")
+        if not isinstance(calendar_freshness, dict):
+            calendar_freshness = {
+                "schema_version": "dawnstrike.calendar_freshness.v1",
+                "status": "unknown",
+                "fail_closed": True,
+            }
+        freshness_ready = calendar_freshness.get("status") == "current"
         safety_evidence = publication["manifest"].get("safety_evidence")
         safety_verified = _safety_is_verified(safety_evidence)
         gate = reconciliation_gate or {
@@ -537,6 +545,7 @@ class DailyFinalizeService:
             if (
                 snapshot_status in {"complete", "no_trade"}
                 and calendar_status in {"complete", "no_trade"}
+                and freshness_ready
                 and upstream_status == "complete"
                 and safety_verified
                 and gate.get("ready") is True
@@ -559,6 +568,12 @@ class DailyFinalizeService:
             "calendar_payload_sha256": calendar_publication["manifest"].get(
                 "payload_sha256"
             ),
+            "calendar_freshness": calendar_freshness,
+            "authoritative_as_of_market_date": calendar_freshness.get(
+                "authoritative_as_of_market_date"
+            ),
+            "next_publication_at": calendar_freshness.get("next_publication_at"),
+            "stale_after": calendar_freshness.get("next_stale_after"),
             "publication_set_sha256": publication_set.get("publication_set_sha256"),
             "source_data_watermark": market_date,
             "outcome_coverage": _coverage_summary(

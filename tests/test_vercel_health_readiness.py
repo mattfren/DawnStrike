@@ -53,15 +53,37 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         encoding="utf-8",
     )
     calendar = data_root / "calendar.json"
-    calendar.write_bytes(b'{"days":[]}')
+    calendar_freshness = {
+        "schema_version": "dawnstrike.calendar_freshness.v1",
+        "status": "current",
+        "generated_at": datetime.now(ZoneInfo("UTC")).replace(microsecond=0).isoformat(),
+        "timezone": "America/Chicago",
+        "publication_time_local": "17:30",
+        "publication_cadence": "market_days",
+        "authoritative_as_of_market_date": current_market_date,
+        "latest_expected_market_date": current_market_date,
+        "expected_publication_at": None,
+        "stale_after": None,
+        "next_publication_market_date": current_market_date,
+        "next_publication_at": None,
+        "next_stale_after": None,
+        "grace_period_seconds": 3600,
+        "fail_closed": True,
+        "research_only": True,
+        "live_trading_enabled": False,
+    }
+    calendar.write_text(
+        json.dumps({"days": [], "freshness": calendar_freshness}), encoding="utf-8"
+    )
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
     calendar_manifest = data_root / "calendar.json.manifest.json"
     calendar_manifest.write_text(
         json.dumps(
-            {
-                "payload_sha256": calendar_hash,
-                "canonical_input_hash_sha256": canonical_hash,
-                "performance_payload_sha256": snapshot_hash,
+                {
+                    "payload_sha256": calendar_hash,
+                    "canonical_input_hash_sha256": canonical_hash,
+                    "performance_payload_sha256": snapshot_hash,
+                    "freshness": calendar_freshness,
             }
         ),
         encoding="utf-8",
@@ -152,6 +174,7 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         "live_trading_enabled": False,
         "research_only": True,
         "safety_status": "verified",
+        "calendar_freshness": calendar_freshness,
     }
     monkeypatch.setattr(readiness, "PUBLIC_ROOT", public_root)
     monkeypatch.setattr(readiness, "SNAPSHOT_PATH", snapshot)
@@ -230,3 +253,27 @@ def test_readiness_market_calendar_skips_exchange_holidays() -> None:
 
     assert not readiness._is_market_day(date(2026, 9, 7))
     assert readiness._is_market_day(date(2026, 9, 8))
+
+
+def test_readiness_rejects_calendar_contract_past_stale_after() -> None:
+    from api import readiness
+
+    freshness = {
+        "schema_version": "dawnstrike.calendar_freshness.v1",
+        "status": "current",
+        "generated_at": "2026-08-18T22:30:00+00:00",
+        "timezone": "America/Chicago",
+        "authoritative_as_of_market_date": "2026-08-18",
+        "latest_expected_market_date": "2026-08-18",
+        "next_publication_market_date": "2026-08-19",
+        "next_publication_at": "2026-08-19T22:30:00+00:00",
+        "next_stale_after": "2026-08-19T23:30:00+00:00",
+        "fail_closed": True,
+    }
+    payload = json.dumps({"freshness": freshness}).encode("utf-8")
+    failures = readiness._calendar_contract_failures(
+        payload,
+        {"freshness": freshness},
+        {"calendar_freshness": freshness},
+    )
+    assert "calendar_freshness_stale_by_clock" in failures

@@ -14,6 +14,7 @@ from intraday_scanner.alpha.v5_policy import (
 from intraday_scanner.performance.calendar_snapshot import (
     _calendar_status,
     build_calendar_payload,
+    calendar_freshness_contract,
     write_public_calendar,
 )
 from intraday_scanner.performance.service import CanonicalPerformanceService
@@ -160,6 +161,46 @@ def test_calendar_closed_day_is_unavailable_and_never_observed() -> None:
     assert saturday["observed_zero"] is False
 
 
+def test_calendar_prepublication_day_is_pending_not_missing() -> None:
+    payload = build_calendar_payload(
+        _performance([], as_of="2026-08-20"),
+        as_of_market_date="2026-08-20",
+        generated_at="2026-08-20T22:00:00+00:00",  # 17:00 America/Chicago
+    )
+
+    day = next(row for row in payload["days"] if row["date"] == "2026-08-20")
+    assert day["status"] == "PENDING"
+    assert day["publication_state"] == "awaiting_publication"
+    assert day["authoritative"] is False
+    assert payload["freshness"]["status"] == "awaiting_publication"
+    assert payload["freshness"]["next_publication_market_date"] == "2026-08-20"
+
+
+def test_calendar_future_day_is_pending_not_missing() -> None:
+    payload = build_calendar_payload(
+        _performance([], as_of="2026-08-21"),
+        as_of_market_date="2026-08-21",
+        generated_at="2026-08-20T22:00:00+00:00",
+    )
+
+    day = next(row for row in payload["days"] if row["date"] == "2026-08-21")
+    assert day["status"] == "PENDING"
+    assert day["publication_state"] == "future"
+    assert payload["freshness"]["status"] == "future"
+    assert payload["freshness"]["authoritative_as_of_market_date"] == "2026-08-19"
+
+
+def test_calendar_freshness_contract_fails_closed_after_grace_period() -> None:
+    contract = calendar_freshness_contract(
+        as_of_market_date="2026-08-18",
+        generated_at="2026-08-20T22:00:00+00:00",
+    )
+    assert contract["status"] == "stale"
+    assert contract["fail_closed"] is True
+    assert contract["timezone"] == "America/Chicago"
+    assert contract["next_stale_after"] == "2026-08-20T23:30:00+00:00"
+
+
 def test_calendar_writer_binds_manifest_to_canonical_input(tmp_path: Path) -> None:
     db_path = tmp_path / "calendar.sqlite"
     SQLiteScanStore(db_path).initialize()
@@ -184,6 +225,7 @@ def test_calendar_writer_binds_manifest_to_canonical_input(tmp_path: Path) -> No
     assert manifest["canonical_input_hash_sha256"] == "canonical-hash"
     assert manifest["performance_payload_sha256"] == "performance-hash"
     assert manifest["status"] == "degraded"
+    assert manifest["freshness"] == payload["freshness"]
     assert Path(publication["manifest_path"]).exists()
 
 

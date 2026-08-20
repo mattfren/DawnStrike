@@ -12,6 +12,15 @@ from typing import Any
 from intraday_scanner.providers.web_source_base import validate_web_source_config
 
 CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
+PUBLICATION_CONTRACT = {
+    "schema_version": "dawnstrike.publication_schedule.v1",
+    "timezone": "America/Chicago",
+    "market_day_only": True,
+    "scheduled_time_local": "17:30",
+    "task_name": CANONICAL_TASK_NAME,
+    "research_only": True,
+    "live_trading_enabled": False,
+}
 EXPECTED_TASKS = {
     "Dawnstrike AlphaOps Morning": "run_alphaops_morning.ps1",
     "Dawnstrike AlphaOps Monitor 5m": "run_alphaops_monitor.ps1",
@@ -148,6 +157,7 @@ def scheduler_doctor(
         "failed_task_count": len(failed_checks),
         "unexpected_enabled_tasks": unexpected_enabled,
         "next_scheduled_run": next_runs[0] if next_runs else None,
+        "publication_contract": dict(PUBLICATION_CONTRACT),
         "forbidden_legacy_root": FORBIDDEN_LEGACY_ROOT,
         "next_action": next_action,
     }
