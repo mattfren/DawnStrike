@@ -101,7 +101,7 @@ const CALENDAR_CLOSED_DATES = new Set();
 const state = {{ calendar: {{
   as_of_market_date: "2026-08-18",
   freshness: {{
-    status: "stale",
+    status: "current",
     authoritative_as_of_market_date: "2026-08-18",
     next_publication_market_date: "2026-08-20",
     next_publication_at: "2026-08-20T22:30:00+00:00",
@@ -120,10 +120,19 @@ const future = calendarCellStatus({{
   date: "2026-08-21", status: "PENDING", publication_state: "future", authoritative: false,
 }}, []);
 const closedWeekend = calendarCellStatus({{ date: "2026-08-22" }}, []);
+const historicalBefore = calendarCellStatus({{
+  date: "2026-08-17", status: "MISSING", publication_state: "published", authoritative: true,
+}}, []);
+const historicalAt = calendarCellStatus({{
+  date: "2026-08-18", status: "MISSING", publication_state: "published", authoritative: true,
+}}, []);
 now = new Date("2026-08-20T23:45:00+00:00");
 const overdue = calendarCellStatus({{ date: "2026-08-19" }}, []);
 const overdueCurrent = calendarCellStatus({{ date: "2026-08-20" }}, []);
-console.log(JSON.stringify({{ preDeadline, future, closedWeekend, overdue, overdueCurrent }}));
+console.log(JSON.stringify({{
+  preDeadline, future, closedWeekend, historicalBefore, historicalAt,
+  overdue, overdueCurrent,
+}}));
 """
     completed = subprocess.run(
         [node, "-e", probe], check=True, capture_output=True, text=True
@@ -132,6 +141,8 @@ console.log(JSON.stringify({{ preDeadline, future, closedWeekend, overdue, overd
         "preDeadline": "NOT_PUBLISHED",
         "future": "FUTURE",
         "closedWeekend": "UNAVAILABLE",
+        "historicalBefore": "MISSING",
+        "historicalAt": "MISSING",
         "overdue": "STALE",
         "overdueCurrent": "STALE",
     }

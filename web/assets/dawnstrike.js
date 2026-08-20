@@ -1008,12 +1008,15 @@ function calendarTimestampIsPast(value) {
 
 function calendarFreshnessPublicationStatus(dateKey) {
   const freshness = calendarFreshness();
+  const candidateDate = String(dateKey || "");
+  const authoritativeDate = calendarPublicationDate();
   const status = String(freshness.status || "").toLowerCase();
-  if (status !== "stale") return null;
   const nextDate = String(freshness.next_publication_market_date || "");
-  if (!nextDate || String(dateKey) < nextDate) return "STALE";
-  if (String(dateKey) === nextDate && freshness.next_publication_at && !calendarTimestampIsPast(freshness.next_publication_at)) return null;
-  if (String(dateKey) === nextDate && calendarTimestampIsPast(freshness.next_stale_after)) return "STALE";
+  if (!authoritativeDate || !/^\d{4}-\d{2}-\d{2}$/.test(candidateDate) || !nextDate || candidateDate <= authoritativeDate || candidateDate > nextDate) return null;
+  if (calendarTimestampIsPast(freshness.next_stale_after)) return "STALE";
+  if (status !== "stale") return null;
+  if (candidateDate < nextDate) return "STALE";
+  if (candidateDate === nextDate && freshness.next_publication_at && !calendarTimestampIsPast(freshness.next_publication_at)) return null;
   return null;
 }
 
