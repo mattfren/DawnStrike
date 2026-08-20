@@ -25,6 +25,9 @@ def test_calendar_refresh_revalidates_without_resetting_calendar_state() -> None
 
     assert 'cache: "no-store"' in source
     assert 'headers: { "Cache-Control": "no-cache" }' in source
+    assert 'loadJson("/api/readiness", request)' in source
+    assert '[200, 503].includes(dynamic.status)' in source
+    assert 'loadJson("/readiness.json", request)' in source
     assert 'window.addEventListener("focus", requestDashboardRefresh)' in source
     assert 'document.addEventListener("visibilitychange", requestDashboardRefresh)' in source
     assert "window.setInterval(requestDashboardRefresh, DASHBOARD_REFRESH_INTERVAL_MS)" in source

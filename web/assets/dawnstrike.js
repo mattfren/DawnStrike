@@ -136,12 +136,24 @@ async function loadJson(path, { revalidate = false } = {}) {
   return { payload, status: response.status };
 }
 
+async function loadReadiness(request) {
+  const dynamic = await loadJson("/api/readiness", request).catch(() => null);
+  if (
+    dynamic
+    && [200, 503].includes(dynamic.status)
+    && dynamic.payload?.schema_version === "dawnstrike.readiness.v1"
+  ) {
+    return dynamic;
+  }
+  return loadJson("/readiness.json", request).catch(() => ({ payload: {}, status: 0 }));
+}
+
 async function loadDashboardData({ revalidate = false } = {}) {
   const request = { revalidate };
   const calendarLoad = revalidate ? loadJson("/data/calendar.json", request) : loadJson("/data/calendar.json");
   const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection] = await Promise.all([
     loadJson("/data/performance.json", request),
-    loadJson("/readiness.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadReadiness(request),
     loadJson("/data/performance.json.manifest.json", request).catch(() => ({ payload: {}, status: 0 })),
     loadJson("/stage-manifest.json", request).catch(() => ({ payload: {}, status: 0 })),
     calendarLoad.catch(() => ({ payload: {}, status: 0 })),
