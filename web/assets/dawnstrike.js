@@ -1319,6 +1319,9 @@ function calendarStatusLabel(status) {
     MISSING: "Missing",
     UNAVAILABLE: "Unavailable",
     UNREALIZED: "Unrealized",
+    NOT_PUBLISHED: "Not yet published",
+    FUTURE: "Future",
+    STALE: "Stale / overdue",
   }[status] || "Not reported");
 }
 

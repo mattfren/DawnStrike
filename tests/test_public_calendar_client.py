@@ -81,6 +81,29 @@ console.log(JSON.stringify({{
     }
 
 
+def test_calendar_client_labels_publication_states_explicitly() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for the public calendar client contract"
+    source = Path("web/assets/dawnstrike.js").read_text(encoding="utf-8")
+    helper = _javascript_function(source, "calendarStatusLabel")
+    probe = f"""
+{helper}
+console.log(JSON.stringify({{
+  unpublished: calendarStatusLabel("NOT_PUBLISHED"),
+  future: calendarStatusLabel("FUTURE"),
+  stale: calendarStatusLabel("STALE"),
+}}));
+"""
+    completed = subprocess.run(
+        [node, "-e", probe], check=True, capture_output=True, text=True
+    )
+    assert json.loads(completed.stdout) == {
+        "unpublished": "Not yet published",
+        "future": "Future",
+        "stale": "Stale / overdue",
+    }
+
+
 def test_calendar_client_prefers_contract_fields_and_marks_overdue_publication() -> None:
     node = shutil.which("node")
     assert node is not None, "Node.js is required for the public calendar client contract"
