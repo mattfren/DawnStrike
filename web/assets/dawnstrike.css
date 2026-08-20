@@ -324,6 +324,8 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-legend .legend-pending { background:var(--warning); }
 .calendar-legend .legend-research { border:1px solid var(--cyan); background:transparent; box-shadow:0 0 7px rgba(95,218,255,.25); }
 .calendar-legend .legend-missing { border:1px solid var(--danger); background:transparent; }
+.calendar-legend .legend-not-published { background:var(--warning); }
+.calendar-legend .legend-future { background:var(--cyan); }
 .calendar-legend .legend-unavailable { background:#485467; }
 .calendar-workspace { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(300px,.72fr); gap:.8rem; align-items:start; }
 .calendar-workspace > * { min-width:0; }
@@ -356,6 +358,10 @@ td strong { color:var(--ink); font-weight:700; }
 .calendar-cell.status-pending i,.calendar-cell.status-unrealized i,.calendar-cell.status-partial i { background:var(--warning); }
 .calendar-cell.status-missing { border-style:dashed; }
 .calendar-cell.status-missing i { border:1px solid var(--danger); background:transparent; }
+.calendar-cell.status-not-published { border-style:dotted; border-color:rgba(255,196,91,.52); background:rgba(255,196,91,.035); }
+.calendar-cell.status-not-published i { background:var(--warning); }
+.calendar-cell.status-future { border-style:dotted; border-color:rgba(95,218,255,.34); background:rgba(95,218,255,.025); }
+.calendar-cell.status-future i { background:var(--cyan); }
 .calendar-cell.status-unavailable { background:rgba(72,84,103,.035); }
 .calendar-cell.status-unavailable i { background:#485467; }
 .calendar-cell.research-only { border-color:rgba(95,218,255,.24); }

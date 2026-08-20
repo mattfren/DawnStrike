@@ -29,6 +29,8 @@ const V6_GATE_LABELS = {
 };
 
 const PAGE_SIZE = 10;
+const DASHBOARD_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const DASHBOARD_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
 const state = {
   data: null,
   readiness: null,
@@ -51,6 +53,9 @@ const state = {
   },
   performancePage: 0,
   researchPage: 0,
+  refreshPromise: null,
+  lastRefreshAt: 0,
+  refreshTimer: null,
 };
 
 document.querySelectorAll(".table-wrap").forEach((region) => {
@@ -114,39 +119,84 @@ function changePage(table, direction) {
   }
 }
 
-async function loadJson(path) {
-  const response = await fetch(path, { cache: "no-store" });
+async function loadJson(path, { revalidate = false } = {}) {
+  const requestPath = revalidate
+    ? `${path}${path.includes("?") ? "&" : "?"}_refresh=${Date.now()}`
+    : path;
+  const response = await fetch(requestPath, {
+    cache: "no-store",
+    headers: { "Cache-Control": "no-cache" },
+  });
   const payload = await response.json();
   return { payload, status: response.status };
 }
 
+async function loadDashboardData({ revalidate = false } = {}) {
+  const request = { revalidate };
+  const calendarLoad = revalidate ? loadJson("/data/calendar.json", request) : loadJson("/data/calendar.json");
+  const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection] = await Promise.all([
+    loadJson("/data/performance.json", request),
+    loadJson("/readiness.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/performance.json.manifest.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/stage-manifest.json", request).catch(() => ({ payload: {}, status: 0 })),
+    calendarLoad.catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/calendar.json.manifest.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/publication-set.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/v6-learning.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/scenarios.json", request).catch(() => ({ payload: {}, status: 0 })),
+    loadJson("/data/opportunity-projection.json", request).catch(() => ({ payload: { state: "DISABLED", rows: [] }, status: 0 })),
+  ]);
+  return { snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection };
+}
+
+function applyDashboardData({ snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection }, { initial = false } = {}) {
+  const previousCalendarMonth = state.calendarMonth;
+  state.data = snapshot.payload;
+  state.readiness = readiness;
+  state.manifest = manifest.payload;
+  state.calendar = calendar.payload;
+  state.calendarManifest = calendarManifest.payload;
+  state.publicationSet = publicationSet.payload;
+  state.v6 = v6.payload;
+  state.scenarios = scenarios.payload;
+  state.opportunityProjection = opportunityProjection.payload;
+  state.stage = stage.payload;
+  if (initial || !previousCalendarMonth) {
+    state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
+  }
+  if (initial) initializeCalendarFilters();
+  render();
+}
+
+async function refreshDashboard({ initial = false } = {}) {
+  if (state.refreshPromise) return state.refreshPromise;
+  state.refreshPromise = loadDashboardData({ revalidate: !initial })
+    .then((payloads) => {
+      applyDashboardData(payloads, { initial });
+      state.lastRefreshAt = Date.now();
+    })
+    .finally(() => {
+      state.refreshPromise = null;
+    });
+  return state.refreshPromise;
+}
+
+function requestDashboardRefresh() {
+  if (document.visibilityState === "hidden") return;
+  if (Date.now() - state.lastRefreshAt < DASHBOARD_REFRESH_MIN_INTERVAL_MS) return;
+  refreshDashboard().catch(() => undefined);
+}
+
+function installDashboardRefresh() {
+  window.addEventListener("focus", requestDashboardRefresh);
+  document.addEventListener("visibilitychange", requestDashboardRefresh);
+  state.refreshTimer = window.setInterval(requestDashboardRefresh, DASHBOARD_REFRESH_INTERVAL_MS);
+}
+
 async function init() {
   try {
-    const [snapshot, readiness, manifest, stage, calendar, calendarManifest, publicationSet, v6, scenarios, opportunityProjection] = await Promise.all([
-      loadJson("/data/performance.json"),
-      loadJson("/readiness.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/performance.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/stage-manifest.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/calendar.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/calendar.json.manifest.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/publication-set.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/v6-learning.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/scenarios.json").catch(() => ({ payload: {}, status: 0 })),
-      loadJson("/data/opportunity-projection.json").catch(() => ({ payload: { state: "DISABLED", rows: [] }, status: 0 })),
-    ]);
-    state.data = snapshot.payload;
-    state.readiness = readiness;
-    state.manifest = manifest.payload;
-    state.calendar = calendar.payload;
-    state.calendarManifest = calendarManifest.payload;
-    state.publicationSet = publicationSet.payload;
-    state.v6 = v6.payload;
-    state.scenarios = scenarios.payload;
-    state.opportunityProjection = opportunityProjection.payload;
-    state.stage = stage.payload;
-    state.calendarMonth = String(calendar.payload?.as_of_market_date || snapshot.payload?.as_of_market_date || "").slice(0, 7) || null;
-    initializeCalendarFilters();
-    render();
+    await refreshDashboard({ initial: true });
+    installDashboardRefresh();
     const requestedView = window.location.hash.slice(1);
     if (["overview", "calendar", "performance", "research", "scenarios", "system"].includes(requestedView)) showView(requestedView);
   } catch (error) {
@@ -724,7 +774,7 @@ function renderCalendar() {
   const leading = monthDateKeys.length ? sundayOffset(monthDateKeys[0]) : 0;
   const cells = Array.from({ length: leading }, () => '<span class="calendar-spacer" aria-hidden="true"></span>');
   monthDateKeys.forEach((dateKey) => {
-    const day = lookup.get(dateKey);
+    const day = lookup.get(dateKey) || calendarPlaceholderDay(dateKey);
     const matches = filteredCalendarRecords(day);
     const status = calendarCellStatus(day, matches);
     const summary = calendarDayReturnSummary(matches);
@@ -767,8 +817,12 @@ function renderCalendar() {
       selectedButton?.setAttribute("aria-pressed", "true");
     }
   }
-  const selectedDay = lookup.get(state.calendarSelectedDate);
+  const selectedDay = lookup.get(state.calendarSelectedDate) || calendarPlaceholderDay(state.calendarSelectedDate);
   renderCalendarDetail(selectedDay, filteredCalendarRecords(selectedDay));
+}
+
+function calendarPlaceholderDay(dateKey) {
+  return dateKey ? { date: dateKey, month: String(dateKey).slice(0, 7), records: [] } : null;
 }
 
 function filteredCalendarRecords(day) {
@@ -818,6 +872,13 @@ function calendarCumulativeState(value) {
 function calendarDailyRecap(day, records) {
   if (!day) return "";
   if (!records.length) {
+    const publicationStatus = calendarPublicationStatus(day.date);
+    if (publicationStatus === "FUTURE") {
+      return '<div class="calendar-recap-heading"><span>Daily recap</span><strong>Future</strong></div><p>This date is in the future. No observation is expected or inferred.</p>';
+    }
+    if (publicationStatus === "NOT_PUBLISHED") {
+      return '<div class="calendar-recap-heading"><span>Daily recap</span><strong>Not yet published</strong></div><p>The canonical payload ends before this date. The result is pending publication, not a zero or a loss.</p>';
+    }
     const closed = day.market_session_status === "closed";
     return `<div class="calendar-recap-heading"><span>Daily recap</span><strong>${closed ? "Market closed" : "No observation"}</strong></div><p>${escapeHtml(closed ? (day.market_session_reason || "The market was closed.") : "No canonical result was published. This day is unknown, not a zero or a loss.")}</p>`;
   }
@@ -893,6 +954,8 @@ function renderCalendarHistorySummary(days) {
 }
 
 function calendarCellStatus(day, records) {
+  const publicationStatus = calendarPublicationStatus(day?.date);
+  if (publicationStatus) return publicationStatus;
   if (records.length > 1) {
     const statuses = records.map((record) => record?.status || "MISSING");
     if (statuses.every((status) => status === "NO_TRADE")) return "NO_TRADE";
@@ -901,6 +964,29 @@ function calendarCellStatus(day, records) {
   }
   if (records.length === 1) return records[0]?.status || "MISSING";
   return day?.market_session_status === "closed" ? "UNAVAILABLE" : "MISSING";
+}
+
+function calendarPublicationDate() {
+  const value = state.calendar?.as_of_market_date;
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : null;
+}
+
+function calendarCurrentDateChicago(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return values.year && values.month && values.day ? `${values.year}-${values.month}-${values.day}` : null;
+}
+
+function calendarPublicationStatus(dateKey) {
+  const asOf = calendarPublicationDate();
+  if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || "")) || String(dateKey) <= asOf) return null;
+  const today = calendarCurrentDateChicago();
+  return today && String(dateKey) > today ? "FUTURE" : "NOT_PUBLISHED";
 }
 
 function renderCalendarSummary(days) {
@@ -1005,6 +1091,23 @@ function renderCalendarDetail(day, records) {
   }
   const record = records[0];
   if (!record) {
+    const publicationStatus = calendarPublicationStatus(day.date);
+    if (publicationStatus) {
+      const future = publicationStatus === "FUTURE";
+      setStatus("calendar-detail-status", future ? "Future" : "Not yet published", "PENDING");
+      note.textContent = future
+        ? "This date is in the future. No observation is expected or inferred."
+        : "The canonical payload ends before this date. It is pending publication, not a zero-return day.";
+      recap.innerHTML = calendarDailyRecap(day, records);
+      metrics.innerHTML = detailRows([
+        ["Publication", future ? "Future" : "Not yet published", false],
+        ["Return", "Not reported", false],
+        ["Observed zero", "No", true],
+      ]);
+      reasons.innerHTML = "";
+      trades.innerHTML = "";
+      return;
+    }
     const closed = day.market_session_status === "closed";
     setStatus("calendar-detail-status", closed ? "Market closed" : "Missing", closed ? "" : "PARTIAL");
     note.textContent = closed ? day.market_session_reason || "The market was closed." : "No canonical observation exists for this market day. It is not a zero-return day.";
@@ -1206,9 +1309,9 @@ function renderSystem(readiness, manifest, stage, data) {
 function stageClass(status) { return ["LOCAL_VERIFIED", "COMPLETE"].includes(String(status)) ? "good" : ["FAILED", "DEGRADED"].includes(String(status)) ? "bad" : "warn"; }
 
 function detailRows(rows) { return rows.map(([label, value, good]) => `<dt>${escapeHtml(label)}</dt><dd class="${good ? "good" : "bad"}">${escapeHtml(String(value))}</dd>`).join(""); }
-function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE", "realized"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "FAILED", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED"].includes(String(status))); }
-function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
-function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
+function setStatus(id, text, status) { const node = document.getElementById(id); if (!node) return; node.textContent = text; node.classList.toggle("good", ["COMPLETE", "ready", "NO_TRADE", "realized"].includes(String(status))); node.classList.toggle("bad", ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE"].includes(String(status))); }
+function statusChip(status) { const label = labelForStatus(status); const cls = ["COMPLETE", "NO_TRADE", "realized"].includes(String(status)) ? "good" : ["DEGRADED", "PARTIAL", "PENDING", "MISSING", "UNAVAILABLE", "UNREALIZED", "NOT_PUBLISHED", "FUTURE", "missing_outcome", "quarantined"].includes(String(status)) ? "bad" : ""; return `<span class="status-chip ${cls}">${escapeHtml(label)}</span>`; }
+function labelForStatus(status) { return ({ COMPLETE: "Complete", PARTIAL: "Partial", PENDING: "Pending", MISSING: "Missing", UNAVAILABLE: "Unavailable", UNREALIZED: "Unrealized", NOT_PUBLISHED: "Not yet published", FUTURE: "Future", DEGRADED: "Needs attention", NO_TRADE: "No trade", realized: "Realized", missing_outcome: "Outcome needed", quarantined: "Quarantined", unrealized: "Open", no_trade: "No trade" }[status] || "Not reported"); }
 function formatPercent(value) { return numberOrNull(value) == null ? '<span class="value-muted">Not reported</span>' : `<span>${formatPercentText(value)}</span>`; }
 function formatPercentText(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`; }
 function formatPrice(value) { const numeric = numberOrNull(value); return numeric == null ? "Not reported" : `$${numeric.toFixed(2)}`; }
