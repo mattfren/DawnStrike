@@ -11,11 +11,10 @@ import argparse
 import hashlib
 import json
 from datetime import date, datetime
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 CURRENT = "CURRENT"
@@ -264,23 +263,34 @@ def _verify_remote(url: str, local: dict[str, Any], *, timeout_seconds: float) -
 
 
 def _fetch_json(url: str, *, timeout_seconds: float) -> dict[str, Any]:
-    separator = "&" if "?" in url else "?"
-    request = Request(
-        f"{url}{separator}verify=calendar-ops",
-        headers={"Accept": "application/json", "Cache-Control": "no-cache"},
-    )
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            encoded = response.read()
-            value = json.loads(encoded)
-            return {
-                "status": int(response.status),
-                "value": value if isinstance(value, dict) else {},
-                "sha256": _sha(encoded),
-                "error": False,
-            }
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return {"status": None, "value": {}, "sha256": None, "error": True}
+    query = f"{parsed.query}&verify=calendar-ops" if parsed.query else "verify=calendar-ops"
+    target = urlunparse(("", "", parsed.path or "/", "", query, ""))
+    connection_type = HTTPSConnection if parsed.scheme == "https" else HTTPConnection
+    connection: HTTPConnection | HTTPSConnection | None = None
+    try:
+        connection = connection_type(parsed.hostname, port=parsed.port, timeout=timeout_seconds)
+        connection.request(
+            "GET",
+            target,
+            headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+        )
+        response = connection.getresponse()
+        encoded = response.read()
+        value = json.loads(encoded)
+        return {
+            "status": int(response.status),
+            "value": value if isinstance(value, dict) else {},
+            "sha256": _sha(encoded),
+            "error": False,
+        }
+    except (HTTPException, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return {"status": None, "value": {}, "sha256": None, "error": True}
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _first_date(*values: object) -> str | None:

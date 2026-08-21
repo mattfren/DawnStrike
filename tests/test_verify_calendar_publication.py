@@ -157,3 +157,9 @@ def test_remote_source_sha_mismatch_is_deployment_sha_mismatch(tmp_path: Path, m
 
     assert result["status"] == verifier.DEPLOYMENT_SHA_MISMATCH
     assert "deployment_source_sha_health_mismatch" in result["errors"]
+
+
+def test_remote_fetch_rejects_non_http_schemes() -> None:
+    result = verifier._fetch_json("file:///etc/passwd", timeout_seconds=0.1)
+
+    assert result == {"status": None, "value": {}, "sha256": None, "error": True}
