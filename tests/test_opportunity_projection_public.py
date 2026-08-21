@@ -42,7 +42,7 @@ def test_static_renderer_uses_dom_construction_not_persisted_inner_html() -> Non
     assert ".textContent" in renderer
     assert ".innerHTML" not in renderer
     assert ".slice(0, 5)" in renderer
-    assert 'loadJson("/data/opportunity-projection.json")' in source
+    assert 'loadJson("/data/opportunity-projection.json", request)' in source
     assert "NO QUALIFYING TRADE CURRENTLY EXISTS." in renderer
 
 
