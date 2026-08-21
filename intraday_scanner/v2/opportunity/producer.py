@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -15,7 +14,10 @@ from intraday_scanner.storage.opportunity_store import (
     OpportunityPersistenceReceipt,
     OpportunityStore,
 )
-from intraday_scanner.storage.test_isolation import ACTIVE_DATABASE
+from intraday_scanner.storage.test_isolation import (
+    is_active_database_path,
+    is_explicit_absolute_database_path,
+)
 from intraday_scanner.v2.data import MarketDataset
 from intraday_scanner.v2.opportunity.catalyst import InjectedCatalystAdapter
 from intraday_scanner.v2.opportunity.discovery import (
@@ -345,7 +347,7 @@ class OpportunityResearchProducer:
         initial_telemetry: tuple[StageTelemetry, ...] = (),
     ) -> ProducerReceipt:
         path = Path(database_path)
-        if not path.is_absolute():
+        if not is_explicit_absolute_database_path(database_path):
             cause = ValueError(ProducerFailureCode.EXPLICIT_PATH_REQUIRED.value)
             telemetry = (
                 *initial_telemetry,
@@ -364,8 +366,7 @@ class OpportunityResearchProducer:
                 cause,
                 telemetry,
             ) from cause
-        resolved = path.resolve(strict=False)
-        if os.path.normcase(str(resolved)) == os.path.normcase(str(ACTIVE_DATABASE)):
+        if is_active_database_path(database_path):
             cause = ValueError(ProducerFailureCode.ACTIVE_PATH_FORBIDDEN.value)
             telemetry = (
                 *initial_telemetry,
@@ -384,6 +385,7 @@ class OpportunityResearchProducer:
                 cause,
                 telemetry,
             ) from cause
+        resolved = path.resolve(strict=False)
         stage_telemetry = list(initial_telemetry)
         started = time.perf_counter()
         try:

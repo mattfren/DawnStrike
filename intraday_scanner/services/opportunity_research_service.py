@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,7 +15,7 @@ from typing import Any
 from intraday_scanner.services.opportunity_catalyst_adapter import (
     load_retained_catalyst_adapter,
 )
-from intraday_scanner.storage.test_isolation import ACTIVE_DATABASE
+from intraday_scanner.storage.test_isolation import is_active_database_path
 from intraday_scanner.v2.data import MarketDataset
 from intraday_scanner.v2.data_truth import (
     DataTruthManifest,
@@ -507,8 +506,7 @@ def _optional_file_hash(path: Path | None) -> str:
 
 
 def _require_non_active_database(path: Path) -> None:
-    resolved = path.resolve(strict=False)
-    if os.path.normcase(str(resolved)) == os.path.normcase(str(ACTIVE_DATABASE)):
+    if is_active_database_path(path):
         raise ValueError("active database is forbidden for local opportunity research")
 
 

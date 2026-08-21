@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from intraday_scanner.storage.read_only import connect_read_only
-from intraday_scanner.storage.test_isolation import ACTIVE_DATABASE
+from intraday_scanner.storage.test_isolation import is_active_database_path
 from intraday_scanner.v2.opportunity.catalyst import (
     CatalystEvidence,
     InjectedCatalystAdapter,
@@ -26,9 +25,9 @@ def load_retained_catalyst_adapter(
 
     if decision_at.tzinfo is None or decision_at.utcoffset() is None:
         raise ValueError("catalyst decision_at must be timezone-aware")
-    resolved = Path(database_path).resolve(strict=False)
-    if os.path.normcase(str(resolved)) == os.path.normcase(str(ACTIVE_DATABASE)):
+    if is_active_database_path(database_path):
         raise ValueError("active database is forbidden for retained catalyst evidence")
+    resolved = Path(database_path).resolve(strict=False)
     normalized_symbols = tuple(sorted({item.strip().upper() for item in symbols if item.strip()}))
     if not normalized_symbols:
         return InjectedCatalystAdapter({})
