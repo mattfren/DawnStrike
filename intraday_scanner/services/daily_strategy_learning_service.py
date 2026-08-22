@@ -643,7 +643,7 @@ def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[
             )
             contradiction_row["authoritative_contradiction_count"] += 1
 
-    blocking_rows = [
+    blocking_rows: list[dict[str, Any]] = [
         {
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
