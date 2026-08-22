@@ -51,8 +51,13 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "scenario_b64" in script
     assert "opportunity-projection.json.manifest.json" in script
     assert "opportunity_b64" in script
-    assert "static_file_hashes_verified = $true" in script
+    assert '"static_file_hashes_verified":true' in script
     assert "api\\public_state.py" in script
+    assert "function Read-RawJsonObject" in script
+    assert "[System.Text.Json.JsonDocument]::Parse($raw)" in script
+    assert "$stateJson = '{' + ($stateParts -join ',') + '}'" in script
+    assert "ISO timestamps into DateTime values" in script
+    assert "| ConvertFrom-Json" not in script
     assert "StageRoot must resolve inside the project build directory" in script
     assert "StageRoot must not overlap the source public artifact" in script
     assert "[System.IO.Path]::GetFullPath($stageCandidate)" in script

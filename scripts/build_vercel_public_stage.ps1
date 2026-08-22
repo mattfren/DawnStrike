@@ -60,21 +60,49 @@ $snapshotBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\p
 $calendarBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\calendar.json"))
 $scenarioBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\scenarios.json"))
 $opportunityBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\opportunity-projection.json"))
-$state = [ordered]@{
-    readiness = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "readiness.json") | ConvertFrom-Json)
-    snapshot_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\performance.json.manifest.json") | ConvertFrom-Json)
-    build_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "build-manifest.json") | ConvertFrom-Json)
-    snapshot_b64 = [Convert]::ToBase64String($snapshotBytes)
-    calendar_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\calendar.json.manifest.json") | ConvertFrom-Json)
-    calendar_b64 = [Convert]::ToBase64String($calendarBytes)
-    scenario_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\scenarios.json.manifest.json") | ConvertFrom-Json)
-    scenario_b64 = [Convert]::ToBase64String($scenarioBytes)
-    opportunity_manifest = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\opportunity-projection.json.manifest.json") | ConvertFrom-Json)
-    opportunity_b64 = [Convert]::ToBase64String($opportunityBytes)
-    publication_set = (Get-Content -Raw -LiteralPath (Join-Path $publicSource "data\publication-set.json") | ConvertFrom-Json)
-    static_file_hashes_verified = $true
+function Read-RawJsonObject {
+    param([string]$Path)
+
+    $raw = [System.IO.File]::ReadAllText($Path).Trim()
+    $document = $null
+    try {
+        $document = [System.Text.Json.JsonDocument]::Parse($raw)
+        if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+            throw "Expected a JSON object: $Path"
+        }
+    }
+    finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
+    return $raw
 }
-$stateJson = $state | ConvertTo-Json -Depth 100 -Compress
+
+function ConvertTo-JsonString {
+    param([string]$Value)
+
+    return ($Value | ConvertTo-Json -Compress)
+}
+
+# Keep the generated JSON text byte-for-byte semantic. ConvertFrom-Json parses
+# ISO timestamps into DateTime values on newer PowerShell releases, and a later
+# ConvertTo-Json then rewrites UTC strings into the host's local offset. That
+# breaks equality between the embedded function state and the hashed static
+# Calendar manifest even though both originated from the same artifact.
+$stateParts = @(
+    '"readiness":' + (Read-RawJsonObject (Join-Path $publicSource "readiness.json"))
+    '"snapshot_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\performance.json.manifest.json"))
+    '"build_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "build-manifest.json"))
+    '"snapshot_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($snapshotBytes)))
+    '"calendar_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\calendar.json.manifest.json"))
+    '"calendar_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($calendarBytes)))
+    '"scenario_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\scenarios.json.manifest.json"))
+    '"scenario_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($scenarioBytes)))
+    '"opportunity_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\opportunity-projection.json.manifest.json"))
+    '"opportunity_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($opportunityBytes)))
+    '"publication_set":' + (Read-RawJsonObject (Join-Path $publicSource "data\publication-set.json"))
+    '"static_file_hashes_verified":true'
+)
+$stateJson = '{' + ($stateParts -join ',') + '}'
 $pythonString = $stateJson | ConvertTo-Json -Compress
 $stateModule = "import json`n`nPUBLIC_STATE = json.loads($pythonString)`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
