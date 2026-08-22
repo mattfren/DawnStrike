@@ -44,7 +44,7 @@ def _resolver(body: dict[str, object], *, model: str = "gpt-test", max_symbols: 
     client = SimpleNamespace(responses=SimpleNamespace(create=create))
     return (
         StrategyGapResolver(
-            api_key="fixture",
+            api_key="fixture",  # pragma: allowlist secret
             model="gpt-requested",
             client=client,
             max_symbols=max_symbols,
@@ -116,7 +116,7 @@ def test_provider_timeout_becomes_a_disclosed_gap() -> None:
 
     client = SimpleNamespace(responses=TimeoutResponses())
     result = StrategyGapResolver(
-        api_key="fixture",
+        api_key="fixture",  # pragma: allowlist secret
         model="gpt-test",
         client=client,
     ).resolve(
