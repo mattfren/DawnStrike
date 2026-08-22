@@ -3,7 +3,7 @@
   "branch": "codex/luna-strategy-decisions-20260822",
   "base_branch": "codex/strategy-learning-remediation-20260821",
   "base_sha": "b479245708d3e679d39887425aae4996b3dad7db",
-  "exact_final_commit_sha": "a55b3fd331f758608d1df7646374352329478cac",
+  "exact_final_commit_sha": "9f021ec8285a437ada3661c636d33b4c2ee10e6c",
   "stacked_pr": {
     "base": "codex/strategy-learning-remediation-20260821",
     "head": "codex/luna-strategy-decisions-20260822",
@@ -50,7 +50,7 @@
     "ruff_modified_scope": "PASS",
     "compileall_modified_scope": "PASS",
     "full_suite": "NOT_PASSING: initial run hit legacy schema-31 rejection; post-repair heavy fixture rerun was interrupted before termination",
-    "exact_sha_ci": "PENDING",
+    "exact_sha_ci": "RERUN_PENDING_AFTER_B608_REPAIR",
     "git_diff_check": "PASS",
     "worktree_clean": "PASS_AT_IMPLEMENTATION_COMMIT"
   },
