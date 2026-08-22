@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -4600,9 +4601,7 @@ class SQLiteScanStore:
                 rows = connection.execute(query, params).fetchall()
                 return [_raw_json_row(row) for row in rows]
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not load raw price observations: {exc}"
-            ) from exc
+            raise StorageError(f"Could not load raw price observations: {exc}") from exc
 
     def persist_trade_intents(
         self,
@@ -6150,9 +6149,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if existing is not None:
                         if str(existing[0]) != payload_json:
-                            raise StorageError(
-                                f"immutable V6 outcome conflict: {identity}"
-                            )
+                            raise StorageError(f"immutable V6 outcome conflict: {identity}")
                         skipped += 1
                         continue
                     cursor = connection.execute(
@@ -6385,9 +6382,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if existing is not None:
                         if str(existing[0]) != payload_json:
-                            raise StorageError(
-                                f"immutable V6 label conflict: {identity}"
-                            )
+                            raise StorageError(f"immutable V6 label conflict: {identity}")
                         skipped += 1
                         continue
                     cursor = connection.execute(
@@ -6462,14 +6457,10 @@ class SQLiteScanStore:
                 ).fetchone()
                 if existing is not None:
                     existing_payload = _json_value(existing[0])
-                    if (
-                        not isinstance(existing_payload, dict)
-                        or _immutable_semantics(existing_payload)
-                        != _immutable_semantics(row)
-                    ):
-                        raise StorageError(
-                            f"immutable V6 dataset conflict: {identity}"
-                        )
+                    if not isinstance(existing_payload, dict) or _immutable_semantics(
+                        existing_payload
+                    ) != _immutable_semantics(row):
+                        raise StorageError(f"immutable V6 dataset conflict: {identity}")
                     return False
                 cursor = connection.execute(
                     """
@@ -7439,6 +7430,154 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load scenario replay trades: {exc}") from exc
 
+    def persist_strategy_decision_receipt(
+        self,
+        receipt: Any,
+        *,
+        evidence_claims: Iterable[Any] = (),
+        resolution_run: Any | None = None,
+    ) -> bool:
+        """Insert one immutable receipt, rejecting identity/payload drift."""
+
+        self.initialize()
+        canonical = receipt.canonical_json()
+        claims = [
+            claim.to_dict() if hasattr(claim, "to_dict") else dict(claim)
+            for claim in evidence_claims
+        ]
+        run = (
+            resolution_run.to_dict()
+            if resolution_run is not None and hasattr(resolution_run, "to_dict")
+            else resolution_run
+        )
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    (
+                        "SELECT receipt_hash_sha256, canonical_json "
+                        "FROM strategy_decision_receipts WHERE receipt_id = ?"
+                    ),
+                    (str(receipt.receipt_id),),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        str(existing[0]) != str(receipt.receipt_hash_sha256)
+                        or str(existing[1]) != canonical
+                    ):
+                        raise StorageError("strategy decision receipt identity/payload mismatch")
+                    return False
+                connection.execute(
+                    """INSERT INTO strategy_decision_receipts
+                    (receipt_id, receipt_hash_sha256, strategy_id, strategy_version, symbol,
+                     market_date, pick_tier, research_pick_eligible, paper_entry_eligible,
+                     source_identity, input_hash_sha256, canonical_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        receipt.receipt_id,
+                        receipt.receipt_hash_sha256,
+                        receipt.strategy_id,
+                        receipt.strategy_version,
+                        receipt.symbol,
+                        receipt.market_date,
+                        receipt.pick_tier.value
+                        if hasattr(receipt.pick_tier, "value")
+                        else str(receipt.pick_tier),
+                        int(receipt.research_pick_eligible),
+                        int(receipt.paper_entry_eligible),
+                        receipt.source_identity,
+                        receipt.input_hash_sha256,
+                        canonical,
+                        datetime.now(UTC).replace(microsecond=0).isoformat(),
+                    ),
+                )
+                for result in receipt.condition_results:
+                    row = result.to_dict()
+                    connection.execute(
+                        """INSERT INTO strategy_condition_results
+                        (receipt_id, condition_id, status, source_urls_json,
+                         source_hashes_json, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            receipt.receipt_id,
+                            result.condition_id,
+                            result.status.value
+                            if hasattr(result.status, "value")
+                            else str(result.status),
+                            json.dumps(list(result.source_urls), sort_keys=True),
+                            json.dumps(list(result.source_hashes), sort_keys=True),
+                            json.dumps(row, sort_keys=True, separators=(",", ":")),
+                        ),
+                    )
+                for claim in claims:
+                    connection.execute(
+                        """INSERT OR IGNORE INTO strategy_evidence_claims
+                        (claim_id, receipt_id, condition_id, symbol, source_urls_json,
+                         source_hashes_json, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(claim["claim_id"]),
+                            receipt.receipt_id,
+                            str(claim["condition_id"]),
+                            str(claim["symbol"]),
+                            json.dumps(claim.get("source_urls") or []),
+                            json.dumps(claim.get("source_hashes") or []),
+                            json.dumps(claim, sort_keys=True, separators=(",", ":")),
+                        ),
+                    )
+                if isinstance(run, dict):
+                    connection.execute(
+                        """INSERT OR IGNORE INTO strategy_evidence_resolution_runs
+                        (run_id, receipt_id, symbol, market_date, requested_model, actual_model,
+                         response_id, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(run["run_id"]),
+                            receipt.receipt_id,
+                            str(run["symbol"]),
+                            str(run["market_date"]),
+                            str(run["requested_model"]),
+                            str(run["actual_model"]),
+                            str(run["response_id"]),
+                            json.dumps(run, sort_keys=True, separators=(",", ":")),
+                        ),
+                    )
+            return True
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist strategy decision receipt: {exc}") from exc
+
+    def persist_strategy_decision_receipts(self, receipts: Iterable[Any]) -> dict[str, int]:
+        inserted = 0
+        reused = 0
+        for receipt in receipts:
+            if self.persist_strategy_decision_receipt(receipt):
+                inserted += 1
+            else:
+                reused += 1
+        return {"inserted": inserted, "reused": reused}
+
+    def load_strategy_decision_receipts(
+        self, *, market_date: str | None = None, strategy_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if market_date:
+            clauses.append("market_date = ?")
+            params.append(market_date)
+        if strategy_id:
+            clauses.append("strategy_id = ?")
+            params.append(strategy_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                (
+                    f"SELECT canonical_json FROM strategy_decision_receipts{where} "
+                    "ORDER BY created_at DESC LIMIT ?"
+                ),  # noqa: S608
+                (*params, limit),
+            ).fetchall()
+        return [json.loads(str(row[0])) for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
             return connect_read_only(self.db_path)
@@ -7643,11 +7782,7 @@ def _raw_json_row(row: sqlite3.Row) -> dict[str, Any]:
 
     payload = _json_value(row["payload_json"])
     return {
-        "columns": {
-            key: row[key]
-            for key in row.keys()
-            if key != "payload_json"
-        },
+        "columns": {key: row[key] for key in row.keys() if key != "payload_json"},
         "payload_json": payload,
     }
 

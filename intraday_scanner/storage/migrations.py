@@ -6,6 +6,9 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+# The governed opportunity stores in this base intentionally accept schema 30
+# only. Strategy receipts are an additive sidecar migration and therefore do
+# not advance that legacy marker.
 CURRENT_SCHEMA_VERSION = 30
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -36,6 +39,17 @@ def run_migrations(connection: sqlite3.Connection) -> int:
     version = get_schema_version(connection)
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
+            continue
+        if target_version == 31:
+            already_present = connection.execute(
+                """SELECT 1 FROM sqlite_master WHERE type = 'table'
+                AND name = 'strategy_decision_receipts' LIMIT 1"""
+            ).fetchone()
+            if already_present is not None:
+                continue
+            migration(connection)
+            # Do not advance schema_version: older governed stores validate
+            # the 29/30 marker and the receipt tables are independently additive.
             continue
         migration(connection)
         set_schema_version(connection, target_version)
@@ -2245,6 +2259,71 @@ def _migration_030_opportunity_validation(
     )
 
 
+def _migration_031_strategy_decision_receipts(connection: sqlite3.Connection) -> None:
+    """Add immutable, additive strategy decision evidence tables."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_decision_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            pick_tier TEXT NOT NULL,
+            research_pick_eligible INTEGER NOT NULL,
+            paper_entry_eligible INTEGER NOT NULL,
+            source_identity TEXT NOT NULL,
+            input_hash_sha256 TEXT NOT NULL,
+            canonical_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_decision_receipts_lookup
+        ON strategy_decision_receipts(market_date, strategy_id, symbol, pick_tier);
+        CREATE TABLE IF NOT EXISTS strategy_condition_results (
+            receipt_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_urls_json TEXT NOT NULL,
+            source_hashes_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (receipt_id, condition_id),
+            FOREIGN KEY (receipt_id) REFERENCES strategy_decision_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS strategy_evidence_claims (
+            claim_id TEXT PRIMARY KEY,
+            receipt_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            source_urls_json TEXT NOT NULL,
+            source_hashes_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY (receipt_id) REFERENCES strategy_decision_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS strategy_evidence_resolution_runs (
+            run_id TEXT PRIMARY KEY,
+            receipt_id TEXT,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            requested_model TEXT NOT NULL,
+            actual_model TEXT NOT NULL,
+            response_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            FOREIGN KEY (receipt_id) REFERENCES strategy_decision_receipts(receipt_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS strategy_decision_receipts_no_update
+        BEFORE UPDATE ON strategy_decision_receipts BEGIN
+            SELECT RAISE(ABORT, 'strategy_decision_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_decision_receipts_no_delete
+        BEFORE DELETE ON strategy_decision_receipts BEGIN
+            SELECT RAISE(ABORT, 'strategy_decision_receipts is append-only');
+        END;
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -2285,4 +2364,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (28, _migration_028_opportunity_outcomes),
     (29, _migration_029_opportunity_research),
     (30, _migration_030_opportunity_validation),
+    (31, _migration_031_strategy_decision_receipts),
 )
