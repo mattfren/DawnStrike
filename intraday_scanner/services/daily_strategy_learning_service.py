@@ -38,7 +38,7 @@ class StrategyEvidenceAnalyzer(Protocol):
     def analyze(
         self,
         strategy: StrategySpec,
-        context: "DailyLearningContext",
+        context: DailyLearningContext,
     ) -> Mapping[str, Any]: ...
 
 
@@ -99,6 +99,115 @@ class MappingEvidenceAnalyzer:
         if not isinstance(value, Mapping):
             raise ValueError(f"evidence for {strategy.strategy_id} must be an object")
         return value
+
+
+class AttributionReportAnalyzer:
+    """Adapt deterministic strategy-attribution output into the daily loop.
+
+    Only closed rows enter the outcome list. Open marks, no-trades, missing
+    truth, and conflicts remain miss/evidence records and cannot become return
+    labels. Remediation hypotheses remain unapplied research proposals.
+    """
+
+    def __init__(self, report: Any) -> None:
+        payload = report.to_dict() if hasattr(report, "to_dict") else report
+        if not isinstance(payload, Mapping):
+            raise ValueError("attribution report must be an object")
+        rows = payload.get("rows", ())
+        summaries = payload.get("summaries", ())
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise ValueError("attribution report rows must be a list")
+        if not isinstance(summaries, Sequence) or isinstance(summaries, (str, bytes)):
+            raise ValueError("attribution report summaries must be a list")
+        self._schema = str(payload.get("schema_version") or "unknown_attribution_contract")
+        self._rows = tuple(dict(row) for row in rows if isinstance(row, Mapping))
+        self._summaries = tuple(
+            dict(summary) for summary in summaries if isinstance(summary, Mapping)
+        )
+
+    def analyze(
+        self,
+        strategy: StrategySpec,
+        context: DailyLearningContext,
+    ) -> Mapping[str, Any]:
+        del context
+        rows = tuple(
+            row
+            for row in self._rows
+            if row.get("strategy_id") == strategy.strategy_id
+            and row.get("strategy_version") in {None, "", strategy.version}
+        )
+        summaries = tuple(
+            summary
+            for summary in self._summaries
+            if summary.get("strategy_id") == strategy.strategy_id
+            and summary.get("strategy_version") in {None, "", strategy.version}
+        )
+        outcomes = [
+            {
+                **row,
+                "status": "RESOLVED",
+            }
+            for row in rows
+            if str(row.get("state")) == "closed"
+        ]
+        misses = [
+            dict(row)
+            for row in rows
+            if str(row.get("classification")) not in {"closed_win", "closed_flat"}
+        ]
+        proposals: list[dict[str, Any]] = []
+        if strategy.status not in {"benchmark", "baseline"}:
+            grouped: dict[str, dict[str, Any]] = {}
+            for summary in summaries:
+                eligibility = summary.get("eligibility")
+                eligible_count = (
+                    int(eligibility.get("eligible_count") or 0)
+                    if isinstance(eligibility, Mapping)
+                    else 0
+                )
+                hypotheses = summary.get("remediation_hypotheses", ())
+                if not isinstance(hypotheses, Sequence) or isinstance(
+                    hypotheses, (str, bytes)
+                ):
+                    continue
+                for hypothesis in hypotheses:
+                    if not isinstance(hypothesis, Mapping):
+                        continue
+                    root_cause = str(hypothesis.get("hypothesis_id") or "unknown_evidence")
+                    current = grouped.setdefault(
+                        root_cause,
+                        {
+                            "root_cause_category": root_cause,
+                            "supporting_miss_count": 0,
+                            "eligible_sample_count": 0,
+                            "hypothesis": str(hypothesis.get("action") or "Collect evidence."),
+                            "controlled_change": {
+                                "scope": "research_challenger_only",
+                                "component": root_cause,
+                            },
+                            "evidence_cohorts": [],
+                            "evidence_hashes": [],
+                        },
+                    )
+                    current["supporting_miss_count"] += int(
+                        hypothesis.get("trigger_count") or 0
+                    )
+                    current["eligible_sample_count"] += eligible_count
+                    cohort = summary.get("cohort")
+                    if cohort and cohort not in current["evidence_cohorts"]:
+                        current["evidence_cohorts"].append(cohort)
+                    for evidence_hash in summary.get("evidence_hashes", ()):
+                        if evidence_hash not in current["evidence_hashes"]:
+                            current["evidence_hashes"].append(evidence_hash)
+            proposals = [grouped[key] for key in sorted(grouped)]
+        return {
+            "status": "ATTRIBUTED" if rows else "NO_RETAINED_ROWS",
+            "evidence_contract": self._schema,
+            "outcomes": outcomes,
+            "misses": misses,
+            "proposals": proposals,
+        }
 
 
 def _canonical_json(value: Any) -> str:
@@ -339,6 +448,7 @@ __all__ = [
     "PROPOSAL_SCHEMA",
     "DailyLearningContext",
     "EmptyEvidenceAnalyzer",
+    "AttributionReportAnalyzer",
     "MappingEvidenceAnalyzer",
     "StrategyEvidenceAnalyzer",
     "run_daily_strategy_learning",

@@ -1,8 +1,14 @@
 import json
 from pathlib import Path
 
+from intraday_scanner.performance.strategy_miss_attribution import (
+    attribute_strategy_misses,
+)
+from intraday_scanner.services.daily_strategy_learning_service import (
+    AttributionReportAnalyzer,
+    run_daily_strategy_learning,
+)
 from intraday_scanner.v2.strategies import build_strategy_catalog
-from intraday_scanner.services.daily_strategy_learning_service import run_daily_strategy_learning
 
 
 class FixtureAnalyzer:
@@ -102,3 +108,61 @@ def test_daily_learning_rejects_unfrozen_inputs(tmp_path: Path) -> None:
             pass
         else:
             raise AssertionError("unfrozen daily-learning input was accepted")
+
+
+def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) -> None:
+    rows = [
+        {
+            "record_id": "benchmark",
+            "market_date": "2026-08-20",
+            "cohort": "shadow_challenger",
+            "strategy_id": "benchmark_buy_hold_equal_weight",
+            "strategy_version": "v1.0",
+            "record_status": "realized",
+            "return_pct": 1.0,
+            "open_position_count": 0,
+        },
+        {
+            "record_id": "no-trade",
+            "market_date": "2026-08-20",
+            "cohort": "shadow_challenger",
+            "strategy_id": "ts_momentum_sma_atr",
+            "strategy_version": "v1.0",
+            "record_status": "no_trade",
+            "return_pct": 0.0,
+            "open_position_count": 0,
+        },
+        {
+            "record_id": "closed-loss",
+            "market_date": "2026-08-20",
+            "cohort": "shadow_challenger",
+            "strategy_id": "ts_momentum_sma_atr",
+            "strategy_version": "v1.0",
+            "record_status": "realized",
+            "return_pct": -0.5,
+            "open_position_count": 0,
+        },
+    ]
+    report = attribute_strategy_misses(rows)
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-attribution",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        analyzer=AttributionReportAnalyzer(report),
+    )
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+
+    assert [row["record_id"] for row in evidence["outcomes"]] == ["closed-loss"]
+    assert {row["record_id"] for row in evidence["misses"]} == {
+        "closed-loss",
+        "no-trade",
+    }
+    assert all(row["state"] == "closed" for row in evidence["outcomes"])
+    assert result["proposal_count"] >= 2

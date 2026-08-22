@@ -24,7 +24,7 @@ def _row(**overrides: object) -> dict[str, object]:
     return row
 
 
-def test_no_trade_positive_benchmark_is_profitable_miss_without_treating_no_trade_as_zero() -> None:
+def test_no_trade_positive_benchmark_is_opportunity_cost_not_a_counterfactual() -> None:
     report = attribute_strategy_misses(
         [
             _row(
@@ -46,9 +46,10 @@ def test_no_trade_positive_benchmark_is_profitable_miss_without_treating_no_trad
     miss = next(row for row in report.rows if row.record_id == "miss")
     summary = next(item for item in report.summaries if item.strategy_id == "example_strategy")
     assert miss.state is AttributionState.NO_TRADE
-    assert miss.classification == "profitable_miss"
-    assert miss.eligibility is Eligibility.ELIGIBLE
-    assert set(("no_trade", "opportunity_cost", "profitable_miss")) <= set(miss.categories)
+    assert miss.classification == "positive_benchmark_no_trade"
+    assert miss.eligibility is Eligibility.UNKNOWN
+    assert set(("no_trade", "opportunity_cost")) <= set(miss.categories)
+    assert "profitable_miss" not in miss.categories
     assert miss.benchmark_return_pct == 1.25
     assert summary.opportunity_cost_count == 1
     assert summary.opportunity_cost_return_sum_pct == 1.25

@@ -129,6 +129,48 @@ def test_unsupported_borrow_and_sector_evidence_is_explicit_and_fail_closed() ->
     )
 
 
+def test_cross_sectional_rank_two_margin_uses_the_next_lower_rank() -> None:
+    dataset = _dataset()
+    index = 120
+    rank_two = None
+    for symbol, bars in dataset.bars_by_symbol.items():
+        evaluation = evaluate_challenger_gates(
+            "cross_sectional_relative_strength", dataset, symbol, bars, index
+        )
+        membership = next(
+            (gate for gate in evaluation.gates if gate.name == "rank_membership"), None
+        )
+        if membership is not None and membership.value == 2:
+            rank_two = evaluation
+            break
+
+    assert rank_two is not None
+    margin = next(gate for gate in rank_two.gates if gate.name == "rank_margin")
+    assert isinstance(margin.value, float)
+    assert margin.value >= 0.0
+
+
+def test_donchian_zero_volume_history_fails_participation_without_error() -> None:
+    dataset = _dataset()
+    symbol = "NOVA"
+    index = 120
+    bars = dataset.bars_by_symbol[symbol]
+    zero_volume = tuple(
+        replace(bar, volume=0) if index - 20 <= offset < index else bar
+        for offset, bar in enumerate(bars)
+    )
+    adjusted = replace(
+        dataset, bars_by_symbol={**dataset.bars_by_symbol, symbol: zero_volume}
+    )
+
+    evaluation = evaluate_challenger_gates(
+        "donchian_breakout_20_10", adjusted, symbol, zero_volume, index
+    )
+    participation = next(gate for gate in evaluation.gates if gate.name == "participation")
+    assert participation.status == "FAIL"
+    assert participation.value is None
+
+
 def test_gap_gate_trace_reports_first_and_all_failures() -> None:
     dataset = _dataset()
     bars = dataset.bars_by_symbol["NOVA"]

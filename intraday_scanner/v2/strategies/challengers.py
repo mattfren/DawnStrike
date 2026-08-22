@@ -205,6 +205,7 @@ def _evaluate_donchian(bars: tuple[MarketBar, ...], index: int) -> list[GateResu
             _unavailable("breakout_quality", "prior high, ATR14, and volume history are required")
         ]
     close = bars[index].close
+    prior_volume_mean = mean(prior_vol)
     return gates + [
         _gate(
             "breakout_quality",
@@ -220,9 +221,9 @@ def _evaluate_donchian(bars: tuple[MarketBar, ...], index: int) -> list[GateResu
         ),
         _gate(
             "participation",
-            bars[index].volume / mean(prior_vol) >= 1.10,
+            prior_volume_mean > 0 and bars[index].volume / prior_volume_mean >= 1.10,
             "volume must be at least 1.10x prior-20 mean",
-            bars[index].volume / mean(prior_vol) if mean(prior_vol) else None,
+            bars[index].volume / prior_volume_mean if prior_volume_mean else None,
         ),
         _gate(
             "volatility_regime",
@@ -248,12 +249,18 @@ def _evaluate_cross_sectional(
             scores.append((momentum / volatility, other_symbol))
     ranked = sorted(scores, reverse=True)
     own = next((score for score, candidate in ranked if candidate == symbol), None)
-    next_score = next((score for score, candidate in ranked if candidate != symbol), None)
     own_rank = next(
         (rank for rank, (_, candidate) in enumerate(ranked, start=1) if candidate == symbol),
         None,
     )
-    if own is None or next_score is None or own_rank is None:
+    # Compare the candidate with the next lower rank. Comparing rank two to
+    # rank one would make a top-two candidate's margin negative by definition.
+    next_lower_score = (
+        ranked[own_rank][0]
+        if own_rank is not None and own_rank < len(ranked)
+        else None
+    )
+    if own is None or next_lower_score is None or own_rank is None:
         gates.append(
             _unavailable("rank_margin", "synchronized cross-sectional history is required")
         )
@@ -269,9 +276,9 @@ def _evaluate_cross_sectional(
         gates.append(
             _gate(
                 "rank_margin",
-                own - next_score >= 0.05,
-                "top rank must clear the next rank by 0.05",
-                own - next_score,
+                own - next_lower_score >= 0.05,
+                "candidate must clear the next lower rank by 0.05",
+                own - next_lower_score,
             )
         )
     gates.append(

@@ -388,9 +388,13 @@ def _attribute_row(
     elif no_trade:
         state = AttributionState.NO_TRADE
         if benchmark is not None and benchmark > 0:
-            classification = "profitable_miss"
-            categories.update(("no_trade", "opportunity_cost", "profitable_miss"))
-            eligibility = Eligibility.ELIGIBLE
+            classification = "positive_benchmark_no_trade"
+            categories.update(("no_trade", "opportunity_cost"))
+            # A positive comparator day quantifies opportunity cost, but it is
+            # not a causal counterfactual return for the strategy's rejected or
+            # absent setup. Keep it outside closed-outcome learning until an
+            # eligible path replay exists.
+            eligibility = Eligibility.UNKNOWN
         else:
             classification = "no_trade"
             categories.add("no_trade")
