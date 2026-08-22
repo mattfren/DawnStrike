@@ -7559,23 +7559,33 @@ class SQLiteScanStore:
         self, *, market_date: str | None = None, strategy_id: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
         self.initialize()
-        clauses: list[str] = []
         params: list[Any] = []
-        if market_date:
-            clauses.append("market_date = ?")
+        if market_date and strategy_id:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE market_date = ? AND strategy_id = ? "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params.extend((market_date, strategy_id))
+        elif market_date:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE market_date = ? ORDER BY created_at DESC LIMIT ?"
+            )
             params.append(market_date)
-        if strategy_id:
-            clauses.append("strategy_id = ?")
+        elif strategy_id:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE strategy_id = ? ORDER BY created_at DESC LIMIT ?"
+            )
             params.append(strategy_id)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        else:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
         with self._connect() as connection:
-            rows = connection.execute(
-                (
-                    f"SELECT canonical_json FROM strategy_decision_receipts{where} "
-                    "ORDER BY created_at DESC LIMIT ?"
-                ),  # noqa: S608
-                (*params, limit),
-            ).fetchall()
+            rows = connection.execute(query, (*params, limit)).fetchall()
         return [json.loads(str(row[0])) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
