@@ -107,6 +107,7 @@ from intraday_scanner.services.daily_run_service import (
 from intraday_scanner.services.daily_strategy_learning_service import (
     AttributionReportAnalyzer,
     MappingEvidenceAnalyzer,
+    StrategyEvidenceAnalyzer,
     run_daily_strategy_learning,
 )
 from intraday_scanner.services.e2e_automation_service import (
@@ -1845,7 +1846,7 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
 
 
 def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
-    analyzer = None
+    analyzer: StrategyEvidenceAnalyzer | None = None
     if args.evidence_file:
         payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):

@@ -389,10 +389,12 @@ def _evaluate_fvg(bars: tuple[MarketBar, ...], index: int) -> list[GateResult]:
     prior_vol = mean(bar.volume for bar in bars[index - 20 : index])
     closes = [bar.close for bar in bars]
     sma20 = sma(closes, 20)
+    current_sma = sma20[index]
+    previous_sma = sma20[index - 1]
     trend_slope = (
-        sma20[index] is not None
-        and sma20[index - 1] is not None
-        and sma20[index] > sma20[index - 1]
+        current_sma is not None
+        and previous_sma is not None
+        and current_sma > previous_sma
     )
     gates.extend(
         [
@@ -559,7 +561,7 @@ def build_challenger_catalog() -> tuple[StrategySpec, ...]:
     champions = {
         spec.strategy_id: spec for spec in build_legacy_catalog() if spec.status == "experimental"
     }
-    ids = (
+    ids: tuple[str, ...] = (
         "ts_momentum_sma_atr",
         "donchian_breakout_20_10",
         "cross_sectional_relative_strength",

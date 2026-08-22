@@ -369,7 +369,8 @@ def _attribute_row(
     benchmark_hashes: dict[tuple[str, str], tuple[str, ...]],
     benchmark_conflicts: set[tuple[str, str]],
 ) -> StrategyMissAttributionRow:
-    payload = row.get("_payload") if isinstance(row.get("_payload"), Mapping) else {}
+    raw_payload = row.get("_payload")
+    payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, Mapping) else {}
     strategy_id = str(row.get("strategy_id") or payload.get("strategy_id") or "unknown")
     strategy_version = _optional_text(row, payload, "strategy_version")
     config_identity = _first_text(row, payload, _CONFIG_FIELDS)
@@ -759,7 +760,8 @@ def _first_text(
 
 
 def _evidence_hashes(row: Mapping[str, Any]) -> tuple[str, ...]:
-    payload = row.get("_payload") if isinstance(row.get("_payload"), Mapping) else {}
+    raw_payload = row.get("_payload")
+    payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, Mapping) else {}
     values = {str(row.get(field) or payload.get(field)).strip() for field in _HASH_FIELDS}
     return tuple(sorted(value for value in values if value and value != "None"))
 
@@ -785,7 +787,8 @@ def _safe_nonnegative_int(value: Any) -> int | None:
     return parsed if parsed is not None and parsed >= 0 else None
 
 
-def _sum_or_none(values: list[float | None]) -> float | None:
+def _sum_or_none(values: Iterable[float | None]) -> float | None:
+    values = list(values)
     if not values:
         return None
     return round(sum(value for value in values if value is not None), 10)

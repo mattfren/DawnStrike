@@ -147,18 +147,21 @@ def build_strategy_challenger_backtest_report(
                     metric_delta = None
                 else:
                     comparison_status = "RESEARCH_COMPARABLE"
-                    metric_delta = {
-                        key: float(challenger_result.metrics[key])
-                        - float(champion_result.metrics[key])
-                        for key in (
+                    metric_delta = {}
+                    for key in (
                             "total_return_pct",
                             "max_drawdown_pct",
                             "win_rate",
                             "expectancy",
-                        )
-                        if champion_result.metrics.get(key) is not None
-                        and challenger_result.metrics.get(key) is not None
-                    }
+                    ):
+                        champion_value = champion_result.metrics.get(key)
+                        challenger_value = challenger_result.metrics.get(key)
+                        if isinstance(champion_value, (int, float)) and isinstance(
+                            challenger_value, (int, float)
+                        ):
+                            metric_delta[key] = float(challenger_value) - float(
+                                champion_value
+                            )
                     metric_delta["trade_count"] = challenger_trades - champion_trades
             if static_gate is None and challenger_payload["trade_count"] == 0:
                 comparison_status = "NOT_EVALUABLE_NO_CHALLENGER_TRADES"
