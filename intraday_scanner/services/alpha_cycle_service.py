@@ -6,15 +6,18 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.ai.strategy_gap_resolver import StrategyGapResolver
 from intraday_scanner.alpha.alert_gate import apply_alert_gates
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION, AlphaModel
 from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.regime_detector import detect_regime
+from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
@@ -364,7 +367,6 @@ def alpha_cycle(
         _signal_payload(row, scan_result.run_id, timestamp, index)
         for index, row in enumerate(signals, 1)
     ]
-    signals = apply_alert_gates(signals)
     strategy_receipt_stats = _apply_strategy_decision_receipts(
         signals,
         store=store,
@@ -372,6 +374,9 @@ def alpha_cycle(
         decision_at=timestamp,
         source_summary=source_summary,
     )
+    if scanner_config.strategy_evidence_enabled:
+        signals = _apply_receipt_risk_gates(signals, feature_vectors)
+    signals = apply_alert_gates(signals)
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
     research_radar = _research_radar(signals) if decision.get("no_trade") else []
@@ -1428,14 +1433,11 @@ def _apply_strategy_decision_receipts(
     config: Any,
     decision_at: str,
     source_summary: dict[str, Any],
+    gap_resolver: Any | None = None,
 ) -> dict[str, Any]:
-    """Compute immutable receipts in optional shadow mode only.
+    """Build, resolve, re-evaluate, and persist receipts before final gates."""
 
-    The legacy AlphaOps disposition is intentionally unchanged in shadow mode;
-    receipt statuses are attached for operator and learning consumers.
-    """
-
-    if not config.strategy_evidence_enabled:
+    if not getattr(config, "strategy_evidence_enabled", False):
         return {"status": "disabled", "computed": 0, "persisted": 0, "reused": 0}
 
     from intraday_scanner.decisioning.condition_registry import (
@@ -1443,12 +1445,53 @@ def _apply_strategy_decision_receipts(
         strategy_ids,
     )
     from intraday_scanner.decisioning.contracts import ConditionCategory, ConditionStatus
+    from intraday_scanner.decisioning.evidence_resolver import CONDITION_CLAIM_TYPES
 
     code_sha = str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
+    shadow_only = bool(getattr(config, "strategy_evidence_shadow_only", True))
+    max_candidates = max(1, int(getattr(config, "strategy_evidence_max_candidates", 1)))
+    max_symbols = max(
+        1,
+        int(getattr(config, "indeterminate_research_max_symbols", max_candidates)),
+    )
+    resolution_budget = min(max_candidates, max_symbols)
+    timeout_seconds = float(
+        getattr(config, "indeterminate_research_timeout_seconds", 60.0)
+    )
+    max_tool_calls = int(getattr(config, "indeterminate_research_max_tool_calls", 3))
     supported = set(strategy_ids())
     eligible_rows: list[tuple[int, dict[str, Any]]] = []
     uncovered: list[dict[str, Any]] = []
+    construction_records: dict[int, dict[str, Any]] = {}
+
+    def _mark_construction_failure(index: int, row: dict[str, Any], reason: str) -> None:
+        record = {
+            "status": "FAIL_CLOSED",
+            "rank": row.get("rank") or index + 1,
+            "ticker": str(row.get("ticker") or "").upper(),
+            "strategy_id": str(row.get("strategy_id") or row.get("decision_strategy_id") or ""),
+            "decision_at": decision_at,
+            "reason": reason,
+        }
+        construction_records[index] = record
+        row.update(
+            {
+                "strategy_receipt_construction_status": "FAIL_CLOSED",
+                "strategy_receipt_construction_record": record,
+                "strategy_receipt_gap": reason,
+            }
+        )
+
     for index, row in enumerate(signals):
+        row.update(
+            {
+                "strategy_receipt_enabled": True,
+                "strategy_receipt_shadow_only": shadow_only,
+                "strategy_receipt_legacy_can_alert": bool(row.get("can_alert")),
+                "strategy_receipt_construction_status": "PENDING",
+                "strategy_receipt_disagreement": [],
+            }
+        )
         strategy_id = str(
             row.get("strategy_id") or row.get("decision_strategy_id") or ""
         ).strip()
@@ -1470,62 +1513,250 @@ def _apply_strategy_decision_receipts(
                 "reason": reason,
             }
         )
+        _mark_construction_failure(index, row, reason)
 
-    budget = max(1, int(config.strategy_evidence_max_candidates))
-    deferred_count = max(0, len(eligible_rows) - budget)
     source_identity = str(source_summary.get("source_identity") or "").strip()
     if not source_identity:
         source_run_id = str(source_summary.get("run_id") or "").strip()
         if source_run_id:
             source_identity = f"web_auto_collect:{source_run_id}"
 
-    def _blocked_stats(status: str, reason: str) -> dict[str, Any]:
-        for _index, row in eligible_rows:
-            row["strategy_receipt_gap"] = reason
-        stats = {
-            "status": status,
-            "computed": 0,
-            "persisted": 0,
-            "reused": 0,
-            "eligible_candidates": len(eligible_rows),
-            "uncovered_candidates": len(uncovered),
-            "uncovered": uncovered,
-            "resolution_budget": budget,
-            "resolution_deferred": deferred_count,
-            "research_only": True,
-            "policy_mutation": False,
-            "broker_execution_enabled": False,
-        }
-        source_summary["strategy_decision_receipts"] = stats
-        return stats
-
     if not code_sha:
-        return _blocked_stats("blocked_missing_code_identity", "missing code identity")
-    if not source_identity:
-        return _blocked_stats("blocked_missing_source_identity", "missing source identity")
+        missing_identity_reason = "missing code identity"
+    elif not source_identity:
+        missing_identity_reason = "missing source identity"
+    else:
+        missing_identity_reason = ""
 
-    service = StrategyDecisionService(
-        code_sha=code_sha,
-        source_identity=source_identity,
-        score_threshold=float(getattr(config, "alert_score_threshold", 0.0)),
-    )
-    receipts = []
-    build_errors: list[dict[str, Any]] = []
-    for index, row in eligible_rows:
+    service: StrategyDecisionService | None = None
+    initial_records: list[tuple[int, dict[str, Any], Any]] = []
+    if not missing_identity_reason:
+        service = StrategyDecisionService(
+            code_sha=code_sha,
+            source_identity=source_identity,
+            score_threshold=float(getattr(config, "alert_score_threshold", 0.0)),
+        )
+        individually_built: list[tuple[int, dict[str, Any], Any]] = []
+        for index, row in eligible_rows:
+            try:
+                receipt = service.build_receipt(row, decision_at=decision_at)
+            except (KeyError, TypeError, ValueError) as exc:
+                _mark_construction_failure(
+                    index, row, f"receipt construction failed: {type(exc).__name__}"
+                )
+                continue
+            individually_built.append((index, row, receipt))
+        if individually_built:
+            try:
+                batch = service.evaluate_candidates(
+                    [row for _index, row, _receipt in individually_built],
+                    decision_at=decision_at,
+                )
+                initial_records = [
+                    (item[0], item[1], receipt)
+                    for item, receipt in zip(individually_built, batch, strict=True)
+                ]
+            except (KeyError, TypeError, ValueError):
+                initial_records = individually_built
+    else:
+        for index, row in eligible_rows:
+            _mark_construction_failure(index, row, missing_identity_reason)
+
+    unresolved_statuses = {
+        ConditionStatus.MISSING_DISCLOSED,
+        ConditionStatus.STALE,
+        ConditionStatus.CONFLICT,
+    }
+    resolvable_categories = {
+        ConditionCategory.AI_RESOLVABLE,
+        ConditionCategory.EXECUTION_ONLY,
+        ConditionCategory.ADVISORY,
+    }
+    def _record_rank(item: tuple[int, dict[str, Any], Any]) -> tuple[int, str, str, int]:
+        index, row, _receipt = item
         try:
-            receipt = service.build_receipt(row, decision_at=decision_at)
+            rank = int(float(row.get("rank") or index + 1))
+        except (TypeError, ValueError):
+            rank = index + 1
+        return (
+            rank,
+            str(row.get("ticker") or "").upper(),
+            str(row.get("strategy_id") or ""),
+            index,
+        )
+
+    ranked_initial_records = sorted(initial_records, key=_record_rank)
+    selected_initial_records = ranked_initial_records[:max_candidates]
+    selected_indices = {item[0] for item in selected_initial_records}
+    deferred_count = max(0, len(ranked_initial_records) - len(selected_initial_records))
+    resolution_candidates: list[tuple[int, dict[str, Any], Any, list[str]]] = []
+    resolution_overrides: dict[int, dict[str, Any]] = {}
+    resolution_bundles: dict[int, dict[str, Any]] = {}
+    resolution_metrics: dict[str, Any] = {
+        "request_count": 0,
+        "web_search_call_count": 0,
+        "token_usage": {},
+        "cache_hits": 0,
+        "elapsed_ms": 0,
+        "attempts": 0,
+    }
+    for index, row, receipt in initial_records:
+        specs = {spec.condition_id: spec for spec in registry_for_strategy(receipt.strategy_id)}
+        result_by_id = {result.condition_id: result for result in receipt.condition_results}
+        unresolved: list[str] = []
+        resolver_condition_ids: list[str] = []
+        for spec in specs.values():
+            result = result_by_id[spec.condition_id]
+            if (
+                result.status not in unresolved_statuses
+                or spec.category not in resolvable_categories
+            ):
+                continue
+            unresolved.append(spec.condition_id)
+            if (
+                spec.resolver_id == "strategy_gap_resolver"
+                and spec.condition_id in CONDITION_CLAIM_TYPES
+            ):
+                resolver_condition_ids.append(spec.condition_id)
+        row["strategy_receipt_unresolved_conditions"] = unresolved
+        row["strategy_receipt_resolution_candidates"] = resolver_condition_ids
+        row["strategy_evidence_resolution_status"] = (
+            "not_required" if not unresolved else "not_resolver_supported"
+        )
+        blocking_only_contextual = True
+        for failure in receipt.all_blocking_failures:
+            failure_spec = specs.get(failure)
+            result = result_by_id.get(failure)
+            if (
+                failure_spec is None
+                or failure_spec.category not in resolvable_categories
+                or (result is not None and result.status == ConditionStatus.FAIL)
+            ):
+                blocking_only_contextual = False
+                break
+        if (
+            index in selected_indices
+            and resolver_condition_ids
+            and blocking_only_contextual
+        ):
+            resolution_candidates.append((index, row, receipt, resolver_condition_ids))
+
+    def _rank(item: tuple[int, dict[str, Any], Any, list[str]]) -> tuple[int, str, str, int]:
+        index, row, _receipt, _condition_ids = item
+        try:
+            rank = int(float(row.get("rank") or index + 1))
+        except (TypeError, ValueError):
+            rank = index + 1
+        return (
+            rank,
+            str(row.get("ticker") or "").upper(),
+            str(row.get("strategy_id") or ""),
+            index,
+        )
+
+    resolution_candidates.sort(key=_rank)
+    selected_resolution_candidates = resolution_candidates[:resolution_budget]
+    resolution_deferred_count = max(
+        0, len(resolution_candidates) - len(selected_resolution_candidates)
+    )
+    resolution_metrics["selected_candidates"] = len(selected_initial_records)
+    resolution_metrics["resolver_candidates"] = len(selected_resolution_candidates)
+    if selected_resolution_candidates:
+        resolver = gap_resolver or StrategyGapResolver(
+            api_key=str(getattr(config, "openai_api_key", "") or ""),
+            model=str(getattr(config, "scenario_openai_model", "") or ""),
+            timeout_seconds=timeout_seconds,
+            max_tool_calls=max_tool_calls,
+            max_symbols=max_symbols,
+        )
+        deadline = time.monotonic() + (timeout_seconds * len(selected_resolution_candidates))
+        for index, row, _receipt, condition_ids in selected_resolution_candidates:
+            if time.monotonic() >= deadline:
+                row["strategy_evidence_resolution_status"] = "time_budget_exhausted"
+                continue
+            resolution_metrics["attempts"] += 1
+            try:
+                result = resolver.resolve(
+                    symbol=str(row.get("ticker") or row.get("symbol") or "").upper(),
+                    market_date=str(row.get("market_date") or decision_at[:10]),
+                    decision_at=decision_at,
+                    condition_ids=condition_ids,
+                    source_identity=source_identity,
+                )
+            except Exception as exc:  # provider failures remain disclosed gaps
+                row["strategy_evidence_resolution_status"] = (
+                    f"provider_failure:{type(exc).__name__}"
+                )
+                continue
+            row["strategy_evidence_resolution_status"] = str(
+                result.get("status") or "provider_failure"
+            )
+            overrides: dict[str, Any] = {}
+            for raw_condition in result.get("condition_results") or ():
+                if not isinstance(raw_condition, dict):
+                    continue
+                condition_id = str(raw_condition.get("condition_id") or "")
+                if condition_id in condition_ids:
+                    overrides[condition_id] = dict(raw_condition)
+            if overrides:
+                resolution_overrides[index] = overrides
+            run = result.get("run")
+            claims = [claim for claim in result.get("claims") or () if isinstance(claim, dict)]
+            if isinstance(run, dict):
+                resolution_bundles[index] = {"claims": claims, "run": dict(run)}
+                for metric in (
+                    "request_count",
+                    "web_search_call_count",
+                    "cache_hits",
+                    "elapsed_ms",
+                ):
+                    resolution_metrics[metric] += int(run.get(metric) or 0)
+                for key, value in dict(run.get("token_usage") or {}).items():
+                    resolution_metrics["token_usage"][str(key)] = (
+                        int(resolution_metrics["token_usage"].get(str(key), 0)) + int(value or 0)
+                    )
+
+    final_records: list[tuple[int, dict[str, Any], Any, dict[str, Any]]] = []
+    for index, row, _initial_receipt in initial_records:
+        overrides = resolution_overrides.get(index, {})
+        payload = dict(row)
+        if overrides:
+            payload["condition_results"] = overrides
+        try:
+            if service is None:
+                _mark_construction_failure(index, row, "receipt service unavailable")
+                continue
+            receipt = service.build_receipt(
+                payload,
+                decision_at=decision_at,
+                condition_overrides=overrides or None,
+            )
         except (KeyError, TypeError, ValueError) as exc:
-            reason = f"receipt construction failed: {type(exc).__name__}"
-            row["strategy_receipt_gap"] = reason
-            build_errors.append(
-                {
-                    "rank": row.get("rank") or index + 1,
-                    "ticker": str(row.get("ticker") or "").upper(),
-                    "strategy_id": str(row.get("strategy_id") or ""),
-                    "reason": reason,
-                }
+            _mark_construction_failure(
+                index, row, f"final receipt construction failed: {type(exc).__name__}"
             )
             continue
+        final_records.append((index, row, receipt, overrides))
+
+    if final_records and service is not None:
+        try:
+            batch = service.evaluate_candidates(
+                [
+                    ({**row, "condition_results": overrides} if overrides else dict(row))
+                    for _index, row, _receipt, overrides in final_records
+                ],
+                decision_at=decision_at,
+            )
+            final_records = [
+                (item[0], item[1], receipt, item[3])
+                for item, receipt in zip(final_records, batch, strict=True)
+            ]
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    persisted_count = 0
+    reused_count = 0
+    for index, row, receipt, _overrides in final_records:
         specs = {spec.condition_id: spec for spec in registry_for_strategy(receipt.strategy_id)}
         result_by_id = {result.condition_id: result for result in receipt.condition_results}
         core_categories = {
@@ -1551,6 +1782,13 @@ def _apply_strategy_decision_receipts(
             if specs[result.condition_id].category == ConditionCategory.AI_RESOLVABLE
             and result.status == ConditionStatus.RESOLVED_FROM_SOURCE
         ]
+        unresolved_final = [
+            spec.condition_id
+            for spec in specs.values()
+            if spec.category in resolvable_categories
+            and result_by_id[spec.condition_id].status in unresolved_statuses
+        ]
+        tier = getattr(receipt.pick_tier, "value", str(receipt.pick_tier))
         why = (
             "all research-blocking conditions passed"
             if receipt.research_pick_eligible and not receipt.disclosed_gaps
@@ -1560,11 +1798,15 @@ def _apply_strategy_decision_receipts(
                 else f"blocked by {receipt.first_blocking_failure or 'deterministic policy'}"
             )
         )
+        disagreements = list(row.get("strategy_receipt_disagreement") or [])
+        if bool(row.get("strategy_receipt_legacy_can_alert")) != receipt.research_pick_eligible:
+            if "legacy_vs_receipt_alert_disposition" not in disagreements:
+                disagreements.append("legacy_vs_receipt_alert_disposition")
         row.update(
             {
                 "receipt_id": receipt.receipt_id,
                 "receipt_hash_sha256": receipt.receipt_hash_sha256,
-                "pick_tier": getattr(receipt.pick_tier, "value", str(receipt.pick_tier)),
+                "pick_tier": tier,
                 "research_pick_eligible": receipt.research_pick_eligible,
                 "paper_entry_eligible": receipt.paper_entry_eligible,
                 "disclosed_gaps": list(receipt.disclosed_gaps),
@@ -1574,25 +1816,51 @@ def _apply_strategy_decision_receipts(
                 "core_conditions_passed": core_passed,
                 "ai_resolved_evidence": ai_evidence,
                 "reward_risk_ratio": receipt.reward_risk_ratio,
+                "strategy_receipt_tier": tier,
+                "strategy_receipt_research_pick_eligible": receipt.research_pick_eligible,
+                "strategy_receipt_paper_entry_eligible": receipt.paper_entry_eligible,
+                "strategy_receipt_unresolved_conditions": unresolved_final,
+                "strategy_receipt_construction_status": "COMPLETE",
                 "strategy_receipt_gap": "",
+                "strategy_receipt_disagreement": disagreements,
                 "receipt_reason": why,
+                "research_only": receipt.research_only,
+                "broker_execution_enabled": receipt.broker_execution_enabled,
             }
         )
-        receipts.append(receipt)
-    persisted = store.persist_strategy_decision_receipts(receipts)
+        bundle = resolution_bundles.get(index, {})
+        run = bundle.get("run")
+        if isinstance(run, dict) and str(run.get("status") or "") != "cache_hit":
+            run = dict(run)
+            if str(run.get("run_id") or "").startswith("unavailable-"):
+                run["run_id"] = f"unavailable-{receipt.receipt_id}"
+        inserted = store.persist_strategy_decision_receipt(
+            receipt,
+            evidence_claims=bundle.get("claims") or (),
+            resolution_run=run,
+        )
+        if inserted:
+            persisted_count += 1
+        else:
+            reused_count += 1
+
     stats = {
-        "status": "shadow_only" if config.strategy_evidence_shadow_only else "receipt_only",
-        "computed": len(receipts),
-        "persisted": persisted["inserted"],
-        "reused": persisted["reused"],
+        "status": "shadow_only" if shadow_only else "non_shadow_research_only",
+        "computed": len(final_records),
+        "persisted": persisted_count,
+        "reused": reused_count,
         "eligible_candidates": len(eligible_rows),
         "uncovered_candidates": len(uncovered),
         "uncovered": uncovered,
-        "build_errors": build_errors,
-        "resolution_budget": budget,
-        "resolution_candidates": min(len(eligible_rows), budget),
+        "construction_records": list(construction_records.values()),
+        "build_errors": list(construction_records.values()),
+        "resolution_budget": resolution_budget,
+        "resolution_candidates": len(selected_initial_records),
+        "resolver_candidates": len(selected_resolution_candidates),
+        "selected_candidates": len(selected_initial_records),
         "resolution_deferred": deferred_count,
-        # Lane B never mutates the existing AlphaOps policy or selection.
+        "resolver_deferred": resolution_deferred_count,
+        "resolution_metrics": resolution_metrics,
         "legacy_selection_unchanged": True,
         "policy_mutation": False,
         "research_only": True,
@@ -1600,6 +1868,43 @@ def _apply_strategy_decision_receipts(
     }
     source_summary["strategy_decision_receipts"] = stats
     return stats
+
+
+def _apply_receipt_risk_gates(
+    signals: list[dict[str, Any]], feature_vectors: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    feature_by_ticker = {
+        str(row.get("ticker") or "").upper(): row for row in feature_vectors
+    }
+    for row in signals:
+        legacy_can_alert = row.get("can_alert")
+        legacy_no_trade_reason = str(row.get("no_trade_reason") or "")
+        decision = evaluate_risk(
+            row,
+            feature_by_ticker.get(str(row.get("ticker") or "").upper(), {}),
+        )
+        row.update(decision.to_dict())
+        row["research_only"] = True
+        row["broker_execution_enabled"] = False
+        disagreements = list(row.get("strategy_receipt_disagreement") or [])
+        for reason in decision.strategy_receipt_disagreement or []:
+            if reason not in disagreements:
+                disagreements.append(reason)
+        row["strategy_receipt_disagreement"] = disagreements
+        if bool(row.get("strategy_receipt_shadow_only")):
+            row["can_alert"] = legacy_can_alert
+            row["no_trade_reason"] = legacy_no_trade_reason
+        elif not decision.can_alert:
+            row["no_trade_reason"] = ";".join(
+                dict.fromkeys(
+                    [
+                        item
+                        for item in [legacy_no_trade_reason, *decision.hard_avoid_reasons]
+                        if item
+                    ]
+                )
+            )
+    return signals
 
 
 def _notification_event(

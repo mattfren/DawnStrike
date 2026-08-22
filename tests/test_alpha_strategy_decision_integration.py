@@ -1,10 +1,14 @@
 import sqlite3
+from typing import Any
 
 import pytest
 
 from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
-from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
+from intraday_scanner.services.alpha_cycle_service import (
+    _apply_receipt_risk_gates,
+    _apply_strategy_decision_receipts,
+)
 from intraday_scanner.services.daily_strategy_learning_service import (
     _aggregate_decision_receipts,
 )
@@ -12,8 +16,8 @@ from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
-def _supported_signal(strategy_id: str = "ts_momentum_sma_atr") -> dict[str, object]:
-    row: dict[str, object] = {
+def _supported_signal(strategy_id: str = "ts_momentum_sma_atr") -> dict[str, Any]:
+    row: dict[str, Any] = {
         "ticker": "TEST",
         "strategy_id": strategy_id,
         "strategy_version": "v1",
@@ -26,6 +30,34 @@ def _supported_signal(strategy_id: str = "ts_momentum_sma_atr") -> dict[str, obj
     }
     row.update({spec.condition_id: True for spec in registry_for_strategy(strategy_id)})
     return row
+
+
+class _FakeGapResolver:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def resolve(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        condition_ids = [str(item) for item in kwargs["condition_ids"]]
+        return {
+            "status": "completed",
+            "condition_results": [
+                {
+                    "condition_id": condition_id,
+                    "status": "RESOLVED_FROM_SOURCE",
+                    "observed_value": "fixture source-grounded context",
+                    "reason": "mocked cited evidence",
+                    "source_urls": ["https://example.com/fixture"],
+                    "source_hashes": ["a" * 64],
+                    "resolver_id": "strategy_gap_resolver",
+                    "resolution_method": "mocked_provider",
+                    "requested_model": "fixture-model",
+                    "actual_model": "fixture-model",
+                }
+                for condition_id in condition_ids
+            ],
+            "claims": [],
+        }
 
 
 def test_strategy_evidence_defaults_disabled_and_shadow_only(monkeypatch) -> None:
@@ -75,6 +107,132 @@ def test_receipt_integration_covers_supported_rows_after_legacy_rows(tmp_path, m
     assert first["receipt_id"].startswith("sdr-")
     assert second["receipt_id"].startswith("sdr-")
     assert len(store.load_strategy_decision_receipts()) == 2
+
+
+def test_receipt_resolution_orders_supported_candidates_and_respects_budget(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "c" * 40)
+    config = load_config(
+        strategy_evidence_enabled=True,
+        strategy_evidence_shadow_only=True,
+        strategy_evidence_max_candidates=2,
+        alert_score_threshold=0,
+    )
+    rows = []
+    for ticker, rank in (("THIRD", 3), ("FIRST", 1), ("SECOND", 2)):
+        row = _supported_signal()
+        row["ticker"] = ticker
+        row["rank"] = rank
+        row.pop("offering_or_dilution")
+        rows.append(row)
+    resolver = _FakeGapResolver()
+
+    stats = _apply_strategy_decision_receipts(
+        rows,
+        store=SQLiteScanStore(tmp_path / "ordered.sqlite"),
+        config=config,
+        decision_at="2026-08-22T14:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+        gap_resolver=resolver,
+    )
+
+    assert stats["selected_candidates"] == 2
+    assert stats["resolution_deferred"] == 1
+    assert stats["resolver_candidates"] == 2
+    assert [call["symbol"] for call in resolver.calls] == ["FIRST", "SECOND"]
+    assert rows[0]["strategy_evidence_resolution_status"] == "not_resolver_supported"
+    assert rows[1]["pick_tier"] == "QUALIFIED_PICK"
+    assert rows[2]["pick_tier"] == "QUALIFIED_PICK"
+
+
+def test_shadow_receipt_risk_helper_preserves_legacy_cohort() -> None:
+    row = {
+        "ticker": "SHADOW",
+        "can_alert": True,
+        "no_trade_reason": "legacy disposition",
+        "strategy_receipt_enabled": True,
+        "strategy_receipt_shadow_only": True,
+        "strategy_receipt_construction_status": "COMPLETE",
+        "receipt_id": "sdr-fixture",
+        "strategy_receipt_tier": "BLOCKED_DATA",
+        "strategy_receipt_research_pick_eligible": False,
+        "strategy_receipt_paper_entry_eligible": False,
+    }
+
+    _apply_receipt_risk_gates([row], [])
+
+    assert row["can_alert"] is True
+    assert row["no_trade_reason"] == "legacy disposition"
+    assert row["broker_execution_enabled"] is not True
+
+
+def test_non_shadow_receipt_risk_helper_blocks_research_alert_only() -> None:
+    row = _supported_signal()
+    row.update(
+        {
+            "premarket_price": 10,
+            "premarket_volume": 1000,
+            "source_confidence": 90,
+            "strategy_receipt_enabled": True,
+            "strategy_receipt_shadow_only": False,
+            "strategy_receipt_construction_status": "COMPLETE",
+            "receipt_id": "sdr-fixture",
+            "strategy_receipt_tier": "BLOCKED_DATA",
+            "strategy_receipt_research_pick_eligible": False,
+            "strategy_receipt_paper_entry_eligible": False,
+            "broker_execution_enabled": False,
+        }
+    )
+
+    _apply_receipt_risk_gates([row], [])
+
+    assert row["can_alert"] is False
+    assert "strategy_receipt_ineligible" in row["hard_avoid_reasons"]
+    assert row["broker_execution_enabled"] is False
+
+
+def test_supported_candidate_gets_explicit_fail_closed_construction_status(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("DAWNSTRIKE_CODE_SHA", raising=False)
+    config = load_config(strategy_evidence_enabled=True, strategy_evidence_shadow_only=False)
+    row = _supported_signal()
+
+    stats = _apply_strategy_decision_receipts(
+        [row],
+        store=SQLiteScanStore(tmp_path / "construction.sqlite"),
+        config=config,
+        decision_at="2026-08-22T14:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+    )
+
+    assert stats["computed"] == 0
+    assert row["strategy_receipt_construction_status"] == "FAIL_CLOSED"
+    assert row["strategy_receipt_construction_record"]["status"] == "FAIL_CLOSED"
+    assert row["strategy_receipt_gap"] == "missing code identity"
+
+
+def test_final_receipt_explicitly_keeps_broker_execution_disabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "d" * 40)
+    row = _supported_signal()
+    config = load_config(
+        strategy_evidence_enabled=True,
+        strategy_evidence_shadow_only=False,
+        alert_score_threshold=0,
+    )
+
+    _apply_strategy_decision_receipts(
+        [row],
+        store=SQLiteScanStore(tmp_path / "broker.sqlite"),
+        config=config,
+        decision_at="2026-08-22T14:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+    )
+
+    assert row["strategy_receipt_construction_status"] == "COMPLETE"
+    assert row["research_only"] is True
+    assert row["broker_execution_enabled"] is False
 
 
 def test_receipt_migration_repairs_partial_sidecar_and_protects_children(tmp_path) -> None:
