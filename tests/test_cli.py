@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 from intraday_scanner.cli import main
@@ -36,6 +37,77 @@ def test_cli_strategy_learning_daily_writes_research_only_receipts(tmp_path, cap
     assert receipt["research_only"] is True
     assert receipt["automatic_promotion"] is False
     assert receipt["broker_execution_enabled"] is False
+
+
+def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, capsys):
+    database_path = tmp_path / "performance.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
+            "strategy_version TEXT, record_status TEXT, return_pct REAL, "
+            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "benchmark",
+                    "2026-08-20",
+                    "shadow_challenger",
+                    "benchmark_buy_hold_equal_weight",
+                    "v1.0",
+                    "realized",
+                    1.0,
+                    None,
+                    0,
+                    "{}",
+                ),
+                (
+                    "loss",
+                    "2026-08-20",
+                    "shadow_challenger",
+                    "ts_momentum_sma_atr",
+                    "v1.0",
+                    "realized",
+                    -0.5,
+                    None,
+                    0,
+                    "{}",
+                ),
+            ],
+        )
+    out_dir = tmp_path / "strategy-learning-db"
+
+    status = main(
+        [
+            "strategy-learning-daily",
+            "--market-date",
+            "2026-08-20",
+            "--cutoff",
+            "2026-08-20T22:00:00+00:00",
+            "--source-identity",
+            "fixture-db:2026-08-20",
+            "--code-sha",
+            "fixture-code-sha",
+            "--out-dir",
+            str(out_dir),
+            "--db-path",
+            str(database_path),
+        ]
+    )
+
+    assert status == 0
+    result = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    assert evidence["counts"]["outcomes_retained"] == 1
+    assert evidence["outcomes"][0]["return_pct"] == -0.5
+    assert receipt["automatic_policy_change"] is False
 
 
 def test_cli_live_scan_without_keys_fails_gracefully(monkeypatch, capsys):

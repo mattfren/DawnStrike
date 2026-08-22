@@ -30,6 +30,10 @@ from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.paper_audit import main as paper_audit_main
 from intraday_scanner.performance.cli import main as performance_reconcile_main
+from intraday_scanner.performance.strategy_miss_attribution import (
+    attribute_strategy_misses,
+    load_portfolio_performance_rows_readonly,
+)
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_enrichment_provider import CsvEnrichmentProvider
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider, read_snapshot_csv
@@ -96,13 +100,14 @@ from intraday_scanner.services.daily_orchestrator_service import (
     daily_orchestration_status,
     write_heartbeat,
 )
-from intraday_scanner.services.daily_strategy_learning_service import (
-    MappingEvidenceAnalyzer,
-    run_daily_strategy_learning,
-)
 from intraday_scanner.services.daily_run_service import (
     resolve_release_sha,
     shared_daily_run_id,
+)
+from intraday_scanner.services.daily_strategy_learning_service import (
+    AttributionReportAnalyzer,
+    MappingEvidenceAnalyzer,
+    run_daily_strategy_learning,
 )
 from intraday_scanner.services.e2e_automation_service import (
     automation_daemon,
@@ -533,10 +538,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     daily_strategy_learning_parser.add_argument("--source-hash-sha256", default=None)
     daily_strategy_learning_parser.add_argument("--code-sha", required=True)
     daily_strategy_learning_parser.add_argument("--out-dir", required=True)
-    daily_strategy_learning_parser.add_argument(
+    daily_strategy_evidence = daily_strategy_learning_parser.add_mutually_exclusive_group()
+    daily_strategy_evidence.add_argument(
         "--evidence-file",
         default=None,
         help="Optional JSON mapping keyed by strategy ID for injected evidence/proposals",
+    )
+    daily_strategy_evidence.add_argument(
+        "--db-path",
+        default=None,
+        help=(
+            "Optional SQLite database read with mode=ro and PRAGMA query_only; "
+            "attributes retained portfolio performance rows through market-date"
+        ),
     )
 
     alpha_v6_train_weekly_parser = subparsers.add_parser(
@@ -1823,6 +1837,14 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         if not isinstance(payload, dict):
             raise SnapshotValidationError("strategy learning evidence must be a JSON object")
         analyzer = MappingEvidenceAnalyzer(payload)
+    elif args.db_path:
+        rows = load_portfolio_performance_rows_readonly(
+            args.db_path,
+            date_cutoff=args.market_date,
+        )
+        analyzer = AttributionReportAnalyzer(
+            attribute_strategy_misses(rows, date_cutoff=args.market_date)
+        )
     result = run_daily_strategy_learning(
         market_date=args.market_date,
         cutoff=args.cutoff,

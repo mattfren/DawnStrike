@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from intraday_scanner.performance.contracts import Cohort, normalize_cohort, safe_float
@@ -264,6 +266,35 @@ def summarize_strategy_misses(
     """Convenience facade returning only deterministic per-strategy summaries."""
 
     return attribute_strategy_misses(rows, date_cutoff=date_cutoff).summaries
+
+
+def load_portfolio_performance_rows_readonly(
+    database_path: str | Path,
+    *,
+    date_cutoff: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Load retained performance rows through a query-only SQLite connection."""
+
+    path = Path(database_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"strategy-learning database is missing: {path}")
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        if date_cutoff is None:
+            cursor = connection.execute(
+                "SELECT * FROM portfolio_performance_rows ORDER BY market_date, record_id"
+            )
+        else:
+            cursor = connection.execute(
+                "SELECT * FROM portfolio_performance_rows "
+                "WHERE market_date <= ? ORDER BY market_date, record_id",
+                (date_cutoff,),
+            )
+        return tuple(dict(row) for row in cursor.fetchall())
+    finally:
+        connection.close()
 
 
 def _mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
@@ -778,6 +809,7 @@ __all__ = [
     "StrategyMissAttributionSummary",
     "attribute_strategy_misses",
     "from_portfolio_rows",
+    "load_portfolio_performance_rows_readonly",
     "summarize_strategy_misses",
 ]
 
