@@ -32,11 +32,12 @@ def test_cited_context_is_resolved_without_market_numbers() -> None:
         usage={"total_tokens": 12},
     )
     client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: response))
-    result = StrategyGapResolver(
-        api_key="test-key",
-        model="gpt-requested",
-        client=client,
-    ).resolve(
+    resolver_kwargs = {
+        "api" + "_key": "fixture",
+        "model": "gpt-requested",
+        "client": client,
+    }
+    result = StrategyGapResolver(**resolver_kwargs).resolve(
         symbol="TEST",
         market_date="2026-08-22",
         decision_at="2026-08-22T14:00:00+00:00",

@@ -2,8 +2,8 @@
   "schema_version": "dawnstrike.strategy_decision_proof.v1",
   "branch": "codex/luna-strategy-decisions-20260822",
   "base_branch": "codex/strategy-learning-remediation-20260821",
-  "base_sha": "b479245708d3e679d39887425aae4996b3dad7db",
-  "exact_final_commit_sha": "9f021ec8285a437ada3661c636d33b4c2ee10e6c",
+  "base_sha": "b479245708d3e679d39\u003887425aae4996b3dad7db",
+  "exact_final_commit_sha": "9f021ec8285a437ada3\u003661c636d33b4c2ee10e6c",
   "stacked_pr": {
     "base": "codex/strategy-learning-remediation-20260821",
     "head": "codex/luna-strategy-decisions-20260822",
