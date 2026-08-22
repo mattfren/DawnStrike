@@ -265,12 +265,31 @@ try {
     if ($v6Research.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $v6Research.exit_code
     }
+    $strategyLearningCutoff = "${MarketDate}T23:59:59+00:00"
+    $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};mode=ro;query_only=on"
+    $strategyLearning = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @(
+            "-m", "intraday_scanner.cli", "strategy-learning-daily",
+            "--market-date", $MarketDate,
+            "--cutoff", $strategyLearningCutoff,
+            "--source-identity", $strategyLearningSource,
+            "--code-sha", $releaseSha,
+            "--out-dir", (Join-Path $outputRoot "strategy_learning"),
+            "--db-path", $dbPath
+        ) `
+        -LogRoot $logRoot `
+        -LogName "strategy_learning_daily-$MarketDate"
+    if ($strategyLearning.exit_code -ne 0) {
+        Set-OverallFailure -ExitCode $strategyLearning.exit_code
+    }
     $learningStageExit = $learnExit
     $learningErrorCode = if ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
     foreach ($v6Result in @(
         @{ Result = $v6DailyMonitor; Code = "alpha_v6_daily_monitor_failed" },
         @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
-        @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" }
+        @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" },
+        @{ Result = $strategyLearning; Code = "strategy_learning_daily_failed" }
     )) {
         if ($learningStageExit -eq 0 -and $v6Result.Result.exit_code -ne 0) {
             $learningStageExit = $v6Result.Result.exit_code
