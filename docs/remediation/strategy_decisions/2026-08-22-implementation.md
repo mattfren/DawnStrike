@@ -2,22 +2,17 @@
 
 ## Audit status and provenance
 
-Lane C owns only this document and `2026-08-22-proof.json`. The source and
-test implementation was not changed in this lane.
+The final source-code integration snapshot is `002cf95b…`; its full identity is
+recorded in the proof JSON. The proof-parent snapshot is `1d813fc0…`, which also
+contains only the detect-secrets allowlist annotations for two mocked API-key
+fixtures. The branch was clean at that snapshot. The documentation commit that
+contains this receipt is deliberately not written into the JSON as its own SHA:
+doing so would make the proof self-referential. Its exact final SHA and CI runs
+are returned by the operator handoff.
 
-The implementation snapshot is the last source-code implementation commit
-(`9f021ec8…`); its full commit and tree identities are recorded in the proof
-JSON. The proof-parent and PR-head snapshot is `ae142eab…`, which includes the
-static-security repair and the scanner-false-positive test repair. The branch
-was clean at that snapshot. The documentation commit created by this lane is
-deliberately not written into the JSON as its own SHA: doing so would make the
-proof self-referential. The containing proof commit is returned by the lane
-handoff and its parent is recorded in the JSON.
-
-PR #42 is open, targets `codex/strategy-learning-remediation-20260821`, and
-points at the audited pre-proof branch head. Both the push and pull-request CI
-runs passed for that exact head. This lane did not push the documentation-only
-commit, modify PR metadata, merge, deploy, or change runtime/state.
+PR #42 remains open and targets
+`codex/strategy-learning-remediation-20260821`. No PR metadata was changed and
+the PR was not merged. This work did not deploy or mutate runtime/state.
 
 ## Registry and policy
 
@@ -97,11 +92,17 @@ reused, and a same-ID/different-payload attempt fails closed. Prior signal and
 performance rows are not rewritten, and the protected runtime/state database
 was not opened or mutated.
 
-Shadow mode computes and persists receipts while leaving legacy selection and
-alerting unchanged. Telegram includes tier, receipt ID, disclosed gaps, and
-entry-confirmation state when receipt fields are present. Daily learning
-consumes receipts as research evidence only and never changes policy,
-promotes a strategy automatically, or enables broker execution.
+Every evaluated strategy now produces its decision receipt before legacy alert
+and risk gates run. Shadow mode computes and persists receipts while leaving
+legacy selection, ranking, and alerting unchanged. In non-shadow research mode,
+receipt tier and eligibility fail closed through the alert and risk gates;
+paper-entry eligibility also requires explicit confirmation. Telegram includes
+tier, receipt ID, disclosed gaps, and entry-confirmation state when receipt
+fields are present. Daily learning consumes receipts as research evidence only
+and reports strategy/version, condition status, tier/eligibility, outcomes,
+frequent blockers, AI resolutions, disclosed-gap outcomes, contradictions, and
+safety flags. It never changes policy, promotes a strategy automatically, or
+enables broker execution.
 
 ## Changed files audited against the base
 
@@ -111,30 +112,30 @@ The complete grouping is recorded in the proof JSON:
 - Contracts and registry: decisioning contracts, registry, policy, and service.
 - Resolver and persistence: evidence resolver, AI resolver, migrations, and
   SQLite receipt storage.
-- Integration and operator: configuration, Alpha cycle integration, and
-  Telegram formatting.
-- Learning and tests: daily learning plus the six strategy decision test files.
+- Integration and operator: configuration, Alpha cycle integration, alert and
+  risk gate exposure, and Telegram formatting.
+- Learning and tests: daily learning plus the seven strategy decision test
+  files.
 - Documentation and proof: this document and `2026-08-22-proof.json`.
 
 ## Verification and remaining gaps
 
-The focused strategy receipt command passed with 15 tests. Local Ruff, mypy,
-compileall, JavaScript syntax, Bandit, JSON parsing, diff checks, and the
-owned-document detect-secrets scan passed. The local unconstrained full-suite
-command was not completed: its initial run exposed the legacy schema-marker
-compatibility issue, and the post-repair heavy fixture rerun was interrupted.
-No local full-suite PASS claim is made.
+The required ten-file strategy receipt command passed with 63 tests. Local
+Ruff, scoped mypy, compileall, JavaScript syntax, Bandit, tracked-file
+detect-secrets, JSON parsing, and diff checks passed. The unconstrained local
+suite completed at 100% with exit code 0; collection confirms 3,262 tests. The
+run took approximately 3 hours 50 minutes because several legacy fixture tests
+are deliberately compute-heavy.
 
-Exact-SHA CI is stronger than that local limitation for the implementation
-snapshot: push run `32587040383` and PR run `32587042757` both ran at the
-audited branch head, with all 16 pytest shards, Python/public-contract checks,
-dependency/static/SBOM checks, and Windows schedule/secret checks passing.
-Those runs do not cover the new documentation-only commit because it was not
-pushed. The proof JSON records this distinction, the exact PR URL, the
-implementation/tree identity, and the proof-parent identity.
+The first post-integration exact-SHA CI pair ran against `002cf95b…`. All 16
+pytest shards passed. Its Windows job rejected two mocked credential literals
+values in mocked tests; no credential was present. Commit `1d813fc0…` adds only
+the repository-standard `pragma: allowlist secret` annotations, and the same
+tracked-file scanner then passed locally. The exact final proof-commit CI run
+IDs and terminal conclusions are returned by the handoff because a containing
+commit cannot truthfully record its own future run IDs.
 
-The remaining evidence gap is therefore local full-suite termination after the
-compatibility repair, plus the absence of CI for this unpushed documentation
-commit. Production, runtime/state, schedulers, deployment, merge, and broker
-execution remain untouched; automatic policy change and promotion remain
-disabled; missing outcomes are not treated as zero.
+There is no remaining implementation or local-verification gap. Production,
+runtime/state, schedulers, deployment, merge, and broker execution remain
+untouched; automatic policy change and promotion remain disabled; missing
+outcomes are not treated as zero.

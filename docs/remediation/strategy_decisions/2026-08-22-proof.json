@@ -5,18 +5,18 @@
   "base_sha": "b479245708d3e679d39\u003887425aae4996b3dad7db",
   "audit_snapshots": {
     "implementation": {
-      "commit_sha": "9f021ec\u0038285a437ada3661c636d33b4c2ee10e6c",
-      "tree_sha": "7bba5df4265b35b5f3e7e\u00349dc09ce49a249d12c2",
-      "role": "Last source-code implementation commit; later commits are proof refresh or scanner-fix-only changes."
+      "commit_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+      "tree_sha": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
+      "role": "Final source-code integration commit; the next commit contains only detect-secrets allowlist annotations in mocked tests."
     },
     "branch_head_at_audit": {
-      "commit_sha": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
-      "tree_sha": "a\u003230f52d64aa670be97d56d0113a5dfdb5acb613",
-      "role": "PR #42 head and exact-SHA CI target audited before this documentation-only repair."
+      "commit_sha": "1d813fc02f971e30d536dc3dc\u003836b2435bfde51b",
+      "tree_sha": "23e43f40dc6ea267e0ee1ef\u0038c0b1c3d1ec853007",
+      "role": "Clean local proof-parent after the mocked-fixture scanner annotations; the containing documentation commit is intentionally not self-referenced."
     },
     "proof_parent": {
-      "commit_sha": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
-      "tree_sha": "a\u003230f52d64aa670be97d56d0113a5dfdb5acb613"
+      "commit_sha": "1d813fc02f971e30d536dc3dc\u003836b2435bfde51b",
+      "tree_sha": "23e43f40dc6ea267e0ee1ef\u0038c0b1c3d1ec853007"
     },
     "proof_commit": {
       "commit_sha": null,
@@ -31,8 +31,8 @@
     "url": "https://github.com/mattfren/DawnStrike/pull/42",
     "state_at_audit": "OPEN",
     "is_draft": false,
-    "head_sha_at_audit": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
-    "head_tree_sha_at_audit": "a\u003230f52d64aa670be97d56d0113a5dfdb5acb613",
+    "head_sha_at_audit": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+    "head_tree_sha_at_audit": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
     "merge_commit": null,
     "merged_at": null
   },
@@ -53,6 +53,8 @@
     "integration_and_operator": [
       "intraday_scanner/config.py",
       "intraday_scanner/services/alpha_cycle_service.py",
+      "intraday_scanner/alpha/alert_gate.py",
+      "intraday_scanner/alpha/risk_governor.py",
       "intraday_scanner/notifiers/telegram_formatter.py"
     ],
     "learning_and_tests": [
@@ -62,6 +64,7 @@
       "tests/test_strategy_gap_resolver.py",
       "tests/test_strategy_decision_service.py",
       "tests/test_alpha_strategy_decision_integration.py",
+      "tests/test_daily_strategy_learning_service.py",
       "tests/test_telegram_strategy_decision_receipt.py"
     ],
     "documentation_and_proof": [
@@ -72,7 +75,7 @@
   "changed_files_audit": {
     "diff_base": "b479245708d3e679d39\u003887425aae4996b3dad7db",
     "allowlist_only": true,
-    "proof_repair_scope": "documentation_and_proof_only"
+    "proof_repair_scope": "documentation_and_proof_only_after_mocked-test scanner annotations"
   },
   "condition_registry": {
     "strategy_count": 9,
@@ -137,9 +140,9 @@
   "verification": {
     "local": {
       "focused_strategy_tests": {
-        "command": "py -3 -m pytest -q tests/test_strategy_decision_contracts.py tests/test_strategy_condition_registry.py tests/test_strategy_gap_resolver.py tests/test_strategy_decision_service.py tests/test_alpha_strategy_decision_integration.py tests/test_telegram_strategy_decision_receipt.py",
+        "command": "py -3 -m pytest -q tests/test_strategy_decision_contracts.py tests/test_strategy_condition_registry.py tests/test_strategy_gap_resolver.py tests/test_strategy_decision_service.py tests/test_alpha_strategy_decision_integration.py tests/test_telegram_strategy_decision_receipt.py tests/test_v2_strategy_challengers.py tests/test_indeterminate_researcher.py tests/test_indeterminate_research_service.py tests/test_daily_strategy_learning_service.py",
         "result": "PASS",
-        "observed": "15 passed"
+        "observed": "63 passed"
       },
       "ruff": {
         "command": "py -3 -m ruff check .",
@@ -165,9 +168,9 @@
         "command": "ConvertFrom-Json 2026-08-22-proof.json",
         "result": "PASS"
       },
-      "detect_secrets_owned_docs": {
-        "command": "py -3 -m detect_secrets scan docs/remediation/strategy_decisions/2026-08-22-implementation.md docs/remediation/strategy_decisions/2026-08-22-proof.json",
-        "result": "PASS: zero findings"
+      "detect_secrets_tracked": {
+        "command": "py -3 scripts/run_detect_secrets_tracked.py --baseline .secrets.baseline",
+        "result": "PASS: zero findings after two mocked credential fixtures were explicitly allowlisted"
       },
       "git_diff_check": {
         "command": "git diff --check",
@@ -175,35 +178,37 @@
       },
       "full_suite": {
         "command": "py -3 -m pytest -q",
-        "result": "NOT_COMPLETED",
-        "details": "Initial run hit the legacy schema-31 rejection; the post-repair heavy fixture rerun was interrupted before termination. No local full-suite PASS claim is made."
+        "result": "PASS",
+        "observed": "100 percent, exit code 0; 3262 tests collected",
+        "duration": "approximately 3 hours 50 minutes"
       },
-      "worktree_before_proof_repair": "CLEAN"
+      "worktree_before_proof_refresh": "CLEAN"
     },
     "exact_sha_ci": {
-      "result": "PASS",
-      "scope_sha": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
-      "scope_tree_sha": "a\u003230f52d64aa670be97d56d0113a5dfdb5acb613",
-      "note": "These runs cover the audited pre-proof branch head. The documentation-only commit created by this lane was not pushed and has no CI result.",
+      "result": "IMPLEMENTATION_TEST_SHARDS_PASS_SCANNER_FIX_PENDING_FINAL_PUSH",
+      "scope_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+      "scope_tree_sha": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
+      "note": "All 16 pytest shards passed at this implementation SHA. The Windows job rejected two mocked fixture literals; commit 1d813fc0 adds only standard false-positive annotations and the tracked scanner passes locally. Final containing-commit CI is reported by the handoff because this file cannot self-reference future run IDs.",
       "push_run": {
-        "id": 32587040383,
-        "head_sha": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
+        "id": 32596808403,
+        "head_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
         "status": "COMPLETED",
-        "conclusion": "SUCCESS",
-        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32587040383"
+        "conclusion": "FAILURE: mocked-fixture secret false positive only; all pytest shards passed",
+        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32596808403"
       },
       "pull_request_run": {
-        "id": 32587042757,
-        "head_sha": "ae142eabee1c107f\u003872fc35dce3b6fb2ae2fd6cf",
+        "id": 32596810590,
+        "head_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
         "status": "COMPLETED",
-        "conclusion": "SUCCESS",
-        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32587042757"
+        "conclusion": "FAILURE: mocked-fixture secret false positive only; all pytest shards passed",
+        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32596810590"
       },
       "checks": {
         "pytest_shards": "16/16 PASS",
         "python_and_public_contracts": "PASS",
         "dependency_static_and_sbom": "PASS",
-        "windows_schedule_verification": "PASS"
+        "windows_schedule_parse": "PASS",
+        "tracked_credential_scan": "FAIL at implementation SHA; fixed locally in proof parent and awaiting final exact-SHA run"
       }
     }
   },
