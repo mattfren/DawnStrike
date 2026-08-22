@@ -160,3 +160,22 @@ def test_unknown_sector_cohort_allows_only_one_conditional_candidate() -> None:
     assert receipts[1].pick_tier.value == "WATCH_ONLY"
     assert receipts[1].research_pick_eligible is False
     assert receipts[1].first_blocking_failure == "sector_industry:UNKNOWN_COHORT_LIMIT"
+
+
+def test_gap_corporate_action_uncertainty_is_conditional() -> None:
+    service, candidate, values = _candidate("gap_up_continuation")
+    values["corporate_action_basis"] = None
+    receipt = service.build_receipt(candidate, condition_overrides=values)
+    assert receipt.pick_tier.value == "CONDITIONAL_PICK"
+    assert receipt.research_pick_eligible is True
+    assert receipt.paper_entry_eligible is False
+    assert "corporate_action_basis" in receipt.disclosed_gaps
+
+
+def test_confirmed_split_basis_cannot_be_ordinary_gap_continuation() -> None:
+    service, candidate, values = _candidate("gap_up_continuation")
+    values["corporate_action_basis"] = False
+    receipt = service.build_receipt(candidate, condition_overrides=values)
+    assert receipt.pick_tier.value == "BLOCKED_DATA"
+    assert receipt.research_pick_eligible is False
+    assert "corporate_action_basis" in receipt.all_blocking_failures

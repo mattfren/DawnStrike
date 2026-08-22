@@ -108,6 +108,29 @@ def test_provider_failure_becomes_disclosed_gap() -> None:
     assert result["claims"] == []
 
 
+def test_provider_timeout_becomes_a_disclosed_gap() -> None:
+    class TimeoutResponses:
+        @staticmethod
+        def create(**_kwargs: object) -> None:
+            raise TimeoutError("sanitized fixture timeout")
+
+    client = SimpleNamespace(responses=TimeoutResponses())
+    result = StrategyGapResolver(
+        api_key="fixture",
+        model="gpt-test",
+        client=client,
+    ).resolve(
+        symbol="TEST",
+        market_date="2026-08-22",
+        decision_at="2026-08-22T14:00:00+00:00",
+        condition_ids=["catalyst_event"],
+        source_identity="fixture-source",
+    )
+    assert result["status"] == "provider_timeout"
+    assert result["condition_results"][0]["status"] == "MISSING_DISCLOSED"
+    assert result["claims"] == []
+
+
 def test_invalid_claims_are_disclosed_not_passed() -> None:
     cases = (
         _claim(source_urls=[]),
