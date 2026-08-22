@@ -258,9 +258,7 @@ def format_alpha_watch(
         and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
         and row.get("manual_confirmation_required") is False
     ][:3]
-    research_watchlist = [
-        row for row in candidates if row not in official_candidates
-    ][:3]
+    research_watchlist = [row for row in candidates if row not in official_candidates][:3]
     lines = [
         "🚀 Dawnstrike Alpha Watch",
         (
@@ -289,6 +287,9 @@ def format_alpha_watch(
             f"   Confidence {_text(row.get('confidence_bucket'), 'n/a')} | "
             f"Setup {_text(row.get('setup_key'), 'n/a')}"
         )
+        receipt_line = _decision_receipt_line(row)
+        if receipt_line:
+            lines.append(f"   {receipt_line}")
         risk = _risk_text(row)
         if risk != "none":
             lines.append(f"   Risk {_truncate(risk, 80)}")
@@ -304,10 +305,10 @@ def format_alpha_watch(
         )
         if isinstance(reasons, list):
             reasons = "; ".join(str(item) for item in reasons)
-        lines.append(
-            f"- {_text(row.get('ticker'), 'n/a')}: "
-            f"{_truncate(str(reasons), 100)}"
-        )
+        lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reasons), 100)}")
+        receipt_line = _decision_receipt_line(row)
+        if receipt_line:
+            lines.append(f"  {receipt_line}")
     lines.extend(["", "NO TRADE / BLOCKED REASONS"])
     if blocked_signals:
         for row in blocked_signals[:3]:
@@ -320,10 +321,7 @@ def format_alpha_watch(
             )
             if isinstance(reason, list):
                 reason = "; ".join(str(item) for item in reason)
-            lines.append(
-                f"- {_text(row.get('ticker'), 'n/a')}: "
-                f"{_truncate(str(reason), 100)}"
-            )
+            lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reason), 100)}")
     else:
         lines.append(
             "- "
@@ -512,8 +510,7 @@ def format_dollar_volume(value: Any) -> str:
 def _source_label(source_summary: dict[str, Any]) -> str:
     attempts = list(source_summary.get("attempts") or [])
     if any(
-        str(item.get("source") or "").lower() == "local_inbox"
-        and item.get("status") == "success"
+        str(item.get("source") or "").lower() == "local_inbox" and item.get("status") == "success"
         for item in attempts
     ):
         return "manual"
@@ -545,6 +542,25 @@ def _action_parts(value: Any) -> tuple[str, str]:
     if not text:
         return "", "CAUTION"
     return "", text
+
+
+def _decision_receipt_line(row: dict[str, Any]) -> str:
+    tier = str(row.get("pick_tier") or "").strip()
+    receipt_id = str(row.get("receipt_id") or "").strip()
+    if not tier and not receipt_id:
+        return ""
+    missing = row.get("disclosed_gaps") or row.get("first_blocking_failure") or ""
+    if isinstance(missing, (list, tuple)):
+        missing = ",".join(str(item) for item in missing[:2])
+    entry = (
+        "entry confirmation required"
+        if not row.get("paper_entry_eligible")
+        else "paper-entry conditions passed"
+    )
+    return (
+        f"Receipt {_text(receipt_id, 'not recorded')} | Tier {_text(tier, 'not reported')} | "
+        f"{entry} | Gaps {_truncate(str(missing), 60) if missing else 'none'}"
+    )
 
 
 def _catalyst_line(row: dict[str, Any]) -> str:
