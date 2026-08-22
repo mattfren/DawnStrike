@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ from intraday_scanner.services.signal_review_service import (
     review_alpha_signals,
 )
 from intraday_scanner.services.source_reliability_service import build_source_reliability
+from intraday_scanner.services.strategy_decision_service import StrategyDecisionService
 from intraday_scanner.services.web_collection_service import web_auto_collect, web_source_doctor
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -292,8 +294,7 @@ def alpha_cycle(
     )
     source_config = load_web_sources_config(config_path)
     fixture_mode = any(
-        source.enabled and bool(source.fixture_path)
-        for source in source_config.sources
+        source.enabled and bool(source.fixture_path) for source in source_config.sources
     )
     if not fixture_mode:
         scanner_config = _alphaops_scanner_config(scanner_config)
@@ -364,6 +365,13 @@ def alpha_cycle(
         for index, row in enumerate(signals, 1)
     ]
     signals = apply_alert_gates(signals)
+    strategy_receipt_stats = _apply_strategy_decision_receipts(
+        signals,
+        store=store,
+        config=scanner_config,
+        decision_at=timestamp,
+        source_summary=source_summary,
+    )
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
     research_radar = _research_radar(signals) if decision.get("no_trade") else []
@@ -557,9 +565,7 @@ def alpha_cycle(
         "v6_shadow": {
             "strategy_version": "dawnstrike-alphaops-v6-shadow",
             "decision_count": len(v6_decisions),
-            "tracked_count": sum(
-                1 for row in v6_decisions if row.get("action") == "SHADOW_TRACK"
-            ),
+            "tracked_count": sum(1 for row in v6_decisions if row.get("action") == "SHADOW_TRACK"),
             "persistence": v6_decision_stats,
             "versioned_universe_membership_count": len(universe_memberships),
             "missing_versioned_universe_memberships": missing_v6_universe_memberships,
@@ -568,6 +574,7 @@ def alpha_cycle(
             "broker_execution_enabled": False,
         },
         "signal_count": len(signals),
+        "strategy_decision_receipts": strategy_receipt_stats,
         "research_radar": research_radar,
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,
@@ -665,8 +672,7 @@ def alpha_monitor(
             signals = [
                 row
                 for row in signals
-                if str(row.get("signal_id") or row.get("signal_key") or "")
-                in official_signal_ids
+                if str(row.get("signal_id") or row.get("signal_key") or "") in official_signal_ids
             ]
             selection_evidence_status = "exact_official_cohort"
         elif radar_selections:
@@ -699,10 +705,7 @@ def alpha_monitor(
         for row in signals
         if (
             str(row.get("monitor_cohort") or "") == ALPHAOPS_RADAR_COHORT
-            or (
-                bool(row.get("can_alert"))
-                and not str(row.get("no_trade_reason") or "").strip()
-            )
+            or (bool(row.get("can_alert")) and not str(row.get("no_trade_reason") or "").strip())
         )
     ]
     price_observation: dict[str, Any] | None = None
@@ -767,9 +770,7 @@ def alpha_monitor(
         )
     if price_observation is not None:
         result["price_observation"] = {
-            key: value
-            for key, value in price_observation.items()
-            if key != "observations"
+            key: value for key, value in price_observation.items() if key != "observations"
         }
         if not current_prices:
             result.update(
@@ -791,9 +792,7 @@ def alpha_monitor(
     if current_quotes is not None:
         result["live_quote_check"] = {
             "required_for_research_radar": True,
-            "usable_count": sum(
-                1 for row in current_quotes.values() if row.get("is_usable")
-            ),
+            "usable_count": sum(1 for row in current_quotes.values() if row.get("is_usable")),
             "requested_count": len(active_signals),
             "maximum_spread_pct": 3.0,
         }
@@ -836,9 +835,7 @@ def _radar_monitor_signals(
     selections: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     selection_by_signal = {
-        str(row.get("signal_id") or ""): row
-        for row in selections
-        if row.get("signal_id")
+        str(row.get("signal_id") or ""): row for row in selections if row.get("signal_id")
     }
     monitored: list[dict[str, Any]] = []
     for signal in signals:
@@ -848,10 +845,7 @@ def _radar_monitor_signals(
             continue
         selection_payload = dict(selection.get("payload_json") or {})
         radar_signal = dict(selection_payload.get("signal") or {})
-        target = _number(
-            radar_signal.get("radar_target")
-            or signal.get("research_radar_target")
-        )
+        target = _number(radar_signal.get("radar_target") or signal.get("research_radar_target"))
         monitored.append(
             {
                 **signal,
@@ -1164,9 +1158,7 @@ def _merge_ranked_safety(
     ranked: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     safety_by_ticker = {
-        str(row.get("ticker") or "").upper(): row
-        for row in ranked
-        if row.get("ticker")
+        str(row.get("ticker") or "").upper(): row for row in ranked if row.get("ticker")
     }
     fields = (
         "sec_risk_status",
@@ -1233,9 +1225,7 @@ def _register_alpaca_screening_universe(
         "critical_truth_complete": True,
         "registration_allowed": True,
     }
-    contract_hash = hashlib.sha256(
-        json.dumps(contract, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    contract_hash = hashlib.sha256(json.dumps(contract, sort_keys=True).encode("utf-8")).hexdigest()
     raw_hash = str(evidence.get("raw_artifact_sha256") or "")
     if len(raw_hash) != 64:
         return {
@@ -1355,9 +1345,7 @@ def _research_radar(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         reasons = signal.get("alert_gate_reasons") or []
         reason_text = (
-            "; ".join(str(item) for item in reasons)
-            if isinstance(reasons, list)
-            else str(reasons)
+            "; ".join(str(item) for item in reasons) if isinstance(reasons, list) else str(reasons)
         )
         rows.append(
             {
@@ -1390,10 +1378,7 @@ def _annotate_research_radar(
     signals: list[dict[str, Any]],
     radar: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    radar_by_id = {
-        str(row.get("signal_id") or row.get("signal_key") or ""): row
-        for row in radar
-    }
+    radar_by_id = {str(row.get("signal_id") or row.get("signal_key") or ""): row for row in radar}
     output: list[dict[str, Any]] = []
     for signal in signals:
         signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
@@ -1433,6 +1418,72 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         "signal_key": f"{scan_id}:{rank}:{row.get('ticker')}",
         "telegram_key": f"alpha:{scan_id}:{rank}:{row.get('ticker')}",
         "alert_sent": False,
+    }
+
+
+def _apply_strategy_decision_receipts(
+    signals: list[dict[str, Any]],
+    *,
+    store: SQLiteScanStore,
+    config: Any,
+    decision_at: str,
+    source_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute immutable receipts in optional shadow mode only.
+
+    The legacy AlphaOps disposition is intentionally unchanged in shadow mode;
+    receipt statuses are attached for operator and learning consumers.
+    """
+
+    if not config.strategy_evidence_enabled:
+        return {"status": "disabled", "computed": 0, "persisted": 0, "reused": 0}
+    code_sha = str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
+    if not code_sha:
+        source_summary["strategy_decision_receipts"] = {
+            "status": "blocked_missing_code_identity",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        return {
+            "status": "blocked_missing_code_identity",
+            "computed": 0,
+            "persisted": 0,
+            "reused": 0,
+        }
+    from intraday_scanner.decisioning.condition_registry import strategy_ids
+
+    supported = set(strategy_ids())
+    service = StrategyDecisionService(
+        code_sha=code_sha,
+        source_identity=str(source_summary.get("source_identity") or "alpha-cycle-source"),
+        score_threshold=float(getattr(config, "alert_score_threshold", 0.0)),
+    )
+    receipts = []
+    for row in signals[: int(config.strategy_evidence_max_candidates)]:
+        if str(row.get("strategy_id") or "") not in supported:
+            continue
+        receipt = service.build_receipt(row, decision_at=decision_at)
+        row.update(
+            {
+                "receipt_id": receipt.receipt_id,
+                "receipt_hash_sha256": receipt.receipt_hash_sha256,
+                "pick_tier": getattr(receipt.pick_tier, "value", str(receipt.pick_tier)),
+                "research_pick_eligible": receipt.research_pick_eligible,
+                "paper_entry_eligible": receipt.paper_entry_eligible,
+                "disclosed_gaps": list(receipt.disclosed_gaps),
+                "first_blocking_failure": receipt.first_blocking_failure,
+            }
+        )
+        receipts.append(receipt)
+    persisted = store.persist_strategy_decision_receipts(receipts)
+    return {
+        "status": "shadow_only" if config.strategy_evidence_shadow_only else "enabled",
+        "computed": len(receipts),
+        "persisted": persisted["inserted"],
+        "reused": persisted["reused"],
+        "legacy_selection_unchanged": bool(config.strategy_evidence_shadow_only),
+        "research_only": True,
+        "broker_execution_enabled": False,
     }
 
 
@@ -1520,9 +1571,7 @@ def _persist_official_selections(
         ]
     )
     decision_name = (
-        "no_trade"
-        if decision.get("no_trade")
-        else str(decision.get("decision_tier") or "selected")
+        "no_trade" if decision.get("no_trade") else str(decision.get("decision_tier") or "selected")
     )
     body_sha256 = _body_sha256(event.body)
     rows: list[dict[str, Any]] = []
@@ -1530,10 +1579,7 @@ def _persist_official_selections(
         signal_id = _selection_signal_id(signal, scan_id)
         if not signal_id:
             continue
-        identity = (
-            f"{strategy_id}|{strategy_version}|"
-            f"{ALPHAOPS_OFFICIAL_COHORT}|{signal_id}"
-        )
+        identity = f"{strategy_id}|{strategy_version}|{ALPHAOPS_OFFICIAL_COHORT}|{signal_id}"
         selection_id = f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
         row = {
             "selection_id": selection_id,
@@ -1630,10 +1676,7 @@ def _persist_research_radar_selections(
         signal_id = _selection_signal_id(signal, scan_id)
         if not signal_id:
             continue
-        identity = (
-            f"{ALPHAOPS_RADAR_COHORT}|{ALPHAOPS_RADAR_VERSION}|"
-            f"{scan_id}|{signal_id}"
-        )
+        identity = f"{ALPHAOPS_RADAR_COHORT}|{ALPHAOPS_RADAR_VERSION}|{scan_id}|{signal_id}"
         row = {
             "selection_id": f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}",
             "scan_id": scan_id,
@@ -1740,12 +1783,8 @@ def _persist_notification_delivery_memberships(
             )
             body_sha256 = _body_sha256(stored_body)
             for selection in event_selections:
-                identity = (
-                    f"{event.event_key}|{channel}|{selection['signal_id']}"
-                )
-                membership_id = (
-                    f"delivery:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
-                )
+                identity = f"{event.event_key}|{channel}|{selection['signal_id']}"
+                membership_id = f"delivery:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
                 delivery_row: dict[str, Any] = {
                     "membership_id": membership_id,
                     "selection_id": str(selection["selection_id"]),
@@ -1856,8 +1895,10 @@ def recover_legacy_alpha_notification_memberships(
             for row in matched_rows
             if str(row.get("generated_at") or "")
         ]
-        selected_at = min(generated_at_values) if generated_at_values else str(
-            notification.get("sent_at") or utc_now_iso()
+        selected_at = (
+            min(generated_at_values)
+            if generated_at_values
+            else str(notification.get("sent_at") or utc_now_iso())
         )
         event = NotificationEvent(
             event_key=event_key,
@@ -1946,8 +1987,10 @@ def _dispatch(
         channels = ["console"]
     config = load_config(database_path=Path(db_path), notifier_channels=",".join(channels))
     notifiers: list[BaseNotifier]
-    if dry_run and "telegram" in channels and not (
-        config.telegram_bot_token and config.telegram_chat_id
+    if (
+        dry_run
+        and "telegram" in channels
+        and not (config.telegram_bot_token and config.telegram_chat_id)
     ):
         notifiers = [ConsoleNotifier()]
     else:
@@ -1992,9 +2035,7 @@ def _link_notification_events(
             was_alerted=was_alerted,
             signal_ids=delivered_ids,
         )
-        delivery_by_signal = {
-            str(row["signal_id"]): row for row in delivered_rows
-        }
+        delivery_by_signal = {str(row["signal_id"]): row for row in delivered_rows}
         if delivered_ids:
             event_timestamp = utc_now_iso()
             store.persist_signal_events(
@@ -2027,9 +2068,7 @@ def _link_notification_events(
                             "cohort": delivery_by_signal.get(signal_id, {}).get(
                                 "cohort", ALPHAOPS_OFFICIAL_COHORT
                             ),
-                            "body_sha256": delivery_by_signal.get(signal_id, {}).get(
-                                "body_sha256"
-                            ),
+                            "body_sha256": delivery_by_signal.get(signal_id, {}).get("body_sha256"),
                         },
                     }
                     for signal_id in delivered_ids

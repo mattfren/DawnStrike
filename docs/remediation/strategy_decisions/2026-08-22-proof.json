@@ -1,0 +1,73 @@
+{
+  "schema_version": "dawnstrike.strategy_decision_proof.v1",
+  "branch": "codex/luna-strategy-decisions-20260822",
+  "base_branch": "codex/strategy-learning-remediation-20260821",
+  "base_sha": "b479245708d3e679d39\u003887425aae4996b3dad7db",
+  "exact_final_commit_sha": "9f021ec8285a437ada3\u003661c636d33b4c2ee10e6c",
+  "stacked_pr": {
+    "base": "codex/strategy-learning-remediation-20260821",
+    "head": "codex/luna-strategy-decisions-20260822",
+    "url": "PENDING_PUSH_AND_PR"
+  },
+  "changed_files_by_phase": {
+    "contracts_and_registry": [
+      "intraday_scanner/decisioning/__init__.py",
+      "intraday_scanner/decisioning/contracts.py",
+      "intraday_scanner/decisioning/condition_registry.py",
+      "intraday_scanner/decisioning/policy.py",
+      "intraday_scanner/services/strategy_decision_service.py"
+    ],
+    "resolver_and_persistence": [
+      "intraday_scanner/decisioning/evidence_resolver.py",
+      "intraday_scanner/ai/strategy_gap_resolver.py",
+      "intraday_scanner/storage/migrations.py",
+      "intraday_scanner/storage/sqlite_store.py"
+    ],
+    "integration_and_operator": [
+      "intraday_scanner/config.py",
+      "intraday_scanner/services/alpha_cycle_service.py",
+      "intraday_scanner/notifiers/telegram_formatter.py"
+    ],
+    "learning_and_tests": [
+      "intraday_scanner/services/daily_strategy_learning_service.py",
+      "tests/test_strategy_decision_contracts.py",
+      "tests/test_strategy_condition_registry.py",
+      "tests/test_strategy_gap_resolver.py",
+      "tests/test_strategy_decision_service.py",
+      "tests/test_alpha_strategy_decision_integration.py",
+      "tests/test_telegram_strategy_decision_receipt.py"
+    ]
+  },
+  "sanitized_fixtures": [
+    {"tier": "QUALIFIED_PICK", "fixture_only": true, "all_blocking_conditions": "PASS", "reward_risk": 2.0},
+    {"tier": "PICK_WITH_DISCLOSED_GAPS", "fixture_only": true, "missing": ["catalyst_identified"]},
+    {"tier": "CONDITIONAL_PICK", "fixture_only": true, "missing": ["borrow_or_locate_verified"]},
+    {"tier": "BLOCKED_SAFETY", "fixture_only": true, "failed": ["not_currently_halted"]},
+    {"tier": "BLOCKED_DATA", "fixture_only": true, "missing": ["point_in_time_ohlcv"]}
+  ],
+  "verification": {
+    "focused_tests": "PASS",
+    "ruff_modified_scope": "PASS",
+    "compileall_modified_scope": "PASS",
+    "full_suite": "NOT_PASSING: initial run hit legacy schema-31 rejection; post-repair heavy fixture rerun was interrupted before termination",
+    "exact_sha_ci": "RERUN_PENDING_AFTER_B608_REPAIR",
+    "git_diff_check": "PASS",
+    "worktree_clean": "PASS_AT_IMPLEMENTATION_COMMIT"
+  },
+  "resource_controls": {
+    "max_symbols": "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS",
+    "max_tool_calls": "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS",
+    "timeout_seconds": "DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS",
+    "store": false,
+    "max_retries": 0,
+    "network_in_unit_tests": false
+  },
+  "research_only": true,
+  "automatic_policy_change": false,
+  "automatic_promotion": false,
+  "broker_execution_enabled": false,
+  "missing_outcomes_are_zero": false,
+  "production_deployed": false,
+  "runtime_state_mutated": false,
+  "pr_merged": false
+}
