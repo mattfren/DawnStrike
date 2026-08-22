@@ -185,6 +185,9 @@ from intraday_scanner.services.screener_automation import (
     watch_screener_inbox,
 )
 from intraday_scanner.services.setup_monitor import run_setup_monitor
+from intraday_scanner.services.strategy_challenger_backtest_service import (
+    run_strategy_challenger_backtest,
+)
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
 from intraday_scanner.services.universe_service import load_symbols_file, parse_symbols
@@ -552,6 +555,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "attributes retained portfolio performance rows through market-date"
         ),
     )
+
+    strategy_challenger_backtest_parser = subparsers.add_parser(
+        "strategy-challenger-backtest",
+        help="Compare all catalog strategies and research challengers on verified DataTruth",
+    )
+    strategy_challenger_backtest_parser.add_argument("--data-truth-root", required=True)
+    strategy_challenger_backtest_parser.add_argument("--snapshot-id", default=None)
+    strategy_challenger_backtest_parser.add_argument("--code-sha", required=True)
+    strategy_challenger_backtest_parser.add_argument("--out", required=True)
 
     alpha_v6_train_weekly_parser = subparsers.add_parser(
         "alpha-v6-train-weekly",
@@ -1221,6 +1233,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_v6_daily_monitor(args)
         if args.command == "strategy-learning-daily":
             return _run_strategy_learning_daily(args)
+        if args.command == "strategy-challenger-backtest":
+            return _run_strategy_challenger_backtest(args)
         if args.command == "alpha-v6-train-weekly":
             return _run_alpha_v6_train_weekly(args)
         if args.command == "alpha-v6-register-experiment":
@@ -1853,6 +1867,17 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         code_sha=args.code_sha,
         out_dir=args.out_dir,
         analyzer=analyzer,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "complete" else 1
+
+
+def _run_strategy_challenger_backtest(args: argparse.Namespace) -> int:
+    result = run_strategy_challenger_backtest(
+        data_truth_root=args.data_truth_root,
+        snapshot_id=args.snapshot_id,
+        code_sha=args.code_sha,
+        out_path=args.out,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "complete" else 1
