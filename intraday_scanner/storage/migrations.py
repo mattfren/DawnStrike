@@ -11,6 +11,23 @@ from datetime import datetime, timezone
 # not advance that legacy marker.
 CURRENT_SCHEMA_VERSION = 30
 
+_STRATEGY_RECEIPT_TABLES = (
+    "strategy_decision_receipts",
+    "strategy_condition_results",
+    "strategy_evidence_claims",
+    "strategy_evidence_resolution_runs",
+)
+_STRATEGY_RECEIPT_TRIGGERS = (
+    "strategy_decision_receipts_no_update",
+    "strategy_decision_receipts_no_delete",
+    "strategy_condition_results_no_update",
+    "strategy_condition_results_no_delete",
+    "strategy_evidence_claims_no_update",
+    "strategy_evidence_claims_no_delete",
+    "strategy_evidence_resolution_runs_no_update",
+    "strategy_evidence_resolution_runs_no_delete",
+)
+
 Migration = Callable[[sqlite3.Connection], None]
 
 
@@ -41,11 +58,27 @@ def run_migrations(connection: sqlite3.Connection) -> int:
         if version >= target_version:
             continue
         if target_version == 31:
-            already_present = connection.execute(
-                """SELECT 1 FROM sqlite_master WHERE type = 'table'
-                AND name = 'strategy_decision_receipts' LIMIT 1"""
-            ).fetchone()
-            if already_present is not None:
+            missing_tables = {
+                name
+                for name in _STRATEGY_RECEIPT_TABLES
+                if connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ? LIMIT 1""",
+                    (name,),
+                ).fetchone()
+                is None
+            }
+            missing_triggers = {
+                name
+                for name in _STRATEGY_RECEIPT_TRIGGERS
+                if connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                    WHERE type = 'trigger' AND name = ? LIMIT 1""",
+                    (name,),
+                ).fetchone()
+                is None
+            }
+            if not missing_tables and not missing_triggers:
                 continue
             migration(connection)
             # Do not advance schema_version: older governed stores validate
@@ -2319,6 +2352,36 @@ def _migration_031_strategy_decision_receipts(connection: sqlite3.Connection) ->
         CREATE TRIGGER IF NOT EXISTS strategy_decision_receipts_no_delete
         BEFORE DELETE ON strategy_decision_receipts BEGIN
             SELECT RAISE(ABORT, 'strategy_decision_receipts is append-only');
+        END;
+        CREATE INDEX IF NOT EXISTS idx_strategy_condition_results_receipt
+        ON strategy_condition_results(receipt_id, condition_id);
+        CREATE INDEX IF NOT EXISTS idx_strategy_evidence_claims_receipt
+        ON strategy_evidence_claims(receipt_id, condition_id);
+        CREATE INDEX IF NOT EXISTS idx_strategy_evidence_runs_receipt
+        ON strategy_evidence_resolution_runs(receipt_id, market_date);
+        CREATE TRIGGER IF NOT EXISTS strategy_condition_results_no_update
+        BEFORE UPDATE ON strategy_condition_results BEGIN
+            SELECT RAISE(ABORT, 'strategy_condition_results is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_condition_results_no_delete
+        BEFORE DELETE ON strategy_condition_results BEGIN
+            SELECT RAISE(ABORT, 'strategy_condition_results is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_evidence_claims_no_update
+        BEFORE UPDATE ON strategy_evidence_claims BEGIN
+            SELECT RAISE(ABORT, 'strategy_evidence_claims is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_evidence_claims_no_delete
+        BEFORE DELETE ON strategy_evidence_claims BEGIN
+            SELECT RAISE(ABORT, 'strategy_evidence_claims is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_evidence_resolution_runs_no_update
+        BEFORE UPDATE ON strategy_evidence_resolution_runs BEGIN
+            SELECT RAISE(ABORT, 'strategy_evidence_resolution_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_evidence_resolution_runs_no_delete
+        BEFORE DELETE ON strategy_evidence_resolution_runs BEGIN
+            SELECT RAISE(ABORT, 'strategy_evidence_resolution_runs is append-only');
         END;
         """
     )

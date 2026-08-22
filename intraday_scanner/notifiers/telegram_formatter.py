@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.services.time_utils import get_operator_time_label
@@ -287,8 +288,7 @@ def format_alpha_watch(
             f"   Confidence {_text(row.get('confidence_bucket'), 'n/a')} | "
             f"Setup {_text(row.get('setup_key'), 'n/a')}"
         )
-        receipt_line = _decision_receipt_line(row)
-        if receipt_line:
+        for receipt_line in _decision_receipt_lines(row):
             lines.append(f"   {receipt_line}")
         risk = _risk_text(row)
         if risk != "none":
@@ -306,8 +306,7 @@ def format_alpha_watch(
         if isinstance(reasons, list):
             reasons = "; ".join(str(item) for item in reasons)
         lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reasons), 100)}")
-        receipt_line = _decision_receipt_line(row)
-        if receipt_line:
+        for receipt_line in _decision_receipt_lines(row):
             lines.append(f"  {receipt_line}")
     lines.extend(["", "NO TRADE / BLOCKED REASONS"])
     if blocked_signals:
@@ -322,6 +321,8 @@ def format_alpha_watch(
             if isinstance(reason, list):
                 reason = "; ".join(str(item) for item in reason)
             lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reason), 100)}")
+            for receipt_line in _decision_receipt_lines(row):
+                lines.append(f"  {receipt_line}")
     else:
         lines.append(
             "- "
@@ -544,23 +545,88 @@ def _action_parts(value: Any) -> tuple[str, str]:
     return "", text
 
 
-def _decision_receipt_line(row: dict[str, Any]) -> str:
+def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
     tier = str(row.get("pick_tier") or "").strip()
     receipt_id = str(row.get("receipt_id") or "").strip()
-    if not tier and not receipt_id:
-        return ""
-    missing = row.get("disclosed_gaps") or row.get("first_blocking_failure") or ""
-    if isinstance(missing, (list, tuple)):
-        missing = ",".join(str(item) for item in missing[:2])
+    if not tier and not receipt_id and not row.get("strategy_receipt_gap"):
+        return []
+    strategy_id = _text(row.get("strategy_id"), "not reported")
+    strategy_version = _text(
+        row.get("strategy_version") or row.get("model_version"), "not reported"
+    )
     entry = (
         "entry confirmation required"
         if not row.get("paper_entry_eligible")
         else "paper-entry conditions passed"
     )
-    return (
-        f"Receipt {_text(receipt_id, 'not recorded')} | Tier {_text(tier, 'not reported')} | "
-        f"{entry} | Gaps {_truncate(str(missing), 60) if missing else 'none'}"
+    why = _text(
+        row.get("receipt_reason")
+        or row.get("why_qualified")
+        or row.get("first_blocking_failure")
+        or row.get("strategy_receipt_gap"),
+        "not reported",
     )
+    lines = [
+        f"Receipt {_text(receipt_id, 'not recorded')} | Tier {_text(tier, 'not reported')}",
+        (
+            f"Strategy {strategy_id} {strategy_version} | "
+            f"R/R {format_score(row.get('reward_risk_ratio'))}R"
+        ),
+        f"Entry: {entry}",
+        f"Why: {_truncate(why, 100)}",
+    ]
+
+    core = row.get("core_conditions_passed") or []
+    if isinstance(core, (list, tuple)):
+        core_items: list[str] = []
+        for item in core[:6]:
+            value = item.get("condition_id") if isinstance(item, dict) else item
+            if str(value or "").strip():
+                core_items.append(str(value))
+        core_text = ", ".join(core_items)
+    else:
+        core_text = str(core).strip()
+    lines.append(f"Core passed: {_truncate(core_text, 100) if core_text else 'not reported'}")
+
+    ai = row.get("ai_resolved_evidence") or []
+    ai_parts: list[str] = []
+    if isinstance(ai, (list, tuple)):
+        for item in ai[:3]:
+            if not isinstance(item, dict):
+                ai_parts.append(str(item))
+                continue
+            condition_id = _text(item.get("condition_id"), "condition")
+            urls = item.get("source_urls") or []
+            citation = (
+                _citation_label(urls[0])
+                if isinstance(urls, list) and urls
+                else "citation not reported"
+            )
+            ai_parts.append(f"{condition_id} [{citation}]")
+    ai_text = _truncate("; ".join(ai_parts), 120) if ai_parts else "none reported"
+    lines.append(f"AI evidence: {ai_text}")
+
+    missing = row.get("disclosed_gaps") or row.get("first_blocking_failure") or ""
+    if isinstance(missing, (list, tuple)):
+        missing = ", ".join(str(item) for item in missing[:4])
+    lines.append(f"Gaps: {_truncate(str(missing), 100) if missing else 'none'}")
+    return lines
+
+
+def _decision_receipt_line(row: dict[str, Any]) -> str:
+    """Compatibility helper for callers that need one compact receipt line."""
+
+    return " | ".join(_decision_receipt_lines(row))
+
+
+def _citation_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "citation not reported"
+    parsed = urlsplit(text)
+    if parsed.netloc:
+        text = parsed.netloc + (parsed.path or "")
+    return _truncate(text, 48)
 
 
 def _catalyst_line(row: dict[str, Any]) -> str:

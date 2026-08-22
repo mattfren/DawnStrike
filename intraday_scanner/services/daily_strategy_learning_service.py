@@ -458,34 +458,264 @@ __all__ = [
 
 
 def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Summarize receipt conditions without changing any policy automatically."""
+    """Summarize receipt evidence without changing any policy automatically.
 
-    by_condition: dict[str, dict[str, Any]] = {}
+    Outcome labels are accepted only when an upstream source explicitly supplies
+    them. Missing, open, or conflicting outcomes stay visible and never become
+    a zero-return label.
+    """
+
+    by_condition: dict[tuple[str, str, str, str, bool, bool, str], dict[str, Any]] = {}
+    by_strategy: dict[tuple[str, str], dict[str, Any]] = {}
     tier_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    resolved_gaps: dict[tuple[str, str, str], dict[str, Any]] = {}
+    disclosed_gap_outcomes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    winner_exclusions: dict[tuple[str, str, str], dict[str, Any]] = {}
+    authoritative_contradictions: dict[tuple[str, str, str], dict[str, Any]] = {}
+    blocking_counts: dict[tuple[str, str, str], int] = {}
+
+    valid_receipt_count = 0
     for receipt in receipts:
+        if not isinstance(receipt, Mapping):
+            continue
+        valid_receipt_count += 1
+        strategy_id = str(receipt.get("strategy_id") or "UNKNOWN")
+        strategy_version = str(receipt.get("strategy_version") or "UNKNOWN")
         tier = str(receipt.get("pick_tier") or "UNKNOWN")
+        research_eligible = bool(receipt.get("research_pick_eligible"))
+        paper_eligible = bool(receipt.get("paper_entry_eligible"))
+        outcome_state = _receipt_outcome_state(receipt)
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
-        for raw in receipt.get("condition_results") or ():
+        outcome_counts[outcome_state] = outcome_counts.get(outcome_state, 0) + 1
+
+        strategy_key = (strategy_id, strategy_version)
+        strategy_row = by_strategy.setdefault(
+            strategy_key,
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "receipt_count": 0,
+                "tier_counts": {},
+                "outcome_state_counts": {},
+                "research_pick_eligible_count": 0,
+                "paper_entry_eligible_count": 0,
+            },
+        )
+        strategy_row["receipt_count"] += 1
+        strategy_row["tier_counts"][tier] = strategy_row["tier_counts"].get(tier, 0) + 1
+        strategy_row["outcome_state_counts"][outcome_state] = (
+            strategy_row["outcome_state_counts"].get(outcome_state, 0) + 1
+        )
+        strategy_row["research_pick_eligible_count"] += int(research_eligible)
+        strategy_row["paper_entry_eligible_count"] += int(paper_eligible)
+
+        blocking_ids = {
+            str(item)
+            for item in receipt.get("all_blocking_failures") or ()
+            if str(item).strip()
+        }
+        disclosed_ids = {
+            str(item)
+            for item in receipt.get("disclosed_gaps") or ()
+            if str(item).strip()
+        }
+        for condition_id in blocking_ids:
+            blocking_key = (strategy_id, strategy_version, condition_id)
+            blocking_counts[blocking_key] = blocking_counts.get(blocking_key, 0) + 1
+
+        condition_results = receipt.get("condition_results") or ()
+        if not isinstance(condition_results, Sequence) or isinstance(
+            condition_results, (str, bytes)
+        ):
+            condition_results = ()
+        for raw in condition_results:
             if not isinstance(raw, Mapping):
                 continue
-            condition_id = str(raw.get("condition_id") or "")
+            condition_id = str(raw.get("condition_id") or "").strip()
             if not condition_id:
                 continue
-            row = by_condition.setdefault(
-                condition_id,
-                {"condition_id": condition_id, "status_counts": {}, "receipt_count": 0},
-            )
             status = str(raw.get("status") or "UNKNOWN")
-            counts = row["status_counts"]
-            counts[status] = int(counts.get(status, 0)) + 1
+            key = (
+                strategy_id,
+                strategy_version,
+                condition_id,
+                status,
+                research_eligible,
+                paper_eligible,
+                outcome_state,
+            )
+            row = by_condition.setdefault(
+                key,
+                {
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "condition_id": condition_id,
+                    "condition_status": status,
+                    "pick_tier": tier,
+                    "research_pick_eligible": research_eligible,
+                    "paper_entry_eligible": paper_eligible,
+                    "outcome_state": outcome_state,
+                    "receipt_count": 0,
+                    "blocking_candidate_count": 0,
+                    "disclosed_gap_count": 0,
+                    "ai_resolved_count": 0,
+                },
+            )
             row["receipt_count"] += 1
+            row["blocking_candidate_count"] += int(condition_id in blocking_ids)
+            row["disclosed_gap_count"] += int(condition_id in disclosed_ids)
+            is_ai_resolved = status == "RESOLVED_FROM_SOURCE" and str(
+                raw.get("resolver_id") or ""
+            ) not in {"", "deterministic"}
+            row["ai_resolved_count"] += int(is_ai_resolved)
+
+            if is_ai_resolved:
+                resolved_key = (strategy_id, strategy_version, condition_id)
+                resolved_row = resolved_gaps.setdefault(
+                    resolved_key,
+                    {
+                        "strategy_id": strategy_id,
+                        "strategy_version": strategy_version,
+                        "condition_id": condition_id,
+                        "resolved_count": 0,
+                    },
+                )
+                resolved_row["resolved_count"] += 1
+
+            if condition_id in disclosed_ids and outcome_state in {"WIN", "LOSS"}:
+                gap_key = (strategy_id, strategy_version, condition_id, outcome_state)
+                gap_row = disclosed_gap_outcomes.setdefault(
+                    gap_key,
+                    {
+                        "strategy_id": strategy_id,
+                        "strategy_version": strategy_version,
+                        "condition_id": condition_id,
+                        "outcome_state": outcome_state,
+                        "count": 0,
+                    },
+                )
+                gap_row["count"] += 1
+
+            if outcome_state == "WIN" and condition_id in blocking_ids:
+                winner_key = (strategy_id, strategy_version, condition_id)
+                winner_row = winner_exclusions.setdefault(
+                    winner_key,
+                    {
+                        "strategy_id": strategy_id,
+                        "strategy_version": strategy_version,
+                        "condition_id": condition_id,
+                        "eventual_winner_count": 0,
+                    },
+                )
+                winner_row["eventual_winner_count"] += 1
+
+            if raw.get("ai_claim_contradicted") is True or raw.get(
+                "contradicted_by_authoritative_source"
+            ) is True:
+                contradiction_key = (strategy_id, strategy_version, condition_id)
+                contradiction_row = authoritative_contradictions.setdefault(
+                    contradiction_key,
+                    {
+                        "strategy_id": strategy_id,
+                        "strategy_version": strategy_version,
+                        "condition_id": condition_id,
+                        "authoritative_contradiction_count": 0,
+                    },
+                )
+                contradiction_row["authoritative_contradiction_count"] += 1
+
+        for raw in receipt.get("contradicted_claims") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            condition_id = str(raw.get("condition_id") or "").strip()
+            if not condition_id or raw.get("authoritative") is not True:
+                continue
+            contradiction_key = (strategy_id, strategy_version, condition_id)
+            contradiction_row = authoritative_contradictions.setdefault(
+                contradiction_key,
+                {
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "condition_id": condition_id,
+                    "authoritative_contradiction_count": 0,
+                },
+            )
+            contradiction_row["authoritative_contradiction_count"] += 1
+
+    blocking_rows = [
+        {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "condition_id": condition_id,
+            "blocking_candidate_count": count,
+        }
+        for (strategy_id, strategy_version, condition_id), count in blocking_counts.items()
+    ]
+    blocking_rows.sort(
+        key=lambda row: (
+            -int(row["blocking_candidate_count"]),
+            str(row["strategy_id"]),
+            str(row["strategy_version"]),
+            str(row["condition_id"]),
+        )
+    )
+    legacy_conditions: dict[str, dict[str, Any]] = {}
+    for observation in by_condition.values():
+        condition_id = str(observation["condition_id"])
+        summary = legacy_conditions.setdefault(
+            condition_id,
+            {"condition_id": condition_id, "status_counts": {}, "receipt_count": 0},
+        )
+        status = str(observation["condition_status"])
+        summary["status_counts"][status] = (
+            summary["status_counts"].get(status, 0) + int(observation["receipt_count"])
+        )
+        summary["receipt_count"] += int(observation["receipt_count"])
     return {
-        "receipt_count": len(receipts),
+        "receipt_count": valid_receipt_count,
         "tier_counts": tier_counts,
-        "conditions": [by_condition[key] for key in sorted(by_condition)],
+        "outcome_state_counts": outcome_counts,
+        "strategies": [by_strategy[key] for key in sorted(by_strategy)],
+        "conditions": [legacy_conditions[key] for key in sorted(legacy_conditions)],
+        "condition_observations": [by_condition[key] for key in sorted(by_condition)],
+        "conditions_most_frequently_blocking": blocking_rows,
+        "ai_resolvable_gaps_successfully_resolved": [
+            resolved_gaps[key] for key in sorted(resolved_gaps)
+        ],
+        "disclosed_gap_outcomes": [
+            disclosed_gap_outcomes[key] for key in sorted(disclosed_gap_outcomes)
+        ],
+        "conditions_that_excluded_eventual_winners": [
+            winner_exclusions[key] for key in sorted(winner_exclusions)
+        ],
+        "ai_claims_later_contradicted": [
+            authoritative_contradictions[key]
+            for key in sorted(authoritative_contradictions)
+        ],
         "research_only": True,
         "automatic_policy_change": False,
         "automatic_promotion": False,
         "broker_execution_enabled": False,
         "missing_outcomes_are_zero": False,
     }
+
+
+def _receipt_outcome_state(receipt: Mapping[str, Any]) -> str:
+    raw = receipt.get("outcome_state")
+    if raw is None:
+        raw = receipt.get("outcome_status")
+    if raw is None:
+        raw = receipt.get("outcome")
+    if isinstance(raw, Mapping):
+        raw = raw.get("state") or raw.get("status") or raw.get("classification")
+    value = str(raw or "").strip().upper()
+    if value in {"WIN", "WON", "CLOSED_WIN", "PROFIT", "PROFITABLE"}:
+        return "WIN"
+    if value in {"LOSS", "LOST", "CLOSED_LOSS", "LOSSING", "UNPROFITABLE"}:
+        return "LOSS"
+    if value in {"FLAT", "CLOSED_FLAT", "BREAKEVEN", "BREAK_EVEN"}:
+        return "FLAT"
+    if value in {"OPEN", "PENDING", "UNRESOLVED", "MISSING", "UNKNOWN", ""}:
+        return "MISSING_OUTCOME"
+    return value

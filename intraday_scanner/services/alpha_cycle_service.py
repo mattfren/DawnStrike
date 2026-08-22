@@ -1437,32 +1437,129 @@ def _apply_strategy_decision_receipts(
 
     if not config.strategy_evidence_enabled:
         return {"status": "disabled", "computed": 0, "persisted": 0, "reused": 0}
+
+    from intraday_scanner.decisioning.condition_registry import (
+        registry_for_strategy,
+        strategy_ids,
+    )
+    from intraday_scanner.decisioning.contracts import ConditionCategory, ConditionStatus
+
     code_sha = str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
-    if not code_sha:
-        source_summary["strategy_decision_receipts"] = {
-            "status": "blocked_missing_code_identity",
-            "research_only": True,
-            "broker_execution_enabled": False,
-        }
-        return {
-            "status": "blocked_missing_code_identity",
+    supported = set(strategy_ids())
+    eligible_rows: list[tuple[int, dict[str, Any]]] = []
+    uncovered: list[dict[str, Any]] = []
+    for index, row in enumerate(signals):
+        strategy_id = str(
+            row.get("strategy_id") or row.get("decision_strategy_id") or ""
+        ).strip()
+        if not strategy_id:
+            reason = "missing strategy identity"
+        elif strategy_id not in supported:
+            reason = f"strategy is outside universal registry: {strategy_id}"
+        else:
+            if not row.get("strategy_id"):
+                row["strategy_id"] = strategy_id
+            eligible_rows.append((index, row))
+            continue
+        row["strategy_receipt_gap"] = reason
+        uncovered.append(
+            {
+                "rank": row.get("rank") or index + 1,
+                "ticker": str(row.get("ticker") or "").upper(),
+                "strategy_id": strategy_id or None,
+                "reason": reason,
+            }
+        )
+
+    budget = max(1, int(config.strategy_evidence_max_candidates))
+    deferred_count = max(0, len(eligible_rows) - budget)
+    source_identity = str(source_summary.get("source_identity") or "").strip()
+    if not source_identity:
+        source_run_id = str(source_summary.get("run_id") or "").strip()
+        if source_run_id:
+            source_identity = f"web_auto_collect:{source_run_id}"
+
+    def _blocked_stats(status: str, reason: str) -> dict[str, Any]:
+        for _index, row in eligible_rows:
+            row["strategy_receipt_gap"] = reason
+        stats = {
+            "status": status,
             "computed": 0,
             "persisted": 0,
             "reused": 0,
+            "eligible_candidates": len(eligible_rows),
+            "uncovered_candidates": len(uncovered),
+            "uncovered": uncovered,
+            "resolution_budget": budget,
+            "resolution_deferred": deferred_count,
+            "research_only": True,
+            "policy_mutation": False,
+            "broker_execution_enabled": False,
         }
-    from intraday_scanner.decisioning.condition_registry import strategy_ids
+        source_summary["strategy_decision_receipts"] = stats
+        return stats
 
-    supported = set(strategy_ids())
+    if not code_sha:
+        return _blocked_stats("blocked_missing_code_identity", "missing code identity")
+    if not source_identity:
+        return _blocked_stats("blocked_missing_source_identity", "missing source identity")
+
     service = StrategyDecisionService(
         code_sha=code_sha,
-        source_identity=str(source_summary.get("source_identity") or "alpha-cycle-source"),
+        source_identity=source_identity,
         score_threshold=float(getattr(config, "alert_score_threshold", 0.0)),
     )
     receipts = []
-    for row in signals[: int(config.strategy_evidence_max_candidates)]:
-        if str(row.get("strategy_id") or "") not in supported:
+    build_errors: list[dict[str, Any]] = []
+    for index, row in eligible_rows:
+        try:
+            receipt = service.build_receipt(row, decision_at=decision_at)
+        except (KeyError, TypeError, ValueError) as exc:
+            reason = f"receipt construction failed: {type(exc).__name__}"
+            row["strategy_receipt_gap"] = reason
+            build_errors.append(
+                {
+                    "rank": row.get("rank") or index + 1,
+                    "ticker": str(row.get("ticker") or "").upper(),
+                    "strategy_id": str(row.get("strategy_id") or ""),
+                    "reason": reason,
+                }
+            )
             continue
-        receipt = service.build_receipt(row, decision_at=decision_at)
+        specs = {spec.condition_id: spec for spec in registry_for_strategy(receipt.strategy_id)}
+        result_by_id = {result.condition_id: result for result in receipt.condition_results}
+        core_categories = {
+            ConditionCategory.HARD_MARKET,
+            ConditionCategory.HARD_RISK,
+            ConditionCategory.STRATEGY_CORE,
+        }
+        core_passed = [
+            condition_id
+            for condition_id, spec in specs.items()
+            if spec.category in core_categories
+            and result_by_id[condition_id].status
+            in {ConditionStatus.PASS, ConditionStatus.RESOLVED_FROM_SOURCE}
+        ]
+        ai_evidence = [
+            {
+                "condition_id": result.condition_id,
+                "status": getattr(result.status, "value", str(result.status)),
+                "source_urls": list(result.source_urls)[:2],
+                "source_hashes": list(result.source_hashes)[:2],
+            }
+            for result in receipt.condition_results
+            if specs[result.condition_id].category == ConditionCategory.AI_RESOLVABLE
+            and result.status == ConditionStatus.RESOLVED_FROM_SOURCE
+        ]
+        why = (
+            "all research-blocking conditions passed"
+            if receipt.research_pick_eligible and not receipt.disclosed_gaps
+            else (
+                "research eligible with disclosed gaps"
+                if receipt.research_pick_eligible
+                else f"blocked by {receipt.first_blocking_failure or 'deterministic policy'}"
+            )
+        )
         row.update(
             {
                 "receipt_id": receipt.receipt_id,
@@ -1472,19 +1569,37 @@ def _apply_strategy_decision_receipts(
                 "paper_entry_eligible": receipt.paper_entry_eligible,
                 "disclosed_gaps": list(receipt.disclosed_gaps),
                 "first_blocking_failure": receipt.first_blocking_failure,
+                "all_blocking_failures": list(receipt.all_blocking_failures),
+                "condition_results": [result.to_dict() for result in receipt.condition_results],
+                "core_conditions_passed": core_passed,
+                "ai_resolved_evidence": ai_evidence,
+                "reward_risk_ratio": receipt.reward_risk_ratio,
+                "strategy_receipt_gap": "",
+                "receipt_reason": why,
             }
         )
         receipts.append(receipt)
     persisted = store.persist_strategy_decision_receipts(receipts)
-    return {
-        "status": "shadow_only" if config.strategy_evidence_shadow_only else "enabled",
+    stats = {
+        "status": "shadow_only" if config.strategy_evidence_shadow_only else "receipt_only",
         "computed": len(receipts),
         "persisted": persisted["inserted"],
         "reused": persisted["reused"],
-        "legacy_selection_unchanged": bool(config.strategy_evidence_shadow_only),
+        "eligible_candidates": len(eligible_rows),
+        "uncovered_candidates": len(uncovered),
+        "uncovered": uncovered,
+        "build_errors": build_errors,
+        "resolution_budget": budget,
+        "resolution_candidates": min(len(eligible_rows), budget),
+        "resolution_deferred": deferred_count,
+        # Lane B never mutates the existing AlphaOps policy or selection.
+        "legacy_selection_unchanged": True,
+        "policy_mutation": False,
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    source_summary["strategy_decision_receipts"] = stats
+    return stats
 
 
 def _notification_event(
