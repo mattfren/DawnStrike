@@ -96,6 +96,10 @@ from intraday_scanner.services.daily_orchestrator_service import (
     daily_orchestration_status,
     write_heartbeat,
 )
+from intraday_scanner.services.daily_strategy_learning_service import (
+    MappingEvidenceAnalyzer,
+    run_daily_strategy_learning,
+)
 from intraday_scanner.services.daily_run_service import (
     resolve_release_sha,
     shared_daily_run_id,
@@ -518,6 +522,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_daily_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_daily_monitor_parser.add_argument("--market-date", default=None)
+
+    daily_strategy_learning_parser = subparsers.add_parser(
+        "strategy-learning-daily",
+        help="Inventory strategies and write research-only daily miss-learning artifacts",
+    )
+    daily_strategy_learning_parser.add_argument("--market-date", required=True)
+    daily_strategy_learning_parser.add_argument("--cutoff", required=True)
+    daily_strategy_learning_parser.add_argument("--source-identity", required=True)
+    daily_strategy_learning_parser.add_argument("--source-hash-sha256", default=None)
+    daily_strategy_learning_parser.add_argument("--code-sha", required=True)
+    daily_strategy_learning_parser.add_argument("--out-dir", required=True)
+    daily_strategy_learning_parser.add_argument(
+        "--evidence-file",
+        default=None,
+        help="Optional JSON mapping keyed by strategy ID for injected evidence/proposals",
+    )
 
     alpha_v6_train_weekly_parser = subparsers.add_parser(
         "alpha-v6-train-weekly",
@@ -1185,6 +1205,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_v6_learn(args)
         if args.command == "alpha-v6-daily-monitor":
             return _run_alpha_v6_daily_monitor(args)
+        if args.command == "strategy-learning-daily":
+            return _run_strategy_learning_daily(args)
         if args.command == "alpha-v6-train-weekly":
             return _run_alpha_v6_train_weekly(args)
         if args.command == "alpha-v6-register-experiment":
@@ -1792,6 +1814,26 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
     result = run_alpha_v6_daily_monitor(SQLiteScanStore(args.db_path), market_date=args.market_date)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
+    analyzer = None
+    if args.evidence_file:
+        payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise SnapshotValidationError("strategy learning evidence must be a JSON object")
+        analyzer = MappingEvidenceAnalyzer(payload)
+    result = run_daily_strategy_learning(
+        market_date=args.market_date,
+        cutoff=args.cutoff,
+        source_identity=args.source_identity,
+        source_hash_sha256=args.source_hash_sha256,
+        code_sha=args.code_sha,
+        out_dir=args.out_dir,
+        analyzer=analyzer,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "complete" else 1
 
 
 def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:

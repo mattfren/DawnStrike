@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from intraday_scanner.cli import main
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -7,6 +10,32 @@ def test_cli_init_db_creates_sqlite(tmp_path):
     db_path = tmp_path / "scanner.sqlite"
     assert main(["init-db", "--db-path", str(db_path)]) == 0
     assert db_path.exists()
+
+
+def test_cli_strategy_learning_daily_writes_research_only_receipts(tmp_path, capsys):
+    out_dir = tmp_path / "strategy-learning"
+    status = main(
+        [
+            "strategy-learning-daily",
+            "--market-date",
+            "2026-08-20",
+            "--cutoff",
+            "2026-08-20T22:00:00+00:00",
+            "--source-identity",
+            "fixture-source:2026-08-20",
+            "--code-sha",
+            "fixture-code-sha",
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+    assert status == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "complete"
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    assert receipt["research_only"] is True
+    assert receipt["automatic_promotion"] is False
+    assert receipt["broker_execution_enabled"] is False
 
 
 def test_cli_live_scan_without_keys_fails_gracefully(monkeypatch, capsys):
