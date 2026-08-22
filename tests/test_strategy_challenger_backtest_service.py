@@ -37,9 +37,10 @@ def test_all_strategies_and_challengers_are_compared_research_only() -> None:
     assert by_id["benchmark_buy_hold_equal_weight"]["champion"]["trade_count"] > 0
     assert by_id["cash_no_trade_baseline"]["champion"]["trade_count"] == 0
     assert by_id["failed_breakout_reversal_short"]["comparison_status"] == (
-        "NOT_EVALUABLE_NO_CHALLENGER_TRADES"
+        "NOT_EVALUABLE_UNAVAILABLE_REQUIRED_DATA"
     )
     assert by_id["failed_breakout_reversal_short"]["metric_delta"] is None
+    assert by_id["failed_breakout_reversal_short"]["challenger"]["metrics"] is None
     assert by_id["failed_breakout_reversal_short"]["gate_telemetry"][
         "eligible_count"
     ] == 0

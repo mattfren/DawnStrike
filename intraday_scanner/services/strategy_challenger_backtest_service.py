@@ -20,6 +20,10 @@ from intraday_scanner.v2.strategies import (
 
 SCHEMA_VERSION = "dawnstrike.strategy_challenger_backtest.v1"
 GATE_TELEMETRY_WINDOW_BARS = 60
+_STATIC_UNAVAILABLE = {
+    "cross_sectional_relative_strength": "sector_concentration",
+    "failed_breakout_reversal_short": "borrow_evidence",
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -47,6 +51,8 @@ def _gate_telemetry(
     strategy_id: str,
     candidate_version: str,
     dataset: MarketDataset,
+    *,
+    window_bars: int = GATE_TELEMETRY_WINDOW_BARS,
 ) -> dict[str, Any]:
     statuses: Counter[str] = Counter()
     failures: Counter[str] = Counter()
@@ -55,7 +61,7 @@ def _gate_telemetry(
     evaluated = 0
     for symbol in dataset.symbols:
         bars = dataset.bars_by_symbol[symbol]
-        start_index = max(0, len(bars) - GATE_TELEMETRY_WINDOW_BARS)
+        start_index = max(0, len(bars) - window_bars)
         for index in range(start_index, len(bars)):
             evaluation = evaluate_challenger_gates(
                 strategy_id,
@@ -74,7 +80,7 @@ def _gate_telemetry(
             if evaluation.first_failure is not None:
                 first_failures[evaluation.first_failure.name] += 1
     return {
-        "window_bars_per_symbol": GATE_TELEMETRY_WINDOW_BARS,
+        "window_bars_per_symbol": window_bars,
         "evaluated_strategy_symbol_timestamps": evaluated,
         "eligible_count": eligible,
         "ineligible_count": evaluated - eligible,
@@ -110,39 +116,62 @@ def build_strategy_challenger_backtest_report(
             "gate_telemetry": None,
         }
         if challenger is not None:
-            challenger_result = engine.run(challenger, dataset)
             champion_trades = int(champion_result.metrics.get("trade_count") or 0)
-            challenger_trades = int(challenger_result.metrics.get("trade_count") or 0)
-            if challenger_trades == 0:
-                comparison_status = "NOT_EVALUABLE_NO_CHALLENGER_TRADES"
-                metric_delta = None
-            elif champion_trades == 0:
-                comparison_status = "NOT_EVALUABLE_NO_PARENT_TRADES"
-                metric_delta = None
-            else:
-                comparison_status = "RESEARCH_COMPARABLE"
-                metric_delta = {
-                    key: float(challenger_result.metrics[key])
-                    - float(champion_result.metrics[key])
-                    for key in (
-                        "total_return_pct",
-                        "max_drawdown_pct",
-                        "win_rate",
-                        "expectancy",
-                    )
-                    if champion_result.metrics.get(key) is not None
-                    and challenger_result.metrics.get(key) is not None
+            static_gate = _STATIC_UNAVAILABLE.get(champion.strategy_id)
+            if static_gate is not None:
+                challenger_payload = {
+                    "strategy_id": challenger.strategy_id,
+                    "strategy_version": challenger.version,
+                    "status": challenger.status,
+                    "validation_status": challenger.validation_status,
+                    "metrics": None,
+                    "trade_count": 0,
+                    "warning_count": 1,
+                    "warning_sample": [
+                        f"UNAVAILABLE_REQUIRED_DATA:{static_gate}; backtest not run"
+                    ],
                 }
-                metric_delta["trade_count"] = challenger_trades - champion_trades
+                comparison_status = "NOT_EVALUABLE_UNAVAILABLE_REQUIRED_DATA"
+                metric_delta = None
+                telemetry_window = 1
+            else:
+                challenger_result = engine.run(challenger, dataset)
+                challenger_payload = _result_payload(challenger_result)
+                challenger_trades = int(challenger_result.metrics.get("trade_count") or 0)
+                telemetry_window = GATE_TELEMETRY_WINDOW_BARS
+                if challenger_trades == 0:
+                    comparison_status = "NOT_EVALUABLE_NO_CHALLENGER_TRADES"
+                    metric_delta = None
+                elif champion_trades == 0:
+                    comparison_status = "NOT_EVALUABLE_NO_PARENT_TRADES"
+                    metric_delta = None
+                else:
+                    comparison_status = "RESEARCH_COMPARABLE"
+                    metric_delta = {
+                        key: float(challenger_result.metrics[key])
+                        - float(champion_result.metrics[key])
+                        for key in (
+                            "total_return_pct",
+                            "max_drawdown_pct",
+                            "win_rate",
+                            "expectancy",
+                        )
+                        if champion_result.metrics.get(key) is not None
+                        and challenger_result.metrics.get(key) is not None
+                    }
+                    metric_delta["trade_count"] = challenger_trades - champion_trades
+            if static_gate is None and challenger_payload["trade_count"] == 0:
+                comparison_status = "NOT_EVALUABLE_NO_CHALLENGER_TRADES"
             row.update(
                 {
-                    "challenger": _result_payload(challenger_result),
+                    "challenger": challenger_payload,
                     "comparison_status": comparison_status,
                     "metric_delta": metric_delta,
                     "gate_telemetry": _gate_telemetry(
                         challenger.strategy_id,
                         challenger.version,
                         dataset,
+                        window_bars=telemetry_window,
                     ),
                 }
             )
