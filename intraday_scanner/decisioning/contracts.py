@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 
 class ConditionCategory(StrEnum):
@@ -49,8 +50,22 @@ def canonical_json(value: Any) -> str:
     """Serialize JSON without non-finite values or implementation-dependent spacing."""
 
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        _json_ready(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
 
 
 def _reject_nonfinite(value: Any, path: str = "payload") -> None:
@@ -65,6 +80,8 @@ def _reject_nonfinite(value: Any, path: str = "payload") -> None:
 
 
 def _iso_datetime(value: str, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an ISO-8601 datetime")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
@@ -74,6 +91,8 @@ def _iso_datetime(value: str, field_name: str) -> None:
 
 
 def _iso_date(value: str, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an ISO date")
     try:
         date.fromisoformat(value)
     except (TypeError, ValueError) as exc:
@@ -83,7 +102,14 @@ def _iso_date(value: str, field_name: str) -> None:
 def _tuple(value: Any) -> tuple[Any, ...]:
     if value is None:
         return ()
+    if isinstance(value, str):
+        return (value,)
     return tuple(value)
+
+
+def _public_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 @dataclass(frozen=True)
@@ -103,10 +129,15 @@ class ConditionSpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "category", ConditionCategory(self.category))
+        object.__setattr__(self, "required_source_types", _tuple(self.required_source_types))
         if not self.condition_id.strip() or not self.strategy_id.strip():
             raise ValueError("condition_id and strategy_id are required")
         if self.freshness_limit_seconds is not None and self.freshness_limit_seconds < 0:
             raise ValueError("freshness_limit_seconds cannot be negative")
+        if not self.resolver_id.strip() or not self.missing_policy.strip():
+            raise ValueError("resolver_id and missing_policy are required")
+        if not self.policy_version.strip():
+            raise ValueError("policy_version is required")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self) | {"category": getattr(self.category, "value", str(self.category))}
@@ -133,6 +164,13 @@ class ConditionResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", ConditionStatus(self.status))
+        for field_name in (
+            "source_urls",
+            "source_hashes",
+            "contradictions",
+            "unresolved_unknowns",
+        ):
+            object.__setattr__(self, field_name, _tuple(getattr(self, field_name)))
         if not self.condition_id.strip():
             raise ValueError("condition_id is required")
         _reject_nonfinite(asdict(self))
@@ -171,6 +209,16 @@ class EvidenceClaim:
         if not _SYMBOL.fullmatch(symbol):
             raise ValueError("symbol must be a valid uppercase ticker")
         object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "source_urls", _tuple(self.source_urls))
+        object.__setattr__(self, "source_hashes", _tuple(self.source_hashes))
+        if (
+            not self.claim_id.strip()
+            or not self.condition_id.strip()
+            or not self.claim_type.strip()
+        ):
+            raise ValueError("claim identity and type are required")
+        if not self.statement.strip():
+            raise ValueError("evidence claim statement is required")
         _iso_datetime(self.published_at, "published_at")
         if self.effective_at:
             _iso_datetime(self.effective_at, "effective_at")
@@ -178,6 +226,8 @@ class EvidenceClaim:
             raise ValueError("evidence claims require cited source URLs")
         if len(self.source_urls) != len(self.source_hashes):
             raise ValueError("source URL and hash counts must match")
+        if any(not _public_url(url) for url in self.source_urls):
+            raise ValueError("evidence claims require public HTTP(S) URLs")
         if any(not _SHA256.fullmatch(str(item)) for item in self.source_hashes):
             raise ValueError("source_hashes must contain SHA-256 hex digests")
 
@@ -202,13 +252,24 @@ class EvidenceResolutionRun:
     cache_hits: int = 0
     elapsed_ms: int = 0
     status: str = "completed"
+    started_at: str = ""
+    completed_at: str = ""
 
     def __post_init__(self) -> None:
         _iso_date(self.market_date, "market_date")
-        if not self.symbol.strip() or not self.source_identity.strip():
+        symbol = self.symbol.strip().upper()
+        if not _SYMBOL.fullmatch(symbol) or not self.source_identity.strip():
             raise ValueError("symbol and source_identity are required")
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "condition_ids", _tuple(self.condition_ids))
+        if len(self.condition_ids) != len(set(self.condition_ids)):
+            raise ValueError("duplicate condition IDs are not allowed")
         if not self.requested_model.strip() or not self.actual_model.strip():
             raise ValueError("requested and actual model identity are required")
+        if self.started_at:
+            _iso_datetime(self.started_at, "started_at")
+        if self.completed_at:
+            _iso_datetime(self.completed_at, "completed_at")
         if (
             min(self.request_count, self.web_search_call_count, self.cache_hits, self.elapsed_ms)
             < 0
@@ -254,14 +315,32 @@ class StrategyDecisionReceipt:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "pick_tier", PickTier(self.pick_tier))
+        if not self.schema_version.strip():
+            raise ValueError("schema_version is required")
+        if not self.strategy_id.strip() or not self.strategy_version.strip():
+            raise ValueError("strategy identity and version are required")
+        symbol = self.symbol.strip().upper()
+        if not _SYMBOL.fullmatch(symbol):
+            raise ValueError("symbol must be a valid uppercase ticker")
+        object.__setattr__(self, "symbol", symbol)
         _iso_date(self.market_date, "market_date")
         _iso_datetime(self.decision_at, "decision_at")
         if not self.code_sha.strip() or not self.source_identity.strip():
             raise ValueError("code_sha and source_identity are required")
+        if not isinstance(self.condition_results, tuple):
+            object.__setattr__(self, "condition_results", tuple(self.condition_results))
+        if any(not isinstance(item, ConditionResult) for item in self.condition_results):
+            raise ValueError("condition_results must contain typed ConditionResult values")
+        for field_name in ("all_blocking_failures", "disclosed_gaps"):
+            object.__setattr__(self, field_name, _tuple(getattr(self, field_name)))
         if not _SHA256.fullmatch(self.input_hash_sha256):
             raise ValueError("input_hash_sha256 must be a SHA-256 hex digest")
         if self.broker_execution_enabled:
             raise ValueError("broker execution must remain disabled")
+        if not self.research_only:
+            raise ValueError("strategy decision receipts must remain research-only")
+        if self.paper_entry_eligible and not self.research_pick_eligible:
+            raise ValueError("paper entry cannot be eligible when research pick is not eligible")
         _reject_nonfinite(self.to_dict(include_hash=False))
         ids = [item.condition_id for item in self.condition_results]
         if len(ids) != len(set(ids)):

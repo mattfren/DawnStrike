@@ -245,7 +245,7 @@ _STRATEGY_CONDITIONS: dict[str, tuple[tuple[str, ConditionCategory, str, bool, b
             ConditionCategory.ADVISORY,
             "Daily OHLC is explicitly a proxy for intraday structure",
             False,
-            False,
+            True,
         ),
         ("gap_quality", ConditionCategory.STRATEGY_CORE, "Gap quality passes", True, True),
         ("participation", ConditionCategory.STRATEGY_CORE, "Participation passes", True, True),
@@ -356,6 +356,38 @@ def _spec(
     resolver = (
         "strategy_gap_resolver" if category == ConditionCategory.AI_RESOLVABLE else "deterministic"
     )
+    source_types: tuple[str, ...]
+    if category in {
+        ConditionCategory.HARD_MARKET,
+        ConditionCategory.HARD_RISK,
+        ConditionCategory.STRATEGY_CORE,
+    }:
+        source_types = ("market_feed",)
+    elif category == ConditionCategory.EXECUTION_ONLY:
+        source_types = ("execution_provider",)
+    elif category == ConditionCategory.ADVISORY:
+        source_types = ("public_source",)
+    else:
+        source_types = ("sec", "issuer_ir", "regulatory_notice", "attributable_wire")
+    if condition_id == "reward_risk_at_least_1_50":
+        threshold_contract = {"operator": ">=", "minimum_reward_risk": 1.50}
+    else:
+        threshold_contract = {"policy": "existing"}
+    if category == ConditionCategory.HARD_RISK:
+        missing_policy = "BLOCKED_SAFETY"
+    elif category in {
+        ConditionCategory.HARD_MARKET,
+        ConditionCategory.STRATEGY_CORE,
+    }:
+        missing_policy = "BLOCKED_DATA"
+    elif category == ConditionCategory.EXECUTION_ONLY:
+        missing_policy = "CONDITIONAL_PICK"
+    elif research:
+        missing_policy = "BLOCKED_DATA"
+    elif paper:
+        missing_policy = "CONDITIONAL_PICK"
+    else:
+        missing_policy = "PICK_WITH_DISCLOSED_GAPS"
     return ConditionSpec(
         condition_id=condition_id,
         strategy_id=strategy_id,
@@ -366,19 +398,10 @@ def _spec(
         freshness_limit_seconds=86_400
         if category in {ConditionCategory.AI_RESOLVABLE, ConditionCategory.ADVISORY}
         else 300,
-        required_source_types=("market_feed",)
-        if category
-        in {
-            ConditionCategory.HARD_MARKET,
-            ConditionCategory.HARD_RISK,
-            ConditionCategory.STRATEGY_CORE,
-        }
-        else ("sec", "issuer_ir", "regulatory_notice"),
+        required_source_types=source_types,
         resolver_id=resolver,
-        threshold_contract={"policy": "existing"},
-        missing_policy="BLOCKED_SAFETY"
-        if category == ConditionCategory.HARD_RISK
-        else "BLOCKED_DATA",
+        threshold_contract=threshold_contract,
+        missing_policy=missing_policy,
     )
 
 

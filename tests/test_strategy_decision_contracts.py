@@ -73,3 +73,22 @@ def test_duplicate_condition_ids_are_rejected() -> None:
 def test_non_finite_condition_values_are_rejected() -> None:
     with pytest.raises(ValueError, match="non-finite"):
         ConditionResult("x", ConditionStatus.PASS, observed_value=float("nan"))
+
+
+def test_tampered_receipt_hash_is_rejected() -> None:
+    receipt = _receipt()
+    with pytest.raises(ValueError, match="receipt_hash_sha256"):
+        replace(receipt, receipt_hash_sha256="0" * 64)
+
+
+def test_receipts_cannot_leave_research_only_or_paper_entry_boundaries() -> None:
+    receipt = _receipt()
+    with pytest.raises(ValueError, match="research-only"):
+        replace(receipt, research_only=False, receipt_hash_sha256="")
+    with pytest.raises(ValueError, match="paper entry"):
+        replace(
+            receipt,
+            research_pick_eligible=False,
+            paper_entry_eligible=True,
+            receipt_hash_sha256="",
+        )
