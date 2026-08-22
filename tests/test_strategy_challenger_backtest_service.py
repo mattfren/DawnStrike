@@ -27,6 +27,7 @@ def test_all_strategies_and_challengers_are_compared_research_only() -> None:
     assert report["broker_execution_enabled"] is False
     assert report["missing_outcomes_are_zero"] is False
     assert report["evidence_boundary"] == "latest_snapshot_retrospective_not_forward"
+    assert report["gate_telemetry_boundary"] == "latest_60_bars_per_symbol"
     assert len(report["report_sha256"]) == 64
 
     by_id = {row["strategy_id"]: row for row in report["strategies"]}

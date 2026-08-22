@@ -528,14 +528,18 @@ def _candidate_signal(
     index: int,
 ) -> StrategySignal | None:
     point_in_time = _point_in_time_dataset(dataset, index)
-    signal = champion.signal(point_in_time, symbol, bars[: index + 1], index)
+    # The audited catalog indicators are index-addressed rolling calculations;
+    # reusing the stable bar tuple lets their feature cache work without
+    # changing the value at ``index``. Cross-sectional inputs still receive a
+    # prefix-only dataset, and the future-mutation tests enforce this boundary.
+    signal = champion.signal(point_in_time, symbol, bars, index)
     if signal is None:
         return None
     evaluation = evaluate_challenger_gates(
         candidate.strategy_id,
         point_in_time,
         symbol,
-        bars[: index + 1],
+        bars,
         index,
         candidate_version=candidate.version,
     )

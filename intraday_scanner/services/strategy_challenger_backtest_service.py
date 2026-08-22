@@ -19,6 +19,7 @@ from intraday_scanner.v2.strategies import (
 )
 
 SCHEMA_VERSION = "dawnstrike.strategy_challenger_backtest.v1"
+GATE_TELEMETRY_WINDOW_BARS = 60
 
 
 def _canonical_json(value: Any) -> str:
@@ -54,7 +55,8 @@ def _gate_telemetry(
     evaluated = 0
     for symbol in dataset.symbols:
         bars = dataset.bars_by_symbol[symbol]
-        for index in range(len(bars)):
+        start_index = max(0, len(bars) - GATE_TELEMETRY_WINDOW_BARS)
+        for index in range(start_index, len(bars)):
             evaluation = evaluate_challenger_gates(
                 strategy_id,
                 dataset,
@@ -72,6 +74,7 @@ def _gate_telemetry(
             if evaluation.first_failure is not None:
                 first_failures[evaluation.first_failure.name] += 1
     return {
+        "window_bars_per_symbol": GATE_TELEMETRY_WINDOW_BARS,
         "evaluated_strategy_symbol_timestamps": evaluated,
         "eligible_count": eligible,
         "ineligible_count": evaluated - eligible,
@@ -163,6 +166,7 @@ def build_strategy_challenger_backtest_report(
         "broker_execution_enabled": False,
         "missing_outcomes_are_zero": False,
         "evidence_boundary": "latest_snapshot_retrospective_not_forward",
+        "gate_telemetry_boundary": "latest_60_bars_per_symbol",
     }
     report["report_sha256"] = _sha256(report)
     return report
@@ -209,6 +213,7 @@ def run_strategy_challenger_backtest(
 
 __all__ = [
     "SCHEMA_VERSION",
+    "GATE_TELEMETRY_WINDOW_BARS",
     "build_strategy_challenger_backtest_report",
     "run_strategy_challenger_backtest",
 ]
