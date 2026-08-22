@@ -167,9 +167,7 @@ class AttributionReportAnalyzer:
                     else 0
                 )
                 hypotheses = summary.get("remediation_hypotheses", ())
-                if not isinstance(hypotheses, Sequence) or isinstance(
-                    hypotheses, (str, bytes)
-                ):
+                if not isinstance(hypotheses, Sequence) or isinstance(hypotheses, (str, bytes)):
                     continue
                 for hypothesis in hypotheses:
                     if not isinstance(hypothesis, Mapping):
@@ -190,9 +188,7 @@ class AttributionReportAnalyzer:
                             "evidence_hashes": [],
                         },
                     )
-                    current["supporting_miss_count"] += int(
-                        hypothesis.get("trigger_count") or 0
-                    )
+                    current["supporting_miss_count"] += int(hypothesis.get("trigger_count") or 0)
                     current["eligible_sample_count"] += eligible_count
                     cohort = summary.get("cohort")
                     if cohort and cohort not in current["evidence_cohorts"]:
@@ -335,6 +331,7 @@ def run_daily_strategy_learning(
     out_dir: str | Path,
     source_hash_sha256: str | None = None,
     analyzer: StrategyEvidenceAnalyzer | None = None,
+    decision_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Inventory the catalog and write one immutable research-only daily run."""
 
@@ -369,6 +366,8 @@ def run_daily_strategy_learning(
         )
         proposals.extend(strategy_proposals)
 
+    receipt_learning = _aggregate_decision_receipts(decision_receipts or ())
+
     immutable_identity = {
         "schema_version": DAILY_LEARNING_SCHEMA,
         "market_date": context.market_date,
@@ -385,6 +384,7 @@ def run_daily_strategy_learning(
             for item in inventory
         ],
         "evidence_hash_sha256": _sha256(strategy_evidence),
+        "decision_receipt_hash_sha256": _sha256(receipt_learning),
     }
     run_id = "dslearn-" + _sha256(immutable_identity)[:24]
     root = Path(out_dir) / context.market_date
@@ -407,6 +407,7 @@ def run_daily_strategy_learning(
         "strategy_count": len(inventory),
         "catalog": inventory,
         "strategy_evidence": strategy_evidence,
+        "decision_receipt_learning": receipt_learning,
         "proposal_count": len(proposals),
         "artifacts": {
             "remediation_proposals": str(root / "remediation_proposals.json"),
@@ -440,6 +441,7 @@ def run_daily_strategy_learning(
         "daily_fit_performed": False,
         "automatic_promotion": False,
         "broker_execution_enabled": False,
+        "decision_receipt_learning": receipt_learning,
     }
 
 
@@ -453,3 +455,37 @@ __all__ = [
     "StrategyEvidenceAnalyzer",
     "run_daily_strategy_learning",
 ]
+
+
+def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize receipt conditions without changing any policy automatically."""
+
+    by_condition: dict[str, dict[str, Any]] = {}
+    tier_counts: dict[str, int] = {}
+    for receipt in receipts:
+        tier = str(receipt.get("pick_tier") or "UNKNOWN")
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        for raw in receipt.get("condition_results") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            condition_id = str(raw.get("condition_id") or "")
+            if not condition_id:
+                continue
+            row = by_condition.setdefault(
+                condition_id,
+                {"condition_id": condition_id, "status_counts": {}, "receipt_count": 0},
+            )
+            status = str(raw.get("status") or "UNKNOWN")
+            counts = row["status_counts"]
+            counts[status] = int(counts.get(status, 0)) + 1
+            row["receipt_count"] += 1
+    return {
+        "receipt_count": len(receipts),
+        "tier_counts": tier_counts,
+        "conditions": [by_condition[key] for key in sorted(by_condition)],
+        "research_only": True,
+        "automatic_policy_change": False,
+        "automatic_promotion": False,
+        "broker_execution_enabled": False,
+        "missing_outcomes_are_zero": False,
+    }
