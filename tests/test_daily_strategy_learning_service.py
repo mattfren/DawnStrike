@@ -166,3 +166,277 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
     }
     assert all(row["state"] == "closed" for row in evidence["outcomes"])
     assert result["proposal_count"] >= 2
+
+
+def _decision_condition(condition_id: str, status: str, **fields: object) -> dict[str, object]:
+    return {"condition_id": condition_id, "status": status, **fields}
+
+
+def _decision_receipt(
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    pick_tier: str,
+    research_pick_eligible: bool,
+    paper_entry_eligible: bool,
+    outcome_state: str,
+    condition_results: list[dict[str, object]],
+    all_blocking_failures: tuple[str, ...] = (),
+    disclosed_gaps: tuple[str, ...] = (),
+    contradicted_claims: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "pick_tier": pick_tier,
+        "research_pick_eligible": research_pick_eligible,
+        "paper_entry_eligible": paper_entry_eligible,
+        "outcome_state": outcome_state,
+        "condition_results": condition_results,
+        "all_blocking_failures": list(all_blocking_failures),
+        "disclosed_gaps": list(disclosed_gaps),
+        "contradicted_claims": contradicted_claims or [],
+    }
+
+
+def test_daily_learning_aggregates_decision_receipts_without_self_modification(
+    tmp_path: Path,
+) -> None:
+    receipts = [
+        _decision_receipt(
+            strategy_id="ts_momentum_sma_atr",
+            strategy_version="v1.0",
+            pick_tier="QUALIFIED_PICK",
+            research_pick_eligible=True,
+            paper_entry_eligible=True,
+            outcome_state="WIN",
+            condition_results=[
+                _decision_condition(
+                    "offering_or_dilution",
+                    "RESOLVED_FROM_SOURCE",
+                    resolver_id="strategy_gap_resolver",
+                ),
+                _decision_condition("trend_regime", "PASS"),
+            ],
+            contradicted_claims=[
+                {"condition_id": "offering_or_dilution", "authoritative": True}
+            ],
+        ),
+        _decision_receipt(
+            strategy_id="ts_momentum_sma_atr",
+            strategy_version="v1.0",
+            pick_tier="PICK_WITH_DISCLOSED_GAPS",
+            research_pick_eligible=True,
+            paper_entry_eligible=False,
+            outcome_state="LOSS",
+            condition_results=[_decision_condition("catalyst_identified", "MISSING_DISCLOSED")],
+            disclosed_gaps=("catalyst_identified",),
+        ),
+        _decision_receipt(
+            strategy_id="ts_momentum_sma_atr",
+            strategy_version="v1.0",
+            pick_tier="BLOCKED_DATA",
+            research_pick_eligible=False,
+            paper_entry_eligible=False,
+            outcome_state="WIN",
+            condition_results=[_decision_condition("point_in_time_ohlcv", "FAIL")],
+            all_blocking_failures=("point_in_time_ohlcv",),
+        ),
+        _decision_receipt(
+            strategy_id="ts_momentum_sma_atr",
+            strategy_version="v1.1",
+            pick_tier="CONDITIONAL_PICK",
+            research_pick_eligible=True,
+            paper_entry_eligible=False,
+            outcome_state="LOSS",
+            condition_results=[
+                _decision_condition("borrow_or_locate_verified", "MISSING_DISCLOSED")
+            ],
+            disclosed_gaps=("borrow_or_locate_verified",),
+        ),
+        _decision_receipt(
+            strategy_id="ts_momentum_sma_atr",
+            strategy_version="v1.0",
+            pick_tier="BLOCKED_DATA",
+            research_pick_eligible=False,
+            paper_entry_eligible=False,
+            outcome_state="MISSING_OUTCOME",
+            condition_results=[_decision_condition("point_in_time_ohlcv", "FAIL")],
+            all_blocking_failures=("point_in_time_ohlcv",),
+        ),
+        _decision_receipt(
+            strategy_id="cross_sectional_relative_strength",
+            strategy_version="v1.0",
+            pick_tier="BLOCKED_SAFETY",
+            research_pick_eligible=False,
+            paper_entry_eligible=False,
+            outcome_state="WIN",
+            condition_results=[_decision_condition("reward_risk_at_least_1_50", "FAIL")],
+            all_blocking_failures=("reward_risk_at_least_1_50",),
+        ),
+        _decision_receipt(
+            strategy_id="gap_up_continuation",
+            strategy_version="v1.0",
+            pick_tier="CONDITIONAL_PICK",
+            research_pick_eligible=True,
+            paper_entry_eligible=False,
+            outcome_state="WIN",
+            condition_results=[_decision_condition("corporate_action_basis", "MISSING_DISCLOSED")],
+            disclosed_gaps=("corporate_action_basis",),
+        ),
+    ]
+
+    result = run_daily_strategy_learning(
+        market_date="2026-08-22",
+        cutoff="2026-08-22T22:00:00+00:00",
+        source_identity="fixture-decision-receipts:2026-08-22",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        decision_receipts=receipts,
+    )
+    artifact = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    learning = artifact["decision_receipt_learning"]
+
+    assert learning["receipt_count"] == 7
+    assert learning["tier_counts"] == {
+        "BLOCKED_DATA": 2,
+        "BLOCKED_SAFETY": 1,
+        "CONDITIONAL_PICK": 2,
+        "PICK_WITH_DISCLOSED_GAPS": 1,
+        "QUALIFIED_PICK": 1,
+    }
+    assert learning["outcome_state_counts"] == {
+        "LOSS": 2,
+        "MISSING_OUTCOME": 1,
+        "WIN": 4,
+    }
+
+    strategies = {
+        (row["strategy_id"], row["strategy_version"]): row
+        for row in learning["strategies"]
+    }
+    assert strategies[("ts_momentum_sma_atr", "v1.0")] == {
+        "strategy_id": "ts_momentum_sma_atr",
+        "strategy_version": "v1.0",
+        "receipt_count": 4,
+        "tier_counts": {
+            "BLOCKED_DATA": 2,
+            "PICK_WITH_DISCLOSED_GAPS": 1,
+            "QUALIFIED_PICK": 1,
+        },
+        "outcome_state_counts": {"LOSS": 1, "MISSING_OUTCOME": 1, "WIN": 2},
+        "research_pick_eligible_count": 2,
+        "paper_entry_eligible_count": 1,
+    }
+    assert strategies[("ts_momentum_sma_atr", "v1.1")]["receipt_count"] == 1
+
+    observations = {
+        (
+            row["strategy_id"],
+            row["strategy_version"],
+            row["condition_id"],
+            row["condition_status"],
+            row["pick_tier"],
+            row["research_pick_eligible"],
+            row["paper_entry_eligible"],
+            row["outcome_state"],
+        ): row
+        for row in learning["condition_observations"]
+    }
+    assert observations[
+        (
+            "ts_momentum_sma_atr",
+            "v1.0",
+            "offering_or_dilution",
+            "RESOLVED_FROM_SOURCE",
+            "QUALIFIED_PICK",
+            True,
+            True,
+            "WIN",
+        )
+    ]["ai_resolved_count"] == 1
+    assert observations[
+        (
+            "ts_momentum_sma_atr",
+            "v1.0",
+            "catalyst_identified",
+            "MISSING_DISCLOSED",
+            "PICK_WITH_DISCLOSED_GAPS",
+            True,
+            False,
+            "LOSS",
+        )
+    ]["disclosed_gap_count"] == 1
+
+    assert learning["conditions_most_frequently_blocking"][0] == {
+        "strategy_id": "ts_momentum_sma_atr",
+        "strategy_version": "v1.0",
+        "condition_id": "point_in_time_ohlcv",
+        "blocking_candidate_count": 2,
+    }
+    assert {
+        (
+            row["strategy_id"],
+            row["strategy_version"],
+            row["condition_id"],
+            row["blocking_candidate_count"],
+        )
+        for row in learning["conditions_most_frequently_blocking"]
+    } == {
+        ("ts_momentum_sma_atr", "v1.0", "point_in_time_ohlcv", 2),
+        ("cross_sectional_relative_strength", "v1.0", "reward_risk_at_least_1_50", 1),
+    }
+
+    assert learning["ai_resolvable_gaps_successfully_resolved"] == [
+        {
+            "strategy_id": "ts_momentum_sma_atr",
+            "strategy_version": "v1.0",
+            "condition_id": "offering_or_dilution",
+            "resolved_count": 1,
+        }
+    ]
+    assert {
+        (row["condition_id"], row["outcome_state"], row["count"])
+        for row in learning["disclosed_gap_outcomes"]
+    } == {
+        ("borrow_or_locate_verified", "LOSS", 1),
+        ("catalyst_identified", "LOSS", 1),
+        ("corporate_action_basis", "WIN", 1),
+    }
+    assert {
+        (row["condition_id"], row["eventual_winner_count"])
+        for row in learning["conditions_that_excluded_eventual_winners"]
+    } == {
+        ("point_in_time_ohlcv", 1),
+        ("reward_risk_at_least_1_50", 1),
+    }
+    assert learning["ai_claims_later_contradicted"] == [
+        {
+            "strategy_id": "ts_momentum_sma_atr",
+            "strategy_version": "v1.0",
+            "condition_id": "offering_or_dilution",
+            "authoritative_contradiction_count": 1,
+        }
+    ]
+
+    safety_flags = (
+        "research_only",
+        "automatic_policy_change",
+        "automatic_promotion",
+        "broker_execution_enabled",
+        "missing_outcomes_are_zero",
+    )
+    assert {flag: learning[flag] for flag in safety_flags} == {
+        "research_only": True,
+        "automatic_policy_change": False,
+        "automatic_promotion": False,
+        "broker_execution_enabled": False,
+        "missing_outcomes_are_zero": False,
+    }
+    assert {flag: artifact[flag] for flag in safety_flags} == {
+        "research_only": True,
+        "automatic_policy_change": False,
+        "automatic_promotion": False,
+        "broker_execution_enabled": False,
+        "missing_outcomes_are_zero": False,
+    }

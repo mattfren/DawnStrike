@@ -31,6 +31,9 @@ PASSING_EVIDENCE_STATUSES = frozenset({"CLEAR", "VERIFIED", "OK", "PASS"})
 ALERTABLE_EDGE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
 ALERTABLE_SETUP_GRADES = frozenset({"A", "B"})
 ALERTABLE_CONFIDENCE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
+RECEIPT_ALERTABLE_TIERS = frozenset(
+    {"QUALIFIED_PICK", "PICK_WITH_DISCLOSED_GAPS", "CONDITIONAL_PICK"}
+)
 
 
 def apply_alert_gates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -98,6 +101,7 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
     edge_reasons: list[str] = []
     missing: list[str] = []
     warnings: list[str] = []
+    receipt_state = _strategy_receipt_gate_state(row)
 
     ticker = str(row.get("ticker") or "").upper().strip()
     risk_text = _combined_text(
@@ -248,6 +252,8 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         ):
             edge_reasons.append("historical first-touch win rate is too low")
 
+    reasons.extend(receipt_state["blocking_reasons"])
+
     public_warnings = _unique([*missing, *warnings])
     if reasons:
         status = BLOCKED
@@ -281,6 +287,14 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         "official_paper_eligible": False,
         "public_data_warning": "; ".join(public_warnings),
         "data_quality_label": _data_quality_label(grade),
+        "strategy_receipt_tier": receipt_state["tier"],
+        "strategy_receipt_research_pick_eligible": receipt_state["research_eligible"],
+        "strategy_receipt_paper_entry_eligible": receipt_state["paper_eligible"],
+        "strategy_receipt_entry_confirmation_required": (
+            receipt_state["entry_confirmation_required"]
+        ),
+        "strategy_receipt_disagreement": receipt_state["disagreements"],
+        "strategy_receipt_gate_blocked": receipt_state["blocked"],
     }
 
 
@@ -425,6 +439,88 @@ def _optional_float(value: Any) -> float | None:
 
 def _valid_ticker(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,4}", value or ""))
+
+
+def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
+    """Expose receipt policy to the alert gate without weakening legacy gates."""
+
+    if not _truthy(row.get("strategy_receipt_enabled")):
+        return {
+            "blocked": False,
+            "tier": "",
+            "research_eligible": None,
+            "paper_eligible": None,
+            "entry_confirmation_required": False,
+            "disagreements": [],
+            "blocking_reasons": [],
+        }
+
+    tier = str(row.get("strategy_receipt_tier") or row.get("pick_tier") or "").upper()
+    research_eligible = _bool_or_none(
+        row.get("strategy_receipt_research_pick_eligible")
+    )
+    paper_eligible = _bool_or_none(row.get("strategy_receipt_paper_entry_eligible"))
+    shadow_only = _truthy(row.get("strategy_receipt_shadow_only"))
+    disagreements = _unique(
+        [
+            *_tokens(row.get("strategy_receipt_disagreement")),
+        ]
+    )
+    blocking_reasons: list[str] = []
+    receipt_id = str(row.get("receipt_id") or "").strip()
+    construction_status = str(
+        row.get("strategy_receipt_construction_status") or ""
+    ).upper()
+    if not receipt_id or construction_status != "COMPLETE":
+        _append_unique(disagreements, "strategy_receipt_construction_failed")
+        if not shadow_only:
+            blocking_reasons.append("strategy decision receipt unavailable")
+    elif research_eligible is not True:
+        _append_unique(disagreements, "strategy_receipt_research_ineligible")
+        if not shadow_only:
+            blocking_reasons.append("strategy decision receipt is not research eligible")
+    elif tier not in RECEIPT_ALERTABLE_TIERS:
+        _append_unique(disagreements, "strategy_receipt_tier_not_alertable")
+        if not shadow_only:
+            blocking_reasons.append("strategy decision receipt tier is not alertable")
+
+    legacy_can_alert = _bool_or_none(row.get("strategy_receipt_legacy_can_alert"))
+    if (
+        legacy_can_alert is not None
+        and research_eligible is not None
+        and legacy_can_alert != research_eligible
+    ):
+        _append_unique(disagreements, "legacy_vs_receipt_alert_disposition")
+
+    return {
+        "blocked": bool(blocking_reasons),
+        "tier": tier,
+        "research_eligible": research_eligible,
+        "paper_eligible": paper_eligible,
+        "entry_confirmation_required": bool(research_eligible and not paper_eligible),
+        "disagreements": disagreements,
+        "blocking_reasons": blocking_reasons,
+    }
+
+
+def _append_unique(target: list[str], value: str) -> None:
+    if value not in target:
+        target.append(value)
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in {None, ""}:
+        return None
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "y", "1"}:
+        return True
+    if normalized in {"false", "no", "n", "0"}:
+        return False
+    return None
 
 
 def _unique(items: list[str]) -> list[str]:

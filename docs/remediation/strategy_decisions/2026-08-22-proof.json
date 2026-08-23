@@ -1,0 +1,234 @@
+{
+  "schema_version": "dawnstrike.strategy_decision_proof.v1",
+  "branch": "codex/luna-strategy-decisions-20260822",
+  "base_branch": "codex/strategy-learning-remediation-20260821",
+  "base_sha": "b479245708d3e679d39\u003887425aae4996b3dad7db",
+  "audit_snapshots": {
+    "implementation": {
+      "commit_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+      "tree_sha": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
+      "role": "Final source-code integration commit; the next commit contains only detect-secrets allowlist annotations in mocked tests."
+    },
+    "branch_head_at_audit": {
+      "commit_sha": "1d813fc02f971e30d536dc3dc\u003836b2435bfde51b",
+      "tree_sha": "23e43f40dc6ea267e0ee1ef\u0038c0b1c3d1ec853007",
+      "role": "Clean local proof-parent after the mocked-fixture scanner annotations; the containing documentation commit is intentionally not self-referenced."
+    },
+    "proof_parent": {
+      "commit_sha": "1d813fc02f971e30d536dc3dc\u003836b2435bfde51b",
+      "tree_sha": "23e43f40dc6ea267e0ee1ef\u0038c0b1c3d1ec853007"
+    },
+    "proof_commit": {
+      "commit_sha": null,
+      "tree_sha": null,
+      "sha_policy": "Intentionally null: embedding the containing commit SHA would create an impossible self-referential claim. The committed proof SHA is returned by the lane handoff."
+    }
+  },
+  "stacked_pr": {
+    "number": 42,
+    "base": "codex/strategy-learning-remediation-20260821",
+    "head": "codex/luna-strategy-decisions-20260822",
+    "url": "https://github.com/mattfren/DawnStrike/pull/42",
+    "state_at_audit": "OPEN",
+    "is_draft": false,
+    "head_sha_at_audit": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+    "head_tree_sha_at_audit": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
+    "merge_commit": null,
+    "merged_at": null
+  },
+  "changed_files_by_phase": {
+    "contracts_and_registry": [
+      "intraday_scanner/decisioning/__init__.py",
+      "intraday_scanner/decisioning/contracts.py",
+      "intraday_scanner/decisioning/condition_registry.py",
+      "intraday_scanner/decisioning/policy.py",
+      "intraday_scanner/services/strategy_decision_service.py"
+    ],
+    "resolver_and_persistence": [
+      "intraday_scanner/decisioning/evidence_resolver.py",
+      "intraday_scanner/ai/strategy_gap_resolver.py",
+      "intraday_scanner/storage/migrations.py",
+      "intraday_scanner/storage/sqlite_store.py"
+    ],
+    "integration_and_operator": [
+      "intraday_scanner/config.py",
+      "intraday_scanner/services/alpha_cycle_service.py",
+      "intraday_scanner/alpha/alert_gate.py",
+      "intraday_scanner/alpha/risk_governor.py",
+      "intraday_scanner/notifiers/telegram_formatter.py"
+    ],
+    "learning_and_tests": [
+      "intraday_scanner/services/daily_strategy_learning_service.py",
+      "tests/test_strategy_decision_contracts.py",
+      "tests/test_strategy_condition_registry.py",
+      "tests/test_strategy_gap_resolver.py",
+      "tests/test_strategy_decision_service.py",
+      "tests/test_alpha_strategy_decision_integration.py",
+      "tests/test_daily_strategy_learning_service.py",
+      "tests/test_telegram_strategy_decision_receipt.py"
+    ],
+    "documentation_and_proof": [
+      "docs/remediation/strategy_decisions/2026-08-22-implementation.md",
+      "docs/remediation/strategy_decisions/2026-08-22-proof.json"
+    ]
+  },
+  "changed_files_audit": {
+    "diff_base": "b479245708d3e679d39\u003887425aae4996b3dad7db",
+    "allowlist_only": true,
+    "proof_repair_scope": "documentation_and_proof_only_after_mocked-test scanner annotations"
+  },
+  "condition_registry": {
+    "strategy_count": 9,
+    "strategies": [
+      "ts_momentum_sma_atr",
+      "donchian_breakout_20_10",
+      "cross_sectional_relative_strength",
+      "pullback_reclaim_uptrend",
+      "volatility_contraction_breakout",
+      "failed_breakout_reversal_short",
+      "bullish_fvg_continuation",
+      "gap_up_continuation",
+      "gap_up_continuation_atr"
+    ],
+    "common_hard_market": [
+      "valid_symbol",
+      "point_in_time_ohlcv",
+      "positive_current_price",
+      "positive_current_volume",
+      "source_identity_present",
+      "source_fresh",
+      "no_market_source_conflict"
+    ],
+    "common_hard_risk": [
+      "not_currently_halted",
+      "valid_entry_reference",
+      "valid_stop_geometry",
+      "valid_target_when_required",
+      "reward_risk_at_least_1_50",
+      "within_risk_budget",
+      "spread_within_existing_policy"
+    ]
+  },
+  "sanitized_fixtures": [
+    {
+      "tier": "QUALIFIED_PICK",
+      "fixture_only": true,
+      "all_blocking_conditions": "PASS",
+      "reward_risk": 2.0
+    },
+    {
+      "tier": "PICK_WITH_DISCLOSED_GAPS",
+      "fixture_only": true,
+      "missing": ["catalyst_identified"]
+    },
+    {
+      "tier": "CONDITIONAL_PICK",
+      "fixture_only": true,
+      "missing": ["borrow_or_locate_verified"]
+    },
+    {
+      "tier": "BLOCKED_SAFETY",
+      "fixture_only": true,
+      "failed": ["not_currently_halted"]
+    },
+    {
+      "tier": "BLOCKED_DATA",
+      "fixture_only": true,
+      "missing": ["point_in_time_ohlcv"]
+    }
+  ],
+  "verification": {
+    "local": {
+      "focused_strategy_tests": {
+        "command": "py -3 -m pytest -q tests/test_strategy_decision_contracts.py tests/test_strategy_condition_registry.py tests/test_strategy_gap_resolver.py tests/test_strategy_decision_service.py tests/test_alpha_strategy_decision_integration.py tests/test_telegram_strategy_decision_receipt.py tests/test_v2_strategy_challengers.py tests/test_indeterminate_researcher.py tests/test_indeterminate_research_service.py tests/test_daily_strategy_learning_service.py",
+        "result": "PASS",
+        "observed": "63 passed"
+      },
+      "ruff": {
+        "command": "py -3 -m ruff check .",
+        "result": "PASS"
+      },
+      "mypy": {
+        "command": "py -3 -m mypy intraday_scanner",
+        "result": "PASS"
+      },
+      "compileall": {
+        "command": "py -3 -m compileall -q intraday_scanner scripts",
+        "result": "PASS"
+      },
+      "javascript_syntax": {
+        "command": "node --check web/assets/dawnstrike.js",
+        "result": "PASS"
+      },
+      "bandit": {
+        "command": "py -3 -m bandit -r intraday_scanner scripts -ll -b config/security/bandit-baseline.json",
+        "result": "PASS: zero new medium/high findings"
+      },
+      "json_parse": {
+        "command": "ConvertFrom-Json 2026-08-22-proof.json",
+        "result": "PASS"
+      },
+      "detect_secrets_tracked": {
+        "command": "py -3 scripts/run_detect_secrets_tracked.py --baseline .secrets.baseline",
+        "result": "PASS: zero findings after two mocked credential fixtures were explicitly allowlisted"
+      },
+      "git_diff_check": {
+        "command": "git diff --check",
+        "result": "PASS"
+      },
+      "full_suite": {
+        "command": "py -3 -m pytest -q",
+        "result": "PASS",
+        "observed": "100 percent, exit code 0; 3262 tests collected",
+        "duration": "approximately 3 hours 50 minutes"
+      },
+      "worktree_before_proof_refresh": "CLEAN"
+    },
+    "exact_sha_ci": {
+      "result": "IMPLEMENTATION_TEST_SHARDS_PASS_SCANNER_FIX_PENDING_FINAL_PUSH",
+      "scope_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+      "scope_tree_sha": "bd03fbd8a1f023af142f\u0038a6fe2c74b9f4dccff68",
+      "note": "All 16 pytest shards passed at this implementation SHA. The Windows job rejected two mocked fixture literals; commit 1d813fc0 adds only standard false-positive annotations and the tracked scanner passes locally. Final containing-commit CI is reported by the handoff because this file cannot self-reference future run IDs.",
+      "push_run": {
+        "id": 32596808403,
+        "head_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE: mocked-fixture secret false positive only; all pytest shards passed",
+        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32596808403"
+      },
+      "pull_request_run": {
+        "id": 32596810590,
+        "head_sha": "002cf95b622bf5dbe5d4\u0038ba3a34537a36b823196",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE: mocked-fixture secret false positive only; all pytest shards passed",
+        "url": "https://github.com/mattfren/DawnStrike/actions/runs/32596810590"
+      },
+      "checks": {
+        "pytest_shards": "16/16 PASS",
+        "python_and_public_contracts": "PASS",
+        "dependency_static_and_sbom": "PASS",
+        "windows_schedule_parse": "PASS",
+        "tracked_credential_scan": "FAIL at implementation SHA; fixed locally in proof parent and awaiting final exact-SHA run"
+      }
+    }
+  },
+  "resource_controls": {
+    "max_symbols": "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS",
+    "max_tool_calls": "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS",
+    "timeout_seconds": "DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS",
+    "store": false,
+    "max_retries": 0,
+    "network_in_unit_tests": false,
+    "observed_test_provider_requests": 0,
+    "observed_test_token_cost": "none",
+    "live_provider_latency": "not measured; provider calls were mocked"
+  },
+  "research_only": true,
+  "automatic_policy_change": false,
+  "automatic_promotion": false,
+  "broker_execution_enabled": false,
+  "missing_outcomes_are_zero": false,
+  "production_deployed": false,
+  "runtime_state_mutated": false,
+  "pr_merged": false
+}

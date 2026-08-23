@@ -102,6 +102,9 @@ class ScannerConfig:
     indeterminate_research_max_symbols: int = 12
     indeterminate_research_timeout_seconds: float = 60.0
     indeterminate_research_max_tool_calls: int = 3
+    strategy_evidence_enabled: bool = False
+    strategy_evidence_shadow_only: bool = True
+    strategy_evidence_max_candidates: int = 12
     alpaca_api_key_id: str = ""
     alpaca_api_secret_key: str = ""
     alpaca_data_feed: str = "iex"
@@ -185,17 +188,15 @@ class ScannerConfig:
         if not 1 <= self.scenario_news_symbol_batch_size <= 50:
             raise ConfigError("DAWNSTRIKE_SCENARIO_NEWS_SYMBOL_BATCH_SIZE must be 1 through 50")
         if not 1 <= self.indeterminate_research_max_symbols <= 20:
-            raise ConfigError(
-                "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS must be 1 through 20"
-            )
+            raise ConfigError("DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_SYMBOLS must be 1 through 20")
         if self.indeterminate_research_timeout_seconds <= 0:
-            raise ConfigError(
-                "DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS must be positive"
-            )
+            raise ConfigError("DAWNSTRIKE_INDETERMINATE_RESEARCH_TIMEOUT_SECONDS must be positive")
         if not 1 <= self.indeterminate_research_max_tool_calls <= 10:
             raise ConfigError(
                 "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS must be 1 through 10"
             )
+        if self.strategy_evidence_max_candidates < 1:
+            raise ConfigError("DAWNSTRIKE_STRATEGY_EVIDENCE_MAX_CANDIDATES must be positive")
         outcome_providers = [
             item.strip().lower()
             for item in self.outcome_capture_provider_order.split(",")
@@ -383,9 +384,7 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         scenario_intelligence_enabled=_to_bool(
             _env("DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED", "false", env_values)
         ),
-        scenario_openai_model=_env(
-            "DAWNSTRIKE_OPENAI_MODEL", "gpt-5.6-terra", env_values
-        ),
+        scenario_openai_model=_env("DAWNSTRIKE_OPENAI_MODEL", "gpt-5.6-terra", env_values),
         scenario_openai_timeout_seconds=_to_float(
             "DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS",
             _env("DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS", "45", env_values),
@@ -417,12 +416,20 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
             "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS",
             _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS", "3", env_values),
         ),
+        strategy_evidence_enabled=_to_bool(
+            _env("DAWNSTRIKE_STRATEGY_EVIDENCE_ENABLED", "false", env_values)
+        ),
+        strategy_evidence_shadow_only=_to_bool(
+            _env("DAWNSTRIKE_STRATEGY_EVIDENCE_SHADOW_ONLY", "true", env_values)
+        ),
+        strategy_evidence_max_candidates=_to_int(
+            "DAWNSTRIKE_STRATEGY_EVIDENCE_MAX_CANDIDATES",
+            _env("DAWNSTRIKE_STRATEGY_EVIDENCE_MAX_CANDIDATES", "12", env_values),
+        ),
         alpaca_api_key_id=_env("ALPACA_API_KEY_ID", "", env_values),
         alpaca_api_secret_key=_env("ALPACA_API_SECRET_KEY", "", env_values),
         alpaca_data_feed=_env("ALPACA_DATA_FEED", "iex", env_values),
-        massive_api_key=_env_any(
-            ["MASSIVE_API_KEY", "POLYGON_API_KEY"], "", env_values
-        ),
+        massive_api_key=_env_any(["MASSIVE_API_KEY", "POLYGON_API_KEY"], "", env_values),
         outcome_capture_provider_order=_env(
             "INTRADAY_OUTCOME_CAPTURE_PROVIDER_ORDER", "yahoo,alpaca", env_values
         ).lower(),

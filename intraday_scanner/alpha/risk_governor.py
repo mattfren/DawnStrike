@@ -15,6 +15,10 @@ class RiskDecision:
     avoid_reasons: list[str]
     hard_avoid_reasons: list[str]
     soft_penalties: list[str]
+    strategy_receipt_tier: str = ""
+    strategy_receipt_research_pick_eligible: bool | None = None
+    strategy_receipt_paper_entry_eligible: bool | None = None
+    strategy_receipt_disagreement: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +29,12 @@ class RiskDecision:
             "avoid_reasons": self.avoid_reasons,
             "hard_avoid_reasons": self.hard_avoid_reasons,
             "soft_penalties": self.soft_penalties,
+            "strategy_receipt_tier": self.strategy_receipt_tier,
+            "strategy_receipt_research_pick_eligible": (
+                self.strategy_receipt_research_pick_eligible
+            ),
+            "strategy_receipt_paper_entry_eligible": self.strategy_receipt_paper_entry_eligible,
+            "strategy_receipt_disagreement": list(self.strategy_receipt_disagreement or []),
         }
 
 
@@ -60,6 +70,16 @@ def evaluate_risk(
     avoid_reasons = _dedupe(raw_avoids)
     hard: list[str] = []
     soft: list[str] = []
+    receipt_tier = str(candidate.get("strategy_receipt_tier") or "").strip().upper()
+    receipt_research_eligible = _bool_or_none(
+        candidate.get("strategy_receipt_research_pick_eligible")
+    )
+    receipt_paper_eligible = _bool_or_none(
+        candidate.get("strategy_receipt_paper_entry_eligible")
+    )
+    receipt_disagreements: list[str] = []
+    receipt_enabled = _truthy(candidate.get("strategy_receipt_enabled"))
+    receipt_shadow_only = _truthy(candidate.get("strategy_receipt_shadow_only"))
 
     price = _float(candidate.get("premarket_price") or features.get("premarket_price"))
     volume = _float(candidate.get("premarket_volume") or features.get("premarket_volume"))
@@ -122,6 +142,35 @@ def evaluate_risk(
     if 0 < spread > 4.0:
         soft.append("wide_spread")
 
+    if receipt_enabled:
+        receipt_id = str(candidate.get("receipt_id") or "").strip()
+        construction_status = str(
+            candidate.get("strategy_receipt_construction_status") or ""
+        ).upper()
+        if not receipt_id or construction_status != "COMPLETE":
+            receipt_disagreements.append("strategy_receipt_construction_failed")
+            if not receipt_shadow_only:
+                hard.append("strategy_receipt_unavailable")
+        elif receipt_research_eligible is not True:
+            receipt_disagreements.append("strategy_receipt_research_ineligible")
+            if not receipt_shadow_only:
+                hard.append("strategy_receipt_ineligible")
+        elif receipt_tier not in {
+            "QUALIFIED_PICK",
+            "PICK_WITH_DISCLOSED_GAPS",
+            "CONDITIONAL_PICK",
+        }:
+            receipt_disagreements.append("strategy_receipt_tier_not_alertable")
+            if not receipt_shadow_only:
+                hard.append("strategy_receipt_tier_not_alertable")
+        legacy_can_alert = _bool_or_none(candidate.get("strategy_receipt_legacy_can_alert"))
+        if (
+            legacy_can_alert is not None
+            and receipt_research_eligible is not None
+            and legacy_can_alert != receipt_research_eligible
+        ):
+            receipt_disagreements.append("legacy_vs_receipt_alert_disposition")
+
     hard = _dedupe(hard)
     soft = _dedupe(soft)
     risk_score = max(0.0, 100.0 - (len(hard) * 35.0) - (len(soft) * 7.5))
@@ -135,6 +184,10 @@ def evaluate_risk(
         avoid_reasons=merged_avoids,
         hard_avoid_reasons=hard,
         soft_penalties=soft,
+        strategy_receipt_tier=receipt_tier,
+        strategy_receipt_research_pick_eligible=receipt_research_eligible,
+        strategy_receipt_paper_entry_eligible=receipt_paper_eligible,
+        strategy_receipt_disagreement=receipt_disagreements,
     )
 
 
@@ -175,3 +228,18 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in {None, ""}:
+        return None
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "y", "1"}:
+        return True
+    if normalized in {"false", "no", "n", "0"}:
+        return False
+    return None

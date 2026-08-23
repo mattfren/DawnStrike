@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -4600,9 +4601,7 @@ class SQLiteScanStore:
                 rows = connection.execute(query, params).fetchall()
                 return [_raw_json_row(row) for row in rows]
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not load raw price observations: {exc}"
-            ) from exc
+            raise StorageError(f"Could not load raw price observations: {exc}") from exc
 
     def persist_trade_intents(
         self,
@@ -6150,9 +6149,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if existing is not None:
                         if str(existing[0]) != payload_json:
-                            raise StorageError(
-                                f"immutable V6 outcome conflict: {identity}"
-                            )
+                            raise StorageError(f"immutable V6 outcome conflict: {identity}")
                         skipped += 1
                         continue
                     cursor = connection.execute(
@@ -6385,9 +6382,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if existing is not None:
                         if str(existing[0]) != payload_json:
-                            raise StorageError(
-                                f"immutable V6 label conflict: {identity}"
-                            )
+                            raise StorageError(f"immutable V6 label conflict: {identity}")
                         skipped += 1
                         continue
                     cursor = connection.execute(
@@ -6462,14 +6457,10 @@ class SQLiteScanStore:
                 ).fetchone()
                 if existing is not None:
                     existing_payload = _json_value(existing[0])
-                    if (
-                        not isinstance(existing_payload, dict)
-                        or _immutable_semantics(existing_payload)
-                        != _immutable_semantics(row)
-                    ):
-                        raise StorageError(
-                            f"immutable V6 dataset conflict: {identity}"
-                        )
+                    if not isinstance(existing_payload, dict) or _immutable_semantics(
+                        existing_payload
+                    ) != _immutable_semantics(row):
+                        raise StorageError(f"immutable V6 dataset conflict: {identity}")
                     return False
                 cursor = connection.execute(
                     """
@@ -7439,6 +7430,265 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load scenario replay trades: {exc}") from exc
 
+    def persist_strategy_decision_receipt(
+        self,
+        receipt: Any,
+        *,
+        evidence_claims: Iterable[Any] = (),
+        resolution_run: Any | None = None,
+    ) -> bool:
+        """Insert one immutable receipt, rejecting identity/payload drift."""
+
+        self.initialize()
+        canonical = receipt.canonical_json()
+        claims = [
+            claim.to_dict() if hasattr(claim, "to_dict") else dict(claim)
+            for claim in evidence_claims
+        ]
+        run = (
+            resolution_run.to_dict()
+            if resolution_run is not None and hasattr(resolution_run, "to_dict")
+            else resolution_run
+        )
+        receipt_id = str(receipt.receipt_id)
+        receipt_hash = str(receipt.receipt_hash_sha256)
+
+        def _assert_root_identity(existing: tuple[Any, ...]) -> None:
+            if str(existing[0]) != receipt_hash or str(existing[1]) != canonical:
+                raise StorageError("strategy decision receipt identity/payload mismatch")
+
+        try:
+            with self._connect() as connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                # Serialize writers around the immutable identity check. This
+                # makes an exact retry deterministic even when two scan
+                # workers race to persist the same receipt.
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    (
+                        "SELECT receipt_hash_sha256, canonical_json "
+                        "FROM strategy_decision_receipts WHERE receipt_id = ?"
+                    ),
+                    (receipt_id,),
+                ).fetchone()
+                inserted = existing is None
+                if existing is None:
+                    try:
+                        connection.execute(
+                            """INSERT INTO strategy_decision_receipts
+                            (receipt_id, receipt_hash_sha256, strategy_id, strategy_version, symbol,
+                             market_date, pick_tier, research_pick_eligible, paper_entry_eligible,
+                             source_identity, input_hash_sha256, canonical_json, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                receipt_id,
+                                receipt_hash,
+                                receipt.strategy_id,
+                                receipt.strategy_version,
+                                receipt.symbol,
+                                receipt.market_date,
+                                receipt.pick_tier.value
+                                if hasattr(receipt.pick_tier, "value")
+                                else str(receipt.pick_tier),
+                                int(receipt.research_pick_eligible),
+                                int(receipt.paper_entry_eligible),
+                                receipt.source_identity,
+                                receipt.input_hash_sha256,
+                                canonical,
+                                datetime.now(UTC).replace(microsecond=0).isoformat(),
+                            ),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        # A receipt hash collision with another ID is not an
+                        # exact retry and must fail closed. A concurrent ID
+                        # insert is re-read and compared below.
+                        existing = connection.execute(
+                            """SELECT receipt_hash_sha256, canonical_json
+                            FROM strategy_decision_receipts WHERE receipt_id = ?""",
+                            (receipt_id,),
+                        ).fetchone()
+                        if existing is None:
+                            hash_owner = connection.execute(
+                                """SELECT receipt_id FROM strategy_decision_receipts
+                                WHERE receipt_hash_sha256 = ?""",
+                                (receipt_hash,),
+                            ).fetchone()
+                            if hash_owner is not None:
+                                raise StorageError(
+                                    "strategy decision receipt hash is bound to another receipt ID"
+                                ) from exc
+                            raise
+                        inserted = False
+                if existing is not None:
+                    _assert_root_identity(existing)
+
+                for result in receipt.condition_results:
+                    row = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+                    condition_payload = json.dumps(
+                        row, sort_keys=True, separators=(",", ":")
+                    )
+                    existing_condition = connection.execute(
+                        """SELECT payload_json FROM strategy_condition_results
+                        WHERE receipt_id = ? AND condition_id = ?""",
+                        (receipt_id, str(row["condition_id"])),
+                    ).fetchone()
+                    if existing_condition is not None:
+                        if str(existing_condition[0]) != condition_payload:
+                            raise StorageError(
+                                "strategy decision condition payload mismatch"
+                            )
+                        continue
+                    connection.execute(
+                        """INSERT INTO strategy_condition_results
+                        (receipt_id, condition_id, status, source_urls_json,
+                         source_hashes_json, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            receipt_id,
+                            str(row["condition_id"]),
+                            getattr(row.get("status"), "value", str(row.get("status") or "")),
+                            json.dumps(
+                                list(row.get("source_urls") or ()),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            json.dumps(
+                                list(row.get("source_hashes") or ()),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            condition_payload,
+                        ),
+                    )
+                for claim in claims:
+                    if not isinstance(claim, Mapping):
+                        raise StorageError("strategy evidence claim must be an object")
+                    claim_id = str(claim.get("claim_id") or "")
+                    if not claim_id:
+                        raise StorageError("strategy evidence claim ID is required")
+                    claim_payload = json.dumps(
+                        dict(claim), sort_keys=True, separators=(",", ":")
+                    )
+                    existing_claim = connection.execute(
+                        """SELECT receipt_id, payload_json FROM strategy_evidence_claims
+                        WHERE claim_id = ?""",
+                        (claim_id,),
+                    ).fetchone()
+                    if existing_claim is not None:
+                        if str(existing_claim[1]) != claim_payload:
+                            raise StorageError("strategy evidence claim payload mismatch")
+                        if str(existing_claim[0]) != receipt_id:
+                            raise StorageError(
+                                "strategy evidence claim is already bound to another receipt"
+                            )
+                        continue
+                    connection.execute(
+                        """INSERT INTO strategy_evidence_claims
+                        (claim_id, receipt_id, condition_id, symbol, source_urls_json,
+                         source_hashes_json, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            claim_id,
+                            receipt_id,
+                            str(claim["condition_id"]),
+                            str(claim["symbol"]),
+                            json.dumps(
+                                claim.get("source_urls") or [],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            json.dumps(
+                                claim.get("source_hashes") or [],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            claim_payload,
+                        ),
+                    )
+                if isinstance(run, dict):
+                    run_id = str(run.get("run_id") or "")
+                    if not run_id:
+                        raise StorageError("strategy evidence resolution run ID is required")
+                    run_payload = json.dumps(run, sort_keys=True, separators=(",", ":"))
+                    existing_run = connection.execute(
+                        """SELECT receipt_id, payload_json FROM strategy_evidence_resolution_runs
+                        WHERE run_id = ?""",
+                        (run_id,),
+                    ).fetchone()
+                    if existing_run is not None:
+                        if str(existing_run[1]) != run_payload:
+                            raise StorageError("strategy evidence resolution run payload mismatch")
+                        if str(existing_run[0] or "") != receipt_id:
+                            raise StorageError(
+                                "strategy evidence resolution run is already bound "
+                                "to another receipt"
+                            )
+                        return inserted
+                    connection.execute(
+                        """INSERT INTO strategy_evidence_resolution_runs
+                        (run_id, receipt_id, symbol, market_date, requested_model, actual_model,
+                         response_id, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            run_id,
+                            receipt_id,
+                            str(run["symbol"]),
+                            str(run["market_date"]),
+                            str(run["requested_model"]),
+                            str(run["actual_model"]),
+                            str(run["response_id"]),
+                            run_payload,
+                        ),
+                    )
+                return inserted
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist strategy decision receipt: {exc}") from exc
+
+    def persist_strategy_decision_receipts(self, receipts: Iterable[Any]) -> dict[str, int]:
+        inserted = 0
+        reused = 0
+        for receipt in receipts:
+            if self.persist_strategy_decision_receipt(receipt):
+                inserted += 1
+            else:
+                reused += 1
+        return {"inserted": inserted, "reused": reused}
+
+    def load_strategy_decision_receipts(
+        self, *, market_date: str | None = None, strategy_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        params: list[Any] = []
+        if market_date and strategy_id:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE market_date = ? AND strategy_id = ? "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params.extend((market_date, strategy_id))
+        elif market_date:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE market_date = ? ORDER BY created_at DESC LIMIT ?"
+            )
+            params.append(market_date)
+        elif strategy_id:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "WHERE strategy_id = ? ORDER BY created_at DESC LIMIT ?"
+            )
+            params.append(strategy_id)
+        else:
+            query = (
+                "SELECT canonical_json FROM strategy_decision_receipts "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+        with self._connect() as connection:
+            rows = connection.execute(query, (*params, limit)).fetchall()
+        return [json.loads(str(row[0])) for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
             return connect_read_only(self.db_path)
@@ -7643,11 +7893,7 @@ def _raw_json_row(row: sqlite3.Row) -> dict[str, Any]:
 
     payload = _json_value(row["payload_json"])
     return {
-        "columns": {
-            key: row[key]
-            for key in row.keys()
-            if key != "payload_json"
-        },
+        "columns": {key: row[key] for key in row.keys() if key != "payload_json"},
         "payload_json": payload,
     }
 
