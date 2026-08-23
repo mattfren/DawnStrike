@@ -121,6 +121,8 @@ class BacktestEngine:
             )
         if strategy.strategy_id == "cash_no_trade_baseline":
             return self._cash_result(strategy, dataset)
+        if strategy.strategy_id == "benchmark_buy_hold_equal_weight":
+            return self._benchmark_result(strategy, dataset)
 
         cash = self.settings.initial_capital
         positions: dict[str, _Position] = {}
@@ -605,6 +607,168 @@ class BacktestEngine:
                 (), tuple(equity_curve), exposure_position_days=0, eligible_symbol_days=0
             ),
             warnings=dataset.warnings,
+        )
+
+    def _benchmark_result(
+        self,
+        strategy: StrategySpec,
+        dataset: MarketDataset,
+    ) -> BacktestResult:
+        """Run the catalog's equal-weight hold-to-end comparator.
+
+        The benchmark deliberately bypasses the alpha risk/reward gate because
+        it has no profit target. It still uses next-bar fills, modeled costs,
+        the frozen catastrophe stop, and explicit terminal liquidation.
+        """
+
+        start_index = int(strategy.parameters.get("start_index", 0))
+        entry_index = start_index + 1
+        eligible_symbols = tuple(
+            symbol
+            for symbol in dataset.symbols
+            if len(dataset.bars_by_symbol[symbol]) > entry_index
+        )
+        if not eligible_symbols:
+            result = self._cash_result(strategy, dataset)
+            return replace(
+                result,
+                warnings=tuple(
+                    dict.fromkeys(
+                        (*result.warnings, "benchmark had no symbols with a valid next-bar fill")
+                    )
+                ),
+            )
+
+        cash = self.settings.initial_capital
+        allocation = self.settings.initial_capital / len(eligible_symbols)
+        positions: dict[str, _Position] = {}
+        trades: list[TradeRecord] = []
+        equity_curve: list[EquityPoint] = []
+        warnings = list(dataset.warnings)
+        peak_equity = self.settings.initial_capital
+        exposure_position_days = 0
+        eligible_symbol_days = 0
+        max_bars = max(len(bars) for bars in dataset.bars_by_symbol.values())
+
+        for index in range(max_bars):
+            if index == entry_index:
+                for symbol in eligible_symbols:
+                    bars = dataset.bars_by_symbol[symbol]
+                    signal = strategy.signal(dataset, symbol, bars, start_index)
+                    if signal is None:
+                        warnings.append(f"{symbol}: benchmark entry signal unavailable")
+                        continue
+                    bar = bars[index]
+                    entry_price = bar.open * (1.0 + self._slippage_rate())
+                    entry_fee_per_unit = entry_price * self.settings.fee_bps / 10_000.0
+                    available = max(0.0, allocation - self.settings.commission_per_trade)
+                    quantity = int(available // (entry_price + entry_fee_per_unit))
+                    if quantity < 1:
+                        warnings.append(f"{symbol}: benchmark allocation could not buy one unit")
+                        continue
+                    notional = quantity * entry_price
+                    entry_fee = self._fee(notional)
+                    position = _Position(
+                        symbol=symbol,
+                        direction=Direction.LONG,
+                        quantity=quantity,
+                        entry_price=entry_price,
+                        stop=signal.stop,
+                        target=None,
+                        entry_time=bar.timestamp,
+                        entry_index=index,
+                        entry_notional=notional,
+                        entry_fee=entry_fee,
+                        entry_slippage=max(0.0, entry_price - bar.open) * quantity,
+                        initial_risk=max(
+                            0.0,
+                            (entry_price - self._adverse_exit_fill(Direction.LONG, signal.stop))
+                            * quantity
+                            + entry_fee,
+                        ),
+                        signal=signal,
+                    )
+                    cash = self._apply_entry_cash(cash, position)
+                    positions[symbol] = position
+
+            if index >= entry_index:
+                for symbol in list(positions):
+                    bars = dataset.bars_by_symbol[symbol]
+                    if len(bars) <= index:
+                        continue
+                    position = positions[symbol]
+                    bar = bars[index]
+                    if bar.open <= position.stop:
+                        raw_exit, reason = bar.open, "gap_stop"
+                    elif bar.low <= position.stop:
+                        raw_exit, reason = position.stop, "stop"
+                    else:
+                        continue
+                    trade, cash = self._close_position(
+                        position,
+                        bar,
+                        index,
+                        raw_exit,
+                        reason,
+                        cash,
+                    )
+                    trades.append(trade)
+                    del positions[symbol]
+
+            exposure_position_days += len(positions)
+            eligible_symbol_days += len(eligible_symbols)
+            equity = self._mark_to_market(cash, positions, dataset, index)
+            peak_equity = max(peak_equity, equity)
+            timestamp = self._timestamp_for_index(dataset, index)
+            if timestamp is not None:
+                equity_curve.append(
+                    EquityPoint(
+                        timestamp=timestamp,
+                        equity=equity,
+                        cash=cash,
+                        open_positions=len(positions),
+                        drawdown_pct=(equity / peak_equity - 1.0) if peak_equity else 0.0,
+                    )
+                )
+
+        final_index = max_bars - 1
+        for symbol in list(positions):
+            bars = dataset.bars_by_symbol[symbol]
+            index = min(final_index, len(bars) - 1)
+            bar = bars[index]
+            trade, cash = self._close_position(
+                positions[symbol],
+                bar,
+                index,
+                bar.close,
+                "end_of_test_liquidation",
+                cash,
+            )
+            trades.append(trade)
+            del positions[symbol]
+
+        if equity_curve:
+            peak_equity = max(peak_equity, cash)
+            equity_curve.append(
+                EquityPoint(
+                    timestamp=equity_curve[-1].timestamp,
+                    equity=cash,
+                    cash=cash,
+                    open_positions=0,
+                    drawdown_pct=(cash / peak_equity - 1.0) if peak_equity else 0.0,
+                )
+            )
+        return BacktestResult(
+            strategy=strategy,
+            trades=tuple(trades),
+            equity_curve=tuple(equity_curve),
+            metrics=self._metrics(
+                tuple(trades),
+                tuple(equity_curve),
+                exposure_position_days=exposure_position_days,
+                eligible_symbol_days=eligible_symbol_days,
+            ),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
     def _timestamp_for_index(self, dataset: MarketDataset, index: int) -> datetime | None:

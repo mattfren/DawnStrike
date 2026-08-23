@@ -8,6 +8,17 @@ from intraday_scanner.performance.contracts import (
     ReturnMethodology,
 )
 from intraday_scanner.performance.service import CanonicalPerformanceService
+from intraday_scanner.performance.strategy_miss_attribution import (
+    AttributionState,
+    Eligibility,
+    StrategyMissAttributionReport,
+    StrategyMissAttributionRow,
+    StrategyMissAttributionSummary,
+    attribute_strategy_misses,
+    from_portfolio_rows,
+    load_portfolio_performance_rows_readonly,
+    summarize_strategy_misses,
+)
 
 __all__ = [
     "CanonicalPerformanceService",
@@ -16,4 +27,13 @@ __all__ = [
     "PerformanceCohort",
     "PerformanceRow",
     "ReturnMethodology",
+    "AttributionState",
+    "Eligibility",
+    "StrategyMissAttributionReport",
+    "StrategyMissAttributionRow",
+    "StrategyMissAttributionSummary",
+    "attribute_strategy_misses",
+    "from_portfolio_rows",
+    "load_portfolio_performance_rows_readonly",
+    "summarize_strategy_misses",
 ]

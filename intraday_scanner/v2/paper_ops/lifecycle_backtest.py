@@ -444,6 +444,29 @@ class PaperOpsLifecycleBacktestEngine:
         results: dict[str, BacktestResult] = {}
         for strategy in strategies:
             strategy_id = strategy.strategy_id
+            if strategy.status in {"benchmark", "baseline"}:
+                comparator = self._metric_engine.run(strategy, dataset)
+                comparator_metrics = dict(comparator.metrics)
+                comparator_metrics.update(
+                    {
+                        "execution_model": "dedicated_comparator",
+                        "orders_created": len(comparator.trades),
+                        "orders_blocked": 0,
+                        "fills": len(comparator.trades),
+                        "open_position_count": 0,
+                        "pending_order_count": 0,
+                        "end_of_test_liquidations": sum(
+                            trade.exit_reason == "end_of_test_liquidation"
+                            for trade in comparator.trades
+                        ),
+                        "open_positions_marked_not_liquidated": 0,
+                    }
+                )
+                results[strategy_id] = replace(
+                    comparator,
+                    metrics=comparator_metrics,
+                )
+                continue
             strategy_trades = tuple(trades[strategy_id])
             strategy_equity = tuple(equity_curves[strategy_id])
             metrics = self._metric_engine._metrics(

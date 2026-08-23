@@ -22,6 +22,12 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert "Required AlphaOps EOD run blocked by daily lock" in eod
     assert "exit $(if ($receiptWritten) { 3 } else { 2 })" in eod
     assert "Write-DawnstrikeLockDenialReceipt" in eod
+    assert '"strategy-learning-daily"' in eod
+    assert '"--source-identity", $strategyLearningSource' in eod
+    assert '"--db-path", $dbPath' in eod
+    assert "sqlite-readonly:" in eod
+    assert "mode=ro;query_only=on" in eod
+    assert '"strategy_learning_daily_failed"' in eod
     assert "Write-DawnstrikeLockDenialReceipt" in runner
 
     weekly = Path("scripts/run_alphaops_weekly_training.ps1").read_text(
