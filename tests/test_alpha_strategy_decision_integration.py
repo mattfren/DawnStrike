@@ -8,6 +8,7 @@ from intraday_scanner.decisioning.condition_registry import registry_for_strateg
 from intraday_scanner.services.alpha_cycle_service import (
     _apply_receipt_risk_gates,
     _apply_strategy_decision_receipts,
+    _signal_payload,
 )
 from intraday_scanner.services.daily_strategy_learning_service import (
     _aggregate_decision_receipts,
@@ -30,6 +31,19 @@ def _supported_signal(strategy_id: str = "ts_momentum_sma_atr") -> dict[str, Any
     }
     row.update({spec.condition_id: True for spec in registry_for_strategy(strategy_id)})
     return row
+
+
+def test_alpha_signal_payload_binds_active_strategy_contract() -> None:
+    payload = _signal_payload(
+        {"ticker": "TEST", "alpha_score": 90},
+        "scan-1",
+        "2026-08-25T13:00:00+00:00",
+        1,
+    )
+
+    assert payload["strategy_id"] == "alphaops_v5"
+    assert payload["strategy_version"] == "dawnstrike-alphaops-v5.0.0"
+    assert payload["signal_key"] == "scan-1:1:TEST"
 
 
 class _FakeGapResolver:

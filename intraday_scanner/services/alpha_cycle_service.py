@@ -1415,8 +1415,11 @@ def _number(value: Any) -> float | None:
 
 
 def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int) -> dict[str, Any]:
+    strategy_id, strategy_version = alphaops_strategy_contract(timestamp)
     return {
         **row,
+        "strategy_id": str(row.get("strategy_id") or strategy_id),
+        "strategy_version": str(row.get("strategy_version") or strategy_version),
         "scan_id": scan_id,
         "rank": rank,
         "timestamp": timestamp,
