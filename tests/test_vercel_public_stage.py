@@ -54,10 +54,11 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert '"static_file_hashes_verified":true' in script
     assert "api\\public_state.py" in script
     assert "function Read-RawJsonObject" in script
-    assert "[System.Text.Json.JsonDocument]::Parse($raw)" in script
+    assert "ConvertFrom-Json -InputObject $raw" in script
+    assert "return the original text" in script
+    assert "System.Text.Json" not in script
     assert "$stateJson = '{' + ($stateParts -join ',') + '}'" in script
-    assert "ISO timestamps into DateTime values" in script
-    assert "| ConvertFrom-Json" not in script
+    assert "ISO timestamps and" in script
     assert "StageRoot must resolve inside the project build directory" in script
     assert "StageRoot must not overlap the source public artifact" in script
     assert "[System.IO.Path]::GetFullPath($stageCandidate)" in script

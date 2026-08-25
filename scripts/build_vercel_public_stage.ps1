@@ -64,15 +64,11 @@ function Read-RawJsonObject {
     param([string]$Path)
 
     $raw = [System.IO.File]::ReadAllText($Path).Trim()
-    $document = $null
-    try {
-        $document = [System.Text.Json.JsonDocument]::Parse($raw)
-        if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
-            throw "Expected a JSON object: $Path"
-        }
-    }
-    finally {
-        if ($null -ne $document) { $document.Dispose() }
+    # Parse only for validation; return the original text so PowerShell's
+    # DateTime coercion cannot rewrite UTC timestamps or alter hashed state.
+    $parsed = ConvertFrom-Json -InputObject $raw
+    if ($null -eq $parsed -or $parsed -isnot [pscustomobject]) {
+        throw "Expected a JSON object: $Path"
     }
     return $raw
 }
@@ -83,11 +79,9 @@ function ConvertTo-JsonString {
     return ($Value | ConvertTo-Json -Compress)
 }
 
-# Keep the generated JSON text byte-for-byte semantic. ConvertFrom-Json parses
-# ISO timestamps into DateTime values on newer PowerShell releases, and a later
-# ConvertTo-Json then rewrites UTC strings into the host's local offset. That
-# breaks equality between the embedded function state and the hashed static
-# Calendar manifest even though both originated from the same artifact.
+# Keep the generated JSON text byte-for-byte semantic. Read-RawJsonObject parses
+# only for validation and returns the original text, so ISO timestamps and
+# manifest values remain identical to the hashed static artifacts.
 $stateParts = @(
     '"readiness":' + (Read-RawJsonObject (Join-Path $publicSource "readiness.json"))
     '"snapshot_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\performance.json.manifest.json"))
