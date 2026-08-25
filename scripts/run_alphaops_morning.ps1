@@ -104,14 +104,17 @@ try {
         $errorCode = "source_config_missing"
     } else {
         $alphaCyclePath = Join-Path $outputRoot "alpha_cycle.json"
-        Move-DawnstrikePriorAlphaCycleArtifact `
+        $priorAlphaCyclePath = Move-DawnstrikePriorAlphaCycleArtifact `
             -ArtifactPath $alphaCyclePath `
-            -ArchiveRoot (Join-Path $outputRoot "attempt_archive") | Out-Null
+            -ArchiveRoot (Join-Path $outputRoot "attempt_archive")
         $alphaCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
             -ArgumentList @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify) `
             -LogRoot $logRoot `
             -LogName "alpha_morning-$MarketDate"
+        Restore-DawnstrikePriorAlphaCycleArtifact `
+            -ArtifactPath $alphaCyclePath `
+            -ArchivePath $priorAlphaCyclePath | Out-Null
         $stageExit = $alphaCycle.exit_code
         $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
     }

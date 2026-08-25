@@ -171,6 +171,48 @@ def test_artifact_can_validate_a_current_session_without_process_receipt(
     assert result["process_started_at_utc"] is None
 
 
+def test_prior_artifact_is_restored_only_when_attempt_produced_no_replacement(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "alpha_cycle.json"
+    archive = tmp_path / "attempt_archive" / "alpha_cycle.prior.json"
+    archive.parent.mkdir()
+    archive.write_text("prior", encoding="utf-8")
+    command = (
+        f". '{HELPER}'; "
+        f"$restored = Restore-DawnstrikePriorAlphaCycleArtifact -ArtifactPath '{artifact}' "
+        f"-ArchivePath '{archive}'; "
+        "$restored | ConvertTo-Json -Compress"
+    )
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) is True
+    assert artifact.read_text(encoding="utf-8") == "prior"
+    assert not archive.exists()
+
+    archive.write_text("older", encoding="utf-8")
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) is False
+    assert artifact.read_text(encoding="utf-8") == "prior"
+    assert archive.read_text(encoding="utf-8") == "older"
+
+
 def test_artifact_rejects_identity_and_source_failures(tmp_path: Path) -> None:
     payload = _valid_payload()
     payload["run_contract"]["producer_run_id"] = "different-scan"

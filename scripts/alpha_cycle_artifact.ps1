@@ -13,6 +13,24 @@ function Move-DawnstrikePriorAlphaCycleArtifact {
     return $archivePath
 }
 
+function Restore-DawnstrikePriorAlphaCycleArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactPath,
+        [AllowNull()][string]$ArchivePath
+    )
+    if (Test-Path -LiteralPath $ArtifactPath -PathType Leaf) {
+        return $false
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($ArchivePath) -or
+        -not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)
+    ) {
+        return $false
+    }
+    Move-Item -LiteralPath $ArchivePath -Destination $ArtifactPath
+    return $true
+}
+
 function Test-DawnstrikeNonNegativeInteger {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return $false }
