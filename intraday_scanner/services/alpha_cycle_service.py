@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
@@ -162,12 +164,13 @@ def alpha_cycle(
             raise ValueError("market_date must match as_of date")
         if as_of is None:
             as_of = datetime.fromisoformat(f"{parsed_market_date}T12:00:00+00:00")
+    cycle_observed_at = as_of or datetime.now(timezone.utc)
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     core_universe = build_core_universe_contract(
         core_universe_manifest,
-        observed_at=as_of or datetime.now(timezone.utc),
-        market_date=market_date or (as_of or datetime.now(timezone.utc)).date().isoformat(),
+        observed_at=cycle_observed_at,
+        market_date=market_date or cycle_observed_at.date().isoformat(),
     )
     write_core_universe_contract(core_universe, output_dir / "core_universe_contract.json")
     session_gate = _scheduled_session_gate(notify=notify, as_of=as_of)
@@ -235,7 +238,11 @@ def alpha_cycle(
                 database_path=Path(db_path),
             )
         )
-        recovery = discover_core_universe_rows(core_universe, config=recovery_config)
+        recovery = discover_core_universe_rows(
+            core_universe,
+            config=recovery_config,
+            observed_at=cycle_observed_at,
+        )
         recovery_rows = rank_core_universe_rows(recovery.get("rows") or [])
         if recovery.get("status") == "READY" and recovery_rows:
             recovery_path = write_snapshot_rows(
@@ -299,6 +306,15 @@ def alpha_cycle(
             slate_path, market_date=no_data_generated_at[:10]
         )
         source_summary["ranked_research_slate"] = luna_research_slate
+        source_summary["ranked_research_slate_lineage"] = {
+            "frozen_source_scan_id": str(luna_research_slate.get("scan_id") or ""),
+            "current_scan_id": no_data_scan_id,
+            "reuse_status": (
+                "CURRENT_SCAN"
+                if str(luna_research_slate.get("scan_id") or "") == no_data_scan_id
+                else "GOVERNED_DAILY_FREEZE_REUSE"
+            ),
+        }
         message = format_alpha_no_trade(
             reason=str(review["decision"]["reason"]),
             next_action=str(review["decision"]["next_action"]),
@@ -423,7 +439,11 @@ def alpha_cycle(
     if core_only_recovery:
         scanner_config = scanner_config.with_overrides(min_gap_pct=0.0, ideal_gap_low_pct=1.0)
     core_discovery = (
-        discover_core_universe_rows(core_universe, config=scanner_config)
+        discover_core_universe_rows(
+            core_universe,
+            config=scanner_config,
+            observed_at=cycle_observed_at,
+        )
         if not fixture_mode
         else {
             "status": "BLOCKED_EXTERNAL",
@@ -515,8 +535,12 @@ def alpha_cycle(
     scan_paths = write_scan_outputs(scan_result, scanner_config.output_dir)
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
+    for row in [*ranked, *all_candidates]:
+        row.setdefault("universe_lane", "mover")
+        row.setdefault("evidence_lane", "mover")
     core_ranked: list[dict[str, Any]] = []
     core_all: list[dict[str, Any]] = []
+    core_enrichment_summary: dict[str, Any] = {"status": "not_run"}
     if core_eligible_rows:
         core_snapshot = write_snapshot_rows(
             core_eligible_rows, output_dir / "web_collect" / "core_lane_snapshot.csv"
@@ -535,6 +559,7 @@ def alpha_cycle(
             out_dir=output_dir / "core_premarket_enrichment",
         )
         core_discovery["enrichment_summary"] = core_enrichment["summary"]
+        core_enrichment_summary = dict(core_enrichment["summary"])
         core_snapshot_path = str(
             dict(core_enrichment.get("paths") or {}).get("snapshot") or core_snapshot
         )
@@ -543,6 +568,9 @@ def alpha_cycle(
         )
         core_ranked = [candidate.to_dict() for candidate in core_scan.ranked_candidates]
         core_all = [candidate.to_dict() for candidate in core_scan.all_candidates]
+        for row in [*core_ranked, *core_all]:
+            row["universe_lane"] = "core"
+            row["evidence_lane"] = "core"
         ranked = _merge_lane_candidates(ranked, core_ranked)
         all_candidates = _merge_lane_candidates(all_candidates, core_all)
     core_ranked_count = sum(
@@ -619,13 +647,59 @@ def alpha_cycle(
     if scanner_config.strategy_evidence_enabled:
         signals = _apply_receipt_risk_gates(signals, feature_vectors)
     signals = apply_alert_gates(signals)
+    receipt_verifier = _persisted_strategy_receipt_verifier(
+        store,
+        market_date=timestamp[:10],
+    )
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
+    mover_enrichment_status = str(enrichment["summary"].get("status") or "").lower()
+    core_snapshot_status = str(core_discovery.get("status") or "DATA_UNAVAILABLE").upper()
+    core_enrichment_status = str(core_enrichment_summary.get("status") or "not_run").lower()
+    mover_lane_eligible = mover_enrichment_status in {"complete", "partial"}
+    core_lane_eligible = (
+        core_snapshot_status == "READY"
+        and core_enrichment_status in {"complete", "partial"}
+    )
+    coverage_limitations: list[str] = []
+    if str(core_universe.get("status") or "") != "READY":
+        coverage_limitations.append("core_membership_contract_unavailable")
+    if core_snapshot_status != "READY":
+        coverage_limitations.append("core_snapshot_coverage_incomplete")
+    if not core_lane_eligible:
+        coverage_limitations.append("core_enrichment_not_data_eligible")
+    if mover_source_failed:
+        coverage_limitations.append("mover_source_unavailable")
+    mover_fallback_limited = str(
+        enrichment["summary"].get("secondary_fallback_status") or ""
+    ).lower() in {
+        "research_only_applied_above_ceiling",
+        "applied_research_only_above_ceiling",
+        "ceiling_exceeded_not_applied",
+    }
+    if mover_fallback_limited:
+        coverage_limitations.append("mover_secondary_fallback_above_ceiling")
+    core_fallback_limited = str(
+        core_enrichment_summary.get("secondary_fallback_status") or ""
+    ).lower() in {
+        "research_only_applied_above_ceiling",
+        "applied_research_only_above_ceiling",
+        "ceiling_exceeded_not_applied",
+    }
+    if core_fallback_limited:
+        coverage_limitations.append("core_secondary_fallback_above_ceiling")
+    combined_data_eligible = mover_lane_eligible or core_lane_eligible
+    combined_coverage_status = (
+        "COMPLETE"
+        if combined_data_eligible and not coverage_limitations
+        else "LIMITED"
+        if combined_data_eligible
+        else "DATA_UNAVAILABLE"
+    )
     luna_research_slate = build_ranked_research_slate(
         signals,
         target=5,
-        data_eligible=str(enrichment["summary"].get("status") or "").lower()
-        in {"complete", "partial"},
+        data_eligible=combined_data_eligible,
         generated_at=timestamp,
         market_date=timestamp[:10],
         scan_id=scan_result.run_id,
@@ -634,16 +708,63 @@ def alpha_cycle(
             for row in core_universe.get("members") or []
         ],
         require_safety=True,
+        coverage_status=combined_coverage_status,
+        lane_statuses={
+            "mover": {
+                "source_status": "SOURCE_FAILED" if mover_source_failed else "READY",
+                "enrichment_status": mover_enrichment_status or "not_run",
+                "data_eligible": mover_lane_eligible,
+                "secondary_fallback_status": str(
+                    enrichment["summary"].get("secondary_fallback_status") or ""
+                ),
+                "promotion_limited": mover_fallback_limited,
+            },
+            "core": {
+                "contract_status": str(core_universe.get("status") or "DATA_UNAVAILABLE"),
+                "snapshot_status": core_snapshot_status,
+                "enrichment_status": core_enrichment_status,
+                "data_eligible": core_lane_eligible,
+                "secondary_fallback_status": str(
+                    core_enrichment_summary.get("secondary_fallback_status") or ""
+                ),
+                "promotion_limited": core_fallback_limited,
+            },
+        },
+        coverage_limitations=coverage_limitations,
     )
     slate_path = output_dir / "ranked_research_slate.json"
     persist_ranked_research_slate(luna_research_slate, slate_path)
     luna_research_slate = _load_frozen_luna_slate(slate_path, market_date=timestamp[:10])
     source_summary["ranked_research_slate"] = luna_research_slate
+    frozen_source_scan_id = str(luna_research_slate.get("scan_id") or "")
+    source_summary["ranked_research_slate_lineage"] = {
+        "frozen_source_scan_id": frozen_source_scan_id,
+        "current_scan_id": scan_result.run_id,
+        "reuse_status": (
+            "CURRENT_SCAN"
+            if frozen_source_scan_id == scan_result.run_id
+            else "GOVERNED_DAILY_FREEZE_REUSE"
+        ),
+    }
+    slate_publication_rows = apply_publication_semantics(
+        list(luna_research_slate.get("rows") or []),
+        slate=luna_research_slate,
+        coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
+        require_watcher_proof=True,
+        receipt_verifier=receipt_verifier,
+    )
+    if len(slate_publication_rows) != int(luna_research_slate.get("published_count") or 0):
+        raise SnapshotValidationError(
+            "FROZEN_SLATE_SIGNAL_MISSING: immutable research rows could not be "
+            "reconstructed for publication"
+        )
+    source_summary["ranked_research_publication_rows"] = slate_publication_rows
     signals = apply_publication_semantics(
         signals,
         slate=luna_research_slate,
-        coverage=enrichment["summary"],
+        coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
         require_watcher_proof=True,
+        receipt_verifier=receipt_verifier,
     )
     research_radar = _research_radar(signals) if decision.get("no_trade") else []
     signals = _annotate_research_radar(signals, research_radar)
@@ -708,7 +829,7 @@ def alpha_cycle(
         message = format_alpha_no_trade(
             reason=str(decision.get("reason") or ""),
             next_action=str(decision.get("next_action") or ""),
-            research_signals=list(luna_research_slate.get("rows") or research_radar),
+            research_signals=slate_publication_rows or research_radar,
             research_total=int(luna_research_slate.get("published_count") or 0),
         )
         hint = "alpha_no_trade"
@@ -734,7 +855,7 @@ def alpha_cycle(
             title,
             message,
             selected_signals=selected_signals,
-            research_signals=list(luna_research_slate.get("rows") or research_radar),
+            research_signals=slate_publication_rows or research_radar,
         )
     ]
     selection_members = selected_signals or ([no_trade_row] if no_trade_row is not None else [])
@@ -753,6 +874,7 @@ def alpha_cycle(
         # edge and no-edge days.  The radar cohort is the existing read-only
         # persistence surface and remains broker-disabled.
         radar=list(luna_research_slate.get("rows") or research_radar),
+        slate=luna_research_slate,
         selected_at=timestamp,
         event=events[0],
     )
@@ -1379,27 +1501,44 @@ def _merge_lane_candidates(
     """Merge already-produced lane candidates, preserving overlap metadata."""
 
     merged: dict[str, dict[str, Any]] = {}
-    for row in [*mover_candidates, *core_candidates]:
+    lane_rows = [("mover", row) for row in mover_candidates] + [
+        ("core", row) for row in core_candidates
+    ]
+    for lane, source_row in lane_rows:
+        row = dict(source_row)
+        row.setdefault("universe_lane", lane)
+        row.setdefault("evidence_lane", lane)
         ticker = str(row.get("ticker") or "").upper()
         if not ticker:
             continue
         if ticker not in merged:
             merged[ticker] = dict(row)
             continue
-        current = merged[ticker]
+        prior = merged[ticker]
+        # The row whose fields survive must retain its actual evidence lane.
+        # Prefer the independently collected core snapshot on overlaps; its
+        # own lane fallback/freshness contract is evaluated downstream.
+        current = dict(row) if lane == "core" else dict(prior)
         current["universe_lane"] = "mover+core"
+        current["evidence_lane"] = lane if lane == "core" else str(
+            prior.get("evidence_lane") or "mover"
+        )
         current["core_universe_memberships"] = (
-            current.get("core_universe_memberships") or row.get("core_universe_memberships") or ""
+            current.get("core_universe_memberships")
+            or prior.get("core_universe_memberships")
+            or row.get("core_universe_memberships")
+            or ""
         )
         current["discovery_context"] = ";".join(
             sorted(
                 {
-                    str(current.get("discovery_context") or ""),
+                    str(prior.get("discovery_context") or ""),
                     str(row.get("discovery_context") or ""),
                 }
                 - {""}
             )
         )
+        merged[ticker] = current
     return sorted(
         merged.values(),
         key=lambda row: float(row.get("score") or row.get("total_score") or 0),
@@ -1751,6 +1890,7 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         "strategy_id": str(row.get("strategy_id") or strategy_id),
         "strategy_version": str(row.get("strategy_version") or strategy_version),
         "scan_id": scan_id,
+        "market_date": str(row.get("market_date") or timestamp[:10]),
         "rank": rank,
         "timestamp": timestamp,
         "signal_key": f"{scan_id}:{rank}:{row.get('ticker')}",
@@ -1758,6 +1898,8 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         "alert_sent": False,
     }
     if payload["strategy_id"] == "alphaops_v5":
+        payload["session_id"] = str(payload.get("session_id") or "regular")
+        payload["entry_window"] = str(payload.get("entry_window") or "09:30-15:30")
         plan = construct_alphaops_v5_plan(payload, decision_at=timestamp)
         payload["alphaops_market_structure_plan"] = plan.to_dict()
         payload["plan_hash_sha256"] = plan.plan_hash_sha256
@@ -1785,6 +1927,7 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         if plan.status == COMPLETE:
             # These are the already-frozen values, carried forward unchanged
             # for downstream receipts and alert gates.
+            payload["direction"] = plan.direction
             payload["entry_watch_level"] = plan.entry
             payload["breakout_trigger"] = plan.entry
             payload["invalidation_level"] = plan.stop
@@ -2169,6 +2312,7 @@ def _apply_strategy_decision_receipts(
             {
                 "receipt_id": receipt.receipt_id,
                 "receipt_hash_sha256": receipt.receipt_hash_sha256,
+                "strategy_decision_receipt": receipt.to_dict(),
                 "pick_tier": tier,
                 "research_pick_eligible": receipt.research_pick_eligible,
                 "paper_entry_eligible": receipt.paper_entry_eligible,
@@ -2201,6 +2345,9 @@ def _apply_strategy_decision_receipts(
             receipt,
             evidence_claims=bundle.get("claims") or (),
             resolution_run=run,
+        )
+        row["strategy_receipt_persistence_status"] = (
+            "PERSISTED" if inserted else "REUSED"
         )
         if inserted:
             persisted_count += 1
@@ -2415,6 +2562,7 @@ def _persist_research_radar_selections(
     *,
     scan_id: str,
     radar: list[dict[str, Any]],
+    slate: dict[str, Any],
     selected_at: str,
     event: NotificationEvent,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2452,6 +2600,22 @@ def _persist_research_radar_selections(
         ]
     )
     body_sha256 = _body_sha256(event.body)
+    frozen_source_scan_id = str(slate.get("scan_id") or "")
+    if not frozen_source_scan_id:
+        raise SnapshotValidationError("Frozen research slate has no source scan identity")
+    reuse_status = (
+        "CURRENT_SCAN"
+        if frozen_source_scan_id == scan_id
+        else "GOVERNED_DAILY_FREEZE_REUSE"
+    )
+    frozen_lineage = {
+        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+        "slate_id": str(slate.get("slate_id") or ""),
+        "slate_content_hash_sha256": str(slate.get("content_hash_sha256") or ""),
+        "frozen_source_scan_id": frozen_source_scan_id,
+        "current_scan_id": scan_id,
+        "reuse_status": reuse_status,
+    }
     rows: list[dict[str, Any]] = []
     for signal in radar:
         signal_id = _selection_signal_id(signal, scan_id)
@@ -2461,6 +2625,8 @@ def _persist_research_radar_selections(
         row = {
             "selection_id": f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}",
             "scan_id": scan_id,
+            "source_scan_id": frozen_source_scan_id,
+            "scan_lineage_status": reuse_status,
             "signal_id": signal_id,
             "ticker": str(signal.get("ticker") or "").upper(),
             "rank": signal.get("rank"),
@@ -2475,6 +2641,8 @@ def _persist_research_radar_selections(
         row["payload_json"] = {
             **row,
             "signal": signal,
+            "frozen_slate_lineage": frozen_lineage,
+            "frozen_ranked_research_slate": slate,
             "research_only": True,
             "broker_execution_enabled": False,
         }
@@ -2754,6 +2922,39 @@ def _legacy_selection_signal(row: dict[str, Any]) -> dict[str, Any]:
         "model_version": str(row.get("model_version") or ALPHA_MODEL_VERSION),
         "timestamp": str(row.get("generated_at") or ""),
     }
+
+
+def _persisted_strategy_receipt_verifier(
+    store: SQLiteScanStore,
+    *,
+    market_date: str,
+) -> Callable[[dict[str, Any]], bool]:
+    """Resolve receipt envelopes against immutable storage before promotion."""
+
+    persisted = {
+        str(item.get("receipt_id") or ""): item
+        for item in store.load_strategy_decision_receipts(
+            market_date=market_date,
+            strategy_id="alphaops_v5",
+            limit=5_000,
+        )
+        if str(item.get("receipt_id") or "")
+    }
+
+    def verify(row: dict[str, Any]) -> bool:
+        payload = row.get("strategy_decision_receipt")
+        if not isinstance(payload, dict):
+            return False
+        receipt_id = str(payload.get("receipt_id") or "")
+        stored = persisted.get(receipt_id)
+        if stored is None:
+            return False
+        try:
+            return canonical_json(stored) == canonical_json(payload)
+        except (TypeError, ValueError):
+            return False
+
+    return verify
 
 
 def _dispatch(

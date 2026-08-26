@@ -175,7 +175,7 @@ def construct_alphaops_v5_plan(
     signal: Mapping[str, Any] | None = None,
     *,
     decision_at: str | None = None,
-    direction: str = "long",
+    direction: str | None = None,
     observations: Mapping[str, Any] | None = None,
     entry_observation: Mapping[str, Any] | None = None,
     stop_observation: Mapping[str, Any] | None = None,
@@ -201,7 +201,7 @@ def construct_alphaops_v5_plan(
         signal["target_observation"] = target_observation
     if target_observations is not None:
         signal["target_observations"] = target_observations
-    normalized_direction = str(direction or signal.get("direction") or "long").lower()
+    normalized_direction = str(signal.get("direction") or direction or "long").lower()
     if normalized_direction not in {"long", "short"}:
         return _invalid(normalized_direction, "direction_unknown")
     if decision_at is not None and _parse_timestamp(decision_at) is None:

@@ -12,6 +12,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     apply_publication_semantics,
     build_ranked_research_slate,
     publication_counts,
+    validate_ranked_research_slate,
 )
 
 
@@ -68,6 +69,10 @@ class AlphaRunContract:
     core_universe_count: int = 0
     core_universe_hash_sha256: str = ""
     core_universe_market_date: str = ""
+    core_snapshot_status: str = "DATA_UNAVAILABLE"
+    core_snapshot_requested_count: int = 0
+    core_snapshot_returned_count: int = 0
+    core_snapshot_complete: bool = False
     core_index_verdicts: dict[str, dict[str, Any]] = field(default_factory=dict)
     core_raw_artifact_hashes: tuple[str, ...] = ()
     core_member_set_hash_sha256: str = ""
@@ -75,6 +80,8 @@ class AlphaRunContract:
     slate_id: str = ""
     slate_content_hash_sha256: str = ""
     slate_market_date: str = ""
+    slate_source_scan_id: str = ""
+    slate_reuse_status: str = "UNSPECIFIED"
     slate_published_count: int = 0
     slate_selection_ids: tuple[str, ...] = ()
     schema_version: str = "alphaops.run_contract.v1"
@@ -105,18 +112,43 @@ def build_alpha_run_contract(
     enrichment_status = str(enrichment.get("status") or "not_run")
     coverage = evaluate_premarket_coverage(enrichment)
     data_eligible = coverage.status in {"complete", "partial"}
-    slate = build_ranked_research_slate(
-        signals,
-        target=5,
-        data_eligible=data_eligible,
-    )
     persisted_slate = dict(source_summary.get("ranked_research_slate") or {})
-    published_signals = apply_publication_semantics(
-        signals,
-        slate=slate,
-        coverage=enrichment,
-        require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
-    )
+    if persisted_slate:
+        slate = validate_ranked_research_slate(
+            persisted_slate,
+            market_date=generated_at[:10],
+        )
+    else:
+        slate = build_ranked_research_slate(
+            signals,
+            target=5,
+            data_eligible=data_eligible,
+            generated_at=generated_at,
+            market_date=generated_at[:10],
+            scan_id=scan_id,
+            require_safety=bool(source_summary.get("require_watcher_proof")),
+        )
+    frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
+    if isinstance(frozen_publication_rows, list):
+        published_signals = [dict(row) for row in frozen_publication_rows]
+        expected_selection_ids = list(slate.get("selection_ids") or [])
+        actual_selection_ids = [
+            str(row.get("research_selection_id") or "") for row in published_signals
+        ]
+        if actual_selection_ids != expected_selection_ids:
+            raise ValueError(
+                "Run-contract publication rows do not match the immutable slate cohort."
+            )
+    else:
+        # A standalone contract build has no database-backed receipt resolver,
+        # so it may reconstruct Tier 1 only. Tier 2/3 promotion is copied only
+        # from the exact publication rows produced by the operational cycle.
+        published_signals = apply_publication_semantics(
+            list(slate.get("rows") or []),
+            slate=slate,
+            coverage={"lanes": slate.get("lane_statuses") or {}},
+            require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
+        )
     publication = publication_counts(
         published_signals,
         official_selected=(
@@ -126,6 +158,10 @@ def build_alpha_run_contract(
             else 0
         ),
     )
+    if publication["ranked_research"] != int(slate.get("published_count") or 0):
+        raise ValueError(
+            "Run-contract publication counts do not match the immutable research slate."
+        )
     source_collected = _first_count(
         source_summary.get("source_collected"),
         source_summary.get("rows_normalized"),
@@ -149,6 +185,25 @@ def build_alpha_run_contract(
             "contract_hash_sha256": source_summary.get("core_universe_hash_sha256"),
         }
     lane_counts = dict(source_summary.get("lane_counts") or {})
+    slate_lineage = dict(source_summary.get("ranked_research_slate_lineage") or {})
+    slate_source_scan_id = str(slate.get("scan_id") or "")
+    expected_reuse_status = (
+        "CURRENT_SCAN" if slate_source_scan_id == scan_id else "GOVERNED_DAILY_FREEZE_REUSE"
+    )
+    declared_source_scan_id = str(
+        slate_lineage.get("frozen_source_scan_id") or slate_source_scan_id
+    )
+    declared_current_scan_id = str(slate_lineage.get("current_scan_id") or scan_id)
+    declared_reuse_status = str(
+        slate_lineage.get("reuse_status") or expected_reuse_status
+    )
+    if (
+        declared_source_scan_id != slate_source_scan_id
+        or declared_current_scan_id != scan_id
+        or declared_reuse_status != expected_reuse_status
+    ):
+        raise ValueError("Run-contract frozen slate lineage is inconsistent.")
+    slate_reuse_status = expected_reuse_status
     research_symbols = tuple(
         sorted(
             {
@@ -239,24 +294,35 @@ def build_alpha_run_contract(
             or source_summary.get("market_date")
             or generated_at[:10]
         ),
+        core_snapshot_status=str(core.get("status") or "DATA_UNAVAILABLE"),
+        core_snapshot_requested_count=max(int(core.get("requested_count") or 0), 0),
+        core_snapshot_returned_count=max(int(core.get("returned_count") or 0), 0),
+        core_snapshot_complete=(
+            str(core.get("status") or "") == "READY"
+            and int(core.get("requested_count") or 0) > 0
+            and int(core.get("requested_count") or 0)
+            == int(core.get("returned_count") or 0)
+        ),
         core_index_verdicts=dict(core.get("index_verdicts") or {}),
         core_raw_artifact_hashes=tuple(
-            sorted(str(item) for item in core.get("raw_artifact_hashes") or [])
+            str(item) for item in core.get("raw_artifact_hashes") or []
         ),
         core_member_set_hash_sha256=str(core.get("canonical_member_set_hash_sha256") or ""),
         lane_counts=lane_counts,
-        slate_id=str(persisted_slate.get("slate_id") or slate.get("slate_id") or ""),
+        slate_id=str(slate.get("slate_id") or ""),
         slate_content_hash_sha256=str(
-            persisted_slate.get("content_hash_sha256") or slate.get("content_hash_sha256") or ""
+            slate.get("content_hash_sha256") or ""
         ),
-        slate_market_date=str(persisted_slate.get("market_date") or generated_at[:10]),
+        slate_market_date=str(slate.get("market_date") or generated_at[:10]),
+        slate_source_scan_id=slate_source_scan_id,
+        slate_reuse_status=slate_reuse_status,
         slate_published_count=max(
-            int(persisted_slate.get("published_count") or slate.get("published_count") or 0), 0
+            int(slate.get("published_count") or 0), 0
         ),
         slate_selection_ids=tuple(
             sorted(
                 str(item)
-                for item in persisted_slate.get("selection_ids") or slate.get("selection_ids") or []
+                for item in slate.get("selection_ids") or []
             )
         ),
     )

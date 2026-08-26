@@ -1,6 +1,7 @@
 import pytest
 
 from intraday_scanner.alpha.run_contracts import build_alpha_run_contract
+from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
 
 
 def _contract(*, enrichment, watchlist=None):
@@ -106,4 +107,84 @@ def test_contract_rejects_a_count_without_the_explicit_research_symbols():
                 "verified_count": 1,
                 "secondary_fallback_status": "not_needed",
             }
+        )
+
+
+def test_contract_reports_governed_cross_scan_frozen_slate_without_current_replacement():
+    slate = build_ranked_research_slate(
+        [{"ticker": "FROZEN", "signal_id": "signal-frozen"}],
+        generated_at="2026-08-05T12:00:00+00:00",
+        market_date="2026-08-05",
+        scan_id="scan-original",
+    )
+    contract = build_alpha_run_contract(
+        scan_id="scan-retry",
+        generated_at="2026-08-05T12:23:00+00:00",
+        ranked_count=1,
+        signals=[{"ticker": "CURRENT", "signal_id": "signal-current"}],
+        review={
+            "decision": {"reason": "No clean edge."},
+            "selection_diagnostics": {},
+            "watchlist": [],
+        },
+        source_summary={
+            "status": "success",
+            "ranked_research_slate": slate,
+            "ranked_research_slate_lineage": {
+                "frozen_source_scan_id": "scan-original",
+                "current_scan_id": "scan-retry",
+                "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
+            },
+        },
+        enrichment_summary={
+            "status": "complete",
+            "selected_count": 1,
+            "selected_symbols": ["CURRENT"],
+            "verified_count": 1,
+            "secondary_fallback_status": "not_needed",
+        },
+        notification_stats={},
+    )
+
+    assert contract.ranked_research_count == 1
+    assert contract.slate_selection_ids == tuple(sorted(slate["selection_ids"]))
+    assert contract.slate_source_scan_id == "scan-original"
+    assert contract.slate_reuse_status == "GOVERNED_DAILY_FREEZE_REUSE"
+
+
+def test_contract_rejects_caller_claimed_slate_lineage_that_disagrees_with_artifact():
+    slate = build_ranked_research_slate(
+        [{"ticker": "FROZEN", "signal_id": "signal-frozen"}],
+        generated_at="2026-08-05T12:00:00+00:00",
+        market_date="2026-08-05",
+        scan_id="scan-original",
+    )
+    with pytest.raises(ValueError, match="frozen slate lineage is inconsistent"):
+        build_alpha_run_contract(
+            scan_id="scan-retry",
+            generated_at="2026-08-05T12:23:00+00:00",
+            ranked_count=1,
+            signals=[],
+            review={
+                "decision": {"reason": "No clean edge."},
+                "selection_diagnostics": {},
+                "watchlist": [],
+            },
+            source_summary={
+                "status": "success",
+                "ranked_research_slate": slate,
+                "ranked_research_slate_lineage": {
+                    "frozen_source_scan_id": "scan-retry",
+                    "current_scan_id": "scan-retry",
+                    "reuse_status": "CURRENT_SCAN",
+                },
+            },
+            enrichment_summary={
+                "status": "complete",
+                "selected_count": 0,
+                "selected_symbols": [],
+                "verified_count": 0,
+                "secondary_fallback_status": "not_needed",
+            },
+            notification_stats={},
         )

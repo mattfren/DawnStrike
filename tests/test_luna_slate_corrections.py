@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from intraday_scanner.services import luna_core_universe_service as core
+from intraday_scanner.services.alpha_cycle_service import _merge_lane_candidates
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    TIER1,
+    TIER2,
+    apply_publication_semantics,
     build_ranked_research_slate,
     persist_ranked_research_slate,
     validate_ranked_research_slate,
@@ -95,6 +101,46 @@ def test_self_declared_test_and_hash_without_bytes_cannot_bypass_production() ->
     assert "expected_count_below_production_minimum:S&P 500" in contract["blockers"]
 
 
+def test_reconstitution_lineage_requires_order_and_structured_identity() -> None:
+    hashes = ["a" * 64, "b" * 64]
+    member_hash = "c" * 64
+    manifest = {
+        "reconstitution_lineage": {
+            "schema_version": "dawnstrike.core_universe_lineage.v1",
+            "builder_id": "official-source-builder",
+            "transformation_id": "ordered-reconstitution",
+            "reconstitution_id": "rebalance-2026-08-26",
+            "effective_date": "2026-08-26",
+            "input_artifact_hashes": hashes,
+            "canonical_member_set_hash_sha256": member_hash,
+        }
+    }
+    assert core._has_reconstitution_lineage(
+        manifest,
+        effective_date="2026-08-26",
+        artifact_hashes=hashes,
+        member_hash=member_hash,
+    )
+    reversed_manifest = json.loads(json.dumps(manifest))
+    reversed_manifest["reconstitution_lineage"]["input_artifact_hashes"] = list(
+        reversed(hashes)
+    )
+    assert not core._has_reconstitution_lineage(
+        reversed_manifest,
+        effective_date="2026-08-26",
+        artifact_hashes=hashes,
+        member_hash=member_hash,
+    )
+    missing_identity = json.loads(json.dumps(manifest))
+    missing_identity["reconstitution_lineage"].pop("transformation_id")
+    assert not core._has_reconstitution_lineage(
+        missing_identity,
+        effective_date="2026-08-26",
+        artifact_hashes=hashes,
+        member_hash=member_hash,
+    )
+
+
 def test_discovery_partial_batch_is_explicitly_incomplete() -> None:
     class Provider:
         def get_premarket_snapshot(self, symbols, config):
@@ -114,6 +160,36 @@ def test_discovery_partial_batch_is_explicitly_incomplete() -> None:
     )
     assert result["status"] == "INCOMPLETE"
     assert result["coverage_receipts"][0]["missing_symbols"] == ["B"]
+
+
+def test_discovery_freshness_is_bound_to_explicit_cycle_observation_time() -> None:
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:00:00+00:00",
+                    "premarket_price": 10,
+                }
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "members": [{"symbol": "A", "index_memberships": ["S&P 500"]}],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "READY"
+    assert result["rows"][0]["freshness_status"] == "FRESH"
+    assert result["rows"][0].get("stale_data_flag") is not True
 
 
 def test_slate_has_immutable_identity_and_persistence(tmp_path: Path) -> None:
@@ -143,6 +219,116 @@ def test_slate_has_immutable_identity_and_persistence(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("tampered slate must fail integrity validation")
+
+
+def test_lane_local_fallback_ceiling_does_not_demote_independent_core(
+    monkeypatch,
+) -> None:
+    from intraday_scanner.services import luna_research_slate_service as slate_service
+
+    rows = [
+        {"ticker": "MOVE", "universe_lane": "mover", "evidence_lane": "mover"},
+        {"ticker": "CORE", "universe_lane": "core", "evidence_lane": "core"},
+    ]
+    slate = build_ranked_research_slate(
+        rows,
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-lanes",
+    )
+    monkeypatch.setattr(slate_service, "_plan_qualified", lambda row, **_: True)
+    monkeypatch.setattr(
+        slate_service,
+        "_alertable",
+        lambda row, *, require_watcher_proof: False,
+    )
+    published = apply_publication_semantics(
+        rows,
+        slate=slate,
+        coverage={
+            "lanes": {
+                "mover": {"promotion_limited": True},
+                "core": {"promotion_limited": False},
+            }
+        },
+    )
+
+    by_ticker = {row["ticker"]: row for row in published}
+    assert by_ticker["MOVE"]["publication_tier"] == TIER1
+    assert by_ticker["CORE"]["publication_tier"] == TIER2
+
+
+def test_overlap_candidate_retains_the_core_row_as_its_evidence_lane() -> None:
+    merged = _merge_lane_candidates(
+        [
+            {
+                "ticker": "OVER",
+                "score": 10,
+                "source": "mover-fallback",
+                "discovery_context": "mover",
+            }
+        ],
+        [
+            {
+                "ticker": "OVER",
+                "score": 9,
+                "source": "core-authenticated",
+                "discovery_context": "S&P 500",
+                "core_universe_memberships": "S&P 500",
+            }
+        ],
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["universe_lane"] == "mover+core"
+    assert merged[0]["evidence_lane"] == "core"
+    assert merged[0]["source"] == "core-authenticated"
+
+
+def test_slate_scan_identity_is_nonempty_and_content_bound() -> None:
+    slate = build_ranked_research_slate(
+        [{"ticker": "AAA"}],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+    )
+    assert slate["scan_id"] == "luna-research:2026-08-26"
+    validate_ranked_research_slate(slate, market_date="2026-08-26")
+
+
+def test_selection_identity_namespaces_duplicate_upstream_ids_by_ticker() -> None:
+    slate = build_ranked_research_slate(
+        [
+            {"ticker": "AAA", "signal_id": "shared-id"},
+            {"ticker": "BBB", "signal_id": "shared-id"},
+        ],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-shared-id",
+    )
+    assert len(set(slate["selection_ids"])) == 2
+    assert {row["research_source_signal_id"] for row in slate["rows"]} == {"shared-id"}
+    validate_ranked_research_slate(slate, market_date="2026-08-26")
+
+
+def test_publication_excludes_broker_enabled_input_and_forces_disabled_output() -> None:
+    enabled = {
+        "ticker": "LIVE",
+        "broker_execution_enabled": True,
+        "broker_execution": "live",
+    }
+    safe = {"ticker": "SAFE"}
+    slate = build_ranked_research_slate(
+        [enabled, safe],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-broker-boundary",
+    )
+    assert slate["symbols"] == ["SAFE"]
+    published = apply_publication_semantics([enabled, safe], slate=slate)
+    safe_row = next(row for row in published if row["ticker"] == "SAFE")
+    assert safe_row["research_only"] is True
+    assert safe_row["broker_execution"] == "disabled"
+    assert safe_row["broker_execution_enabled"] is False
 
 
 def test_tier_one_requires_positive_current_clear_safety_evidence() -> None:

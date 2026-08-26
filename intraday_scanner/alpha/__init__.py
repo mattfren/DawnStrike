@@ -5,6 +5,13 @@ does not place orders, hold broker credentials, or execute trades.
 """
 
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION, AlphaModel
+from intraday_scanner.alpha.episode_identity import (
+    EpisodeIdentity,
+    EpisodeIdentityError,
+    build_episode_identity,
+    canonical_episode_identity,
+    deduplicate_episode_candidates,
+)
 from intraday_scanner.alpha.feature_factory import FEATURE_MODEL_VERSION, build_feature_vector
 from intraday_scanner.alpha.no_trade_filter import NoTradeDecision, evaluate_no_trade
 from intraday_scanner.alpha.plan_constructor import (
@@ -19,13 +26,6 @@ from intraday_scanner.alpha.plan_constructor import (
     validate_alphaops_v5_plan,
 )
 from intraday_scanner.alpha.risk_governor import RiskDecision, evaluate_risk
-from intraday_scanner.alpha.episode_identity import (
-    EpisodeIdentity,
-    EpisodeIdentityError,
-    build_episode_identity,
-    canonical_episode_identity,
-    deduplicate_episode_candidates,
-)
 
 __all__ = [
     "ALPHA_MODEL_VERSION",

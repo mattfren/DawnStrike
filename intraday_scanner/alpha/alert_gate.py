@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
+
+from intraday_scanner.decisioning.contracts import canonical_json
 
 ALERT_OK = "ALERT_OK"
 PASS = "PASS"
@@ -460,7 +463,6 @@ def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
         row.get("strategy_receipt_research_pick_eligible")
     )
     paper_eligible = _bool_or_none(row.get("strategy_receipt_paper_entry_eligible"))
-    shadow_only = _truthy(row.get("strategy_receipt_shadow_only"))
     disagreements = _unique(
         [
             *_tokens(row.get("strategy_receipt_disagreement")),
@@ -468,21 +470,19 @@ def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
     )
     blocking_reasons: list[str] = []
     receipt_id = str(row.get("receipt_id") or "").strip()
+    receipt_valid = validate_strategy_receipt_envelope(row)
     construction_status = str(
         row.get("strategy_receipt_construction_status") or ""
     ).upper()
-    if not receipt_id or construction_status != "COMPLETE":
+    if not receipt_id or construction_status != "COMPLETE" or not receipt_valid:
         _append_unique(disagreements, "strategy_receipt_construction_failed")
-        if not shadow_only:
-            blocking_reasons.append("strategy decision receipt unavailable")
+        blocking_reasons.append("strategy decision receipt unavailable or unauthenticated")
     elif research_eligible is not True:
         _append_unique(disagreements, "strategy_receipt_research_ineligible")
-        if not shadow_only:
-            blocking_reasons.append("strategy decision receipt is not research eligible")
+        blocking_reasons.append("strategy decision receipt is not research eligible")
     elif tier not in RECEIPT_ALERTABLE_TIERS:
         _append_unique(disagreements, "strategy_receipt_tier_not_alertable")
-        if not shadow_only:
-            blocking_reasons.append("strategy decision receipt tier is not alertable")
+        blocking_reasons.append("strategy decision receipt tier is not alertable")
 
     legacy_can_alert = _bool_or_none(row.get("strategy_receipt_legacy_can_alert"))
     if (
@@ -501,6 +501,55 @@ def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
         "disagreements": disagreements,
         "blocking_reasons": blocking_reasons,
     }
+
+
+def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
+    payload = row.get("strategy_decision_receipt")
+    if not isinstance(payload, dict):
+        return False
+    receipt_hash = str(payload.get("receipt_hash_sha256") or "").lower()
+    receipt_id = str(payload.get("receipt_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+        return False
+    hash_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"receipt_hash_sha256", "receipt_id"}
+    }
+    expected_hash = hashlib.sha256(canonical_json(hash_payload).encode("utf-8")).hexdigest()
+    if receipt_hash != expected_hash or receipt_id != "sdr-" + receipt_hash[:24]:
+        return False
+    ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+    if (
+        payload.get("schema_version") != "dawnstrike.strategy_decision_receipt.v1"
+        or str(payload.get("symbol") or "").upper() != ticker
+        or str(payload.get("strategy_id") or "") != str(row.get("strategy_id") or "")
+        or str(payload.get("strategy_version") or "")
+        != str(row.get("strategy_version") or "")
+        or receipt_hash != str(row.get("receipt_hash_sha256") or "").lower()
+        or receipt_id != str(row.get("receipt_id") or "")
+        or str(row.get("strategy_receipt_persistence_status") or "").upper()
+        not in {"PERSISTED", "REUSED"}
+        or str(payload.get("pick_tier") or "").upper()
+        != str(row.get("strategy_receipt_tier") or row.get("pick_tier") or "").upper()
+        or payload.get("research_pick_eligible")
+        is not _bool_or_none(row.get("strategy_receipt_research_pick_eligible"))
+        or payload.get("paper_entry_eligible")
+        is not _bool_or_none(row.get("strategy_receipt_paper_entry_eligible"))
+        or payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+    ):
+        return False
+    for payload_key, row_keys in (
+        ("entry_reference", ("entry_reference", "entry_watch_level", "entry_trigger")),
+        ("stop", ("stop", "invalidation_level", "invalidation")),
+        ("target", ("target", "target_1", "first_target")),
+        ("reward_risk_ratio", ("reward_risk_ratio",)),
+    ):
+        row_value = next((row.get(key) for key in row_keys if row.get(key) is not None), None)
+        if _optional_float(payload.get(payload_key)) != _optional_float(row_value):
+            return False
+    return True
 
 
 def _append_unique(target: list[str], value: str) -> None:

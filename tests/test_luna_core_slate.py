@@ -151,6 +151,33 @@ def test_tier_one_coexists_with_one_official_and_tier_two_three_remain_zero():
     assert "OFFICIAL PAPER CANDIDATES" not in text
 
 
+def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacements():
+    frozen = {
+        "ticker": "FROZEN",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    current = {
+        "ticker": "CURRENT",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    text = format_alpha_watch(
+        signals=[current],
+        edge_label="research",
+        source_summary={
+            "ranked_research_slate": {"published_count": 1, "rows": [frozen]},
+            "ranked_research_publication_rows": [frozen],
+        },
+    )
+
+    assert "FROZEN" in text
+    assert "CURRENT" not in text
+    assert "Research slate: 1 of 1 shown" in text
+
+
 def test_tier_semantics_and_research_monitor_label():
     plan = {
         "schema_version": "alphaops.structural_plan.v1",

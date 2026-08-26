@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from intraday_scanner.alpha.alert_gate import apply_alert_gate
+from intraday_scanner.alpha.plan_constructor import construct_alphaops_v5_plan
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACTIVATION_TIMESTAMP,
     ALPHAOPS_V5_STRATEGY_ID,
@@ -149,6 +150,43 @@ def test_v5_clean_candidate_is_risk_sized_from_simulated_equity() -> None:
     assert decision.broker_execution_enabled is False
 
 
+def test_v5_direct_policy_rejects_allowlisted_target_without_strict_plan() -> None:
+    signal = _clean_signal()
+    signal.pop("alphaops_market_structure_plan")
+    signal.pop("plan_hash_sha256")
+
+    decision = evaluate_v5_official_paper(signal, _observation())
+
+    assert decision.eligible_for_official_paper is False
+    assert "strict_frozen_plan_missing_or_invalid" in decision.reasons
+
+
+def test_shadow_receipt_cannot_alert_when_envelope_is_missing_or_ineligible() -> None:
+    row = _clean_signal()
+    row.update(
+        {
+            "can_alert": True,
+            "strategy_receipt_enabled": True,
+            "strategy_receipt_shadow_only": True,
+            "strategy_receipt_construction_status": "COMPLETE",
+            "strategy_receipt_persistence_status": "PERSISTED",
+            "receipt_id": "sdr-" + "a" * 24,
+            "receipt_hash_sha256": "a" * 64,
+            "strategy_receipt_tier": "QUALIFIED_PICK",
+            "strategy_receipt_research_pick_eligible": False,
+            "strategy_receipt_paper_entry_eligible": False,
+        }
+    )
+
+    gated = apply_alert_gate(row)
+
+    assert gated["alert_gate_status"] == "BLOCKED"
+    assert gated["can_alert"] is False
+    assert "strategy decision receipt unavailable or unauthenticated" in gated[
+        "alert_gate_reasons"
+    ]
+
+
 def test_v5_cost_model_is_explicitly_provisional_until_empirical_evidence() -> None:
     model = v5_execution_cost_model()
 
@@ -291,7 +329,7 @@ def _clean_signal(
     invalidation_level: float = 9.0,
     target_1: float = 12.75,
 ) -> dict[str, object]:
-    return {
+    signal: dict[str, object] = {
         "signal_id": f"sig-{ticker}",
         "selection_id": f"selection-{ticker}",
         "ticker": ticker,
@@ -338,6 +376,42 @@ def _clean_signal(
         "target_basis_value": target_1,
         "target_basis_source": "premarket_structure_fixture",
         "target_derived_from_risk": False,
+        "market_structure_observations": {
+            "entry": _plan_observation(entry_watch_level, "a" * 64, "sourced_entry"),
+            "stop": _plan_observation(invalidation_level, "b" * 64, "sourced_stop"),
+            "target": {
+                **_plan_observation(target_1, "c" * 64, "prior_day_resistance"),
+                "target_basis_kind": "sourced_resistance",
+            },
+        },
+    }
+    plan = construct_alphaops_v5_plan(
+        signal,
+        decision_at="2026-07-31T13:30:00+00:00",
+    )
+    signal["alphaops_market_structure_plan"] = plan.to_dict()
+    signal["plan_hash_sha256"] = plan.plan_hash_sha256
+    signal["direction"] = plan.direction
+    signal["target_basis_kind"] = plan.target_basis_kind
+    signal["plan_levels_frozen"] = True
+    signal["plan_construction_status"] = plan.status
+    return signal
+
+
+def _plan_observation(
+    value: float, source_hash: str, observation_kind: str
+) -> dict[str, object]:
+    return {
+        "value": value,
+        "raw_value": value,
+        "observed_at": "2026-07-31T13:00:00+00:00",
+        "completed_at": "2026-07-31T13:00:00+00:00",
+        "source": "completed-market-feed",
+        "source_url": "https://example.test/market",
+        "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "derivation_policy": "identity",
+        "is_complete": True,
     }
 
 

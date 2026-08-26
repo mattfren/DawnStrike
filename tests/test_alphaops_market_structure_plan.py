@@ -18,7 +18,14 @@ from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.services.alpha_cycle_service import (
     _apply_strategy_decision_receipts,
+    _persisted_strategy_receipt_verifier,
     _signal_payload,
+)
+from intraday_scanner.services.luna_research_slate_service import (
+    TIER1,
+    TIER2,
+    apply_publication_semantics,
+    build_ranked_research_slate,
 )
 from intraday_scanner.services.strategy_decision_service import StrategyDecisionService
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -86,6 +93,29 @@ def test_range_extension_is_not_a_eligible_target_basis() -> None:
         "premarket_range_extension_1.618"
     )
     assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
+
+
+def test_signal_direction_overrides_constructor_default_for_short_plan() -> None:
+    signal = _signal(target=8.0)
+    signal["direction"] = "short"
+    signal["entry_watch_level"] = 10.0
+    signal["invalidation_level"] = 11.0
+    signal["market_structure_observations"]["entry"] = _observation(
+        10.0, "a" * 64
+    )
+    signal["market_structure_observations"]["stop"] = _observation(
+        11.0, "b" * 64, observation_kind="sourced_stop"
+    )
+    signal["market_structure_observations"]["target"] = {
+        **_observation(8.0, "c" * 64, observation_kind="prior_day_resistance"),
+        "target_basis_kind": "sourced_resistance",
+    }
+
+    plan = construct_alphaops_v5_plan(signal)
+
+    assert plan.status == COMPLETE
+    assert plan.direction == "short"
+    assert (plan.entry, plan.stop, plan.target) == (10.0, 11.0, 8.0)
 
 
 def test_structural_target_requires_raw_level_and_non_risk_derivation() -> None:
@@ -368,3 +398,121 @@ def test_alpha_cycle_structural_plan_preserves_hash_levels_through_alert_gate(
     gated = apply_alert_gates([payload])[0]
     assert gated["plan_hash_sha256"] == frozen.plan_hash_sha256
     assert gated["strategy_receipt_paper_entry_eligible"] is True
+    assert gated["strategy_receipt_gate_blocked"] is False
+
+
+def test_strict_plan_and_persisted_receipt_promote_tier_two_but_tampering_does_not(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "c" * 40)
+    source = _signal()
+    source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+    source.update(
+        {
+            "source_count": 2,
+            "source_quality_status": "VERIFIED",
+            "freshness_status": "FRESH",
+            "halt_status": "CLEAR",
+            "sec_risk_status": "CLEAR",
+            "corporate_action_status": "CLEAR",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
+        }
+    )
+    payload = _signal_payload(source, "scan-tier-two", "2026-08-26T13:30:00+00:00", 1)
+    receipt_store = SQLiteScanStore(tmp_path / "tier-two.sqlite")
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=receipt_store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "completed-market-feed"},
+    )
+    slate = build_ranked_research_slate(
+        [payload],
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-tier-two",
+        require_safety=True,
+    )
+
+    assert (
+        apply_publication_semantics([payload], slate=slate)[0]["publication_tier"]
+        == TIER1
+    )
+    published = apply_publication_semantics(
+        [payload],
+        slate=slate,
+        require_watcher_proof=False,
+        receipt_verifier=_persisted_strategy_receipt_verifier(
+            receipt_store,
+            market_date="2026-08-26",
+        ),
+    )[0]
+    assert published["publication_tier"] == TIER2
+
+    tampered = {**payload, "receipt_hash_sha256": "0" * 64}
+    assert (
+        apply_publication_semantics(
+            [tampered],
+            slate=slate,
+            receipt_verifier=_persisted_strategy_receipt_verifier(
+                receipt_store,
+                market_date="2026-08-26",
+            ),
+        )[0]["publication_tier"]
+        == TIER1
+    )
+
+
+def test_tier_two_requires_the_exact_alphaops_v5_strategy_version(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "d" * 40)
+    source = _signal()
+    source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+    source.update(
+        {
+            "source_count": 2,
+            "source_quality_status": "VERIFIED",
+            "freshness_status": "FRESH",
+            "halt_status": "CLEAR",
+            "sec_risk_status": "CLEAR",
+            "corporate_action_status": "CLEAR",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
+        }
+    )
+    payload = _signal_payload(source, "scan-wrong-version", "2026-08-26T13:30:00+00:00", 1)
+    payload["strategy_version"] = "attacker-version"
+    receipt_store = SQLiteScanStore(tmp_path / "wrong-version.sqlite")
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=receipt_store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "completed-market-feed"},
+    )
+    slate = build_ranked_research_slate(
+        [payload],
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-wrong-version",
+        require_safety=True,
+    )
+
+    published = apply_publication_semantics(
+        [payload],
+        slate=slate,
+        receipt_verifier=_persisted_strategy_receipt_verifier(
+            receipt_store,
+            market_date="2026-08-26",
+        ),
+    )[0]
+    assert published["publication_tier"] == TIER1

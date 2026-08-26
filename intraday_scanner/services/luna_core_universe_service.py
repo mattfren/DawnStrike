@@ -256,7 +256,7 @@ def build_core_universe_contract(
                 "source_id": source_id,
                 "source_uri": source_uri,
                 "raw_artifact_sha256": raw_hash,
-                "raw_artifact_hashes": sorted(raw_hashes),
+                "raw_artifact_hashes": list(raw_hashes),
                 "canonical_member_set_hash_sha256": computed_member_hash,
                 "declared_canonical_member_set_hash_sha256": declared_member_hash or None,
                 "error_codes": sorted(set(manifest_errors)),
@@ -374,14 +374,14 @@ def build_core_universe_contract(
             }
         ),
         "source_artifacts": source_artifacts,
-        "raw_artifact_hashes": sorted(
+        "raw_artifact_hashes": [
             digest
             for item in source_artifacts
             for digest in (
                 item.get("raw_artifact_hashes")
                 or ([item["raw_artifact_sha256"]] if item.get("raw_artifact_sha256") else [])
             )
-        ),
+        ],
         "members": sorted(members.values(), key=lambda row: row["symbol"]),
         "membership_count": len(members),
         "index_verdicts": index_verdicts,
@@ -687,6 +687,7 @@ def discover_core_universe_rows(
     *,
     config: ScannerConfig,
     provider: Any | None = None,
+    observed_at: datetime | None = None,
     max_symbols: int = 600,
     batch_size: int = 50,
 ) -> dict[str, Any]:
@@ -726,6 +727,15 @@ def discover_core_universe_rows(
             "returned_count": 0,
         }
     active_provider = provider or AlpacaProvider(config)
+    discovered_at = observed_at or datetime.now(timezone.utc)
+    if discovered_at.tzinfo is None:
+        discovered_at = discovered_at.replace(tzinfo=timezone.utc)
+    else:
+        discovered_at = discovered_at.astimezone(timezone.utc)
+    max_snapshot_age_seconds = max(
+        int(getattr(config, "premarket_enrichment_max_age_seconds", 1_200) or 1_200),
+        60,
+    )
     memberships = {
         canonical_symbol(row.get("symbol") or row.get("ticker")): list(
             row.get("index_memberships") or []
@@ -769,6 +779,16 @@ def discover_core_universe_rows(
                 "missing_symbols": missing,
                 "unknown_symbols": unknown,
                 "duplicate_symbols": duplicates,
+                "authenticated_provider": authenticated,
+                "response_hash_sha256": hashlib.sha256(
+                    json.dumps(
+                        batch_rows,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest(),
                 "status": "READY"
                 if not missing
                 and not unknown
@@ -787,8 +807,21 @@ def discover_core_universe_rows(
                 # These statuses describe the authenticated snapshot receipt;
                 # halt/SEC/corporate-action statuses are attached only by their
                 # respective evidence collectors later in the cycle.
-                row["source_quality_status"] = "VERIFIED" if authenticated else "UNKNOWN"
-                row["freshness_status"] = "FRESH" if authenticated else "UNKNOWN"
+                source_verified = authenticated and str(row.get("source") or "").lower().startswith(
+                    "alpaca"
+                )
+                freshness = _snapshot_freshness_status(
+                    row,
+                    observed_at=discovered_at,
+                    max_age_seconds=max_snapshot_age_seconds,
+                )
+                row["source_quality_status"] = "VERIFIED" if source_verified else "UNKNOWN"
+                row["freshness_status"] = freshness
+                if freshness != "FRESH":
+                    row["stale_data_flag"] = True
+                    row["coverage_warning"] = (
+                        "core_snapshot_timestamp_missing_or_outside_freshness_limit"
+                    )
                 rows.append(row)
     except (DataProviderError, OSError, TypeError, ValueError) as exc:
         return {
@@ -1050,11 +1083,12 @@ def _has_reconstitution_lineage(
     if not isinstance(lineage, dict):
         return False
     schema = str(lineage.get("schema_version") or lineage.get("schema") or "").strip()
-    builder = str(
-        lineage.get("builder_id")
-        or lineage.get("transformation_id")
-        or lineage.get("builder")
-        or ""
+    builder = str(lineage.get("builder_id") or lineage.get("builder") or "").strip()
+    transformation = str(
+        lineage.get("transformation_id") or lineage.get("transformation") or ""
+    ).strip()
+    reconstitution_id = str(
+        lineage.get("reconstitution_id") or lineage.get("lineage_id") or ""
     ).strip()
     lineage_effective = _date_text(lineage.get("effective_date") or lineage.get("as_of_date"))
     input_hashes = lineage.get("input_artifact_hashes") or lineage.get("artifact_hashes")
@@ -1064,11 +1098,35 @@ def _has_reconstitution_lineage(
         or ""
     ).lower()
     return (
-        bool(schema and builder and lineage_effective and lineage_effective == effective_date)
+        bool(
+            schema
+            and builder
+            and transformation
+            and reconstitution_id
+            and lineage_effective
+            and lineage_effective == effective_date
+        )
         and isinstance(input_hashes, list)
-        and sorted(str(item).lower() for item in input_hashes) == sorted(artifact_hashes)
+        and [str(item).lower() for item in input_hashes] == artifact_hashes
         and lineage_member_hash == member_hash
     )
+
+
+def _snapshot_freshness_status(
+    row: dict[str, Any],
+    *,
+    observed_at: datetime,
+    max_age_seconds: int,
+) -> str:
+    timestamp = _parse_datetime(row.get("source_timestamp") or row.get("as_of_timestamp"))
+    if timestamp is None:
+        return "UNKNOWN"
+    age_seconds = (observed_at - timestamp).total_seconds()
+    if age_seconds < -60:
+        return "FUTURE"
+    if age_seconds > max_age_seconds:
+        return "STALE"
+    return "FRESH"
 
 
 def _validate_raw_artifact(manifest: dict[str, Any]) -> tuple[str, str | None]:
@@ -1164,7 +1222,7 @@ def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[s
             hashes.append(digest)
         if not entries:
             errors.append("raw_artifact_entries_missing")
-        return sorted(hashes), errors
+        return hashes, errors
     digest, error = _validate_raw_artifact(manifest)
     return ([digest] if not error else []), ([error] if error else [])
 

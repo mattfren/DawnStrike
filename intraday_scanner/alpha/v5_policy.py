@@ -20,6 +20,12 @@ from intraday_scanner.alpha.execution_cost import (
     ExecutionCostModel,
 )
 from intraday_scanner.alpha.path_replay import resolve_path
+from intraday_scanner.alpha.plan_constructor import (
+    COMPLETE as PLAN_COMPLETE,
+)
+from intraday_scanner.alpha.plan_constructor import (
+    validate_alphaops_v5_plan,
+)
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -274,6 +280,14 @@ def evaluate_v5_official_paper(
     """Evaluate one prospective entry and produce a reconstructable trace."""
 
     source = _SignalFacts(signal)
+    raw_plan = signal.get("alphaops_market_structure_plan")
+    strict_plan = dict(raw_plan) if isinstance(raw_plan, dict) else {}
+    try:
+        strict_plan_valid = bool(strict_plan) and validate_alphaops_v5_plan(strict_plan)
+    except (TypeError, ValueError):
+        strict_plan_valid = False
+    strict_plan_hash = str(strict_plan.get("plan_hash_sha256") or "")
+    strict_plan_direction = str(strict_plan.get("direction") or "").lower()
     at = (
         decision_time
         or str(observation.get("requested_at") or "")
@@ -413,6 +427,32 @@ def evaluate_v5_official_paper(
         "wrong_strategy_contract",
         observed=f"{strategy_id}:{strategy_version}",
         threshold=f"{policy.strategy_id}:{policy.strategy_version}",
+        component="contract",
+        weight=0,
+    )
+    plan_levels_bound = (
+        strict_plan_valid
+        and strict_plan.get("status") == PLAN_COMPLETE
+        and strict_plan_direction == "long"
+        and str(signal.get("plan_hash_sha256") or "") == strict_plan_hash
+        and _number(strict_plan.get("entry")) == trigger
+        and _number(strict_plan.get("stop")) == stop
+        and _number(strict_plan.get("target")) == target
+        and source.text("target_basis_kind").lower()
+        == str(strict_plan.get("target_basis_kind") or "").lower()
+        and strict_plan.get("target_frozen_before_reward_risk") is True
+    )
+    check(
+        "strict_frozen_plan",
+        plan_levels_bound,
+        "strict_frozen_plan_missing_or_invalid",
+        observed={
+            "status": strict_plan.get("status"),
+            "direction": strict_plan_direction,
+            "plan_hash_sha256": strict_plan_hash,
+            "row_plan_hash_sha256": str(signal.get("plan_hash_sha256") or ""),
+        },
+        threshold="validated, source-bound AlphaOps v5 long plan with frozen levels",
         component="contract",
         weight=0,
     )
@@ -634,11 +674,12 @@ def evaluate_v5_official_paper(
         component="risk",
         weight=0,
     )
-    target_basis = source.text("target_basis_kind").lower()
+    target_basis = str(strict_plan.get("target_basis_kind") or "").lower()
     target_is_risk_derived = source.boolean("target_derived_from_risk")
     check(
         "independent_target",
-        target_basis in INDEPENDENT_TARGET_BASES
+        plan_levels_bound
+        and target_basis in INDEPENDENT_TARGET_BASES
         and target_is_risk_derived is False,
         "target_not_independently_derived",
         observed={

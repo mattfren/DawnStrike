@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,9 @@ def build_ranked_research_slate(
     scan_id: str | None = None,
     canonical_member_ids: Iterable[str] | None = None,
     require_safety: bool = False,
+    coverage_status: str = "",
+    lane_statuses: dict[str, Any] | None = None,
+    coverage_limitations: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Rank distinct, non-vetoed rows for research observation only.
 
@@ -89,9 +92,15 @@ def build_ranked_research_slate(
         "schema_version": "dawnstrike.luna.ranked_research_slate.v1",
         "generated_at": generated,
         "market_date": (market_date or generated[:10])[:10],
-        "scan_id": str(scan_id or ""),
+        "scan_id": str(scan_id or f"luna-research:{(market_date or generated[:10])[:10]}"),
         "canonical_input_ids": input_ids,
         "canonical_member_ids": member_ids,
+        "coverage_status": coverage_status.strip().upper()
+        or ("ELIGIBLE" if data_eligible else "DATA_UNAVAILABLE"),
+        "lane_statuses": dict(lane_statuses or {}),
+        "coverage_limitations": sorted(
+            {str(item).strip() for item in (coverage_limitations or []) if str(item).strip()}
+        ),
         "target_count": requested,
         "published_count": len(selected),
         "ranked_research_count": len(selected),
@@ -116,6 +125,7 @@ def apply_publication_semantics(
     slate: dict[str, Any] | None = None,
     coverage: dict[str, Any] | None = None,
     require_watcher_proof: bool = False,
+    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Annotate rows with Tier 1/2/3 fields without changing legacy classification."""
 
@@ -124,11 +134,6 @@ def apply_publication_semantics(
     slate_by_symbol = {str(row.get("ticker") or "").upper(): row for row in slate_rows}
     slate_symbols = set(slate_by_symbol)
     coverage_payload = dict(coverage or {})
-    ceiling_block = str(coverage_payload.get("secondary_fallback_status") or "").lower() in {
-        "research_only_applied_above_ceiling",
-        "applied_research_only_above_ceiling",
-        "ceiling_exceeded_not_applied",
-    }
     output: list[dict[str, Any]] = []
     for row in source:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
@@ -137,22 +142,18 @@ def apply_publication_semantics(
             row, require_safety=require_watcher_proof
         ):
             slate_row = slate_by_symbol[ticker]
+            enriched["research_only"] = True
+            enriched["broker_execution"] = "disabled"
+            enriched["broker_execution_enabled"] = False
             enriched["research_rank"] = slate_row.get("research_rank")
             enriched["research_selection_id"] = slate_row.get("research_selection_id")
             enriched["publication_tier"] = TIER1
             enriched["entry_state"] = "RESEARCH_ONLY"
-            row_ceiling_block = (
-                ceiling_block
-                or _truthy(row.get("research_only_above_ceiling"))
-                or _truthy(row.get("above_ceiling"))
-                or str(row.get("secondary_fallback_status") or "").lower()
-                in {
-                    "research_only_applied_above_ceiling",
-                    "applied_research_only_above_ceiling",
-                    "ceiling_exceeded_not_applied",
-                }
+            row_ceiling_block = _row_promotion_limited(row, coverage_payload)
+            qualified = (
+                _plan_qualified(row, receipt_verifier=receipt_verifier)
+                and not row_ceiling_block
             )
-            qualified = _plan_qualified(row) and not row_ceiling_block
             enriched["plan_qualification_status"] = (
                 "QUALIFIED" if qualified else "WAITING_CURRENT_CHECKS"
             )
@@ -197,9 +198,21 @@ def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    validate_ranked_research_slate(slate, market_date=str(slate.get("market_date") or ""))
     serialized = json.dumps(slate, indent=2, sort_keys=True) + "\n"
-    if not path.exists():
-        path.write_text(serialized, encoding="utf-8")
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("existing ranked research slate is unreadable") from exc
+        if not isinstance(existing, dict):
+            raise ValueError("existing ranked research slate is not an object")
+        validate_ranked_research_slate(
+            existing,
+            market_date=str(slate.get("market_date") or ""),
+        )
+        return path
+    path.write_text(serialized, encoding="utf-8")
     return path
 
 
@@ -210,14 +223,42 @@ def validate_ranked_research_slate(
 
     if slate.get("schema_version") != "dawnstrike.luna.ranked_research_slate.v1":
         raise ValueError("ranked research slate schema is invalid")
+    if not str(slate.get("scan_id") or "").strip():
+        raise ValueError("ranked research slate producer scan ID is invalid")
+    generated_at = _parse_watcher_time(slate.get("generated_at"))
+    slate_market_date = str(slate.get("market_date") or "")
+    if (
+        generated_at is None
+        or len(slate_market_date) != 10
+        or generated_at.date().isoformat() != slate_market_date
+    ):
+        raise ValueError("ranked research slate timestamps are invalid")
     if market_date and str(slate.get("market_date") or "") != str(market_date)[:10]:
         raise ValueError("ranked research slate market date is invalid")
     if slate.get("research_only") is not True or slate.get("broker_execution") != "disabled":
         raise ValueError("ranked research slate execution flags are invalid")
+    if not str(slate.get("coverage_status") or "").strip() or not isinstance(
+        slate.get("lane_statuses"), dict
+    ):
+        raise ValueError("ranked research slate coverage contract is invalid")
+    if not isinstance(slate.get("coverage_limitations"), list):
+        raise ValueError("ranked research slate coverage limitations are invalid")
     rows = slate.get("rows")
     if not isinstance(rows, list):
         raise ValueError("ranked research slate rows are invalid")
-    if int(slate.get("published_count") or -1) != len(rows):
+    try:
+        published_count = int(slate.get("published_count"))
+        ranked_count = int(slate.get("ranked_research_count"))
+        target_count = int(slate.get("target_count"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ranked research slate counts are invalid") from exc
+    if (
+        published_count != len(rows)
+        or ranked_count != len(rows)
+        or target_count < 0
+        or published_count < 0
+        or published_count > target_count
+    ):
         raise ValueError("ranked research slate count is invalid")
     symbols = [str(row.get("ticker") or "").upper() for row in rows]
     if symbols != list(slate.get("symbols") or []) or len(set(symbols)) != len(symbols):
@@ -227,7 +268,17 @@ def validate_ranked_research_slate(
         selection_ids
     ):
         raise ValueError("ranked research slate selection IDs are inconsistent")
-    for row in rows:
+    for rank, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError("ranked research slate row is not an object")
+        if (
+            row.get("research_only") is not True
+            or row.get("broker_execution") != "disabled"
+            or row.get("publication_tier") != TIER1
+            or row.get("entry_state") != "RESEARCH_ONLY"
+            or int(row.get("research_rank") or 0) != rank
+        ):
+            raise ValueError("ranked research slate row semantics are invalid")
         row_hash = str(row.get("research_row_hash_sha256") or "")
         row_payload = {
             key: value for key, value in row.items() if key != "research_row_hash_sha256"
@@ -250,6 +301,15 @@ def validate_ranked_research_slate(
 def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> bool:
     ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     if not ticker or ticker == "NO_TRADE":
+        return False
+    if (
+        _truthy(row.get("broker_execution_enabled"))
+        or (
+            str(row.get("broker_execution") or "").strip().lower()
+            not in {"", "disabled"}
+        )
+        or row.get("research_only") is False
+    ):
         return False
     for key in (
         "fabricated",
@@ -280,6 +340,34 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
     if require_safety and _safety_blockers(row):
         return False
     return True
+
+
+def _row_promotion_limited(row: dict[str, Any], coverage: dict[str, Any]) -> bool:
+    blocked_statuses = {
+        "research_only_applied_above_ceiling",
+        "applied_research_only_above_ceiling",
+        "ceiling_exceeded_not_applied",
+    }
+    if (
+        _truthy(row.get("research_only_above_ceiling"))
+        or _truthy(row.get("above_ceiling"))
+        or str(row.get("secondary_fallback_status") or "").lower() in blocked_statuses
+    ):
+        return True
+    lane_payloads = coverage.get("lanes")
+    if isinstance(lane_payloads, dict):
+        evidence_lane = str(
+            row.get("evidence_lane") or row.get("universe_lane") or "mover"
+        ).lower()
+        if evidence_lane == "mover+core":
+            evidence_lane = "mover"
+        lane = lane_payloads.get(evidence_lane)
+        if isinstance(lane, dict):
+            return _truthy(lane.get("promotion_limited")) or str(
+                lane.get("secondary_fallback_status") or ""
+            ).lower() in blocked_statuses
+        return True
+    return str(coverage.get("secondary_fallback_status") or "").lower() in blocked_statuses
 
 
 def _safety_blockers(row: dict[str, Any]) -> list[str]:
@@ -321,27 +409,13 @@ def _safety_blockers(row: dict[str, Any]) -> list[str]:
     return blockers
 
 
-def _plan_qualified(row: dict[str, Any]) -> bool:
-    # Alpha's strict public market-structure validator is integrated on the
-    # adjacent lane.  Luna deliberately exposes the hook but cannot infer
-    # Tier 2/3 from a self-asserted structural plan in this branch.
+def _plan_qualified(
+    row: dict[str, Any],
+    *,
+    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+) -> bool:
     market_plan = row.get("alphaops_market_structure_plan")
-    if not isinstance(market_plan, dict):
-        return False
-    try:
-        from intraday_scanner.alpha.plan_constructor import (
-            validate_alphaops_v5_plan,
-        )
-    except ImportError:
-        return False
-    try:
-        validated = validate_alphaops_v5_plan(market_plan)
-    except (TypeError, ValueError):
-        try:
-            validated = validate_alphaops_v5_plan(market_plan, row)
-        except (TypeError, ValueError):
-            return False
-    if validated is False:
+    if not isinstance(market_plan, dict) or not _immutable_plan_provenance(row):
         return False
     plan_hash = str(
         market_plan.get("plan_hash_sha256") or market_plan.get("strategy_plan_hash_sha256") or ""
@@ -351,20 +425,35 @@ def _plan_qualified(row: dict[str, Any]) -> bool:
     ).lower()
     if len(plan_hash) != 64 or plan_hash != row_plan_hash:
         return False
-    for row_key, plan_keys in {
-        "entry_trigger": ("entry_trigger", "entry"),
-        "invalidation": ("invalidation", "stop", "invalidation_level"),
-        "target_1": ("target_1", "target", "first_target"),
+    for row_keys, plan_keys in {
+        ("entry_trigger", "entry_watch_level", "entry"): ("entry_trigger", "entry"),
+        ("invalidation", "invalidation_level", "stop"): (
+            "invalidation",
+            "stop",
+            "invalidation_level",
+        ),
+        ("target_1", "target", "first_target"): ("target_1", "target", "first_target"),
     }.items():
+        row_value = next(
+            (row.get(key) for key in row_keys if row.get(key) is not None), None
+        )
         plan_value = next(
             (market_plan.get(key) for key in plan_keys if market_plan.get(key) is not None), None
         )
-        if plan_value is not None and _number(row.get(row_key)) != _number(plan_value):
+        if plan_value is not None and _number(row_value) != _number(plan_value):
             return False
     plan_direction = str(market_plan.get("direction") or "").upper()
-    if plan_direction and plan_direction != str(row.get("direction") or "LONG").upper():
+    row_direction = str(row.get("direction") or row.get("trade_direction") or "").upper()
+    if not row_direction or plan_direction != row_direction:
         return False
-    if not _static_hard_gates(row) or not _supported_strategy(row):
+    from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_STRATEGY_VERSION
+
+    if (
+        not _static_hard_gates(row)
+        or not _safe_for_research(row, require_safety=True)
+        or str(row.get("strategy_id") or "").lower() != "alphaops_v5"
+        or str(row.get("strategy_version") or "") != ALPHAOPS_V5_STRATEGY_VERSION
+    ):
         return False
     receipt = str(
         row.get("strategy_receipt_status")
@@ -373,9 +462,21 @@ def _plan_qualified(row: dict[str, Any]) -> bool:
         or row.get("strategy_receipt_construction_status")
         or ""
     ).upper()
-    if receipt != "COMPLETE" or not _immutable_plan_provenance(row):
+    if (
+        receipt != "COMPLETE"
+        or not _valid_hash(str(row.get("receipt_hash_sha256") or "").lower())
+        or not str(row.get("receipt_id") or "").strip()
+    ):
         return False
-    entry = _number(row.get("entry_trigger") or row.get("entry"))
+    from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
+
+    if (
+        not validate_strategy_receipt_envelope(row)
+        or receipt_verifier is None
+        or not receipt_verifier(row)
+    ):
+        return False
+    entry = _number(row.get("entry_trigger") or row.get("entry_watch_level") or row.get("entry"))
     stop = _number(row.get("invalidation") or row.get("stop") or row.get("invalidation_level"))
     target = _number(row.get("target_1") or row.get("target") or row.get("first_target"))
     direction = str(row.get("direction") or row.get("trade_direction") or "LONG").upper()
@@ -392,15 +493,17 @@ def _plan_qualified(row: dict[str, Any]) -> bool:
         return False
     if abs(entry - stop) / entry > 0.15:
         return False
-    after_cost_rr = _number(
+    qualification_rr = _number(
         row.get("after_cost_reward_risk_ratio")
         or row.get("reward_risk_ratio_after_cost")
         or row.get("after_cost_rr")
+        or row.get("actual_after_cost_reward_risk")
+        or row.get("reward_risk_ratio")
     )
     return (
         row.get("strategy_receipt_paper_entry_eligible") is True
-        and after_cost_rr is not None
-        and after_cost_rr >= 1.5
+        and qualification_rr is not None
+        and qualification_rr >= 1.5
     )
 
 
@@ -419,9 +522,16 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         return False
     digest = str(proof.get("proof_hash_sha256") or "").lower()
     signal_id = str(row.get("signal_id") or row.get("signal_key") or "").strip()
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     plan = row.get("alphaops_market_structure_plan")
     plan_hash = str(plan.get("plan_hash_sha256") or "") if isinstance(plan, dict) else ""
-    if not signal_id or not plan_hash or str(proof.get("signal_id") or "") != signal_id:
+    if (
+        not signal_id
+        or not ticker
+        or not plan_hash
+        or str(proof.get("signal_id") or "") != signal_id
+        or str(proof.get("ticker") or proof.get("symbol") or "").upper() != ticker
+    ):
         return False
     if str(proof.get("plan_hash_sha256") or "") != plan_hash:
         return False
@@ -444,6 +554,86 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         ).hexdigest()
         if receipt_hash != expected:
             return False
+        if (
+            str(receipt.get("signal_id") or "") != signal_id
+            or str(receipt.get("plan_hash_sha256") or "") != plan_hash
+            or str(receipt.get("ticker") or receipt.get("symbol") or "").upper() != ticker
+            or receipt.get("research_only") is not True
+            or receipt.get("broker_execution") != "disabled"
+        ):
+            return False
+    quote = proof["quote_receipt"]
+    quote_time = _parse_watcher_time(quote.get("observed_at"))
+    bid = _number(quote.get("bid"))
+    ask = _number(quote.get("ask"))
+    last = _number(quote.get("last") or quote.get("price"))
+    current_price = _number(
+        row.get("current_price")
+        or row.get("current_quote_price")
+        or row.get("observed_price")
+    )
+    plan_entry = _number(plan.get("entry") if isinstance(plan, dict) else None)
+    plan_stop = _number(plan.get("stop") if isinstance(plan, dict) else None)
+    plan_target = _number(plan.get("target") if isinstance(plan, dict) else None)
+    plan_direction = str(plan.get("direction") or "").lower() if isinstance(plan, dict) else ""
+    spread_pct = ((ask - bid) / ((ask + bid) / 2.0) * 100.0) if bid and ask else None
+    trigger_consistent = (
+        plan_entry is not None
+        and plan_stop is not None
+        and plan_target is not None
+        and last is not None
+        and (
+            (
+                plan_direction == "long"
+                and plan_stop < plan_entry <= last < plan_target
+                and ((last - plan_entry) / plan_entry * 100.0) <= 2.0
+            )
+            or (
+                plan_direction == "short"
+                and plan_target < last <= plan_entry < plan_stop
+                and ((plan_entry - last) / plan_entry * 100.0) <= 2.0
+            )
+        )
+    )
+    if (
+        str(quote.get("schema_version") or "") != "dawnstrike.alphaops.quote_receipt.v1"
+        or str(quote.get("status") or "").upper() != "USABLE"
+        or not str(quote.get("source") or "").strip()
+        or quote_time is None
+        or quote_time > checked_at
+        or (checked_at - quote_time).total_seconds() > 360
+        or bid is None
+        or ask is None
+        or bid <= 0
+        or ask < bid
+        or last is None
+        or current_price is None
+        or abs(last - current_price) > 1e-9
+        or _number(quote.get("entry_reference")) != plan_entry
+        or str(quote.get("entry_window_status") or "").upper() != "OPEN"
+        or str(quote.get("trigger_status") or "").upper() != "CONFIRMED"
+        or spread_pct is None
+        or spread_pct > 2.0
+        or not trigger_consistent
+    ):
+        return False
+    portfolio = proof["portfolio_receipt"]
+    portfolio_time = _parse_watcher_time(portfolio.get("checked_at"))
+    if (
+        str(portfolio.get("schema_version") or "")
+        != "dawnstrike.alphaops.portfolio_admission.v1"
+        or str(portfolio.get("status") or "").upper() != "ADMITTED"
+        or portfolio.get("admitted") is not True
+        or list(portfolio.get("blocking_reasons") or [])
+        or str(portfolio.get("account_mode") or "").upper() != "PAPER"
+        or not str(portfolio.get("simulated_account_id") or "").strip()
+        or not str(portfolio.get("admission_id") or "").strip()
+        or str(portfolio.get("admission_key") or "")
+        != f"paper-admission:{signal_id}:{plan_hash[:16]}"
+        or portfolio_time is None
+        or abs((checked_at - portfolio_time).total_seconds()) > 60
+    ):
+        return False
     canonical = {key: value for key, value in proof.items() if key != "proof_hash_sha256"}
     expected_proof_hash = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
@@ -519,34 +709,19 @@ def _supported_strategy(row: dict[str, Any]) -> bool:
 
 
 def _immutable_plan_provenance(row: dict[str, Any]) -> bool:
-    contract = (
-        row.get("structural_plan_contract")
-        or row.get("alphaops_plan_contract")
-        or row.get("plan_contract")
-    )
+    contract = row.get("alphaops_market_structure_plan")
     if not isinstance(contract, dict) or str(contract.get("status") or "").upper() != "COMPLETE":
         return False
-    plan_hash = str(contract.get("plan_hash_sha256") or "").lower()
-    if len(plan_hash) != 64 or any(char not in "0123456789abcdef" for char in plan_hash):
+    try:
+        from intraday_scanner.alpha.plan_constructor import validate_alphaops_v5_plan
+    except ImportError:
         return False
-    canonical = {key: value for key, value in contract.items() if key != "plan_hash_sha256"}
-    expected_hash = hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    ).hexdigest()
-    if expected_hash != plan_hash:
+    try:
+        if validate_alphaops_v5_plan(contract) is False:
+            return False
+    except (TypeError, ValueError):
         return False
-    provenance = contract.get("provenance")
-    if not isinstance(provenance, dict) or provenance.get("independent") is not True:
-        return False
-    observations = provenance.get("observations")
-    if not isinstance(observations, list) or len(observations) < 3:
-        return False
-    distinct = {
-        (str(item.get("source_id") or ""), str(item.get("observation_hash") or ""))
-        for item in observations
-        if isinstance(item, dict)
-    }
-    return len(distinct) >= 3 and all(source and digest for source, digest in distinct)
+    return _valid_hash(str(contract.get("plan_hash_sha256") or "").lower())
 
 
 def _number(value: Any) -> float | None:
@@ -561,11 +736,16 @@ def _annotate(row: dict[str, Any], *, rank: int, tier: str) -> dict[str, Any]:
     output = dict(row)
     output["ticker"] = str(output.get("ticker") or output.get("symbol") or "").upper()
     output["research_rank"] = rank
-    output["research_selection_id"] = str(
+    source_signal_id = str(
         output.get("signal_id")
         or output.get("signal_key")
         or f"luna-research:{output['ticker']}:{rank}"
     )
+    output["research_source_signal_id"] = source_signal_id
+    selection_basis = f"{output['ticker']}|{source_signal_id}"
+    output["research_selection_id"] = "luna-research:" + hashlib.sha256(
+        selection_basis.encode("utf-8")
+    ).hexdigest()[:24]
     output["publication_tier"] = tier
     output["plan_qualification_status"] = "WAITING_CURRENT_CHECKS"
     output["entry_state"] = "RESEARCH_ONLY"

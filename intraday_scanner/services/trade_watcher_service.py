@@ -488,12 +488,23 @@ def _watch_signals(
             "missing watchable historical signals: "
             + ", ".join(sorted(missing_signal_ids))
         )
+    for selection in selected_rows:
+        historical_row = historical_by_id[str(selection.get("signal_id") or "")]
+        _validate_selection_historical_scan_binding(
+            selection,
+            historical_row,
+            market_date=market_date,
+        )
     # Apply the frozen episode boundary immediately before watcher intent
     # creation. Legacy selections without an episode contract remain compatible;
     # opted-in rows are deduplicated and conflicting directions fail closed.
     candidate_rows = [
         {
             **historical_by_id[str(selection.get("signal_id") or "")],
+            **_episode_identity_payload(
+                historical_by_id[str(selection.get("signal_id") or "")],
+                selection,
+            ),
             **selection,
             # The immutable selection envelope stores the original Alpha
             # signal under ``payload_json.signal`` while historical rows keep
@@ -530,6 +541,10 @@ def _watch_signals(
     return [
         {
             **historical_by_id[str(selection.get("signal_id") or "")],
+            **_episode_identity_payload(
+                historical_by_id[str(selection.get("signal_id") or "")],
+                selection,
+            ),
             "selection_id": selection.get("selection_id"),
             "strategy_id": selection.get("strategy_id"),
             "strategy_version": selection.get("strategy_version"),
@@ -552,6 +567,93 @@ def _watch_signals(
         }
         for selection in selected_rows
     ]
+
+
+def _validate_selection_historical_scan_binding(
+    selection: dict[str, Any],
+    historical: dict[str, Any],
+    *,
+    market_date: str,
+) -> None:
+    """Reject cross-scan joins unless an exact frozen slate authorizes reuse."""
+
+    selection_scan_id = str(selection.get("scan_id") or "")
+    historical_scan_id = str(historical.get("scan_id") or "")
+    if selection_scan_id and selection_scan_id == historical_scan_id:
+        return
+    payload = selection.get("payload_json")
+    if not isinstance(payload, dict):
+        raise SnapshotValidationError(
+            "Selection/historical scan identity mismatch has no governed frozen-slate lineage."
+        )
+    lineage = payload.get("frozen_slate_lineage")
+    slate = payload.get("frozen_ranked_research_slate")
+    frozen_signal = payload.get("signal")
+    if not isinstance(lineage, dict) or not isinstance(slate, dict) or not isinstance(
+        frozen_signal, dict
+    ):
+        raise SnapshotValidationError(
+            "Selection/historical scan identity mismatch has incomplete frozen-slate lineage."
+        )
+    try:
+        from intraday_scanner.services.luna_research_slate_service import (
+            validate_ranked_research_slate,
+        )
+
+        validate_ranked_research_slate(slate, market_date=market_date)
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError(
+            "Selection/historical cross-scan frozen slate failed integrity checks."
+        ) from exc
+    frozen_scan_id = str(slate.get("scan_id") or "")
+    if (
+        str(selection.get("cohort") or "") != "research_radar"
+        or str(lineage.get("schema_version") or "")
+        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
+        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
+        or str(lineage.get("slate_content_hash_sha256") or "")
+        != str(slate.get("content_hash_sha256") or "")
+        or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
+        or str(lineage.get("current_scan_id") or "") != selection_scan_id
+        or str(lineage.get("reuse_status") or "") != "GOVERNED_DAILY_FREEZE_REUSE"
+        or frozen_scan_id != historical_scan_id
+        or str(selection.get("source_scan_id") or payload.get("source_scan_id") or "")
+        != historical_scan_id
+        or str(
+            selection.get("scan_lineage_status")
+            or payload.get("scan_lineage_status")
+            or ""
+        )
+        != "GOVERNED_DAILY_FREEZE_REUSE"
+    ):
+        raise SnapshotValidationError(
+            "Selection/historical cross-scan lineage does not bind the exact frozen slate."
+        )
+    selection_id = str(frozen_signal.get("research_selection_id") or "")
+    matching_rows = [
+        row
+        for row in slate.get("rows") or []
+        if str(row.get("research_selection_id") or "") == selection_id
+    ]
+    signal_id = str(selection.get("signal_id") or "")
+    frozen_signal_id = str(
+        frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or ""
+    )
+    ticker = str(selection.get("ticker") or "").upper()
+    if (
+        not selection_id
+        or len(matching_rows) != 1
+        or json.dumps(matching_rows[0], sort_keys=True, separators=(",", ":"))
+        != json.dumps(frozen_signal, sort_keys=True, separators=(",", ":"))
+        or not signal_id
+        or signal_id != frozen_signal_id
+        or signal_id != str(historical.get("signal_id") or "")
+        or ticker != str(frozen_signal.get("ticker") or "").upper()
+        or ticker != str(historical.get("ticker") or "").upper()
+    ):
+        raise SnapshotValidationError(
+            "Selection/historical cross-scan lineage does not bind the selected signal."
+        )
 
 
 def _existing_symbol_lifecycles(

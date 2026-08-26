@@ -16,8 +16,12 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
 )
+from intraday_scanner.services.luna_research_slate_service import (
+    build_ranked_research_slate,
+)
 from intraday_scanner.services.trade_watcher_service import (
     _existing_symbol_lifecycles,
+    _validate_selection_historical_scan_binding,
     run_trade_watcher,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -40,6 +44,120 @@ def test_existing_open_or_pending_symbol_blocks_any_new_episode() -> None:
         [{"status": "OPEN", "ticker": "AAPL"}],
     )
     assert symbols == {"NOVA", "AAPL"}
+
+
+def test_selection_historical_cross_scan_requires_governed_frozen_slate() -> None:
+    historical = {
+        "signal_id": "sig-frozen",
+        "scan_id": "scan-old",
+        "ticker": "NOVA",
+    }
+    with pytest.raises(SnapshotValidationError, match="frozen-slate lineage"):
+        _validate_selection_historical_scan_binding(
+            {
+                "signal_id": "sig-frozen",
+                "scan_id": "scan-new",
+                "ticker": "NOVA",
+                "payload_json": {},
+            },
+            historical,
+            market_date="2026-08-26",
+        )
+
+
+def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() -> None:
+    slate = build_ranked_research_slate(
+        [
+            {
+                "ticker": "NOVA",
+                "signal_id": "sig-frozen",
+                "scan_id": "scan-old",
+            }
+        ],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-old",
+    )
+    frozen_signal = slate["rows"][0]
+    selection = {
+        "signal_id": "sig-frozen",
+        "scan_id": "scan-new",
+        "source_scan_id": "scan-old",
+        "scan_lineage_status": "GOVERNED_DAILY_FREEZE_REUSE",
+        "ticker": "NOVA",
+        "cohort": "research_radar",
+        "payload_json": {
+            "signal": frozen_signal,
+            "frozen_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
+                "frozen_source_scan_id": "scan-old",
+                "current_scan_id": "scan-new",
+                "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
+            },
+            "frozen_ranked_research_slate": slate,
+        },
+    }
+
+    _validate_selection_historical_scan_binding(
+        selection,
+        {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
+        market_date="2026-08-26",
+    )
+
+
+def test_trade_watcher_rejects_cross_scan_official_selection_join(tmp_path: Path) -> None:
+    db_path = tmp_path / "cross-scan.sqlite"
+    store = SQLiteScanStore(db_path)
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "sig-cross-scan",
+                "scan_id": "scan-old",
+                "generated_at": "2026-06-22T13:20:00+00:00",
+                "market_date": "2026-06-22",
+                "ticker": "NOVA",
+                "rank": 1,
+                "signal_label": "WATCH",
+                "entry_watch_level": 10.25,
+                "invalidation_level": 9.5,
+                "target_1": 11.5,
+                "raw_payload_json": {},
+            }
+        ]
+    )
+    store.persist_signal_selections(
+        [
+            {
+                "selection_id": "selection-cross-scan",
+                "scan_id": "scan-new",
+                "signal_id": "sig-cross-scan",
+                "ticker": "NOVA",
+                "rank": 1,
+                "strategy_id": "alphaops_v4",
+                "strategy_version": "dawnstrike-alphaops-v4",
+                "cohort": "official_telegram",
+                "decision": "clean_edge",
+                "selected_at": "2026-06-22T13:21:00+00:00",
+                "event_key": "alphaops:scan-new:watch",
+                "body_sha256": "body-cross-scan",
+            }
+        ]
+    )
+
+    with pytest.raises(SnapshotValidationError, match="scan identity mismatch"):
+        run_trade_watcher(
+            db_path=db_path,
+            source="csv",
+            market_date="2026-06-22",
+            requested_at="09:35",
+            minute_bars=_write_minute_bars(
+                tmp_path / "cross-scan-bars.csv",
+                [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+            ),
+            dry_run=True,
+        )
 
 
 def test_trade_watcher_enters_once_and_persists_paper_fill(tmp_path: Path) -> None:
@@ -924,8 +1042,10 @@ def _persist_v5_signal(
     signal = {
         "signal_id": "sig-NOVA-v5",
         "scan_id": "scan-v5",
-        "generated_at": "2026-07-31T12:10:00+00:00",
+        "generated_at": "2026-07-31T13:30:00+00:00",
         "market_date": "2026-07-31",
+        "session_id": "regular",
+        "entry_window": "09:30-15:30",
         "ticker": "NOVA",
         "rank": 1,
         "source": "verified_snapshot",
@@ -967,7 +1087,25 @@ def _persist_v5_signal(
         "classification": (
             "WATCH ONLY" if manual_confirmation_required else "TRADE SETUP"
         ),
+        "market_structure_observations": {
+            "entry": _watcher_plan_observation(10.0, "a" * 64, "sourced_entry"),
+            "stop": _watcher_plan_observation(9.0, "b" * 64, "sourced_stop"),
+            "target": {
+                **_watcher_plan_observation(
+                    12.75, "c" * 64, "prior_day_resistance"
+                ),
+                "target_basis_kind": "sourced_resistance",
+            },
+        },
     }
+    from intraday_scanner.services.alpha_cycle_service import _signal_payload
+
+    signal = _signal_payload(
+        signal,
+        "scan-v5",
+        "2026-07-31T13:30:00+00:00",
+        1,
+    )
     store.persist_historical_signals(
         [{**signal, "raw_payload_json": signal}]
     )
@@ -983,7 +1121,7 @@ def _persist_v5_signal(
                 "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
                 "cohort": "official_telegram",
                 "decision": decision,
-                "selected_at": "2026-07-31T12:10:00+00:00",
+                "selected_at": "2026-07-31T13:30:00+00:00",
                 "event_key": "alphaops:scan-v5:alpha_morning_watch",
                 "body_sha256": "watch-body-hash-v5",
                 "payload_json": {
@@ -993,6 +1131,23 @@ def _persist_v5_signal(
             }
         ]
     )
+
+
+def _watcher_plan_observation(
+    value: float, source_hash: str, observation_kind: str
+) -> dict[str, object]:
+    return {
+        "value": value,
+        "raw_value": value,
+        "observed_at": "2026-07-31T13:00:00+00:00",
+        "completed_at": "2026-07-31T13:00:00+00:00",
+        "source": "completed-market-feed",
+        "source_url": "https://example.test/market",
+        "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "derivation_policy": "identity",
+        "is_complete": True,
+    }
 
 
 def _persist_no_trade_selection(store: SQLiteScanStore, day: str) -> None:

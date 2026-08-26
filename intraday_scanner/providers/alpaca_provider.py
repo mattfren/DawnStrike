@@ -14,7 +14,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
@@ -244,7 +243,8 @@ class AlpacaProvider(MarketDataProvider):
             as_of = str(
                 latest_trade.get("t")
                 or minute_bar.get("t")
-                or datetime.now(timezone.utc).isoformat()
+                or daily_bar.get("t")
+                or ""
             )
             rows.append(
                 SnapshotRow(
@@ -265,6 +265,9 @@ class AlpacaProvider(MarketDataProvider):
                     reverse_split_90d=False,
                     source="alpaca",
                     as_of_timestamp=as_of,
+                    source_timestamp=as_of,
+                    extraction_mode="alpaca_authenticated_api",
+                    stale_data_flag=not bool(as_of),
                     dollar_volume=round(price * volume, 2),
                     gap_pct=round(_gap_pct(price, previous_close), 2),
                     catalyst_headline="",

@@ -251,13 +251,31 @@ def format_alpha_watch(
 ) -> str:
     source_summary = dict(source_summary or {})
     blocked_signals = list(blocked_signals or [])
-    candidates = [row for row in signals if _telegram_candidate_allowed(row)][:5]
+    candidates = [row for row in signals if _telegram_candidate_allowed(row)]
     slate = dict(source_summary.get("ranked_research_slate") or {})
-    slate_total = int(slate.get("published_count") or len(candidates))
-    slate_shown = len(candidates)
+    frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
+    if isinstance(frozen_publication_rows, list):
+        slate_candidates = [
+            row for row in frozen_publication_rows if _telegram_candidate_allowed(row)
+        ]
+    else:
+        slate_candidates = [
+            row for row in slate.get("rows") or [] if _telegram_candidate_allowed(row)
+        ]
+    if not slate_candidates:
+        slate_candidates = candidates[:5]
+    slate_total = int(slate.get("published_count") or len(slate_candidates))
+    slate_shown = len(slate_candidates)
+    promotion_candidates: list[dict[str, Any]] = []
+    seen_promotion_tickers: set[str] = set()
+    for row in [*slate_candidates, *candidates]:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker and ticker not in seen_promotion_tickers:
+            promotion_candidates.append(row)
+            seen_promotion_tickers.add(ticker)
     official_candidates = [
         row
-        for row in candidates
+        for row in promotion_candidates
         if (
             str(row.get("publication_tier") or "")
             in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
@@ -269,8 +287,17 @@ def format_alpha_watch(
         and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
         and row.get("manual_confirmation_required") is False
     ][:3]
-    research_watchlist = [row for row in candidates if row not in official_candidates][:3]
-    explicit_publication = any("publication_tier" in row for row in candidates)
+    official_tickers = {
+        str(row.get("ticker") or "").upper() for row in official_candidates
+    }
+    research_watchlist = [
+        row
+        for row in slate_candidates
+        if str(row.get("ticker") or "").upper() not in official_tickers
+    ][:5]
+    explicit_publication = any(
+        "publication_tier" in row for row in promotion_candidates
+    )
     official_heading = (
         "OFFICIAL PAPER CANDIDATES"
         if official_candidates or not explicit_publication
