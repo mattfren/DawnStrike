@@ -59,6 +59,10 @@ SNAPSHOT_COLUMNS = [
     "preferred_source",
     "row_merge_reason",
     "discovery_context",
+    "universe_lane",
+    "core_universe_memberships",
+    "core_lane_score",
+    "core_lane_eligible",
     "as_of_timestamp",
     "data_source_kind",
     "shadow_mode",
@@ -221,6 +225,10 @@ CANDIDATE_COLUMNS = [
     "preferred_source",
     "row_merge_reason",
     "discovery_context",
+    "universe_lane",
+    "core_universe_memberships",
+    "core_lane_score",
+    "core_lane_eligible",
     "halt_status",
     "sec_risk_status",
     "corporate_action_status",
@@ -361,6 +369,10 @@ class SnapshotRow:
     corporate_action_status: str = ""
     source_quality_status: str = ""
     discovery_context: str = ""
+    universe_lane: str = "mover"
+    core_universe_memberships: str = ""
+    core_lane_score: float | None = None
+    core_lane_eligible: bool = False
     data_source_kind: str = ""
     shadow_mode: bool = False
     paid_data: bool = False
@@ -496,6 +508,14 @@ class SnapshotRow:
             corporate_action_status=str(row.get("corporate_action_status") or "").strip(),
             source_quality_status=str(row.get("source_quality_status") or "").strip(),
             discovery_context=str(row.get("discovery_context") or "").strip(),
+            universe_lane=str(row.get("universe_lane") or "mover").strip(),
+            core_universe_memberships=str(row.get("core_universe_memberships") or "").strip(),
+            core_lane_score=(
+                None
+                if row.get("core_lane_score") in {None, ""}
+                else parse_float(row.get("core_lane_score"), "core_lane_score")
+            ),
+            core_lane_eligible=parse_bool(row.get("core_lane_eligible")),
             data_source_kind=str(row.get("data_source_kind") or "").strip(),
             shadow_mode=parse_bool(row.get("shadow_mode")),
             paid_data=parse_bool(row.get("paid_data")),
@@ -605,6 +625,10 @@ class SnapshotRow:
             "preferred_source": self.preferred_source,
             "row_merge_reason": self.row_merge_reason,
             "discovery_context": self.discovery_context,
+            "universe_lane": self.universe_lane,
+            "core_universe_memberships": self.core_universe_memberships,
+            "core_lane_score": self.core_lane_score,
+            "core_lane_eligible": self.core_lane_eligible,
             "as_of_timestamp": self.as_of_timestamp,
             "data_source_kind": self.data_source_kind,
             "shadow_mode": self.shadow_mode,
@@ -802,6 +826,10 @@ class ScoredCandidate:
             "preferred_source": self.snapshot.preferred_source or self.snapshot.source,
             "row_merge_reason": self.snapshot.row_merge_reason,
             "discovery_context": self.snapshot.discovery_context,
+            "universe_lane": self.snapshot.universe_lane,
+            "core_universe_memberships": self.snapshot.core_universe_memberships,
+            "core_lane_score": self.snapshot.core_lane_score,
+            "core_lane_eligible": self.snapshot.core_lane_eligible,
             "halt_status": self.snapshot.halt_status,
             "sec_risk_status": self.snapshot.sec_risk_status,
             "corporate_action_status": self.snapshot.corporate_action_status,

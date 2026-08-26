@@ -71,7 +71,6 @@ from intraday_scanner.services.learning_service import (
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
-    merge_core_universe_rows,
     rank_core_universe_rows,
     write_core_universe_contract,
     write_snapshot_rows,
@@ -190,7 +189,9 @@ def alpha_cycle(
         "contract_membership_count": core_universe.get("membership_count", 0),
         "contract_hash_sha256": core_universe.get("content_hash_sha256"),
     }
-    mover_snapshot_count = len(list(collection.get("rows") or []))
+    mover_source_failed = collection.get("status") != "success"
+    mover_snapshot_count = len(list(collection.get("rows") or [])) if not mover_source_failed else 0
+    core_only_recovery = False
     source_reliability = build_source_reliability(
         source_summary,
         outcomes=load_production_alpha_learning_labels(store),
@@ -199,6 +200,37 @@ def alpha_cycle(
     if source_reliability:
         store.persist_alpha_source_reliability(source_reliability)
 
+    if collection.get("status") != "success" and core_universe.get("status") == "READY":
+        # A mover-source outage is lane-local.  A READY core manifest may still
+        # supply independent read-only snapshots for the Alpha cycle.
+        recovery_config = _alphaops_scanner_config(
+            load_config(
+                provider="csv", output_dir=output_dir / "core_recovery_scan", database_path=Path(db_path)
+            )
+        )
+        recovery = discover_core_universe_rows(core_universe, config=recovery_config)
+        recovery_rows = rank_core_universe_rows(recovery.get("rows") or [])
+        if recovery_rows:
+            recovery_path = write_snapshot_rows(
+                recovery_rows, output_dir / "web_collect" / "core_recovery_snapshot.csv"
+            )
+            source_summary["mover_lane_status"] = "SOURCE_FAILED"
+            source_summary["mover_lane_reason"] = str(source_summary.get("top_failure_reason") or "mover collection failed")
+            source_summary["status"] = "success"
+            core_only_recovery = True
+            source_summary["core_universe"] = {
+                **recovery,
+                "eligible_count": len(recovery_rows),
+                "contract_status": core_universe.get("status"),
+                "contract_membership_count": core_universe.get("membership_count", 0),
+                "contract_hash_sha256": core_universe.get("content_hash_sha256"),
+            }
+            collection = {
+                **collection,
+                "status": "success",
+                "rows": recovery_rows,
+                "snapshot_path": str(recovery_path),
+            }
     if collection.get("status") != "success":
         review = review_alpha_signals([], source_summary=source_summary)
         no_data_scan_id = f"{cycle_name}:source_failure:{utc_now_iso()[:10]}"
@@ -330,6 +362,10 @@ def alpha_cycle(
     )
     if not fixture_mode:
         scanner_config = _alphaops_scanner_config(scanner_config)
+    if core_only_recovery:
+        scanner_config = scanner_config.with_overrides(
+            min_gap_pct=0.0, ideal_gap_low_pct=1.0
+        )
     core_discovery = (
         discover_core_universe_rows(core_universe, config=scanner_config)
         if not fixture_mode
@@ -347,21 +383,8 @@ def alpha_cycle(
         "contract_membership_count": core_universe.get("membership_count", 0),
         "contract_hash_sha256": core_universe.get("content_hash_sha256"),
     }
-    if core_discovery.get("rows"):
-        core_eligible_rows = rank_core_universe_rows(core_discovery["rows"])
-        core_discovery["eligible_count"] = len(core_eligible_rows)
-        merged_rows = merge_core_universe_rows(
-            list(collection.get("rows") or []),
-            core_eligible_rows,
-        )
-        merged_snapshot = write_snapshot_rows(
-            merged_rows,
-            output_dir / "web_collect" / "core_merged_snapshot.csv",
-        )
-        collection["rows"] = merged_rows
-        collection["snapshot_path"] = str(merged_snapshot)
-    else:
-        core_discovery["eligible_count"] = 0
+    core_eligible_rows = rank_core_universe_rows(core_discovery.get("rows") or [])
+    core_discovery["eligible_count"] = len(core_eligible_rows)
     enrichment = enrich_premarket_rows(
         list(collection.get("rows") or []),
         config=scanner_config,
@@ -392,16 +415,59 @@ def alpha_cycle(
     scan_paths = write_scan_outputs(scan_result, scanner_config.output_dir)
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
+    core_ranked: list[dict[str, Any]] = []
+    core_all: list[dict[str, Any]] = []
+    if core_eligible_rows:
+        core_snapshot = write_snapshot_rows(
+            core_eligible_rows, output_dir / "web_collect" / "core_lane_snapshot.csv"
+        )
+        core_config = scanner_config.with_overrides(
+            min_gap_pct=0.0,
+            ideal_gap_low_pct=1.0,
+            top_n=max(1, int(scanner_config.top_n)),
+        )
+        core_enrichment = enrich_premarket_rows(
+            core_eligible_rows,
+            config=core_config,
+            source="alpaca",
+            allow_yahoo_fallback=False,
+            rehearsal_mode=False,
+            out_dir=output_dir / "core_premarket_enrichment",
+        )
+        core_discovery["enrichment_summary"] = core_enrichment["summary"]
+        core_snapshot_path = str(
+            dict(core_enrichment.get("paths") or {}).get("snapshot") or core_snapshot
+        )
+        core_scan = ScanService(CsvSnapshotProvider(core_snapshot_path), store=store).run(
+            core_config, persist=False
+        )
+        core_ranked = [candidate.to_dict() for candidate in core_scan.ranked_candidates]
+        core_all = [candidate.to_dict() for candidate in core_scan.all_candidates]
+        ranked = _merge_lane_candidates(ranked, core_ranked)
+        all_candidates = _merge_lane_candidates(all_candidates, core_all)
     core_ranked_count = sum(
-        1 for row in ranked if "luna_core" in str(row.get("discovery_context") or "")
+        1
+        for row in ranked
+        if str(row.get("universe_lane") or "") in {"core", "mover+core"}
+    )
+    mover_ranked_count = sum(
+        1
+        for row in ranked
+        if str(row.get("universe_lane") or "mover") in {"mover", "mover+core"}
     )
     core_eligible_count = int(core_discovery.get("eligible_count") or 0)
+    mover_eligible_count = sum(
+        1
+        for row in all_candidates
+        if str(row.get("universe_lane") or "mover") in {"mover", "mover+core"}
+    )
+    overlap_ranked_count = sum(1 for row in ranked if row.get("universe_lane") == "mover+core")
     source_summary["lane_counts"] = {
         "mover": {
             "member_count": int(source_summary.get("candidate_count") or mover_snapshot_count),
             "snapshot_count": mover_snapshot_count,
-            "eligible_count": max(len(all_candidates) - core_eligible_count, 0),
-            "ranked_count": max(len(ranked) - core_ranked_count, 0),
+            "eligible_count": 0 if mover_source_failed else mover_eligible_count,
+            "ranked_count": 0 if mover_source_failed else mover_ranked_count,
         },
         "core": {
             "member_count": int(core_universe.get("membership_count") or 0),
@@ -409,6 +475,7 @@ def alpha_cycle(
             "eligible_count": core_eligible_count,
             "ranked_count": core_ranked_count,
         },
+        "overlap": {"ranked_count": overlap_ranked_count},
     }
     timestamp = scan_result.created_at
     ranked, ranked_sec_summary = _verify_ranked_sec_safety(
@@ -1178,6 +1245,38 @@ def _persist_run_contract(
     )
     _write_json(output_dir / "alpha_run_contract.json", contract.to_dict())
     return contract
+
+
+def _merge_lane_candidates(
+    mover_candidates: list[dict[str, Any]], core_candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge already-produced lane candidates, preserving overlap metadata."""
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in [*mover_candidates, *core_candidates]:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        if ticker not in merged:
+            merged[ticker] = dict(row)
+            continue
+        current = merged[ticker]
+        current["universe_lane"] = "mover+core"
+        current["core_universe_memberships"] = current.get("core_universe_memberships") or row.get("core_universe_memberships") or ""
+        current["discovery_context"] = ";".join(
+            sorted(
+                {
+                    str(current.get("discovery_context") or ""),
+                    str(row.get("discovery_context") or ""),
+                }
+                - {""}
+            )
+        )
+    return sorted(
+        merged.values(),
+        key=lambda row: float(row.get("score") or row.get("total_score") or 0),
+        reverse=True,
+    )
 
 
 def _alphaops_scanner_config(config: Any) -> Any:

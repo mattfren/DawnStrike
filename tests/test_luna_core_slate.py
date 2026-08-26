@@ -1,3 +1,7 @@
+import hashlib
+import json
+from pathlib import Path
+
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.services.luna_core_universe_service import build_core_universe_contract
 from intraday_scanner.services.luna_core_universe_service import discover_core_universe_rows, merge_core_universe_rows, rank_core_universe_rows
@@ -113,10 +117,27 @@ def test_tier_one_coexists_with_one_official_and_tier_two_three_remain_zero():
 
 
 def test_tier_semantics_and_research_monitor_label():
-    row = {"ticker": "SAFE", "alpha_score": 1, "entry_trigger": 10, "invalidation": 9, "target_1": 12, "can_alert": True, "alert_gate_status": "PASS", "plan_qualified": True, "publication_tier": TIER1, "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "plan_hash_sha256": "a" * 64, "plan_provenance": {"source": "independent-bars", "independent": True}, "after_cost_rr": 1.5}
+    plan = {"schema_version": "alphaops.structural_plan.v1", "status": "COMPLETE", "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64}, "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64}, "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64}, "provenance": {"independent": True, "observations": [{"source_id": "entry", "observation_hash": "e" * 64}, {"source_id": "stop", "observation_hash": "s" * 64}, {"source_id": "target", "observation_hash": "t" * 64}]}}
+    plan["plan_hash_sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    row = {"ticker": "SAFE", "alpha_score": 1, "entry_trigger": 10, "invalidation": 9, "target_1": 12, "can_alert": True, "alert_gate_status": "PASS", "plan_qualified": True, "publication_tier": TIER1, "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "structural_plan_contract": plan, "after_cost_rr": 1.5}
     annotated = apply_publication_semantics([row], slate={"rows": [row]}, coverage={})
     assert annotated[0]["publication_tier"] == TIER3
     assert monitor_alpha_signals(annotated, current_prices={"SAFE": 10.1})["events"][0]["label"] == "ENTRY TRIGGERED"
+
+
+def test_live_fallback_ceiling_demotes_a_genuinely_qualified_plan_to_tier_one():
+    plan = {"schema_version": "alphaops.structural_plan.v1", "status": "COMPLETE", "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64}, "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64}, "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64}, "provenance": {"independent": True, "observations": [{"source_id": "entry", "observation_hash": "e" * 64}, {"source_id": "stop", "observation_hash": "s" * 64}, {"source_id": "target", "observation_hash": "t" * 64}]}}
+    plan["plan_hash_sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    row = {"ticker": "QUAL", "entry_trigger": 10, "invalidation": 9, "target_1": 12, "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "structural_plan_contract": plan, "after_cost_rr": 1.5, "can_alert": True, "alert_gate_status": "PASS"}
+    slate = build_ranked_research_slate([row])
+    assert apply_publication_semantics([row], slate=slate, coverage={})[0]["publication_tier"] == TIER3
+    assert apply_publication_semantics([row], slate=slate, coverage={"secondary_fallback_status": "applied_research_only_above_ceiling"})[0]["publication_tier"] == TIER1
+
+
+def test_receipt_hash_or_three_urls_cannot_stand_in_for_structural_plan():
+    row = {"ticker": "WEAK", "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "receipt_hash_sha256": "a" * 64, "condition_results": [{"source_urls": ["u1"]}, {"source_urls": ["u2"]}, {"source_urls": ["u3"]}], "entry_trigger": 10, "invalidation": 9, "target_1": 12, "after_cost_rr": 1.5}
+    slate = build_ranked_research_slate([row])
+    assert apply_publication_semantics([row], slate=slate)[0]["publication_tier"] == TIER1
 
 
 def test_core_discovery_uses_only_ready_members_and_merges_lanes():
@@ -146,3 +167,10 @@ def test_core_lane_eligibility_does_not_apply_mover_gap_floor():
         [{"ticker": "FLAT", "premarket_price": 10, "premarket_volume": 100, "gap_pct": 0}]
     )
     assert [row["ticker"] for row in ranked] == ["FLAT"]
+
+
+def test_production_scheduler_exposes_governed_core_manifest_path():
+    script = Path("scripts/run_alphaops_morning.ps1").read_text(encoding="utf-8")
+    assert "$CoreUniverseManifest" in script
+    assert "--core-universe-manifest" in script
+    assert "config\\luna_core_universe.json" in script

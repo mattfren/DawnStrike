@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,7 @@ def apply_publication_semantics(
     coverage_payload = dict(coverage or {})
     ceiling_block = str(coverage_payload.get("secondary_fallback_status") or "").lower() in {
         "research_only_applied_above_ceiling",
+        "applied_research_only_above_ceiling",
         "ceiling_exceeded_not_applied",
     }
     output: list[dict[str, Any]] = []
@@ -214,24 +216,34 @@ def _supported_strategy(row: dict[str, Any]) -> bool:
 
 
 def _immutable_plan_provenance(row: dict[str, Any]) -> bool:
-    plan_hash = str(
-        row.get("plan_hash_sha256")
-        or row.get("immutable_plan_hash")
-        or row.get("receipt_hash_sha256")
-        or ""
-    ).lower()
+    contract = (
+        row.get("structural_plan_contract")
+        or row.get("alphaops_plan_contract")
+        or row.get("plan_contract")
+    )
+    if not isinstance(contract, dict) or str(contract.get("status") or "").upper() != "COMPLETE":
+        return False
+    plan_hash = str(contract.get("plan_hash_sha256") or "").lower()
     if len(plan_hash) != 64 or any(char not in "0123456789abcdef" for char in plan_hash):
         return False
-    provenance = row.get("plan_provenance") or row.get("plan_source_provenance")
-    if isinstance(provenance, dict):
-        return bool(provenance.get("independent") is True or provenance.get("independently_sourced") is True) and bool(provenance.get("source") or provenance.get("source_id"))
-    if row.get("plan_provenance_hash") and row.get("plan_source_independent") is True:
-        return True
-    condition_results = row.get("condition_results")
-    return isinstance(condition_results, list) and sum(
-        bool(isinstance(item, dict) and (item.get("source_urls") or item.get("source_hashes")))
-        for item in condition_results
-    ) >= 3
+    canonical = {key: value for key, value in contract.items() if key != "plan_hash_sha256"}
+    expected_hash = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    if expected_hash != plan_hash:
+        return False
+    provenance = contract.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("independent") is not True:
+        return False
+    observations = provenance.get("observations")
+    if not isinstance(observations, list) or len(observations) < 3:
+        return False
+    distinct = {
+        (str(item.get("source_id") or ""), str(item.get("observation_hash") or ""))
+        for item in observations
+        if isinstance(item, dict)
+    }
+    return len(distinct) >= 3 and all(source and digest for source, digest in distinct)
 
 
 def _number(value: Any) -> float | None:
