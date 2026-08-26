@@ -1055,6 +1055,9 @@ def test_non_clean_edge_paper_selection_is_quarantined_from_current_return(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    delivery = store.load_notification_deliveries(signal_id="signal-1")[0]
+    delivery_payload = dict(delivery["payload_json"])
+    delivery_payload["decision"] = "probability_fallback"
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE signal_selections SET decision = ?, payload_json = ? "
@@ -1069,11 +1072,11 @@ def test_non_clean_edge_paper_selection_is_quarantined_from_current_return(
             "UPDATE notification_delivery_memberships "
             "SET decision = ?, payload_json = ? "
             "WHERE selection_id = ?",
-            (
-                "probability_fallback",
-                json.dumps({**payload, "delivery_status": "delivered"}, sort_keys=True),
-                selection["selection_id"],
-            ),
+                (
+                    "probability_fallback",
+                    json.dumps(delivery_payload, sort_keys=True),
+                    selection["selection_id"],
+                ),
         )
     rows = _contiguous_bars(
         overrides={
