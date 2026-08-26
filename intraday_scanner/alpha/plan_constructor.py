@@ -21,13 +21,34 @@ from intraday_scanner.decisioning.contracts import canonical_json
 
 NO_VALID_PLAN = "NO_VALID_PLAN"
 COMPLETE = "COMPLETE"
+LEGACY_RESEARCH_BASELINE = "LEGACY_RESEARCH_BASELINE"
 SUPPORTED_TARGET_BASES = frozenset(
     {
-        "premarket_range_extension",
         "sourced_resistance",
-        "atr_extension",
-        "vwap_structure",
         "prior_resistance",
+        "prior_swing_high",
+        "prior_day_resistance",
+        "prior_week_resistance",
+        "gap_boundary",
+        "liquidity_level",
+        "vwap_structure",
+    }
+)
+SUPPORTED_OBSERVATION_KINDS = frozenset(
+    {
+        "sourced_entry",
+        "sourced_stop",
+        "sourced_invalidation",
+        "premarket_price",
+        "premarket_low",
+        "prior_swing_high",
+        "prior_day_resistance",
+        "prior_week_resistance",
+        "sourced_resistance",
+        "prior_resistance",
+        "gap_boundary",
+        "liquidity_level",
+        "vwap_structure",
     }
 )
 _SHA256 = frozenset("0123456789abcdef")
@@ -43,6 +64,9 @@ class PlanObservation:
     completed_at: str
     source: str
     source_hash: str
+    observation_kind: str
+    raw_value: float
+    derivation_policy: str
     source_url: str = ""
     observation_hash: str = ""
     is_complete: bool = True
@@ -140,9 +164,39 @@ def construct_alphaops_v5_plan(
     if isinstance(target_candidates, (list, tuple)):
         observations.setdefault("target_candidates", target_candidates)
 
+    declared_entry = observations.get("entry")
+    declared_stop = observations.get("stop")
     values = {
-        "entry": _number(_first(signal, "entry", "entry_reference", "entry_watch_level", "entry_trigger", "breakout_trigger")),
-        "stop": _number(_first(signal, "stop", "stop_price", "invalidation_level", "invalidation", "exit_line")),
+        "entry": _number(
+            _first(
+                signal,
+                "entry",
+                "entry_reference",
+                "entry_watch_level",
+                "entry_trigger",
+                "breakout_trigger",
+            )
+            or (
+                _first(declared_entry, "value", "price", "level")
+                if isinstance(declared_entry, Mapping)
+                else None
+            )
+        ),
+        "stop": _number(
+            _first(
+                signal,
+                "stop",
+                "stop_price",
+                "invalidation_level",
+                "invalidation",
+                "exit_line",
+            )
+            or (
+                _first(declared_stop, "value", "price", "level")
+                if isinstance(declared_stop, Mapping)
+                else None
+            )
+        ),
     }
     target_value = _number(_first(signal, "target", "target_1", "first_target"))
     target_basis = str(_first(signal, "target_basis_kind", "target_basis", "target_role") or "").strip().lower()
@@ -166,7 +220,17 @@ def construct_alphaops_v5_plan(
     selected_basis = ""
     for _index, candidate in enumerate(candidates):
         value = _number(_first(candidate, "value", "target", "target_1", "first_target"))
-        basis = str(_first(candidate, "target_basis_kind", "target_basis", "basis", "role") or target_basis).strip().lower()
+        basis = str(
+            _first(
+                candidate,
+                "target_basis_kind",
+                "target_basis",
+                "basis",
+                "observation_kind",
+                "role",
+            )
+            or target_basis
+        ).strip().lower()
         candidate_derived = _bool(
             _first(candidate, "target_derived_from_risk", "derived_from_risk")
         )
@@ -258,6 +322,35 @@ def _invalid(direction: str, reason: str) -> AlphaOpsMarketStructurePlan:
     )
 
 
+def apply_structural_level_enrichment(
+    signal: Mapping[str, Any],
+    observations: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach upstream structural observations without deriving any levels.
+
+    Providers should call this adapter after independently collecting entry,
+    stop, and structural-target observations.  It intentionally performs no
+    fallback, arithmetic, or target search; the constructor remains the sole
+    validator and freezer.
+    """
+
+    if not isinstance(observations, Mapping):
+        raise TypeError("structural observations must be a mapping")
+    return {
+        **dict(signal),
+        "market_structure_observations": dict(observations),
+        "legacy_plan_baseline": False,
+    }
+
+
+def with_structural_level_enrichment(
+    signal: Mapping[str, Any], observations: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Compatibility alias for upstream structural-level providers."""
+
+    return apply_structural_level_enrichment(signal, observations)
+
+
 def _target_candidates(
     signal: Mapping[str, Any], observations: Mapping[str, Any], value: float | None, basis: str
 ) -> list[Mapping[str, Any]]:
@@ -294,10 +387,38 @@ def _observation_for(
     source = str(_first(data, "source", "source_identity", "provider") or "").strip()
     source_url = str(_first(data, "source_url", "url") or "").strip()
     source_hash = str(_first(data, "source_hash", "source_hash_sha256", "observation_sha256", "hash") or "").strip().lower()
+    observation_kind = str(
+        _first(data, "observation_kind", "basis_kind", "kind") or ""
+    ).strip().lower()
+    raw_value = _number(
+        _first(data, "raw_value", "basis_value", "raw_basis_value")
+    )
+    derivation_policy = str(
+        _first(data, "derivation_policy", "derivation", "level_policy") or ""
+    ).strip().lower()
     complete = _bool(_first(data, "is_complete", "completed", "observation_complete"))
     if complete is not True or numeric is None or not math.isfinite(numeric) or numeric <= 0:
         return None
-    if not observed_at or not completed_at or not source or len(source_hash) != 64 or not set(source_hash) <= _SHA256:
+    if (
+        not observed_at
+        or not completed_at
+        or not source
+        or not observation_kind
+        or raw_value is None
+        or raw_value <= 0
+        or not derivation_policy
+        or len(source_hash) != 64
+        or not set(source_hash) <= _SHA256
+    ):
+        return None
+    if observation_kind not in SUPPORTED_OBSERVATION_KINDS:
+        return None
+    if role == "target" and observation_kind not in SUPPORTED_TARGET_BASES:
+        return None
+    if role == "target" and any(
+        token in derivation_policy
+        for token in ("range_extension", "risk_multiple", "atr_extension")
+    ):
         return None
     observed_dt = _parse_timestamp(observed_at)
     completed_dt = _parse_timestamp(completed_at)
@@ -314,6 +435,9 @@ def _observation_for(
         "source": source,
         "source_url": source_url,
         "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "raw_value": raw_value,
+        "derivation_policy": derivation_policy,
         "is_complete": True,
     }
     expected_hash = hashlib.sha256(canonical_json(observation_payload).encode("utf-8")).hexdigest()
@@ -327,6 +451,9 @@ def _observation_for(
         completed_at=completed_at,
         source=source,
         source_hash=source_hash,
+        observation_kind=observation_kind,
+        raw_value=raw_value,
+        derivation_policy=derivation_policy,
         source_url=source_url,
         observation_hash=expected_hash,
     )
@@ -342,6 +469,22 @@ def _provenance_aliases(signal: Mapping[str, Any], role: str) -> dict[str, Any]:
         "source": (f"{prefix}_source", "source", "preferred_source"),
         "source_url": (f"{prefix}_source_url", "source_url"),
         "source_hash": (f"{prefix}_source_hash", "source_hash_sha256", "enrichment_observation_sha256"),
+        "observation_kind": (
+            f"{prefix}_observation_kind",
+            f"{prefix}_basis_kind",
+            "observation_kind",
+            "target_basis_kind" if role == "target" else "",
+        ),
+        "raw_value": (
+            f"{prefix}_raw_value",
+            f"{prefix}_basis_value",
+            "raw_value",
+            "target_basis_value" if role == "target" else "",
+        ),
+        "derivation_policy": (
+            f"{prefix}_derivation_policy",
+            "derivation_policy",
+        ),
         "is_complete": (f"{prefix}_is_complete", "enrichment_is_complete", "is_complete"),
     }
     for field, names in aliases.items():
@@ -401,10 +544,14 @@ def _bool(value: Any) -> bool | None:
 __all__ = [
     "AlphaOpsMarketStructurePlan",
     "COMPLETE",
+    "LEGACY_RESEARCH_BASELINE",
     "NO_VALID_PLAN",
     "PlanObservation",
     "SUPPORTED_TARGET_BASES",
+    "SUPPORTED_OBSERVATION_KINDS",
+    "apply_structural_level_enrichment",
     "build_alphaops_v5_plan",
     "build_market_structure_plan",
     "construct_alphaops_v5_plan",
+    "with_structural_level_enrichment",
 ]

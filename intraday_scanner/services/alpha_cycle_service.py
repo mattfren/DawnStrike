@@ -1631,8 +1631,16 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         payload["stop_observation_provenance"] = plan.status == COMPLETE
         payload["target_observation_provenance"] = plan.status == COMPLETE
         payload["plan_levels_frozen"] = plan.status == COMPLETE
-        payload["plan_construction_status"] = plan.status
-        payload["plan_construction_reason"] = plan.reason
+        payload["plan_construction_status"] = (
+            "LEGACY_RESEARCH_BASELINE"
+            if payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            else plan.status
+        )
+        payload["plan_construction_reason"] = (
+            str(payload.get("legacy_plan_reason") or "")
+            if payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            else plan.reason
+        )
         if plan.status == COMPLETE:
             # These are the already-frozen values, carried forward unchanged
             # for downstream receipts and alert gates.

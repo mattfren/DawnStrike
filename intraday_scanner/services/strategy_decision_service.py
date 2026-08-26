@@ -69,12 +69,29 @@ class StrategyDecisionService:
             declared_plan = candidate.get("alphaops_market_structure_plan")
             plan_integrity = True
             if isinstance(declared_plan, Mapping):
+                declared_status = str(declared_plan.get("status") or "").strip()
                 declared_hash = str(
                     declared_plan.get("plan_hash_sha256")
                     or candidate.get("plan_hash_sha256")
                     or ""
                 ).strip()
-                plan_integrity = not declared_hash or declared_hash == plan.plan_hash_sha256
+                plan_integrity = (
+                    (not declared_status or declared_status == plan.status)
+                    and (not declared_hash or declared_hash == plan.plan_hash_sha256)
+                )
+                for field, expected in (
+                    ("entry", plan.entry),
+                    ("stop", plan.stop),
+                    ("target", plan.target),
+                ):
+                    if field in declared_plan and _number(declared_plan.get(field)) != expected:
+                        plan_integrity = False
+                if (
+                    "target_basis_kind" in declared_plan
+                    and str(declared_plan.get("target_basis_kind") or "")
+                    != plan.target_basis_kind
+                ):
+                    plan_integrity = False
             elif candidate.get("plan_hash_sha256"):
                 plan_integrity = str(candidate.get("plan_hash_sha256")).strip() == plan.plan_hash_sha256
             candidate_payload["alphaops_market_structure_plan"] = plan.to_dict()
@@ -116,6 +133,17 @@ class StrategyDecisionService:
         market_date = now[:10] if market_date_value is None else str(market_date_value).strip()
         overrides = dict(candidate.get("condition_results") or {})
         overrides.update(dict(condition_overrides or {}))
+        if strategy_id == "alphaops_v5":
+            # These conditions are constructor-owned. Caller overrides cannot
+            # turn an invalid or mismatched plan into a complete receipt.
+            for condition_id in {
+                "market_structure_plan",
+                "entry_observation_provenance",
+                "stop_observation_provenance",
+                "target_observation_provenance",
+                "plan_levels_frozen",
+            }:
+                overrides.pop(condition_id, None)
         known_condition_ids = {spec.condition_id for spec in specs}
         unknown_overrides = sorted(set(overrides) - known_condition_ids)
         if unknown_overrides:

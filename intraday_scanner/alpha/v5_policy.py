@@ -35,11 +35,14 @@ PASSING_ALERT_GATES = frozenset({"PASS", "ALERT_OK"})
 PASSING_STATUSES = frozenset({"CLEAR", "VERIFIED", "OK", "PASS"})
 INDEPENDENT_TARGET_BASES = frozenset(
     {
-        "premarket_range_extension",
         "sourced_resistance",
-        "atr_extension",
-        "vwap_structure",
         "prior_resistance",
+        "prior_swing_high",
+        "prior_day_resistance",
+        "prior_week_resistance",
+        "gap_boundary",
+        "liquidity_level",
+        "vwap_structure",
     }
 )
 RESEARCH_ONLY_TIERS = frozenset(

@@ -170,8 +170,8 @@ CANDIDATE_COLUMNS = [
     "target_basis_extension",
     "target_policy_version",
     "target_derived_from_risk",
-    "market_structure_observations",
-    "target_frozen_before_reward_risk",
+    "legacy_plan_status",
+    "legacy_plan_reason",
     "risk_flags",
     "exit_bias",
     "best_exit_bias",
@@ -743,41 +743,6 @@ class ScoredCandidate:
             "was_fallback": self.snapshot.enrichment_was_fallback,
             "observation_sha256": self.snapshot.enrichment_observation_sha256,
         }
-        # Explicit per-leg provenance consumed by the AlphaOps v5 plan
-        # constructor. Missing completion metadata remains missing and fails
-        # closed; it is never synthesized here.
-        structure_source = (
-            self.snapshot.premarket_range_source
-            or self.snapshot.source
-            or self.snapshot.preferred_source
-        )
-        structure_url = self.snapshot.premarket_range_source_url or self.snapshot.source_url
-        structure_observed_at = (
-            self.snapshot.enrichment_observed_at
-            or self.snapshot.source_timestamp
-            or self.snapshot.as_of_timestamp
-        )
-        structure_completed_at = self.snapshot.enrichment_bar_completed_at
-        structure_hash = self.snapshot.enrichment_observation_sha256
-        market_structure_observations = {
-            role: {
-                "value": value,
-                "observed_at": structure_observed_at,
-                "completed_at": structure_completed_at,
-                "source": structure_source,
-                "source_url": structure_url,
-                "source_hash": structure_hash,
-                "is_complete": self.snapshot.enrichment_is_complete,
-            }
-            for role, value in (
-                ("entry", self.breakout_trigger),
-                ("stop", self.invalidation_level),
-                ("target", self.first_target),
-            )
-        }
-        market_structure_observations["target"]["target_basis_kind"] = (
-            "premarket_range_extension"
-        )
         payload = {
             "rank": self.rank,
             "ticker": self.snapshot.ticker,
@@ -839,8 +804,10 @@ class ScoredCandidate:
             "pullback_zone": self.pullback_zone,
             "invalidation_level": self.invalidation_level,
             "first_target": self.first_target,
-            "market_structure_observations": market_structure_observations,
-            "target_frozen_before_reward_risk": True,
+            # These values are the legacy range baseline only. They are not
+            # emitted as v5 structural observations or qualifying evidence.
+            "legacy_plan_status": "LEGACY_RESEARCH_BASELINE",
+            "legacy_plan_reason": "range-derived levels require independent structural enrichment",
             "stretch_target": self.stretch_target,
             "risk_flags": ";".join(self.risk_flags),
             "exit_bias": self.best_exit_bias,

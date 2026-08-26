@@ -10,6 +10,7 @@ from intraday_scanner.alpha.no_trade_filter import NoTradeDecision, evaluate_no_
 from intraday_scanner.alpha.plan_constructor import (
     AlphaOpsMarketStructurePlan,
     PlanObservation,
+    apply_structural_level_enrichment,
     build_alphaops_v5_plan,
     build_market_structure_plan,
     construct_alphaops_v5_plan,
@@ -21,6 +22,7 @@ __all__ = [
     "FEATURE_MODEL_VERSION",
     "AlphaModel",
     "AlphaOpsMarketStructurePlan",
+    "apply_structural_level_enrichment",
     "NoTradeDecision",
     "PlanObservation",
     "RiskDecision",
