@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from intraday_scanner.alpha.episode_identity import build_episode_identity
 from intraday_scanner.alpha.path_replay import (
     ELIGIBILITY_POLICY_VERSION,
     ENTRY_MODE_ALREADY_ENTERED,
@@ -57,6 +58,10 @@ _PAPER_ENTER_INTENT_BODY_KEYS = frozenset(
         "schema_version",
         "intent_id",
         "selection_id",
+        "episode_id",
+        "matched_strategy_ids",
+        "primary_strategy_id",
+        "episode_dedup_counts",
         "scan_id",
         "signal_id",
         "ticker",
@@ -563,6 +568,10 @@ def canonical_paper_enter_intent_context(
             for field in (
                 "intent_id",
                 "selection_id",
+                "episode_id",
+                "matched_strategy_ids",
+                "primary_strategy_id",
+                "episode_dedup_counts",
                 "signal_id",
                 "ticker",
                 "market_date",
@@ -2184,6 +2193,10 @@ def _validate_intent_column_projection(
         "source_observed_at",
         "source_bar_completed_at",
         "selection_id",
+        "episode_id",
+        "matched_strategy_ids",
+        "primary_strategy_id",
+        "episode_dedup_counts",
         "strategy_id",
         "strategy_version",
         "cohort",
@@ -2399,6 +2412,24 @@ def _validate_current_v5_entry_intent(
         "decision": selection["decision"],
         "selected_at": selection["selected_at"],
     }
+    expected_episode = build_episode_identity(evaluation_signal)
+    if payload.get("episode_id") != expected_episode.episode_id:
+        raise ValueError("paper entry intent episode identity is inconsistent")
+    matched_strategy_ids = payload.get("matched_strategy_ids")
+    primary_strategy_id = payload.get("primary_strategy_id")
+    if not (
+        isinstance(matched_strategy_ids, list)
+        and matched_strategy_ids
+        and all(
+            isinstance(item, str) and item == item.strip() and item
+            for item in matched_strategy_ids
+        )
+        and matched_strategy_ids == sorted(set(matched_strategy_ids))
+        and ALPHAOPS_V5_STRATEGY_ID in matched_strategy_ids
+        and primary_strategy_id == ALPHAOPS_V5_STRATEGY_ID
+    ):
+        raise ValueError("paper entry intent strategy episode metadata is invalid")
+    _validate_episode_dedup_counts(payload.get("episode_dedup_counts"))
     observation = {
         **copy.deepcopy(dict(source_columns)),
         **copy.deepcopy(dict(source_payload)),
@@ -2437,7 +2468,7 @@ def _validate_current_v5_entry_intent(
         if not _json_equal(payload.get(field), expected):
             raise ValueError(f"paper entry intent {field} is not reproducible")
     intent_basis = (
-        f"paper_execute:{selection['market_date']}:{selection['signal_id']}:"
+        f"paper_execute:{selection['market_date']}:{expected_episode.episode_id}:"
         f"{selection['ticker']}:ENTER_LONG:{payload['decision_time']}:"
         f"{payload['decision_price']}"
     )
@@ -2454,6 +2485,45 @@ def _validate_current_v5_entry_intent(
     )
     if payload.get("reason") != expected_reason or payload.get("blocked_reason") != "":
         raise ValueError("paper entry intent reason is not canonical")
+
+
+def _validate_episode_dedup_counts(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("paper entry intent episode de-dup counts are missing")
+    count_fields = {
+        "raw_pair_count",
+        "unique_symbol_count",
+        "unique_episode_count",
+        "unique_reservation_count",
+        "duplicate_collapse_count",
+        "overlapping_reservation_collapse_count",
+        "conflicting_direction_episode_count",
+        "blocked_count",
+    }
+    if set(value) != {*count_fields, "status"}:
+        raise ValueError("paper entry intent episode de-dup schema is invalid")
+    if value.get("status") != "FROZEN_IDENTITY_ACTIVE":
+        raise ValueError("paper entry intent episode de-dup is not frozen")
+    if any(type(value.get(field)) is not int or int(value[field]) < 0 for field in count_fields):
+        raise ValueError("paper entry intent episode de-dup counts are invalid")
+    raw_pairs = int(value["raw_pair_count"])
+    unique_symbols = int(value["unique_symbol_count"])
+    unique_episodes = int(value["unique_episode_count"])
+    unique_reservations = int(value["unique_reservation_count"])
+    duplicate_collapses = int(value["duplicate_collapse_count"])
+    overlap_collapses = int(value["overlapping_reservation_collapse_count"])
+    conflicts = int(value["conflicting_direction_episode_count"])
+    blocked = int(value["blocked_count"])
+    if not (
+        raw_pairs >= 1
+        and 1 <= unique_symbols <= unique_episodes <= raw_pairs
+        and 1 <= unique_reservations <= unique_episodes
+        and blocked == 0
+        and conflicts == 0
+        and raw_pairs == unique_episodes + duplicate_collapses
+        and unique_episodes == unique_reservations + overlap_collapses
+    ):
+        raise ValueError("paper entry intent episode de-dup counts conflict")
 
 
 def _canonical_paper_enter_intent_receipt_valid(value: object) -> bool:

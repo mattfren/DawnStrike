@@ -187,6 +187,10 @@ def test_raw_watcher_intent_adapter_preserves_columns_and_binds_full_trace(
         ALPHAOPS_V5_POLICY_VERSION
     )
     assert receipt["cost_model_version"] == ALPHAOPS_V5_COST_MODEL_VERSION
+    assert receipt["episode_id"] == record["payload_json"]["episode_id"]
+    assert receipt["matched_strategy_ids"] == [ALPHAOPS_V5_STRATEGY_ID]
+    assert receipt["primary_strategy_id"] == ALPHAOPS_V5_STRATEGY_ID
+    assert receipt["episode_dedup_counts"]["status"] == "FROZEN_IDENTITY_ACTIVE"
     binding = return_truth_module.canonical_replay_binding(
         composite,
         kind="alpha_paper_enter_intent",
@@ -344,6 +348,10 @@ def test_composite_entry_receipt_keeps_subminute_effective_time(
         "quantity",
         "notional",
         "stand_down",
+        "episode_id",
+        "matched_strategy_ids",
+        "primary_strategy_id",
+        "episode_dedup_counts",
     ),
 )
 def test_raw_watcher_intent_adapter_rejects_one_fact_mutations(
@@ -400,6 +408,14 @@ def test_raw_watcher_intent_adapter_rejects_one_fact_mutations(
         payload["official_paper_eligible"] = False
         columns["action"] = "STAND_DOWN"
         columns["lifecycle_state"] = "STAND_DOWN"
+    elif mutation == "episode_id":
+        payload["episode_id"] = "episode:" + "f" * 32
+    elif mutation == "matched_strategy_ids":
+        payload["matched_strategy_ids"] = ["forged_strategy"]
+    elif mutation == "primary_strategy_id":
+        payload["primary_strategy_id"] = "forged_strategy"
+    elif mutation == "episode_dedup_counts":
+        payload["episode_dedup_counts"]["raw_pair_count"] += 1
     else:  # pragma: no cover - parameter exhaustiveness
         raise AssertionError(mutation)
 
@@ -1787,13 +1803,65 @@ def _v5_signal(day: str = DAY) -> dict[str, Any]:
         "alert_gate_status": "PASS",
         "manual_confirmation_required": False,
         "classification": "TRADE SETUP",
+        "market_structure_observations": {
+            "entry": _v5_plan_observation(
+                10.0,
+                "a" * 64,
+                day=day,
+                observation_kind="sourced_entry",
+            ),
+            "stop": _v5_plan_observation(
+                9.0,
+                "b" * 64,
+                day=day,
+                observation_kind="sourced_stop",
+            ),
+            "target": {
+                **_v5_plan_observation(
+                    12.75,
+                    "c" * 64,
+                    day=day,
+                    observation_kind="prior_day_resistance",
+                ),
+                "target_basis_kind": "sourced_resistance",
+            },
+        },
     }
+    from intraday_scanner.services.alpha_cycle_service import _signal_payload
+
+    signal = _signal_payload(
+        signal,
+        str(signal["scan_id"]),
+        str(signal["generated_at"]),
+        1,
+    )
     signal["raw_payload_json"] = {
         key: deepcopy(value)
         for key, value in signal.items()
         if key != "raw_payload_json"
     }
     return signal
+
+
+def _v5_plan_observation(
+    value: float,
+    source_hash: str,
+    *,
+    day: str,
+    observation_kind: str,
+) -> dict[str, Any]:
+    return {
+        "value": value,
+        "raw_value": value,
+        "observed_at": f"{day}T12:55:00+00:00",
+        "completed_at": f"{day}T12:55:00+00:00",
+        "source": "completed-market-feed",
+        "source_url": "https://example.test/market",
+        "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "derivation_policy": "identity",
+        "is_complete": True,
+    }
 
 
 def _canonical_signal(day: str = DAY) -> dict[str, Any]:
