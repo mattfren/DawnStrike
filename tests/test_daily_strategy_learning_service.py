@@ -226,6 +226,37 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
     assert result["proposal_count"] >= 2
 
 
+def test_attribution_adapter_quarantines_provisional_closed_rows() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "aggregate",
+                "market_date": "2026-08-20",
+                "cohort": "official_forward_paper",
+                "strategy_id": "ts_momentum_sma_atr",
+                "strategy_version": "v1.0",
+                "record_status": "realized",
+                "return_pct": -2.0,
+                "fill_truth_status": "missing_committed_fill_truth",
+                "fill_id": "fill-without-commit",
+            }
+        ]
+    )
+    strategy = next(
+        item
+        for item in build_strategy_catalog()
+        if item.strategy_id == "ts_momentum_sma_atr" and item.version == "v1.0"
+    )
+    result = AttributionReportAnalyzer(report).analyze(
+        strategy,
+        type("Context", (), {})(),
+    )
+    assert result["outcomes"] == []
+    assert len(result["quarantined_closed"]) == 1
+    assert result["quarantined_closed"][0]["status"] == "CLOSED_PROVISIONAL"
+    assert result["misses"][0]["classification"] == "closed_provisional"
+
+
 def _decision_condition(condition_id: str, status: str, **fields: object) -> dict[str, object]:
     return {"condition_id": condition_id, "status": status, **fields}
 

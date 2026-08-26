@@ -16,8 +16,30 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
 )
-from intraday_scanner.services.trade_watcher_service import run_trade_watcher
+from intraday_scanner.services.trade_watcher_service import (
+    _existing_symbol_lifecycles,
+    run_trade_watcher,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+
+def test_existing_open_or_pending_symbol_blocks_any_new_episode() -> None:
+    symbols = _existing_symbol_lifecycles(
+        [
+            {
+                "action": "ENTER_LONG",
+                "lifecycle_state": "ENTRY_TRIGGERED",
+                "ticker": "NOVA",
+            },
+            {
+                "action": "ENTER_LONG",
+                "lifecycle_state": "CLOSED",
+                "ticker": "CLOSED",
+            },
+        ],
+        [{"status": "OPEN", "ticker": "AAPL"}],
+    )
+    assert symbols == {"NOVA", "AAPL"}
 
 
 def test_trade_watcher_enters_once_and_persists_paper_fill(tmp_path: Path) -> None:

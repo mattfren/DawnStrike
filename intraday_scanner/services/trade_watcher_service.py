@@ -17,6 +17,7 @@ from typing import Any
 
 from intraday_scanner.alpha.episode_identity import (
     EpisodeIdentityError,
+    build_episode_identity,
     deduplicate_episode_candidates,
 )
 from intraday_scanner.alpha.v5_policy import (
@@ -156,6 +157,7 @@ def run_trade_watcher(
         )
         if str(value or "").strip()
     }
+    existing_symbol_lifecycles = _existing_symbol_lifecycles(existing_intents, positions)
     open_position_rows = [dict(row) for row in positions if row.get("status") == "OPEN"]
     (
         repair_intents,
@@ -271,6 +273,13 @@ def run_trade_watcher(
             states[-1]["reason"] = "duplicate_episode_existing_lifecycle"
             states[-1]["episode_id"] = episode_id
             continue
+        if (
+            intent.get("action") == ACTION_ENTER
+            and ticker in existing_symbol_lifecycles
+        ):
+            states[-1]["reason"] = "duplicate_symbol_existing_open_or_pending_lifecycle"
+            states[-1]["episode_id"] = episode_id or None
+            continue
         intent["created_at"] = created_at
         intent["notification_event_key"] = f"trade_intent:{intent['intent_id']}"
         intent["payload_json"] = dict(intent)
@@ -280,6 +289,8 @@ def run_trade_watcher(
         existing_intent_ids.add(intent["intent_id"])
         if episode_id:
             existing_episode_ids.add(episode_id)
+        if intent.get("action") == ACTION_ENTER:
+            existing_symbol_lifecycles.add(ticker)
         if _should_notify(intent, settings):
             event = _notification_event(intent)
             notification_events_by_key[event.event_key] = event
@@ -484,16 +495,24 @@ def _watch_signals(
         {
             **historical_by_id[str(selection.get("signal_id") or "")],
             **selection,
-            "payload_json": selection.get("payload_json") or {},
+            # The immutable selection envelope stores the original Alpha
+            # signal under ``payload_json.signal`` while historical rows keep
+            # it under ``raw_payload_json``.  Present both sources to the
+            # identity validator so a frozen plan cannot be downgraded to a
+            # legacy row merely because of storage wrapping.
+            "payload_json": _episode_identity_payload(
+                historical_by_id[str(selection.get("signal_id") or "")],
+                selection,
+            ),
         }
         for selection in selected_rows
     ]
-    identity_ready = [row for row in candidate_rows if _has_episode_identity(row)]
-    if identity_ready:
-        if len(identity_ready) != len(candidate_rows):
+    identity_marked = [row for row in candidate_rows if _identity_fields_present(row)]
+    if identity_marked:
+        if len(identity_marked) != len(candidate_rows):
             raise SnapshotValidationError(
-                "Selected paper signals mix frozen episode identities with rows "
-                "missing episode truth; intent creation is blocked."
+                "Selected paper signals mix episode identity fields with legacy rows; "
+                "intent creation is blocked."
             )
         try:
             deduped = deduplicate_episode_candidates(candidate_rows)
@@ -521,13 +540,94 @@ def _watch_signals(
             "episode_id": selection.get("episode_id"),
             "matched_strategy_ids": selection.get("matched_strategy_ids") or [],
             "primary_strategy_id": selection.get("primary_strategy_id") or "",
+            "matched_episode_ids": selection.get("matched_episode_ids") or [],
+            "alternative_episode_ids": selection.get("alternative_episode_ids") or [],
+            "alternative_strategy_ids": selection.get("alternative_strategy_ids") or [],
+            "session_id": selection.get("session_id"),
+            "direction": selection.get("direction"),
+            "entry_window": selection.get("entry_window"),
+            "frozen_plan_hash": selection.get("frozen_plan_hash"),
+            "plan_freeze_status": selection.get("plan_freeze_status"),
             "episode_dedup_counts": selection.get("episode_dedup_counts") or {},
         }
         for selection in selected_rows
     ]
 
 
+def _existing_symbol_lifecycles(
+    intents: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+) -> set[str]:
+    """Return symbols with an existing open or unresolved entry lifecycle."""
+
+    symbols = {
+        str(row.get("ticker") or "").upper()
+        for row in positions
+        if str(row.get("status") or "").upper() in {"OPEN", "PENDING"}
+        and str(row.get("ticker") or "").strip()
+    }
+    terminal = {
+        STATE_CLOSED,
+        STATE_STAND_DOWN,
+        "CANCELLED",
+        "REJECTED",
+        "BLOCKED",
+        "FAILED",
+    }
+    for row in intents:
+        if str(row.get("action") or "").upper() != ACTION_ENTER:
+            continue
+        lifecycle = str(row.get("lifecycle_state") or "").upper()
+        if lifecycle in terminal:
+            continue
+        ticker = str(row.get("ticker") or "").upper().strip()
+        if ticker:
+            symbols.add(ticker)
+    return symbols
+
+
 def _has_episode_identity(row: dict[str, Any]) -> bool:
+    try:
+        build_episode_identity(row)
+    except (EpisodeIdentityError, TypeError, ValueError):
+        return False
+    return True
+
+
+_EPISODE_IDENTITY_MARKERS = (
+    "episode_id",
+    "session_id",
+    "market_session",
+    "session",
+    "direction",
+    "trade_direction",
+    "entry_window",
+    "entry_window_id",
+    "entry_window_key",
+    "decision_window",
+    "entry_window_start",
+    "entry_window_end",
+    "entry_start",
+    "entry_end",
+    "frozen_plan",
+    "plan",
+    "alphaops_market_structure_plan",
+    "frozen_plan_hash",
+    "plan_hash",
+    "plan_hash_sha256",
+    "strategy_plan_hash",
+    "plan_freeze_status",
+    "freeze_status",
+    "provenance_status",
+    "plan_provenance_status",
+    "plan_levels_frozen",
+    "plan_construction_status",
+)
+
+
+def _identity_fields_present(row: dict[str, Any]) -> bool:
+    """Detect partial modern identity before deciding legacy compatibility."""
+
     payload = row.get("payload_json")
     if isinstance(payload, str):
         try:
@@ -535,35 +635,42 @@ def _has_episode_identity(row: dict[str, Any]) -> bool:
         except (TypeError, ValueError):
             payload = None
     payload = payload if isinstance(payload, dict) else {}
-    def value(*keys: str) -> str:
-        for key in keys:
-            raw = row.get(key)
-            if raw in (None, ""):
-                raw = payload.get(key)
-            if raw not in (None, ""):
-                return str(raw).strip()
-        return ""
-    return bool(
-        value("market_date", "trade_date", "date")
-        and value("session_id", "market_session", "session", "run_id", "scan_id")
-        and value("symbol", "ticker", "canonical_symbol")
-        and value("direction", "trade_direction")
-        and (
-            value("entry_window", "entry_window_id", "decision_window")
-            or (
-                value("entry_window_start", "entry_start")
-                and value("entry_window_end", "entry_end")
-            )
-        )
-        and value("frozen_plan_hash", "plan_hash", "plan_hash_sha256")
-        and value(
-            "plan_freeze_status",
-            "freeze_status",
-            "provenance_status",
-            "plan_provenance_status",
-        ).lower()
-        in {"frozen", "verified", "committed"}
+    return any(
+        row.get(field) not in (None, "") or payload.get(field) not in (None, "")
+        for field in _EPISODE_IDENTITY_MARKERS
     )
+
+
+def _episode_identity_payload(
+    historical: dict[str, Any],
+    selection: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose persisted signal identity without changing its source envelope."""
+
+    payload: dict[str, Any] = {}
+    raw = historical.get("raw_payload_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = None
+    if isinstance(raw, dict):
+        payload.update(raw)
+    selected_payload = selection.get("payload_json")
+    if isinstance(selected_payload, str):
+        try:
+            selected_payload = json.loads(selected_payload)
+        except (TypeError, ValueError):
+            selected_payload = None
+    if isinstance(selected_payload, dict):
+        payload.update(selected_payload)
+        nested_signal = selected_payload.get("signal")
+        if isinstance(nested_signal, dict):
+            payload.update(nested_signal)
+    nested_signal = payload.get("signal")
+    if isinstance(nested_signal, dict):
+        payload.update(nested_signal)
+    return payload
 
 
 def _validate_exact_session_selections(

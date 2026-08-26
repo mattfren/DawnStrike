@@ -83,6 +83,17 @@ _TEXT_FIELDS = (
     "activation_status",
     "terminal_state",
 )
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_PAPER_OPS_FORWARD_COHORTS = {
+    "official_forward",
+    "official_forward_paper",
+    "shadow_challenger",
+}
+_PAPER_OPS_POINT_IN_TIME_LIMITATIONS = (
+    "paper_ops_open_pending_point_in_time_is_limited_to_entry_evidence_at_or_before_cutoff",
+    "paper_ops_terminal_lifecycle_events_after_cutoff_are_omitted_not_back_projected",
+    "paper_ops_current_materialized_ledger_cannot_reconstruct_historical_open_state_without_entry_and_terminal_timestamps",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +121,11 @@ class StrategyMissAttributionRow:
     episode_id: str | None = None
     fill_truth_status: str | None = None
     eligibility_reason: str | None = None
+    # Source identity is retained so a consumer can distinguish exact PaperOps
+    # lifecycles from legacy/aggregate observations without parsing evidence
+    # hashes or record IDs.
+    series_role: str | None = None
+    record_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +148,8 @@ class StrategyMissAttributionRow:
             "episode_id": self.episode_id,
             "fill_truth_status": self.fill_truth_status,
             "eligibility_reason": self.eligibility_reason,
+            "series_role": self.series_role,
+            "record_type": self.record_type,
         }
 
 
@@ -154,6 +172,7 @@ class StrategyMissAttributionSummary:
     no_trade_count: int
     missing_outcome_count: int
     conflicting_outcome_count: int
+    provisional_closed_count: int
     closed_win_count: int
     closed_loss_count: int
     closed_flat_count: int
@@ -191,6 +210,7 @@ class StrategyMissAttributionSummary:
                 "wins": self.closed_win_count,
                 "losses": self.closed_loss_count,
                 "flats": self.closed_flat_count,
+                "provisional_count": self.provisional_closed_count,
                 "return_sum_pct": self.closed_return_sum_pct,
             },
             "open_mtm_return_sum_pct": self.open_mtm_return_sum_pct,
@@ -219,6 +239,7 @@ class StrategyMissAttributionReport:
     research_only: bool = True
     promotion_eligible: bool = False
     policy_changes: tuple[str, ...] = ()
+    point_in_time_limitations: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +251,7 @@ class StrategyMissAttributionReport:
             "research_only": self.research_only,
             "promotion_eligible": self.promotion_eligible,
             "policy_changes": list(self.policy_changes),
+            "point_in_time_limitations": list(self.point_in_time_limitations),
             "rows": [row.to_dict() for row in self.rows],
             "summaries": [summary.to_dict() for summary in self.summaries],
         }
@@ -250,41 +272,38 @@ def attribute_strategy_misses(
     """
 
     normalized = [_mapping(row) for row in rows]
+    point_in_time_limitations: tuple[str, ...] = ()
     if paper_ops_rows is not None:
         blotter = [
             _blotter_mapping(row)
             for row in paper_ops_rows
-            if str(_mapping(row).get("mode") or "forward") == "forward"
-            and str(_mapping(row).get("series_role") or "")
+            if str(_mapping(row).get("mode") or "forward").lower() == "forward"
+            and str(_mapping(row).get("series_role") or "").strip().lower()
             in {"champion", "challenger"}
         ]
-        blotter_groups = {
+        blotter_series = {
             (
-                str(item.get("market_date") or item.get("signal_date") or "")[:10],
                 str(item.get("strategy_id") or ""),
                 str(item.get("strategy_version") or ""),
+                str(item.get("series_role") or "").lower(),
             )
             for item in blotter
-            if str(item.get("lifecycle_status") or "") in {"closed", "open", "pending"}
+            if str(item.get("lifecycle_status") or "").lower()
+            in {"closed", "open", "pending", "blocked", "quarantined"}
         }
-        # Portfolio aggregates are still retained as evidence, but their
-        # closed/open counts are superseded by exact blotter lifecycles when
-        # the same forward strategy series is available.
+        blotter_pairs = {(strategy, version) for strategy, version, _role in blotter_series}
+        # Portfolio aggregates are not a second outcome source once an exact
+        # forward PaperOps lifecycle series exists.  Matching by date is
+        # incorrect: an aggregate's signal date and a blotter close date are
+        # different immutable events, and a date join leaves duplicate closes.
+        # Benchmarks, replay, and unrelated historical cohorts remain intact.
         normalized = [
             item
             for item in normalized
-            if not (
-                str(item.get("record_type") or "")
-                in {"portfolio_observation", "account_observation"}
-                and (_safe_nonnegative_int(item.get("trade_count")) or 0) > 0
-                and (
-                    str(item.get("market_date") or "")[:10],
-                    str(item.get("strategy_id") or ""),
-                    str(item.get("strategy_version") or ""),
-                ) in blotter_groups
-            )
+            if not _superseded_forward_aggregate(item, blotter_series, blotter_pairs)
         ]
         normalized.extend(blotter)
+        point_in_time_limitations = _PAPER_OPS_POINT_IN_TIME_LIMITATIONS
     cutoff = date_cutoff or _derived_cutoff(normalized)
     included = [row for row in normalized if _within_cutoff(row, cutoff)]
     excluded = len(normalized) - len(included)
@@ -298,11 +317,19 @@ def attribute_strategy_misses(
         # aggregate return across an unknown number of trades.
         lifecycle_rows = _expand_lifecycle_rows(row, date_cutoff=cutoff)
         for lifecycle_row in lifecycle_rows:
-            if lifecycle_row.get("_lifecycle_child"):
+            if lifecycle_row.get("_lifecycle_child") or str(
+                lifecycle_row.get("record_type") or ""
+            ) == "paper_ops_blotter_lifecycle":
                 lifecycle_key = (
                     _cohort(lifecycle_row),
+                    str(lifecycle_row.get("series_role") or "").lower(),
                     str(lifecycle_row.get("strategy_id") or "unknown"),
-                    str(lifecycle_row.get("lifecycle_id") or lifecycle_row.get("record_id") or ""),
+                    str(lifecycle_row.get("strategy_version") or ""),
+                    str(
+                        lifecycle_row.get("lifecycle_id")
+                        or lifecycle_row.get("record_id")
+                        or ""
+                    ),
                 )
                 if lifecycle_key in seen_lifecycles:
                     continue
@@ -325,6 +352,7 @@ def attribute_strategy_misses(
         excluded_after_cutoff_count=excluded,
         rows=tuple(attributed),
         summaries=tuple(summaries),
+        point_in_time_limitations=point_in_time_limitations,
     )
 
 
@@ -396,13 +424,37 @@ def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
 
     item = _mapping(row)
     status = str(item.get("lifecycle_status") or "").strip().lower()
-    item["market_date"] = str(item.get("signal_date") or item.get("market_date") or "")[:10]
+    role = str(item.get("series_role") or "").strip().lower()
+    signal_date = str(item.get("signal_date") or item.get("market_date") or "")[:10]
+    terminal_time = _first_timestamp(
+        item,
+        ("close_time", "closed_at", "exit_time", "exit_timestamp"),
+    )
+    terminal_date = terminal_time[:10] if terminal_time else ""
+    # A closed lifecycle is dated by its immutable terminal event, never by
+    # the signal/entry day.  This is what makes an Aug-21 point-in-time run
+    # exclude a close first observed on Aug-25.
+    item["market_date"] = terminal_date if status == "closed" and terminal_date else signal_date
+    item["_terminal_event_date"] = terminal_date or None
+    entry_time = _first_timestamp(item, ("fill_time", "opened_at", "signal_time"))
+    item["_entry_event_date"] = (entry_time[:10] if entry_time else signal_date) or None
+    if status == "closed" and not terminal_date:
+        item["_point_in_time_unreconstructable"] = True
     item["ticker"] = str(item.get("symbol") or item.get("ticker") or "").upper()
     item["record_id"] = str(
         item.get("record_id") or item.get("position_id") or item.get("order_id") or ""
     )
     item["record_type"] = "paper_ops_blotter_lifecycle"
-    item["cohort"] = "shadow_challenger"
+    # The materializer currently exposes series_role rather than a cohort
+    # column.  Preserve a supplied cohort; otherwise derive the governed
+    # champion/challenger cohort without collapsing them into one bucket.
+    if role == "champion":
+        item["cohort"] = str(item.get("cohort") or "official_forward_paper")
+    elif role == "challenger":
+        item["cohort"] = str(item.get("cohort") or "shadow_challenger")
+    else:
+        item["cohort"] = str(item.get("cohort") or "unknown")
+    item["series_role"] = role or None
     item["record_status"] = {
         "closed": "closed",
         "open": "open_mtm",
@@ -418,11 +470,19 @@ def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
     item["lifecycle_id"] = str(
         item.get("close_id") or item.get("position_id") or item.get("order_id") or item["record_id"]
     )
+    if not item["record_id"]:
+        item["record_id"] = item["lifecycle_id"]
     item["episode_id"] = str(item.get("episode_id") or "") or None
-    fill_hash = str(item.get("fill_truth_hash_sha256") or "")
-    item["fill_truth_status"] = "committed" if fill_hash else "missing_committed_fill_truth"
+    # BLOTTER_FIELDS has no committed FillTruth field.  A ledger/file hash is
+    # source provenance, not a FillTruth receipt, so every materialized row is
+    # explicitly provisional until a governed CommitBridge join is supplied.
+    supplied_fill_hash = str(item.get("fill_truth_hash_sha256") or "").strip()
+    if supplied_fill_hash:
+        item["untrusted_fill_truth_hash"] = supplied_fill_hash
+    item["fill_truth_hash_sha256"] = ""
+    item["fill_truth_status"] = "missing_committed_fill_truth"
     item["eligibility_reason"] = (
-        "" if fill_hash else "missing_committed_fill_truth; provisional_only"
+        "missing_committed_fill_truth; provisional_only; governed_commitbridge_join_unavailable"
     )
     item["source_hash_sha256"] = str(
         item.get("ledger_source_hash_sha256")
@@ -432,7 +492,70 @@ def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
         or ""
     )
     item["input_hash_sha256"] = str(item.get("fill_data_snapshot_id") or "")
+    item["_lifecycle_child"] = True
+    warnings = item.get("blotter_warnings")
+    if isinstance(warnings, (list, tuple)) and warnings:
+        item["_blotter_integrity_failed"] = True
+        item["record_status"] = "quarantined"
+        item["return_pct"] = None
+        item["eligibility_reason"] = (
+            "paper_ops_blotter_integrity_warning; attribution_quarantined"
+        )
     return item
+
+
+def _superseded_forward_aggregate(
+    item: Mapping[str, Any],
+    blotter_series: set[tuple[str, str, str]],
+    blotter_pairs: set[tuple[str, str]],
+) -> bool:
+    """Return whether a forward aggregate is superseded by exact blotter truth."""
+
+    if str(item.get("record_type") or "") == "paper_ops_blotter_lifecycle":
+        return False
+    cohort = _cohort(dict(item))
+    if cohort not in _PAPER_OPS_FORWARD_COHORTS:
+        return False
+    strategy = str(item.get("strategy_id") or "")
+    version = str(item.get("strategy_version") or "")
+    if not strategy or (strategy, version) not in blotter_pairs:
+        return False
+    status = str(item.get("record_status") or item.get("outcome_status") or "").lower()
+    has_outcome = status in _CLOSED_STATES or status in _OPEN_STATES or status in {
+        "missing_outcome",
+        "quarantined",
+    }
+    has_counts = (
+        (_safe_nonnegative_int(item.get("trade_count")) or 0) > 0
+        or (_safe_nonnegative_int(item.get("open_position_count")) or 0) > 0
+    )
+    if not (has_outcome or has_counts):
+        return False
+    role = _aggregate_series_role(item, cohort)
+    # Never suppress a different role merely because the strategy/version
+    # pair exists in the blotter.  An omitted aggregate role is inferred only
+    # from its governed cohort above; exact role matching keeps champion and
+    # challenger populations separate.
+    return (strategy, version, role) in blotter_series
+
+
+def _aggregate_series_role(item: Mapping[str, Any], cohort: str) -> str:
+    role = str(item.get("series_role") or "").strip().lower()
+    if role in {"champion", "challenger"}:
+        return role
+    if cohort in {"official_forward", "official_forward_paper"}:
+        return "champion"
+    if cohort == "shadow_challenger":
+        return "challenger"
+    return ""
+
+
+def _first_timestamp(item: Mapping[str, Any], fields: Iterable[str]) -> str:
+    for field in fields:
+        value = str(item.get(field) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _derived_cutoff(rows: list[dict[str, Any]]) -> str | None:
@@ -444,8 +567,20 @@ def _derived_cutoff(rows: list[dict[str, Any]]) -> str | None:
 def _within_cutoff(row: dict[str, Any], cutoff: str | None) -> bool:
     if cutoff is None:
         return True
+    if row.get("_point_in_time_unreconstructable"):
+        return False
     date = str(row.get("market_date") or "").strip()
-    return bool(date) and date <= cutoff
+    if not date or date > cutoff:
+        return False
+    entry_date = str(row.get("_entry_event_date") or "").strip()
+    terminal_date = str(row.get("_terminal_event_date") or "").strip()
+    # A materialized current open/pending row is usable only when its entry is
+    # known by the cutoff and no terminal event is known after it.  We do not
+    # back-project a future close into a historical open state.
+    return not (
+        (entry_date and entry_date > cutoff)
+        or (terminal_date and terminal_date > cutoff)
+    )
 
 
 def _benchmark_index(
@@ -583,13 +718,15 @@ def _expand_lifecycle_rows(
                     expanded["return_pct"] = child_dict[key]
                     break
         if _child_close_after_cutoff(child_dict, date_cutoff):
-            # A late close is future evidence relative to this run.  Keep it
-            # visibly open/pending and discard its future return.
-            expanded["record_status"] = "open_mtm"
-            expanded["open_position_count"] = 1
+            # A late close is future evidence relative to this run.  The
+            # materialized source cannot safely reconstruct the historical
+            # open/pending state, so quarantine it instead of back-projecting
+            # a current state or learning from its future return.
+            expanded["record_status"] = "quarantined"
+            expanded["open_position_count"] = 0
             expanded["trade_count"] = 0
             expanded["return_pct"] = None
-            expanded["_payload"]["outcome_status"] = "open_mtm"
+            expanded["_payload"]["outcome_status"] = "quarantined"
             expanded["_payload"]["outcome_reason"] = "close_after_cutoff"
         output.append(expanded)
     return output or [row]
@@ -612,18 +749,11 @@ def _lifecycle_state(child: Mapping[str, Any]) -> str:
     if value is None:
         value = child.get("status") or child.get("lifecycle_state") or child.get("outcome_status")
     state = str(getattr(value, "value", value) or "").strip().lower()
-    # A fill/entry event is not a closed trade.  Without a committed FillTruth
-    # receipt it remains unresolved, even when a retry supplied a price or a
-    # stale child status says ``closed``.
-    if child.get("fill_id") and not any(
-        str(child.get(field) or "").strip()
-        for field in (
-            "fill_truth_hash_sha256",
-            "fill_truth_receipt_hash_sha256",
-            "committed_fill_truth_hash",
-            "source_bar_hash_sha256",
-        )
-    ):
+    # A fill/entry event is not a closed trade.  Without a governed committed
+    # FillTruth receipt it remains unresolved, even when a retry supplied a
+    # price or a stale child status says ``closed``.  A source-bar hash is
+    # market-data provenance, never FillTruth.
+    if child.get("fill_id") and not _has_committed_fill_truth(child):
         return "missing_outcome"
     if state in _CLOSED_STATES:
         return "closed"
@@ -641,6 +771,41 @@ def _lifecycle_state(child: Mapping[str, Any]) -> str:
     ):
         return "closed"
     return state
+
+
+def _has_committed_fill_truth(value: Mapping[str, Any]) -> bool:
+    """Recognize only an explicitly verified FillTruth CommitBridge record."""
+
+    status = str(value.get("fill_truth_status") or "").strip().lower()
+    if status not in {"committed", "verified", "complete"}:
+        return False
+    fill_hash = str(
+        value.get("fill_truth_hash_sha256")
+        or value.get("committed_fill_truth_hash")
+        or ""
+    ).strip()
+    if not _SHA256.fullmatch(fill_hash):
+        return False
+    # There is no FillTruth field in the current PaperOps blotter contract.
+    # Future governed joins must carry an explicit verification marker and a
+    # receipt object; a bare hash/status pair is intentionally insufficient.
+    receipt = value.get("fill_truth_receipt") or value.get("fill_truth_commit_receipt")
+    if not isinstance(receipt, Mapping):
+        return False
+    contract = str(
+        receipt.get("contract")
+        or receipt.get("schema")
+        or receipt.get("schema_version")
+        or ""
+    ).lower()
+    return (
+        bool(value.get("fill_truth_contract_verified") is True)
+        and "filltruth" in contract.replace("_", "")
+        and bool(
+            receipt.get("committed") is True
+            or receipt.get("status") in {"committed", "verified"}
+        )
+    )
 
 
 def _child_close_after_cutoff(child: Mapping[str, Any], cutoff: str | None) -> bool:
@@ -703,10 +868,15 @@ def _attribute_row(
     }
     explicit_conflict = _truthy(row, payload, ("conflicting_outcome", "outcome_conflict"))
     fill_truth_status = _optional_text(row, payload, "fill_truth_status")
-    provisional_fill = bool(
-        fill_truth_status
-        and fill_truth_status.lower() not in {"committed", "verified", "complete"}
+    fill_evidence_present = any(
+        _optional_text(row, payload, field)
+        for field in ("fill_id", "fill_price", "quantity_filled")
     )
+    provisional_fill = fill_evidence_present and not _has_committed_fill_truth(
+        {**dict(payload), **row}
+    )
+    if fill_truth_status and not _has_committed_fill_truth({**dict(payload), **row}):
+        provisional_fill = True
     eligibility_reason = _optional_text(row, payload, "eligibility_reason")
     conflict = explicit_conflict or benchmark_conflict
     if no_trade and (return_pct is not None and return_pct != 0.0):
@@ -803,6 +973,8 @@ def _attribute_row(
         episode_id=_optional_text(row, payload, "episode_id"),
         fill_truth_status=fill_truth_status,
         eligibility_reason=eligibility_reason,
+        series_role=_optional_text(row, payload, "series_role"),
+        record_type=_optional_text(row, payload, "record_type"),
     )
 
 
@@ -832,11 +1004,16 @@ def _build_summaries(
         strategy_id, version, config, execution_policy, cohort = key
         classifications = Counter(row.classification for row in group)
         categories = Counter(category for row in group for category in row.categories)
-        closed = [
+        closed_all = [
             row
             for row in group
             if row.state is AttributionState.CLOSED and row.return_pct is not None
         ]
+        # A closed lifecycle count is retained for reconciliation, but only
+        # committed/eligible closes contribute to outcome metrics.  Provisional
+        # closes (notably the current blotter's missing FillTruth) must never
+        # influence return sums, win/loss counts, or learner headlines.
+        closed = [row for row in closed_all if row.eligibility is Eligibility.ELIGIBLE]
         open_rows = [
             row
             for row in group
@@ -876,9 +1053,9 @@ def _build_summaries(
                 conflicting_outcome_count=sum(
                     row.state is AttributionState.CONFLICTING_OUTCOME for row in group
                 ),
-                closed_win_count=classifications.get("closed_win", 0),
-                closed_loss_count=classifications.get("false_positive", 0),
-                closed_flat_count=classifications.get("closed_flat", 0),
+                closed_win_count=sum(row.classification == "closed_win" for row in closed),
+                closed_loss_count=sum(row.classification == "false_positive" for row in closed),
+                closed_flat_count=sum(row.classification == "closed_flat" for row in closed),
                 closed_return_sum_pct=_sum_or_none(closed_returns),
                 open_mtm_return_sum_pct=_sum_or_none(open_returns),
                 opportunity_cost_count=len(opportunity),
@@ -889,6 +1066,7 @@ def _build_summaries(
                     sorted({item for row in group for item in row.evidence_hashes})
                 ),
                 remediation_hypotheses=remediation,
+                provisional_closed_count=len(closed_all) - len(closed),
             )
         )
     return summaries

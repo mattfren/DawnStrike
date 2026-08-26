@@ -143,18 +143,31 @@ class AttributionReportAnalyzer:
             if summary.get("strategy_id") == strategy.strategy_id
             and summary.get("strategy_version") in {None, "", strategy.version}
         )
-        outcomes = [
-            {
-                **row,
-                "status": "RESOLVED",
-            }
-            for row in rows
-            if str(row.get("state")) == "closed"
-        ]
+        outcomes: list[dict[str, Any]] = []
+        quarantined_closed: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("state")) != "closed":
+                continue
+            eligibility = str(row.get("eligibility") or "").lower()
+            classification = str(row.get("classification") or "")
+            if eligibility != "eligible" or classification == "closed_provisional":
+                quarantined_closed.append(
+                    {
+                        **row,
+                        "status": "CLOSED_PROVISIONAL",
+                        "eligibility_reason": row.get("eligibility_reason")
+                        or "closed_lifecycle_is_not_learning_eligible",
+                    }
+                )
+                continue
+            outcomes.append({**row, "status": "RESOLVED"})
         misses = [
             dict(row)
             for row in rows
-            if str(row.get("classification")) not in {"closed_win", "closed_flat"}
+            if (
+                str(row.get("classification")) not in {"closed_win", "closed_flat"}
+                or str(row.get("eligibility") or "").lower() != "eligible"
+            )
         ]
         proposals: list[dict[str, Any]] = []
         if strategy.status not in {"benchmark", "baseline"}:
@@ -202,6 +215,10 @@ class AttributionReportAnalyzer:
             "evidence_contract": self._schema,
             "outcomes": outcomes,
             "misses": misses,
+            "quarantined_closed": quarantined_closed,
+            "counts": {
+                "closed_provisional_quarantined": len(quarantined_closed),
+            },
             "proposals": proposals,
         }
 
@@ -285,7 +302,10 @@ def _reuse_immutable_artifacts(
         for key, value in required_safety.items()
     ):
         raise ValueError(f"immutable daily-learning safety boundary mismatch: {root}")
-    if receipt.get("daily_fit_performed") is not False or receipt.get("champion_mutated") is not False:
+    if (
+        receipt.get("daily_fit_performed") is not False
+        or receipt.get("champion_mutated") is not False
+    ):
         raise ValueError(f"immutable daily-learning receipt is not research-only: {root}")
 
     return {
@@ -337,11 +357,19 @@ def _normalize_analysis(
     excluded_unresolved = 0
     excluded_future = 0
     missing_return = 0
+    excluded_ineligible = 0
+    quarantined_closed = _as_sequence(
+        raw.get("quarantined_closed"), "quarantined_closed", strategy.strategy_id
+    )
 
     for row in _as_sequence(raw.get("outcomes"), "outcomes", strategy.strategy_id):
         status = str(row.get("status", "")).upper()
-        if status in _UNRESOLVED_STATUSES:
+        eligibility = str(row.get("eligibility") or "").lower()
+        if status in _UNRESOLVED_STATUSES or (
+            eligibility and eligibility != "eligible"
+        ) or str(row.get("classification") or "") == "closed_provisional":
             excluded_unresolved += 1
+            excluded_ineligible += int(bool(eligibility and eligibility != "eligible"))
             continue
         if _date_is_after(row.get("market_date"), context.market_date):
             excluded_future += 1
@@ -387,10 +415,13 @@ def _normalize_analysis(
             "misses_retained": len(misses),
             "proposals_retained": len(proposals),
             "unresolved_outcomes_excluded": excluded_unresolved,
+            "ineligible_outcomes_excluded": excluded_ineligible,
             "future_evidence_excluded": excluded_future,
             "outcomes_without_return_excluded_from_return_metrics": missing_return,
+            "closed_provisional_quarantined": len(quarantined_closed),
         },
         "evidence_contract": str(raw.get("evidence_contract", "injected_unattributed_v1")),
+        "quarantined_closed": [dict(row) for row in quarantined_closed],
     }
     return evidence, proposals
 
