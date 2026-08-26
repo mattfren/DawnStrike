@@ -662,6 +662,12 @@ def _existing_symbol_lifecycles(
 ) -> set[str]:
     """Return symbols with an existing open or unresolved entry lifecycle."""
 
+    closed_entry_intent_ids = {
+        str(row.get("entry_intent_id") or "").strip()
+        for row in positions
+        if str(row.get("status") or "").upper() == "CLOSED"
+        and str(row.get("entry_intent_id") or "").strip()
+    }
     symbols = {
         str(row.get("ticker") or "").upper()
         for row in positions
@@ -683,7 +689,12 @@ def _existing_symbol_lifecycles(
         if lifecycle in terminal:
             continue
         ticker = str(row.get("ticker") or "").upper().strip()
-        if ticker:
+        # A durable ENTER intent can retain a pre-close lifecycle state after
+        # its position has been reconciled and closed.  The closed position is
+        # authoritative only when its exact entry intent is linked; a missing
+        # or different link must keep the symbol locked conservatively.
+        intent_id = str(row.get("intent_id") or "").strip()
+        if ticker and intent_id not in closed_entry_intent_ids:
             symbols.add(ticker)
     return symbols
 

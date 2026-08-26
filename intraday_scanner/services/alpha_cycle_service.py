@@ -766,7 +766,15 @@ def alpha_cycle(
         require_watcher_proof=True,
         receipt_verifier=receipt_verifier,
     )
-    research_radar = _research_radar(signals) if decision.get("no_trade") else []
+    # The persisted daily slate is authoritative.  An empty frozen slate is a
+    # deliberate no-research result and must not be repopulated from the
+    # current signal set during a retry or no-edge rendering path.
+    research_radar = (
+        _research_radar(signals)
+        if decision.get("no_trade")
+        and int(luna_research_slate.get("published_count") or 0) > 0
+        else []
+    )
     signals = _annotate_research_radar(signals, research_radar)
     store.persist_alpha_signals(signals)
     regime = detect_regime(signals, source_summary)
@@ -829,7 +837,7 @@ def alpha_cycle(
         message = format_alpha_no_trade(
             reason=str(decision.get("reason") or ""),
             next_action=str(decision.get("next_action") or ""),
-            research_signals=slate_publication_rows or research_radar,
+            research_signals=slate_publication_rows,
             research_total=int(luna_research_slate.get("published_count") or 0),
         )
         hint = "alpha_no_trade"
@@ -855,7 +863,7 @@ def alpha_cycle(
             title,
             message,
             selected_signals=selected_signals,
-            research_signals=slate_publication_rows or research_radar,
+            research_signals=slate_publication_rows,
         )
     ]
     selection_members = selected_signals or ([no_trade_row] if no_trade_row is not None else [])
@@ -873,7 +881,7 @@ def alpha_cycle(
         # Freeze the exact five-target research slate for monitoring on both
         # edge and no-edge days.  The radar cohort is the existing read-only
         # persistence surface and remains broker-disabled.
-        radar=list(luna_research_slate.get("rows") or research_radar),
+        radar=list(luna_research_slate.get("rows") or []),
         slate=luna_research_slate,
         selected_at=timestamp,
         event=events[0],
@@ -1059,6 +1067,37 @@ def alpha_monitor(
         cohort=ALPHAOPS_RADAR_COHORT,
         limit=50,
     )
+    try:
+        radar_monitor_signals = _radar_monitor_signals(signals, radar_selections)
+    except SnapshotValidationError as exc:
+        return {
+            "status": "selection_evidence_unavailable",
+            "label": "SELECTION AUDIT REQUIRED",
+            "message": str(exc),
+            "latest_watchlist_market_date": latest_signal_date or "unknown",
+            "required_market_date": session_gate.market_date if session_gate else None,
+            "tickers": [],
+            "events": [],
+            "notification_stats": {"sent": 0, "skipped": 0},
+            "selection_evidence_status": "unavailable",
+            "session_gate": session_gate.to_dict() if session_gate else None,
+        }
+    if radar_selections and not radar_monitor_signals:
+        return {
+            "status": "selection_evidence_unavailable",
+            "label": "SELECTION AUDIT REQUIRED",
+            "message": (
+                "The persisted research slate selections could not be matched to "
+                "current or governed frozen signal rows; no monitor notification was created."
+            ),
+            "latest_watchlist_market_date": latest_signal_date or "unknown",
+            "required_market_date": session_gate.market_date if session_gate else None,
+            "tickers": [],
+            "events": [],
+            "notification_stats": {"sent": 0, "skipped": 0},
+            "selection_evidence_status": "unavailable",
+            "session_gate": session_gate.to_dict() if session_gate else None,
+        }
     selection_evidence_status = "legacy_manual_fallback"
     if exact_selections:
         official_signal_ids = {
@@ -1073,16 +1112,16 @@ def alpha_monitor(
                 for row in signals
                 if str(row.get("signal_id") or row.get("signal_key") or "") in official_signal_ids
             ]
-            signals = [*official_signals, *_radar_monitor_signals(signals, radar_selections)]
+            signals = [*official_signals, *radar_monitor_signals]
             selection_evidence_status = "exact_official_and_research_slate_cohort"
         elif radar_selections:
-            signals = _radar_monitor_signals(signals, radar_selections)
+            signals = radar_monitor_signals
             selection_evidence_status = "exact_research_radar_cohort"
         else:
             signals = []
             selection_evidence_status = "exact_no_trade_cohort"
     elif radar_selections:
-        signals = _radar_monitor_signals(signals, radar_selections)
+        signals = radar_monitor_signals
         selection_evidence_status = "exact_research_radar_cohort"
     elif session_gate is not None and signals:
         return {
@@ -1234,17 +1273,37 @@ def _radar_monitor_signals(
     signals: list[dict[str, Any]],
     selections: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    selection_by_signal = {
-        str(row.get("signal_id") or ""): row for row in selections if row.get("signal_id")
+    signal_by_id = {
+        str(row.get("signal_id") or row.get("signal_key") or ""): row
+        for row in signals
+        if str(row.get("signal_id") or row.get("signal_key") or "")
     }
     monitored: list[dict[str, Any]] = []
-    for signal in signals:
-        signal_id = str(signal.get("signal_id") or signal.get("signal_key") or "")
-        selection = selection_by_signal.get(signal_id)
-        if selection is None:
-            continue
+    for selection in selections:
+        signal_id = str(selection.get("signal_id") or "")
+        if not signal_id:
+            raise SnapshotValidationError("Research slate selection is missing signal identity.")
         selection_payload = dict(selection.get("payload_json") or {})
         radar_signal = dict(selection_payload.get("signal") or {})
+        selection_scan_id = str(selection.get("scan_id") or "")
+        source_scan_id = str(selection.get("source_scan_id") or "")
+        cross_scan = bool(source_scan_id and source_scan_id != selection_scan_id)
+        if cross_scan:
+            radar_signal = _validated_frozen_radar_signal(selection)
+            if radar_signal is None:
+                raise SnapshotValidationError(
+                    "Persisted research slate selection has invalid governed frozen-slate lineage."
+                )
+            signal = radar_signal
+        else:
+            signal = signal_by_id.get(signal_id)
+            if signal is None:
+                if not radar_signal:
+                    continue
+                validated = _validated_frozen_radar_signal(selection)
+                if validated is None:
+                    continue
+                signal = validated
         target = _number(radar_signal.get("radar_target") or signal.get("research_radar_target"))
         monitored.append(
             {
@@ -1259,6 +1318,59 @@ def _radar_monitor_signals(
             }
         )
     return monitored
+
+
+def _validated_frozen_radar_signal(selection: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the exact slate row carried by a governed radar selection."""
+
+    payload = selection.get("payload_json")
+    if not isinstance(payload, dict):
+        return None
+    slate = payload.get("frozen_ranked_research_slate")
+    lineage = payload.get("frozen_slate_lineage")
+    frozen_signal = payload.get("signal")
+    if not isinstance(slate, dict) or not isinstance(lineage, dict) or not isinstance(
+        frozen_signal, dict
+    ):
+        return None
+    market_date = str(selection.get("selected_at") or slate.get("market_date") or "")[:10]
+    try:
+        validate_ranked_research_slate(slate, market_date=market_date)
+    except (TypeError, ValueError):
+        return None
+    frozen_scan_id = str(slate.get("scan_id") or "")
+    selection_scan_id = str(selection.get("scan_id") or "")
+    source_scan_id = str(selection.get("source_scan_id") or "")
+    frozen_selection_id = str(frozen_signal.get("research_selection_id") or "")
+    matching_rows = [
+        row
+        for row in slate.get("rows") or []
+        if str(row.get("research_selection_id") or "") == frozen_selection_id
+    ]
+    if (
+        str(lineage.get("schema_version") or "")
+        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
+        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
+        or str(lineage.get("slate_content_hash_sha256") or "")
+        != str(slate.get("content_hash_sha256") or "")
+        or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
+        or str(lineage.get("current_scan_id") or "") != selection_scan_id
+        or str(lineage.get("reuse_status") or "")
+        != (
+            "CURRENT_SCAN"
+            if frozen_scan_id == selection_scan_id
+            else "GOVERNED_DAILY_FREEZE_REUSE"
+        )
+        or source_scan_id != frozen_scan_id
+        or len(matching_rows) != 1
+        or canonical_json(matching_rows[0]) != canonical_json(frozen_signal)
+        or str(frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or "")
+        != str(selection.get("signal_id") or "")
+        or str(frozen_signal.get("ticker") or "").upper()
+        != str(selection.get("ticker") or "").upper()
+    ):
+        return None
+    return dict(frozen_signal)
 
 
 def _live_quote_is_usable(

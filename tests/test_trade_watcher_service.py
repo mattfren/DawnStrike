@@ -46,6 +46,56 @@ def test_existing_open_or_pending_symbol_blocks_any_new_episode() -> None:
     assert symbols == {"NOVA", "AAPL"}
 
 
+def test_closed_position_reconciles_stale_nonterminal_enter_intent() -> None:
+    symbols = _existing_symbol_lifecycles(
+        [
+            {
+                "intent_id": "intent-old",
+                "action": "ENTER_LONG",
+                "lifecycle_state": "ENTRY_TRIGGERED",
+                "ticker": "NOVA",
+            }
+        ],
+        [
+            {
+                "status": "CLOSED",
+                "ticker": "NOVA",
+                "entry_intent_id": "intent-old",
+            }
+        ],
+    )
+
+    assert symbols == set()
+
+
+def test_closed_position_does_not_clear_newer_unresolved_enter_intent() -> None:
+    symbols = _existing_symbol_lifecycles(
+        [
+            {
+                "intent_id": "intent-old",
+                "action": "ENTER_LONG",
+                "lifecycle_state": "ENTRY_TRIGGERED",
+                "ticker": "NOVA",
+            },
+            {
+                "intent_id": "intent-new",
+                "action": "ENTER_LONG",
+                "lifecycle_state": "ENTRY_TRIGGERED",
+                "ticker": "NOVA",
+            },
+        ],
+        [
+            {
+                "status": "CLOSED",
+                "ticker": "NOVA",
+                "entry_intent_id": "intent-old",
+            }
+        ],
+    )
+
+    assert symbols == {"NOVA"}
+
+
 def test_selection_historical_cross_scan_requires_governed_frozen_slate() -> None:
     historical = {
         "signal_id": "sig-frozen",

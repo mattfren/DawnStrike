@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.alpha.alpha_model import AlphaModel
 from intraday_scanner.alpha.edge_calibrator import (
     calibrate_edge,
@@ -13,6 +15,8 @@ from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.setup_memory import build_setup_memory
 from intraday_scanner.cli import main
+from intraday_scanner.errors import SnapshotValidationError
+from intraday_scanner.notifiers import NotificationEvent
 from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_monitor,
     format_alpha_no_trade,
@@ -20,9 +24,13 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_watch,
 )
 from intraday_scanner.services.alpha_cycle_service import (
+    _persist_research_radar_selections,
     _radar_monitor_signals,
     _research_radar,
     alpha_monitor,
+)
+from intraday_scanner.services.luna_research_slate_service import (
+    build_ranked_research_slate,
 )
 from intraday_scanner.services.signal_review_service import (
     monitor_alpha_signals,
@@ -475,6 +483,95 @@ def test_research_radar_uses_independent_stretch_target_and_tracks_lifecycle():
             "NOVA": {"bid": 10.08, "ask": 10.12, "spread_pct": 0.4, "is_usable": True}
         },
     )["events"][0]["label"] == "ENTRY TRIGGERED"
+
+
+def test_radar_monitor_rehydrates_exact_cross_scan_frozen_slate_signal():
+    slate = build_ranked_research_slate(
+        [{"ticker": "NOVA", "signal_id": "scan-old:1:NOVA", "target_1": 11.0}],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-old",
+    )
+    frozen_signal = slate["rows"][0]
+    selection = {
+        "selection_id": "selection-frozen",
+        "scan_id": "scan-retry",
+        "source_scan_id": "scan-old",
+        "scan_lineage_status": "GOVERNED_DAILY_FREEZE_REUSE",
+        "signal_id": "scan-old:1:NOVA",
+        "ticker": "NOVA",
+        "payload_json": {
+            "signal": frozen_signal,
+            "frozen_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
+                "frozen_source_scan_id": "scan-old",
+                "current_scan_id": "scan-retry",
+                "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
+            },
+            "frozen_ranked_research_slate": slate,
+        },
+    }
+
+    monitored = _radar_monitor_signals([], [selection])
+
+    assert len(monitored) == 1
+    assert monitored[0]["signal_id"] == "scan-old:1:NOVA"
+    assert monitored[0]["monitor_cohort"] == "research_radar"
+
+
+def test_radar_monitor_fails_closed_for_unbound_cross_scan_selection():
+    selection = {
+        "scan_id": "scan-retry",
+        "source_scan_id": "scan-old",
+        "signal_id": "scan-old:1:NOVA",
+        "ticker": "NOVA",
+        "payload_json": {"signal": {"signal_id": "scan-old:1:NOVA", "ticker": "NOVA"}},
+    }
+
+    with pytest.raises(SnapshotValidationError, match="frozen-slate lineage"):
+        _radar_monitor_signals([], [selection])
+
+
+def test_empty_authoritative_slate_has_no_radar_notification_or_selection_rows(tmp_path):
+    slate = build_ranked_research_slate(
+        [],
+        target=5,
+        data_eligible=False,
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-empty",
+    )
+    event = NotificationEvent(
+        event_key="alphaops:scan-empty:alpha_no_trade",
+        title="Dawnstrike Alpha Check",
+        body="No clean edge today.",
+        channel_hint="alpha_no_trade",
+    )
+    store = SQLiteScanStore(tmp_path / "empty-slate.sqlite")
+
+    rows, stats = _persist_research_radar_selections(
+        store,
+        scan_id="scan-empty",
+        radar=list(slate["rows"]),
+        slate=slate,
+        selected_at="2026-08-26T13:00:00+00:00",
+        event=event,
+    )
+    body = format_alpha_no_trade(
+        reason="DATA_UNAVAILABLE",
+        next_action="wait",
+        research_signals=[],
+        research_total=0,
+    )
+
+    assert slate["published_count"] == 0
+    assert rows == []
+    assert stats["inserted"] == 0
+    assert store.load_signal_selections(cohort="research_radar") == []
+    assert "Research slate: 0 of 0 shown" in body
+    assert "No clean edge today." in body
 
 
 def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkeypatch):

@@ -178,6 +178,29 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
     assert "Research slate: 1 of 1 shown" in text
 
 
+def test_alpha_watch_keeps_explicit_empty_slate_authoritative():
+    candidate = {
+        "ticker": "CURRENT",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    text = format_alpha_watch(
+        signals=[candidate],
+        edge_label="research",
+        source_summary={
+            "ranked_research_slate": {
+                "published_count": 0,
+                "rows": [],
+            },
+            "ranked_research_publication_rows": [],
+        },
+    )
+
+    assert "CURRENT" not in text
+    assert "Research slate: 0 of 0 shown" in text
+
+
 def test_tier_semantics_and_research_monitor_label():
     plan = {
         "schema_version": "alphaops.structural_plan.v1",

@@ -252,19 +252,26 @@ def format_alpha_watch(
     source_summary = dict(source_summary or {})
     blocked_signals = list(blocked_signals or [])
     candidates = [row for row in signals if _telegram_candidate_allowed(row)]
-    slate = dict(source_summary.get("ranked_research_slate") or {})
+    raw_slate = source_summary.get("ranked_research_slate")
+    has_authoritative_slate = isinstance(raw_slate, dict)
+    slate = dict(raw_slate) if has_authoritative_slate else {}
     frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
     if isinstance(frozen_publication_rows, list):
         slate_candidates = [
             row for row in frozen_publication_rows if _telegram_candidate_allowed(row)
         ]
-    else:
+    elif has_authoritative_slate:
         slate_candidates = [
             row for row in slate.get("rows") or [] if _telegram_candidate_allowed(row)
         ]
-    if not slate_candidates:
+    else:
         slate_candidates = candidates[:5]
-    slate_total = int(slate.get("published_count") or len(slate_candidates))
+    published_count = slate.get("published_count")
+    slate_total = (
+        int(published_count)
+        if published_count is not None
+        else len(slate_candidates)
+    )
     slate_shown = len(slate_candidates)
     promotion_candidates: list[dict[str, Any]] = []
     seen_promotion_tickers: set[str] = set()
