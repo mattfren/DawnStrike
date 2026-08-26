@@ -2,6 +2,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.cli import main
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -108,6 +110,146 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
     assert evidence["counts"]["outcomes_retained"] == 1
     assert evidence["outcomes"][0]["return_pct"] == -0.5
     assert receipt["automatic_policy_change"] is False
+
+
+def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
+    tmp_path, capsys
+):
+    database_path = tmp_path / "timestamp-performance.sqlite"
+    payload = {
+        "trade_lifecycles": [
+            {
+                "trade_id": "before-cutoff",
+                "status": "closed",
+                "close_time": "2026-08-20T14:00:00+00:00",
+                "return_pct": -1.0,
+            },
+            {
+                "trade_id": "after-cutoff",
+                "status": "closed",
+                "close_time": "2026-08-20T15:00:00+00:00",
+                "return_pct": 2.0,
+            },
+        ]
+    }
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
+            "strategy_version TEXT, record_status TEXT, return_pct REAL, "
+            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "same-day-aggregate",
+                "2026-08-20",
+                "shadow_challenger",
+                "ts_momentum_sma_atr",
+                "v1.0",
+                "realized",
+                None,
+                None,
+                0,
+                json.dumps(payload),
+            ),
+        )
+    out_dir = tmp_path / "strategy-learning-timestamp"
+
+    status = main(
+        [
+            "strategy-learning-daily",
+            "--market-date",
+            "2026-08-20",
+            "--cutoff",
+            "2026-08-20T14:30:00+00:00",
+            "--source-identity",
+            "fixture-timestamp:2026-08-20",
+            "--code-sha",
+            "fixture-code-sha",
+            "--out-dir",
+            str(out_dir),
+            "--db-path",
+            str(database_path),
+        ]
+    )
+
+    assert status == 0
+    result = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    assert [row["record_id"] for row in evidence["outcomes"]] == ["before-cutoff"]
+    assert {row["record_id"] for row in evidence["misses"]} == {
+        "before-cutoff",
+        "after-cutoff",
+    }
+    assert all(row["record_id"] != "after-cutoff" for row in evidence["outcomes"])
+
+
+def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path, capsys):
+    database_path = tmp_path / "mutable-performance.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
+            "strategy_version TEXT, record_status TEXT, return_pct REAL, "
+            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "first",
+                "2026-08-20",
+                "shadow_challenger",
+                "ts_momentum_sma_atr",
+                "v1.0",
+                "realized",
+                -0.5,
+                None,
+                0,
+                "{}",
+            ),
+        )
+    out_dir = tmp_path / "strategy-learning-input-binding"
+    arguments = [
+        "strategy-learning-daily",
+        "--market-date",
+        "2026-08-20",
+        "--cutoff",
+        "2026-08-20T22:00:00+00:00",
+        "--source-identity",
+        "same-source-label",
+        "--code-sha",
+        "fixture-code-sha",
+        "--out-dir",
+        str(out_dir),
+        "--db-path",
+        str(database_path),
+    ]
+    assert main(arguments) == 0
+    capsys.readouterr()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "second",
+                "2026-08-20",
+                "shadow_challenger",
+                "ts_momentum_sma_atr",
+                "v1.0",
+                "realized",
+                0.75,
+                None,
+                0,
+                "{}",
+            ),
+        )
+    with pytest.raises(ValueError, match="invocation identity changed"):
+        main(arguments)
 
 
 def test_cli_live_scan_without_keys_fails_gracefully(monkeypatch, capsys):

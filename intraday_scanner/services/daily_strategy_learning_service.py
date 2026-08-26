@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -49,6 +50,7 @@ class DailyLearningContext:
     source_identity: str
     code_sha: str
     source_hash_sha256: str
+    input_hash_sha256: str = ""
 
     def __post_init__(self) -> None:
         try:
@@ -67,6 +69,8 @@ class DailyLearningContext:
             raise ValueError("cutoff must include a timezone")
         if len(self.source_hash_sha256) != 64:
             raise ValueError("source_hash_sha256 must be a SHA-256 hex digest")
+        if self.input_hash_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.input_hash_sha256):
+            raise ValueError("input_hash_sha256 must be a canonical lowercase SHA-256 hex digest")
 
 
 class EmptyEvidenceAnalyzer:
@@ -282,12 +286,14 @@ def _reuse_immutable_artifacts(
         "cutoff": context.cutoff,
         "source_identity": context.source_identity,
         "source_hash_sha256": context.source_hash_sha256,
+        "input_hash_sha256": context.input_hash_sha256 or context.source_hash_sha256,
         "code_sha": context.code_sha,
     }
     if any(receipt.get(key) != value for key, value in expected_identity.items()):
         raise ValueError(f"immutable daily-learning invocation identity changed: {root}")
     if proposals.get("schema_version") != PROPOSAL_SCHEMA or any(
-        proposals.get(key) != receipt.get(key) for key in ("run_id", "market_date", "cutoff")
+        proposals.get(key) != receipt.get(key)
+        for key in ("run_id", "market_date", "cutoff", "input_hash_sha256")
     ):
         raise ValueError(f"immutable daily-learning artifact identity mismatch: {root}")
     required_safety = {
@@ -322,6 +328,7 @@ def _reuse_immutable_artifacts(
         "automatic_promotion": False,
         "broker_execution_enabled": False,
         "decision_receipt_learning": receipt.get("decision_receipt_learning") or {},
+        "input_hash_sha256": receipt.get("input_hash_sha256") or "",
     }
 
 
@@ -434,6 +441,7 @@ def run_daily_strategy_learning(
     code_sha: str,
     out_dir: str | Path,
     source_hash_sha256: str | None = None,
+    input_hash_sha256: str | None = None,
     analyzer: StrategyEvidenceAnalyzer | None = None,
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -446,6 +454,7 @@ def run_daily_strategy_learning(
         source_identity=source_identity,
         code_sha=code_sha,
         source_hash_sha256=source_hash,
+        input_hash_sha256=input_hash_sha256 or source_hash,
     )
     root = Path(out_dir) / context.market_date
     reused = _reuse_immutable_artifacts(root, context)
@@ -482,6 +491,7 @@ def run_daily_strategy_learning(
         "cutoff": context.cutoff,
         "source_identity": context.source_identity,
         "source_hash_sha256": context.source_hash_sha256,
+        "input_hash_sha256": context.input_hash_sha256,
         "code_sha": context.code_sha,
         "catalog": [
             {
@@ -500,6 +510,7 @@ def run_daily_strategy_learning(
         "run_id": run_id,
         "market_date": context.market_date,
         "cutoff": context.cutoff,
+        "input_hash_sha256": context.input_hash_sha256,
         "proposals": proposals,
         "research_only": True,
         "automatic_policy_change": False,
@@ -549,6 +560,7 @@ def run_daily_strategy_learning(
         "automatic_promotion": False,
         "broker_execution_enabled": False,
         "decision_receipt_learning": receipt_learning,
+        "input_hash_sha256": context.input_hash_sha256,
     }
 
 

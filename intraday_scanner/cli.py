@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1860,11 +1862,15 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
 
 def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
     analyzer: StrategyEvidenceAnalyzer | None = None
+    input_hash_sha256: str | None = None
     if args.evidence_file:
         payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise SnapshotValidationError("strategy learning evidence must be a JSON object")
         analyzer = MappingEvidenceAnalyzer(payload)
+        input_hash_sha256 = _hash_strategy_learning_inputs(
+            evidence_payload=payload,
+        )
     elif args.db_path:
         rows = load_portfolio_performance_rows_readonly(
             args.db_path,
@@ -1878,10 +1884,15 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
                 output_root=Path(args.paper_ops_root),
                 mode="forward",
             )
+        input_hash_sha256 = _hash_strategy_learning_inputs(
+            database_rows=rows,
+            paper_ops_rows=paper_ops_rows,
+            paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
+        )
         analyzer = AttributionReportAnalyzer(
             attribute_strategy_misses(
                 rows,
-                date_cutoff=args.market_date,
+                date_cutoff=args.cutoff,
                 paper_ops_rows=paper_ops_rows,
             )
         )
@@ -1892,10 +1903,62 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         source_hash_sha256=args.source_hash_sha256,
         code_sha=args.code_sha,
         out_dir=args.out_dir,
+        input_hash_sha256=input_hash_sha256,
         analyzer=analyzer,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "complete" else 1
+
+
+def _hash_strategy_learning_inputs(
+    *,
+    database_rows: Sequence[Mapping[str, Any]] | None = None,
+    paper_ops_rows: Sequence[Mapping[str, Any]] | None = None,
+    paper_ops_root: Path | None = None,
+    evidence_payload: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Bind reuse to the exact evidence objects consumed by the analyzer.
+
+    Hashing the in-memory rows avoids a database/WAL time-of-check/time-of-use
+    gap and excludes mutable storage layout from the immutable receipt.  The
+    read-only PaperOps materializer hash is carried on each row and included
+    here, so registry/config/manifest bytes still participate in the identity.
+    """
+
+    parts: list[tuple[str, bytes]] = []
+    if database_rows is not None:
+        parts.append(("portfolio_performance_rows", _canonical_input_bytes(database_rows)))
+    if paper_ops_rows is not None:
+        parts.append(("paper_ops_lifecycle_rows", _canonical_input_bytes(paper_ops_rows)))
+    if paper_ops_root is not None:
+        from intraday_scanner.v2.paper_ops.trade_blotter import (
+            hash_trade_blotter_readonly_inputs,
+        )
+
+        paper_hash = hash_trade_blotter_readonly_inputs(paper_ops_root)
+        parts.append(("paper_ops_materializer_inputs", paper_hash.encode("ascii")))
+    if evidence_payload is not None:
+        parts.append(("evidence_payload", _canonical_input_bytes(evidence_payload)))
+    if not parts:
+        return None
+    digest = hashlib.sha256()
+    for label, payload in sorted(parts, key=lambda item: item[0]):
+        encoded_label = label.encode("utf-8")
+        digest.update(len(encoded_label).to_bytes(8, "big"))
+        digest.update(encoded_label)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def _canonical_input_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _run_strategy_challenger_backtest(args: argparse.Namespace) -> int:

@@ -22,6 +22,7 @@ from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_tru
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
 from intraday_scanner.v2.paper_ops.trade_blotter import (
     build_trade_blotter,
+    hash_trade_blotter_readonly_inputs,
     load_trade_blotter_readonly,
     verify_trade_blotter,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "forward_readiness",
     "write_calendar_view",
     "build_trade_blotter",
+    "hash_trade_blotter_readonly_inputs",
     "load_trade_blotter_readonly",
     "verify_trade_blotter",
     "verify_source_bar_truth",

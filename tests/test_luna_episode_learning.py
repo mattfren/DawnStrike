@@ -13,6 +13,7 @@ from intraday_scanner.alpha.episode_identity import (
 )
 from intraday_scanner.performance.strategy_miss_attribution import (
     AttributionState,
+    Eligibility,
     attribute_strategy_misses,
 )
 
@@ -149,6 +150,74 @@ def test_source_bar_hash_is_not_fill_truth() -> None:
     )
     assert report.rows[0].state is AttributionState.MISSING_OUTCOME
     assert report.rows[0].return_pct is None
+
+
+def test_forged_fill_truth_receipt_stays_provisional_and_ineligible() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "forged-fill-truth",
+                "market_date": "2026-08-21",
+                "cohort": "official_forward_paper",
+                "strategy_id": "s1",
+                "strategy_version": "v1",
+                "record_status": "realized",
+                "return_pct": 2.0,
+                "fill_id": "fill-1",
+                "close_time": "2026-08-21T15:00:00Z",
+                "fill_truth_status": "committed",
+                "fill_truth_hash_sha256": "a" * 64,
+                "fill_truth_contract_verified": True,
+                "fill_truth_receipt": {
+                    "schema_version": "dawnstrike.filltruth.commit.v1",
+                    "status": "committed",
+                    "committed": True,
+                    "fill_id": "fill-1",
+                    "fill_truth_hash_sha256": "a" * 64,
+                },
+            }
+        ],
+        date_cutoff="2026-08-21T16:00:00+00:00",
+    )
+    row = report.rows[0]
+    assert row.state is AttributionState.CLOSED
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+
+
+def test_exact_timestamp_cutoff_quarantines_later_same_day_close() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "same-day-lifecycles",
+                "market_date": "2026-08-21",
+                "cohort": "shadow_challenger",
+                "strategy_id": "s1",
+                "strategy_version": "v1",
+                "payload_json": {
+                    "trade_lifecycles": [
+                        {
+                            "trade_id": "before-cutoff",
+                            "status": "closed",
+                            "close_time": "2026-08-21T14:00:00+00:00",
+                            "return_pct": -1.0,
+                        },
+                        {
+                            "trade_id": "after-cutoff",
+                            "status": "closed",
+                            "close_time": "2026-08-21T15:00:00+00:00",
+                            "return_pct": 3.0,
+                        },
+                    ]
+                },
+            }
+        ],
+        date_cutoff="2026-08-21T14:30:00+00:00",
+    )
+    rows = {row.lifecycle_id: row for row in report.rows}
+    assert rows["before-cutoff"].state is AttributionState.CLOSED
+    assert rows["after-cutoff"].state is AttributionState.MISSING_OUTCOME
+    assert rows["after-cutoff"].return_pct is None
 
 
 def test_readonly_blotter_lifecycle_supersedes_mixed_aggregate_and_stays_provisional() -> None:

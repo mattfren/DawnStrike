@@ -175,9 +175,17 @@ def load_trade_blotter_readonly(
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
     require_observer_command(output_root, "blotter")
+    input_hash_before = hash_trade_blotter_readonly_inputs(output_root)
     rows, warnings = _materialize_rows_unchecked(output_root)
+    input_hash_after = hash_trade_blotter_readonly_inputs(output_root)
+    if input_hash_before != input_hash_after:
+        warnings = [
+            *warnings,
+            "PaperOps immutable inputs changed during read-only materialization",
+        ]
     ledger_path = output_root / "ledger" / "paper_ledger.jsonl"
     ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    input_hash = input_hash_after
     selected: list[dict[str, object]] = []
     for row in rows:
         if mode is not None and str(row.get("mode") or "") != mode:
@@ -197,6 +205,7 @@ def load_trade_blotter_readonly(
             {
                 **row,
                 "ledger_source_hash_sha256": ledger_hash,
+                "read_only_input_hash_sha256": input_hash,
                 "blotter_warnings": list(warnings),
                 "read_only_materialization": True,
             }
@@ -206,6 +215,43 @@ def load_trade_blotter_readonly(
 
 # Explicitly named alias for callers that use the source vocabulary.
 load_paper_ops_blotter_readonly = load_trade_blotter_readonly
+
+
+def hash_trade_blotter_readonly_inputs(output_root: Path) -> str:
+    """Hash the immutable bytes consumed by the read-only blotter materializer.
+
+    This is intentionally separate from the ledger provenance hash.  The
+    materializer also reads the execution-cost contract, strategy registry,
+    and run manifests; binding all of those bytes prevents a daily-learning
+    retry from reusing a receipt merely because its human source label stayed
+    the same.  No export or reconciliation artifact is included because those
+    are materializer outputs rather than inputs.
+    """
+
+    root = Path(output_root).resolve()
+    candidates = [
+        root / "ledger" / "paper_ledger.jsonl",
+        root / "state" / "paper_ops_config.json",
+        root / "state" / "strategy_registry.json",
+    ]
+    manifests = root / "manifests"
+    if manifests.is_dir():
+        candidates.extend(sorted(manifests.glob("*.json")))
+    if not any(path.is_file() for path in candidates if path.parent != manifests):
+        raise FileNotFoundError(f"PaperOps immutable input root is missing: {root}")
+
+    digest = hashlib.sha256()
+    for path in sorted(set(candidates), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        if not path.is_file():
+            digest.update(b"<missing>")
+            continue
+        payload = path.read_bytes()
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
 
 
 def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:

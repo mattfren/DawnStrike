@@ -15,6 +15,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -83,7 +84,6 @@ _TEXT_FIELDS = (
     "activation_status",
     "terminal_state",
 )
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 _PAPER_OPS_FORWARD_COHORTS = {
     "official_forward",
     "official_forward_paper",
@@ -385,10 +385,15 @@ def load_portfolio_performance_rows_readonly(
                 "SELECT * FROM portfolio_performance_rows ORDER BY market_date, record_id"
             )
         else:
+            # ``date_cutoff`` may be the exact ISO timestamp supplied to the
+            # daily-learning CLI.  SQLite rows are date-keyed, so load the
+            # whole cutoff day and let attribution compare immutable event
+            # timestamps without losing same-day rows before the cutoff.
+            query_cutoff = str(date_cutoff).strip()[:10]
             cursor = connection.execute(
                 "SELECT * FROM portfolio_performance_rows "
                 "WHERE market_date <= ? ORDER BY market_date, record_id",
-                (date_cutoff,),
+                (query_cutoff,),
             )
         return tuple(dict(row) for row in cursor.fetchall())
     finally:
@@ -436,8 +441,10 @@ def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
     # exclude a close first observed on Aug-25.
     item["market_date"] = terminal_date if status == "closed" and terminal_date else signal_date
     item["_terminal_event_date"] = terminal_date or None
+    item["_terminal_event_at"] = terminal_time or None
     entry_time = _first_timestamp(item, ("fill_time", "opened_at", "signal_time"))
     item["_entry_event_date"] = (entry_time[:10] if entry_time else signal_date) or None
+    item["_entry_event_at"] = entry_time or None
     if status == "closed" and not terminal_date:
         item["_point_in_time_unreconstructable"] = True
     item["ticker"] = str(item.get("symbol") or item.get("ticker") or "").upper()
@@ -564,22 +571,85 @@ def _derived_cutoff(rows: list[dict[str, Any]]) -> str | None:
     return max(dates) if dates else None
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse an aware ISO timestamp for point-in-time comparisons."""
+
+    text = str(value or "").strip()
+    if not text or "T" not in text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _cutoff_parts(cutoff: str | None) -> tuple[str, datetime | None]:
+    text = str(cutoff or "").strip()
+    if not text:
+        return "", None
+    return text[:10], _parse_timestamp(text)
+
+
+def _event_after_cutoff(value: Any, cutoff: str | None) -> bool:
+    """Return true when an event is after, or unorderable against, cutoff."""
+
+    if not cutoff:
+        return False
+    cutoff_date, cutoff_at = _cutoff_parts(cutoff)
+    event = str(value or "").strip()
+    if not event or len(event) < 10:
+        return False
+    event_date = event[:10]
+    if event_date > cutoff_date:
+        return True
+    if event_date < cutoff_date or cutoff_at is None:
+        return False
+    event_at = _parse_timestamp(event)
+    # A same-day date-only or malformed timestamp cannot be placed before an
+    # exact cutoff.  Quarantine it instead of allowing current-state evidence
+    # to leak into a point-in-time run.
+    return event_at is None or event_at > cutoff_at
+
+
 def _within_cutoff(row: dict[str, Any], cutoff: str | None) -> bool:
     if cutoff is None:
         return True
     if row.get("_point_in_time_unreconstructable"):
         return False
+    cutoff_date, _cutoff_at = _cutoff_parts(cutoff)
     date = str(row.get("market_date") or "").strip()
-    if not date or date > cutoff:
+    if not date or date[:10] > cutoff_date:
         return False
-    entry_date = str(row.get("_entry_event_date") or "").strip()
-    terminal_date = str(row.get("_terminal_event_date") or "").strip()
+    entry_event = _first_timestamp(
+        row,
+        (
+            "_entry_event_at",
+            "fill_time",
+            "opened_at",
+            "signal_time",
+            "_entry_event_date",
+        ),
+    )
+    terminal_event = _first_timestamp(
+        row,
+        (
+            "_terminal_event_at",
+            "close_time",
+            "closed_at",
+            "exit_time",
+            "exit_timestamp",
+            "_terminal_event_date",
+        ),
+    )
     # A materialized current open/pending row is usable only when its entry is
     # known by the cutoff and no terminal event is known after it.  We do not
     # back-project a future close into a historical open state.
     return not (
-        (entry_date and entry_date > cutoff)
-        or (terminal_date and terminal_date > cutoff)
+        _event_after_cutoff(entry_event, cutoff)
+        or _event_after_cutoff(terminal_event, cutoff)
     )
 
 
@@ -701,6 +771,15 @@ def _expand_lifecycle_rows(
             "lifecycle_id": lifecycle_id,
             "parent_record_id": parent_id,
         }
+        entry_time = _first_timestamp(child_dict, ("fill_time", "opened_at", "signal_time"))
+        terminal_time = _first_timestamp(
+            child_dict,
+            ("close_time", "closed_at", "exit_time", "exit_timestamp"),
+        )
+        if entry_time:
+            expanded["_entry_event_at"] = entry_time
+        if terminal_time:
+            expanded["_terminal_event_at"] = terminal_time
         state = _lifecycle_state(child_dict)
         if state:
             expanded["record_status"] = state
@@ -750,11 +829,17 @@ def _lifecycle_state(child: Mapping[str, Any]) -> str:
         value = child.get("status") or child.get("lifecycle_state") or child.get("outcome_status")
     state = str(getattr(value, "value", value) or "").strip().lower()
     # A fill/entry event is not a closed trade.  Without a governed committed
-    # FillTruth receipt it remains unresolved, even when a retry supplied a
-    # price or a stale child status says ``closed``.  A source-bar hash is
-    # market-data provenance, never FillTruth.
+    # FillTruth receipt it remains unresolved unless an immutable terminal
+    # close event is present; that explicit close is still provisional and
+    # ineligible at attribution time.  A source-bar hash is market-data
+    # provenance, never FillTruth.
     if child.get("fill_id") and not _has_committed_fill_truth(child):
-        return "missing_outcome"
+        has_terminal_event = any(
+            str(child.get(field) or "").strip()
+            for field in ("closed_at", "close_time", "exit_time", "exit_timestamp")
+        )
+        if not has_terminal_event:
+            return "missing_outcome"
     if state in _CLOSED_STATES:
         return "closed"
     if state in _OPEN_STATES:
@@ -774,38 +859,18 @@ def _lifecycle_state(child: Mapping[str, Any]) -> str:
 
 
 def _has_committed_fill_truth(value: Mapping[str, Any]) -> bool:
-    """Recognize only an explicitly verified FillTruth CommitBridge record."""
+    """Return false until a governed FillTruth join is actually available.
 
-    status = str(value.get("fill_truth_status") or "").strip().lower()
-    if status not in {"committed", "verified", "complete"}:
-        return False
-    fill_hash = str(
-        value.get("fill_truth_hash_sha256")
-        or value.get("committed_fill_truth_hash")
-        or ""
-    ).strip()
-    if not _SHA256.fullmatch(fill_hash):
-        return False
-    # There is no FillTruth field in the current PaperOps blotter contract.
-    # Future governed joins must carry an explicit verification marker and a
-    # receipt object; a bare hash/status pair is intentionally insufficient.
-    receipt = value.get("fill_truth_receipt") or value.get("fill_truth_commit_receipt")
-    if not isinstance(receipt, Mapping):
-        return False
-    contract = str(
-        receipt.get("contract")
-        or receipt.get("schema")
-        or receipt.get("schema_version")
-        or ""
-    ).lower()
-    return (
-        bool(value.get("fill_truth_contract_verified") is True)
-        and "filltruth" in contract.replace("_", "")
-        and bool(
-            receipt.get("committed") is True
-            or receipt.get("status") in {"committed", "verified"}
-        )
-    )
+    A caller-supplied status, digest, or even a self-hashed receipt proves
+    only that the caller serialized those values.  The current PaperOps
+    materializer exposes no committed FillTruth source or resolver token, so
+    accepting any mapping here would let an attacker manufacture learning
+    eligibility.  Keep every raw attribution row provisional until a future
+    trusted materializer supplies an authenticated join through this boundary.
+    """
+
+    del value
+    return False
 
 
 def _child_close_after_cutoff(child: Mapping[str, Any], cutoff: str | None) -> bool:
@@ -821,8 +886,7 @@ def _child_close_after_cutoff(child: Mapping[str, Any], cutoff: str | None) -> b
         "trade_date",
         "market_date",
     ):
-        value = str(child.get(field) or "").strip()
-        if value and value[:10] > cutoff:
+        if _event_after_cutoff(child.get(field), cutoff):
             return True
     return False
 

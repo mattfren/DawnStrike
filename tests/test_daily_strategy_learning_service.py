@@ -122,6 +122,35 @@ def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanaly
     assert second["idempotent_reused"] is True
 
 
+def test_daily_learning_rejects_reuse_when_bound_input_bytes_change(tmp_path: Path) -> None:
+    first = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-source:2026-08-20",
+        source_hash_sha256="c" * 64,
+        input_hash_sha256="a" * 64,
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        analyzer=FixtureAnalyzer(),
+    )
+    assert first["input_hash_sha256"] == "a" * 64
+    try:
+        run_daily_strategy_learning(
+            market_date="2026-08-20",
+            cutoff="2026-08-20T22:00:00+00:00",
+            source_identity="fixture-source:2026-08-20",
+            source_hash_sha256="c" * 64,
+            input_hash_sha256="b" * 64,
+            code_sha="fixture-code-sha",
+            out_dir=tmp_path,
+            analyzer=FixtureAnalyzer(),
+        )
+    except ValueError as exc:
+        assert "invocation identity changed" in str(exc)
+    else:
+        raise AssertionError("changed bound input bytes were incorrectly reused")
+
+
 def test_daily_learning_retry_rejects_tampered_frozen_artifact(tmp_path: Path) -> None:
     first = run_daily_strategy_learning(
         market_date="2026-08-20",
