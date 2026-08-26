@@ -153,6 +153,18 @@ def test_source_bar_hash_is_not_fill_truth() -> None:
 
 
 def test_forged_fill_truth_receipt_stays_provisional_and_ineligible() -> None:
+    # Even a caller that recomputes a receipt hash over its own payload has
+    # not established a governed committed FillTruth join.
+    receipt = {
+        "schema_version": "dawnstrike.filltruth.commit.v1",
+        "status": "committed",
+        "committed": True,
+        "fill_id": "fill-1",
+        "fill_truth_hash_sha256": "a" * 64,
+    }
+    receipt["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
     report = attribute_strategy_misses(
         [
             {
@@ -168,13 +180,8 @@ def test_forged_fill_truth_receipt_stays_provisional_and_ineligible() -> None:
                 "fill_truth_status": "committed",
                 "fill_truth_hash_sha256": "a" * 64,
                 "fill_truth_contract_verified": True,
-                "fill_truth_receipt": {
-                    "schema_version": "dawnstrike.filltruth.commit.v1",
-                    "status": "committed",
-                    "committed": True,
-                    "fill_id": "fill-1",
-                    "fill_truth_hash_sha256": "a" * 64,
-                },
+                "fill_truth_receipt_hash_sha256": receipt["receipt_hash_sha256"],
+                "fill_truth_receipt": receipt,
             }
         ],
         date_cutoff="2026-08-21T16:00:00+00:00",
