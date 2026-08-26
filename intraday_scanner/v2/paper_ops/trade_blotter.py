@@ -155,6 +155,59 @@ def verify_trade_blotter(
     return result
 
 
+def load_trade_blotter_readonly(
+    *,
+    output_root: Path,
+    mode: str | None = None,
+    run_date: str | None = None,
+    strategy_id: str | None = None,
+    strategy_version: str | None = None,
+    series_role: str | None = None,
+) -> list[dict[str, object]]:
+    """Materialize PaperOps lifecycle rows without writing any artifact.
+
+    The regular blotter command writes exports and is therefore unsuitable for
+    read-only learning.  This boundary reads the immutable ledger and applies
+    the same deterministic materializer, attaching the ledger file hash as
+    provenance for downstream attribution.
+    """
+
+    from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
+
+    require_observer_command(output_root, "blotter")
+    rows, warnings = _materialize_rows_unchecked(output_root)
+    ledger_path = output_root / "ledger" / "paper_ledger.jsonl"
+    ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    selected: list[dict[str, object]] = []
+    for row in rows:
+        if mode is not None and str(row.get("mode") or "") != mode:
+            continue
+        if run_date is not None and str(row.get("signal_date") or "") != run_date[:10]:
+            continue
+        if strategy_id is not None and str(row.get("strategy_id") or "") != strategy_id:
+            continue
+        if (
+            strategy_version is not None
+            and str(row.get("strategy_version") or "") != strategy_version
+        ):
+            continue
+        if series_role is not None and str(row.get("series_role") or "") != series_role:
+            continue
+        selected.append(
+            {
+                **row,
+                "ledger_source_hash_sha256": ledger_hash,
+                "blotter_warnings": list(warnings),
+                "read_only_materialization": True,
+            }
+        )
+    return selected
+
+
+# Explicitly named alias for callers that use the source vocabulary.
+load_paper_ops_blotter_readonly = load_trade_blotter_readonly
+
+
 def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 

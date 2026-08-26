@@ -52,6 +52,10 @@ _HASH_FIELDS = (
     "fill_truth_receipt_hash_sha256",
     "committed_fill_truth_hash",
     "close_receipt_hash_sha256",
+    "ledger_source_hash_sha256",
+    "data_snapshot_id",
+    "fill_data_snapshot_id",
+    "close_data_snapshot_id",
 )
 _CONFIG_FIELDS = (
     "config_identity",
@@ -104,6 +108,8 @@ class StrategyMissAttributionRow:
     # ``None``; explicit child lifecycle records are independently attributable.
     lifecycle_id: str | None = None
     episode_id: str | None = None
+    fill_truth_status: str | None = None
+    eligibility_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +130,8 @@ class StrategyMissAttributionRow:
             "evidence_hashes": list(self.evidence_hashes),
             "lifecycle_id": self.lifecycle_id,
             "episode_id": self.episode_id,
+            "fill_truth_status": self.fill_truth_status,
+            "eligibility_reason": self.eligibility_reason,
         }
 
 
@@ -231,6 +239,7 @@ def attribute_strategy_misses(
     rows: Iterable[Mapping[str, Any] | Any],
     *,
     date_cutoff: str | None = None,
+    paper_ops_rows: Iterable[Mapping[str, Any] | Any] | None = None,
 ) -> StrategyMissAttributionReport:
     """Attribute retained portfolio/per-strategy rows without inventing truth.
 
@@ -241,6 +250,41 @@ def attribute_strategy_misses(
     """
 
     normalized = [_mapping(row) for row in rows]
+    if paper_ops_rows is not None:
+        blotter = [
+            _blotter_mapping(row)
+            for row in paper_ops_rows
+            if str(_mapping(row).get("mode") or "forward") == "forward"
+            and str(_mapping(row).get("series_role") or "")
+            in {"champion", "challenger"}
+        ]
+        blotter_groups = {
+            (
+                str(item.get("market_date") or item.get("signal_date") or "")[:10],
+                str(item.get("strategy_id") or ""),
+                str(item.get("strategy_version") or ""),
+            )
+            for item in blotter
+            if str(item.get("lifecycle_status") or "") in {"closed", "open", "pending"}
+        }
+        # Portfolio aggregates are still retained as evidence, but their
+        # closed/open counts are superseded by exact blotter lifecycles when
+        # the same forward strategy series is available.
+        normalized = [
+            item
+            for item in normalized
+            if not (
+                str(item.get("record_type") or "")
+                in {"portfolio_observation", "account_observation"}
+                and (_safe_nonnegative_int(item.get("trade_count")) or 0) > 0
+                and (
+                    str(item.get("market_date") or "")[:10],
+                    str(item.get("strategy_id") or ""),
+                    str(item.get("strategy_version") or ""),
+                ) in blotter_groups
+            )
+        ]
+        normalized.extend(blotter)
     cutoff = date_cutoff or _derived_cutoff(normalized)
     included = [row for row in normalized if _within_cutoff(row, cutoff)]
     excluded = len(normalized) - len(included)
@@ -345,6 +389,50 @@ def _mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
     elif isinstance(payload, Mapping):
         result["_payload"] = dict(payload)
     return result
+
+
+def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
+    """Project one read-only PaperOps blotter row into attribution truth."""
+
+    item = _mapping(row)
+    status = str(item.get("lifecycle_status") or "").strip().lower()
+    item["market_date"] = str(item.get("signal_date") or item.get("market_date") or "")[:10]
+    item["ticker"] = str(item.get("symbol") or item.get("ticker") or "").upper()
+    item["record_id"] = str(
+        item.get("record_id") or item.get("position_id") or item.get("order_id") or ""
+    )
+    item["record_type"] = "paper_ops_blotter_lifecycle"
+    item["cohort"] = "shadow_challenger"
+    item["record_status"] = {
+        "closed": "closed",
+        "open": "open_mtm",
+        "pending": "missing_outcome",
+        "blocked": "no_trade",
+    }.get(status, "missing_outcome")
+    if status == "closed":
+        item["return_pct"] = safe_float(item.get("trade_return_pct"))
+    else:
+        item["return_pct"] = None
+    item["open_position_count"] = 1 if status == "open" else 0
+    item["trade_count"] = 1 if status == "closed" else 0
+    item["lifecycle_id"] = str(
+        item.get("close_id") or item.get("position_id") or item.get("order_id") or item["record_id"]
+    )
+    item["episode_id"] = str(item.get("episode_id") or "") or None
+    fill_hash = str(item.get("fill_truth_hash_sha256") or "")
+    item["fill_truth_status"] = "committed" if fill_hash else "missing_committed_fill_truth"
+    item["eligibility_reason"] = (
+        "" if fill_hash else "missing_committed_fill_truth; provisional_only"
+    )
+    item["source_hash_sha256"] = str(
+        item.get("ledger_source_hash_sha256")
+        or item.get("source_hash_sha256")
+        or item.get("close_data_snapshot_id")
+        or item.get("data_snapshot_id")
+        or ""
+    )
+    item["input_hash_sha256"] = str(item.get("fill_data_snapshot_id") or "")
+    return item
 
 
 def _derived_cutoff(rows: list[dict[str, Any]]) -> str | None:
@@ -614,6 +702,12 @@ def _attribute_row(
         "data_unavailable",
     }
     explicit_conflict = _truthy(row, payload, ("conflicting_outcome", "outcome_conflict"))
+    fill_truth_status = _optional_text(row, payload, "fill_truth_status")
+    provisional_fill = bool(
+        fill_truth_status
+        and fill_truth_status.lower() not in {"committed", "verified", "complete"}
+    )
+    eligibility_reason = _optional_text(row, payload, "eligibility_reason")
     conflict = explicit_conflict or benchmark_conflict
     if no_trade and (return_pct is not None and return_pct != 0.0):
         conflict = True
@@ -662,8 +756,11 @@ def _attribute_row(
         categories.add("open_mtm")
     elif status in {"realized", "closed", "complete", "resolved"} and return_pct is not None:
         state = AttributionState.CLOSED
-        eligibility = Eligibility.ELIGIBLE
-        if return_pct < 0:
+        eligibility = Eligibility.INELIGIBLE if provisional_fill else Eligibility.ELIGIBLE
+        if provisional_fill:
+            classification = "closed_provisional"
+            categories.update(("closed_provisional", "missing_fill_truth", "data_unavailable"))
+        elif return_pct < 0:
             classification = "false_positive"
             categories.update(("closed_loss", "false_positive"))
         elif return_pct > 0:
@@ -704,6 +801,8 @@ def _attribute_row(
         evidence_hashes=tuple(sorted(hashes)),
         lifecycle_id=_optional_text(row, payload, "lifecycle_id"),
         episode_id=_optional_text(row, payload, "episode_id"),
+        fill_truth_status=fill_truth_status,
+        eligibility_reason=eligibility_reason,
     )
 
 
@@ -726,7 +825,10 @@ def _build_summaries(
             )
         ].append(row)
     summaries: list[StrategyMissAttributionSummary] = []
-    for key, group in sorted(grouped.items()):
+    for key, group in sorted(
+        grouped.items(),
+        key=lambda item: tuple(str(value or "") for value in item[0]),
+    ):
         strategy_id, version, config, execution_policy, cohort = key
         classifications = Counter(row.classification for row in group)
         categories = Counter(category for row in group for category in row.categories)

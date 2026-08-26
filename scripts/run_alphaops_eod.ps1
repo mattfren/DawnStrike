@@ -276,7 +276,8 @@ try {
             "--source-identity", $strategyLearningSource,
             "--code-sha", $releaseSha,
             "--out-dir", (Join-Path $outputRoot "strategy_learning"),
-            "--db-path", $dbPath
+            "--db-path", $dbPath,
+            "--paper-ops-root", $paperOpsRoot
         ) `
         -LogRoot $logRoot `
         -LogName "strategy_learning_daily-$MarketDate"

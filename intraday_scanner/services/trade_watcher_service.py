@@ -145,6 +145,17 @@ def run_trade_watcher(
     existing_intents = store.load_trade_intents(limit=50_000)
     existing_intent_ids = {str(row.get("intent_id") or "") for row in existing_intents}
     positions = store.load_paper_positions(limit=50_000)
+    existing_episode_ids = {
+        str(value)
+        for row in existing_intents + [dict(item) for item in positions]
+        for value in (
+            row.get("episode_id"),
+            (row.get("payload_json") or {}).get("episode_id")
+            if isinstance(row.get("payload_json"), dict)
+            else None,
+        )
+        if str(value or "").strip()
+    }
     open_position_rows = [dict(row) for row in positions if row.get("status") == "OPEN"]
     (
         repair_intents,
@@ -168,6 +179,20 @@ def run_trade_watcher(
     signals_by_id = {_signal_id(row): row for row in carry_signals}
     signals_by_id.update({_signal_id(row): row for row in session_signals})
     signals = list(signals_by_id.values())
+    episode_diagnostics = next(
+        (
+            dict(signal.get("episode_dedup_counts") or {})
+            for signal in signals
+            if signal.get("episode_dedup_counts")
+        ),
+        {
+            "status": "LEGACY_IDENTITY_UNAVAILABLE",
+            "raw_pair_count": 0,
+            "unique_symbol_count": 0,
+            "unique_episode_count": 0,
+            "duplicate_collapse_count": 0,
+        },
+    )
     target_tickers = tickers or [str(row.get("ticker") or "") for row in signals]
     price_result = collect_price_observations(
         db_path=db_path,
@@ -237,6 +262,15 @@ def run_trade_watcher(
         intent = decision.get("intent")
         if not intent:
             continue
+        episode_id = str(intent.get("episode_id") or signal.get("episode_id") or "").strip()
+        if (
+            episode_id
+            and intent.get("action") == ACTION_ENTER
+            and episode_id in existing_episode_ids
+        ):
+            states[-1]["reason"] = "duplicate_episode_existing_lifecycle"
+            states[-1]["episode_id"] = episode_id
+            continue
         intent["created_at"] = created_at
         intent["notification_event_key"] = f"trade_intent:{intent['intent_id']}"
         intent["payload_json"] = dict(intent)
@@ -244,6 +278,8 @@ def run_trade_watcher(
             continue
         new_intents.append(intent)
         existing_intent_ids.add(intent["intent_id"])
+        if episode_id:
+            existing_episode_ids.add(episode_id)
         if _should_notify(intent, settings):
             event = _notification_event(intent)
             notification_events_by_key[event.event_key] = event
@@ -317,6 +353,7 @@ def run_trade_watcher(
             "contract": "trade_intent_is_durable_outbox_notification_is_receipt",
             "retry_safe": True,
         },
+        "episode_diagnostics": episode_diagnostics,
         "prior_open_position_count": len(open_position_rows),
         "carried_open_position_count": len(remaining_open_rows),
         "canonical_eod_repair_count": len(repair_positions),
@@ -470,6 +507,7 @@ def _watch_signals(
         selected_rows = list(deduped["selected"])
         for row in selected_rows:
             row["episode_dedup_counts"] = dict(deduped["counts"])
+            row["episode_dedup_counts"]["status"] = "FROZEN_IDENTITY_ACTIVE"
     return [
         {
             **historical_by_id[str(selection.get("signal_id") or "")],
@@ -510,8 +548,21 @@ def _has_episode_identity(row: dict[str, Any]) -> bool:
         and value("session_id", "market_session", "session", "run_id", "scan_id")
         and value("symbol", "ticker", "canonical_symbol")
         and value("direction", "trade_direction")
-        and value("entry_window", "entry_window_id", "decision_window")
+        and (
+            value("entry_window", "entry_window_id", "decision_window")
+            or (
+                value("entry_window_start", "entry_start")
+                and value("entry_window_end", "entry_end")
+            )
+        )
         and value("frozen_plan_hash", "plan_hash", "plan_hash_sha256")
+        and value(
+            "plan_freeze_status",
+            "freeze_status",
+            "provenance_status",
+            "plan_provenance_status",
+        ).lower()
+        in {"frozen", "verified", "committed"}
     )
 
 
@@ -1166,6 +1217,7 @@ def _intent(
         price=price,
         blocked_reason=blocked_reason,
         stable_block=stable_block,
+        episode_id=str(signal.get("episode_id") or ""),
     )
     raw_signal_payload = signal.get("raw_payload_json")
     if not isinstance(raw_signal_payload, dict):
@@ -1196,6 +1248,7 @@ def _intent(
         "episode_id": str(signal.get("episode_id") or ""),
         "matched_strategy_ids": list(signal.get("matched_strategy_ids") or []),
         "primary_strategy_id": str(signal.get("primary_strategy_id") or ""),
+        "episode_dedup_counts": dict(signal.get("episode_dedup_counts") or {}),
         "strategy_id": str(signal.get("strategy_id") or ALPHAOPS_STRATEGY_ID),
         "strategy_version": str(
             signal.get("strategy_version")
@@ -1227,11 +1280,13 @@ def _intent_id(
     price: float | None,
     blocked_reason: str,
     stable_block: bool,
+    episode_id: str = "",
 ) -> str:
+    identity = episode_id or signal_id
     basis = (
-        f"{mode}:{market_date}:{signal_id}:{ticker}:{action}:{blocked_reason}"
+        f"{mode}:{market_date}:{identity}:{ticker}:{action}:{blocked_reason}"
         if stable_block
-        else f"{mode}:{market_date}:{signal_id}:{ticker}:{action}:{decision_time}:{price}"
+        else f"{mode}:{market_date}:{identity}:{ticker}:{action}:{decision_time}:{price}"
     )
     return "ti_" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
@@ -1261,7 +1316,9 @@ def _open_paper_position(
     )
     position_id = (
         "pp_"
-        + hashlib.sha256(f"{intent['signal_id']}:{intent['market_date']}".encode()).hexdigest()[:24]
+        + hashlib.sha256(
+            f"{intent.get('episode_id') or intent['signal_id']}:{intent['market_date']}".encode()
+        ).hexdigest()[:24]
     )
     now = str(intent.get("decision_time") or "")
     position = {
@@ -1286,6 +1343,7 @@ def _open_paper_position(
         "max_adverse_excursion": None,
         "updated_at": now,
         "selection_id": intent.get("selection_id"),
+        "episode_id": intent.get("episode_id"),
         "strategy_id": intent.get("strategy_id"),
         "strategy_version": intent.get("strategy_version"),
         "cohort": intent.get("cohort"),
@@ -1484,6 +1542,10 @@ def _state_row(
     return {
         "ticker": str(signal.get("ticker") or "").upper(),
         "signal_id": _signal_id(signal),
+        "episode_id": str(signal.get("episode_id") or ""),
+        "matched_strategy_ids": list(signal.get("matched_strategy_ids") or []),
+        "primary_strategy_id": str(signal.get("primary_strategy_id") or ""),
+        "episode_dedup_counts": dict(signal.get("episode_dedup_counts") or {}),
         "rank": signal.get("rank"),
         "state": decision.get("state"),
         "reason": decision.get("reason"),

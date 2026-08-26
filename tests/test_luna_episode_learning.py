@@ -120,6 +120,57 @@ def test_fill_without_committed_fill_truth_is_unresolved() -> None:
     assert report.rows[0].return_pct is None
 
 
+def test_readonly_blotter_lifecycle_supersedes_mixed_aggregate_and_stays_provisional() -> None:
+    aggregate = {
+        "record_id": "aggregate",
+        "market_date": "2026-08-21",
+        "cohort": "shadow_challenger",
+        "strategy_id": "s1",
+        "strategy_version": "v1",
+        "record_type": "portfolio_observation",
+        "record_status": "realized",
+        "trade_count": 1,
+        "open_position_count": 1,
+        "return_pct": 3.0,
+    }
+    blotter = [
+        {
+            "mode": "forward",
+            "signal_date": "2026-08-21",
+            "strategy_id": "s1",
+            "strategy_version": "v1",
+            "series_role": "champion",
+            "symbol": "ABCD",
+            "lifecycle_status": "closed",
+            "close_id": "close-1",
+            "trade_return_pct": -1.25,
+            "ledger_source_hash_sha256": "b" * 64,
+        },
+        {
+            "mode": "forward",
+            "signal_date": "2026-08-21",
+            "strategy_id": "s1",
+            "strategy_version": "v1",
+            "series_role": "champion",
+            "symbol": "EFGH",
+            "lifecycle_status": "open",
+            "position_id": "position-1",
+            "ledger_source_hash_sha256": "b" * 64,
+        },
+    ]
+    report = attribute_strategy_misses([aggregate], paper_ops_rows=blotter)
+    assert {row.lifecycle_id for row in report.rows} == {"close-1", "position-1"}
+    closed = next(row for row in report.rows if row.lifecycle_id == "close-1")
+    assert closed.state is AttributionState.CLOSED
+    assert closed.eligibility.value == "ineligible"
+    assert closed.fill_truth_status == "missing_committed_fill_truth"
+    assert closed.return_pct == -1.25
+    assert (
+        next(row for row in report.rows if row.lifecycle_id == "position-1").state
+        is AttributionState.OPEN_MTM
+    )
+
+
 def _candidate(strategy: str, direction: str = "long") -> dict[str, object]:
     return {
         "market_date": "2026-08-21",
@@ -127,7 +178,8 @@ def _candidate(strategy: str, direction: str = "long") -> dict[str, object]:
         "ticker": " abcd ",
         "direction": direction,
         "entry_window": "09:30-09:35",
-        "frozen_plan_hash": "p" * 64,
+        "frozen_plan_hash": "a" * 64,
+        "plan_freeze_status": "frozen",
         "strategy_id": strategy,
         "selection_id": strategy + "-selection",
     }
@@ -159,7 +211,44 @@ def test_conflicting_directions_are_distinct_but_blocked() -> None:
         for item in result["blocked"]
     )
     assert result["counts"]["conflicting_direction_episode_count"] == 1
-    assert result["counts"]["unique_episode_count"] == 1
+    assert result["counts"]["unique_episode_count"] == 2
+
+
+def test_conflicting_directions_block_when_plan_hashes_differ() -> None:
+    long = _candidate("s1", "long")
+    short = _candidate("s2", "short")
+    short["frozen_plan_hash"] = "b" * 64
+    result = deduplicate_episode_candidates([long, short])
+    assert result["selected"] == []
+    assert result["counts"]["unique_episode_count"] == 2
+
+
+def test_conflicting_directions_require_overlapping_entry_windows() -> None:
+    long = _candidate("s1", "long")
+    short = _candidate("s2", "short")
+    short["entry_window"] = "10:00-10:05"
+    result = deduplicate_episode_candidates([long, short])
+    assert len(result["selected"]) == 2
+    assert result["counts"]["conflicting_direction_episode_count"] == 0
+
+
+def test_plan_hash_and_freeze_provenance_are_strict() -> None:
+    candidate = _candidate("s1")
+    candidate["frozen_plan_hash"] = "a" * 16
+    try:
+        build_episode_identity(candidate)
+    except EpisodeIdentityError:
+        pass
+    else:
+        raise AssertionError("short plan hash must fail closed")
+    candidate["frozen_plan_hash"] = "a" * 64
+    candidate.pop("plan_freeze_status")
+    try:
+        build_episode_identity(candidate)
+    except EpisodeIdentityError:
+        pass
+    else:
+        raise AssertionError("unfrozen plan provenance must fail closed")
 
 
 def test_missing_episode_identity_is_blocked_without_guessing() -> None:

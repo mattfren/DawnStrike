@@ -552,6 +552,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     daily_strategy_learning_parser.add_argument("--source-hash-sha256", default=None)
     daily_strategy_learning_parser.add_argument("--code-sha", required=True)
     daily_strategy_learning_parser.add_argument("--out-dir", required=True)
+    daily_strategy_learning_parser.add_argument(
+        "--paper-ops-root",
+        default=None,
+        help="Optional governed PaperOps root read through the immutable blotter materializer",
+    )
     daily_strategy_evidence = daily_strategy_learning_parser.add_mutually_exclusive_group()
     daily_strategy_evidence.add_argument(
         "--evidence-file",
@@ -1869,8 +1874,20 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
             args.db_path,
             date_cutoff=args.market_date,
         )
+        paper_ops_rows = None
+        if args.paper_ops_root:
+            from intraday_scanner.v2.paper_ops.trade_blotter import load_trade_blotter_readonly
+
+            paper_ops_rows = load_trade_blotter_readonly(
+                output_root=Path(args.paper_ops_root),
+                mode="forward",
+            )
         analyzer = AttributionReportAnalyzer(
-            attribute_strategy_misses(rows, date_cutoff=args.market_date)
+            attribute_strategy_misses(
+                rows,
+                date_cutoff=args.market_date,
+                paper_ops_rows=paper_ops_rows,
+            )
         )
     result = run_daily_strategy_learning(
         market_date=args.market_date,

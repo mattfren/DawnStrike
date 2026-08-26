@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -44,13 +45,11 @@ class EpisodeIdentity:
         )
 
     @property
-    def conflict_key(self) -> tuple[str, str, str, str, str]:
+    def conflict_key(self) -> tuple[str, str, str]:
         return (
             self.market_date,
             self.session_id,
             self.symbol,
-            self.entry_window,
-            self.frozen_plan_hash,
         )
 
     def to_dict(self) -> dict[str, str]:
@@ -65,7 +64,11 @@ class EpisodeIdentity:
         }
 
 
-def build_episode_identity(candidate: Mapping[str, Any] | Any) -> EpisodeIdentity:
+def build_episode_identity(
+    candidate: Mapping[str, Any] | Any,
+    *,
+    require_frozen: bool = True,
+) -> EpisodeIdentity:
     """Build an identity from a selection/plan without strategy-specific fields.
 
     All identity fields are required.  A plan hash may be supplied directly or
@@ -102,12 +105,23 @@ def build_episode_identity(candidate: Mapping[str, Any] | Any) -> EpisodeIdentit
         "entry_window_key",
         "decision_window",
     )
+    if not entry_window:
+        entry_start = text("entry_window_start", "entry_start")
+        entry_end = text("entry_window_end", "entry_end")
+        if entry_start and entry_end:
+            entry_window = f"{entry_start}-{entry_end}"
     frozen_hash = text(
         "frozen_plan_hash",
         "plan_hash",
         "plan_hash_sha256",
         "strategy_plan_hash",
     )
+    freeze_status = text(
+        "plan_freeze_status",
+        "freeze_status",
+        "provenance_status",
+        "plan_provenance_status",
+    ).lower()
     if not frozen_hash:
         plan = row.get("frozen_plan") or row.get("plan")
         if plan is None:
@@ -129,8 +143,19 @@ def build_episode_identity(candidate: Mapping[str, Any] | Any) -> EpisodeIdentit
         )
     if direction not in {"long", "short"}:
         raise EpisodeIdentityError(f"episode direction is unsupported: {direction!r}")
-    if len(frozen_hash) < 16:
-        raise EpisodeIdentityError("frozen_plan_hash is too short to be immutable evidence")
+    if not re.fullmatch(r"[0-9a-f]{64}", frozen_hash):
+        raise EpisodeIdentityError(
+            "frozen_plan_hash must be a canonical lowercase 64-character SHA-256"
+        )
+    plan = row.get("frozen_plan") or row.get("plan")
+    if plan is None:
+        plan = payload.get("frozen_plan") or payload.get("plan")
+    if isinstance(plan, Mapping) and _stable_hash(plan) != frozen_hash:
+        raise EpisodeIdentityError("frozen_plan does not match frozen_plan_hash")
+    if require_frozen and freeze_status not in {"frozen", "verified", "committed"}:
+        raise EpisodeIdentityError(
+            "episode identity requires frozen plan provenance status"
+        )
     basis = json.dumps(required, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
     return EpisodeIdentity(episode_id="episode:" + digest[:32], **required)
@@ -165,20 +190,29 @@ def deduplicate_episode_candidates(
             continue
         groups[identity.key].append((row, identity))
 
-    by_conflict: dict[tuple[str, ...], set[str]] = defaultdict(set)
+    by_conflict: dict[
+        tuple[str, ...], list[tuple[dict[str, Any], EpisodeIdentity]]
+    ] = defaultdict(list)
     for _key, rows in groups.items():
         identity = rows[0][1]
-        by_conflict[identity.conflict_key].update(item[1].direction for item in rows)
+        by_conflict[identity.conflict_key].extend(rows)
     selected: list[dict[str, Any]] = []
-    conflict_keys = {
-        key for key, directions in by_conflict.items() if len(directions) > 1
-    }
+    conflict_keys: set[tuple[str, ...]] = set()
+    for key, rows in by_conflict.items():
+        for left_index, (_, left) in enumerate(rows):
+            for _, right in rows[left_index + 1 :]:
+                if left.direction != right.direction and _windows_overlap(
+                    left.entry_window, right.entry_window
+                ):
+                    conflict_keys.add(key)
+                    break
+            if key in conflict_keys:
+                break
     conflict_episodes = len(conflict_keys)
     for _key, rows in sorted(groups.items(), key=lambda item: item[0]):
         identity = rows[0][1]
-        directions = by_conflict[identity.conflict_key]
         ordered = sorted(rows, key=lambda item: _candidate_sort_key(item[0]))
-        if len(directions) > 1:
+        if identity.conflict_key in conflict_keys:
             for row, ident in ordered:
                 blocked.append(
                     {
@@ -215,15 +249,13 @@ def deduplicate_episode_candidates(
         for row in raw
         if str(row.get("symbol") or row.get("ticker") or "").strip()
     }
-    unique_episode_count = len(selected) + sum(
-        1 for directions in by_conflict.values() if len(directions) > 1
-    )
+    unique_episode_count = len(groups)
     # A conflicting group has one logical candidate but no selected candidate;
     # keep that distinction in diagnostics and do not treat it as a duplicate.
     duplicate_collapse_count = sum(
         max(0, len(rows) - 1)
         for rows in groups.values()
-        if len(by_conflict[rows[0][1].conflict_key]) == 1
+        if rows[0][1].conflict_key not in conflict_keys
     )
     return {
         "selected": selected,
@@ -257,12 +289,34 @@ def _stable_hash(value: Any) -> str:
 
 
 def _candidate_sort_key(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    rank = row.get("rank")
+    try:
+        rank_value = float(rank) if rank not in (None, "") else 999999.0
+    except (TypeError, ValueError):
+        rank_value = 999999.0
     return (
-        str(row.get("rank") if row.get("rank") is not None else "999999"),
+        f"{rank_value:020.8f}",
         str(row.get("strategy_id") or ""),
         str(row.get("strategy_version") or ""),
         str(row.get("selection_id") or row.get("signal_id") or ""),
     )
+
+
+def _windows_overlap(left: str, right: str) -> bool:
+    """Compare HH:MM-HH:MM windows; labels overlap only when equal."""
+
+    def bounds(value: str) -> tuple[int, int] | None:
+        matches = re.findall(r"(?<!\d)(\d{1,2}):(\d{2})", value)
+        if len(matches) < 2:
+            return None
+        start = int(matches[0][0]) * 60 + int(matches[0][1])
+        end = int(matches[1][0]) * 60 + int(matches[1][1])
+        return (start, end) if end > start else None
+
+    left_bounds, right_bounds = bounds(left), bounds(right)
+    if left_bounds is None or right_bounds is None:
+        return left == right
+    return left_bounds[0] < right_bounds[1] and right_bounds[0] < left_bounds[1]
 
 
 __all__ = [
