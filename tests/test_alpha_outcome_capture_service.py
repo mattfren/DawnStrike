@@ -244,6 +244,69 @@ def test_paper_selection_recomputes_delivery_body_hash(
         canonical_paper_selection_context(selection, delivery=delivery)
 
 
+def test_paper_selection_rejects_rendered_body_omitting_official_ticker(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "delivery-official-section.sqlite")
+    _persist_selected_signals(store, [_v5_signal()])
+    selection = deepcopy(
+        store.load_signal_selections(signal_id="signal-v5-entry")[0]
+    )
+    delivery = deepcopy(
+        store.load_notification_deliveries(
+            signal_id="signal-v5-entry",
+            limit=10,
+        )[0]
+    )
+    body = (
+        "OFFICIAL PAPER CANDIDATES\n"
+        "- None\n"
+        "\nRESEARCH WATCHLIST\n"
+        "- NOVA: retained only as research"
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    selection["body_sha256"] = body_hash
+    selection["payload_json"]["body_sha256"] = body_hash
+    delivery["body_sha256"] = body_hash
+    delivery["payload_json"]["body_sha256"] = body_hash
+    delivery["payload_json"]["body"] = body
+
+    with pytest.raises(ValueError, match="official candidate section"):
+        canonical_paper_selection_context(selection, delivery=delivery)
+
+
+def test_paper_selection_rejects_duplicate_official_ticker_occurrence(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "delivery-duplicate-official.sqlite")
+    _persist_selected_signals(store, [_v5_signal()])
+    selection = deepcopy(
+        store.load_signal_selections(signal_id="signal-v5-entry")[0]
+    )
+    delivery = deepcopy(
+        store.load_notification_deliveries(
+            signal_id="signal-v5-entry",
+            limit=10,
+        )[0]
+    )
+    body = (
+        "PAPER PLAN QUALIFIED\n"
+        "1) NOVA — Alpha 80 | fixture\n"
+        "2) NOVA — Alpha 80 | duplicate\n"
+        "\nRESEARCH WATCHLIST\n"
+        "- None"
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    selection["body_sha256"] = body_hash
+    selection["payload_json"]["body_sha256"] = body_hash
+    delivery["body_sha256"] = body_hash
+    delivery["payload_json"]["body_sha256"] = body_hash
+    delivery["payload_json"]["body"] = body
+
+    with pytest.raises(ValueError, match="official candidate section"):
+        canonical_paper_selection_context(selection, delivery=delivery)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -1975,7 +2038,24 @@ def _persist_selected_signals(
     store.persist_historical_signals(canonical_signals)
     selections: list[dict[str, Any]] = []
     deliveries: list[dict[str, Any]] = []
-    body = f"alpha-outcome-fixture:{batch_scan_id}"
+    tickers = list(
+        dict.fromkeys(
+            str(signal.get("ticker") or "").upper()
+            for signal in canonical_signals
+        )
+    )
+    body = "\n".join(
+        [
+            "OFFICIAL PAPER CANDIDATES",
+            *[
+                f"{index}) {ticker} — Alpha 80 | fixture"
+                for index, ticker in enumerate(tickers, 1)
+            ],
+            "",
+            "RESEARCH WATCHLIST",
+            "- None",
+        ]
+    )
     body_sha256 = hashlib.sha256(body.encode()).hexdigest()
     event_key = f"alphaops:{batch_scan_id}:alpha_morning_watch"
     for index, signal in enumerate(canonical_signals, 1):

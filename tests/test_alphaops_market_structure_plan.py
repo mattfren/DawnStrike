@@ -171,6 +171,26 @@ def test_valid_plan_freezes_three_independently_hashed_observations() -> None:
     assert validate_alphaops_v5_plan(plan.to_dict()) is True
 
 
+def test_timezone_naive_observation_timestamps_fail_closed() -> None:
+    for field in ("observed_at", "completed_at"):
+        signal = _signal()
+        for observation in signal["market_structure_observations"].values():
+            observation[field] = "2026-08-26T13:00:00"
+
+        plan = construct_alphaops_v5_plan(signal)
+
+        assert plan.status == NO_VALID_PLAN
+
+
+def test_timezone_naive_decision_timestamp_fails_closed() -> None:
+    plan = construct_alphaops_v5_plan(
+        _signal(), decision_at="2026-08-26T13:30:00"
+    )
+
+    assert plan.status == NO_VALID_PLAN
+    assert plan.reason == "decision_time_invalid"
+
+
 def test_serialized_plan_reconstructs_with_the_same_canonical_hash() -> None:
     plan = construct_alphaops_v5_plan(_signal())
     emitted = plan.to_dict()

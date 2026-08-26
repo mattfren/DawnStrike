@@ -6,6 +6,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from intraday_scanner.notifiers.base import NotificationEvent
+from intraday_scanner.services.luna_research_slate_service import (
+    official_publication_rows,
+)
 from intraday_scanner.services.time_utils import get_operator_time_label
 
 DEFAULT_MORNING_MAX_CHARS = 4096
@@ -285,20 +288,19 @@ def format_alpha_watch(
         if ticker and ticker not in seen_promotion_tickers:
             promotion_candidates.append(row)
             seen_promotion_tickers.add(ticker)
-    official_candidates = [
-        row
-        for row in promotion_candidates
-        if (
-            str(row.get("publication_tier") or "")
-            in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
-            or (
-                not row.get("publication_tier")
-                and str(row.get("decision_tier") or "").lower() == "clean_edge"
-            )
-        )
-        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
-        and row.get("manual_confirmation_required") is False
-    ][:3]
+    explicit_publication = any(
+        "publication_tier" in row for row in promotion_candidates
+    )
+    if explicit_publication:
+        official_candidates = official_publication_rows(promotion_candidates, limit=3)
+    else:
+        official_candidates = [
+            row
+            for row in promotion_candidates
+            if str(row.get("decision_tier") or "").lower() == "clean_edge"
+            and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+            and row.get("manual_confirmation_required") is False
+        ][:3]
     official_tickers = {
         str(row.get("ticker") or "").upper() for row in official_candidates
     }
@@ -307,9 +309,6 @@ def format_alpha_watch(
         for row in slate_candidates
         if str(row.get("ticker") or "").upper() not in official_tickers
     ][:5]
-    explicit_publication = any(
-        "publication_tier" in row for row in promotion_candidates
-    )
     official_heading = (
         "OFFICIAL PAPER CANDIDATES"
         if official_candidates or not explicit_publication

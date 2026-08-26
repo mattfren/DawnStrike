@@ -759,7 +759,10 @@ def _parse_timestamp(value: Any) -> Any:
         if not text:
             return None
         parsed = datetime.fromisoformat(text)
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        # A timestamp without an explicit offset has no safe interpretation at
+        # this boundary.  Treating it as UTC can make a point-in-time plan
+        # appear complete while silently shifting the source observation.
+        return parsed if parsed.tzinfo is not None else None
     except (TypeError, ValueError):
         return None
 

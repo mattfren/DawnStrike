@@ -24,6 +24,7 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_watch,
 )
 from intraday_scanner.services.alpha_cycle_service import (
+    _historical_publication_rows,
     _persist_research_radar_selections,
     _radar_monitor_signals,
     _research_radar,
@@ -519,6 +520,15 @@ def test_radar_monitor_rehydrates_exact_cross_scan_frozen_slate_signal():
     assert len(monitored) == 1
     assert monitored[0]["signal_id"] == "scan-old:1:NOVA"
     assert monitored[0]["monitor_cohort"] == "research_radar"
+
+
+def test_retry_materializes_exact_frozen_rows_before_delivery():
+    current = {"ticker": "CURRENT", "signal_key": "scan-retry:1:CURRENT"}
+    frozen = {"ticker": "FROZEN", "signal_key": "scan-old:1:FROZEN"}
+
+    rows = _historical_publication_rows([current], [frozen, current])
+
+    assert [row["ticker"] for row in rows] == ["CURRENT", "FROZEN"]
 
 
 def test_radar_monitor_fails_closed_for_unbound_cross_scan_selection():

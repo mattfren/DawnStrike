@@ -13,6 +13,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
     apply_publication_semantics,
     build_ranked_research_slate,
+    official_publication_rows,
     publication_counts,
 )
 from intraday_scanner.services.signal_review_service import monitor_alpha_signals
@@ -149,6 +150,27 @@ def test_tier_one_coexists_with_one_official_and_tier_two_three_remain_zero():
     }
     text = format_alpha_watch(signals=annotated, edge_label="research")
     assert "OFFICIAL PAPER CANDIDATES" not in text
+
+
+def test_official_rows_are_exact_frozen_promotions_not_current_review_rows():
+    frozen = [
+        {
+            "ticker": "FROZEN",
+            "publication_tier": "PAPER_PLAN_QUALIFIED",
+            "alert_gate_status": "PASS",
+            "manual_confirmation_required": False,
+        }
+    ]
+    current = {
+        "ticker": "CURRENT",
+        "decision_tier": "clean_edge",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+    }
+
+    assert [row["ticker"] for row in official_publication_rows(frozen)] == ["FROZEN"]
+    assert official_publication_rows([]) == []
+    assert official_publication_rows([current]) == []
 
 
 def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacements():

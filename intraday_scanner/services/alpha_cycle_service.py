@@ -84,6 +84,7 @@ from intraday_scanner.services.luna_core_universe_service import (
 from intraday_scanner.services.luna_research_slate_service import (
     apply_publication_semantics,
     build_ranked_research_slate,
+    official_publication_rows,
     persist_ranked_research_slate,
     validate_ranked_research_slate,
 )
@@ -816,27 +817,62 @@ def alpha_cycle(
         universe_membership_by_ticker=universe_memberships,
     )
     v6_decision_stats = store.persist_alpha_v6_decisions(v6_decisions)
+    selected_signals = official_publication_rows(slate_publication_rows, limit=3)
+    source_summary["official_publication_rows"] = selected_signals
+    official_no_trade = not selected_signals
+    publication_decision = dict(decision)
+    if official_no_trade:
+        publication_reason = str(decision.get("reason") or "").strip()
+        if not publication_reason or not decision.get("no_trade"):
+            publication_reason = (
+                "No immutable frozen Tier 2/3 plan qualified for official paper publication."
+            )
+        publication_decision.update(
+            {
+                "no_trade": True,
+                "decision_tier": "no_trade",
+                "reason": publication_reason,
+                "primary_reason_code": "frozen_slate_no_official_selection",
+                "next_action": str(decision.get("next_action") or "").strip()
+                or "Review the ranked research slate and wait for all plan gates to pass.",
+            }
+        )
+    else:
+        publication_decision.update(
+            {
+                "no_trade": False,
+                "decision_tier": "clean_edge",
+                "reason": "Immutable frozen Tier 2/3 paper-plan cohort selected.",
+                "primary_reason_code": "frozen_slate_official_selection",
+            }
+        )
+    publication_review = {
+        **review,
+        "decision": publication_decision,
+        "watchlist": selected_signals,
+    }
     historical_rows = record_alpha_historical_signals(
         store,
-        signals,
+        _historical_publication_rows(signals, slate_publication_rows),
         source_summary=source_summary,
-        no_trade_reason=str(decision.get("reason") or "") if decision.get("no_trade") else "",
+        no_trade_reason=(
+            str(publication_decision.get("reason") or "") if official_no_trade else ""
+        ),
     )
     no_trade_row: dict[str, Any] | None = None
-    if decision.get("no_trade"):
+    if official_no_trade:
         no_trade_row = record_no_trade_historical_signal(
             store,
             scan_id=scan_result.run_id,
             generated_at=timestamp,
-            reason=str(decision.get("reason") or ""),
+            reason=str(publication_decision.get("reason") or ""),
             source_summary=source_summary,
             candidate_count=len(ranked),
         )
-    selected_signals = list(review["watchlist"])
-    if decision.get("no_trade"):
+    if official_no_trade:
         message = format_alpha_no_trade(
-            reason=str(decision.get("reason") or ""),
-            next_action=str(decision.get("next_action") or ""),
+            reason=str(publication_decision.get("reason") or ""),
+            next_action=str(publication_decision.get("next_action") or ""),
             research_signals=slate_publication_rows,
             research_total=int(luna_research_slate.get("published_count") or 0),
         )
@@ -844,12 +880,12 @@ def alpha_cycle(
         title = "Dawnstrike Alpha Check"
     else:
         edge_label = (
-            _trust_gate_edge_label(list(review["watchlist"]))
+            _trust_gate_edge_label(selected_signals)
             if str(decision.get("decision_tier") or "") == "probability_fallback"
-            else _edge_label(signals)
+            else _edge_label(selected_signals)
         )
         message = format_alpha_watch(
-            signals=signals,
+            signals=slate_publication_rows,
             edge_label=edge_label,
             source_summary=source_summary,
             blocked_signals=list(review["blocked"]),
@@ -871,7 +907,7 @@ def alpha_cycle(
         store,
         scan_id=scan_result.run_id,
         selected_signals=selection_members,
-        decision=decision,
+        decision=publication_decision,
         selected_at=timestamp,
         event=events[0],
     )
@@ -898,7 +934,7 @@ def alpha_cycle(
         "generated_at": timestamp,
         "ranked_count": len(ranked),
         "signals": signals,
-        "review": review,
+        "review": publication_review,
         "source_summary": source_summary,
         "enrichment_summary": dict(enrichment["summary"]),
     }
@@ -958,7 +994,7 @@ def alpha_cycle(
         notification_deliveries=notification_deliveries,
     )
     result: dict[str, Any] = {
-        "status": "complete" if not decision.get("no_trade") else "no_trade",
+        "status": "no_trade" if official_no_trade else "complete",
         "run_type": cycle_name,
         "scan_id": scan_result.run_id,
         "model_version": ALPHA_MODEL_VERSION,
@@ -986,7 +1022,7 @@ def alpha_cycle(
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,
         "top_signal": signals[0] if signals else None,
-        "review": review,
+        "review": publication_review,
         "selection_stats": selection_stats,
         "research_radar_selection_stats": radar_selection_stats,
         "notification_stats": notification_stats,
@@ -2778,6 +2814,25 @@ def _selection_signal_id(signal: dict[str, Any], scan_id: str) -> str:
     if not ticker or rank in {None, ""}:
         return ""
     return f"{scan_id}:{rank}:{ticker}"
+
+
+def _historical_publication_rows(
+    current_signals: list[dict[str, Any]],
+    frozen_publication_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize frozen rows before delivery, including crash-retry recovery."""
+
+    rows: list[dict[str, Any]] = []
+    seen_signal_ids: set[str] = set()
+    for row in [*current_signals, *frozen_publication_rows]:
+        signal_id = str(row.get("signal_id") or row.get("signal_key") or "").strip()
+        if not signal_id:
+            signal_id = _selection_signal_id(row, str(row.get("scan_id") or ""))
+        if not signal_id or signal_id in seen_signal_ids:
+            continue
+        rows.append(dict(row))
+        seen_signal_ids.add(signal_id)
+    return rows
 
 
 def _notification_channels(notify: str) -> list[str]:

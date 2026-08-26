@@ -193,6 +193,38 @@ def publication_counts(
     }
 
 
+def official_publication_rows(
+    rows: Iterable[dict[str, Any]] | None,
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Return the exact frozen Tier 2/3 rows represented as official plans.
+
+    The daily research slate is the authoritative cohort. A retry-time review
+    watchlist is intentionally not an input here: it cannot add a symbol that
+    was absent from the immutable slate or revive an empty frozen cohort.
+    """
+
+    selected: list[dict[str, Any]] = []
+    seen_tickers: set[str] = set()
+    for source in rows or []:
+        row = dict(source)
+        ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        if (
+            not ticker
+            or ticker in seen_tickers
+            or row.get("publication_tier") not in {TIER2, TIER3}
+            or str(row.get("alert_gate_status") or "").upper() not in {"PASS", "ALERT_OK"}
+            or row.get("manual_confirmation_required") is not False
+        ):
+            continue
+        selected.append(row)
+        seen_tickers.add(ticker)
+        if len(selected) >= max(int(limit), 0):
+            break
+    return selected
+
+
 def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path) -> Path:
     """Persist the exact slate artifact; no database or broker side effects."""
 
@@ -793,6 +825,7 @@ __all__ = [
     "TIER3",
     "apply_publication_semantics",
     "build_ranked_research_slate",
+    "official_publication_rows",
     "persist_ranked_research_slate",
     "publication_counts",
     "validate_ranked_research_slate",

@@ -475,6 +475,16 @@ def canonical_paper_selection_context(
         raise ValueError("paper delivery body hash is invalid")
     if delivery_payload.get("research_only") is not True:
         raise ValueError("paper delivery is not research-only")
+    if selected_decision != "no_trade":
+        official_tickers = _rendered_official_candidate_tickers(delivered_body)
+        if (
+            official_tickers is None
+            or official_tickers.count(str(selected["ticker"]).upper()) != 1
+        ):
+            raise ValueError(
+                "paper delivery official candidate section must contain selected "
+                "ticker exactly once"
+            )
 
     selection_evidence = {
         "schema_version": "dawnstrike.alphaops.paper_selection_context.v3",
@@ -2539,6 +2549,33 @@ def _validate_episode_dedup_counts(value: object) -> None:
         and unique_episodes == unique_reservations + overlap_collapses
     ):
         raise ValueError("paper entry intent episode de-dup counts conflict")
+
+
+def _rendered_official_candidate_tickers(body: object) -> list[str] | None:
+    """Parse numbered tickers from the rendered official-candidate section."""
+
+    if not isinstance(body, str):
+        return None
+    in_official_section = False
+    found_official_section = False
+    tickers: list[str] = []
+    for line in body.splitlines():
+        normalized = line.strip().upper()
+        if normalized in {"OFFICIAL PAPER CANDIDATES", "PAPER PLAN QUALIFIED"}:
+            in_official_section = True
+            found_official_section = True
+            continue
+        if in_official_section and normalized.startswith("RESEARCH WATCHLIST"):
+            break
+        if not in_official_section:
+            continue
+        match = re.match(
+            r"^\s*\d+\)\s*([A-Za-z][A-Za-z0-9._-]*)(?:\s+[—-]|\s*$)",
+            line,
+        )
+        if match:
+            tickers.append(match.group(1).upper())
+    return tickers if found_official_section else None
 
 
 def _canonical_paper_enter_intent_receipt_valid(value: object) -> bool:

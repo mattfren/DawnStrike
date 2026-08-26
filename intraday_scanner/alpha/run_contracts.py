@@ -11,6 +11,7 @@ from intraday_scanner.alpha.data_eligibility import evaluate_premarket_coverage
 from intraday_scanner.services.luna_research_slate_service import (
     apply_publication_semantics,
     build_ranked_research_slate,
+    official_publication_rows,
     publication_counts,
     validate_ranked_research_slate,
 )
@@ -149,14 +150,23 @@ def build_alpha_run_contract(
             coverage={"lanes": slate.get("lane_statuses") or {}},
             require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
         )
+    authoritative_slate = bool(persisted_slate) or isinstance(
+        frozen_publication_rows, list
+    )
+    exact_official_rows = official_publication_rows(published_signals, limit=3)
+    legacy_official_count = (
+        len(watchlist)
+        if not authoritative_slate
+        and not decision.get("no_trade")
+        and str(decision.get("decision_tier") or "") == "clean_edge"
+        else 0
+    )
+    official_selected_count = (
+        len(exact_official_rows) if authoritative_slate else legacy_official_count
+    )
     publication = publication_counts(
         published_signals,
-        official_selected=(
-            len(watchlist)
-            if not decision.get("no_trade")
-            and str(decision.get("decision_tier") or "") == "clean_edge"
-            else 0
-        ),
+        official_selected=official_selected_count,
     )
     if publication["ranked_research"] != int(slate.get("published_count") or 0):
         raise ValueError(
@@ -226,7 +236,7 @@ def build_alpha_run_contract(
         outcome = SelectionOutcome.SOURCE_FAILED
     elif coverage.data_ineligible:
         outcome = SelectionOutcome.DATA_INELIGIBLE
-    elif watchlist:
+    elif official_selected_count:
         outcome = SelectionOutcome.WATCHLIST_READY
     elif signals and all(_truthy(row.get("fixture_only")) for row in signals):
         outcome = SelectionOutcome.REHEARSAL_COMPLETE

@@ -152,6 +152,54 @@ def test_contract_reports_governed_cross_scan_frozen_slate_without_current_repla
     assert contract.slate_reuse_status == "GOVERNED_DAILY_FREEZE_REUSE"
 
 
+def test_empty_frozen_slate_cannot_publish_retry_watchlist_or_watchlist_ready():
+    slate = build_ranked_research_slate(
+        [],
+        target=5,
+        data_eligible=False,
+        generated_at="2026-08-05T12:00:00+00:00",
+        market_date="2026-08-05",
+        scan_id="scan-original",
+    )
+    contract = build_alpha_run_contract(
+        scan_id="scan-retry",
+        generated_at="2026-08-05T12:23:00+00:00",
+        ranked_count=1,
+        signals=[{"ticker": "CURRENT", "signal_id": "signal-current"}],
+        review={
+            "decision": {
+                "no_trade": False,
+                "decision_tier": "clean_edge",
+                "reason": "current retry found an unrelated row",
+            },
+            "selection_diagnostics": {},
+            "watchlist": [{"ticker": "CURRENT", "signal_id": "signal-current"}],
+        },
+        source_summary={
+            "status": "success",
+            "ranked_research_slate": slate,
+            "ranked_research_publication_rows": [],
+            "ranked_research_slate_lineage": {
+                "frozen_source_scan_id": "scan-original",
+                "current_scan_id": "scan-retry",
+                "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
+            },
+        },
+        enrichment_summary={
+            "status": "complete",
+            "selected_count": 1,
+            "selected_symbols": ["CURRENT"],
+            "verified_count": 1,
+            "secondary_fallback_status": "not_needed",
+        },
+        notification_stats={},
+    )
+
+    assert contract.slate_published_count == 0
+    assert contract.official_selected_count == 0
+    assert contract.selection_outcome == "valid_no_edge"
+
+
 def test_contract_rejects_caller_claimed_slate_lineage_that_disagrees_with_artifact():
     slate = build_ranked_research_slate(
         [{"ticker": "FROZEN", "signal_id": "signal-frozen"}],
