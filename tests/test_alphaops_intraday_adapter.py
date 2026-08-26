@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from intraday_scanner.alpha.plan_constructor import construct_alphaops_v5_plan
 from intraday_scanner.v2.strategies.alphaops_intraday import (
     IntradayDecisionPoint,
     build_alphaops_intraday_strategy,
@@ -14,7 +15,7 @@ DECISION_AT = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
 
 
 def _signal() -> dict[str, object]:
-    return {
+    signal: dict[str, object] = {
         "ticker": "NOVA",
         "strategy_id": "alphaops_v5",
         "strategy_version": "dawnstrike-alphaops-v5.0.0",
@@ -47,8 +48,44 @@ def _signal() -> dict[str, object]:
         "entry_watch_level": 10.0,
         "invalidation_level": 9.0,
         "target_1": 12.75,
-        "target_basis_kind": "sourced_resistance",
+        "target_basis_kind": "prior_day_resistance",
         "target_derived_from_risk": False,
+    }
+    signal["market_structure_observations"] = {
+        "entry": _observation(10.0, "a" * 64, "sourced_entry"),
+        "stop": _observation(9.0, "b" * 64, "sourced_stop"),
+        "target": {
+            **_observation(12.75, "c" * 64, "prior_day_resistance"),
+            "target_basis_kind": "sourced_resistance",
+        },
+    }
+    plan = construct_alphaops_v5_plan(
+        signal,
+        decision_at=DECISION_AT.isoformat(),
+    )
+    signal["alphaops_market_structure_plan"] = plan.to_dict()
+    signal["plan_hash_sha256"] = plan.plan_hash_sha256
+    signal["plan_levels_frozen"] = True
+    signal["plan_construction_status"] = plan.status
+    return signal
+
+
+def _observation(
+    value: float,
+    source_hash: str,
+    observation_kind: str,
+) -> dict[str, object]:
+    return {
+        "value": value,
+        "raw_value": value,
+        "observed_at": "2026-08-03T13:00:00+00:00",
+        "completed_at": "2026-08-03T13:00:00+00:00",
+        "source": "completed-market-feed",
+        "source_url": "https://example.test/market",
+        "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "derivation_policy": "identity",
+        "is_complete": True,
     }
 
 
@@ -76,6 +113,33 @@ def test_v5_intraday_adapter_preserves_policy_and_lineage() -> None:
     assert evaluation.decision.broker_execution_enabled is False
     assert evaluation.to_dict()["point_in_time"] is True
     assert evaluation.to_dict()["artifact_hash_sha256"] == "bars-hash"
+
+
+def test_v5_intraday_adapter_blocks_missing_frozen_plan() -> None:
+    signal = _signal()
+    signal.pop("alphaops_market_structure_plan")
+    signal.pop("plan_hash_sha256")
+
+    point = IntradayDecisionPoint(
+        symbol="NOVA",
+        decision_at=DECISION_AT,
+        signal=signal,
+        observation={
+            "price": 10.05,
+            "observed_at": DECISION_AT.isoformat(),
+            "requested_at": DECISION_AT.isoformat(),
+            "freshness_seconds": 0,
+            "is_usable": True,
+        },
+        artifact_identity="fixture:bars:NOVA:2026-08-03",
+        artifact_hash_sha256="bars-hash",
+        exchange_session_id="XNYS:2026-08-03:regular",
+    )
+
+    evaluation = evaluate_alphaops_intraday(point)
+
+    assert evaluation.decision.eligible_for_official_paper is False
+    assert "strict_frozen_plan_missing_or_invalid" in evaluation.decision.reasons
 
 
 def test_point_in_time_observation_excludes_future_bars() -> None:
