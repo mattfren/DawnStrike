@@ -201,6 +201,31 @@ def test_alpha_watch_keeps_explicit_empty_slate_authoritative():
     assert "Research slate: 0 of 0 shown" in text
 
 
+def test_alpha_watch_empty_slate_cannot_promote_current_plan_candidate():
+    current = {
+        "ticker": "CURRENT",
+        "publication_tier": "PAPER_PLAN_QUALIFIED",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    text = format_alpha_watch(
+        signals=[current],
+        edge_label="research",
+        source_summary={
+            "ranked_research_slate": {
+                "published_count": 0,
+                "rows": [],
+            }
+        },
+    )
+
+    assert "CURRENT" not in text
+    assert "0 official candidates" in text
+    assert "Research slate: 0 of 0 shown" in text
+
+
 def test_tier_semantics_and_research_monitor_label():
     plan = {
         "schema_version": "alphaops.structural_plan.v1",

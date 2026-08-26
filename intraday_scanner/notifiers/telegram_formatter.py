@@ -275,7 +275,12 @@ def format_alpha_watch(
     slate_shown = len(slate_candidates)
     promotion_candidates: list[dict[str, Any]] = []
     seen_promotion_tickers: set[str] = set()
-    for row in [*slate_candidates, *candidates]:
+    promotion_source = (
+        slate_candidates
+        if has_authoritative_slate
+        else [*slate_candidates, *candidates]
+    )
+    for row in promotion_source:
         ticker = str(row.get("ticker") or "").upper()
         if ticker and ticker not in seen_promotion_tickers:
             promotion_candidates.append(row)
