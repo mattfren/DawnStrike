@@ -87,6 +87,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     official_publication_rows,
     persist_ranked_research_slate,
     validate_ranked_research_slate,
+    validated_frozen_selection_signal,
 )
 from intraday_scanner.services.premarket_enrichment_service import enrich_premarket_rows
 from intraday_scanner.services.price_observation_service import collect_price_observations
@@ -910,6 +911,7 @@ def alpha_cycle(
         decision=publication_decision,
         selected_at=timestamp,
         event=events[0],
+        slate=luna_research_slate,
     )
     radar_selection_rows, radar_selection_stats = _persist_research_radar_selections(
         store,
@@ -1363,50 +1365,14 @@ def _validated_frozen_radar_signal(selection: dict[str, Any]) -> dict[str, Any] 
     if not isinstance(payload, dict):
         return None
     slate = payload.get("frozen_ranked_research_slate")
-    lineage = payload.get("frozen_slate_lineage")
-    frozen_signal = payload.get("signal")
-    if not isinstance(slate, dict) or not isinstance(lineage, dict) or not isinstance(
-        frozen_signal, dict
-    ):
+    if not isinstance(slate, dict):
         return None
     market_date = str(selection.get("selected_at") or slate.get("market_date") or "")[:10]
-    try:
-        validate_ranked_research_slate(slate, market_date=market_date)
-    except (TypeError, ValueError):
-        return None
-    frozen_scan_id = str(slate.get("scan_id") or "")
-    selection_scan_id = str(selection.get("scan_id") or "")
-    source_scan_id = str(selection.get("source_scan_id") or "")
-    frozen_selection_id = str(frozen_signal.get("research_selection_id") or "")
-    matching_rows = [
-        row
-        for row in slate.get("rows") or []
-        if str(row.get("research_selection_id") or "") == frozen_selection_id
-    ]
-    if (
-        str(lineage.get("schema_version") or "")
-        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
-        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
-        or str(lineage.get("slate_content_hash_sha256") or "")
-        != str(slate.get("content_hash_sha256") or "")
-        or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
-        or str(lineage.get("current_scan_id") or "") != selection_scan_id
-        or str(lineage.get("reuse_status") or "")
-        != (
-            "CURRENT_SCAN"
-            if frozen_scan_id == selection_scan_id
-            else "GOVERNED_DAILY_FREEZE_REUSE"
-        )
-        or source_scan_id != frozen_scan_id
-        or len(matching_rows) != 1
-        or canonical_json(matching_rows[0]) != canonical_json(frozen_signal)
-        or str(frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or "")
-        != str(selection.get("signal_id") or "")
-        or str(frozen_signal.get("ticker") or "").upper()
-        != str(selection.get("ticker") or "").upper()
-    ):
-        return None
-    return dict(frozen_signal)
+    return validated_frozen_selection_signal(
+        selection,
+        market_date=market_date,
+        allowed_cohorts=(ALPHAOPS_RADAR_COHORT,),
+    )
 
 
 def _live_quote_is_usable(
@@ -2616,6 +2582,7 @@ def _persist_official_selections(
     decision: dict[str, Any],
     selected_at: str,
     event: NotificationEvent,
+    slate: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Freeze the exact signal identities represented by one operator message."""
 
@@ -2629,7 +2596,7 @@ def _persist_official_selections(
                 "definition_json": {
                     "name": "AlphaOps v5" if strategy_id == "alphaops_v5" else "AlphaOps v4",
                     "cohort": ALPHAOPS_OFFICIAL_COHORT,
-                    "decision_source": "review.watchlist",
+                    "decision_source": "governed_official_cohort",
                     "model_version": ALPHA_MODEL_VERSION,
                     "prospective_contract": strategy_id == "alphaops_v5",
                     "research_only": True,
@@ -2650,11 +2617,66 @@ def _persist_official_selections(
         "no_trade" if decision.get("no_trade") else str(decision.get("decision_tier") or "selected")
     )
     body_sha256 = _body_sha256(event.body)
+    frozen_slate = dict(slate or {})
+    frozen_rows_by_id: dict[str, dict[str, Any]] = {}
+    frozen_lineage: dict[str, Any] = {}
+    frozen_source_scan_id = ""
+    reuse_status = ""
+    if frozen_slate:
+        validate_ranked_research_slate(
+            frozen_slate,
+            market_date=selected_at[:10],
+        )
+        frozen_source_scan_id = str(frozen_slate.get("scan_id") or "")
+        reuse_status = (
+            "CURRENT_SCAN"
+            if frozen_source_scan_id == scan_id
+            else "GOVERNED_DAILY_FREEZE_REUSE"
+        )
+        frozen_lineage = {
+            "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+            "slate_id": str(frozen_slate.get("slate_id") or ""),
+            "slate_content_hash_sha256": str(
+                frozen_slate.get("content_hash_sha256") or ""
+            ),
+            "frozen_source_scan_id": frozen_source_scan_id,
+            "current_scan_id": scan_id,
+            "reuse_status": reuse_status,
+        }
+        frozen_rows_by_id = {
+            str(row.get("research_selection_id") or ""): dict(row)
+            for row in frozen_slate.get("rows") or []
+            if str(row.get("research_selection_id") or "")
+        }
     rows: list[dict[str, Any]] = []
     for signal in selected_signals:
         signal_id = _selection_signal_id(signal, scan_id)
         if not signal_id:
             continue
+        signal_payload = dict(signal)
+        selection_lineage: dict[str, Any] = {}
+        is_no_trade = str(signal.get("ticker") or "").upper() == "NO_TRADE"
+        if frozen_slate and not is_no_trade:
+            research_selection_id = str(
+                signal.get("research_selection_id") or ""
+            )
+            frozen_signal = frozen_rows_by_id.get(research_selection_id)
+            if (
+                frozen_signal is None
+                or _selection_signal_id(frozen_signal, frozen_source_scan_id) != signal_id
+                or str(frozen_signal.get("ticker") or "").upper()
+                != str(signal.get("ticker") or "").upper()
+            ):
+                raise SnapshotValidationError(
+                    "Official selection does not bind one exact immutable slate row."
+                )
+            signal_payload = frozen_signal
+            selection_lineage = {
+                "source_scan_id": frozen_source_scan_id,
+                "scan_lineage_status": reuse_status,
+                "frozen_slate_lineage": frozen_lineage,
+                "frozen_ranked_research_slate": frozen_slate,
+            }
         identity = f"{strategy_id}|{strategy_version}|{ALPHAOPS_OFFICIAL_COHORT}|{signal_id}"
         selection_id = f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
         row = {
@@ -2670,11 +2692,18 @@ def _persist_official_selections(
             "selected_at": selected_at,
             "event_key": event.event_key,
             "body_sha256": body_sha256,
+            **{
+                key: value
+                for key, value in selection_lineage.items()
+                if key in {"source_scan_id", "scan_lineage_status"}
+            },
         }
         row["payload_json"] = {
             **row,
             "decision_payload": decision,
-            "signal": signal,
+            "signal": signal_payload,
+            "publication_row": signal,
+            **selection_lineage,
             "research_only": True,
             "broker_execution_enabled": False,
         }

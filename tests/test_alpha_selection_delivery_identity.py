@@ -4,6 +4,9 @@ import sqlite3
 from pathlib import Path
 
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION
+from intraday_scanner.alpha.canonical_return_truth import (
+    canonical_paper_selection_context,
+)
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
@@ -18,6 +21,10 @@ from intraday_scanner.services.alpha_cycle_service import (
     _persist_official_selections,
     recover_legacy_alpha_notification_memberships,
 )
+from intraday_scanner.services.luna_research_slate_service import (
+    build_ranked_research_slate,
+)
+from intraday_scanner.services.trade_watcher_service import _watch_signals
 from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -151,6 +158,96 @@ def test_exact_selected_membership_excludes_blocked_and_survives_dedupe(
     assert deduped[0]["payload_json"]["attempt_status"] == "deduplicated"
     assert deduped[0]["payload_json"]["deduplicated"] is True
     assert len(store.load_notification_deliveries(scan_id=SCAN_ID)) == 1
+
+
+def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-official-retry.sqlite")
+    source_scan_id = "scan-frozen-source"
+    retry_scan_id = "scan-frozen-retry"
+    source_signal = {
+        **_signal("SOBR", rank=1, can_alert=True),
+        "scan_id": source_scan_id,
+        "signal_key": f"{source_scan_id}:1:SOBR",
+        "market_date": "2026-07-15",
+        "timestamp": SELECTED_AT,
+    }
+    slate = build_ranked_research_slate(
+        [source_signal],
+        generated_at=SELECTED_AT,
+        market_date="2026-07-15",
+        scan_id=source_scan_id,
+    )
+    frozen_signal = slate["rows"][0]
+    historical = {
+        **_historical_signal(source_signal),
+        "signal_id": source_signal["signal_key"],
+        "scan_id": source_scan_id,
+        "raw_payload_json": frozen_signal,
+    }
+    store.persist_historical_signals([historical])
+    body = "\n".join(
+        [
+            "OFFICIAL PAPER CANDIDATES",
+            "1) SOBR — Alpha 72 | frozen retry",
+            "",
+            "RESEARCH WATCHLIST",
+            "- None",
+        ]
+    )
+    event = _official_selection_notification_event(
+        retry_scan_id,
+        "alpha_morning_watch",
+        "Dawnstrike Alpha Watch",
+        body,
+        selected_signals=[frozen_signal],
+    )
+    selections, _ = _persist_official_selections(
+        store,
+        scan_id=retry_scan_id,
+        selected_signals=[frozen_signal],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=event,
+        slate=slate,
+    )
+    notification_key = f"{event.event_key}:telegram"
+    assert store.record_notification(
+        event_key=notification_key,
+        channel="telegram",
+        run_id=retry_scan_id,
+        payload={
+            "title": event.title,
+            "body": event.body,
+            "channel_hint": event.channel_hint,
+            "payload": event.payload,
+        },
+    )
+    deliveries = _persist_notification_delivery_memberships(
+        store,
+        selections=selections,
+        events=[event],
+        notify="telegram",
+        preexisting_notification_keys=set(),
+    )
+    persisted = store.load_signal_selections(scan_id=retry_scan_id)[0]
+
+    context = canonical_paper_selection_context(
+        persisted,
+        delivery=deliveries[0],
+    )
+    watched = _watch_signals(store, market_date="2026-07-15")
+
+    assert context["signal_id"] == source_signal["signal_key"]
+    assert context["authoritative_signal"] == frozen_signal
+    assert watched[0]["signal_id"] == source_signal["signal_key"]
+    assert watched[0]["selection_id"] == persisted["selection_id"]
+    assert persisted["payload_json"]["source_scan_id"] == source_scan_id
+    assert (
+        persisted["payload_json"]["scan_lineage_status"]
+        == "GOVERNED_DAILY_FREEZE_REUSE"
+    )
 
 
 def test_selection_identity_migration_is_additive_and_idempotent(tmp_path: Path) -> None:

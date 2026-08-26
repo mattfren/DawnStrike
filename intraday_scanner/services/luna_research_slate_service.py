@@ -330,6 +330,79 @@ def validate_ranked_research_slate(
     return slate
 
 
+def validated_frozen_selection_signal(
+    selection: dict[str, Any],
+    *,
+    market_date: str,
+    allowed_cohorts: Iterable[str] = ("research_radar", "official_telegram"),
+) -> dict[str, Any] | None:
+    """Resolve one exact cross-scan selection from its immutable slate lineage."""
+
+    payload = selection.get("payload_json")
+    if not isinstance(payload, dict):
+        return None
+    slate = payload.get("frozen_ranked_research_slate")
+    lineage = payload.get("frozen_slate_lineage")
+    frozen_signal = payload.get("signal")
+    if not isinstance(slate, dict) or not isinstance(lineage, dict) or not isinstance(
+        frozen_signal, dict
+    ):
+        return None
+    try:
+        validate_ranked_research_slate(slate, market_date=market_date)
+    except (TypeError, ValueError):
+        return None
+    allowed = {str(value) for value in allowed_cohorts}
+    frozen_scan_id = str(slate.get("scan_id") or "")
+    selection_scan_id = str(selection.get("scan_id") or "")
+    source_scan_id = str(
+        selection.get("source_scan_id") or payload.get("source_scan_id") or ""
+    )
+    scan_lineage_status = str(
+        selection.get("scan_lineage_status")
+        or payload.get("scan_lineage_status")
+        or ""
+    )
+    expected_status = (
+        "CURRENT_SCAN"
+        if frozen_scan_id == selection_scan_id
+        else "GOVERNED_DAILY_FREEZE_REUSE"
+    )
+    frozen_selection_id = str(frozen_signal.get("research_selection_id") or "")
+    matching_rows = [
+        row
+        for row in slate.get("rows") or []
+        if str(row.get("research_selection_id") or "") == frozen_selection_id
+    ]
+    signal_id = str(selection.get("signal_id") or "")
+    frozen_signal_id = str(
+        frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or ""
+    )
+    if (
+        str(selection.get("cohort") or "") not in allowed
+        or str(lineage.get("schema_version") or "")
+        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
+        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
+        or str(lineage.get("slate_content_hash_sha256") or "")
+        != str(slate.get("content_hash_sha256") or "")
+        or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
+        or str(lineage.get("current_scan_id") or "") != selection_scan_id
+        or str(lineage.get("reuse_status") or "") != expected_status
+        or source_scan_id != frozen_scan_id
+        or scan_lineage_status != expected_status
+        or not frozen_selection_id
+        or len(matching_rows) != 1
+        or json.dumps(matching_rows[0], sort_keys=True, separators=(",", ":"))
+        != json.dumps(frozen_signal, sort_keys=True, separators=(",", ":"))
+        or not signal_id
+        or signal_id != frozen_signal_id
+        or str(selection.get("ticker") or "").upper()
+        != str(frozen_signal.get("ticker") or "").upper()
+    ):
+        return None
+    return dict(frozen_signal)
+
+
 def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> bool:
     ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     if not ticker or ticker == "NO_TRADE":
@@ -828,5 +901,6 @@ __all__ = [
     "official_publication_rows",
     "persist_ranked_research_slate",
     "publication_counts",
+    "validated_frozen_selection_signal",
     "validate_ranked_research_slate",
 ]

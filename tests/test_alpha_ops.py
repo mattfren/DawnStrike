@@ -501,6 +501,7 @@ def test_radar_monitor_rehydrates_exact_cross_scan_frozen_slate_signal():
         "scan_lineage_status": "GOVERNED_DAILY_FREEZE_REUSE",
         "signal_id": "scan-old:1:NOVA",
         "ticker": "NOVA",
+        "cohort": "research_radar",
         "payload_json": {
             "signal": frozen_signal,
             "frozen_slate_lineage": {

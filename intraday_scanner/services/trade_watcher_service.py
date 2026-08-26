@@ -43,6 +43,9 @@ from intraday_scanner.services.alpha_paper_reconciliation_service import (
     ALPHAOPS_STRATEGY_ID,
     recover_legacy_alpha_delivery_membership,
 )
+from intraday_scanner.services.luna_research_slate_service import (
+    validated_frozen_selection_signal,
+)
 from intraday_scanner.services.price_observation_service import (
     EASTERN,
     UTC,
@@ -581,78 +584,27 @@ def _validate_selection_historical_scan_binding(
     historical_scan_id = str(historical.get("scan_id") or "")
     if selection_scan_id and selection_scan_id == historical_scan_id:
         return
-    payload = selection.get("payload_json")
-    if not isinstance(payload, dict):
-        raise SnapshotValidationError(
-            "Selection/historical scan identity mismatch has no governed frozen-slate lineage."
-        )
-    lineage = payload.get("frozen_slate_lineage")
-    slate = payload.get("frozen_ranked_research_slate")
-    frozen_signal = payload.get("signal")
-    if not isinstance(lineage, dict) or not isinstance(slate, dict) or not isinstance(
-        frozen_signal, dict
-    ):
-        raise SnapshotValidationError(
-            "Selection/historical scan identity mismatch has incomplete frozen-slate lineage."
-        )
-    try:
-        from intraday_scanner.services.luna_research_slate_service import (
-            validate_ranked_research_slate,
-        )
-
-        validate_ranked_research_slate(slate, market_date=market_date)
-    except (TypeError, ValueError) as exc:
-        raise SnapshotValidationError(
-            "Selection/historical cross-scan frozen slate failed integrity checks."
-        ) from exc
-    frozen_scan_id = str(slate.get("scan_id") or "")
-    if (
-        str(selection.get("cohort") or "") != "research_radar"
-        or str(lineage.get("schema_version") or "")
-        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
-        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
-        or str(lineage.get("slate_content_hash_sha256") or "")
-        != str(slate.get("content_hash_sha256") or "")
-        or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
-        or str(lineage.get("current_scan_id") or "") != selection_scan_id
-        or str(lineage.get("reuse_status") or "") != "GOVERNED_DAILY_FREEZE_REUSE"
-        or frozen_scan_id != historical_scan_id
-        or str(selection.get("source_scan_id") or payload.get("source_scan_id") or "")
-        != historical_scan_id
-        or str(
-            selection.get("scan_lineage_status")
-            or payload.get("scan_lineage_status")
-            or ""
-        )
-        != "GOVERNED_DAILY_FREEZE_REUSE"
-    ):
-        raise SnapshotValidationError(
-            "Selection/historical cross-scan lineage does not bind the exact frozen slate."
-        )
-    selection_id = str(frozen_signal.get("research_selection_id") or "")
-    matching_rows = [
-        row
-        for row in slate.get("rows") or []
-        if str(row.get("research_selection_id") or "") == selection_id
-    ]
-    signal_id = str(selection.get("signal_id") or "")
-    frozen_signal_id = str(
-        frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or ""
+    frozen_signal = validated_frozen_selection_signal(
+        selection,
+        market_date=market_date,
+        allowed_cohorts=("research_radar", "official_telegram"),
     )
+    payload = selection.get("payload_json")
+    slate = payload.get("frozen_ranked_research_slate") if isinstance(payload, dict) else None
+    frozen_scan_id = str(slate.get("scan_id") or "") if isinstance(slate, dict) else ""
+    signal_id = str(selection.get("signal_id") or "")
     ticker = str(selection.get("ticker") or "").upper()
     if (
-        not selection_id
-        or len(matching_rows) != 1
-        or json.dumps(matching_rows[0], sort_keys=True, separators=(",", ":"))
-        != json.dumps(frozen_signal, sort_keys=True, separators=(",", ":"))
+        frozen_signal is None
+        or frozen_scan_id != historical_scan_id
         or not signal_id
-        or signal_id != frozen_signal_id
         or signal_id != str(historical.get("signal_id") or "")
         or ticker != str(frozen_signal.get("ticker") or "").upper()
         or ticker != str(historical.get("ticker") or "").upper()
     ):
         raise SnapshotValidationError(
-            "Selection/historical cross-scan lineage does not bind the selected signal."
+            "Selection/historical scan identity mismatch: cross-scan frozen-slate "
+            "lineage does not bind the selected signal."
         )
 
 

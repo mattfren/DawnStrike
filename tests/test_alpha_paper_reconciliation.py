@@ -930,7 +930,16 @@ def _seed_selection(
             }
         ]
     )
-    body_hash = hashlib.sha256(b"1) NOVA - Opportunity").hexdigest()
+    body = "\n".join(
+        [
+            "OFFICIAL PAPER CANDIDATES",
+            "1) NOVA - Opportunity",
+            "",
+            "RESEARCH WATCHLIST",
+            "- None",
+        ]
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
     selection = {
         **_direct_selection(),
         "scan_id": "scan-paper",
@@ -976,7 +985,7 @@ def _seed_selection(
     }
     delivery["payload_json"] = {
         **delivery,
-        "body": "1) NOVA - Opportunity",
+        "body": body,
         "research_only": True,
     }
     store.persist_notification_deliveries([delivery])

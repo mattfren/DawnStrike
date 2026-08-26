@@ -413,13 +413,34 @@ def canonical_paper_selection_context(
             raise ValueError("paper no-trade selection ticker is inconsistent")
     elif str(selected["ticker"]).upper() == "NO_TRADE":
         raise ValueError("paper selected decision cannot use the no-trade ticker")
-    for field in ("signal_id", "scan_id", "ticker", "market_date"):
-        if not _json_equal(signal_payload.get(field), {
-            "signal_id": selected["signal_id"],
-            "scan_id": selected["scan_id"],
-            "ticker": str(selected["ticker"]).upper(),
-            "market_date": market_date,
-        }[field]):
+    signal_scan_id = str(signal_payload.get("scan_id") or "")
+    selection_scan_id = str(selected["scan_id"])
+    if signal_scan_id != selection_scan_id:
+        from intraday_scanner.services.luna_research_slate_service import (
+            validated_frozen_selection_signal,
+        )
+
+        frozen_signal = validated_frozen_selection_signal(
+            dict(selection),
+            market_date=market_date,
+            allowed_cohorts=("official_telegram",),
+        )
+        if frozen_signal is None or not _json_equal(frozen_signal, signal_payload):
+            raise ValueError(
+                "paper selection signal scan conflicts without exact frozen-slate lineage"
+            )
+    for field in ("signal_id", "ticker", "market_date"):
+        signal_value = signal_payload.get(field)
+        if field == "signal_id":
+            signal_value = signal_value or signal_payload.get("signal_key")
+        if not _json_equal(
+            signal_value,
+            {
+                "signal_id": selected["signal_id"],
+                "ticker": str(selected["ticker"]).upper(),
+                "market_date": market_date,
+            }[field],
+        ):
             raise ValueError(f"paper selection signal {field} conflicts with identity")
 
     delivery_fields = (
