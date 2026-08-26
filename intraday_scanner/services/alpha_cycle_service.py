@@ -16,6 +16,7 @@ from intraday_scanner.alpha.alert_gate import apply_alert_gates
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION, AlphaModel
 from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.performance_truth import build_truth_report
+from intraday_scanner.alpha.plan_constructor import COMPLETE, construct_alphaops_v5_plan
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
@@ -1610,7 +1611,7 @@ def _number(value: Any) -> float | None:
 
 def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int) -> dict[str, Any]:
     strategy_id, strategy_version = alphaops_strategy_contract(timestamp)
-    return {
+    payload = {
         **row,
         "strategy_id": str(row.get("strategy_id") or strategy_id),
         "strategy_version": str(row.get("strategy_version") or strategy_version),
@@ -1621,6 +1622,29 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         "telegram_key": f"alpha:{scan_id}:{rank}:{row.get('ticker')}",
         "alert_sent": False,
     }
+    if payload["strategy_id"] == "alphaops_v5":
+        plan = construct_alphaops_v5_plan(payload, decision_at=timestamp)
+        payload["alphaops_market_structure_plan"] = plan.to_dict()
+        payload["plan_hash_sha256"] = plan.plan_hash_sha256
+        payload["market_structure_plan"] = plan.status == COMPLETE
+        payload["entry_observation_provenance"] = plan.status == COMPLETE
+        payload["stop_observation_provenance"] = plan.status == COMPLETE
+        payload["target_observation_provenance"] = plan.status == COMPLETE
+        payload["plan_levels_frozen"] = plan.status == COMPLETE
+        payload["plan_construction_status"] = plan.status
+        payload["plan_construction_reason"] = plan.reason
+        if plan.status == COMPLETE:
+            # These are the already-frozen values, carried forward unchanged
+            # for downstream receipts and alert gates.
+            payload["entry_watch_level"] = plan.entry
+            payload["breakout_trigger"] = plan.entry
+            payload["invalidation_level"] = plan.stop
+            payload["invalidation"] = plan.stop
+            payload["target_1"] = plan.target
+            payload["first_target"] = plan.target
+            payload["target_basis_kind"] = plan.target_basis_kind
+            payload["target_derived_from_risk"] = False
+    return payload
 
 
 def _apply_strategy_decision_receipts(

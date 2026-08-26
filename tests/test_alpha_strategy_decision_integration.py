@@ -114,13 +114,13 @@ def test_receipt_integration_covers_supported_rows_after_legacy_rows(tmp_path, m
         source_summary={"run_id": "source-run-1"},
     )
 
-    assert stats["computed"] == 2
+    assert stats["computed"] == 3
     assert stats["resolution_candidates"] == 1
-    assert stats["resolution_deferred"] == 1
-    assert stats["uncovered_candidates"] == 1
+    assert stats["resolution_deferred"] == 2
+    assert stats["uncovered_candidates"] == 0
     assert first["receipt_id"].startswith("sdr-")
     assert second["receipt_id"].startswith("sdr-")
-    assert len(store.load_strategy_decision_receipts()) == 2
+    assert len(store.load_strategy_decision_receipts()) == 3
 
 
 def test_receipt_resolution_orders_supported_candidates_and_respects_budget(

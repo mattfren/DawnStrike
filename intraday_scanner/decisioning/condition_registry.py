@@ -342,6 +342,46 @@ _STRATEGY_CONDITIONS: dict[str, tuple[tuple[str, ConditionCategory, str, bool, b
             True,
         ),
     ),
+    # AlphaOps v5 is a first-class prospective strategy.  Its structural plan
+    # conditions are intentionally explicit: a legacy/fixed-RR row cannot
+    # silently acquire current v5 eligibility.
+    "alphaops_v5": (
+        (
+            "market_structure_plan",
+            ConditionCategory.STRATEGY_CORE,
+            "A frozen market-structure plan exists",
+            True,
+            True,
+        ),
+        (
+            "entry_observation_provenance",
+            ConditionCategory.STRATEGY_CORE,
+            "Entry level has a completed source observation",
+            True,
+            True,
+        ),
+        (
+            "stop_observation_provenance",
+            ConditionCategory.STRATEGY_CORE,
+            "Stop level has a completed source observation",
+            True,
+            True,
+        ),
+        (
+            "target_observation_provenance",
+            ConditionCategory.STRATEGY_CORE,
+            "Target level has a completed source observation",
+            True,
+            True,
+        ),
+        (
+            "plan_levels_frozen",
+            ConditionCategory.STRATEGY_CORE,
+            "Entry, stop, and target remain unchanged after freeze",
+            True,
+            True,
+        ),
+    ),
 }
 
 

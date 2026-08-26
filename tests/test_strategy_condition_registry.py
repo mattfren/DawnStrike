@@ -6,8 +6,8 @@ from intraday_scanner.decisioning.condition_registry import (
 from intraday_scanner.decisioning.contracts import ConditionCategory
 
 
-def test_registry_contains_all_nine_strategies() -> None:
-    assert len(strategy_ids()) == 9
+def test_registry_contains_all_universal_strategies() -> None:
+    assert len(strategy_ids()) == 10
     assert {row.strategy_id for row in build_condition_registry()} == set(strategy_ids())
     assert all(registry_for_strategy(strategy) for strategy in strategy_ids())
 

@@ -11,6 +11,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
+from intraday_scanner.alpha.plan_constructor import (
+    COMPLETE,
+    construct_alphaops_v5_plan,
+)
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.decisioning.contracts import (
     ConditionResult,
@@ -55,6 +59,51 @@ class StrategyDecisionService:
         if not strategy_id:
             raise ValueError("candidate strategy_id is required")
         specs = registry_for_strategy(strategy_id)
+        # AlphaOps v5 levels must be frozen and source-bound before any
+        # receipt condition (including reward/risk) is evaluated.  Keep this
+        # in the receipt boundary as a second line of defence for callers that
+        # do not use the normal alpha cycle.
+        candidate_payload = dict(candidate)
+        if strategy_id == "alphaops_v5":
+            plan = construct_alphaops_v5_plan(candidate_payload, decision_at=decision_at)
+            declared_plan = candidate.get("alphaops_market_structure_plan")
+            plan_integrity = True
+            if isinstance(declared_plan, Mapping):
+                declared_hash = str(
+                    declared_plan.get("plan_hash_sha256")
+                    or candidate.get("plan_hash_sha256")
+                    or ""
+                ).strip()
+                plan_integrity = not declared_hash or declared_hash == plan.plan_hash_sha256
+            elif candidate.get("plan_hash_sha256"):
+                plan_integrity = str(candidate.get("plan_hash_sha256")).strip() == plan.plan_hash_sha256
+            candidate_payload["alphaops_market_structure_plan"] = plan.to_dict()
+            candidate_payload["plan_hash_sha256"] = plan.plan_hash_sha256
+            candidate_payload["market_structure_plan"] = plan.status == COMPLETE and plan_integrity
+            candidate_payload["entry_observation_provenance"] = plan.status == COMPLETE and plan_integrity
+            candidate_payload["stop_observation_provenance"] = plan.status == COMPLETE and plan_integrity
+            candidate_payload["target_observation_provenance"] = plan.status == COMPLETE and plan_integrity
+            prior_levels = (
+                _number(candidate.get("entry_reference") or candidate.get("entry_watch_level")),
+                _number(candidate.get("stop") or candidate.get("invalidation_level")),
+                _number(candidate.get("target") or candidate.get("target_1")),
+            )
+            candidate_payload["plan_levels_frozen"] = plan.status == COMPLETE and plan_integrity and (
+                prior_levels == (None, None, None)
+                or prior_levels == (plan.entry, plan.stop, plan.target)
+            )
+            if plan.status == COMPLETE:
+                # The values are intentionally copied from the frozen plan;
+                # no post-freeze level selection occurs in this service.
+                candidate_payload["entry_reference"] = plan.entry
+                candidate_payload["entry_watch_level"] = plan.entry
+                candidate_payload["stop"] = plan.stop
+                candidate_payload["invalidation_level"] = plan.stop
+                candidate_payload["target"] = plan.target
+                candidate_payload["target_1"] = plan.target
+                candidate_payload["target_basis_kind"] = plan.target_basis_kind
+                candidate_payload["target_derived_from_risk"] = False
+        candidate = candidate_payload
         now = (
             datetime.now(UTC).replace(microsecond=0).isoformat()
             if decision_at is None
