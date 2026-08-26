@@ -14,6 +14,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from intraday_scanner.config import ScannerConfig
+from intraday_scanner.errors import DataProviderError
+from intraday_scanner.models import SNAPSHOT_COLUMNS
+from intraday_scanner.providers.alpaca_provider import AlpacaProvider
+
 SCHEMA_VERSION = "dawnstrike.luna.core_universe.v1"
 CORE_INDEXES = ("S&P 500", "Nasdaq-100")
 DEFAULT_MAX_AGE_DAYS = 31
@@ -30,6 +35,7 @@ def build_core_universe_contract(
     *,
     observed_at: str | datetime | None = None,
     effective_date: str | None = None,
+    market_date: str | None = None,
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
 ) -> dict[str, Any]:
     """Build an auditable union contract without inventing missing membership.
@@ -53,7 +59,13 @@ def build_core_universe_contract(
             loaded.append(item)
     source_ids = sorted({str(m.get("source_id") or m.get("id") or "").strip() for m in loaded if str(m.get("source_id") or m.get("id") or "").strip()})
     source_uris = sorted({str(m.get("source_uri") or m.get("uri") or m.get("url") or "").strip() for m in loaded if str(m.get("source_uri") or m.get("uri") or m.get("url") or "").strip()})
+    requested_date = _date_text(market_date or effective_date)
     members_by_symbol: dict[str, dict[str, Any]] = {}
+    index_symbols: dict[str, set[str]] = {index: set() for index in CORE_INDEXES}
+    index_expected: dict[str, int | None] = {index: None for index in CORE_INDEXES}
+    index_declared_complete: set[str] = set()
+    index_dates_ok: dict[str, bool] = {index: True for index in CORE_INDEXES}
+    index_seen: set[str] = set()
     observed_dates: list[datetime] = []
     effective_dates: list[str] = []
     complete = bool(loaded) and not source_errors
@@ -70,6 +82,8 @@ def build_core_universe_contract(
             stale = stale or (now - observed).total_seconds() > max(0, max_age_days) * 86400
         if effective:
             effective_dates.append(effective)
+        if requested_date and (effective is None or effective > requested_date):
+            complete = False
         explicit = str(manifest.get("completeness_verdict") or "").upper()
         if explicit and explicit not in {"COMPLETE", "PASS", "READY"}:
             complete = False
@@ -88,6 +102,26 @@ def build_core_universe_contract(
             complete = False
             continue
         manifest_index = manifest.get("index_name") or manifest.get("index")
+        declared = manifest.get("expected_counts")
+        if isinstance(declared, dict):
+            for raw_index, count in declared.items():
+                index = _index_name(raw_index)
+                parsed_count = _positive_int(count)
+                if index and parsed_count is not None:
+                    index_expected[index] = parsed_count
+                    index_seen.add(index)
+        manifest_expected = _positive_int(manifest.get("expected_count"))
+        manifest_index_name = _index_name(manifest_index)
+        equivalent = manifest.get("completeness_by_index") or manifest.get("index_completeness")
+        if isinstance(equivalent, dict):
+            for raw_index, verdict in equivalent.items():
+                if _index_name(raw_index) and str(verdict).upper() in {"COMPLETE", "PASS", "READY"}:
+                    index_declared_complete.add(_index_name(raw_index))
+        if manifest_index_name and explicit in {"COMPLETE", "PASS", "READY"}:
+            index_declared_complete.add(manifest_index_name)
+        if manifest_index_name and manifest_expected is not None:
+            index_expected[manifest_index_name] = manifest_expected
+            index_seen.add(manifest_index_name)
         for record in records:
             if not isinstance(record, dict):
                 complete = False
@@ -106,20 +140,52 @@ def build_core_universe_contract(
             if not normalized_indexes:
                 continue
             row = members_by_symbol.setdefault(symbol, {"symbol": symbol, "index_memberships": [], "sources": []})
+            if requested_date:
+                valid_from = _date_text(record.get("valid_from") or effective)
+                valid_to = _date_text(record.get("valid_to"))
+                if valid_from is None or valid_from > requested_date or (valid_to and requested_date > valid_to):
+                    complete = False
+                    for index in normalized_indexes:
+                        index_dates_ok[index] = False
+                    continue
             row["index_memberships"] = sorted(set(row["index_memberships"]) | set(normalized_indexes))
             row["sources"] = sorted(set(row["sources"]) | {value for value in (source_id, source_uri) if value})
             row["observed_at"] = max(str(row.get("observed_at") or ""), observed.isoformat() if observed else "")
             row["effective_date"] = max(str(row.get("effective_date") or ""), effective or "")
+            for index in normalized_indexes:
+                index_symbols[index].add(symbol)
+                index_seen.add(index)
     if effective_date:
         requested_effective = _date_text(effective_date)
         if requested_effective is None:
             complete = False
         else:
             effective_dates.append(requested_effective)
+    index_verdicts: dict[str, dict[str, Any]] = {}
+    for index in CORE_INDEXES:
+        expected = index_expected[index]
+        observed = len(index_symbols[index])
+        has_index = index in index_seen or observed > 0
+        count_complete = (
+            expected is not None and observed == expected
+        ) or (expected is None and index in index_declared_complete and observed > 0)
+        freshness = "STALE" if stale else "FRESH" if observed_dates else "UNKNOWN"
+        index_complete = has_index and count_complete and index_dates_ok[index] and freshness == "FRESH"
+        index_verdicts[index] = {
+            "status": "READY" if index_complete else "DATA_UNAVAILABLE",
+            "expected_count": expected,
+            "observed_unique_count": observed,
+            "count_verdict": "PASS" if count_complete else "FAIL",
+            "completeness_basis": "declared_source_complete" if expected is None and count_complete else "expected_count",
+            "freshness_verdict": freshness,
+            "effective_date_verdict": "PASS" if index_dates_ok[index] and requested_date else "UNKNOWN",
+            "completeness_verdict": "COMPLETE" if index_complete else "INCOMPLETE",
+        }
     observed_text = max((item.isoformat() for item in observed_dates), default=None)
     effective_text = max(effective_dates, default=None)
     freshness_verdict = "STALE" if stale else "FRESH" if observed_dates else "UNKNOWN"
-    completeness_verdict = "COMPLETE" if complete and members_by_symbol else "INCOMPLETE"
+    all_indexes_complete = all(row["status"] == "READY" for row in index_verdicts.values())
+    completeness_verdict = "COMPLETE" if complete and members_by_symbol and all_indexes_complete else "INCOMPLETE"
     status = "READY" if completeness_verdict == "COMPLETE" and freshness_verdict == "FRESH" else "DATA_UNAVAILABLE"
     content = {
         "schema_version": SCHEMA_VERSION,
@@ -131,6 +197,8 @@ def build_core_universe_contract(
         "source_uri": source_uris[0] if len(source_uris) == 1 else None,
         "members": sorted(members_by_symbol.values(), key=lambda row: row["symbol"]),
         "membership_count": len(members_by_symbol),
+        "index_verdicts": index_verdicts,
+        "requested_market_date": requested_date,
         "completeness_verdict": completeness_verdict,
         "freshness_verdict": freshness_verdict,
         "completeness": completeness_verdict,
@@ -163,6 +231,115 @@ def write_core_universe_contract(contract: dict[str, Any], output_path: str | Pa
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def discover_core_universe_rows(
+    contract: dict[str, Any],
+    *,
+    config: ScannerConfig,
+    provider: Any | None = None,
+    max_symbols: int = 600,
+) -> dict[str, Any]:
+    """Collect current read-only snapshots for READY core members.
+
+    Discovery failure is returned as a lane-local blocker; callers retain the
+    existing mover rows.  No row is synthesized from membership alone.
+    """
+
+    if str(contract.get("status") or "") != "READY":
+        return {"status": "DATA_UNAVAILABLE", "rows": [], "reason": str(contract.get("reason") or "core universe contract unavailable"), "requested_count": 0, "returned_count": 0}
+    members = list(contract.get("members") or [])[: max(int(max_symbols), 0)]
+    symbols = [canonical_symbol(row.get("symbol") or row.get("ticker")) for row in members]
+    symbols = [symbol for symbol in symbols if symbol]
+    if not symbols:
+        return {"status": "DATA_UNAVAILABLE", "rows": [], "reason": "core universe has no members", "requested_count": 0, "returned_count": 0}
+    active_provider = provider or AlpacaProvider(config)
+    try:
+        if hasattr(active_provider, "validate_credentials"):
+            active_provider.validate_credentials()
+        snapshots = active_provider.get_premarket_snapshot(symbols, config)
+    except (DataProviderError, OSError, TypeError, ValueError) as exc:
+        return {"status": "BLOCKED_EXTERNAL", "rows": [], "reason": str(exc), "requested_count": len(symbols), "returned_count": 0}
+    memberships = {canonical_symbol(row.get("symbol") or row.get("ticker")): list(row.get("index_memberships") or []) for row in members}
+    rows: list[dict[str, Any]] = []
+    for snapshot in snapshots or []:
+        row = snapshot.to_dict() if hasattr(snapshot, "to_dict") else dict(snapshot)
+        ticker = canonical_symbol(row.get("ticker"))
+        if ticker not in memberships:
+            continue
+        row["discovery_context"] = "luna_core:" + ",".join(memberships[ticker])
+        row["universe_lane"] = "core"
+        row["core_universe_memberships"] = memberships[ticker]
+        rows.append(row)
+    return {
+        "status": "READY" if rows else "DATA_UNAVAILABLE",
+        "rows": rows,
+        "reason": "" if rows else "core snapshot provider returned no usable rows",
+        "requested_count": len(symbols),
+        "returned_count": len(rows),
+    }
+
+
+def merge_core_universe_rows(
+    mover_rows: Iterable[dict[str, Any]], core_rows: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge lanes by ticker while retaining mover precedence and core metadata."""
+
+    merged: dict[str, dict[str, Any]] = {}
+    for raw in [*(mover_rows or []), *(core_rows or [])]:
+        row = dict(raw)
+        ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
+        if not ticker:
+            continue
+        row["ticker"] = ticker
+        if ticker not in merged:
+            merged[ticker] = row
+            continue
+        current = merged[ticker]
+        if row.get("core_universe_memberships"):
+            current["core_universe_memberships"] = sorted(set(current.get("core_universe_memberships") or []) | set(row["core_universe_memberships"]))
+            current["universe_lane"] = "mover+core"
+            current["discovery_context"] = ";".join(filter(None, {str(current.get("discovery_context") or ""), "luna_core:" + ",".join(current["core_universe_memberships"])}))
+    return list(merged.values())
+
+
+def rank_core_universe_rows(
+    rows: Iterable[dict[str, Any]], *, max_rows: int = 100
+) -> list[dict[str, Any]]:
+    """Cheap core-lane eligibility/rank independent of mover gap predicates."""
+
+    eligible: list[dict[str, Any]] = []
+    for raw in rows or []:
+        row = dict(raw)
+        try:
+            price = float(row.get("premarket_price") or 0)
+            volume = float(row.get("premarket_volume") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or volume <= 0 or row.get("stale_data_flag"):
+            continue
+        row["universe_lane"] = "core"
+        row["core_lane_eligible"] = True
+        row["core_lane_score"] = round(float(row.get("dollar_volume") or price * volume), 2)
+        eligible.append(row)
+    return sorted(
+        eligible,
+        key=lambda row: (float(row.get("core_lane_score") or 0), canonical_symbol(row.get("ticker"))),
+        reverse=True,
+    )[: max(int(max_rows), 0)]
+
+
+def write_snapshot_rows(rows: Iterable[dict[str, Any]], output_path: str | Path) -> Path:
+    import csv
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in SNAPSHOT_COLUMNS})
     return path
 
 
@@ -215,6 +392,14 @@ def _date_text(value: Any) -> str | None:
         return None
 
 
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _unavailable_reasons(loaded: list[dict[str, Any]], complete: bool, stale: bool, has_members: bool) -> list[str]:
     reasons: list[str] = []
     if not loaded:
@@ -234,4 +419,4 @@ def _hash(value: dict[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-__all__ = ["CORE_INDEXES", "SCHEMA_VERSION", "build_core_universe_contract", "canonical_symbol", "read_core_universe_manifest", "write_core_universe_contract"]
+__all__ = ["CORE_INDEXES", "SCHEMA_VERSION", "build_core_universe_contract", "canonical_symbol", "discover_core_universe_rows", "merge_core_universe_rows", "rank_core_universe_rows", "read_core_universe_manifest", "write_core_universe_contract", "write_snapshot_rows"]

@@ -254,9 +254,7 @@ def format_alpha_watch(
     candidates = [
         row
         for row in signals
-        if row.get("can_alert")
-        or str(row.get("publication_tier") or "")
-        == "RANKED_RESEARCH_CANDIDATE"
+        if _telegram_candidate_allowed(row)
     ][:5]
     official_candidates = [
         row
@@ -295,7 +293,8 @@ def format_alpha_watch(
         lines.append(
             f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
             f"{format_score(row.get('alpha_score'))} | "
-            f"{_text(row.get('review_label') or row.get('edge_bucket'), 'n/a')}"
+            f"{_text(row.get('review_label') or row.get('edge_bucket'), 'n/a')} | "
+            f"Tier {_text(row.get('publication_tier'), 'OFFICIAL')}"
         )
         lines.append(
             f"   Trigger {format_price(row.get('entry_trigger') or row.get('breakout_trigger'))} | "
@@ -323,7 +322,11 @@ def format_alpha_watch(
         )
         if isinstance(reasons, list):
             reasons = "; ".join(str(item) for item in reasons)
-        lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reasons), 100)}")
+        lines.append(
+            f"- {_text(row.get('ticker'), 'n/a')}: "
+            f"Tier {_text(row.get('publication_tier'), 'RANKED_RESEARCH_CANDIDATE')} | "
+            f"{_truncate(str(reasons), 100)}"
+        )
         for receipt_line in _decision_receipt_lines(row):
             lines.append(f"  {receipt_line}")
     lines.extend(["", "NO TRADE / BLOCKED REASONS"])
@@ -385,6 +388,7 @@ def format_alpha_no_trade(
         lines.append(
             f"{index}) {_text(row.get('ticker'), 'n/a')} — Alpha "
             f"{format_score(row.get('alpha_score'))} | "
+            f"Tier {_text(row.get('publication_tier'), 'RANKED_RESEARCH_CANDIDATE')} | "
             f"Gap {format_percent(row.get('gap_pct'))} | "
             f"{format_score(row.get('reward_risk_ratio'))}R"
         )
@@ -686,6 +690,35 @@ def _number(value: Any) -> float | None:
         return float(text) * multiplier
     except ValueError:
         return None
+
+
+def _telegram_candidate_allowed(row: dict[str, Any]) -> bool:
+    tier = str(row.get("publication_tier") or "")
+    if tier:
+        return tier in {
+            "RANKED_RESEARCH_CANDIDATE",
+            "PAPER_PLAN_QUALIFIED",
+            "WAITING_CURRENT_CHECKS",
+            "ALERTABLE_PAPER_ENTRY",
+        }
+    if not row.get("can_alert"):
+        return False
+    for key in (
+        "hard_avoid_reasons",
+        "hard_veto_reasons",
+        "hard_no_trade_reason",
+        "stale",
+        "stale_data_flag",
+        "fabricated",
+        "is_fabricated",
+        "unsafe",
+    ):
+        value = row.get(key)
+        if value is True or (isinstance(value, str) and value.strip()) or (
+            isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value)
+        ):
+            return False
+    return True
 
 
 def _text(value: Any, default: str = "n/a") -> str:

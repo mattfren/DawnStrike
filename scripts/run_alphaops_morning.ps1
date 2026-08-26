@@ -3,7 +3,8 @@ param(
     [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
-    [string]$Notify = "telegram"
+    [string]$Notify = "telegram",
+    [string]$CoreUniverseManifest = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,10 @@ Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $sourceConfigPath = Join-Path $state "config\web_sources.yaml"
 $outputRoot = Join-Path $state "outputs\alpha_cycle\$MarketDate"
+$defaultCoreUniverseManifest = Join-Path $state "config\luna_core_universe.json"
+if (-not $CoreUniverseManifest -and (Test-Path -LiteralPath $defaultCoreUniverseManifest -PathType Leaf)) {
+    $CoreUniverseManifest = $defaultCoreUniverseManifest
+}
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
@@ -107,9 +112,11 @@ try {
         $priorAlphaCyclePath = Move-DawnstrikePriorAlphaCycleArtifact `
             -ArtifactPath $alphaCyclePath `
             -ArchiveRoot (Join-Path $outputRoot "attempt_archive")
+        $alphaArguments = @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify)
+        if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
         $alphaCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify) `
+            -ArgumentList $alphaArguments `
             -LogRoot $logRoot `
             -LogName "alpha_morning-$MarketDate"
         Restore-DawnstrikePriorAlphaCycleArtifact `

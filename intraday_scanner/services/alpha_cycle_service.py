@@ -70,7 +70,11 @@ from intraday_scanner.services.learning_service import (
 )
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
+    discover_core_universe_rows,
+    merge_core_universe_rows,
+    rank_core_universe_rows,
     write_core_universe_contract,
+    write_snapshot_rows,
 )
 from intraday_scanner.services.premarket_enrichment_service import enrich_premarket_rows
 from intraday_scanner.services.price_observation_service import collect_price_observations
@@ -145,6 +149,7 @@ def alpha_cycle(
     core_universe = build_core_universe_contract(
         core_universe_manifest,
         observed_at=as_of or datetime.now(timezone.utc),
+        market_date=(as_of or datetime.now(timezone.utc)).date().isoformat(),
     )
     write_core_universe_contract(core_universe, output_dir / "core_universe_contract.json")
     session_gate = _scheduled_session_gate(notify=notify, as_of=as_of)
@@ -180,6 +185,12 @@ def alpha_cycle(
         print_rows=False,
     )
     source_summary = dict(collection.get("source_summary") or {})
+    source_summary["core_universe"] = {
+        "contract_status": core_universe.get("status"),
+        "contract_membership_count": core_universe.get("membership_count", 0),
+        "contract_hash_sha256": core_universe.get("content_hash_sha256"),
+    }
+    mover_snapshot_count = len(list(collection.get("rows") or []))
     source_reliability = build_source_reliability(
         source_summary,
         outcomes=load_production_alpha_learning_labels(store),
@@ -319,6 +330,38 @@ def alpha_cycle(
     )
     if not fixture_mode:
         scanner_config = _alphaops_scanner_config(scanner_config)
+    core_discovery = (
+        discover_core_universe_rows(core_universe, config=scanner_config)
+        if not fixture_mode
+        else {
+            "status": "BLOCKED_EXTERNAL",
+            "rows": [],
+            "reason": "fixture mode has no current core snapshot provider",
+            "requested_count": int(core_universe.get("membership_count") or 0),
+            "returned_count": 0,
+        }
+    )
+    source_summary["core_universe"] = {
+        **core_discovery,
+        "contract_status": core_universe.get("status"),
+        "contract_membership_count": core_universe.get("membership_count", 0),
+        "contract_hash_sha256": core_universe.get("content_hash_sha256"),
+    }
+    if core_discovery.get("rows"):
+        core_eligible_rows = rank_core_universe_rows(core_discovery["rows"])
+        core_discovery["eligible_count"] = len(core_eligible_rows)
+        merged_rows = merge_core_universe_rows(
+            list(collection.get("rows") or []),
+            core_eligible_rows,
+        )
+        merged_snapshot = write_snapshot_rows(
+            merged_rows,
+            output_dir / "web_collect" / "core_merged_snapshot.csv",
+        )
+        collection["rows"] = merged_rows
+        collection["snapshot_path"] = str(merged_snapshot)
+    else:
+        core_discovery["eligible_count"] = 0
     enrichment = enrich_premarket_rows(
         list(collection.get("rows") or []),
         config=scanner_config,
@@ -349,6 +392,24 @@ def alpha_cycle(
     scan_paths = write_scan_outputs(scan_result, scanner_config.output_dir)
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
+    core_ranked_count = sum(
+        1 for row in ranked if "luna_core" in str(row.get("discovery_context") or "")
+    )
+    core_eligible_count = int(core_discovery.get("eligible_count") or 0)
+    source_summary["lane_counts"] = {
+        "mover": {
+            "member_count": int(source_summary.get("candidate_count") or mover_snapshot_count),
+            "snapshot_count": mover_snapshot_count,
+            "eligible_count": max(len(all_candidates) - core_eligible_count, 0),
+            "ranked_count": max(len(ranked) - core_ranked_count, 0),
+        },
+        "core": {
+            "member_count": int(core_universe.get("membership_count") or 0),
+            "snapshot_count": int(core_discovery.get("returned_count") or 0),
+            "eligible_count": core_eligible_count,
+            "ranked_count": core_ranked_count,
+        },
+    }
     timestamp = scan_result.created_at
     ranked, ranked_sec_summary = _verify_ranked_sec_safety(
         ranked,

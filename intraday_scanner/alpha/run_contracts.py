@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -57,6 +57,17 @@ class AlphaRunContract:
     alertable_trade: int = 0
     official_selected: int = 0
     slate_shortfall_reason: str = ""
+    source_collected_count: int = 0
+    enrichment_selected_count: int = 0
+    primary_verified_count: int = 0
+    ranked_research_count: int = 0
+    paper_plan_qualified_count: int = 0
+    alertable_trade_count: int = 0
+    official_selected_count: int = 0
+    core_universe_status: str = "DATA_UNAVAILABLE"
+    core_universe_count: int = 0
+    core_universe_hash_sha256: str = ""
+    lane_counts: dict[str, dict[str, int]] = field(default_factory=dict)
     schema_version: str = "alphaops.run_contract.v1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +115,30 @@ def build_alpha_run_contract(
             else 0
         ),
     )
+    source_collected = _first_count(
+        source_summary.get("source_collected"),
+        source_summary.get("rows_normalized"),
+        source_summary.get("rows_collected"),
+        source_summary.get("candidate_count"),
+        source_summary.get("symbols_returned"),
+        len(signals),
+    )
+    primary_verified = _first_count(
+        enrichment.get("primary_verified_count"),
+        max(
+            coverage.verified_count
+            - _first_count(enrichment.get("secondary_fallback_count")),
+            0,
+        ),
+    )
+    core = dict(source_summary.get("core_universe") or {})
+    if not core:
+        core = {
+            "contract_status": source_summary.get("core_universe_status"),
+            "contract_membership_count": source_summary.get("core_universe_count"),
+            "contract_hash_sha256": source_summary.get("core_universe_hash_sha256"),
+        }
+    lane_counts = dict(source_summary.get("lane_counts") or {})
     research_symbols = tuple(
         sorted(
             {
@@ -165,28 +200,25 @@ def build_alpha_run_contract(
             dry_run=notification_dry_run,
             override=notification_status_override,
         ),
-        source_collected=_first_count(
-            source_summary.get("source_collected"),
-            source_summary.get("rows_normalized"),
-            source_summary.get("rows_collected"),
-            source_summary.get("candidate_count"),
-            source_summary.get("symbols_returned"),
-            len(signals),
-        ),
+        source_collected=source_collected,
         enrichment_selected=coverage.selected_count,
-        primary_verified=_first_count(
-            enrichment.get("primary_verified_count"),
-            max(
-                coverage.verified_count
-                - _first_count(enrichment.get("secondary_fallback_count")),
-                0,
-            ),
-        ),
+        primary_verified=primary_verified,
         ranked_research=publication["ranked_research"],
         paper_plan_qualified=publication["paper_plan_qualified"],
         alertable_trade=publication["alertable_trade"],
         official_selected=publication["official_selected"],
         slate_shortfall_reason=str(slate.get("slate_shortfall_reason") or ""),
+        source_collected_count=source_collected,
+        enrichment_selected_count=coverage.selected_count,
+        primary_verified_count=primary_verified,
+        ranked_research_count=publication["ranked_research"],
+        paper_plan_qualified_count=publication["paper_plan_qualified"],
+        alertable_trade_count=publication["alertable_trade"],
+        official_selected_count=publication["official_selected"],
+        core_universe_status=str(core.get("contract_status") or core.get("status") or "DATA_UNAVAILABLE"),
+        core_universe_count=max(int(core.get("contract_membership_count") or core.get("membership_count") or 0), 0),
+        core_universe_hash_sha256=str(core.get("contract_hash_sha256") or core.get("content_hash_sha256") or ""),
+        lane_counts=lane_counts,
     )
 
 

@@ -81,11 +81,8 @@ def monitor_alpha_signals(
             label = "TARGET HIT"
         elif trigger and price >= trigger:
             # Tier 1 is a research observation, never an entry authorization.
-            label = (
-                "RESEARCH CONDITION MET"
-                if str(row.get("publication_tier") or "") == "RANKED_RESEARCH_CANDIDATE"
-                else "ENTRY TRIGGERED"
-            )
+            tier = str(row.get("publication_tier") or "")
+            label = "ENTRY TRIGGERED" if tier in {"", "ALERTABLE_PAPER_ENTRY"} else "RESEARCH CONDITION MET"
         events.append({
             "ticker": ticker,
             "current_price": price,

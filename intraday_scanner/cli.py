@@ -444,6 +444,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_morning_parser.add_argument("--out-dir", default="outputs/alpha_morning")
     alpha_morning_parser.add_argument("--notify", default="console")
     alpha_morning_parser.add_argument("--dry-run", action="store_true")
+    alpha_morning_parser.add_argument(
+        "--core-universe-manifest",
+        default=None,
+        help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
+    )
 
     alpha_cycle_parser = subparsers.add_parser(
         "alpha-cycle", help="Run one AlphaOps collect-score-notify cycle"
@@ -453,6 +458,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_cycle_parser.add_argument("--out-dir", default="outputs/alpha_cycle")
     alpha_cycle_parser.add_argument("--notify", default="console")
     alpha_cycle_parser.add_argument("--dry-run", action="store_true")
+    alpha_cycle_parser.add_argument(
+        "--core-universe-manifest",
+        default=None,
+        help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
+    )
 
     alpha_monitor_parser = subparsers.add_parser(
         "alpha-monitor", help="Check latest AlphaOps signals against current prices"
@@ -1766,6 +1776,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         out_dir=args.out_dir,
         notify=args.notify,
         dry_run=args.dry_run,
+        core_universe_manifest=args.core_universe_manifest,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1778,6 +1789,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         out_dir=args.out_dir,
         notify=args.notify,
         dry_run=args.dry_run,
+        core_universe_manifest=args.core_universe_manifest,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

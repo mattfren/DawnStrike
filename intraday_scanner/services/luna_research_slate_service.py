@@ -48,9 +48,11 @@ def build_ranked_research_slate(
         "schema_version": "dawnstrike.luna.ranked_research_slate.v1",
         "target_count": requested,
         "published_count": len(selected),
+        "ranked_research_count": len(selected),
         "slate_shortfall_reason": reason if len(selected) < requested else "",
         "rows": selected,
         "symbols": [str(row["ticker"]) for row in selected],
+        "selection_ids": [str(row["research_selection_id"]) for row in selected],
         "publication_tier": TIER1 if selected else None,
         "research_only": True,
         "broker_execution": "disabled",
@@ -68,7 +70,8 @@ def apply_publication_semantics(
 
     source = [dict(row) for row in (rows or [])]
     slate_rows = list((slate or {}).get("rows") or [])
-    slate_symbols = {str(row.get("ticker") or "").upper() for row in slate_rows}
+    slate_by_symbol = {str(row.get("ticker") or "").upper(): row for row in slate_rows}
+    slate_symbols = set(slate_by_symbol)
     coverage_payload = dict(coverage or {})
     ceiling_block = str(coverage_payload.get("secondary_fallback_status") or "").lower() in {
         "research_only_applied_above_ceiling",
@@ -79,6 +82,9 @@ def apply_publication_semantics(
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
         enriched = dict(row)
         if ticker in slate_symbols and _safe_for_research(row):
+            slate_row = slate_by_symbol[ticker]
+            enriched["research_rank"] = slate_row.get("research_rank")
+            enriched["research_selection_id"] = slate_row.get("research_selection_id")
             enriched["publication_tier"] = TIER1
             enriched["entry_state"] = "RESEARCH_ONLY"
             qualified = _plan_qualified(row) and not ceiling_block
@@ -138,7 +144,7 @@ def _safe_for_research(row: dict[str, Any]) -> bool:
             return False
     if str(row.get("plan_input_status") or "").lower() in {"ineligible_missing_truth", "stale", "ineligible"}:
         return False
-    for key in ("hard_avoid_reasons", "hard_veto_reasons", "no_trade_reason"):
+    for key in ("hard_avoid_reasons", "hard_veto_reasons", "hard_no_trade_reason"):
         value = row.get(key)
         if isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value):
             return False
@@ -148,21 +154,101 @@ def _safe_for_research(row: dict[str, Any]) -> bool:
 
 
 def _plan_qualified(row: dict[str, Any]) -> bool:
-    if row.get("plan_qualified") is True or str(row.get("plan_qualification_status") or "").upper() in {"QUALIFIED", "PASS", "PAPER_PLAN_QUALIFIED"}:
-        return True
-    # Existing Alpha rows only become Tier 2 after their explicit current-check
-    # fields say so; absent fields remain waiting rather than inferred.
-    return str(row.get("current_checks_status") or "").upper() in {"PASS", "CURRENT", "VERIFIED"}
+    if not _static_hard_gates(row) or not _supported_strategy(row):
+        return False
+    receipt = str(
+        row.get("strategy_receipt_status")
+        or row.get("decision_receipt_status")
+        or row.get("receipt_status")
+        or row.get("strategy_receipt_construction_status")
+        or ""
+    ).upper()
+    if receipt != "COMPLETE" or not _immutable_plan_provenance(row):
+        return False
+    entry = _number(row.get("entry_trigger") or row.get("entry"))
+    stop = _number(row.get("invalidation") or row.get("stop") or row.get("invalidation_level"))
+    target = _number(row.get("target_1") or row.get("target") or row.get("first_target"))
+    if entry is None or stop is None or target is None or not (entry > stop > 0 and target > entry):
+        return False
+    if (entry - stop) / entry > 0.15:
+        return False
+    after_cost_rr = _number(
+        row.get("after_cost_reward_risk_ratio")
+        or row.get("reward_risk_ratio_after_cost")
+        or row.get("after_cost_rr")
+    )
+    if after_cost_rr is None and row.get("strategy_receipt_paper_entry_eligible") is True:
+        after_cost_rr = _number(row.get("reward_risk_ratio"))
+    return after_cost_rr is not None and after_cost_rr >= 1.5
 
 
 def _alertable(row: dict[str, Any]) -> bool:
-    return bool(row.get("can_alert")) and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+    return (
+        bool(row.get("can_alert"))
+        and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
+        and _static_hard_gates(row)
+    )
+
+
+def _static_hard_gates(row: dict[str, Any]) -> bool:
+    for key in ("hard_avoid_reasons", "hard_veto_reasons", "hard_no_trade_reason"):
+        value = row.get(key)
+        if (isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value)) or (isinstance(value, str) and value.strip()):
+            return False
+    for key in ("stale", "stale_data_flag", "fabricated", "is_fabricated", "synthetic", "is_synthetic", "unsafe", "unsafe_for_research"):
+        if _truthy(row.get(key)):
+            return False
+    for key in ("current_halt", "halted", "recent_offering", "reverse_split_90d"):
+        if _truthy(row.get(key)):
+            return False
+    for key in ("halt_status", "sec_risk_status", "corporate_action_status", "source_quality_status"):
+        value = str(row.get(key) or "").upper()
+        if value in {"FAIL", "FAILED", "BLOCKED", "UNKNOWN", "NOT_VERIFIED", "HALTED", "RISK"}:
+            return False
+    return True
+
+
+def _supported_strategy(row: dict[str, Any]) -> bool:
+    strategy = str(row.get("strategy_id") or row.get("strategy_version") or "").lower()
+    return strategy in {"alphaops_v4", "alphaops_v5", "alphaops_v6_shadow", "dawnstrike-alphaops-v6-shadow"} or strategy.startswith("dawnstrike-alphaops")
+
+
+def _immutable_plan_provenance(row: dict[str, Any]) -> bool:
+    plan_hash = str(
+        row.get("plan_hash_sha256")
+        or row.get("immutable_plan_hash")
+        or row.get("receipt_hash_sha256")
+        or ""
+    ).lower()
+    if len(plan_hash) != 64 or any(char not in "0123456789abcdef" for char in plan_hash):
+        return False
+    provenance = row.get("plan_provenance") or row.get("plan_source_provenance")
+    if isinstance(provenance, dict):
+        return bool(provenance.get("independent") is True or provenance.get("independently_sourced") is True) and bool(provenance.get("source") or provenance.get("source_id"))
+    if row.get("plan_provenance_hash") and row.get("plan_source_independent") is True:
+        return True
+    condition_results = row.get("condition_results")
+    return isinstance(condition_results, list) and sum(
+        bool(isinstance(item, dict) and (item.get("source_urls") or item.get("source_hashes")))
+        for item in condition_results
+    ) >= 3
+
+
+def _number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
 
 
 def _annotate(row: dict[str, Any], *, rank: int, tier: str) -> dict[str, Any]:
     output = dict(row)
     output["ticker"] = str(output.get("ticker") or output.get("symbol") or "").upper()
     output["research_rank"] = rank
+    output["research_selection_id"] = str(
+        output.get("signal_id") or output.get("signal_key") or f"luna-research:{output['ticker']}:{rank}"
+    )
     output["publication_tier"] = tier
     output["plan_qualification_status"] = "WAITING_CURRENT_CHECKS"
     output["entry_state"] = "RESEARCH_ONLY"
