@@ -16,6 +16,13 @@ from intraday_scanner.alpha.plan_constructor import (
     construct_alphaops_v5_plan,
 )
 from intraday_scanner.alpha.risk_governor import RiskDecision, evaluate_risk
+from intraday_scanner.alpha.episode_identity import (
+    EpisodeIdentity,
+    EpisodeIdentityError,
+    build_episode_identity,
+    canonical_episode_identity,
+    deduplicate_episode_candidates,
+)
 
 __all__ = [
     "ALPHA_MODEL_VERSION",
@@ -32,4 +39,9 @@ __all__ = [
     "construct_alphaops_v5_plan",
     "evaluate_no_trade",
     "evaluate_risk",
+    "EpisodeIdentity",
+    "EpisodeIdentityError",
+    "build_episode_identity",
+    "canonical_episode_identity",
+    "deduplicate_episode_candidates",
 ]

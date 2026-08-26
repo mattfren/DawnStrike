@@ -8,6 +8,7 @@ closed outcome and missing truth is never converted to zero.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -47,6 +48,10 @@ _HASH_FIELDS = (
     "source_artifact_hash_sha256",
     "body_sha256",
     "benchmark_hash_sha256",
+    "fill_truth_hash_sha256",
+    "fill_truth_receipt_hash_sha256",
+    "committed_fill_truth_hash",
+    "close_receipt_hash_sha256",
 )
 _CONFIG_FIELDS = (
     "config_identity",
@@ -95,6 +100,10 @@ class StrategyMissAttributionRow:
     return_pct: float | None
     benchmark_return_pct: float | None
     evidence_hashes: tuple[str, ...]
+    # Optional lifecycle identity.  Aggregate rows from older exports retain
+    # ``None``; explicit child lifecycle records are independently attributable.
+    lifecycle_id: str | None = None
+    episode_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +122,8 @@ class StrategyMissAttributionRow:
             "return_pct": self.return_pct,
             "benchmark_return_pct": self.benchmark_return_pct,
             "evidence_hashes": list(self.evidence_hashes),
+            "lifecycle_id": self.lifecycle_id,
+            "episode_id": self.episode_id,
         }
 
 
@@ -236,19 +247,34 @@ def attribute_strategy_misses(
     benchmarks, benchmark_hashes, benchmark_conflicts = _benchmark_index(included)
 
     attributed: list[StrategyMissAttributionRow] = []
+    seen_lifecycles: set[tuple[str, str, str]] = set()
     for row in included:
-        attributed.append(
-            _attribute_row(
-                row,
-                benchmarks=benchmarks,
-                benchmark_hashes=benchmark_hashes,
-                benchmark_conflicts=benchmark_conflicts,
+        # A portfolio observation can contain both closed and open positions.
+        # Expand only explicit child lifecycle evidence; never allocate an
+        # aggregate return across an unknown number of trades.
+        lifecycle_rows = _expand_lifecycle_rows(row, date_cutoff=cutoff)
+        for lifecycle_row in lifecycle_rows:
+            if lifecycle_row.get("_lifecycle_child"):
+                lifecycle_key = (
+                    _cohort(lifecycle_row),
+                    str(lifecycle_row.get("strategy_id") or "unknown"),
+                    str(lifecycle_row.get("lifecycle_id") or lifecycle_row.get("record_id") or ""),
+                )
+                if lifecycle_key in seen_lifecycles:
+                    continue
+                seen_lifecycles.add(lifecycle_key)
+            attributed.append(
+                _attribute_row(
+                    lifecycle_row,
+                    benchmarks=benchmarks,
+                    benchmark_hashes=benchmark_hashes,
+                    benchmark_conflicts=benchmark_conflicts,
+                )
             )
-        )
     attributed.sort(key=_row_sort_key)
     summaries = _build_summaries(attributed, cutoff)
     return StrategyMissAttributionReport(
-        schema_version="dawnstrike.strategy_miss_attribution.v1",
+        schema_version="dawnstrike.strategy_miss_attribution.v2",
         date_cutoff=cutoff,
         input_row_count=len(normalized),
         included_row_count=len(included),
@@ -360,6 +386,192 @@ def _benchmark_index(
             result[key] = None
             conflicts.add(key)
     return result, {key: tuple(sorted(value)) for key, value in hashes.items()}, conflicts
+
+
+_LIFECYCLE_LIST_FIELDS = (
+    "trade_lifecycles",
+    "lifecycle_trades",
+    "trade_records",
+    "closed_trades",
+    "open_trades",
+    "closed_positions",
+    "open_positions",
+    "positions",
+    "trades",
+)
+_CLOSED_STATES = {"closed", "realized", "complete", "resolved", "filled_and_closed"}
+_OPEN_STATES = {"open", "held", "unrealized", "open_mtm", "pending"}
+
+
+def _expand_lifecycle_rows(
+    row: dict[str, Any],
+    *,
+    date_cutoff: str | None,
+) -> list[dict[str, Any]]:
+    """Return one row per explicit lifecycle, preserving aggregate fallback.
+
+    Older PaperOps exports contain only portfolio-level counts.  Such a mixed
+    row is retained as a single ``mixed_lifecycle_unresolved`` observation; it
+    is deliberately not relabeled as open or closed.  Once a source provides
+    explicit child records, each child is attributed exactly once by its stable
+    lifecycle/trade/position ID (or a canonical content key for legacy rows).
+    """
+
+    payload = row.get("_payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    source: list[Mapping[str, Any]] = []
+    # Prefer the canonical combined list.  Otherwise concatenate named lists,
+    # while de-duplicating by immutable lifecycle IDs below.
+    combined = payload.get("trade_lifecycles") or payload.get("lifecycle_trades")
+    if isinstance(combined, list):
+        source = [item for item in combined if isinstance(item, Mapping)]
+    else:
+        for field in _LIFECYCLE_LIST_FIELDS:
+            values = payload.get(field)
+            if isinstance(values, list):
+                source.extend(item for item in values if isinstance(item, Mapping))
+            values = row.get(field)
+            if isinstance(values, list):
+                source.extend(item for item in values if isinstance(item, Mapping))
+    if not source:
+        # A nested list may be carried directly by a dataclass-like row.
+        for field in _LIFECYCLE_LIST_FIELDS:
+            values = row.get(field)
+            if isinstance(values, list):
+                source.extend(item for item in values if isinstance(item, Mapping))
+    if not source:
+        mixed = (
+            _safe_nonnegative_int(row.get("trade_count")) or 0
+        ) > 0 and (_safe_nonnegative_int(row.get("open_position_count")) or 0) > 0
+        if mixed:
+            unresolved = dict(row)
+            unresolved["_aggregate_mixed_lifecycle"] = True
+            unresolved["_payload"] = {
+                **dict(payload),
+                "record_status": "missing_outcome",
+                "lifecycle_reason": "mixed_lifecycle_child_evidence_missing",
+            }
+            unresolved["record_status"] = "missing_outcome"
+            unresolved["return_pct"] = None
+            return [unresolved]
+        return [row]
+
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    parent_id = str(row.get("record_id") or payload.get("record_id") or "aggregate")
+    for index, child in enumerate(source):
+        child_dict = dict(child)
+        lifecycle_id = _lifecycle_id(child_dict, parent_id, index)
+        if lifecycle_id in seen:
+            continue
+        seen.add(lifecycle_id)
+        expanded = dict(row)
+        expanded.update(child_dict)
+        expanded["record_id"] = lifecycle_id
+        expanded["lifecycle_id"] = lifecycle_id
+        expanded["_lifecycle_child"] = True
+        # Child payload is retained and includes parent source identity.  This
+        # gives retries the same row identity without mutating the source.
+        expanded["_payload"] = {
+            **dict(payload),
+            **child_dict,
+            "lifecycle_id": lifecycle_id,
+            "parent_record_id": parent_id,
+        }
+        state = _lifecycle_state(child_dict)
+        if state:
+            expanded["record_status"] = state
+            # Parent aggregate counts must never leak into a child state.  A
+            # closed child is eligible even when sibling positions remain open.
+            expanded["open_position_count"] = 1 if state == "open_mtm" else 0
+            expanded["trade_count"] = 1 if state == "closed" else 0
+            if state == "missing_outcome":
+                expanded["return_pct"] = None
+        if "return_pct" not in child_dict:
+            expanded["return_pct"] = None
+        if expanded.get("return_pct") is None:
+            for key in ("net_return_pct", "realized_return_pct", "gross_return_pct"):
+                if child_dict.get(key) is not None:
+                    expanded["return_pct"] = child_dict[key]
+                    break
+        if _child_close_after_cutoff(child_dict, date_cutoff):
+            # A late close is future evidence relative to this run.  Keep it
+            # visibly open/pending and discard its future return.
+            expanded["record_status"] = "open_mtm"
+            expanded["open_position_count"] = 1
+            expanded["trade_count"] = 0
+            expanded["return_pct"] = None
+            expanded["_payload"]["outcome_status"] = "open_mtm"
+            expanded["_payload"]["outcome_reason"] = "close_after_cutoff"
+        output.append(expanded)
+    return output or [row]
+
+
+def _lifecycle_id(child: Mapping[str, Any], parent_id: str, index: int) -> str:
+    for field in ("lifecycle_id", "trade_id", "position_id", "episode_id", "record_id"):
+        value = str(child.get(field) or "").strip()
+        if value:
+            return value
+    # A content identity avoids duplicate attribution when a retry repeats a
+    # legacy child without an explicit ID.
+    basis = json.dumps(dict(child), sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+    return f"lifecycle:{digest or index}"
+
+
+def _lifecycle_state(child: Mapping[str, Any]) -> str:
+    value = child.get("record_status")
+    if value is None:
+        value = child.get("status") or child.get("lifecycle_state") or child.get("outcome_status")
+    state = str(getattr(value, "value", value) or "").strip().lower()
+    # A fill/entry event is not a closed trade.  Without a committed FillTruth
+    # receipt it remains unresolved, even when a retry supplied a price or a
+    # stale child status says ``closed``.
+    if child.get("fill_id") and not any(
+        str(child.get(field) or "").strip()
+        for field in (
+            "fill_truth_hash_sha256",
+            "fill_truth_receipt_hash_sha256",
+            "committed_fill_truth_hash",
+            "source_bar_hash_sha256",
+        )
+    ):
+        return "missing_outcome"
+    if state in _CLOSED_STATES:
+        return "closed"
+    if state in _OPEN_STATES:
+        return "open_mtm"
+    if state in {"missing", "missing_outcome", "unresolved", "quarantined", "data_unavailable"}:
+        return "missing_outcome"
+    if state in {"filled", "entry_filled", "fill", "entry"}:
+        return "missing_outcome"
+    # Presence of a close timestamp is explicit close evidence even if older
+    # exports omitted a status field.
+    if any(
+        str(child.get(field) or "").strip()
+        for field in ("closed_at", "close_time", "exit_time", "exit_timestamp")
+    ):
+        return "closed"
+    return state
+
+
+def _child_close_after_cutoff(child: Mapping[str, Any], cutoff: str | None) -> bool:
+    if not cutoff:
+        return False
+    for field in (
+        "closed_at",
+        "close_time",
+        "exit_time",
+        "exit_timestamp",
+        "close_date",
+        "exit_date",
+        "trade_date",
+        "market_date",
+    ):
+        value = str(child.get(field) or "").strip()
+        if value and value[:10] > cutoff:
+            return True
+    return False
 
 
 def _attribute_row(
@@ -490,6 +702,8 @@ def _attribute_row(
         return_pct=return_pct,
         benchmark_return_pct=benchmark,
         evidence_hashes=tuple(sorted(hashes)),
+        lifecycle_id=_optional_text(row, payload, "lifecycle_id"),
+        episode_id=_optional_text(row, payload, "episode_id"),
     )
 
 

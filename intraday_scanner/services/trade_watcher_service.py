@@ -8,12 +8,17 @@ limits, and credentials are approved separately.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.episode_identity import (
+    EpisodeIdentityError,
+    deduplicate_episode_candidates,
+)
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
@@ -435,6 +440,36 @@ def _watch_signals(
             "missing watchable historical signals: "
             + ", ".join(sorted(missing_signal_ids))
         )
+    # Apply the frozen episode boundary immediately before watcher intent
+    # creation. Legacy selections without an episode contract remain compatible;
+    # opted-in rows are deduplicated and conflicting directions fail closed.
+    candidate_rows = [
+        {
+            **historical_by_id[str(selection.get("signal_id") or "")],
+            **selection,
+            "payload_json": selection.get("payload_json") or {},
+        }
+        for selection in selected_rows
+    ]
+    identity_ready = [row for row in candidate_rows if _has_episode_identity(row)]
+    if identity_ready:
+        if len(identity_ready) != len(candidate_rows):
+            raise SnapshotValidationError(
+                "Selected paper signals mix frozen episode identities with rows "
+                "missing episode truth; intent creation is blocked."
+            )
+        try:
+            deduped = deduplicate_episode_candidates(candidate_rows)
+        except (EpisodeIdentityError, ValueError) as exc:
+            raise SnapshotValidationError(f"Episode identity validation failed: {exc}") from exc
+        if deduped["blocked"]:
+            raise SnapshotValidationError(
+                "Conflicting or incomplete episode candidates are blocked before "
+                "PaperOps intent creation."
+            )
+        selected_rows = list(deduped["selected"])
+        for row in selected_rows:
+            row["episode_dedup_counts"] = dict(deduped["counts"])
     return [
         {
             **historical_by_id[str(selection.get("signal_id") or "")],
@@ -445,9 +480,39 @@ def _watch_signals(
             "decision": selection.get("decision"),
             "selected_at": selection.get("selected_at"),
             "selection_payload_json": selection.get("payload_json") or {},
+            "episode_id": selection.get("episode_id"),
+            "matched_strategy_ids": selection.get("matched_strategy_ids") or [],
+            "primary_strategy_id": selection.get("primary_strategy_id") or "",
+            "episode_dedup_counts": selection.get("episode_dedup_counts") or {},
         }
         for selection in selected_rows
     ]
+
+
+def _has_episode_identity(row: dict[str, Any]) -> bool:
+    payload = row.get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = None
+    payload = payload if isinstance(payload, dict) else {}
+    def value(*keys: str) -> str:
+        for key in keys:
+            raw = row.get(key)
+            if raw in (None, ""):
+                raw = payload.get(key)
+            if raw not in (None, ""):
+                return str(raw).strip()
+        return ""
+    return bool(
+        value("market_date", "trade_date", "date")
+        and value("session_id", "market_session", "session", "run_id", "scan_id")
+        and value("symbol", "ticker", "canonical_symbol")
+        and value("direction", "trade_direction")
+        and value("entry_window", "entry_window_id", "decision_window")
+        and value("frozen_plan_hash", "plan_hash", "plan_hash_sha256")
+    )
 
 
 def _validate_exact_session_selections(
@@ -1128,6 +1193,9 @@ def _intent(
         "source_observed_at": str(observation.get("observed_at") or ""),
         "source_bar_completed_at": str(observation.get("bar_completed_at") or ""),
         "selection_id": str(signal.get("selection_id") or ""),
+        "episode_id": str(signal.get("episode_id") or ""),
+        "matched_strategy_ids": list(signal.get("matched_strategy_ids") or []),
+        "primary_strategy_id": str(signal.get("primary_strategy_id") or ""),
         "strategy_id": str(signal.get("strategy_id") or ALPHAOPS_STRATEGY_ID),
         "strategy_version": str(
             signal.get("strategy_version")
