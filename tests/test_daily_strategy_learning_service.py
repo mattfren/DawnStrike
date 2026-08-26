@@ -93,6 +93,64 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
     assert receipt_path.read_bytes() == receipt_bytes
 
 
+def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanalysis(
+    tmp_path: Path,
+) -> None:
+    first = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-source:2026-08-20",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        analyzer=FixtureAnalyzer(),
+    )
+
+    class RetryMustNotAnalyze:
+        def analyze(self, strategy, context):
+            raise AssertionError("a retry must reuse the frozen hash-valid artifact")
+
+    second = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-source:2026-08-20",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        analyzer=RetryMustNotAnalyze(),
+    )
+
+    assert second["run_id"] == first["run_id"]
+    assert second["idempotent_reused"] is True
+
+
+def test_daily_learning_retry_rejects_tampered_frozen_artifact(tmp_path: Path) -> None:
+    first = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-source:2026-08-20",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        analyzer=FixtureAnalyzer(),
+    )
+    receipt_path = Path(first["receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["code_sha"] = "tampered"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    try:
+        run_daily_strategy_learning(
+            market_date="2026-08-20",
+            cutoff="2026-08-20T22:00:00+00:00",
+            source_identity="fixture-source:2026-08-20",
+            code_sha="fixture-code-sha",
+            out_dir=tmp_path,
+            analyzer=FixtureAnalyzer(),
+        )
+    except ValueError as exc:
+        assert "hash mismatch" in str(exc)
+    else:
+        raise AssertionError("a tampered immutable receipt was reused")
+
+
 def test_daily_learning_rejects_unfrozen_inputs(tmp_path: Path) -> None:
     for kwargs in (
         {"market_date": "2026-08-20", "cutoff": "2026-08-20T22:00:00", "source_identity": "x"},

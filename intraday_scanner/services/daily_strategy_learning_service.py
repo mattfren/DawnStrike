@@ -232,6 +232,79 @@ def _write_json_idempotent(path: Path, payload: Mapping[str, Any]) -> bool:
     return False
 
 
+def _reuse_immutable_artifacts(
+    root: Path,
+    context: DailyLearningContext,
+) -> dict[str, Any] | None:
+    receipt_path = root / "daily_learning_receipt.json"
+    proposal_path = root / "remediation_proposals.json"
+    if not receipt_path.exists() and not proposal_path.exists():
+        return None
+    if not receipt_path.is_file() or not proposal_path.is_file():
+        raise ValueError(f"immutable daily-learning artifact set is incomplete: {root}")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        proposals = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"immutable daily-learning artifact cannot be read: {root}") from exc
+    if not isinstance(receipt, dict) or not isinstance(proposals, dict):
+        raise ValueError(f"immutable daily-learning artifact must be an object: {root}")
+
+    receipt_hash = str(receipt.get("receipt_sha256") or "")
+    receipt_body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    proposal_hash = str(proposals.get("artifact_sha256") or "")
+    proposal_body = {
+        key: value for key, value in proposals.items() if key != "artifact_sha256"
+    }
+    if receipt_hash != _sha256(receipt_body) or proposal_hash != _sha256(proposal_body):
+        raise ValueError(f"immutable daily-learning artifact hash mismatch: {root}")
+
+    expected_identity = {
+        "schema_version": DAILY_LEARNING_SCHEMA,
+        "market_date": context.market_date,
+        "cutoff": context.cutoff,
+        "source_identity": context.source_identity,
+        "source_hash_sha256": context.source_hash_sha256,
+        "code_sha": context.code_sha,
+    }
+    if any(receipt.get(key) != value for key, value in expected_identity.items()):
+        raise ValueError(f"immutable daily-learning invocation identity changed: {root}")
+    if proposals.get("schema_version") != PROPOSAL_SCHEMA or any(
+        proposals.get(key) != receipt.get(key) for key in ("run_id", "market_date", "cutoff")
+    ):
+        raise ValueError(f"immutable daily-learning artifact identity mismatch: {root}")
+    required_safety = {
+        "research_only": True,
+        "automatic_policy_change": False,
+        "automatic_promotion": False,
+        "broker_execution_enabled": False,
+        "missing_outcomes_are_zero": False,
+    }
+    if any(
+        receipt.get(key) is not value or proposals.get(key) is not value
+        for key, value in required_safety.items()
+    ):
+        raise ValueError(f"immutable daily-learning safety boundary mismatch: {root}")
+    if receipt.get("daily_fit_performed") is not False or receipt.get("champion_mutated") is not False:
+        raise ValueError(f"immutable daily-learning receipt is not research-only: {root}")
+
+    return {
+        "status": "complete",
+        "run_id": str(receipt["run_id"]),
+        "market_date": context.market_date,
+        "strategy_count": int(receipt.get("strategy_count") or 0),
+        "proposal_count": int(receipt.get("proposal_count") or 0),
+        "receipt_path": str(receipt_path),
+        "proposals_path": str(proposal_path),
+        "idempotent_reused": True,
+        "research_only": True,
+        "daily_fit_performed": False,
+        "automatic_promotion": False,
+        "broker_execution_enabled": False,
+        "decision_receipt_learning": receipt.get("decision_receipt_learning") or {},
+    }
+
+
 def _as_sequence(value: Any, field: str, strategy_id: str) -> Sequence[Mapping[str, Any]]:
     if value is None:
         return ()
@@ -343,6 +416,10 @@ def run_daily_strategy_learning(
         code_sha=code_sha,
         source_hash_sha256=source_hash,
     )
+    root = Path(out_dir) / context.market_date
+    reused = _reuse_immutable_artifacts(root, context)
+    if reused is not None:
+        return reused
     analyzer = analyzer or EmptyEvidenceAnalyzer()
     strategies = sorted(build_strategy_catalog(), key=lambda item: (item.strategy_id, item.version))
     inventory: list[dict[str, Any]] = []
@@ -387,7 +464,6 @@ def run_daily_strategy_learning(
         "decision_receipt_hash_sha256": _sha256(receipt_learning),
     }
     run_id = "dslearn-" + _sha256(immutable_identity)[:24]
-    root = Path(out_dir) / context.market_date
     proposal_payload = {
         "schema_version": PROPOSAL_SCHEMA,
         "run_id": run_id,
