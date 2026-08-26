@@ -956,28 +956,30 @@ def _seed_selection(
     store.persist_signal_selections([selection])
     if not persist_delivery:
         return
-    store.persist_notification_deliveries(
-        [
-            {
-                "membership_id": "delivery-paper-nova",
-                "selection_id": SELECTION_ID,
-                "scan_id": "scan-paper",
-                "signal_id": SIGNAL_ID,
-                "ticker": "NOVA",
-                "strategy_id": ALPHAOPS_STRATEGY_ID,
-                "strategy_version": ALPHAOPS_STRATEGY_VERSION,
-                "cohort": DELIVERED_COHORT,
-                "decision": "probability_fallback",
-                "selected_at": f"{DAY}T13:10:00+00:00",
-                "event_key": "alphaops:scan-paper:alpha_morning_watch",
-                "channel": "telegram",
-                "delivery_status": "delivered",
-                "attempted_at": f"{DAY}T13:10:05+00:00",
-                "delivered_at": f"{DAY}T13:10:05+00:00",
-                "body_sha256": body_hash,
-            }
-        ]
-    )
+    delivery = {
+        "membership_id": "delivery-paper-nova",
+        "selection_id": SELECTION_ID,
+        "scan_id": "scan-paper",
+        "signal_id": SIGNAL_ID,
+        "ticker": "NOVA",
+        "strategy_id": ALPHAOPS_STRATEGY_ID,
+        "strategy_version": ALPHAOPS_STRATEGY_VERSION,
+        "cohort": DELIVERED_COHORT,
+        "decision": "probability_fallback",
+        "selected_at": f"{DAY}T13:10:00+00:00",
+        "event_key": "alphaops:scan-paper:alpha_morning_watch",
+        "channel": "telegram",
+        "delivery_status": "delivered",
+        "attempted_at": f"{DAY}T13:10:05+00:00",
+        "delivered_at": f"{DAY}T13:10:05+00:00",
+        "body_sha256": body_hash,
+    }
+    delivery["payload_json"] = {
+        **delivery,
+        "body": "1) NOVA - Opportunity",
+        "research_only": True,
+    }
+    store.persist_notification_deliveries([delivery])
 
 
 def _direct_selection() -> dict[str, object]:

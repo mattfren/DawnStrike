@@ -461,18 +461,33 @@ def canonical_paper_selection_context(
         raise ValueError("paper selection lacks Telegram delivery truth")
     if delivered["delivery_status"] != "delivered":
         raise ValueError("paper selection lacks current delivered status")
+    delivery_payload = delivery.get("payload_json")
+    if not isinstance(delivery_payload, Mapping):
+        raise ValueError("paper delivery lacks its immutable payload")
+    for field in delivery_fields:
+        if not _json_equal(delivery_payload.get(field), delivered[field]):
+            raise ValueError(f"paper delivery {field} conflicts with payload")
+    delivered_body = delivery_payload.get("body")
+    if not _nonblank_text(delivered_body):
+        raise ValueError("paper delivery lacks its rendered notification body")
+    rendered_body_hash = hashlib.sha256(str(delivered_body).encode("utf-8")).hexdigest()
+    if not _secure_equal(body_hash, rendered_body_hash):
+        raise ValueError("paper delivery body hash is invalid")
+    if delivery_payload.get("research_only") is not True:
+        raise ValueError("paper delivery is not research-only")
 
     selection_evidence = {
-        "schema_version": "dawnstrike.alphaops.paper_selection_context.v2",
+        "schema_version": "dawnstrike.alphaops.paper_selection_context.v3",
         "selection": selected,
         "delivery": delivered,
+        "delivered_body": delivered_body,
         "signal": signal_payload,
         "decision_payload": decision_payload,
     }
     source_hash = _hash_payload(selection_evidence)
     input_hash = _hash_payload(
         {
-            "schema_version": "dawnstrike.alphaops.paper_selection_input.v2",
+            "schema_version": "dawnstrike.alphaops.paper_selection_input.v3",
             "selection": selected,
             "signal": signal_payload,
             "decision_payload": decision_payload,
@@ -480,7 +495,7 @@ def canonical_paper_selection_context(
     )
     lineage_hash = _hash_payload(
         {
-            "schema_version": "dawnstrike.alphaops.paper_selection_lineage.v2",
+            "schema_version": "dawnstrike.alphaops.paper_selection_lineage.v3",
             "selection_id": selected["selection_id"],
             "scan_id": selected["scan_id"],
             "signal_id": selected["signal_id"],

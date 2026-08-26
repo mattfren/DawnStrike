@@ -214,6 +214,36 @@ def test_raw_watcher_intent_adapter_preserves_columns_and_binds_full_trace(
     ]["bar_completed_at"]
 
 
+@pytest.mark.parametrize("mutation", ("rendered_body", "co_mutated_hashes"))
+def test_paper_selection_recomputes_delivery_body_hash(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store = SQLiteScanStore(tmp_path / f"delivery-body-{mutation}.sqlite")
+    signal = _v5_signal()
+    _persist_selected_signals(store, [signal])
+    selection = deepcopy(
+        store.load_signal_selections(signal_id=str(signal["signal_id"]))[0]
+    )
+    delivery = deepcopy(
+        store.load_notification_deliveries(
+            signal_id=str(signal["signal_id"]),
+            limit=10,
+        )[0]
+    )
+    if mutation == "rendered_body":
+        delivery["payload_json"]["body"] = "forged rendered notification"
+    else:
+        forged_hash = hashlib.sha256(b"forged rendered notification").hexdigest()
+        selection["body_sha256"] = forged_hash
+        selection["payload_json"]["body_sha256"] = forged_hash
+        delivery["body_sha256"] = forged_hash
+        delivery["payload_json"]["body_sha256"] = forged_hash
+
+    with pytest.raises(ValueError, match="body hash"):
+        canonical_paper_selection_context(selection, delivery=delivery)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -1110,18 +1140,20 @@ def test_sourced_capture_allows_explicit_recorded_no_trade(tmp_path: Path) -> No
         },
     }
     store.persist_signal_selections([selection])
-    store.persist_notification_deliveries(
-        [
-            {
-                **selection,
-                "membership_id": "delivery-no-trade",
-                "channel": "telegram",
-                "delivery_status": "delivered",
-                "attempted_at": selected_at,
-                "delivered_at": selected_at,
-            }
-        ]
-    )
+    delivery = {
+        **selection,
+        "membership_id": "delivery-no-trade",
+        "channel": "telegram",
+        "delivery_status": "delivered",
+        "attempted_at": selected_at,
+        "delivered_at": selected_at,
+    }
+    delivery["payload_json"] = {
+        **delivery,
+        "body": "canonical-no-trade",
+        "research_only": True,
+    }
+    store.persist_notification_deliveries([delivery])
 
     result = capture_sourced_alpha_outcomes(
         db_path=db_path,
@@ -1940,9 +1972,8 @@ def _persist_selected_signals(
     store.persist_historical_signals(canonical_signals)
     selections: list[dict[str, Any]] = []
     deliveries: list[dict[str, Any]] = []
-    body_sha256 = hashlib.sha256(
-        f"alpha-outcome-fixture:{batch_scan_id}".encode()
-    ).hexdigest()
+    body = f"alpha-outcome-fixture:{batch_scan_id}"
+    body_sha256 = hashlib.sha256(body.encode()).hexdigest()
     event_key = f"alphaops:{batch_scan_id}:alpha_morning_watch"
     for index, signal in enumerate(canonical_signals, 1):
         signal_id = str(signal["signal_id"])
@@ -1991,14 +2022,20 @@ def _persist_selected_signals(
             },
         }
         selections.append(common)
-        deliveries.append({
+        delivery = {
             **common,
             "membership_id": f"delivery-{signal_id}",
             "channel": "telegram",
             "delivery_status": "delivered",
             "attempted_at": selected_at,
             "delivered_at": selected_at,
-        })
+        }
+        delivery["payload_json"] = {
+            **delivery,
+            "body": body,
+            "research_only": True,
+        }
+        deliveries.append(delivery)
     store.persist_signal_selections(selections)
     store.persist_notification_deliveries(deliveries)
     if authenticated_entry and any(
