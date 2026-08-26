@@ -16,7 +16,11 @@ from intraday_scanner.alpha.alert_gate import apply_alert_gates
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION, AlphaModel
 from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.performance_truth import build_truth_report
-from intraday_scanner.alpha.plan_constructor import COMPLETE, construct_alphaops_v5_plan
+from intraday_scanner.alpha.plan_constructor import (
+    COMPLETE,
+    NO_VALID_PLAN,
+    construct_alphaops_v5_plan,
+)
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
@@ -1633,12 +1637,18 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
         payload["plan_levels_frozen"] = plan.status == COMPLETE
         payload["plan_construction_status"] = (
             "LEGACY_RESEARCH_BASELINE"
-            if payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            if (
+                plan.status == NO_VALID_PLAN
+                and payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            )
             else plan.status
         )
         payload["plan_construction_reason"] = (
             str(payload.get("legacy_plan_reason") or "")
-            if payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            if (
+                plan.status == NO_VALID_PLAN
+                and payload.get("legacy_plan_status") == "LEGACY_RESEARCH_BASELINE"
+            )
             else plan.reason
         )
         if plan.status == COMPLETE:

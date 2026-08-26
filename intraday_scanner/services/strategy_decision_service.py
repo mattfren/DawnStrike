@@ -14,6 +14,7 @@ from typing import Any
 from intraday_scanner.alpha.plan_constructor import (
     COMPLETE,
     construct_alphaops_v5_plan,
+    is_valid_alphaops_v5_plan,
 )
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.decisioning.contracts import (
@@ -66,34 +67,27 @@ class StrategyDecisionService:
         candidate_payload = dict(candidate)
         if strategy_id == "alphaops_v5":
             plan = construct_alphaops_v5_plan(candidate_payload, decision_at=decision_at)
-            declared_plan = candidate.get("alphaops_market_structure_plan")
             plan_integrity = True
-            if isinstance(declared_plan, Mapping):
-                declared_status = str(declared_plan.get("status") or "").strip()
-                declared_hash = str(
+            declared_plan = candidate.get("alphaops_market_structure_plan")
+            expected_contract = plan.to_dict()
+            plan_integrity = is_valid_alphaops_v5_plan(expected_contract)
+            if "alphaops_market_structure_plan" in candidate:
+                declared_hash = (
                     declared_plan.get("plan_hash_sha256")
-                    or candidate.get("plan_hash_sha256")
-                    or ""
-                ).strip()
-                plan_integrity = (
-                    (not declared_status or declared_status == plan.status)
-                    and (not declared_hash or declared_hash == plan.plan_hash_sha256)
+                    if isinstance(declared_plan, Mapping)
+                    else None
                 )
-                for field, expected in (
-                    ("entry", plan.entry),
-                    ("stop", plan.stop),
-                    ("target", plan.target),
-                ):
-                    if field in declared_plan and _number(declared_plan.get(field)) != expected:
-                        plan_integrity = False
-                if (
-                    "target_basis_kind" in declared_plan
-                    and str(declared_plan.get("target_basis_kind") or "")
-                    != plan.target_basis_kind
-                ):
-                    plan_integrity = False
-            elif candidate.get("plan_hash_sha256"):
-                plan_integrity = str(candidate.get("plan_hash_sha256")).strip() == plan.plan_hash_sha256
+                plan_integrity = (
+                    isinstance(declared_plan, Mapping)
+                    and is_valid_alphaops_v5_plan(declared_plan)
+                    and canonical_json(dict(declared_plan))
+                    == canonical_json(expected_contract)
+                    and declared_hash == expected_contract["plan_hash_sha256"]
+                )
+            if "plan_hash_sha256" in candidate:
+                plan_integrity = plan_integrity and (
+                    candidate.get("plan_hash_sha256") == plan.plan_hash_sha256
+                )
             candidate_payload["alphaops_market_structure_plan"] = plan.to_dict()
             candidate_payload["plan_hash_sha256"] = plan.plan_hash_sha256
             candidate_payload["market_structure_plan"] = plan.status == COMPLETE and plan_integrity

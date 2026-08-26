@@ -3,7 +3,10 @@
 The constructor is deliberately separate from reward/risk evaluation.  It
 freezes levels from completed observations first; the cost and risk gates are
 then free to reject the frozen plan.  In particular, a target is never moved
-to make a reward/risk threshold pass.
+to make a reward/risk threshold pass.  Observation ``source_url`` values must
+be public HTTP(S) references or a narrowly scoped ``internal://`` source ID;
+the latter still requires a nonblank source identity, completed timestamps,
+and a SHA-256 source hash.
 """
 
 # ruff: noqa: E501
@@ -11,17 +14,21 @@ to make a reward/risk threshold pass.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
+import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from intraday_scanner.decisioning.contracts import canonical_json
 
 NO_VALID_PLAN = "NO_VALID_PLAN"
 COMPLETE = "COMPLETE"
 LEGACY_RESEARCH_BASELINE = "LEGACY_RESEARCH_BASELINE"
+PLAN_SCHEMA_VERSION = "dawnstrike.alphaops_market_structure_plan.v1"
 SUPPORTED_TARGET_BASES = frozenset(
     {
         "sourced_resistance",
@@ -51,7 +58,43 @@ SUPPORTED_OBSERVATION_KINDS = frozenset(
         "vwap_structure",
     }
 )
+ALLOWED_DERIVATION_POLICIES = frozenset({"identity", "direct_observation"})
 _SHA256 = frozenset("0123456789abcdef")
+_INTERNAL_SOURCE_URL = re.compile(r"^internal://[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$")
+_PLAN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "direction",
+        "entry",
+        "stop",
+        "target",
+        "target_basis_kind",
+        "target_frozen_at",
+        "observations",
+        "plan_hash_sha256",
+        "reason",
+        "research_only",
+        "broker_execution_enabled",
+        "target_frozen_before_reward_risk",
+    }
+)
+_OBSERVATION_FIELDS = frozenset(
+    {
+        "role",
+        "value",
+        "observed_at",
+        "completed_at",
+        "source",
+        "source_hash",
+        "observation_kind",
+        "raw_value",
+        "derivation_policy",
+        "source_url",
+        "observation_hash",
+        "is_complete",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,13 +156,16 @@ class AlphaOpsMarketStructurePlan:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["observations"] = [item.to_dict() for item in self.observations]
+        payload["schema_version"] = PLAN_SCHEMA_VERSION
         payload["target_frozen_before_reward_risk"] = self.is_complete
         return payload
 
     def compute_hash(self) -> str:
-        """Return the constructor-assigned content hash."""
+        """Recompute the hash over the exact emitted payload, minus its hash."""
 
-        return self.plan_hash_sha256
+        payload = self.to_dict()
+        payload.pop("plan_hash_sha256", None)
+        return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
     def canonical_json(self) -> str:
         return canonical_json(self.to_dict())
@@ -158,6 +204,8 @@ def construct_alphaops_v5_plan(
     normalized_direction = str(direction or signal.get("direction") or "long").lower()
     if normalized_direction not in {"long", "short"}:
         return _invalid(normalized_direction, "direction_unknown")
+    if decision_at is not None and _parse_timestamp(decision_at) is None:
+        return _invalid(normalized_direction, "decision_time_invalid")
     declared = signal.get("market_structure_observations") or signal.get("plan_observations")
     observations: dict[str, Any] = dict(declared) if isinstance(declared, Mapping) else {}
     target_candidates = signal.get("target_observations") or signal.get("target_candidates")
@@ -166,37 +214,39 @@ def construct_alphaops_v5_plan(
 
     declared_entry = observations.get("entry")
     declared_stop = observations.get("stop")
+    entry_observation = (
+        declared_entry
+        if isinstance(declared_entry, Mapping)
+        else signal.get("entry_observation")
+    )
+    stop_observation = (
+        declared_stop
+        if isinstance(declared_stop, Mapping)
+        else signal.get("stop_observation")
+    )
+    entry_value = _first(
+        signal,
+        "entry",
+        "entry_reference",
+        "entry_watch_level",
+        "entry_trigger",
+        "breakout_trigger",
+    )
+    if entry_value is None and isinstance(entry_observation, Mapping):
+        entry_value = _first(entry_observation, "value", "price", "level")
+    stop_value = _first(
+        signal,
+        "stop",
+        "stop_price",
+        "invalidation_level",
+        "invalidation",
+        "exit_line",
+    )
+    if stop_value is None and isinstance(stop_observation, Mapping):
+        stop_value = _first(stop_observation, "value", "price", "level")
     values = {
-        "entry": _number(
-            _first(
-                signal,
-                "entry",
-                "entry_reference",
-                "entry_watch_level",
-                "entry_trigger",
-                "breakout_trigger",
-            )
-            or (
-                _first(declared_entry, "value", "price", "level")
-                if isinstance(declared_entry, Mapping)
-                else None
-            )
-        ),
-        "stop": _number(
-            _first(
-                signal,
-                "stop",
-                "stop_price",
-                "invalidation_level",
-                "invalidation",
-                "exit_line",
-            )
-            or (
-                _first(declared_stop, "value", "price", "level")
-                if isinstance(declared_stop, Mapping)
-                else None
-            )
-        ),
+        "entry": _number(entry_value),
+        "stop": _number(stop_value),
     }
     target_value = _number(_first(signal, "target", "target_1", "first_target"))
     target_basis = str(_first(signal, "target_basis_kind", "target_basis", "target_role") or "").strip().lower()
@@ -213,6 +263,8 @@ def construct_alphaops_v5_plan(
         )
         if leg is None:
             return _invalid(normalized_direction, f"{role}_observation_incomplete")
+        if leg.value != values[role]:
+            return _invalid(normalized_direction, f"{role}_observation_level_mismatch")
         legs[role] = leg
 
     candidates = _target_candidates(signal, observations, target_value, target_basis)
@@ -249,7 +301,9 @@ def construct_alphaops_v5_plan(
         # evaluated later and cannot influence this selection.
         if _valid_geometry(values["entry"], values["stop"], value, normalized_direction):
             selected = leg
-            selected_basis = basis
+            # The emitted basis is the observed structural kind, never a
+            # caller-supplied alias that could obscure what was observed.
+            selected_basis = leg.observation_kind
             break
     if selected is None:
         return _invalid(normalized_direction, "target_observation_or_geometry_invalid")
@@ -260,21 +314,14 @@ def construct_alphaops_v5_plan(
     target = selected.value
     if not _valid_geometry(entry, stop, target, normalized_direction):
         return _invalid(normalized_direction, "plan_geometry_invalid")
-    frozen_at = str(decision_at or selected.completed_at or selected.observed_at)
-    plan_payload = {
-        "status": COMPLETE,
-        "direction": normalized_direction,
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "target_basis_kind": selected_basis,
-        "target_frozen_at": frozen_at,
-        "observations": {name: legs[name].to_dict() for name in ("entry", "stop", "target")},
-        "research_only": True,
-        "broker_execution_enabled": False,
-    }
-    plan_hash = hashlib.sha256(canonical_json(plan_payload).encode("utf-8")).hexdigest()
-    return AlphaOpsMarketStructurePlan(
+    frozen_at = str(
+        decision_at
+        or max(
+            (leg.completed_at for leg in legs.values()),
+            key=lambda value: _parse_timestamp(value) or datetime.min.replace(tzinfo=timezone.utc),
+        )
+    )
+    plan = AlphaOpsMarketStructurePlan(
         status=COMPLETE,
         direction=normalized_direction,
         entry=entry,
@@ -283,8 +330,9 @@ def construct_alphaops_v5_plan(
         target_basis_kind=selected_basis,
         target_frozen_at=frozen_at,
         observations=tuple(legs[name] for name in ("entry", "stop", "target")),
-        plan_hash_sha256=plan_hash,
+        plan_hash_sha256="",
     )
+    return _with_assigned_hash(plan)
 
 
 def build_alphaops_v5_plan(*args: Any, **kwargs: Any) -> AlphaOpsMarketStructurePlan:
@@ -300,15 +348,7 @@ def build_market_structure_plan(*args: Any, **kwargs: Any) -> AlphaOpsMarketStru
 
 
 def _invalid(direction: str, reason: str) -> AlphaOpsMarketStructurePlan:
-    payload = {
-        "status": NO_VALID_PLAN,
-        "direction": direction,
-        "reason": reason,
-        "research_only": True,
-        "broker_execution_enabled": False,
-    }
-    digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
-    return AlphaOpsMarketStructurePlan(
+    plan = AlphaOpsMarketStructurePlan(
         status=NO_VALID_PLAN,
         direction=direction,
         entry=None,
@@ -317,9 +357,208 @@ def _invalid(direction: str, reason: str) -> AlphaOpsMarketStructurePlan:
         target_basis_kind="",
         target_frozen_at="",
         observations=(),
-        plan_hash_sha256=digest,
+        plan_hash_sha256="",
         reason=reason,
     )
+    return _with_assigned_hash(plan)
+
+
+def _with_assigned_hash(plan: AlphaOpsMarketStructurePlan) -> AlphaOpsMarketStructurePlan:
+    """Assign the hash only after the full serialized plan shape exists."""
+
+    return replace(plan, plan_hash_sha256=plan.compute_hash())
+
+
+def validate_alphaops_v5_plan(
+    contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
+    *,
+    raise_on_error: bool = True,
+) -> bool:
+    """Strictly validate an emitted plan contract and its content hashes.
+
+    The validator accepts the serialized mapping produced by ``to_dict`` (or
+    a plan object for convenience). It recomputes the plan hash over every
+    emitted field except ``plan_hash_sha256`` and independently recomputes
+    each observation hash. Set ``raise_on_error=False`` when a boolean probe
+    is preferred; strict callers get a ``ValueError`` for every violation.
+    """
+
+    try:
+        _validate_alphaops_v5_plan(contract)
+    except (TypeError, ValueError, KeyError) as exc:
+        if raise_on_error:
+            raise ValueError(f"invalid AlphaOps v5 plan: {exc}") from exc
+        return False
+    return True
+
+
+def is_valid_alphaops_v5_plan(
+    contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
+) -> bool:
+    """Boolean companion to :func:`validate_alphaops_v5_plan`."""
+
+    return validate_alphaops_v5_plan(contract, raise_on_error=False)
+
+
+def _validate_alphaops_v5_plan(
+    contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
+) -> None:
+    payload = (
+        contract.to_dict()
+        if isinstance(contract, AlphaOpsMarketStructurePlan)
+        else dict(contract)
+    )
+    if set(payload) != _PLAN_FIELDS:
+        raise ValueError("plan schema fields do not match v1 contract")
+    for field in (
+        "schema_version",
+        "status",
+        "direction",
+        "target_basis_kind",
+        "target_frozen_at",
+        "reason",
+        "plan_hash_sha256",
+    ):
+        if type(payload[field]) is not str or payload[field] != payload[field].strip():
+            raise ValueError(f"{field} must be a string")
+    for field in ("research_only", "broker_execution_enabled", "target_frozen_before_reward_risk"):
+        if type(payload[field]) is not bool:
+            raise ValueError(f"{field} must be a boolean")
+    if payload["schema_version"] != PLAN_SCHEMA_VERSION:
+        raise ValueError("unsupported plan schema version")
+    supplied_hash = payload["plan_hash_sha256"]
+    if not _is_sha256(supplied_hash):
+        raise ValueError("plan hash is missing or invalid")
+    hash_payload = dict(payload)
+    hash_payload.pop("plan_hash_sha256", None)
+    expected_hash = hashlib.sha256(
+        canonical_json(hash_payload).encode("utf-8")
+    ).hexdigest()
+    if supplied_hash != expected_hash:
+        raise ValueError("plan hash does not match emitted payload")
+    if payload["research_only"] is not True or payload["broker_execution_enabled"] is not False:
+        raise ValueError("plan must remain research-only with broker execution disabled")
+    status = str(payload.get("status") or "")
+    if not payload["direction"]:
+        raise ValueError("plan direction is required")
+    if payload["target_frozen_before_reward_risk"] is not (status == COMPLETE):
+        raise ValueError("target freeze marker does not match plan status")
+    if status == NO_VALID_PLAN:
+        if (
+            payload["entry"] is not None
+            or payload["stop"] is not None
+            or payload["target"] is not None
+            or payload["target_basis_kind"] != ""
+            or payload["target_frozen_at"] != ""
+            or payload["observations"] != []
+            or not str(payload.get("reason") or "").strip()
+        ):
+            raise ValueError("NO_VALID_PLAN contains qualifying levels or observations")
+        return
+    if status != COMPLETE:
+        raise ValueError("unknown plan status")
+    if payload["reason"] != "":
+        raise ValueError("complete plan cannot carry a failure reason")
+    direction = str(payload.get("direction") or "").lower()
+    entry = _strict_number(payload.get("entry"))
+    stop = _strict_number(payload.get("stop"))
+    target = _strict_number(payload.get("target"))
+    if direction not in {"long", "short"} or not _valid_geometry(entry, stop, target, direction):
+        raise ValueError("complete plan geometry is invalid")
+    if payload["target_basis_kind"] not in SUPPORTED_TARGET_BASES:
+        raise ValueError("target basis is not an independent structural kind")
+    freeze_at = _parse_timestamp(payload["target_frozen_at"])
+    if freeze_at is None:
+        raise ValueError("target freeze timestamp is invalid")
+    raw_observations = payload.get("observations")
+    if not isinstance(raw_observations, list) or [item.get("role") for item in raw_observations if isinstance(item, Mapping)] != ["entry", "stop", "target"]:
+        raise ValueError("complete plan must contain entry, stop, and target observations")
+    by_role: dict[str, Mapping[str, Any]] = {}
+    for raw in raw_observations:
+        if not isinstance(raw, Mapping):
+            raise ValueError("observation must be an object")
+        if set(raw) != _OBSERVATION_FIELDS:
+            raise ValueError("observation schema fields do not match v1 contract")
+        role = str(raw.get("role") or "")
+        if role in by_role:
+            raise ValueError("duplicate observation role")
+        by_role[role] = raw
+        _validate_observation(raw, role)
+    if payload["target_basis_kind"] != by_role["target"]["observation_kind"]:
+        raise ValueError("plan target basis does not match observed structural kind")
+    if any(
+        (_parse_timestamp(by_role[role]["completed_at"]) or freeze_at) > freeze_at
+        for role in ("entry", "stop", "target")
+    ):
+        raise ValueError("plan freeze precedes a completed observation")
+    for role, expected in (("entry", entry), ("stop", stop), ("target", target)):
+        if _strict_number(by_role[role]["value"]) != expected:
+            raise ValueError(f"{role} level does not match its observation")
+
+
+def _validate_observation(raw: Mapping[str, Any], role: str) -> None:
+    for field in (
+        "role",
+        "observed_at",
+        "completed_at",
+        "source",
+        "source_hash",
+        "observation_kind",
+        "derivation_policy",
+        "source_url",
+        "observation_hash",
+    ):
+        if type(raw[field]) is not str or raw[field] != raw[field].strip():
+            raise ValueError(f"{role} {field} must be a string")
+    if type(raw["is_complete"]) is not bool:
+        raise ValueError(f"{role} is_complete must be a boolean")
+    value = _strict_number(raw.get("value"))
+    raw_value = _strict_number(raw.get("raw_value"))
+    if value is None or raw_value is None or value <= 0 or raw_value <= 0:
+        raise ValueError(f"{role} observation values are invalid")
+    if raw.get("is_complete") is not True:
+        raise ValueError(f"{role} observation is not complete")
+    kind = raw["observation_kind"]
+    if kind not in SUPPORTED_OBSERVATION_KINDS:
+        raise ValueError(f"{role} observation kind is unsupported")
+    if role == "target":
+        if kind not in SUPPORTED_TARGET_BASES or value != raw_value:
+            raise ValueError("target must equal its raw observed structural level")
+    derivation = raw["derivation_policy"]
+    if derivation not in ALLOWED_DERIVATION_POLICIES:
+        raise ValueError("observation derivation policy is not allowlisted")
+    if not str(raw.get("source") or "").strip() or not _source_reference_valid(raw.get("source_url")):
+        raise ValueError(f"{role} observation source provenance is incomplete")
+    source_hash = raw["source_hash"]
+    if not _is_sha256(source_hash):
+        raise ValueError(f"{role} observation source hash is invalid")
+    observed_at = _parse_timestamp(raw.get("observed_at"))
+    completed_at = _parse_timestamp(raw.get("completed_at"))
+    if observed_at is None or completed_at is None or observed_at > completed_at:
+        raise ValueError(f"{role} observation timestamps are invalid")
+    observation_hash = raw["observation_hash"]
+    hash_payload = dict(raw)
+    hash_payload.pop("observation_hash", None)
+    expected_hash = hashlib.sha256(
+        canonical_json(hash_payload).encode("utf-8")
+    ).hexdigest()
+    if observation_hash != expected_hash:
+        raise ValueError(f"{role} observation hash does not match emitted payload")
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and bool(text) and set(text) <= _SHA256
+
+
+def _strict_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def apply_structural_level_enrichment(
@@ -358,6 +597,9 @@ def _target_candidates(
     if isinstance(raw, (list, tuple)):
         return [item for item in raw if isinstance(item, Mapping)]
     target = observations.get("target")
+    if isinstance(target, Mapping):
+        return [target]
+    target = signal.get("target_observation")
     if isinstance(target, Mapping):
         return [target]
     if value is None:
@@ -415,6 +657,10 @@ def _observation_for(
         return None
     if role == "target" and observation_kind not in SUPPORTED_TARGET_BASES:
         return None
+    if derivation_policy not in ALLOWED_DERIVATION_POLICIES:
+        return None
+    if role == "target" and numeric != raw_value:
+        return None
     if role == "target" and any(
         token in derivation_policy
         for token in ("range_extension", "risk_multiple", "atr_extension")
@@ -426,6 +672,8 @@ def _observation_for(
     if observed_dt is None or completed_dt is None or observed_dt > completed_dt:
         return None
     if decision_dt is not None and completed_dt > decision_dt:
+        return None
+    if not _source_reference_valid(source_url):
         return None
     observation_payload = {
         "role": role,
@@ -516,6 +764,45 @@ def _parse_timestamp(value: Any) -> Any:
         return None
 
 
+def _source_reference_valid(value: Any) -> bool:
+    text = str(value or "").strip()
+    # A public URL is preferred.  The only internal alternative is a bounded
+    # internal:// source ID, and callers must still provide source identity,
+    # completed timestamps, and a SHA-256 source hash for every observation.
+    if _INTERNAL_SOURCE_URL.fullmatch(text):
+        return True
+    try:
+        parsed = urlsplit(text)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    normalized_hostname = hostname.lower().rstrip(".")
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return False
+    try:
+        address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        return True
+    return (
+        address.is_global
+        and not address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_reserved
+        and not address.is_multicast
+        and not address.is_unspecified
+    )
+
+
 def _first(value: Mapping[str, Any], *names: str) -> Any:
     for name in names:
         if value.get(name) not in {None, ""}:
@@ -542,10 +829,12 @@ def _bool(value: Any) -> bool | None:
 
 
 __all__ = [
+    "ALLOWED_DERIVATION_POLICIES",
     "AlphaOpsMarketStructurePlan",
     "COMPLETE",
     "LEGACY_RESEARCH_BASELINE",
     "NO_VALID_PLAN",
+    "PLAN_SCHEMA_VERSION",
     "PlanObservation",
     "SUPPORTED_TARGET_BASES",
     "SUPPORTED_OBSERVATION_KINDS",
@@ -553,5 +842,7 @@ __all__ = [
     "build_alphaops_v5_plan",
     "build_market_structure_plan",
     "construct_alphaops_v5_plan",
+    "is_valid_alphaops_v5_plan",
+    "validate_alphaops_v5_plan",
     "with_structural_level_enrichment",
 ]

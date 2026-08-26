@@ -10,6 +10,8 @@ from intraday_scanner.alpha.plan_constructor import (
     NO_VALID_PLAN,
     apply_structural_level_enrichment,
     construct_alphaops_v5_plan,
+    is_valid_alphaops_v5_plan,
+    validate_alphaops_v5_plan,
 )
 from intraday_scanner.alpha.v5_policy import evaluate_v5_official_paper
 from intraday_scanner.config import load_config
@@ -86,12 +88,81 @@ def test_range_extension_is_not_a_eligible_target_basis() -> None:
     assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
 
 
+def test_structural_target_requires_raw_level_and_non_risk_derivation() -> None:
+    signal = _signal()
+    signal["market_structure_observations"]["target"]["raw_value"] = 12.5
+    assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
+
+    signal = _signal()
+    signal["market_structure_observations"]["target"]["derivation_policy"] = "risk_multiple"
+    assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
+
+
+def test_explicit_observation_arguments_and_internal_source_ids_are_supported() -> None:
+    observations = {
+        "entry": _observation(10.0, "a" * 64),
+        "stop": _observation(9.0, "b" * 64, observation_kind="sourced_stop"),
+        "target": _observation(12.75, "c" * 64, observation_kind="prior_day_resistance"),
+    }
+    for observation in observations.values():
+        observation["source_url"] = "internal://market-feed/alphaops-v5"
+    plan = construct_alphaops_v5_plan(
+        entry_observation=observations["entry"],
+        stop_observation=observations["stop"],
+        target_observation=observations["target"],
+    )
+    assert plan.status == COMPLETE
+    assert validate_alphaops_v5_plan(plan) is True
+
+
+def test_source_url_rejects_non_public_http_provenance() -> None:
+    for source_url in (
+        "https://localhost/market",
+        "https://127.0.0.1/market",
+        "https://10.0.0.5/market",
+        "https://169.254.1.5/market",
+        "https://224.0.0.1/market",
+        "https://[::1]/market",
+        "https://user:password@example.test/market",
+        "file:///private/market",
+    ):
+        signal = _signal()
+        for observation in signal["market_structure_observations"].values():
+            observation["source_url"] = source_url
+        assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
+
+
 def test_valid_plan_freezes_three_independently_hashed_observations() -> None:
     plan = construct_alphaops_v5_plan(_signal(), decision_at="2026-08-26T13:30:00+00:00")
     assert plan.status == COMPLETE
     assert (plan.entry, plan.stop, plan.target) == (10.0, 9.0, 12.75)
     assert len({item.observation_hash for item in plan.observations}) == 3
-    assert plan.plan_hash_sha256
+    assert plan.plan_hash_sha256 == plan.compute_hash()
+    assert validate_alphaops_v5_plan(plan.to_dict()) is True
+
+
+def test_serialized_plan_reconstructs_with_the_same_canonical_hash() -> None:
+    plan = construct_alphaops_v5_plan(_signal())
+    emitted = plan.to_dict()
+    reconstructed = {
+        **emitted,
+        "observations": [dict(observation) for observation in emitted["observations"]],
+    }
+    assert validate_alphaops_v5_plan(reconstructed) is True
+    assert reconstructed == emitted
+
+
+def test_serialized_plan_validator_rejects_level_observation_and_hash_tamper() -> None:
+    plan = construct_alphaops_v5_plan(_signal())
+    emitted = plan.to_dict()
+    emitted["target"] = 99.0
+    assert is_valid_alphaops_v5_plan(emitted) is False
+    emitted = plan.to_dict()
+    emitted["observations"][2]["raw_value"] = 99.0
+    assert is_valid_alphaops_v5_plan(emitted) is False
+    emitted = plan.to_dict()
+    emitted["plan_hash_sha256"] = "f" * 64
+    assert is_valid_alphaops_v5_plan(emitted) is False
 
 
 def test_structural_enrichment_adapter_only_attaches_upstream_observations() -> None:
@@ -196,6 +267,39 @@ def test_receipt_rejects_mismatched_declared_plan_even_with_true_overrides() -> 
     assert "market_structure_plan" in receipt.all_blocking_failures
 
 
+def test_receipt_boundary_rejects_any_tampered_serialized_plan_contract() -> None:
+    for mutation in (
+        "source_url",
+        "source_hash",
+        "target_raw_value",
+        "extra",
+        "missing",
+        "plan_hash",
+    ):
+        signal = _signal()
+        signal.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+        frozen = construct_alphaops_v5_plan(signal, decision_at="2026-08-26T13:30:00+00:00")
+        declared = frozen.to_dict()
+        if mutation == "source_url":
+            declared["observations"][0]["source_url"] = "https://tampered.test/market"
+        elif mutation == "source_hash":
+            declared["observations"][1]["source_hash"] = "d" * 64
+        elif mutation == "target_raw_value":
+            declared["observations"][2]["raw_value"] = 99.0
+        elif mutation == "extra":
+            declared["unexpected"] = True
+        elif mutation == "missing":
+            del declared["observations"][2]["observation_hash"]
+        else:
+            declared["plan_hash_sha256"] = "d" * 64
+        signal["alphaops_market_structure_plan"] = declared
+        receipt = StrategyDecisionService(
+            code_sha="a" * 40, source_identity="completed-market-feed"
+        ).build_receipt(signal, decision_at="2026-08-26T13:30:00+00:00")
+        assert receipt.paper_entry_eligible is False
+        assert "market_structure_plan" in receipt.all_blocking_failures
+
+
 def test_plan_dataclass_is_immutable() -> None:
     plan = construct_alphaops_v5_plan(_signal())
     try:
@@ -241,10 +345,14 @@ def test_alpha_cycle_structural_plan_preserves_hash_levels_through_alert_gate(
     monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "b" * 40)
     config = load_config(strategy_evidence_enabled=True, strategy_evidence_shadow_only=True)
     source = _signal()
+    source["legacy_plan_status"] = "LEGACY_RESEARCH_BASELINE"
+    source["legacy_plan_reason"] = "range-derived levels require independent structural enrichment"
     source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
     frozen = construct_alphaops_v5_plan(source, decision_at="2026-08-26T13:30:00+00:00")
     payload = _signal_payload(source, "scan-structural", "2026-08-26T13:30:00+00:00", 1)
     assert payload["plan_hash_sha256"] == frozen.plan_hash_sha256
+    assert payload["plan_construction_status"] == COMPLETE
+    assert payload["plan_construction_reason"] == ""
     assert (payload["entry_watch_level"], payload["invalidation_level"], payload["target_1"]) == (
         frozen.entry,
         frozen.stop,
