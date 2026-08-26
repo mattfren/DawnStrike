@@ -48,9 +48,9 @@ CURRENT_CENSORED_PATH = "CURRENT_CENSORED_PATH"
 LEGACY_OR_INCOMPLETE = "LEGACY_OR_INCOMPLETE"
 TERMINAL_MISSING = "TERMINAL_MISSING"
 PAPER_ENTER_INTENT_RECEIPT_SCHEMA_VERSION = (
-    "dawnstrike.alphaops.paper_enter_intent.v1"
+    "dawnstrike.alphaops.paper_enter_intent.v2"
 )
-PAPER_ENTER_INTENT_RECEIPT_ID_PREFIX = "paper-enter-intent-v1-"
+PAPER_ENTER_INTENT_RECEIPT_ID_PREFIX = "paper-enter-intent-v2-"
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PAPER_ENTER_INTENT_BODY_KEYS = frozenset(
