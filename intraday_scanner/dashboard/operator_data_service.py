@@ -153,6 +153,7 @@ def signal_requires_outcome(row: dict[str, Any]) -> bool:
             "WATCH ONLY",
             "ENTRY WATCH",
             "ENTRY TRIGGERED",
+            "RESEARCH CONDITION MET",
             "TARGET HIT",
             "EXIT SIGNAL",
         }:

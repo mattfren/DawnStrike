@@ -8,6 +8,11 @@ from typing import Any
 
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION
 from intraday_scanner.alpha.data_eligibility import evaluate_premarket_coverage
+from intraday_scanner.services.luna_research_slate_service import (
+    apply_publication_semantics,
+    build_ranked_research_slate,
+    publication_counts,
+)
 
 
 class SelectionOutcome(str, Enum):
@@ -42,6 +47,16 @@ class AlphaRunContract:
     notification_status: str
     research_only: bool = True
     broker_execution: str = "disabled"
+    # Additive Luna publication counts.  Legacy fields above remain stable for
+    # consumers that have not migrated to the three-tier contract.
+    source_collected: int = 0
+    enrichment_selected: int = 0
+    primary_verified: int = 0
+    ranked_research: int = 0
+    paper_plan_qualified: int = 0
+    alertable_trade: int = 0
+    official_selected: int = 0
+    slate_shortfall_reason: str = ""
     schema_version: str = "alphaops.run_contract.v1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,6 +84,26 @@ def build_alpha_run_contract(
     enrichment = dict(enrichment_summary or {})
     enrichment_status = str(enrichment.get("status") or "not_run")
     coverage = evaluate_premarket_coverage(enrichment)
+    data_eligible = coverage.status in {"complete", "partial"}
+    slate = build_ranked_research_slate(
+        signals,
+        target=5,
+        data_eligible=data_eligible,
+    )
+    published_signals = apply_publication_semantics(
+        signals,
+        slate=slate,
+        coverage=enrichment,
+    )
+    publication = publication_counts(
+        published_signals,
+        official_selected=(
+            len(watchlist)
+            if not decision.get("no_trade")
+            and str(decision.get("decision_tier") or "") == "clean_edge"
+            else 0
+        ),
+    )
     research_symbols = tuple(
         sorted(
             {
@@ -130,6 +165,28 @@ def build_alpha_run_contract(
             dry_run=notification_dry_run,
             override=notification_status_override,
         ),
+        source_collected=_first_count(
+            source_summary.get("source_collected"),
+            source_summary.get("rows_normalized"),
+            source_summary.get("rows_collected"),
+            source_summary.get("candidate_count"),
+            source_summary.get("symbols_returned"),
+            len(signals),
+        ),
+        enrichment_selected=coverage.selected_count,
+        primary_verified=_first_count(
+            enrichment.get("primary_verified_count"),
+            max(
+                coverage.verified_count
+                - _first_count(enrichment.get("secondary_fallback_count")),
+                0,
+            ),
+        ),
+        ranked_research=publication["ranked_research"],
+        paper_plan_qualified=publication["paper_plan_qualified"],
+        alertable_trade=publication["alertable_trade"],
+        official_selected=publication["official_selected"],
+        slate_shortfall_reason=str(slate.get("slate_shortfall_reason") or ""),
     )
 
 
@@ -159,6 +216,19 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _first_count(*values: Any) -> int:
+    """Read the first present count while preserving an explicit zero."""
+
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 __all__ = [

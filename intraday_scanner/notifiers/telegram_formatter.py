@@ -251,15 +251,33 @@ def format_alpha_watch(
 ) -> str:
     source_summary = dict(source_summary or {})
     blocked_signals = list(blocked_signals or [])
-    candidates = [row for row in signals if row.get("can_alert")][:5]
+    candidates = [
+        row
+        for row in signals
+        if row.get("can_alert")
+        or str(row.get("publication_tier") or "")
+        == "RANKED_RESEARCH_CANDIDATE"
+    ][:5]
     official_candidates = [
         row
         for row in candidates
-        if str(row.get("decision_tier") or "").lower() == "clean_edge"
+        if (
+            str(row.get("publication_tier") or "") in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+            or (
+                not row.get("publication_tier")
+                and str(row.get("decision_tier") or "").lower() == "clean_edge"
+            )
+        )
         and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
         and row.get("manual_confirmation_required") is False
     ][:3]
     research_watchlist = [row for row in candidates if row not in official_candidates][:3]
+    explicit_publication = any("publication_tier" in row for row in candidates)
+    official_heading = (
+        "OFFICIAL PAPER CANDIDATES"
+        if official_candidates or not explicit_publication
+        else "PAPER PLAN QUALIFIED"
+    )
     lines = [
         "🚀 Dawnstrike Alpha Watch",
         (
@@ -268,7 +286,7 @@ def format_alpha_watch(
             f"{len(research_watchlist)} research"
         ),
         "",
-        "OFFICIAL PAPER CANDIDATES",
+        official_heading,
         "(pending fresh quote, session, cost, chase, and portfolio checks)",
     ]
     if not official_candidates:
@@ -350,7 +368,12 @@ def format_alpha_no_trade(
         "📡 Dawnstrike Alpha Check",
         "No clean edge today.",
         "",
-        "OFFICIAL PAPER CANDIDATES",
+        (
+            "OFFICIAL PAPER CANDIDATES"
+            if any(str(row.get("publication_tier") or "") in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"} for row in radar)
+            or not any("publication_tier" in row for row in radar)
+            else "PAPER PLAN QUALIFIED"
+        ),
         "- None",
         "",
         "RESEARCH WATCHLIST / RADAR — CONDITIONAL PAPER STUDY",

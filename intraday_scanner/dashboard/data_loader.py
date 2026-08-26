@@ -380,6 +380,8 @@ def _operator_today_row_status(
     if target is not None and current_price is not None and current_price >= target:
         return "TARGET HIT"
     if current_price is not None and entry_watch is not None and current_price >= entry_watch:
+        if str(signal.get("publication_tier") or "") == "RANKED_RESEARCH_CANDIDATE":
+            return "RESEARCH CONDITION MET"
         return "ENTRY TRIGGERED"
     if outcome and current_price is None:
         return "OUTCOME NEEDED"

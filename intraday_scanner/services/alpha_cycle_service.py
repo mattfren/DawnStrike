@@ -19,6 +19,11 @@ from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
+from intraday_scanner.services.luna_research_slate_service import (
+    apply_publication_semantics,
+    build_ranked_research_slate,
+    persist_ranked_research_slate,
+)
 from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
@@ -63,6 +68,10 @@ from intraday_scanner.services.learning_service import (
     load_production_alpha_learning_labels,
     run_alpha_learning,
 )
+from intraday_scanner.services.luna_core_universe_service import (
+    build_core_universe_contract,
+    write_core_universe_contract,
+)
 from intraday_scanner.services.premarket_enrichment_service import enrich_premarket_rows
 from intraday_scanner.services.price_observation_service import collect_price_observations
 from intraday_scanner.services.return_attribution_service import (
@@ -106,6 +115,7 @@ def alpha_morning(
     notify: str = "console",
     dry_run: bool = False,
     as_of: datetime | None = None,
+    core_universe_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     return alpha_cycle(
         config_path=config_path,
@@ -115,6 +125,7 @@ def alpha_morning(
         dry_run=dry_run,
         cycle_name="alpha_morning",
         as_of=as_of,
+        core_universe_manifest=core_universe_manifest,
     )
 
 
@@ -127,9 +138,15 @@ def alpha_cycle(
     dry_run: bool = False,
     cycle_name: str = "alpha_cycle",
     as_of: datetime | None = None,
+    core_universe_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    core_universe = build_core_universe_contract(
+        core_universe_manifest,
+        observed_at=as_of or datetime.now(timezone.utc),
+    )
+    write_core_universe_contract(core_universe, output_dir / "core_universe_contract.json")
     session_gate = _scheduled_session_gate(notify=notify, as_of=as_of)
     if session_gate is not None:
         phase = core_session_phase(as_of)
@@ -284,6 +301,7 @@ def alpha_cycle(
             "notification_deliveries": notification_deliveries,
             "run_contract": run_contract.to_dict(),
             "out_dir": str(output_dir),
+            "core_universe": core_universe,
         }
         if session_gate is not None:
             no_data_result["session_gate"] = session_gate.to_dict()
@@ -379,6 +397,20 @@ def alpha_cycle(
     signals = apply_alert_gates(signals)
     review = review_alpha_signals(signals, source_summary=source_summary)
     decision = dict(review["decision"])
+    luna_research_slate = build_ranked_research_slate(
+        signals,
+        target=5,
+        data_eligible=str(enrichment["summary"].get("status") or "").lower()
+        in {"complete", "partial"},
+    )
+    persist_ranked_research_slate(
+        luna_research_slate, output_dir / "ranked_research_slate.json"
+    )
+    signals = apply_publication_semantics(
+        signals,
+        slate=luna_research_slate,
+        coverage=enrichment["summary"],
+    )
     research_radar = _research_radar(signals) if decision.get("no_trade") else []
     signals = _annotate_research_radar(signals, research_radar)
     store.persist_alpha_signals(signals)
@@ -442,7 +474,7 @@ def alpha_cycle(
         message = format_alpha_no_trade(
             reason=str(decision.get("reason") or ""),
             next_action=str(decision.get("next_action") or ""),
-            research_signals=research_radar,
+            research_signals=list(luna_research_slate.get("rows") or research_radar),
         )
         hint = "alpha_no_trade"
         title = "Dawnstrike Alpha Check"
@@ -453,7 +485,7 @@ def alpha_cycle(
             else _edge_label(signals)
         )
         message = format_alpha_watch(
-            signals=selected_signals,
+            signals=signals,
             edge_label=edge_label,
             source_summary=source_summary,
             blocked_signals=list(review["blocked"]),
@@ -467,7 +499,7 @@ def alpha_cycle(
             title,
             message,
             selected_signals=selected_signals,
-            research_signals=research_radar,
+            research_signals=list(luna_research_slate.get("rows") or research_radar),
         )
     ]
     selection_members = selected_signals or ([no_trade_row] if no_trade_row is not None else [])
@@ -581,6 +613,8 @@ def alpha_cycle(
         "signal_count": len(signals),
         "strategy_decision_receipts": strategy_receipt_stats,
         "research_radar": research_radar,
+        "ranked_research_slate": luna_research_slate,
+        "core_universe": core_universe,
         "historical_signal_count": len(historical_rows),
         "historical_notification_link": notification_link,
         "top_signal": signals[0] if signals else None,
