@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -47,6 +48,8 @@ _NON_BLOCKING_RECONCILIATION_WARNING_CODES = frozenset(
         "paper_ops_equity_pnl_component_mismatch",
     }
 )
+_FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_LEGACY_RELEASE_SHA_FIELDS = ("release_sha", "source_sha")
 
 
 class DailyFinalizeService:
@@ -714,6 +717,8 @@ class DailyFinalizeService:
             )[:10]
             if observed_date != market_date:
                 continue
+            if _legacy_receipt_release_sha(payload) != self.release_sha:
+                return "failed", {}
             normalized = str(status or payload.get("status") or "").lower()
             stages = payload.get("stages")
             stage_map = {
@@ -1144,6 +1149,24 @@ def _legacy_stage_status(value: str | None) -> str:
     if value in FAILURE_STATUSES:
         return "failed"
     return "not_recorded"
+
+
+def _legacy_receipt_release_sha(payload: dict[str, Any]) -> str | None:
+    """Resolve the one explicit SHA identity accepted from legacy receipts."""
+
+    declared = [
+        payload[field]
+        for field in _LEGACY_RELEASE_SHA_FIELDS
+        if field in payload
+    ]
+    if not declared or any(
+        not isinstance(value, str) or _FULL_GIT_SHA.fullmatch(value) is None
+        for value in declared
+    ):
+        return None
+    if len(set(declared)) != 1:
+        return None
+    return declared[0]
 
 
 def _public_daily_run(snapshot: dict[str, Any]) -> dict[str, Any]:

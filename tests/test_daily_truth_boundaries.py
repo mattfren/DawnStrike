@@ -46,6 +46,7 @@ def test_public_snapshot_is_as_of_and_has_no_local_path(tmp_path: Path) -> None:
 
 def test_upstream_receipt_populates_stage_manifest(tmp_path: Path) -> None:
     db_path = tmp_path / "receipt.sqlite"
+    release_sha = "a" * 40
     SQLiteScanStore(db_path).initialize()
     with sqlite3.connect(db_path) as connection:
         connection.execute(
@@ -64,6 +65,7 @@ def test_upstream_receipt_populates_stage_manifest(tmp_path: Path) -> None:
                 json.dumps(
                     {
                         "market_date": "2026-07-29",
+                        "release_sha": release_sha,
                         "status": "complete",
                         "stages": [
                             {"stage": name, "status": "complete"}
@@ -81,7 +83,11 @@ def test_upstream_receipt_populates_stage_manifest(tmp_path: Path) -> None:
             ),
         )
 
-    result = DailyFinalizeService(db_path, tmp_path / "public").run(
+    result = DailyFinalizeService(
+        db_path,
+        tmp_path / "public",
+        release_sha=release_sha,
+    ).run(
         market_date="2026-07-29", now="2026-07-29T21:00:00+00:00"
     )
     source_stage = next(
@@ -90,3 +96,86 @@ def test_upstream_receipt_populates_stage_manifest(tmp_path: Path) -> None:
     assert result["upstream_status"] == "complete"
     assert source_stage["status"] == "LOCAL_VERIFIED"
     assert (tmp_path / "public" / "daily-finalize.jsonl").exists()
+
+
+def test_legacy_upstream_receipt_accepts_matching_source_sha_alias(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "source-sha-receipt.sqlite"
+    release_sha = "b" * 40
+    _insert_legacy_eod_receipt(
+        db_path,
+        receipt_id="eod-source-sha",
+        payload={
+            "market_date": "2026-07-29",
+            "source_sha": release_sha,
+            "status": "complete",
+        },
+    )
+
+    status, stages = DailyFinalizeService(
+        db_path,
+        tmp_path / "source-sha-public",
+        release_sha=release_sha,
+    )._read_upstream_stages("2026-07-29")
+
+    assert status == "complete"
+    assert stages == {}
+
+
+def test_legacy_upstream_receipt_rejects_missing_or_mismatched_sha(
+    tmp_path: Path,
+) -> None:
+    release_sha = "c" * 40
+    cases = (
+        ("missing", {}),
+        ("mismatched", {"release_sha": "d" * 40}),
+        ("malformed", {"release_sha": "not-a-full-git-sha"}),
+        (
+            "conflicting-aliases",
+            {"release_sha": release_sha, "source_sha": "e" * 40},
+        ),
+    )
+    for label, sha_payload in cases:
+        db_path = tmp_path / f"{label}.sqlite"
+        _insert_legacy_eod_receipt(
+            db_path,
+            receipt_id=f"eod-{label}",
+            payload={
+                "market_date": "2026-07-29",
+                "status": "complete",
+                **sha_payload,
+            },
+        )
+
+        status, stages = DailyFinalizeService(
+            db_path,
+            tmp_path / f"{label}-public",
+            release_sha=release_sha,
+        )._read_upstream_stages("2026-07-29")
+
+        assert status == "failed", label
+        assert stages == {}, label
+
+
+def _insert_legacy_eod_receipt(
+    db_path: Path,
+    *,
+    receipt_id: str,
+    payload: dict[str, object],
+) -> None:
+    SQLiteScanStore(db_path).initialize()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO automation_runs
+            (id, run_type, status, started_at, completed_at, out_dir, payload_json)
+            VALUES (?, 'alphaops_eod', 'complete', ?, ?, 'outputs/alpha_report', ?)
+            """,
+            (
+                receipt_id,
+                "2026-07-29T20:00:00+00:00",
+                "2026-07-29T20:05:00+00:00",
+                json.dumps(payload),
+            ),
+        )
