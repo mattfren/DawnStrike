@@ -10,7 +10,9 @@ param(
         "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app"
     ),
     [switch]$AllowDegraded,
-    [switch]$Promote
+    [switch]$Promote,
+    [ValidateRange(1, 3600)][int]$VercelBuildTimeoutSeconds = 600,
+    [ValidateRange(1, 3600)][int]$VercelCommandTimeoutSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +27,17 @@ $vercel = @("--yes", "vercel@58.4.0")
 $vercelAuth = @()
 if (-not [string]::IsNullOrWhiteSpace($env:VERCEL_TOKEN)) {
     $vercelAuth = @("--token", $env:VERCEL_TOKEN)
+}
+$nodeCommand = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue
+if ($null -eq $nodeCommand) {
+    throw "node.exe is required for bounded Vercel publication."
+}
+$nodePath = $nodeCommand.Source
+$npxCliPath = Join-Path `
+    (Split-Path -Parent $nodePath) `
+    "node_modules\npm\bin\npx-cli.js"
+if (-not (Test-Path -LiteralPath $npxCliPath -PathType Leaf)) {
+    throw "The npm npx-cli.js entry point was not found beside node.exe."
 }
 $promoted = $false
 $priorProduction = $null
@@ -71,30 +84,100 @@ function Invoke-VercelJson {
         [string]$Label
     )
     # Vercel and its bundled curl write banners, warnings, and transfer
-    # progress to stderr even when the command succeeds. Keep stderr separate:
-    # curl progress can otherwise be interleaved inside a multiline JSON body.
-    $previousErrorActionPreference = $ErrorActionPreference
-    $stderrPath = [System.IO.Path]::GetTempFileName()
-    $output = @()
-    $stderrText = ""
-    $exitCode = $null
+    # progress to stderr even when the command succeeds. The bounded runner
+    # keeps stderr separate: curl progress can otherwise be interleaved inside
+    # a multiline JSON body.
+    $result = Invoke-VercelProcess `
+        -Arguments $Arguments `
+        -Label $Label `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds
+    return Convert-VercelJson -Output @($result.Stdout) -Label $Label
+}
+
+function Invoke-VercelProcess {
+    param(
+        [string[]]$Arguments,
+        [string]$Label,
+        [int]$TimeoutSeconds
+    )
+    $allArguments = @($npxCliPath) + $vercel + $Arguments + $vercelAuth
+    $argumentLine = @(
+        $allArguments | ForEach-Object {
+            $value = [string]$_
+            if ($value -match '[\r\n"]') {
+                throw "$Label contains an unsupported native-process argument."
+            }
+            '"' + $value + '"'
+        }
+    ) -join " "
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $nodePath
+    $startInfo.Arguments = $argumentLine
+    $startInfo.WorkingDirectory = [string](Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["CI"] = "1"
+    $startInfo.EnvironmentVariables["NO_COLOR"] = "1"
+    $startInfo.EnvironmentVariables["FORCE_COLOR"] = "0"
+    $startInfo.EnvironmentVariables["VERCEL_TELEMETRY_DISABLED"] = "1"
+    $startInfo.EnvironmentVariables["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+    $startInfo.EnvironmentVariables["NPM_CONFIG_FUND"] = "false"
+    $startInfo.EnvironmentVariables["NPM_CONFIG_AUDIT"] = "false"
+    $startInfo.EnvironmentVariables["NPM_CONFIG_YES"] = "true"
+    $process = $null
+    $stdoutTask = $null
+    $stderrTask = $null
     try {
-        $ErrorActionPreference = "Continue"
-        $output = & npx @vercel @Arguments @vercelAuth 2> $stderrPath
-        $exitCode = $LASTEXITCODE
-        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-            $stderrText = [System.IO.File]::ReadAllText($stderrPath).Trim()
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw "$Label could not start the bounded Vercel process."
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                # The npx CLI can launch build and network descendants. Kill
+                # only the exact tree created above so a timed-out deploy
+                # cannot keep mutating external state after this boundary.
+                $ErrorActionPreference = "Continue"
+                & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            if (-not $process.HasExited) {
+                $process.Kill()
+            }
+            $process.WaitForExit()
+            throw "$Label timed out after $TimeoutSeconds seconds."
+        }
+        # A second parameterless wait flushes redirected output on Windows
+        # PowerShell 5.1 after the process handle has signaled completion.
+        $process.WaitForExit()
+        if (-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)) {
+            throw "$Label output drain timed out after process exit."
+        }
+        $stdoutText = ([string]$stdoutTask.Result).Trim()
+        $stderrText = ([string]$stderrTask.Result).Trim()
+        if ($process.ExitCode -ne 0) {
+            $detail = if ($stderrText) { " stderr: $stderrText" } else { "" }
+            throw "$Label failed with exit code $($process.ExitCode).$detail"
+        }
+        return [pscustomobject]@{
+            Stdout = $stdoutText
+            Stderr = $stderrText
+            ExitCode = [int]$process.ExitCode
         }
     }
     finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
     }
-    if ($exitCode -ne 0) {
-        $detail = if ($stderrText) { " stderr: $stderrText" } else { "" }
-        throw "$Label failed with exit code $exitCode.$detail"
-    }
-    return Convert-VercelJson -Output @($output) -Label $Label
 }
 
 function Get-OptionalJsonProperty {
@@ -120,18 +203,10 @@ function Set-VercelAlias {
     )
     $deploymentHost = ($DeploymentUrl -replace "^https?://", "").TrimEnd("/")
     $aliasHost = ($AliasUrl -replace "^https?://", "").TrimEnd("/")
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $null = & npx @vercel alias set $deploymentHost $aliasHost @vercelAuth 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($exitCode -ne 0) {
-        throw "$Label failed with exit code $exitCode."
-    }
+    $null = Invoke-VercelProcess `
+        -Arguments @("alias", "set", $deploymentHost, $aliasHost) `
+        -Label $Label `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds
 }
 
 function Assert-PublicationState {
@@ -193,9 +268,15 @@ function Assert-PublicationState {
 
 Push-Location $stage
 try {
-& npx @vercel build --yes --project $ProjectId @vercelAuth
-    if ($LASTEXITCODE -ne 0) {
-        throw "Vercel prebuild failed with exit code $LASTEXITCODE."
+    $buildResult = Invoke-VercelProcess `
+        -Arguments @("build", "--yes", "--project", $ProjectId) `
+        -Label "Vercel prebuild" `
+        -TimeoutSeconds $VercelBuildTimeoutSeconds
+    if ($buildResult.Stdout) {
+        [Console]::Out.WriteLine($buildResult.Stdout)
+    }
+    if ($buildResult.Stderr) {
+        [Console]::Error.WriteLine($buildResult.Stderr)
     }
     $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
@@ -244,23 +325,18 @@ if ($Promote) {
     $priorProduction = Invoke-VercelJson `
         -Arguments @("inspect", $ProductionAlias, "--json") `
         -Label "Prior production inspect"
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $null = & npx @vercel promote $previewUrl --yes @vercelAuth 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($exitCode -ne 0) {
-        throw "Vercel promotion failed with exit code $exitCode."
-    }
-    $promoted = $true
 }
 
 try {
     if ($Promote) {
+        # Mark the external state as potentially mutated before starting the
+        # command. A timeout can occur after Vercel accepted the promotion, so
+        # every promotion failure must enter the existing rollback boundary.
+        $promoted = $true
+        $null = Invoke-VercelProcess `
+            -Arguments @("promote", $previewUrl, "--yes") `
+            -Label "Vercel promotion" `
+            -TimeoutSeconds $VercelCommandTimeoutSeconds
         $promotionVerificationError = $null
         for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {

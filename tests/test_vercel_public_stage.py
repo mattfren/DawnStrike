@@ -84,7 +84,7 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
 
     assert "vercel@58.4.0" in script
     assert "sysconfig.get_path('scripts')" in script
-    assert "build --yes --project" in script
+    assert '-Arguments @("build", "--yes", "--project", $ProjectId)' in script
     assert '"--prebuilt"' in script
     assert "verify_vercel_candidate.ps1" in script
     assert "AllowDegraded" in script
@@ -101,12 +101,34 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "$_.meta" not in script
     assert "$priorProduction.id" not in script
     assert "$deployment.readyState" not in script
-    assert "$stderrPath = [System.IO.Path]::GetTempFileName()" in script
-    assert "2> $stderrPath" in script
-    assert "[System.IO.File]::ReadAllText($stderrPath).Trim()" in script
+    assert "function Invoke-VercelProcess" in script
+    assert "Get-Command node.exe" in script
+    assert '"node_modules\\npm\\bin\\npx-cli.js"' in script
+    assert "System.Diagnostics.ProcessStartInfo" in script
+    assert "$startInfo.UseShellExecute = $false" in script
+    assert "$startInfo.CreateNoWindow = $true" in script
+    assert "$process.StandardOutput.ReadToEndAsync()" in script
+    assert "$process.StandardError.ReadToEndAsync()" in script
+    assert "WaitForExit($TimeoutSeconds * 1000)" in script
+    assert "$stdoutTask.Wait(5000)" in script
+    assert "$stderrTask.Wait(5000)" in script
+    assert "output drain timed out after process exit" in script
+    assert "taskkill.exe /PID $process.Id /T /F" in script
+    assert "VercelBuildTimeoutSeconds = 600" in script
+    assert "VercelCommandTimeoutSeconds = 180" in script
+    assert '$startInfo.EnvironmentVariables["CI"] = "1"' in script
+    assert '$startInfo.EnvironmentVariables["VERCEL_TELEMETRY_DISABLED"] = "1"' in script
+    assert '$startInfo.EnvironmentVariables["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"' in script
+    assert "& npx" not in script
+    assert "$stdoutTask.Result" in script
+    assert "$stderrTask.Result" in script
     assert "curl progress can otherwise be interleaved" in script
     assert "Promoted deployment does not match the verified preview" in script
     assert "Production does not match the verified preview" in script
+    assert "A timeout can occur after Vercel accepted the promotion" in script
+    assert script.index("$promoted = $true") < script.index(
+        '-Arguments @("promote", $previewUrl, "--yes")'
+    )
     assert "foreach ($alias in $allProductionAliases)" in script
     assert "Assert-PublicationState" in script
     assert "Production verification did not converge" in script
