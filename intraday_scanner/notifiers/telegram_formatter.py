@@ -251,16 +251,16 @@ def format_alpha_watch(
 ) -> str:
     source_summary = dict(source_summary or {})
     blocked_signals = list(blocked_signals or [])
-    candidates = [
-        row
-        for row in signals
-        if _telegram_candidate_allowed(row)
-    ][:5]
+    candidates = [row for row in signals if _telegram_candidate_allowed(row)][:5]
+    slate = dict(source_summary.get("ranked_research_slate") or {})
+    slate_total = int(slate.get("published_count") or len(candidates))
+    slate_shown = len(candidates)
     official_candidates = [
         row
         for row in candidates
         if (
-            str(row.get("publication_tier") or "") in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+            str(row.get("publication_tier") or "")
+            in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
             or (
                 not row.get("publication_tier")
                 and str(row.get("decision_tier") or "").lower() == "clean_edge"
@@ -283,6 +283,8 @@ def format_alpha_watch(
             f"{len(official_candidates)} official candidates | "
             f"{len(research_watchlist)} research"
         ),
+        "",
+        f"Research slate: {slate_shown} of {slate_total} shown",
         "",
         official_heading,
         "(pending fresh quote, session, cost, chase, and portfolio checks)",
@@ -364,16 +366,24 @@ def format_alpha_no_trade(
     reason: str,
     next_action: str,
     research_signals: list[dict[str, Any]] | None = None,
+    research_total: int | None = None,
     max_chars: int = DEFAULT_ALERT_MAX_CHARS,
 ) -> str:
     radar = list(research_signals or [])[:3]
+    total = int(research_total if research_total is not None else len(research_signals or []))
     lines = [
         "📡 Dawnstrike Alpha Check",
         "No clean edge today.",
         "",
+        f"Research slate: {len(radar)} of {total} shown",
+        "",
         (
             "OFFICIAL PAPER CANDIDATES"
-            if any(str(row.get("publication_tier") or "") in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"} for row in radar)
+            if any(
+                str(row.get("publication_tier") or "")
+                in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+                for row in radar
+            )
             or not any("publication_tier" in row for row in radar)
             else "PAPER PLAN QUALIFIED"
         ),
@@ -714,8 +724,10 @@ def _telegram_candidate_allowed(row: dict[str, Any]) -> bool:
         "unsafe",
     ):
         value = row.get(key)
-        if value is True or (isinstance(value, str) and value.strip()) or (
-            isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value)
+        if (
+            value is True
+            or (isinstance(value, str) and value.strip())
+            or (isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value))
         ):
             return False
     return True

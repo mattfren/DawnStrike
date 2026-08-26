@@ -67,7 +67,16 @@ class AlphaRunContract:
     core_universe_status: str = "DATA_UNAVAILABLE"
     core_universe_count: int = 0
     core_universe_hash_sha256: str = ""
+    core_universe_market_date: str = ""
+    core_index_verdicts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    core_raw_artifact_hashes: tuple[str, ...] = ()
+    core_member_set_hash_sha256: str = ""
     lane_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    slate_id: str = ""
+    slate_content_hash_sha256: str = ""
+    slate_market_date: str = ""
+    slate_published_count: int = 0
+    slate_selection_ids: tuple[str, ...] = ()
     schema_version: str = "alphaops.run_contract.v1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,10 +110,12 @@ def build_alpha_run_contract(
         target=5,
         data_eligible=data_eligible,
     )
+    persisted_slate = dict(source_summary.get("ranked_research_slate") or {})
     published_signals = apply_publication_semantics(
         signals,
         slate=slate,
         coverage=enrichment,
+        require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
     )
     publication = publication_counts(
         published_signals,
@@ -126,8 +137,7 @@ def build_alpha_run_contract(
     primary_verified = _first_count(
         enrichment.get("primary_verified_count"),
         max(
-            coverage.verified_count
-            - _first_count(enrichment.get("secondary_fallback_count")),
+            coverage.verified_count - _first_count(enrichment.get("secondary_fallback_count")),
             0,
         ),
     )
@@ -215,17 +225,46 @@ def build_alpha_run_contract(
         paper_plan_qualified_count=publication["paper_plan_qualified"],
         alertable_trade_count=publication["alertable_trade"],
         official_selected_count=publication["official_selected"],
-        core_universe_status=str(core.get("contract_status") or core.get("status") or "DATA_UNAVAILABLE"),
-        core_universe_count=max(int(core.get("contract_membership_count") or core.get("membership_count") or 0), 0),
-        core_universe_hash_sha256=str(core.get("contract_hash_sha256") or core.get("content_hash_sha256") or ""),
+        core_universe_status=str(
+            core.get("contract_status") or core.get("status") or "DATA_UNAVAILABLE"
+        ),
+        core_universe_count=max(
+            int(core.get("contract_membership_count") or core.get("membership_count") or 0), 0
+        ),
+        core_universe_hash_sha256=str(
+            core.get("contract_hash_sha256") or core.get("content_hash_sha256") or ""
+        ),
+        core_universe_market_date=str(
+            core.get("requested_market_date")
+            or source_summary.get("market_date")
+            or generated_at[:10]
+        ),
+        core_index_verdicts=dict(core.get("index_verdicts") or {}),
+        core_raw_artifact_hashes=tuple(
+            sorted(str(item) for item in core.get("raw_artifact_hashes") or [])
+        ),
+        core_member_set_hash_sha256=str(core.get("canonical_member_set_hash_sha256") or ""),
         lane_counts=lane_counts,
+        slate_id=str(persisted_slate.get("slate_id") or slate.get("slate_id") or ""),
+        slate_content_hash_sha256=str(
+            persisted_slate.get("content_hash_sha256") or slate.get("content_hash_sha256") or ""
+        ),
+        slate_market_date=str(persisted_slate.get("market_date") or generated_at[:10]),
+        slate_published_count=max(
+            int(persisted_slate.get("published_count") or slate.get("published_count") or 0), 0
+        ),
+        slate_selection_ids=tuple(
+            sorted(
+                str(item)
+                for item in persisted_slate.get("selection_ids") or slate.get("selection_ids") or []
+            )
+        ),
     )
 
 
 def _all_plan_inputs_ineligible(signals: list[dict[str, Any]]) -> bool:
     return bool(signals) and all(
-        str(row.get("plan_input_status") or "") == "ineligible_missing_truth"
-        for row in signals
+        str(row.get("plan_input_status") or "") == "ineligible_missing_truth" for row in signals
     )
 
 

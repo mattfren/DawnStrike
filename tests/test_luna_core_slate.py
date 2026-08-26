@@ -3,12 +3,14 @@ import json
 from pathlib import Path
 
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
-from intraday_scanner.services.luna_core_universe_service import build_core_universe_contract
-from intraday_scanner.services.luna_core_universe_service import discover_core_universe_rows, merge_core_universe_rows, rank_core_universe_rows
+from intraday_scanner.services.luna_core_universe_service import (
+    build_core_universe_contract,
+    discover_core_universe_rows,
+    merge_core_universe_rows,
+    rank_core_universe_rows,
+)
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
-    TIER2,
-    TIER3,
     apply_publication_semantics,
     build_ranked_research_slate,
     publication_counts,
@@ -16,7 +18,13 @@ from intraday_scanner.services.luna_research_slate_service import (
 from intraday_scanner.services.signal_review_service import monitor_alpha_signals
 
 
-def _manifest(observed="2026-08-26T12:00:00Z", members=None, source_id="source", index_name=None, expected_count=None):
+def _manifest(
+    observed="2026-08-26T12:00:00Z",
+    members=None,
+    source_id="source",
+    index_name=None,
+    expected_count=None,
+):
     return {
         "source_id": source_id,
         "source_uri": f"https://example.test/{source_id}",
@@ -31,7 +39,11 @@ def _manifest(observed="2026-08-26T12:00:00Z", members=None, source_id="source",
 def test_core_union_dedupes_symbols_and_keeps_index_memberships():
     contract = build_core_universe_contract(
         [
-            _manifest(index_name="S&P 500", expected_count=1, members=[{"ticker": "aapl", "index_memberships": ["S&P 500"]}]),
+            _manifest(
+                index_name="S&P 500",
+                expected_count=1,
+                members=[{"ticker": "aapl", "index_memberships": ["S&P 500"]}],
+            ),
             _manifest(
                 source_id="ndx",
                 index_name="Nasdaq-100",
@@ -43,6 +55,7 @@ def test_core_union_dedupes_symbols_and_keeps_index_memberships():
             ),
         ],
         observed_at="2026-08-26T13:00:00Z",
+        allow_test_override=True,
     )
     assert contract["status"] == "READY"
     assert contract["membership_count"] == 2
@@ -54,11 +67,18 @@ def test_core_union_dedupes_symbols_and_keeps_index_memberships():
 def test_core_union_requires_both_complete_indexes_and_stale_is_unavailable():
     absent = build_core_universe_contract(None, observed_at="2026-08-26T13:00:00Z")
     stale = build_core_universe_contract(
-        _manifest(observed="2026-01-01T12:00:00Z", index_name="S&P 500", expected_count=1, members=[{"ticker": "AAPL", "index": "S&P 500"}]),
+        _manifest(
+            observed="2026-01-01T12:00:00Z",
+            index_name="S&P 500",
+            expected_count=1,
+            members=[{"ticker": "AAPL", "index": "S&P 500"}],
+        ),
         observed_at="2026-08-26T13:00:00Z",
     )
     missing_index = build_core_universe_contract(
-        _manifest(index_name="S&P 500", expected_count=1, members=[{"ticker": "AAPL", "index": "S&P 500"}]),
+        _manifest(
+            index_name="S&P 500", expected_count=1, members=[{"ticker": "AAPL", "index": "S&P 500"}]
+        ),
         observed_at="2026-08-26T13:00:00Z",
     )
     assert absent["status"] == "DATA_UNAVAILABLE"
@@ -103,39 +123,137 @@ def test_soft_no_trade_reason_is_disclosed_on_tier_one_but_hard_reason_is_exclud
 
 def test_tier_one_coexists_with_one_official_and_tier_two_three_remain_zero():
     rows = [
-        {"ticker": "OFFICIAL", "alpha_score": 100, "plan_qualified": True, "can_alert": True, "alert_gate_status": "PASS"},
+        {
+            "ticker": "OFFICIAL",
+            "alpha_score": 100,
+            "plan_qualified": True,
+            "can_alert": True,
+            "alert_gate_status": "PASS",
+        },
         {"ticker": "RESEARCH", "alpha_score": 99},
     ]
     slate = build_ranked_research_slate(rows)
-    annotated = apply_publication_semantics(rows, slate=slate, coverage={"secondary_fallback_status": "applied_research_only_above_ceiling"})
+    annotated = apply_publication_semantics(
+        rows,
+        slate=slate,
+        coverage={"secondary_fallback_status": "applied_research_only_above_ceiling"},
+    )
     assert annotated[0]["publication_tier"] == TIER1
     assert annotated[0]["plan_qualification_status"] == "WAITING_CURRENT_CHECKS"
     counts = publication_counts(annotated, official_selected=1)
-    assert counts == {"ranked_research": 2, "paper_plan_qualified": 0, "alertable_trade": 0, "official_selected": 1}
+    assert counts == {
+        "ranked_research": 2,
+        "paper_plan_qualified": 0,
+        "alertable_trade": 0,
+        "official_selected": 1,
+    }
     text = format_alpha_watch(signals=annotated, edge_label="research")
     assert "OFFICIAL PAPER CANDIDATES" not in text
 
 
 def test_tier_semantics_and_research_monitor_label():
-    plan = {"schema_version": "alphaops.structural_plan.v1", "status": "COMPLETE", "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64}, "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64}, "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64}, "provenance": {"independent": True, "observations": [{"source_id": "entry", "observation_hash": "e" * 64}, {"source_id": "stop", "observation_hash": "s" * 64}, {"source_id": "target", "observation_hash": "t" * 64}]}}
-    plan["plan_hash_sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    row = {"ticker": "SAFE", "alpha_score": 1, "entry_trigger": 10, "invalidation": 9, "target_1": 12, "can_alert": True, "alert_gate_status": "PASS", "plan_qualified": True, "publication_tier": TIER1, "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "structural_plan_contract": plan, "after_cost_rr": 1.5}
+    plan = {
+        "schema_version": "alphaops.structural_plan.v1",
+        "status": "COMPLETE",
+        "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64},
+        "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64},
+        "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64},
+        "provenance": {
+            "independent": True,
+            "observations": [
+                {"source_id": "entry", "observation_hash": "e" * 64},
+                {"source_id": "stop", "observation_hash": "s" * 64},
+                {"source_id": "target", "observation_hash": "t" * 64},
+            ],
+        },
+    }
+    plan["plan_hash_sha256"] = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    row = {
+        "ticker": "SAFE",
+        "alpha_score": 1,
+        "entry_trigger": 10,
+        "invalidation": 9,
+        "target_1": 12,
+        "can_alert": True,
+        "alert_gate_status": "PASS",
+        "plan_qualified": True,
+        "publication_tier": TIER1,
+        "strategy_id": "alphaops_v4",
+        "strategy_receipt_status": "COMPLETE",
+        "structural_plan_contract": plan,
+        "after_cost_rr": 1.5,
+    }
     annotated = apply_publication_semantics([row], slate={"rows": [row]}, coverage={})
-    assert annotated[0]["publication_tier"] == TIER3
-    assert monitor_alpha_signals(annotated, current_prices={"SAFE": 10.1})["events"][0]["label"] == "ENTRY TRIGGERED"
+    assert annotated[0]["publication_tier"] == TIER1
+    assert (
+        monitor_alpha_signals(annotated, current_prices={"SAFE": 10.1})["events"][0]["label"]
+        == "RESEARCH CONDITION MET"
+    )
 
 
 def test_live_fallback_ceiling_demotes_a_genuinely_qualified_plan_to_tier_one():
-    plan = {"schema_version": "alphaops.structural_plan.v1", "status": "COMPLETE", "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64}, "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64}, "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64}, "provenance": {"independent": True, "observations": [{"source_id": "entry", "observation_hash": "e" * 64}, {"source_id": "stop", "observation_hash": "s" * 64}, {"source_id": "target", "observation_hash": "t" * 64}]}}
-    plan["plan_hash_sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    row = {"ticker": "QUAL", "entry_trigger": 10, "invalidation": 9, "target_1": 12, "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "structural_plan_contract": plan, "after_cost_rr": 1.5, "can_alert": True, "alert_gate_status": "PASS"}
+    plan = {
+        "schema_version": "alphaops.structural_plan.v1",
+        "status": "COMPLETE",
+        "entry": {"value": 10, "source_id": "entry", "observation_hash": "e" * 64},
+        "stop": {"value": 9, "source_id": "stop", "observation_hash": "s" * 64},
+        "target": {"value": 12, "source_id": "target", "observation_hash": "t" * 64},
+        "provenance": {
+            "independent": True,
+            "observations": [
+                {"source_id": "entry", "observation_hash": "e" * 64},
+                {"source_id": "stop", "observation_hash": "s" * 64},
+                {"source_id": "target", "observation_hash": "t" * 64},
+            ],
+        },
+    }
+    plan["plan_hash_sha256"] = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    row = {
+        "ticker": "QUAL",
+        "entry_trigger": 10,
+        "invalidation": 9,
+        "target_1": 12,
+        "strategy_id": "alphaops_v4",
+        "strategy_receipt_status": "COMPLETE",
+        "structural_plan_contract": plan,
+        "after_cost_rr": 1.5,
+        "can_alert": True,
+        "alert_gate_status": "PASS",
+    }
     slate = build_ranked_research_slate([row])
-    assert apply_publication_semantics([row], slate=slate, coverage={})[0]["publication_tier"] == TIER3
-    assert apply_publication_semantics([row], slate=slate, coverage={"secondary_fallback_status": "applied_research_only_above_ceiling"})[0]["publication_tier"] == TIER1
+    assert (
+        apply_publication_semantics([row], slate=slate, coverage={})[0]["publication_tier"] == TIER1
+    )
+    assert (
+        apply_publication_semantics(
+            [row],
+            slate=slate,
+            coverage={"secondary_fallback_status": "applied_research_only_above_ceiling"},
+        )[0]["publication_tier"]
+        == TIER1
+    )
 
 
 def test_receipt_hash_or_three_urls_cannot_stand_in_for_structural_plan():
-    row = {"ticker": "WEAK", "strategy_id": "alphaops_v4", "strategy_receipt_status": "COMPLETE", "receipt_hash_sha256": "a" * 64, "condition_results": [{"source_urls": ["u1"]}, {"source_urls": ["u2"]}, {"source_urls": ["u3"]}], "entry_trigger": 10, "invalidation": 9, "target_1": 12, "after_cost_rr": 1.5}
+    row = {
+        "ticker": "WEAK",
+        "strategy_id": "alphaops_v4",
+        "strategy_receipt_status": "COMPLETE",
+        "receipt_hash_sha256": "a" * 64,
+        "condition_results": [
+            {"source_urls": ["u1"]},
+            {"source_urls": ["u2"]},
+            {"source_urls": ["u3"]},
+        ],
+        "entry_trigger": 10,
+        "invalidation": 9,
+        "target_1": 12,
+        "after_cost_rr": 1.5,
+    }
     slate = build_ranked_research_slate([row])
     assert apply_publication_semantics([row], slate=slate)[0]["publication_tier"] == TIER1
 

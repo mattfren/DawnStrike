@@ -112,7 +112,7 @@ try {
         $priorAlphaCyclePath = Move-DawnstrikePriorAlphaCycleArtifact `
             -ArtifactPath $alphaCyclePath `
             -ArchiveRoot (Join-Path $outputRoot "attempt_archive")
-        $alphaArguments = @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify)
+        $alphaArguments = @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify, "--market-date", $MarketDate)
         if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
         $alphaCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
@@ -137,7 +137,8 @@ try {
             $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
                 -ArtifactPath $alphaCyclePath `
                 -ProcessReceipt $alphaCycle `
-                -MarketDate $MarketDate
+                -MarketDate $MarketDate `
+                -RequireCoreCoverage
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
             $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
             $selectionOutcome = [string]$alphaArtifact.selection_outcome

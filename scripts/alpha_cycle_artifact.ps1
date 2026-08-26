@@ -49,7 +49,8 @@ function Test-DawnstrikeAlphaCycleArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactPath,
         [AllowNull()][object]$ProcessReceipt = $null,
-        [Parameter(Mandatory = $true)][string]$MarketDate
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [switch]$RequireCoreCoverage
     )
     if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
         throw "Current AlphaOps cycle artifact is missing: $ArtifactPath"
@@ -101,6 +102,49 @@ function Test-DawnstrikeAlphaCycleArtifact {
     }
     if ([string]$contract.source_status -notin @("success", "ok")) {
         throw "AlphaOps cycle artifact source_status is not successful."
+    }
+    $coreFieldsPresent = $contract.PSObject.Properties.Name -contains "core_universe_status"
+    if ($RequireCoreCoverage -or $coreFieldsPresent) {
+        if ([string]$contract.core_universe_status -ne "READY") {
+            throw "AlphaOps cycle artifact core universe is not READY; full core coverage is unavailable."
+        }
+        if ([string]$contract.core_universe_market_date -ne $MarketDate) {
+            throw "AlphaOps cycle artifact core universe market date does not match the scheduled session."
+        }
+        $indexVerdicts = $contract.core_index_verdicts
+        foreach ($indexName in @("S&P 500", "Nasdaq-100")) {
+            $index = $indexVerdicts.PSObject.Properties[$indexName].Value
+            if ($null -eq $index -or [string]$index.status -ne "READY") {
+                throw "AlphaOps cycle artifact index verdict is not READY: $indexName"
+            }
+        }
+        $rawHashes = @($contract.core_raw_artifact_hashes)
+        if ($rawHashes.Count -lt 1) { throw "AlphaOps cycle artifact is missing raw artifact hashes." }
+        foreach ($digest in $rawHashes) {
+            if ([string]$digest -cnotmatch '^[0-9a-f]{64}$') { throw "AlphaOps cycle artifact has an invalid raw artifact hash." }
+        }
+        if ([string]$contract.core_member_set_hash_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "AlphaOps cycle artifact is missing the canonical core member-set hash."
+        }
+        $laneCounts = $contract.lane_counts
+        foreach ($lane in @("mover", "core")) {
+            $laneValue = $laneCounts.PSObject.Properties[$lane].Value
+            if ($null -eq $laneValue) { throw "AlphaOps cycle artifact is missing lane counts: $lane" }
+            foreach ($field in @("member_count", "snapshot_count", "eligible_count", "ranked_count")) {
+                if (-not (Test-DawnstrikeNonNegativeInteger -Value $laneValue.PSObject.Properties[$field].Value)) {
+                    throw "AlphaOps cycle artifact lane count is invalid: $lane.$field"
+                }
+            }
+        }
+        if ([string]$contract.slate_market_date -ne $MarketDate -or [string]$contract.slate_id -notmatch '^luna-slate-[0-9a-f]{24}$' -or [string]$contract.slate_content_hash_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "AlphaOps cycle artifact slate identity is missing or invalid."
+        }
+        if (-not (Test-DawnstrikeNonNegativeInteger -Value $contract.slate_published_count)) {
+            throw "AlphaOps cycle artifact slate count is invalid."
+        }
+        if ([int64]$contract.slate_published_count -ne @($contract.slate_selection_ids).Count) {
+            throw "AlphaOps cycle artifact slate count is inconsistent."
+        }
     }
     $payloadHasCount = $payload.PSObject.Properties.Name -contains "signal_count"
     $contractHasCount = $contract.PSObject.Properties.Name -contains "signal_count"
