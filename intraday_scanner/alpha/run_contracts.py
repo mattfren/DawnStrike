@@ -78,6 +78,7 @@ class AlphaRunContract:
     core_raw_artifact_hashes: tuple[str, ...] = ()
     core_member_set_hash_sha256: str = ""
     lane_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    lane_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
     slate_id: str = ""
     slate_content_hash_sha256: str = ""
     slate_market_date: str = ""
@@ -245,7 +246,7 @@ def build_alpha_run_contract(
             "FROZEN_SLATE_SCAN_MISMATCH: run-contract frozen slate lineage is inconsistent."
         )
     slate_reuse_status = expected_reuse_status
-    research_symbols = tuple(
+    enrichment_symbols = tuple(
         sorted(
             {
                 str(value).upper().strip()
@@ -254,10 +255,33 @@ def build_alpha_run_contract(
             }
         )
     )
-    if coverage.selected_count != len(research_symbols):
+    if coverage.selected_count != len(enrichment_symbols):
         raise ValueError(
             "Premarket selected_count must match the explicit research symbol universe."
         )
+    lane_statuses = {
+        str(name): dict(value)
+        for name, value in dict(slate.get("lane_statuses") or {}).items()
+        if isinstance(value, dict)
+    }
+    if persisted_slate:
+        # The frozen slate, not the current mover-enrichment cohort, owns the
+        # exact research identity.  This is especially important when a
+        # healthy core lane publishes while the mover lane is unavailable or
+        # when a governed retry reuses a prior scan's cohort.
+        research_symbols = tuple(str(value).upper() for value in slate.get("symbols") or [])
+        slate_coverage_status = str(slate.get("coverage_status") or "").strip().upper()
+        combined_data_eligible = (
+            any(value.get("data_eligible") is True for value in lane_statuses.values())
+            if lane_statuses
+            else slate_coverage_status
+            not in {"", "DATA_UNAVAILABLE", "INELIGIBLE", "BLOCKED"}
+        )
+        contract_coverage_status = slate_coverage_status.lower()
+    else:
+        research_symbols = enrichment_symbols
+        combined_data_eligible = not coverage.data_ineligible
+        contract_coverage_status = coverage.status
     alertable_count = sum(
         1
         for row in signals
@@ -265,7 +289,7 @@ def build_alpha_run_contract(
     )
     if source_status not in {"success", "ok"}:
         outcome = SelectionOutcome.SOURCE_FAILED
-    elif coverage.data_ineligible:
+    elif not combined_data_eligible:
         outcome = SelectionOutcome.DATA_INELIGIBLE
     elif official_selected_count:
         outcome = SelectionOutcome.WATCHLIST_READY
@@ -275,6 +299,23 @@ def build_alpha_run_contract(
         outcome = SelectionOutcome.DATA_INELIGIBLE
     else:
         outcome = SelectionOutcome.VALID_NO_EDGE
+    primary_veto = (
+        str(
+            slate.get("slate_shortfall_reason")
+            or decision.get("primary_reason_code")
+            or diagnostics.get("primary_reason_code")
+            or decision.get("reason")
+            or ""
+        )
+        if persisted_slate
+        else str(
+            coverage.reason_code
+            or decision.get("primary_reason_code")
+            or diagnostics.get("primary_reason_code")
+            or decision.get("reason")
+            or ""
+        )
+    )
     return AlphaRunContract(
         producer="alphaops",
         producer_run_id=scan_id,
@@ -290,15 +331,9 @@ def build_alpha_run_contract(
         premarket_selected_count=coverage.selected_count,
         premarket_verified_count=coverage.verified_count,
         premarket_verified_ratio=coverage.verified_ratio,
-        coverage_status=coverage.status,
+        coverage_status=contract_coverage_status,
         selection_outcome=outcome.value,
-        primary_veto=str(
-            coverage.reason_code
-            or decision.get("primary_reason_code")
-            or diagnostics.get("primary_reason_code")
-            or decision.get("reason")
-            or ""
-        ),
+        primary_veto=primary_veto,
         notification_channel=notification_channel,
         notification_dry_run=notification_dry_run,
         notification_status=_notification_status(
@@ -350,6 +385,7 @@ def build_alpha_run_contract(
         ),
         core_member_set_hash_sha256=str(core.get("canonical_member_set_hash_sha256") or ""),
         lane_counts=lane_counts,
+        lane_statuses=lane_statuses,
         slate_id=str(slate.get("slate_id") or ""),
         slate_content_hash_sha256=str(
             slate.get("content_hash_sha256") or ""
@@ -361,10 +397,7 @@ def build_alpha_run_contract(
             int(slate.get("published_count") or 0), 0
         ),
         slate_selection_ids=tuple(
-            sorted(
-                str(item)
-                for item in slate.get("selection_ids") or []
-            )
+            str(item) for item in slate.get("selection_ids") or []
         ),
     )
 

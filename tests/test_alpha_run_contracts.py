@@ -150,9 +150,76 @@ def test_contract_reports_governed_cross_scan_frozen_slate_without_current_repla
     )
 
     assert contract.ranked_research_count == 1
-    assert contract.slate_selection_ids == tuple(sorted(slate["selection_ids"]))
+    assert contract.research_candidate_count == 1
+    assert contract.research_symbols == ("FROZEN",)
+    assert contract.slate_selection_ids == tuple(slate["selection_ids"])
     assert contract.slate_source_scan_id == "scan-original"
     assert contract.slate_reuse_status == "GOVERNED_DAILY_FREEZE_REUSE"
+
+
+def test_core_only_frozen_slate_owns_research_identity_when_mover_data_is_unavailable():
+    lane_statuses = {
+        "mover": {"data_eligible": False, "source_status": "SOURCE_FAILED"},
+        "core": {
+            "data_eligible": True,
+            "snapshot_status": "PARTIAL",
+            "enrichment_status": "complete",
+        },
+    }
+    slate = build_ranked_research_slate(
+        [
+            {
+                "ticker": "CORE",
+                "signal_id": "signal-core",
+                "universe_lane": "core",
+                "evidence_lane": "core",
+            }
+        ],
+        generated_at="2026-08-05T12:00:00+00:00",
+        market_date="2026-08-05",
+        scan_id="scan-1",
+        coverage_status="LIMITED",
+        lane_statuses=lane_statuses,
+    )
+    contract = build_alpha_run_contract(
+        scan_id="scan-1",
+        generated_at="2026-08-05T12:23:00+00:00",
+        ranked_count=1,
+        signals=[{"ticker": "CORE", "signal_id": "signal-core"}],
+        review={
+            "decision": {"reason": "No plan passed current entry gates."},
+            "selection_diagnostics": {},
+            "watchlist": [],
+        },
+        source_summary={
+            "status": "success",
+            "ranked_research_slate": slate,
+            "ranked_research_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
+                "frozen_source_scan_id": "scan-1",
+                "current_scan_id": "scan-1",
+                "reuse_status": "CURRENT_SCAN",
+            },
+        },
+        enrichment_summary={
+            "status": "partial",
+            "selected_count": 4,
+            "selected_symbols": ["MOVE1", "MOVE2", "MOVE3", "MOVE4"],
+            "verified_count": 0,
+            "secondary_fallback_status": "ceiling_exceeded_not_applied",
+        },
+        notification_stats={},
+    )
+
+    assert contract.research_candidate_count == 1
+    assert contract.research_symbols == ("CORE",)
+    assert contract.selection_outcome == "valid_no_edge"
+    assert contract.coverage_status == "limited"
+    assert contract.premarket_selected_count == 4
+    assert contract.premarket_verified_count == 0
+    assert contract.lane_statuses == lane_statuses
 
 
 def test_contract_rejects_cross_scan_slate_without_explicit_reuse_lineage():
@@ -228,7 +295,7 @@ def test_empty_frozen_slate_cannot_publish_retry_watchlist_or_watchlist_ready():
 
     assert contract.slate_published_count == 0
     assert contract.official_selected_count == 0
-    assert contract.selection_outcome == "valid_no_edge"
+    assert contract.selection_outcome == "data_ineligible"
 
 
 def test_contract_rejects_caller_claimed_slate_lineage_that_disagrees_with_artifact():
