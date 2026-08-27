@@ -22,18 +22,18 @@ def _run_source_failure(
         "utc_now_iso",
         lambda: wall_clock,
     )
-    monkeypatch.setattr(
-        alpha_cycle_service,
-        "web_auto_collect",
-        lambda **_kwargs: {
+    def failed_collection(**kwargs):
+        assert kwargs["observed_at"] == as_of.astimezone(timezone.utc)
+        return {
             "status": "failed",
             "source_summary": {
                 "status": "source_failed",
                 "candidate_count": 0,
                 "reason": "hostile-clock source failure regression",
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(alpha_cycle_service, "web_auto_collect", failed_collection)
     db_path = tmp_path / "alpha.sqlite"
     result = alpha_cycle_service.alpha_cycle(
         config_path="missing.yaml",

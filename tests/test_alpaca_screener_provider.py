@@ -1,5 +1,11 @@
+from datetime import datetime, timezone
+
+import pytest
+
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
+from intraday_scanner.providers import alpaca_screener_provider
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.alpaca_screener_provider import AlpacaScreenerProvider
 
@@ -91,6 +97,28 @@ def test_alpaca_screener_discovers_read_only_common_stock_universe(monkeypatch):
     assert result["rejection_reason_counts"] == {"non_common_security_name": 1}
     assert result["research_only"] is True
     assert result["broker_execution_enabled"] is False
+
+
+def test_alpaca_screener_rejects_historical_as_of_before_current_discovery(
+    monkeypatch,
+):
+    provider = AlpacaScreenerProvider(
+        ScannerConfig(
+            alpaca_api_key_id="key",  # pragma: allowlist secret
+            alpaca_api_secret_key="secret",  # pragma: allowlist secret
+        )
+    )
+    provider.market_data = _FakeMarketData()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        alpaca_screener_provider,
+        "utc_now_iso",
+        lambda: "2026-08-27T13:00:00+00:00",
+    )
+
+    with pytest.raises(DataProviderError, match="POINT_IN_TIME_MOVER_DISCOVERY_UNAVAILABLE"):
+        provider.collect(
+            observed_at=datetime(2026, 8, 26, 13, 0, tzinfo=timezone.utc)
+        )
 
 
 def test_alpaca_latest_quotes_expose_bid_ask_spread(monkeypatch):

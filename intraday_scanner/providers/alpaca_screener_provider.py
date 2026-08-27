@@ -14,6 +14,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
@@ -47,6 +48,17 @@ NON_COMMON_NAME_TERMS = (
 _TICKER = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
 
 
+def _aware_utc(value: datetime | str) -> datetime:
+    parsed = (
+        value
+        if isinstance(value, datetime)
+        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class AlpacaScreenerProvider:
     """Return a point-in-time, liquid US-equity research universe."""
 
@@ -63,9 +75,25 @@ class AlpacaScreenerProvider:
         mover_limit: int = 50,
         include_losers: bool = False,
         max_symbols: int = 160,
+        observed_at: datetime | None = None,
+        maximum_observation_skew_seconds: int = 300,
     ) -> dict[str, Any]:
         self.market_data.validate_credentials()
         started_at = utc_now_iso()
+        requested_at = _aware_utc(observed_at) if observed_at is not None else None
+        retrieved_at = _aware_utc(started_at)
+        observation_skew_seconds = (
+            (retrieved_at - requested_at).total_seconds()
+            if requested_at is not None
+            else 0.0
+        )
+        if requested_at is not None and abs(observation_skew_seconds) > max(
+            int(maximum_observation_skew_seconds), 0
+        ):
+            raise DataProviderError(
+                "POINT_IN_TIME_MOVER_DISCOVERY_UNAVAILABLE: Alpaca screener exposes "
+                "only a current snapshot and cannot satisfy the requested cycle time"
+            )
         most_active = self.market_data._request_json(
             "/v1beta1/screener/stocks/most-actives",
             {"top": str(max(1, min(most_active_limit, 100))), "by": "volume"},
@@ -194,6 +222,13 @@ class AlpacaScreenerProvider:
                 "most_actives": most_active.get("last_updated"),
                 "movers": movers.get("last_updated"),
             },
+            "requested_observed_at": (
+                requested_at.isoformat() if requested_at is not None else ""
+            ),
+            "observation_skew_seconds": round(observation_skew_seconds, 6),
+            "point_in_time_status": (
+                "CURRENT_SNAPSHOT_BOUND" if requested_at is not None else "CURRENT_SNAPSHOT"
+            ),
             "universe_evidence": {
                 "provider_id": "alpaca",
                 "dataset_id": "stocks-screener-plus-active-assets",

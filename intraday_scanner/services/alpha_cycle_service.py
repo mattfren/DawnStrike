@@ -66,6 +66,7 @@ from intraday_scanner.reporting import write_scan_outputs
 from intraday_scanner.services.alpha_official_cohort_service import (
     build_official_cohort_row,
     membership_sha256,
+    validate_or_recover_official_cohort,
 )
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
@@ -223,6 +224,7 @@ def alpha_cycle(
         out_dir=output_dir / "web_collect",
         persist=True,
         print_rows=False,
+        observed_at=cycle_decision_at,
     )
     source_summary = dict(collection.get("source_summary") or {})
     source_summary["require_watcher_proof"] = True
@@ -1285,10 +1287,62 @@ def alpha_monitor(
                 phase=phase,
             )
     store = SQLiteScanStore(db_path)
-    signals = store.load_alpha_signals(limit=25)
-    latest_scan_id = str(signals[0].get("scan_id") or "") if signals else ""
-    signals = [row for row in signals if str(row.get("scan_id") or "") == latest_scan_id]
-    latest_signal_date = _signal_market_date(signals[0]) if signals else ""
+    latest_attempt_signals = store.load_alpha_signals(limit=25)
+    latest_attempt_scan_id = (
+        str(latest_attempt_signals[0].get("scan_id") or "")
+        if latest_attempt_signals
+        else ""
+    )
+    latest_attempt_signals = [
+        row
+        for row in latest_attempt_signals
+        if str(row.get("scan_id") or "") == latest_attempt_scan_id
+    ]
+    latest_attempt_date = (
+        _signal_market_date(latest_attempt_signals[0])
+        if latest_attempt_signals
+        else ""
+    )
+    required_market_date = (
+        session_gate.market_date if session_gate is not None else latest_attempt_date
+    )
+    contract_reference: str | datetime = (
+        as_of
+        or (
+            str(latest_attempt_signals[0].get("timestamp") or "")
+            if latest_attempt_signals
+            else ""
+        )
+        or f"{required_market_date}T12:00:00+00:00"
+    )
+    strategy_id, strategy_version = alphaops_strategy_contract(contract_reference)
+    official_cohort = (
+        store.load_official_strategy_cohort(
+            market_date=required_market_date,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            cohort=ALPHAOPS_OFFICIAL_COHORT,
+        )
+        if required_market_date
+        else None
+    )
+    # A governed Morning retry may persist a newer producer scan while the
+    # date-level official cohort deliberately remains frozen on its original
+    # scan.  Monitoring follows the authoritative cohort, never whichever
+    # alpha_signal row happened to be written most recently.
+    latest_scan_id = str(
+        (official_cohort or {}).get("scan_id") or latest_attempt_scan_id
+    )
+    latest_signal_date = str(
+        (official_cohort or {}).get("market_date") or latest_attempt_date
+    )[:10]
+    signals = (
+        store.load_alpha_signals(scan_id=latest_scan_id, limit=500)
+        if latest_scan_id
+        else []
+    )
+    if not signals and official_cohort is None:
+        signals = latest_attempt_signals
     if session_gate is not None and signals and latest_signal_date != session_gate.market_date:
         return {
             "status": "stale_watchlist",
@@ -1306,10 +1360,17 @@ def alpha_monitor(
         }
     exact_selections = store.load_signal_selections(
         scan_id=latest_scan_id,
+        event_key=str((official_cohort or {}).get("event_key") or "") or None,
+        strategy_id=strategy_id if official_cohort is not None else None,
         cohort=ALPHAOPS_OFFICIAL_COHORT,
         limit=500,
     )
-    if session_gate is not None and latest_scan_id and not exact_selections:
+    if (
+        official_cohort is None
+        and session_gate is not None
+        and latest_scan_id
+        and not exact_selections
+    ):
         # Older AlphaOps runs predate the immutable selection tables.  Recovery
         # is deliberately based on the exact persisted Telegram body; an
         # ambiguous/truncated message remains unknown and therefore fail-closed.
@@ -1321,10 +1382,45 @@ def alpha_monitor(
         )
     radar_selections = store.load_signal_selections(
         scan_id=latest_scan_id,
+        event_key=str((official_cohort or {}).get("event_key") or "") or None,
+        strategy_id=ALPHAOPS_RADAR_COHORT if official_cohort is not None else None,
         cohort=ALPHAOPS_RADAR_COHORT,
         limit=50,
     )
     try:
+        if official_cohort is not None:
+            if not _valid_monitor_official_cohort(
+                official_cohort,
+                exact_selections,
+                market_date=required_market_date,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+            ):
+                raise SnapshotValidationError(
+                    "The persisted official cohort, message manifest, or membership "
+                    "does not match its immutable date-level identity."
+                )
+            if session_gate is not None:
+                delivered = validate_or_recover_official_cohort(
+                    store,
+                    market_date=required_market_date,
+                    strategy_id=strategy_id,
+                    strategy_version=strategy_version,
+                    persist_recovery=False,
+                )
+                if delivered.errors:
+                    raise SnapshotValidationError(
+                        "The official cohort lacks exact Telegram delivery proof: "
+                        + "; ".join(delivered.errors)
+                    )
+        official_monitor_signals = _official_monitor_signals(
+            signals,
+            exact_selections,
+            receipt_verifier=_persisted_strategy_receipt_verifier(
+                store,
+                market_date=required_market_date,
+            ),
+        )
         radar_monitor_signals = _radar_monitor_signals(signals, radar_selections)
     except SnapshotValidationError as exc:
         return {
@@ -1364,12 +1460,34 @@ def alpha_monitor(
             and str(row.get("ticker") or "").upper() != "NO_TRADE"
         }
         if official_signal_ids:
-            official_signals = [
+            if {
+                str(row.get("signal_id") or row.get("signal_key") or "")
+                for row in official_monitor_signals
+            } != official_signal_ids:
+                return {
+                    "status": "selection_evidence_unavailable",
+                    "label": "SELECTION AUDIT REQUIRED",
+                    "message": (
+                        "The exact official AlphaOps cohort could not be reconstructed; "
+                        "no monitor notification was created."
+                    ),
+                    "latest_watchlist_market_date": latest_signal_date or "unknown",
+                    "required_market_date": (
+                        session_gate.market_date if session_gate else None
+                    ),
+                    "tickers": [],
+                    "events": [],
+                    "notification_stats": {"sent": 0, "skipped": 0},
+                    "selection_evidence_status": "unavailable",
+                    "session_gate": session_gate.to_dict() if session_gate else None,
+                }
+            radar_monitor_signals = [
                 row
-                for row in signals
-                if str(row.get("signal_id") or row.get("signal_key") or "") in official_signal_ids
+                for row in radar_monitor_signals
+                if str(row.get("signal_id") or row.get("signal_key") or "")
+                not in official_signal_ids
             ]
-            signals = [*official_signals, *radar_monitor_signals]
+            signals = [*official_monitor_signals, *radar_monitor_signals]
             selection_evidence_status = "exact_official_and_research_slate_cohort"
         elif radar_selections:
             signals = radar_monitor_signals
@@ -1524,6 +1642,162 @@ def _monitor_event_key(scan_id: str, result: dict[str, Any]) -> str:
     state_text = ";".join(states) or str(result.get("status") or "unknown")
     digest = hashlib.sha256(f"{scan_id}|{state_text}".encode()).hexdigest()[:16]
     return f"{scan_id or 'no-scan'}:{digest}"
+
+
+def _valid_monitor_official_cohort(
+    cohort: dict[str, Any],
+    selections: list[dict[str, Any]],
+    *,
+    market_date: str,
+    strategy_id: str,
+    strategy_version: str,
+) -> bool:
+    """Bind monitor ownership to the exact frozen message and member set."""
+
+    identity = f"{market_date}|{strategy_id}|{strategy_version}|{ALPHAOPS_OFFICIAL_COHORT}"
+    expected_cohort_id = (
+        "official-cohort:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    )
+    if (
+        not selections
+        or str(cohort.get("official_cohort_id") or "") != expected_cohort_id
+        or str(cohort.get("market_date") or "") != market_date
+        or str(cohort.get("strategy_id") or "") != strategy_id
+        or str(cohort.get("strategy_version") or "") != strategy_version
+        or str(cohort.get("cohort") or "") != ALPHAOPS_OFFICIAL_COHORT
+        or membership_sha256(selections)
+        != str(cohort.get("membership_sha256") or "")
+    ):
+        return False
+    for selection in selections:
+        if any(
+            str(selection.get(field) or "") != str(cohort.get(field) or "")
+            for field in (
+                "scan_id",
+                "event_key",
+                "body_sha256",
+                "strategy_id",
+                "strategy_version",
+                "cohort",
+            )
+        ) or str(selection.get("selected_at") or "")[:10] != market_date:
+            return False
+    payload = cohort.get("payload_json")
+    manifest = payload.get("notification_manifest") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or not isinstance(manifest, dict):
+        return False
+    try:
+        member_count = int(payload.get("member_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    body = str(manifest.get("body") or "")
+    return bool(
+        payload.get("research_only") is True
+        and payload.get("broker_execution_enabled") is False
+        and member_count == len(selections)
+        and sorted(str(value) for value in payload.get("selection_ids") or [])
+        == sorted(str(row.get("selection_id") or "") for row in selections)
+        and sorted(str(value) for value in payload.get("signal_ids") or [])
+        == sorted(str(row.get("signal_id") or "") for row in selections)
+        and manifest.get("schema_version")
+        == "dawnstrike.alphaops.official_notification_manifest.v1"
+        and str(manifest.get("event_key") or "") == str(cohort.get("event_key") or "")
+        and str(manifest.get("body_sha256") or "")
+        == str(cohort.get("body_sha256") or "")
+        and _body_sha256(body) == str(cohort.get("body_sha256") or "")
+        and str(manifest.get("title") or "")
+        and str(manifest.get("channel_hint") or "")
+        and manifest.get("research_only") is True
+        and manifest.get("broker_execution_enabled") is False
+    )
+
+
+def _official_monitor_signals(
+    signals: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
+    *,
+    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Rehydrate the exact official cohort, including governed scan retries."""
+
+    signal_by_id = {
+        str(row.get("signal_id") or row.get("signal_key") or ""): row
+        for row in signals
+        if str(row.get("signal_id") or row.get("signal_key") or "")
+    }
+    monitored: list[dict[str, Any]] = []
+    for selection in selections:
+        if (
+            str(selection.get("decision") or "").lower() == "no_trade"
+            or str(selection.get("ticker") or "").upper() == "NO_TRADE"
+        ):
+            continue
+        signal_id = str(selection.get("signal_id") or "")
+        selection_scan_id = str(selection.get("scan_id") or "")
+        source_scan_id = str(selection.get("source_scan_id") or "")
+        if not signal_id or not selection_scan_id:
+            raise SnapshotValidationError(
+                "Official selection is missing immutable signal or scan identity."
+            )
+        signal = validated_frozen_selection_signal(
+            selection,
+            market_date=str(selection.get("selected_at") or "")[:10],
+            allowed_cohorts=(ALPHAOPS_OFFICIAL_COHORT,),
+        )
+        if signal is not None:
+            payload = selection.get("payload_json")
+            slate = payload.get("frozen_ranked_research_slate") if isinstance(
+                payload, dict
+            ) else None
+            if not isinstance(slate, dict):  # pragma: no cover - validator requires it
+                raise SnapshotValidationError(
+                    "Official selection is missing its frozen research slate."
+                )
+            # Re-derive Tier 2/3 annotations from the validated frozen source
+            # and persisted decision receipt.  The selection's publication_row
+            # is audit material, not trusted executable state.
+            signal = apply_publication_semantics(
+                [signal],
+                slate=slate,
+                coverage={"lanes": slate.get("lane_statuses") or {}},
+                require_watcher_proof=True,
+                receipt_verifier=receipt_verifier,
+            )[0]
+            if str(signal.get("publication_tier") or "") not in {
+                "PAPER_PLAN_QUALIFIED",
+                "ALERTABLE_PAPER_ENTRY",
+            }:
+                raise SnapshotValidationError(
+                    "Official selection no longer satisfies its frozen paper-plan boundary."
+                )
+        else:
+            # Compatibility for older same-scan cohorts that predate frozen
+            # slate payloads.  A cross-scan assertion never receives this
+            # fallback because it would allow retry-time signal replacement.
+            if source_scan_id and source_scan_id != selection_scan_id:
+                raise SnapshotValidationError(
+                    "Official selection has invalid governed frozen-slate lineage."
+                )
+            candidate = signal_by_id.get(signal_id)
+            if (
+                candidate is None
+                or str(candidate.get("scan_id") or "") != selection_scan_id
+                or str(candidate.get("ticker") or "").upper()
+                != str(selection.get("ticker") or "").upper()
+            ):
+                raise SnapshotValidationError(
+                    "Official selection could not be matched to its exact persisted signal."
+                )
+            signal = dict(candidate)
+        monitored.append(
+            {
+                **signal,
+                "monitor_cohort": ALPHAOPS_OFFICIAL_COHORT,
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        )
+    return monitored
 
 
 def _radar_monitor_signals(

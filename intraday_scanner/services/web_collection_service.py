@@ -191,8 +191,12 @@ def web_auto_collect(
     out_dir: str | Path | None = None,
     persist: bool = False,
     print_rows: bool = False,
+    observed_at: datetime | None = None,
 ) -> dict[str, Any]:
-    run_date = get_market_date()
+    observation_time = observed_at
+    if observation_time is not None and observation_time.tzinfo is None:
+        observation_time = observation_time.replace(tzinfo=timezone.utc)
+    run_date = get_market_date(now=observation_time)
     output_dir = Path(out_dir) if out_dir else WEB_OUT_ROOT / run_date
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = utc_now_iso()
@@ -236,6 +240,7 @@ def web_auto_collect(
             result = _collect_alpaca_screener_source(
                 source=source,
                 db_path=db_path,
+                observed_at=observation_time,
             )
         else:
             continue
@@ -304,6 +309,11 @@ def web_auto_collect(
         "halt_summary": _compact_summary(halt_summary),
         "sec_summary": _compact_summary(sec_summary),
         "snapshot_path": str(snapshot_path),
+        "requested_observed_at": (
+            observation_time.astimezone(timezone.utc).isoformat()
+            if observation_time is not None
+            else ""
+        ),
     }
     source_summary.update(_aggregate_source_health(source_summary))
     quality = _data_quality_report(deduped, failures, source_summary)
@@ -957,6 +967,7 @@ def _collect_alpaca_screener_source(
     *,
     source: WebSourceConfig,
     db_path: str | Path,
+    observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Collect one authenticated read-only screener source without leaking secrets."""
 
@@ -973,6 +984,7 @@ def _collect_alpaca_screener_source(
             include_losers=str(params.get("include_losers") or "false").lower()
             in {"true", "1", "yes", "y"},
             max_symbols=int(params.get("max_symbols") or 160),
+            observed_at=observed_at,
         )
         evidence = result.get("universe_evidence")
         if isinstance(evidence, dict):

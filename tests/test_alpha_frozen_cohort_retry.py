@@ -15,6 +15,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     _persist_notification_delivery_memberships,
     _persist_official_selections,
     _persist_research_radar_selections,
+    alpha_monitor,
 )
 from intraday_scanner.services.alpha_official_cohort_service import membership_sha256
 from intraday_scanner.services.luna_research_slate_service import (
@@ -115,6 +116,97 @@ def test_dispatch_failure_retry_reuses_exact_frozen_event_and_members(
     assert delivered[0]["delivery_status"] == "delivered"
     assert len(store.load_signal_selections(cohort="official_telegram")) == 1
     assert len(store.load_notification_deliveries(cohort="official_telegram")) == 1
+
+
+def test_monitor_uses_frozen_date_cohort_after_newer_retry_scan(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-monitor-retry.sqlite")
+    source = {
+        **_signal(signal_id="scan-original:1:AAA"),
+        "scan_id": "scan-original",
+        "timestamp": SELECTED_AT,
+        "entry_trigger": 10.0,
+        "invalidation": 9.0,
+        "target_1": 12.0,
+    }
+    slate = build_ranked_research_slate(
+        [source],
+        generated_at=SELECTED_AT,
+        market_date=SELECTED_AT[:10],
+        scan_id="scan-original",
+    )
+    event = _event("scan-original", body="No clean edge today.\nResearch watchlist: AAA")
+    no_trade = {
+        "signal_id": "no-trade:2026-08-26",
+        "signal_key": "no-trade:2026-08-26",
+        "scan_id": "scan-original",
+        "ticker": "NO_TRADE",
+        "market_date": SELECTED_AT[:10],
+        "rank": 0,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[no_trade],
+        decision={"no_trade": True, "decision_tier": "no_trade"},
+        selected_at=SELECTED_AT,
+        event=event,
+        slate=slate,
+    )
+    _persist_research_radar_selections(
+        store,
+        scan_id="scan-original",
+        radar=list(slate["rows"]),
+        slate=slate,
+        selected_at=SELECTED_AT,
+        event=event,
+    )
+    store.persist_alpha_signals(
+        [
+            source,
+            {
+                **_signal(signal_id="scan-retry:1:RETRY", ticker="RETRY"),
+                "scan_id": "scan-retry",
+                "timestamp": "2026-08-26T13:05:00+00:00",
+                "entry_trigger": 20.0,
+                "invalidation": 18.0,
+                "target_1": 24.0,
+            },
+        ]
+    )
+
+    result = alpha_monitor(
+        db_path=tmp_path / "frozen-monitor-retry.sqlite",
+        current_prices={"AAA": 10.1, "RETRY": 20.1},
+        dry_run=True,
+    )
+
+    assert result["status"] == "checked"
+    assert result["selection_evidence_status"] == "exact_research_radar_cohort"
+    assert [row["ticker"] for row in result["events"]] == ["AAA"]
+    assert result["events"][0]["monitor_cohort"] == "research_radar"
+
+    with sqlite3.connect(tmp_path / "frozen-monitor-retry.sqlite") as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM official_strategy_cohorts"
+            ).fetchone()[0]
+        )
+        payload["notification_manifest"]["body"] = "tampered retry body"
+        connection.execute(
+            "UPDATE official_strategy_cohorts SET payload_json = ?",
+            (json.dumps(payload, sort_keys=True),),
+        )
+
+    rejected = alpha_monitor(
+        db_path=tmp_path / "frozen-monitor-retry.sqlite",
+        current_prices={"AAA": 10.1},
+        dry_run=True,
+    )
+
+    assert rejected["status"] == "selection_evidence_unavailable"
+    assert rejected["events"] == []
 
 
 def test_no_trade_retry_reuses_original_sentinel_identity(tmp_path: Path) -> None:
