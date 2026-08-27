@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import sqlite3
@@ -8,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -38,6 +38,9 @@ from intraday_scanner.services.alpha_outcome_capture_service import (
     capture_sourced_alpha_outcomes,
 )
 from intraday_scanner.services.learning_service import run_alpha_learning
+from intraday_scanner.services.luna_research_slate_service import (
+    build_ranked_research_slate,
+)
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from tests._alpha_path_truth import canonical_path_result
@@ -98,7 +101,9 @@ def test_sourced_eod_capture_persists_one_canonical_path_receipt(
         fallback_fetcher=lambda *_args, **_kwargs: rows,
     )
 
-    assert result["status"] == "complete"
+    assert result["status"] == "complete", json.dumps(
+        result, sort_keys=True, indent=2, default=str
+    )
     outcome = result["outcomes"][0]
     assert canonical_path_contract_valid(outcome["path_replay_receipt"])
     assert outcome["source_bar_hash_sha256"]
@@ -206,8 +211,8 @@ def test_raw_watcher_intent_adapter_preserves_columns_and_binds_full_trace(
     path_entry = return_truth_module.build_canonical_path_entry_receipt(composite)
     assert path_entry["raw_entry_price"] == record["columns"]["decision_price"]
     assert path_entry["effective_at"] == record["columns"]["decision_time"]
-    assert path_entry["source_observed_at"] == observation_record["columns"][
-        "observed_at"
+    assert path_entry["source_observed_at"] == observation_record["payload_json"][
+        "quote_observed_at"
     ]
     assert path_entry["source_bar_completed_at"] == observation_record[
         "payload_json"
@@ -426,7 +431,7 @@ def test_composite_entry_receipt_keeps_subminute_effective_time(
 
     path_entry = return_truth_module.build_canonical_path_entry_receipt(composite)
     assert path_entry["effective_at"] == f"{DAY}T14:00:30+00:00"
-    assert path_entry["source_observed_at"] == f"{DAY}T13:59:00+00:00"
+    assert path_entry["source_observed_at"] == f"{DAY}T14:00:30+00:00"
     assert path_entry["source_bar_completed_at"] == f"{DAY}T14:00:00+00:00"
 
 
@@ -1567,7 +1572,7 @@ def test_malformed_ohlc_never_becomes_conclusive(tmp_path: Path) -> None:
     assert store.load_signal_outcomes() == []
 
 
-def test_all_eligible_same_ticker_signals_are_captured(tmp_path: Path) -> None:
+def test_all_eligible_distinct_ticker_signals_are_captured(tmp_path: Path) -> None:
     db_path = tmp_path / "multiple-signals.sqlite"
     store = SQLiteScanStore(db_path)
     second = {
@@ -1575,6 +1580,8 @@ def test_all_eligible_same_ticker_signals_are_captured(tmp_path: Path) -> None:
         "signal_id": "signal-2",
         "scan_id": "scan-2",
         "alpha_signal_id": "alpha-2",
+        "ticker": "MSFT",
+        "company": "Microsoft Corp.",
         "generated_at": f"{DAY}T13:45:00Z",
     }
     _persist_selected_signals(store, [_signal(), second])
@@ -1778,6 +1785,8 @@ def test_mixed_repair_and_new_event_accounting_is_aggregated(tmp_path: Path) -> 
         "signal_id": "signal-2",
         "scan_id": "scan-2",
         "alpha_signal_id": "alpha-2",
+        "ticker": "MSFT",
+        "company": "Microsoft Corp.",
         "generated_at": f"{DAY}T13:45:00Z",
     }
     _persist_selected_signals(store, [_signal(), second])
@@ -1925,7 +1934,92 @@ def _v5_signal(day: str = DAY) -> dict[str, Any]:
             },
         },
     }
-    from intraday_scanner.services.alpha_cycle_service import _signal_payload
+    from intraday_scanner.services.alpha_cycle_service import (
+        _attach_authenticated_alpaca_structure,
+        _signal_payload,
+    )
+
+    decision_at = datetime.fromisoformat(
+        str(signal["generated_at"]).replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    observed_at = decision_at - timedelta(minutes=5)
+    completed_at = observed_at + timedelta(minutes=1)
+    prior_day = (datetime.fromisoformat(day).date() - timedelta(days=1)).isoformat()
+    source = "alpaca_market_data_iex"
+    source_url = "https://data.alpaca.markets/v2/stocks/bars"
+    premarket_raw = {
+        "ticker": "NOVA",
+        "feed": "iex",
+        "requested_at": decision_at.isoformat(),
+        "bars": [
+            {
+                "ticker": "NOVA",
+                "timestamp": observed_at.isoformat(),
+                "high": 10.0,
+                "low": 9.0,
+                "close": 9.5,
+                "volume": 500_000,
+            }
+        ],
+    }
+    premarket_raw_json = json.dumps(
+        premarket_raw, sort_keys=True, separators=(",", ":")
+    )
+    prior_raw = {
+        "ticker": "NOVA",
+        "timestamp": f"{prior_day}T00:00:00+00:00",
+        "high": 12.75,
+        "bar": {"t": f"{prior_day}T00:00:00Z", "h": 12.75},
+    }
+    prior_raw_json = json.dumps(prior_raw, sort_keys=True, separators=(",", ":"))
+    observation_payload = {
+        "ticker": "NOVA",
+        "status": "verified",
+        "premarket_high": 10.0,
+        "premarket_low": 9.0,
+        "observed_at": observed_at.isoformat(),
+        "bar_completed_at": completed_at.isoformat(),
+        "is_complete": True,
+        "source": source,
+    }
+    observation_payload_json = json.dumps(
+        observation_payload, sort_keys=True, separators=(",", ":")
+    )
+    signal.update(
+        {
+            "premarket_high": 10.0,
+            "premarket_low": 9.0,
+            "premarket_range_source": source,
+            "premarket_range_source_url": source_url,
+            "enrichment_primary_source": source,
+            "enrichment_status": "verified",
+            "enrichment_is_complete": True,
+            "enrichment_was_fallback": False,
+            "enrichment_observed_at": observed_at.isoformat(),
+            "enrichment_bar_completed_at": completed_at.isoformat(),
+            "enrichment_observation_sha256": hashlib.sha256(
+                observation_payload_json.encode()
+            ).hexdigest(),
+            "enrichment_observation_payload_json": observation_payload_json,
+            "premarket_raw_payload_json": premarket_raw_json,
+            "premarket_source_hash_sha256": hashlib.sha256(
+                premarket_raw_json.encode()
+            ).hexdigest(),
+            "prior_daily_high": 12.75,
+            "prior_daily_high_observed_at": f"{prior_day}T00:00:00+00:00",
+            "prior_daily_high_completed_at": f"{day}T00:00:00+00:00",
+            "prior_daily_high_completion_semantics": "availability_boundary",
+            "prior_daily_high_source": source,
+            "prior_daily_high_source_url": source_url,
+            "prior_daily_high_source_hash": hashlib.sha256(
+                prior_raw_json.encode()
+            ).hexdigest(),
+            "prior_daily_high_raw_payload_json": prior_raw_json,
+        }
+    )
+    signal = _attach_authenticated_alpaca_structure(
+        signal, decision_at=decision_at.isoformat()
+    )
 
     signal = _signal_payload(
         signal,
@@ -1986,44 +2080,69 @@ def _run_v5_watcher_entry(
     day: str = DAY,
     requested_at: str = "10:00",
 ) -> dict[str, Any]:
-    bar_path = tmp_path / f"watcher-entry-{day}.csv"
-    with bar_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "ticker",
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-            ],
-        )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "ticker": "NOVA",
-                "timestamp": datetime.fromisoformat(f"{day}T09:59:00")
-                .replace(tzinfo=EASTERN)
-                .isoformat(),
-                "open": "10.05",
-                "high": "10.05",
-                "low": "10.05",
-                "close": "10.05",
-                "volume": "1000",
+    del tmp_path
+    requested = datetime.fromisoformat(f"{day}T{requested_at}").replace(tzinfo=EASTERN)
+    quote_at = requested.astimezone(timezone.utc).isoformat()
+    bar_at = (
+        requested.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    ).astimezone(timezone.utc).isoformat()
+
+    class AuthenticatedFixtureAlpaca:
+        def __init__(self, _config):
+            pass
+
+        def validate_credentials(self):
+            return None
+
+        def get_minute_bars(self, symbols, start, end, config):
+            del start, end, config
+            return [
+                {
+                    "ticker": symbols[0],
+                    "timestamp": bar_at,
+                    "open": 10.05,
+                    "high": 10.05,
+                    "low": 10.05,
+                    "close": 10.05,
+                    "volume": 1000,
+                }
+            ]
+
+        def get_latest_quotes(self, symbols, config):
+            del config
+            raw = {"t": quote_at, "bp": 10.04, "ap": 10.05}
+            raw_json = json.dumps(
+                {"ticker": symbols[0], "quote": raw},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return {
+                symbols[0]: {
+                    "ticker": symbols[0],
+                    "timestamp": quote_at,
+                    "bid": 10.04,
+                    "ask": 10.05,
+                    "source": "alpaca_market_data_iex",
+                    "raw_payload_json": raw_json,
+                    "source_hash_sha256": hashlib.sha256(raw_json.encode()).hexdigest(),
+                }
             }
+
+    with patch(
+        "intraday_scanner.services.price_observation_service.AlpacaProvider",
+        AuthenticatedFixtureAlpaca,
+    ):
+        result = run_trade_watcher(
+            db_path=db_path,
+            source="alpaca",
+            market_date=day,
+            requested_at=requested_at,
+            dry_run=True,
+            simulated_equity=100_000,
         )
-    result = run_trade_watcher(
-        db_path=db_path,
-        source="csv",
-        market_date=day,
-        requested_at=requested_at,
-        minute_bars=bar_path,
-        dry_run=True,
-        simulated_equity=100_000,
+    assert result["intent_stats"]["inserted"] == 1, json.dumps(
+        result, sort_keys=True, indent=2, default=str
     )
-    assert result["intent_stats"]["inserted"] == 1
     return result
 
 
@@ -2058,6 +2177,27 @@ def _persist_selected_signals(
     )
     body_sha256 = hashlib.sha256(body.encode()).hexdigest()
     event_key = f"alphaops:{batch_scan_id}:alpha_morning_watch"
+    slate_day = str(canonical_signals[0]["market_date"])
+    slate_generated_at = str(canonical_signals[0].get("generated_at") or "")
+    if not slate_generated_at.startswith(slate_day):
+        slate_generated_at = f"{slate_day}T13:00:00+00:00"
+    frozen_slate = build_ranked_research_slate(
+        canonical_signals,
+        generated_at=slate_generated_at,
+        market_date=slate_day,
+        scan_id=batch_scan_id,
+    )
+    frozen_by_signal = {
+        str(row.get("signal_id") or ""): row for row in frozen_slate["rows"]
+    }
+    frozen_lineage = {
+        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+        "slate_id": frozen_slate["slate_id"],
+        "slate_content_hash_sha256": frozen_slate["content_hash_sha256"],
+        "frozen_source_scan_id": batch_scan_id,
+        "current_scan_id": batch_scan_id,
+        "reuse_status": "CURRENT_SCAN",
+    }
     for index, signal in enumerate(canonical_signals, 1):
         signal_id = str(signal["signal_id"])
         day = str(signal["market_date"])
@@ -2097,7 +2237,10 @@ def _persist_selected_signals(
         }
         common["payload_json"] = {
             **common,
-            "signal": dict(signal),
+            "source_scan_id": batch_scan_id,
+            "signal": dict(frozen_by_signal[signal_id]),
+            "frozen_ranked_research_slate": frozen_slate,
+            "frozen_slate_lineage": frozen_lineage,
             "decision_payload": {
                 "decision": "clean_edge",
                 "research_only": True,

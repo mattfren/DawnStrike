@@ -2252,6 +2252,7 @@ def _validate_intent_column_projection(
         "decision_fingerprint",
         "official_paper_eligible",
         "decision_trace",
+        "direction",
     }
     if set(columns) != column_keys or set(payload) != payload_keys:
         raise ValueError("trade intent raw record has an unexpected schema")
@@ -2291,6 +2292,15 @@ def _canonical_source_observation_receipt(
         "source_bar_hash_sha256",
         "no_lookahead",
         "price_rule",
+        "quote",
+        "quote_ask",
+        "quote_bid",
+        "quote_freshness_seconds",
+        "quote_observed_at",
+        "quote_raw_payload_json",
+        "quote_source",
+        "quote_source_hash_sha256",
+        "quote_status",
     }
     if set(columns) != column_keys or set(payload) != payload_keys:
         raise ValueError("price observation raw record has an unexpected schema")
@@ -2372,6 +2382,47 @@ def _canonical_source_observation_receipt(
     expected_status = "exact" if freshness == 0 else "fresh_prior_bar"
     if columns.get("provider_status") != expected_status:
         raise ValueError("price observation provider status is inconsistent")
+    quote_raw_json = payload.get("quote_raw_payload_json")
+    try:
+        quote_raw = json.loads(quote_raw_json) if isinstance(quote_raw_json, str) else None
+        canonical_quote_raw = json.dumps(
+            quote_raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        quote_raw = None
+        canonical_quote_raw = ""
+    raw_quote = quote_raw.get("quote") if isinstance(quote_raw, Mapping) else None
+    quote_observed_at = _canonical_utc(payload.get("quote_observed_at"))
+    quote_bid = _number(payload.get("quote_bid"))
+    quote_ask = _number(payload.get("quote_ask"))
+    quote_freshness = _number(payload.get("quote_freshness_seconds"))
+    if not (
+        isinstance(quote_raw, Mapping)
+        and isinstance(raw_quote, Mapping)
+        and isinstance(quote_raw_json, str)
+        and quote_raw_json == canonical_quote_raw
+        and _json_equal(payload.get("quote"), quote_raw)
+        and str(quote_raw.get("ticker") or "").upper() == ticker
+        and quote_bid is not None
+        and quote_ask is not None
+        and quote_bid > 0
+        and quote_ask >= quote_bid
+        and _number(raw_quote.get("bp")) == quote_bid
+        and _number(raw_quote.get("ap")) == quote_ask
+        and quote_observed_at is not None
+        and _canonical_utc(raw_quote.get("t")) == quote_observed_at
+        and quote_observed_at <= requested_at
+        and quote_freshness is not None
+        and quote_freshness
+        == (requested_at - quote_observed_at).total_seconds()
+        and 0 <= quote_freshness <= tolerance
+        and payload.get("quote_status") == "USABLE"
+        and str(payload.get("quote_source") or "").startswith("alpaca_market_data_")
+        and _secure_equal(
+            payload.get("quote_source_hash_sha256"), _hash_payload(quote_raw)
+        )
+    ):
+        raise ValueError("price observation quote truth is invalid")
     observation_id = columns.get("observation_id")
     identity_head = columns.get("signal_id") or ticker
     expected_id = re.sub(
@@ -2421,6 +2472,7 @@ def _validate_current_v5_entry_intent(
         "mode": "paper_execute",
         "lifecycle_state": "ENTRY_TRIGGERED",
         "action": "ENTER_LONG",
+        "direction": "long",
         "account_id": ALPHAOPS_V5_ACCOUNT_ID,
         "execution_policy_version": ALPHAOPS_V5_POLICY_VERSION,
         "cost_model_version": ALPHAOPS_V5_COST_MODEL_VERSION,
@@ -2429,7 +2481,7 @@ def _validate_current_v5_entry_intent(
         "source_bar_hash_sha256": source_payload.get(
             "source_bar_hash_sha256"
         ),
-        "source_observed_at": source_columns.get("observed_at"),
+        "source_observed_at": source_payload.get("quote_observed_at"),
         "source_bar_completed_at": source_payload.get("bar_completed_at"),
     }
     for field, expected in exact_expected.items():
@@ -2479,6 +2531,10 @@ def _validate_current_v5_entry_intent(
     observation = {
         **copy.deepcopy(dict(source_columns)),
         **copy.deepcopy(dict(source_payload)),
+        "bar_observed_at": source_columns["observed_at"],
+        "observed_at": source_payload["quote_observed_at"],
+        "price": source_payload["quote_ask"],
+        "current_price": source_payload["quote_ask"],
         "bar_completed_at": source_payload["bar_completed_at"],
         "source_bar_hash_sha256": source_payload["source_bar_hash_sha256"],
     }
