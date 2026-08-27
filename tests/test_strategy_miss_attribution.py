@@ -83,23 +83,53 @@ def test_open_mark_to_market_is_not_a_closed_loss() -> None:
     assert summary.open_mtm_return_sum_pct == -2.5
 
 
-def test_closed_negative_outcome_is_observed_false_positive_and_learning_eligible() -> None:
+def test_closed_negative_outcome_without_fill_truth_is_provisional() -> None:
     report = attribute_strategy_misses([_row(return_pct=-1.5)])
     row = report.rows[0]
     summary = report.summaries[0]
     assert row.state is AttributionState.CLOSED
-    assert row.classification == "false_positive"
-    assert row.eligibility is Eligibility.ELIGIBLE
-    assert set(("closed_loss", "false_positive")) <= set(row.categories)
-    assert summary.closed_loss_count == 1
-    assert summary.closed_return_sum_pct == -1.5
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+    assert set(("closed_provisional", "missing_fill_truth")) <= set(row.categories)
+    assert summary.provisional_closed_count == 1
+    assert summary.closed_return_sum_pct is None
 
 
-def test_complete_sourced_status_is_not_mistaken_for_data_unavailable() -> None:
+def test_complete_sourced_status_without_fill_truth_is_provisional() -> None:
     report = attribute_strategy_misses([_row(return_pct=1.0, outcome_status="COMPLETE_SOURCED")])
     row = report.rows[0]
-    assert row.classification == "closed_win"
-    assert "data_unavailable" not in row.categories
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+    assert "missing_fill_truth" in row.categories
+
+
+def test_official_forward_row_without_record_type_or_fill_truth_is_provisional() -> None:
+    row = _row(cohort="official_forward", return_pct=1.0)
+    row.pop("record_type")
+    report = attribute_strategy_misses([row])
+    attributed = report.rows[0]
+    assert attributed.classification == "closed_provisional"
+    assert attributed.eligibility is Eligibility.INELIGIBLE
+    assert attributed.fill_truth_status == "missing_committed_fill_truth"
+
+
+def test_nontrade_and_historical_rows_remain_explicitly_non_return_truth() -> None:
+    report = attribute_strategy_misses(
+        [
+            _row(record_status="no_trade", return_pct=0.0),
+            _row(
+                record_id="historical",
+                cohort="historical_backtest",
+                return_pct=2.0,
+            ),
+        ]
+    )
+    no_trade = next(row for row in report.rows if row.record_id == "r-1")
+    historical = next(row for row in report.rows if row.record_id == "historical")
+    assert no_trade.state is AttributionState.NO_TRADE
+    assert no_trade.eligibility is Eligibility.UNKNOWN
+    assert historical.classification == "closed_provisional"
+    assert historical.eligibility is Eligibility.INELIGIBLE
 
 
 def test_missing_outcome_is_ineligible_and_never_zero() -> None:

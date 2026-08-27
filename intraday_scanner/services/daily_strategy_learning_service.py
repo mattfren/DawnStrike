@@ -872,6 +872,18 @@ def _freeze_invocation_identity(root: Path, context: DailyLearningContext) -> Da
     return context
 
 
+def _external_input_identity(value: Sequence[Mapping[str, Any]] | None) -> Any:
+    """Canonicalize supplied receipt batches, including rejected diagnostics."""
+
+    if value is None:
+        return None
+    return {
+        "accepted": [dict(item) for item in value],
+        "invalid_identities": list(getattr(value, "invalid_identities", ())),
+        "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
+    }
+
+
 def run_daily_strategy_learning(
     *,
     market_date: str,
@@ -888,6 +900,21 @@ def run_daily_strategy_learning(
     """Inventory the catalog and write one immutable research-only daily run."""
 
     source_hash = source_hash_sha256 or hashlib.sha256(source_identity.encode("utf-8")).hexdigest()
+    if input_hash_sha256 is None:
+        supplied_inputs = {
+            name: _external_input_identity(value)
+            for name, value in (
+                ("decision_receipts", decision_receipts),
+                ("v6_decisions", v6_decisions),
+            )
+            if value is not None
+        }
+        if supplied_inputs:
+            input_hash_sha256 = _sha256(supplied_inputs)
+        elif analyzer is not None and not isinstance(analyzer, EmptyEvidenceAnalyzer):
+            raise ValueError(
+                "input_hash_sha256 is required for non-empty external strategy evidence"
+            )
     context = DailyLearningContext(
         market_date=market_date,
         cutoff=cutoff,

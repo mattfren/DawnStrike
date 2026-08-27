@@ -48,10 +48,11 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
             "CREATE TABLE portfolio_performance_rows ("
             "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
             "strategy_version TEXT, record_status TEXT, return_pct REAL, "
-            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+            "benchmark_return_pct REAL, open_position_count INTEGER, "
+            "reconciled_at TEXT, payload_json TEXT)"
         )
         connection.executemany(
-            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     "benchmark",
@@ -63,6 +64,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
                     1.0,
                     None,
                     0,
+                    "2026-08-20T21:00:00+00:00",
                     '{"record_type":"portfolio_observation","close_time":"2026-08-20T15:00:00+00:00"}',
                 ),
                 (
@@ -75,6 +77,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
                     -0.5,
                     None,
                     0,
+                    "2026-08-20T21:00:00+00:00",
                     '{"record_type":"portfolio_observation","close_time":"2026-08-20T15:00:00+00:00"}',
                 ),
             ],
@@ -107,8 +110,8 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
         for item in receipt["strategy_evidence"]
         if item["strategy_id"] == "ts_momentum_sma_atr"
     )
-    assert evidence["counts"]["outcomes_retained"] == 1
-    assert evidence["outcomes"][0]["return_pct"] == -0.5
+    assert evidence["counts"]["outcomes_retained"] == 0
+    assert {row["record_id"] for row in evidence["misses"]} == {"loss"}
     assert receipt["automatic_policy_change"] is False
 
 
@@ -116,7 +119,7 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
     tmp_path, capsys
 ):
     database_path = tmp_path / "timestamp-performance.sqlite"
-    payload = {
+    payload_before = {
         "trade_lifecycles": [
             {
                 "trade_id": "before-cutoff",
@@ -124,12 +127,17 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
                 "close_time": "2026-08-20T14:00:00+00:00",
                 "return_pct": -1.0,
             },
+        ],
+        "record_type": "portfolio_observation",
+    }
+    payload_after = {
+        "trade_lifecycles": [
             {
                 "trade_id": "after-cutoff",
                 "status": "closed",
                 "close_time": "2026-08-20T15:00:00+00:00",
                 "return_pct": 2.0,
-            },
+            }
         ],
         "record_type": "portfolio_observation",
     }
@@ -138,22 +146,39 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
             "CREATE TABLE portfolio_performance_rows ("
             "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
             "strategy_version TEXT, record_status TEXT, return_pct REAL, "
-            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+                "benchmark_return_pct REAL, open_position_count INTEGER, "
+            "reconciled_at TEXT, payload_json TEXT)"
         )
-        connection.execute(
-            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "same-day-aggregate",
-                "2026-08-20",
-                "shadow_challenger",
-                "ts_momentum_sma_atr",
-                "v1.0",
-                "realized",
-                None,
-                None,
-                0,
-                json.dumps(payload),
-            ),
+        connection.executemany(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "same-day-before",
+                    "2026-08-20",
+                    "shadow_challenger",
+                    "ts_momentum_sma_atr",
+                    "v1.0",
+                    "realized",
+                    None,
+                    None,
+                    0,
+                    "2026-08-20T14:20:00+00:00",
+                    json.dumps(payload_before),
+                ),
+                (
+                    "same-day-after",
+                    "2026-08-20",
+                    "shadow_challenger",
+                    "ts_momentum_sma_atr",
+                    "v1.0",
+                    "realized",
+                    None,
+                    None,
+                    0,
+                    "2026-08-20T14:20:00+00:00",
+                    json.dumps(payload_after),
+                ),
+            ],
         )
     out_dir = tmp_path / "strategy-learning-timestamp"
 
@@ -263,10 +288,11 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
             "CREATE TABLE portfolio_performance_rows ("
             "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
             "strategy_version TEXT, record_status TEXT, return_pct REAL, "
-            "benchmark_return_pct REAL, open_position_count INTEGER, payload_json TEXT)"
+            "benchmark_return_pct REAL, open_position_count INTEGER, "
+            "reconciled_at TEXT, payload_json TEXT)"
         )
         connection.execute(
-            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "first",
                 "2026-08-20",
@@ -277,6 +303,7 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
                 -0.5,
                 None,
                 0,
+                "2026-08-20T21:00:00+00:00",
                 "{}",
             ),
         )
@@ -300,7 +327,7 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
     capsys.readouterr()
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "second",
                 "2026-08-20",
@@ -311,10 +338,11 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
                 0.75,
                 None,
                 0,
+                "2026-08-20T21:00:00+00:00",
                 "{}",
             ),
         )
-    with pytest.raises(ValueError, match="invocation identity changed"):
+    with pytest.raises(ValueError, match="invocation identity conflict: input_hash_sha256"):
         main(arguments)
 
 
