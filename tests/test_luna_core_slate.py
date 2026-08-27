@@ -103,6 +103,15 @@ def test_slate_publishes_five_distinct_safe_episodes_and_shortfall():
     assert shortfall["slate_shortfall_reason"]
 
 
+def test_slate_target_zero_publishes_no_rows():
+    slate = build_ranked_research_slate([{"ticker": "SAFE", "alpha_score": 100}], target=0)
+
+    assert slate["target_count"] == 0
+    assert slate["published_count"] == 0
+    assert slate["rows"] == []
+    assert slate["symbols"] == []
+
+
 def test_slate_excludes_hard_veto_stale_and_fabricated_rows():
     rows = [
         {"ticker": "VETO", "alpha_score": 100, "hard_avoid_reasons": ["halt"]},

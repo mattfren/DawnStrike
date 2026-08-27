@@ -46,7 +46,7 @@ def build_ranked_research_slate(
     requested = max(int(target), 0)
     source = [dict(row) for row in (rows or [])]
     safety_blockers: list[str] = []
-    if not data_eligible:
+    if not data_eligible or requested == 0:
         selected: list[dict[str, Any]] = []
     else:
         selected = []
