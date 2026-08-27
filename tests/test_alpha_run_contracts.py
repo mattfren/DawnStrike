@@ -152,6 +152,31 @@ def test_contract_reports_governed_cross_scan_frozen_slate_without_current_repla
     assert contract.slate_reuse_status == "GOVERNED_DAILY_FREEZE_REUSE"
 
 
+def test_contract_rejects_cross_scan_slate_without_explicit_reuse_lineage():
+    slate = build_ranked_research_slate(
+        [{"ticker": "FROZEN", "signal_id": "signal-frozen"}],
+        generated_at="2026-08-05T12:00:00+00:00",
+        market_date="2026-08-05",
+        scan_id="scan-original",
+    )
+    with pytest.raises(ValueError, match="FROZEN_SLATE_SCAN_MISMATCH"):
+        build_alpha_run_contract(
+            scan_id="scan-retry",
+            generated_at="2026-08-05T12:23:00+00:00",
+            ranked_count=0,
+            signals=[],
+            review={"decision": {}, "selection_diagnostics": {}, "watchlist": []},
+            source_summary={"status": "success", "ranked_research_slate": slate},
+            enrichment_summary={
+                "status": "complete",
+                "selected_count": 0,
+                "selected_symbols": [],
+                "verified_count": 0,
+            },
+            notification_stats={},
+        )
+
+
 def test_empty_frozen_slate_cannot_publish_retry_watchlist_or_watchlist_ready():
     slate = build_ranked_research_slate(
         [],

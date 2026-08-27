@@ -200,6 +200,24 @@ def build_alpha_run_contract(
     expected_reuse_status = (
         "CURRENT_SCAN" if slate_source_scan_id == scan_id else "GOVERNED_DAILY_FREEZE_REUSE"
     )
+    # A persisted slate from another scan is only valid when the caller has
+    # carried the explicit, governed retry lineage.  Do not infer consent
+    # from the artifact's scan id or default the missing fields: doing so
+    # makes an arbitrary same-day artifact look like the current cohort.
+    if slate_source_scan_id != scan_id:
+        required_reuse_fields = (
+            "frozen_source_scan_id",
+            "current_scan_id",
+            "reuse_status",
+        )
+        if not isinstance(slate_lineage, dict) or any(
+            not str(slate_lineage.get(field) or "").strip()
+            for field in required_reuse_fields
+        ):
+            raise ValueError(
+                "FROZEN_SLATE_SCAN_MISMATCH: persisted slate scan_id differs "
+                "from current scan_id without governed reuse lineage."
+            )
     declared_source_scan_id = str(
         slate_lineage.get("frozen_source_scan_id") or slate_source_scan_id
     )
@@ -212,7 +230,9 @@ def build_alpha_run_contract(
         or declared_current_scan_id != scan_id
         or declared_reuse_status != expected_reuse_status
     ):
-        raise ValueError("Run-contract frozen slate lineage is inconsistent.")
+        raise ValueError(
+            "FROZEN_SLATE_SCAN_MISMATCH: run-contract frozen slate lineage is inconsistent."
+        )
     slate_reuse_status = expected_reuse_status
     research_symbols = tuple(
         sorted(

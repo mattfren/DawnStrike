@@ -144,13 +144,17 @@ def apply_publication_semantics(
     for row in source:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
         enriched = dict(row)
-        if ticker in slate_symbols and _safe_for_research(
+        # Publication is a hard research-only boundary.  Caller-provided
+        # execution flags and tiers are untrusted input, including for rows
+        # that will be rejected below.
+        enriched["research_only"] = True
+        enriched["broker_execution"] = "disabled"
+        enriched["broker_execution_enabled"] = False
+        selected_and_safe = ticker in slate_symbols and _safe_for_research(
             row, require_safety=require_watcher_proof
-        ):
+        )
+        if selected_and_safe:
             slate_row = slate_by_symbol[ticker]
-            enriched["research_only"] = True
-            enriched["broker_execution"] = "disabled"
-            enriched["broker_execution_enabled"] = False
             enriched["research_rank"] = slate_row.get("research_rank")
             enriched["research_selection_id"] = slate_row.get("research_selection_id")
             enriched["publication_tier"] = TIER1
@@ -185,9 +189,15 @@ def apply_publication_semantics(
             elif qualified:
                 enriched["entry_state"] = "PAPER_PLAN_QUALIFIED"
         else:
-            enriched.setdefault("publication_tier", None)
-            enriched.setdefault("plan_qualification_status", "NOT_SELECTED")
-            enriched.setdefault("entry_state", "NOT_PUBLISHED")
+            # Never retain a caller tier/status on a non-selected or unsafe
+            # row.  Otherwise publication_counts and downstream renderers can
+            # be inflated by an envelope that was never admitted by the
+            # authoritative slate and safety gates.
+            enriched["publication_tier"] = None
+            enriched["plan_qualification_status"] = (
+                "WAITING_CURRENT_CHECKS" if ticker in slate_symbols else "NOT_SELECTED"
+            )
+            enriched["entry_state"] = "NOT_PUBLISHED"
         output.append(enriched)
     return output
 

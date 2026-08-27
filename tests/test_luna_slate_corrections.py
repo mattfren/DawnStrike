@@ -20,6 +20,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     apply_publication_semantics,
     build_ranked_research_slate,
     persist_ranked_research_slate,
+    publication_counts,
     validate_ranked_research_slate,
 )
 
@@ -495,6 +496,44 @@ def test_publication_excludes_broker_enabled_input_and_forces_disabled_output() 
     assert safe_row["research_only"] is True
     assert safe_row["broker_execution"] == "disabled"
     assert safe_row["broker_execution_enabled"] is False
+
+
+def test_publication_cannot_inflate_counts_with_unsafe_or_nonselected_tiers() -> None:
+    frozen = {"ticker": "FROZEN", "source_count": 1}
+    slate = build_ranked_research_slate(
+        [frozen],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-hostile-publication",
+    )
+    hostile_selected = {
+        **frozen,
+        "publication_tier": "ALERTABLE_PAPER_ENTRY",
+        "research_only": False,
+        "broker_execution": "live",
+        "broker_execution_enabled": True,
+    }
+    hostile_unselected = {
+        "ticker": "UNSELECTED",
+        "publication_tier": "PAPER_PLAN_QUALIFIED",
+        "research_only": False,
+        "broker_execution": "live",
+        "broker_execution_enabled": True,
+    }
+
+    published = apply_publication_semantics(
+        [hostile_selected, hostile_unselected], slate=slate
+    )
+    assert all(row["research_only"] is True for row in published)
+    assert all(row["broker_execution"] == "disabled" for row in published)
+    assert all(row["broker_execution_enabled"] is False for row in published)
+    assert all(row["publication_tier"] is None for row in published)
+    assert publication_counts(published) == {
+        "ranked_research": 0,
+        "paper_plan_qualified": 0,
+        "alertable_trade": 0,
+        "official_selected": 0,
+    }
 
 
 def test_tier_one_requires_positive_current_clear_safety_evidence() -> None:
