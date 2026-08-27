@@ -592,8 +592,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--db-path",
         default=None,
         help=(
-            "Optional SQLite database read with mode=ro and PRAGMA query_only; "
-            "attributes retained portfolio performance rows through market-date"
+            "Optional SQLite database held under a non-mutating reserved source lock, "
+            "then read with PRAGMA query_only; attributes retained portfolio performance "
+            "rows through market-date"
         ),
     )
 
@@ -1893,7 +1894,10 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
             raise SnapshotValidationError(f"strategy-learning database is missing: {path}")
         try:
             connection = sqlite3.connect(path)
-            # BEGIN IMMEDIATE takes a reserved lock without changing rows.
+            # BEGIN IMMEDIATE takes a reserved writer-exclusion lock without
+            # changing rows.  This is deliberately not a mode=ro connection:
+            # SQLite cannot acquire the reservation from a read-only URI.  The
+            # transaction is switched to query_only before any source SELECT.
             # No SELECT occurs until the phase-1 reservation is durably
             # installed, so an insert/backdate cannot slip into the cohort.
             connection.execute("BEGIN IMMEDIATE")
@@ -1902,7 +1906,8 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
             return _run_strategy_learning_daily_unlocked(args)
         except sqlite3.Error as exc:
             raise SnapshotValidationError(
-                f"strategy-learning database cannot be opened read-only: {path}"
+                "strategy-learning database cannot establish a non-mutating "
+                f"reserved snapshot: {path}"
             ) from exc
         except ValueError as exc:
             raise SnapshotValidationError(

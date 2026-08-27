@@ -929,7 +929,11 @@ def load_strategy_learning_database_snapshot_readonly(
         )
         generation = {
             "database_path": str(path),
-            "transaction": "sqlite_begin_read",
+            "transaction": (
+                "sqlite_begin_read_mode_ro"
+                if owns_connection
+                else "sqlite_existing_query_only_transaction"
+            ),
             "table_bounds": table_generations,
             "data_version": int(connection.execute("PRAGMA data_version").fetchone()[0]),
         }

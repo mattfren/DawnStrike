@@ -17,6 +17,7 @@ from intraday_scanner.performance.strategy_miss_attribution import (
     load_alpha_v6_decisions_readonly,
     load_portfolio_performance_rows_readonly,
     load_strategy_decision_receipts_readonly,
+    load_strategy_learning_database_snapshot_readonly,
 )
 from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
 from intraday_scanner.services.daily_strategy_learning_service import (
@@ -480,6 +481,7 @@ def test_db_acquisition_holds_one_write_blocking_snapshot_transaction(
     def gated_acquire(current_args):
         connection = current_args._learning_db_connection
         assert connection.in_transaction
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
         writer_thread = threading.Thread(target=writer)
         writer_thread.start()
         assert writer_done.wait(timeout=5)
@@ -490,6 +492,35 @@ def test_db_acquisition_holds_one_write_blocking_snapshot_transaction(
     monkeypatch.setattr(cli_module, "_acquire_strategy_learning_evidence", gated_acquire)
     assert cli_module._run_strategy_learning_daily(args) == 1
     assert writer_result == {"status": "blocked"}
+
+
+def test_database_snapshot_reports_its_actual_transaction_boundary(tmp_path: Path) -> None:
+    database_path = tmp_path / "transaction-provenance.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows "
+            "(record_id TEXT, market_date TEXT, reconciled_at TEXT, payload_json TEXT)"
+        )
+
+    direct = load_strategy_learning_database_snapshot_readonly(
+        database_path,
+        market_date="2026-08-20",
+        date_cutoff="2026-08-20T14:30:00+00:00",
+    )
+    assert direct["generation"]["transaction"] == "sqlite_begin_read_mode_ro"
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("PRAGMA query_only = ON")
+        reserved = load_strategy_learning_database_snapshot_readonly(
+            database_path,
+            market_date="2026-08-20",
+            date_cutoff="2026-08-20T14:30:00+00:00",
+            _connection=connection,
+        )
+        assert reserved["generation"]["transaction"] == (
+            "sqlite_existing_query_only_transaction"
+        )
 
 
 def test_missing_database_tables_cannot_mint_authenticated_zero_receipts(
