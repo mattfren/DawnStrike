@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +103,107 @@ def test_self_declared_test_and_hash_without_bytes_cannot_bypass_production() ->
     assert "expected_count_below_production_minimum:S&P 500" in contract["blockers"]
 
 
+def test_production_core_contract_replays_spy_bytes_before_accepting_recomputed_member_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Changing the declared member and recomputing its hash cannot forge a READY core."""
+
+    symbols = [f"AA{index:03d}" for index in range(503)]
+    rows = [
+        '<row r="3"><c r="B3" t="inlineStr"><is><t>As of 24-Aug-2026</t></is></c></row>',
+        '<row r="5"><c r="B5" t="inlineStr"><is><t>Ticker</t></is></c></row>',
+    ]
+    for number, symbol in enumerate([*symbols, "-", "2602335D"], start=6):
+        rows.append(
+            f'<row r="{number}"><c r="A{number}" t="inlineStr"><is><t>Security</t></is></c>'
+            f'<c r="B{number}" t="inlineStr"><is><t>{symbol}</t></is></c></row>'
+        )
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(rows)}</sheetData></worksheet>'
+    ).encode()
+    shared = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+    )
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", shared)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    raw = payload.getvalue()
+    digest = hashlib.sha256(raw).hexdigest()
+    source_id = "test-spy-source-binding"
+    monkeypatch.setitem(
+        core._TRUSTED_SOURCE_ROOTS,
+        source_id,
+        {
+            "index": "S&P 500",
+            "effective_date": "2026-08-24",
+            "raw_artifact_hashes": (digest,),
+            "transformation_id": "state-street-spy-holdings-parser-v1",
+            "lineage_builder_id": "state-street-spy-holdings-parser-v1",
+            "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
+            "reconstitution_id": "spy-holdings-2026-08-24",
+            "membership_authority": "tracker_holdings_proxy",
+            "official_index_authority": False,
+        },
+    )
+    declared = [
+        {
+            "symbol": symbol,
+            "provider_symbol": symbol,
+            "asset_class": "common_stock",
+            "index": "S&P 500",
+            "valid_from": "2026-08-24",
+            "valid_to": None,
+        }
+        for symbol in symbols
+    ]
+    declared[0]["symbol"] = "FAKE"
+    declared[0]["provider_symbol"] = "FAKE"
+    member_hash = core._canonical_member_hash(declared)
+    path = tmp_path / "spy.xlsx"
+    path.write_bytes(raw)
+    manifest = {
+        "source_id": source_id,
+        "source_uri": "https://example.test/spy.xlsx",
+        "observed_at": "2026-08-26T12:00:00Z",
+        "effective_date": "2026-08-24",
+        "index_name": "S&P 500",
+        "expected_count": 503,
+        "completeness_verdict": "COMPLETE",
+        "members": [
+            {
+                "ticker": row["symbol"],
+                "provider_symbol": row["provider_symbol"],
+                "asset_class": row["asset_class"],
+                "index_memberships": ["S&P 500"],
+                "valid_from": row["valid_from"],
+            }
+            for row in declared
+        ],
+        "canonical_member_set_hash_sha256": member_hash,
+        "source_artifacts": [{"path": str(path), "sha256": digest}],
+        "reconstitution_lineage": {
+            "schema_version": "dawnstrike.core_universe_lineage.v1",
+            "builder_id": "state-street-spy-holdings-parser-v1",
+            "transformation_id": "exclude-cash-and-contra-holdings-v1",
+            "reconstitution_id": "spy-holdings-2026-08-24",
+            "effective_date": "2026-08-24",
+            "input_artifact_hashes": [digest],
+            "canonical_member_set_hash_sha256": member_hash,
+        },
+    }
+    contract = build_core_universe_contract(
+        manifest,
+        observed_at="2026-08-26T13:00:00Z",
+        market_date="2026-08-26",
+    )
+    assert contract["status"] == "DATA_UNAVAILABLE"
+    assert "source_binding_membership_mismatch" in contract["blockers"]
+
+
 def test_reconstitution_lineage_requires_order_and_structured_identity() -> None:
     hashes = ["a" * 64, "b" * 64]
     member_hash = "c" * 64
@@ -192,6 +295,46 @@ def test_discovery_freshness_is_bound_to_explicit_cycle_observation_time() -> No
     assert result["rows"][0].get("stale_data_flag") is not True
 
 
+def test_discovery_does_not_claim_ready_for_stale_or_unverified_batch_rows() -> None:
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "yahoo",
+                    "source_timestamp": "2026-01-01T13:00:00+00:00",
+                    "premarket_price": 10,
+                }
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "members": [{"symbol": "A", "index_memberships": ["S&P 500"]}],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "DATA_UNAVAILABLE"
+    receipt = result["coverage_receipts"][0]
+    assert receipt["provider"] == ""
+    assert receipt["observed_at"] == "2026-01-05T13:05:00+00:00"
+    assert receipt["max_age_seconds"] == 600
+    assert receipt["row_quality"] == [
+        {
+            "ticker": "A",
+            "provider": "",
+            "source_verified": False,
+            "freshness_status": "STALE",
+        }
+    ]
+
+
 def test_slate_has_immutable_identity_and_persistence(tmp_path: Path) -> None:
     slate = build_ranked_research_slate(
         [{"ticker": "AAA", "signal_id": "signal-1"}],
@@ -256,6 +399,29 @@ def test_lane_local_fallback_ceiling_does_not_demote_independent_core(
     by_ticker = {row["ticker"]: row for row in published}
     assert by_ticker["MOVE"]["publication_tier"] == TIER1
     assert by_ticker["CORE"]["publication_tier"] == TIER2
+
+
+def test_slate_selection_requires_the_declared_evidence_lane_to_be_eligible() -> None:
+    rows = [
+        {"ticker": "CORE", "universe_lane": "core", "evidence_lane": "core"},
+        {"ticker": "MOVE", "universe_lane": "mover", "evidence_lane": "mover"},
+        {"ticker": "OVER", "universe_lane": "mover+core", "evidence_lane": ""},
+    ]
+    slate = build_ranked_research_slate(
+        rows,
+        target=5,
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-lane-eligibility",
+        lane_statuses={
+            "mover": {"data_eligible": True},
+            "core": {"data_eligible": False},
+        },
+    )
+
+    assert slate["symbols"] == ["MOVE"]
+    assert slate["slate_shortfall_reason"]
+    validate_ranked_research_slate(slate, market_date="2026-08-26")
 
 
 def test_overlap_candidate_retains_the_core_row_as_its_evidence_lane() -> None:

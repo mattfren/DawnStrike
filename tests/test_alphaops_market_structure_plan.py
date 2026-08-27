@@ -16,6 +16,7 @@ from intraday_scanner.alpha.plan_constructor import (
 from intraday_scanner.alpha.v5_policy import evaluate_v5_official_paper
 from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.services.alpha_cycle_service import (
     _apply_strategy_decision_receipts,
     _persisted_strategy_receipt_verifier,
@@ -213,6 +214,69 @@ def test_serialized_plan_validator_rejects_level_observation_and_hash_tamper() -
     emitted = plan.to_dict()
     emitted["plan_hash_sha256"] = "f" * 64
     assert is_valid_alphaops_v5_plan(emitted) is False
+
+
+def test_every_identity_level_must_equal_raw_observation_after_hash_recompute() -> None:
+    """A self-consistent forged hash must not authorize a changed plan leg."""
+
+    for policy in ("identity", "direct_observation"):
+        for role in ("entry", "stop", "target"):
+            signal = _signal()
+            for observation in signal["market_structure_observations"].values():
+                observation["derivation_policy"] = policy
+            observation = signal["market_structure_observations"][role]
+            observation["value"] = float(observation["value"]) + 0.25
+            assert construct_alphaops_v5_plan(signal).status == NO_VALID_PLAN
+
+            valid_signal = _signal()
+            for observation in valid_signal["market_structure_observations"].values():
+                observation["derivation_policy"] = policy
+            plan = construct_alphaops_v5_plan(valid_signal)
+            assert plan.status == COMPLETE
+            emitted = plan.to_dict()
+            forged = dict(
+                emitted["observations"][{"entry": 0, "stop": 1, "target": 2}[role]]
+            )
+            forged["value"] = float(forged["value"]) + 0.25
+            forged.pop("observation_hash", None)
+            forged["observation_hash"] = __import__("hashlib").sha256(
+                canonical_json(forged).encode("utf-8")
+            ).hexdigest()
+            emitted["observations"][{"entry": 0, "stop": 1, "target": 2}[role]] = forged
+            emitted[role] = forged["value"]
+            emitted.pop("plan_hash_sha256", None)
+            emitted["plan_hash_sha256"] = __import__("hashlib").sha256(
+                canonical_json(emitted).encode("utf-8")
+            ).hexdigest()
+            assert is_valid_alphaops_v5_plan(emitted) is False
+
+
+def test_mismatched_identity_observation_stays_blocked_through_receipt_and_publication(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "e" * 40)
+    source = _signal()
+    source["market_structure_observations"]["entry"]["raw_value"] = 10.25
+    payload = _signal_payload(source, "scan-forged-observation", "2026-08-26T13:30:00+00:00", 1)
+    assert payload["plan_construction_status"] == NO_VALID_PLAN
+    store = SQLiteScanStore(tmp_path / "forged-observation.sqlite")
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=store,
+        config=load_config(strategy_evidence_enabled=True, strategy_evidence_shadow_only=True),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "completed-market-feed"},
+    )
+    assert payload["strategy_receipt_paper_entry_eligible"] is False
+    slate = build_ranked_research_slate(
+        [payload],
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-forged-observation",
+        require_safety=True,
+    )
+    published = apply_publication_semantics([payload], slate=slate)[0]
+    assert published["publication_tier"] is None
 
 
 def test_structural_enrichment_adapter_only_attaches_upstream_observations() -> None:

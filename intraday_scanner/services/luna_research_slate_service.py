@@ -49,6 +49,7 @@ def build_ranked_research_slate(
             if (
                 not ticker
                 or ticker in seen
+                or not _row_lane_eligible(row, lane_statuses)
                 or not _safe_for_research(row, require_safety=require_safety)
             ):
                 if ticker and require_safety:
@@ -303,6 +304,8 @@ def validate_ranked_research_slate(
     for rank, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ValueError("ranked research slate row is not an object")
+        if not _row_lane_eligible(row, slate.get("lane_statuses")):
+            raise ValueError("ranked research slate row lane is not eligible")
         if (
             row.get("research_only") is not True
             or row.get("broker_execution") != "disabled"
@@ -473,6 +476,24 @@ def _row_promotion_limited(row: dict[str, Any], coverage: dict[str, Any]) -> boo
             ).lower() in blocked_statuses
         return True
     return str(coverage.get("secondary_fallback_status") or "").lower() in blocked_statuses
+
+
+def _row_lane_eligible(
+    row: dict[str, Any], lane_statuses: dict[str, Any] | None
+) -> bool:
+    """Require a selected row to use an explicitly eligible evidence lane."""
+
+    if not lane_statuses:
+        return True
+    universe_lane = str(row.get("universe_lane") or "mover").strip().lower()
+    evidence_lane = str(row.get("evidence_lane") or "").strip().lower()
+    if universe_lane == "mover+core" and evidence_lane not in {"mover", "core"}:
+        return False
+    lane = evidence_lane or universe_lane
+    if lane not in {"mover", "core"}:
+        return False
+    payload = lane_statuses.get(lane)
+    return isinstance(payload, dict) and payload.get("data_eligible") is True
 
 
 def _safety_blockers(row: dict[str, Any]) -> list[str]:

@@ -527,6 +527,13 @@ def _validate_observation(raw: Mapping[str, Any], role: str) -> None:
     derivation = raw["derivation_policy"]
     if derivation not in ALLOWED_DERIVATION_POLICIES:
         raise ValueError("observation derivation policy is not allowlisted")
+    if not _derivation_reconciles_level(
+        role=role,
+        value=value,
+        raw_value=raw_value,
+        derivation_policy=derivation,
+    ):
+        raise ValueError(f"{role} level does not reconcile with its raw observation")
     if not str(raw.get("source") or "").strip() or not _source_reference_valid(raw.get("source_url")):
         raise ValueError(f"{role} observation source provenance is incomplete")
     source_hash = raw["source_hash"]
@@ -549,6 +556,23 @@ def _validate_observation(raw: Mapping[str, Any], role: str) -> None:
 def _is_sha256(value: Any) -> bool:
     text = str(value or "")
     return len(text) == 64 and bool(text) and set(text) <= _SHA256
+
+
+def _derivation_reconciles_level(
+    *, role: str, value: float, raw_value: float, derivation_policy: str
+) -> bool:
+    """Recompute the emitted level from the declared derivation policy.
+
+    ``identity`` and ``direct_observation`` both mean that the frozen plan
+    level is exactly the completed source observation for every role. The
+    explicit dispatch makes any future arithmetic policy a deliberate,
+    separately validated schema change instead of an implicit trust boundary.
+    """
+
+    del role  # retained in the signature for useful call-site diagnostics
+    if derivation_policy in {"identity", "direct_observation"}:
+        return value == raw_value
+    return False
 
 
 def _strict_number(value: Any) -> float | None:
@@ -660,6 +684,16 @@ def _observation_for(
     if derivation_policy not in ALLOWED_DERIVATION_POLICIES:
         return None
     if role == "target" and numeric != raw_value:
+        return None
+    # v1 only admits observation-identity policies. Reconcile every leg,
+    # including entry and stop, before freezing it into the plan; otherwise a
+    # caller could smuggle a derived level through a freshly recomputed hash.
+    if not _derivation_reconciles_level(
+        role=role,
+        value=numeric,
+        raw_value=raw_value,
+        derivation_policy=derivation_policy,
+    ):
         return None
     if role == "target" and any(
         token in derivation_policy

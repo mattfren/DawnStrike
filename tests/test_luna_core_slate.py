@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
@@ -361,7 +362,14 @@ def test_core_discovery_uses_only_ready_members_and_merges_lanes():
             return None
 
         def get_premarket_snapshot(self, symbols, config):
-            return [{"ticker": symbols[0], "premarket_price": 10}]
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "alpaca_iex",
+                    "source_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "premarket_price": 10,
+                }
+            ]
 
     contract = {
         "status": "READY",
