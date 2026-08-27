@@ -13,11 +13,13 @@ import hashlib
 import html
 import io
 import json
+import math
 import re
 import zipfile
 from collections import Counter
 from collections.abc import Iterable
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +40,11 @@ MIN_PRODUCTION_COUNTS = {"S&P 500": 503, "Nasdaq-100": 100}
 # not a claim that the whole index was observed.  The resulting PARTIAL
 # status and exact coverage counts remain visible to every downstream gate.
 MIN_CORE_FRESH_ROWS = 1
-CORE_COVERAGE_RECEIPT_SCHEMA_VERSION = "dawnstrike.luna.core_snapshot_coverage_receipt.v1"
+CORE_COVERAGE_RECEIPT_SCHEMA_VERSION = "dawnstrike.luna.core_snapshot_coverage_receipt.v2"
+CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION = (
+    "dawnstrike.luna.core_snapshot_row_projection.v1"
+)
+CORE_COVERAGE_ROW_BINDING_FIELD = "core_coverage_row_binding_hash_sha256"
 _SYMBOL_PATTERN = __import__("re").compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 STATE_STREET_SPY_HOLDINGS_URL = (
     "https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx"
@@ -1025,6 +1031,325 @@ def _snapshot_response_hash(rows: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
+# These are the fields owned by the core-discovery/rank seam: they can affect
+# core eligibility, ranking, freshness, membership, or the provenance of the
+# authenticated provider observation. Optional halt/news/range enrichment
+# owns its own evidence and is intentionally excluded; those stages are
+# allowed to add or replace their fields after this receipt is sealed.
+_CORE_ROW_NUMERIC_FIELDS = (
+    "previous_close",
+    "premarket_price",
+    "premarket_high",
+    "premarket_low",
+    "premarket_volume",
+    "dollar_volume",
+    "gap_pct",
+    "float_shares",
+    "market_cap",
+    "spread_pct",
+    "short_float_pct",
+    "source_confidence",
+    "field_completeness_score",
+    "source_reliability_prior",
+    "reconciliation_confidence_score",
+    "source_count",
+    "core_lane_score",
+    "missing_enrichment_count",
+)
+_CORE_ROW_BOOLEAN_FIELDS = (
+    "stale_data_flag",
+    "core_lane_eligible",
+    "shadow_mode",
+    "paid_data",
+    "fixture_only",
+    "manual_uploaded_data",
+)
+_CORE_ROW_TEXT_FIELDS = (
+    "company",
+    "source",
+    "source_url",
+    "extraction_mode",
+    "source_timestamp",
+    "as_of_timestamp",
+    "extracted_at",
+    "source_quality_status",
+    "data_source_kind",
+    "discovery_context",
+    "universe_lane",
+    "evidence_lane",
+    "freshness_status",
+    "preferred_source",
+    "score_consensus",
+    "conflict_flags",
+    "row_merge_reason",
+    "evidence_confidence_version",
+    "reconciliation_status",
+    "raw_file_path",
+    "imported_at",
+)
+
+
+def _canonical_row_decimal(value: Any) -> str | None:
+    """Return a stable decimal representation across JSON/CSV conversions."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite():
+        return None
+    if parsed == 0:
+        return "0"
+    return format(parsed.normalize(), "f")
+
+
+def _canonical_decimal_product(price: Any, volume: Any) -> str | None:
+    price_text = _canonical_row_decimal(price)
+    volume_text = _canonical_row_decimal(volume)
+    if price_text is None or volume_text is None:
+        return None
+    try:
+        product = Decimal(price_text) * Decimal(volume_text)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not product.is_finite():
+        return None
+    # Providers publish dollar volume to cents; use the same deterministic
+    # projection for a missing value and for the rank score.
+    try:
+        rounded = product.quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None
+    return _canonical_row_decimal(rounded)
+
+
+def _canonical_row_bool(value: Any) -> bool | str:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (float, Decimal)):
+        if not math.isfinite(float(value)):
+            return "invalid:" + str(value).lower()
+        return value != 0
+    if isinstance(value, int):
+        return value != 0
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "t", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "f", "0", "no", "n", ""}:
+        return False
+    # Keep invalid values distinct in the hash. Ranking still fails closed
+    # when an invalid boolean reaches a model parser.
+    return "invalid:" + normalized
+
+
+def _canonical_row_timestamp(value: Any) -> str:
+    if value is None or not str(value).strip():
+        return ""
+    parsed = _parse_datetime(value)
+    return parsed.isoformat() if parsed is not None else str(value).strip()
+
+
+def _canonical_row_memberships(value: Any) -> list[str]:
+    """Normalize list values emitted as native JSON, Python, or CSV text."""
+
+    if value is None:
+        return []
+    parsed: Any = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                candidate = loader(text)
+            except (TypeError, ValueError, SyntaxError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, (list, tuple, set)):
+                parsed = candidate
+                break
+        else:
+            parsed = [part.strip() for part in text.replace(";", ",").split(",")]
+    if isinstance(parsed, dict) or not isinstance(parsed, (list, tuple, set)):
+        parsed = [parsed]
+    normalized: list[str] = []
+    for item in parsed:
+        text = str(item).strip().strip("'\"")
+        if not text:
+            continue
+        normalized.append(_index_name(text) or text)
+    return sorted(normalized)
+
+
+def _row_freshness_status(row: dict[str, Any]) -> str:
+    explicit = str(row.get("freshness_status") or "").strip()
+    if explicit:
+        return explicit
+    payload_text = row.get("core_coverage_receipt_payload_json")
+    if not isinstance(payload_text, str) or not payload_text.strip():
+        return ""
+    try:
+        receipt = json.loads(payload_text)
+        observed_at = _parse_datetime(receipt.get("observed_at"))
+        max_age_seconds = int(receipt.get("max_age_seconds") or 0)
+    except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+        return ""
+    if observed_at is None or max_age_seconds <= 0:
+        return ""
+    return _snapshot_freshness_status(
+        row,
+        observed_at=observed_at,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def build_core_row_binding_projection(
+    row: dict[str, Any], *, freshness_status: str | None = None
+) -> dict[str, Any]:
+    """Build the canonical values used by the core publication/rank gate.
+
+    This projection intentionally excludes receipt identity metadata and raw
+    provider-only fields. It includes every normalized value that can affect
+    core eligibility/ranking or its provenance. Missing ``dollar_volume`` is
+    represented by a deterministic price*volume value so a CSV model
+    round-trip does not turn a legitimate row into a different observation.
+    """
+
+    ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
+    effective_row = dict(row)
+    # SnapshotRow.from_mapping fills these stable defaults while reading CSV.
+    # Apply the same defaults before hashing so a provider dict and its
+    # production CSV representation describe the same observation.
+    effective_row["company"] = str(row.get("company") or ticker).strip()
+    effective_row["previous_close"] = (
+        row.get("previous_close") if row.get("previous_close") not in {None, ""} else 0
+    )
+    effective_row["spread_pct"] = (
+        row.get("spread_pct") if row.get("spread_pct") not in {None, ""} else 0
+    )
+    effective_row["source_confidence"] = (
+        row.get("source_confidence")
+        if row.get("source_confidence") not in {None, ""}
+        else 0
+    )
+    effective_row["source_count"] = (
+        row.get("source_count") if row.get("source_count") not in {None, ""} else 1
+    )
+    effective_row["missing_enrichment_count"] = (
+        row.get("missing_enrichment_count")
+        if row.get("missing_enrichment_count") not in {None, ""}
+        else 0
+    )
+    effective_row["score_consensus"] = str(row.get("score_consensus") or "single_source")
+    effective_row["row_merge_reason"] = str(row.get("row_merge_reason") or "single_source")
+    effective_row["extraction_mode"] = str(
+        row.get("extraction_mode") or row.get("data_source_kind") or ""
+    )
+    # Freshness uses source_timestamp first and as_of_timestamp as its legacy
+    # fallback. Bind both timestamp values while filling a missing as_of value
+    # from source_timestamp so SnapshotRow's current-time default cannot alter
+    # a legitimate row after CSV roundtrip.
+    effective_timestamp = row.get("source_timestamp") or row.get("as_of_timestamp")
+    effective_row["source_timestamp"] = effective_timestamp
+    effective_row["as_of_timestamp"] = row.get("as_of_timestamp") or effective_timestamp
+    projection: dict[str, Any] = {
+        "schema_version": CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION,
+        "ticker": ticker,
+        "core_universe_memberships": _canonical_row_memberships(
+            effective_row.get("core_universe_memberships")
+        ),
+        "source_timestamp_present": bool(str(row.get("source_timestamp") or "").strip()),
+        "as_of_timestamp_present": bool(str(row.get("as_of_timestamp") or "").strip()),
+        "dollar_volume_present": bool(str(row.get("dollar_volume") or "").strip()),
+        "core_lane_score_present": bool(str(row.get("core_lane_score") or "").strip()),
+    }
+    for field in _CORE_ROW_NUMERIC_FIELDS:
+        value = effective_row.get(field)
+        canonical = _canonical_row_decimal(value)
+        if field == "gap_pct" and canonical == "0":
+            previous_close = _canonical_row_decimal(effective_row.get("previous_close"))
+            gap_source = str(effective_row.get("gap_pct_source") or "").strip()
+            try:
+                no_previous_close = previous_close is None or Decimal(previous_close) <= 0
+            except (InvalidOperation, TypeError, ValueError):
+                no_previous_close = True
+            if no_previous_close and not gap_source:
+                # SnapshotRow derives a zero for an absent gap when there is
+                # no previous close. Keep the canonical projection as
+                # absence so that CSV/model fallback does not manufacture a
+                # provider assertion.
+                canonical = None
+        if field == "dollar_volume" and canonical is None:
+            canonical = _canonical_decimal_product(
+                effective_row.get("premarket_price"), effective_row.get("premarket_volume")
+            )
+        if field == "core_lane_score" and canonical is None:
+            canonical = _canonical_decimal_product(
+                effective_row.get("premarket_price"), effective_row.get("premarket_volume")
+            )
+        projection[field] = canonical
+    for field in _CORE_ROW_BOOLEAN_FIELDS:
+        projection[field] = _canonical_row_bool(effective_row.get(field))
+    for field in _CORE_ROW_TEXT_FIELDS:
+        value = freshness_status if field == "freshness_status" else effective_row.get(field)
+        if field == "freshness_status" and not str(value or "").strip():
+            value = _row_freshness_status(row) or "UNKNOWN"
+        if field in {"source", "preferred_source"}:
+            projection[field] = str(value or "").strip().lower()
+        elif field in {
+            "source_quality_status",
+            "freshness_status",
+            "reconciliation_status",
+            "enrichment_status",
+            "enrichment_fallback_status",
+        }:
+            projection[field] = str(value or "").strip().upper()
+        elif field in {"universe_lane", "evidence_lane"}:
+            projection[field] = str(value or "").strip().lower()
+        elif field in {
+            "source_timestamp",
+            "as_of_timestamp",
+            "extracted_at",
+            "imported_at",
+            "enrichment_observed_at",
+            "enrichment_bar_completed_at",
+            "prior_daily_high_observed_at",
+            "prior_daily_high_completed_at",
+        }:
+            projection[field] = _canonical_row_timestamp(value)
+        else:
+            projection[field] = str(value or "").strip()
+    universe_lane = str(projection.get("universe_lane") or "")
+    if not projection.get("evidence_lane") and universe_lane in {"core", "mover+core"}:
+        # ``evidence_lane`` was historically omitted from the snapshot CSV;
+        # infer the safe core value for old readers while still hashing an
+        # explicitly supplied, conflicting value.
+        projection["evidence_lane"] = "core"
+    return projection
+
+
+def core_row_binding_hash(
+    row: dict[str, Any], *, freshness_status: str | None = None
+) -> str:
+    projection = build_core_row_binding_projection(
+        row, freshness_status=freshness_status
+    )
+    return hashlib.sha256(
+        json.dumps(
+            projection,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _failed_core_coverage_receipt(
     *,
     requested: list[str],
@@ -1087,6 +1412,9 @@ def _failed_core_coverage_receipt(
         "observed_at": observed_at.isoformat(),
         "max_age_seconds": int(max_age_seconds),
         "row_quality": [],
+        "row_binding_schema_version": CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION,
+        "row_binding_hashes": {},
+        "row_bindings": [],
         "response_hash_sha256": _snapshot_response_hash([]),
         "status": "FAILED",
         "error_class": str(error_class or "ProviderError"),
@@ -1131,6 +1459,7 @@ def _classify_core_snapshot_batch(
         row = snapshot.to_dict() if hasattr(snapshot, "to_dict") else dict(snapshot)
         ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
         batch_rows.append({**row, "ticker": ticker})
+    response_hash = _snapshot_response_hash(batch_rows)
 
     returned = [str(row.get("ticker") or "") for row in batch_rows]
     returned_nonempty = [ticker for ticker in returned if ticker]
@@ -1220,6 +1549,61 @@ def _classify_core_snapshot_batch(
             for row in batch_rows
         )
     ]
+    row_binding_hashes: dict[str, str] = {}
+    row_bindings: list[dict[str, Any]] = []
+    # Attach every value consumed by the core rank gate before hashing. The
+    # receipt then binds the exact normalized row that is returned to callers;
+    # receipt identity fields are added only after this projection is sealed.
+    for index, row in enumerate(batch_rows):
+        ticker = str(row.get("ticker") or "")
+        if ticker not in eligible_symbols or row_status[index][1] != "FRESH":
+            continue
+        row["discovery_context"] = "luna_core:" + ",".join(
+            requested_memberships.get(ticker, [])
+        )
+        row["universe_lane"] = "core"
+        row["evidence_lane"] = "core"
+        row["core_universe_memberships"] = list(requested_memberships.get(ticker, []))
+        row["source_quality_status"] = "VERIFIED"
+        row["freshness_status"] = "FRESH"
+        effective_source_timestamp = row.get("source_timestamp") or row.get("as_of_timestamp")
+        row["source_timestamp"] = effective_source_timestamp
+        row["as_of_timestamp"] = row.get("as_of_timestamp") or effective_source_timestamp
+        gap_value = row.get("gap_pct")
+        if gap_value is None or (isinstance(gap_value, str) and not gap_value.strip()):
+            # Match SnapshotRow/formula semantics: derive the real gap when
+            # the provider supplied a usable previous close.  Leave it
+            # absent when no previous close exists; formula scoring treats
+            # that absence as zero without turning the provider observation
+            # into an asserted zero-valued gap.
+            try:
+                price = float(row.get("premarket_price"))
+                previous_close = float(row.get("previous_close"))
+            except (TypeError, ValueError):
+                price = 0.0
+                previous_close = 0.0
+            if previous_close > 0:
+                row["gap_pct"] = ((price - previous_close) / previous_close) * 100
+        row["core_lane_eligible"] = True
+        score_text = _canonical_decimal_product(
+            row.get("premarket_price"), row.get("premarket_volume")
+        )
+        if score_text is not None:
+            # Dollar volume is a derived rank input. Normalize it to the
+            # bound price*volume product so callers cannot later supply a
+            # mutable, unbound score value.
+            row["dollar_volume"] = float(score_text)
+        row["core_lane_score"] = float(score_text) if score_text is not None else None
+        binding_hash = core_row_binding_hash(row, freshness_status="FRESH")
+        row_binding_hashes[ticker] = binding_hash
+        row_bindings.append(
+            {
+                "row_index": index,
+                "ticker": ticker,
+                "row_binding_hash_sha256": binding_hash,
+            }
+        )
+        row_quality[index]["row_binding_hash_sha256"] = binding_hash
     quality_ready = bool(requested_symbols) and (
         len(returned) == len(requested_symbols)
         and not missing
@@ -1288,7 +1672,10 @@ def _classify_core_snapshot_batch(
         "observed_at": observed_at.isoformat(),
         "max_age_seconds": int(max_age_seconds),
         "row_quality": row_quality,
-        "response_hash_sha256": _snapshot_response_hash(batch_rows),
+        "row_binding_schema_version": CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION,
+        "row_binding_hashes": row_binding_hashes,
+        "row_bindings": row_bindings,
+        "response_hash_sha256": response_hash,
         "status": status,
         "limitations": sorted(set(limitations)),
     }
@@ -1301,17 +1688,10 @@ def _classify_core_snapshot_batch(
         ticker = str(row.get("ticker") or "")
         if ticker not in eligible_symbols or row_status[index][1] != "FRESH":
             continue
-        row["discovery_context"] = "luna_core:" + ",".join(
-            requested_memberships.get(ticker, [])
-        )
-        row["universe_lane"] = "core"
-        row["evidence_lane"] = "core"
-        row["core_universe_memberships"] = list(requested_memberships.get(ticker, []))
-        row["source_quality_status"] = "VERIFIED"
-        row["freshness_status"] = "FRESH"
         row["core_coverage_receipt_id"] = base["coverage_receipt_id"]
         row["core_coverage_receipt_hash_sha256"] = base["coverage_receipt_hash_sha256"]
         row["core_coverage_receipt_status"] = status
+        row[CORE_COVERAGE_ROW_BINDING_FIELD] = row_binding_hashes.get(ticker, "")
         row["core_coverage_receipt_payload_json"] = receipt_payload
         eligible_rows.append(row)
     return base, eligible_rows
@@ -1587,6 +1967,7 @@ def merge_core_universe_rows(
                 "core_coverage_receipt_hash_sha256",
                 "core_coverage_receipt_status",
                 "core_coverage_receipt_payload_json",
+                CORE_COVERAGE_ROW_BINDING_FIELD,
             ):
                 if row.get(key) and not current.get(key):
                     current[key] = row[key]
@@ -1614,15 +1995,40 @@ def rank_core_universe_rows(
         if not _core_coverage_binding_valid(row):
             continue
         try:
-            price = float(row.get("premarket_price") or 0)
-            volume = float(row.get("premarket_volume") or 0)
-        except (TypeError, ValueError):
+            price_text = _canonical_row_decimal(row.get("premarket_price"))
+            volume_text = _canonical_row_decimal(row.get("premarket_volume"))
+            if price_text is None or volume_text is None:
+                continue
+            price = Decimal(price_text)
+            volume = Decimal(volume_text)
+            score_text = _canonical_decimal_product(price_text, volume_text)
+            reported_dollar_volume = _canonical_row_decimal(row.get("dollar_volume"))
+            if reported_dollar_volume is None:
+                reported_dollar_volume = score_text
+            bound_score = _canonical_row_decimal(row.get("core_lane_score"))
+        except (InvalidOperation, TypeError, ValueError):
             continue
-        if price <= 0 or volume <= 0 or row.get("stale_data_flag"):
+        if (
+            price <= 0
+            or volume <= 0
+            or _canonical_row_bool(row.get("stale_data_flag")) is not False
+            or score_text is None
+            or (
+                bool(row.get(CORE_COVERAGE_ROW_BINDING_FIELD))
+                and (
+                    reported_dollar_volume != score_text
+                    or bound_score != score_text
+                )
+            )
+        ):
             continue
-        row["universe_lane"] = "core"
+        if str(row.get("universe_lane") or "").strip().lower() not in {
+            "core",
+            "mover+core",
+        }:
+            row["universe_lane"] = "core"
         row["core_lane_eligible"] = True
-        row["core_lane_score"] = round(float(row.get("dollar_volume") or price * volume), 2)
+        row["core_lane_score"] = float(score_text)
         eligible.append(row)
     return sorted(
         eligible,
@@ -1646,6 +2052,7 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         "core_coverage_receipt_id",
         "core_coverage_receipt_hash_sha256",
         "core_coverage_receipt_payload_json",
+        CORE_COVERAGE_ROW_BINDING_FIELD,
     }
     if not any(key in row for key in marker_keys):
         universe_lane = str(row.get("universe_lane") or "").strip().lower()
@@ -1681,6 +2088,8 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         return False
     if (
         receipt.get("schema_version") != CORE_COVERAGE_RECEIPT_SCHEMA_VERSION
+        or receipt.get("row_binding_schema_version")
+        != CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION
         or receipt.get("coverage_receipt_hash_sha256") != receipt_hash
         or receipt.get("coverage_receipt_id") != receipt_id
         or receipt_hash != _coverage_receipt_digest(receipt)
@@ -1700,59 +2109,81 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
     fresh_verified = {
         canonical_symbol(value) for value in receipt.get("fresh_verified_symbols") or []
     }
+    duplicates = {
+        canonical_symbol(value) for value in receipt.get("duplicate_symbols") or []
+    }
     if (
         not ticker
         or ticker not in requested
         or ticker not in eligible
         or ticker not in fresh_verified
+        or ticker in duplicates
     ):
         return False
     declared_memberships = receipt.get("requested_memberships")
-    if isinstance(declared_memberships, dict):
-        expected_memberships = sorted(
-            str(value).strip()
-            for value in declared_memberships.get(ticker) or []
-            if str(value).strip()
-        )
-        raw_memberships = row.get("core_universe_memberships")
-        if isinstance(raw_memberships, str):
-            try:
-                parsed_memberships = json.loads(raw_memberships)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                try:
-                    parsed_memberships = ast.literal_eval(raw_memberships)
-                except (SyntaxError, ValueError, TypeError):
-                    parsed_memberships = [
-                        value.strip()
-                        for value in raw_memberships.replace(";", ",").split(",")
-                        if value.strip()
-                    ]
-            if isinstance(parsed_memberships, list) and len(parsed_memberships) == 1:
-                text = str(parsed_memberships[0]).strip()
-                if text.startswith("[") and text.endswith("]"):
-                    parsed_memberships = [
-                        value.strip().strip("'\"")
-                        for value in text[1:-1].split(",")
-                        if value.strip().strip("'\"")
-                    ]
-        else:
-            parsed_memberships = raw_memberships or []
-        if not isinstance(parsed_memberships, (list, tuple, set)):
-            return False
-        actual_memberships = sorted(
-            str(value).strip() for value in parsed_memberships if str(value).strip()
-        )
-        if expected_memberships != actual_memberships:
-            return False
+    if not isinstance(declared_memberships, dict):
+        return False
+    expected_memberships = _canonical_row_memberships(declared_memberships.get(ticker))
+    actual_memberships = _canonical_row_memberships(row.get("core_universe_memberships"))
+    if expected_memberships != actual_memberships:
+        return False
+    binding_hash = str(row.get(CORE_COVERAGE_ROW_BINDING_FIELD) or "").strip().lower()
+    if not _valid_digest(binding_hash):
+        return False
+    declared_hashes = receipt.get("row_binding_hashes")
+    if not isinstance(declared_hashes, dict):
+        return False
+    if str(declared_hashes.get(ticker) or "").strip().lower() != binding_hash:
+        return False
+    row_bindings = receipt.get("row_bindings")
+    if not isinstance(row_bindings, list):
+        return False
+    matching_bindings = [
+        item
+        for item in row_bindings
+        if isinstance(item, dict)
+        and canonical_symbol(item.get("ticker")) == ticker
+        and str(item.get("row_binding_hash_sha256") or "").strip().lower()
+        == binding_hash
+    ]
+    if len(matching_bindings) != 1:
+        # A duplicate or ambiguous ticker must never be resolved by map
+        # iteration order or by whichever provider row happened to win.
+        return False
     if receipt.get("status") not in {"READY", "PARTIAL"}:
         return False
-    if int(receipt.get("fresh_verified_count") or 0) < 1:
+    try:
+        fresh_verified_count = int(receipt.get("fresh_verified_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    if fresh_verified_count < 1:
         return False
     if str(row.get("source_quality_status") or "").upper() != "VERIFIED":
         return False
-    if str(row.get("freshness_status") or "").upper() != "FRESH":
+    freshness_status = str(row.get("freshness_status") or "").strip()
+    if not freshness_status:
+        receipt_observed_at = _parse_datetime(receipt.get("observed_at"))
+        try:
+            receipt_max_age = int(receipt.get("max_age_seconds") or 0)
+        except (TypeError, ValueError):
+            return False
+        if receipt_observed_at is None or receipt_max_age <= 0:
+            return False
+        freshness_status = _snapshot_freshness_status(
+            row,
+            observed_at=receipt_observed_at,
+            max_age_seconds=receipt_max_age,
+        )
+    if freshness_status.upper() != "FRESH":
         return False
-    if row.get("stale_data_flag") is True:
+    if _canonical_row_bool(row.get("stale_data_flag")) is not False:
+        return False
+    if _canonical_row_bool(row.get("core_lane_eligible")) is not True:
+        return False
+    if (
+        core_row_binding_hash(row, freshness_status=freshness_status.upper())
+        != binding_hash
+    ):
         return False
     return True
 
@@ -3071,13 +3502,17 @@ def _hash(value: dict[str, Any]) -> str:
 __all__ = [
     "CORE_INDEXES",
     "CORE_COVERAGE_RECEIPT_SCHEMA_VERSION",
+    "CORE_COVERAGE_ROW_BINDING_FIELD",
+    "CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION",
     "MIN_CORE_FRESH_ROWS",
     "NASDAQ_NDX_SOD_2026_08_27_URL",
     "NASDAQ_NDX_SOD_URL_TEMPLATE",
     "SCHEMA_VERSION",
     "STATE_STREET_SPY_HOLDINGS_URL",
     "build_core_universe_contract",
+    "build_core_row_binding_projection",
     "canonical_symbol",
+    "core_row_binding_hash",
     "core_discovery_data_eligible",
     "discover_core_universe_rows",
     "merge_core_universe_rows",

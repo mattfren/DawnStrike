@@ -67,6 +67,7 @@ SNAPSHOT_COLUMNS = [
     "core_coverage_receipt_hash_sha256",
     "core_coverage_receipt_status",
     "core_coverage_receipt_payload_json",
+    "core_coverage_row_binding_hash_sha256",
     "as_of_timestamp",
     "data_source_kind",
     "shadow_mode",
@@ -250,6 +251,7 @@ CANDIDATE_COLUMNS = [
     "core_coverage_receipt_hash_sha256",
     "core_coverage_receipt_status",
     "core_coverage_receipt_payload_json",
+    "core_coverage_row_binding_hash_sha256",
     "halt_status",
     "sec_risk_status",
     "corporate_action_status",
@@ -398,6 +400,7 @@ class SnapshotRow:
     core_coverage_receipt_hash_sha256: str = ""
     core_coverage_receipt_status: str = ""
     core_coverage_receipt_payload_json: str = ""
+    core_coverage_row_binding_hash_sha256: str = ""
     data_source_kind: str = ""
     shadow_mode: bool = False
     paid_data: bool = False
@@ -564,6 +567,9 @@ class SnapshotRow:
             core_coverage_receipt_payload_json=str(
                 row.get("core_coverage_receipt_payload_json") or ""
             ).strip(),
+            core_coverage_row_binding_hash_sha256=str(
+                row.get("core_coverage_row_binding_hash_sha256") or ""
+            ).strip(),
             data_source_kind=str(row.get("data_source_kind") or "").strip(),
             shadow_mode=parse_bool(row.get("shadow_mode")),
             paid_data=parse_bool(row.get("paid_data")),
@@ -714,6 +720,7 @@ class SnapshotRow:
             "core_coverage_receipt_hash_sha256": self.core_coverage_receipt_hash_sha256,
             "core_coverage_receipt_status": self.core_coverage_receipt_status,
             "core_coverage_receipt_payload_json": self.core_coverage_receipt_payload_json,
+            "core_coverage_row_binding_hash_sha256": self.core_coverage_row_binding_hash_sha256,
             "as_of_timestamp": self.as_of_timestamp,
             "data_source_kind": self.data_source_kind,
             "shadow_mode": self.shadow_mode,
@@ -934,6 +941,9 @@ class ScoredCandidate:
             "core_coverage_receipt_hash_sha256": self.snapshot.core_coverage_receipt_hash_sha256,
             "core_coverage_receipt_status": self.snapshot.core_coverage_receipt_status,
             "core_coverage_receipt_payload_json": self.snapshot.core_coverage_receipt_payload_json,
+            "core_coverage_row_binding_hash_sha256": (
+                self.snapshot.core_coverage_row_binding_hash_sha256
+            ),
             "halt_status": self.snapshot.halt_status,
             "sec_risk_status": self.snapshot.sec_risk_status,
             "corporate_action_status": self.snapshot.corporate_action_status,
