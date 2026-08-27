@@ -71,6 +71,10 @@ ACTION_STAND_DOWN = "STAND_DOWN"
 ENTRY_ACTIONS = frozenset({ACTION_ENTER, ACTION_ENTER_SHORT})
 EXIT_ACTIONS = frozenset({ACTION_EXIT, ACTION_EXIT_SHORT})
 
+
+def _normalized_action(value: Any) -> str:
+    return str(value or "").strip().upper()
+
 STATE_WATCHING = "WATCHING"
 STATE_ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
 STATE_PAPER_OPEN = "PAPER_OPEN"
@@ -222,7 +226,7 @@ def run_trade_watcher(
     prior_entry_signal_ids = {
         str(row.get("signal_id") or "")
         for row in existing_intents
-        if row.get("action") in ENTRY_ACTIONS
+        if _normalized_action(row.get("action")) in ENTRY_ACTIONS
     }
     open_positions = {str(row.get("signal_id") or ""): dict(row) for row in remaining_open_rows}
     all_position_signal_ids = {str(row.get("signal_id") or "") for row in positions}
@@ -288,14 +292,14 @@ def run_trade_watcher(
         episode_id = str(intent.get("episode_id") or signal.get("episode_id") or "").strip()
         if (
             episode_id
-            and intent.get("action") in ENTRY_ACTIONS
+            and _normalized_action(intent.get("action")) in ENTRY_ACTIONS
             and episode_id in existing_episode_ids
         ):
             states[-1]["reason"] = "duplicate_episode_existing_lifecycle"
             states[-1]["episode_id"] = episode_id
             continue
         if (
-            intent.get("action") in ENTRY_ACTIONS
+            _normalized_action(intent.get("action")) in ENTRY_ACTIONS
             and ticker in existing_symbol_lifecycles
         ):
             states[-1]["reason"] = "duplicate_symbol_existing_open_or_pending_lifecycle"
@@ -310,12 +314,12 @@ def run_trade_watcher(
         existing_intent_ids.add(intent["intent_id"])
         if episode_id:
             existing_episode_ids.add(episode_id)
-        if intent.get("action") in ENTRY_ACTIONS:
+        if _normalized_action(intent.get("action")) in ENTRY_ACTIONS:
             existing_symbol_lifecycles.add(ticker)
         if _should_notify(intent, settings):
             event = _notification_event(intent)
             notification_events_by_key[event.event_key] = event
-        if normalized_mode == MODE_PAPER and intent["action"] in ENTRY_ACTIONS:
+        if normalized_mode == MODE_PAPER and _normalized_action(intent["action"]) in ENTRY_ACTIONS:
             position, fill = _open_paper_position(intent, scanner_config)
             open_positions[signal_id] = position
             all_position_signal_ids.add(signal_id)
@@ -324,7 +328,11 @@ def run_trade_watcher(
             paper_positions.append(position)
             paper_fills.append(fill)
             signal_events.append(_signal_event(intent, "ENTRY_SIGNAL"))
-        elif normalized_mode == MODE_PAPER and intent["action"] in EXIT_ACTIONS and open_position:
+        elif (
+            normalized_mode == MODE_PAPER
+            and _normalized_action(intent["action"]) in EXIT_ACTIONS
+            and open_position
+        ):
             position, fill = _close_paper_position(open_position, intent, scanner_config)
             open_positions.pop(signal_id, None)
             open_count = max(0, open_count - 1)
@@ -672,7 +680,7 @@ def _existing_symbol_lifecycles(
         "FAILED",
     }
     for row in intents:
-        if str(row.get("action") or "").upper() not in ENTRY_ACTIONS:
+        if _normalized_action(row.get("action")) not in ENTRY_ACTIONS:
             continue
         lifecycle = str(row.get("lifecycle_state") or "").upper()
         if lifecycle in terminal:
@@ -1883,7 +1891,7 @@ def _notification_event(intent: dict[str, Any]) -> NotificationEvent:
 
 
 def format_trade_intent_message(intent: dict[str, Any]) -> str:
-    action = str(intent.get("action") or "")
+    action = _normalized_action(intent.get("action"))
     mode = str(intent.get("mode") or "").upper()
     ticker = str(intent.get("ticker") or "n/a")
     if action in ENTRY_ACTIONS:
@@ -2331,7 +2339,10 @@ def _price_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _should_notify(intent: dict[str, Any], settings: WatcherSettings) -> bool:
-    return intent.get("action") in ENTRY_ACTIONS | EXIT_ACTIONS or settings.notify_blocked
+    return (
+        _normalized_action(intent.get("action")) in ENTRY_ACTIONS | EXIT_ACTIONS
+        or settings.notify_blocked
+    )
 
 
 def _signal_id(signal: dict[str, Any]) -> str:

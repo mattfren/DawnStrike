@@ -916,6 +916,10 @@ class SQLiteScanStore:
                     ON trade_intents(market_date, account_id, strategy_id, episode_id)
                     WHERE episode_id <> ''
                       AND action IN ('ENTER_LONG', 'ENTER_SHORT');
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_intents_episode_entry_v2
+                    ON trade_intents(market_date, account_id, strategy_id, episode_id)
+                    WHERE episode_id <> ''
+                      AND UPPER(TRIM(action)) IN ('ENTER_LONG', 'ENTER_SHORT');
                     CREATE INDEX IF NOT EXISTS idx_paper_positions_day_status
                     ON paper_positions(market_date, status, ticker);
                     CREATE INDEX IF NOT EXISTS idx_paper_fills_day_ticker
@@ -4843,12 +4847,26 @@ class SQLiteScanStore:
         skipped = 0
         try:
             with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
                 for row in rows:
                     intent_id = str(row.get("intent_id") or "")
                     ticker = str(row.get("ticker") or "").upper()
                     market_date = str(row.get("market_date") or "")[:10]
                     if not intent_id or not ticker or not market_date:
                         continue
+                    if replace:
+                        existing = connection.execute(
+                            "SELECT * FROM trade_intents WHERE intent_id = ?",
+                            (intent_id,),
+                        ).fetchone()
+                        if existing is not None:
+                            if not _trade_intent_semantics_match(existing, row):
+                                raise StorageError(
+                                    "trade intent identity conflict: existing intent semantics "
+                                    f"do not match {intent_id}"
+                                )
+                            skipped += 1
+                            continue
                     insert_statement = (
                         "INSERT OR IGNORE"
                         if _trade_intent_episode_id(row)
@@ -4878,7 +4896,7 @@ class SQLiteScanStore:
                             _trade_intent_account_id(row),
                             str(row.get("mode") or ""),
                             str(row.get("lifecycle_state") or ""),
-                            str(row.get("action") or ""),
+                            _trade_intent_action(row),
                             str(row.get("decision_time") or ""),
                             _float_or_none(row.get("decision_price")),
                             _float_or_none(row.get("trigger_price")),
@@ -4898,6 +4916,17 @@ class SQLiteScanStore:
                     if cursor.rowcount:
                         inserted += 1
                     else:
+                        existing = connection.execute(
+                            "SELECT * FROM trade_intents WHERE intent_id = ?",
+                            (intent_id,),
+                        ).fetchone()
+                        if existing is not None and not _trade_intent_semantics_match(
+                            existing, row
+                        ):
+                            raise StorageError(
+                                "trade intent identity conflict: existing intent semantics "
+                                f"do not match {intent_id}"
+                            )
                         skipped += 1
                 return {"inserted": inserted, "skipped": skipped, "row_count": len(rows)}
         except sqlite3.Error as exc:
@@ -4925,6 +4954,7 @@ class SQLiteScanStore:
         event_stats = {"inserted": 0, "skipped": 0}
         try:
             with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
                 # The watcher builds lifecycle rows before entering this
                 # transaction.  Treat the intent insert as the durable claim:
                 # an entry that loses the episode unique index must not be
@@ -4962,7 +4992,7 @@ class SQLiteScanStore:
                             _trade_intent_account_id(row),
                             str(row.get("mode") or ""),
                             str(row.get("lifecycle_state") or ""),
-                            str(row.get("action") or ""),
+                            _trade_intent_action(row),
                             str(row.get("decision_time") or ""),
                             _float_or_none(row.get("decision_price")),
                             _float_or_none(row.get("trigger_price")),
@@ -4985,9 +5015,16 @@ class SQLiteScanStore:
                     else:
                         intent_stats["skipped"] += 1
                         existing = connection.execute(
-                            "SELECT intent_id FROM trade_intents WHERE intent_id = ?",
+                            "SELECT * FROM trade_intents WHERE intent_id = ?",
                             (intent_id,),
                         ).fetchone()
+                        if existing is not None and not _trade_intent_semantics_match(
+                            existing, row
+                        ):
+                            raise StorageError(
+                                "trade intent identity conflict: existing intent semantics "
+                                f"do not match {intent_id}"
+                            )
                         if existing is not None:
                             admitted_intent_ids.add(intent_id)
 
@@ -4995,14 +5032,14 @@ class SQLiteScanStore:
                     str(row.get("intent_id") or "")
                     for row in intents
                     if str(row.get("intent_id") or "") in admitted_intent_ids
-                    and str(row.get("action") or "").upper()
+                    and _trade_intent_action(row)
                     in {"ENTER_LONG", "ENTER_SHORT"}
                 }
                 admitted_non_entry_intent_ids = {
                     str(row.get("intent_id") or "")
                     for row in intents
                     if str(row.get("intent_id") or "") in admitted_intent_ids
-                    and str(row.get("action") or "").upper()
+                    and _trade_intent_action(row)
                     not in {"ENTER_LONG", "ENTER_SHORT"}
                 }
 
@@ -5030,6 +5067,24 @@ class SQLiteScanStore:
                         # position, while retaining legacy rows with no
                         # linked exit intent.
                         continue
+                    existing_position = connection.execute(
+                        "SELECT * FROM paper_positions WHERE position_id = ?",
+                        (position_id,),
+                    ).fetchone()
+                    if (
+                        existing_position is not None
+                        and status in {"OPEN", "PENDING"}
+                        and not _lifecycle_semantics_match(
+                            existing_position,
+                            row,
+                            keys=_PAPER_POSITION_SEMANTIC_KEYS,
+                            numeric_keys=_PAPER_POSITION_NUMERIC_KEYS,
+                        )
+                    ):
+                        raise StorageError(
+                            "paper position identity conflict: existing lifecycle semantics "
+                            f"do not match {position_id}"
+                        )
                     connection.execute(
                         """
                         INSERT OR REPLACE INTO paper_positions
@@ -5076,6 +5131,20 @@ class SQLiteScanStore:
                         continue
                     if intent_id not in admitted_intent_ids:
                         continue
+                    existing_fill = connection.execute(
+                        "SELECT * FROM paper_trade_fills WHERE fill_id = ?",
+                        (fill_id,),
+                    ).fetchone()
+                    if existing_fill is not None and not _lifecycle_semantics_match(
+                        existing_fill,
+                        row,
+                        keys=_PAPER_FILL_SEMANTIC_KEYS,
+                        numeric_keys=_PAPER_FILL_NUMERIC_KEYS,
+                    ):
+                        raise StorageError(
+                            "paper fill identity conflict: existing lifecycle semantics "
+                            f"do not match {fill_id}"
+                        )
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO paper_trade_fills
@@ -5109,6 +5178,14 @@ class SQLiteScanStore:
                     event_id = str(row.get("event_id") or "")
                     signal_id = str(row.get("signal_id") or "")
                     if not event_id or not signal_id:
+                        continue
+                    event_payload = row.get("payload_json")
+                    bound_intent_id = (
+                        str(event_payload.get("intent_id") or "").strip()
+                        if isinstance(event_payload, dict)
+                        else ""
+                    )
+                    if bound_intent_id and bound_intent_id not in admitted_intent_ids:
                         continue
                     cursor = connection.execute(
                         """
@@ -8205,6 +8282,128 @@ def _json_row(row: sqlite3.Row) -> dict[str, Any]:
     return merged
 
 
+def _trade_intent_action(row: Mapping[str, Any]) -> str:
+    return str(row.get("action") or "").strip().upper()
+
+
+_TRADE_INTENT_SEMANTIC_KEYS = (
+    "signal_id", "market_date", "ticker", "episode_id", "strategy_id",
+    "account_id", "mode", "lifecycle_state", "action", "decision_time",
+    "decision_price", "trigger_price", "stop_price", "target_price", "quantity",
+    "notional", "risk_amount", "reason", "blocked_reason", "source_observation_id",
+    "notification_event_key",
+)
+_TRADE_INTENT_NUMERIC_KEYS = frozenset(
+    {
+        "decision_price",
+        "trigger_price",
+        "stop_price",
+        "target_price",
+        "quantity",
+        "notional",
+        "risk_amount",
+    }
+)
+_PAPER_POSITION_SEMANTIC_KEYS = (
+    "position_id", "signal_id", "market_date", "ticker", "status", "quantity",
+    "entry_intent_id", "exit_intent_id", "opened_at", "closed_at", "entry_price",
+    "exit_price", "stop_price", "target_price", "notional", "realized_pnl",
+    "realized_return_pct", "max_favorable_excursion", "max_adverse_excursion", "updated_at",
+)
+_PAPER_POSITION_NUMERIC_KEYS = frozenset(
+    {
+        "quantity",
+        "entry_price",
+        "exit_price",
+        "stop_price",
+        "target_price",
+        "notional",
+        "realized_pnl",
+        "realized_return_pct",
+        "max_favorable_excursion",
+        "max_adverse_excursion",
+    }
+)
+_PAPER_FILL_SEMANTIC_KEYS = (
+    "fill_id", "position_id", "intent_id", "signal_id", "market_date", "ticker", "side",
+    "fill_time", "fill_price", "quantity", "gross_notional", "slippage_bps",
+)
+_PAPER_FILL_NUMERIC_KEYS = frozenset({"fill_price", "quantity", "gross_notional", "slippage_bps"})
+
+
+def _trade_intent_semantics_match(
+    stored: sqlite3.Row | Mapping[str, Any], incoming: Mapping[str, Any]
+) -> bool:
+    """Require an exact immutable retry, allowing only creation-time drift."""
+
+    def value(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
+        if isinstance(row, sqlite3.Row):
+            return row[key]
+        return row.get(key)
+
+    def canonical(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key in _TRADE_INTENT_SEMANTIC_KEYS:
+            raw = value(row, key)
+            if key in _TRADE_INTENT_NUMERIC_KEYS:
+                result[key] = _float_or_none(raw)
+            elif key == "action":
+                result[key] = str(raw or "").strip().upper()
+            else:
+                result[key] = str(raw or "")
+        raw_payload = value(row, "payload_json")
+        payload = _json_value(raw_payload)
+        if isinstance(payload, dict) and payload:
+            payload = dict(payload)
+        elif isinstance(row, sqlite3.Row):
+            payload = {
+                key: value(row, key)
+                for key in _TRADE_INTENT_SEMANTIC_KEYS
+                if key != "notification_event_key"
+            }
+        else:
+            payload = {key: raw for key, raw in row.items() if key != "payload_json"}
+        payload.pop("created_at", None)
+        if "action" in payload:
+            payload["action"] = str(payload.get("action") or "").strip().upper()
+        result["payload_json"] = payload
+        return result
+
+    try:
+        return canonical(stored) == canonical(incoming)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _lifecycle_semantics_match(
+    stored: sqlite3.Row | Mapping[str, Any], incoming: Mapping[str, Any], *,
+    keys: tuple[str, ...], numeric_keys: frozenset[str],
+) -> bool:
+    """Reject a retry that would rewrite an existing position or fill."""
+
+    def value(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
+        if isinstance(row, sqlite3.Row):
+            return row[key]
+        return row.get(key)
+
+    for key in keys:
+        left, right = value(stored, key), value(incoming, key)
+        if key in numeric_keys:
+            if _float_or_none(left) != _float_or_none(right):
+                return False
+        elif str(left or "") != str(right or ""):
+            return False
+    raw_incoming_payload = value(incoming, "payload_json")
+    incoming_payload = _json_value(raw_incoming_payload)
+    has_incoming_payload = isinstance(raw_incoming_payload, dict) or bool(
+        isinstance(raw_incoming_payload, str) and raw_incoming_payload.strip()
+    )
+    if has_incoming_payload and isinstance(incoming_payload, dict):
+        stored_payload = _json_value(value(stored, "payload_json"))
+        return isinstance(stored_payload, dict) and stored_payload == incoming_payload
+    return True
+
+
 def _trade_intent_row(row: sqlite3.Row) -> dict[str, Any]:
     """Merge intent payloads without allowing them to rewrite claim columns."""
 
@@ -8245,30 +8444,43 @@ def _backfill_trade_intent_identity(connection: sqlite3.Connection) -> None:
     """Backfill identity columns when upgrading pre-episode databases."""
 
     rows = connection.execute(
-        "SELECT intent_id, episode_id, strategy_id, account_id, payload_json "
-        "FROM trade_intents"
+        "SELECT rowid, intent_id, market_date, action, decision_time, created_at, "
+        "episode_id, strategy_id, account_id, payload_json FROM trade_intents "
+        "ORDER BY decision_time ASC, created_at ASC, rowid ASC"
     ).fetchall()
+    claimed_episodes: set[tuple[str, str, str, str]] = set()
     for row in rows:
-        payload = _json_value(row[4])
+        payload = _json_value(row[9])
         if not isinstance(payload, dict):
             payload = {}
-        episode_id = str(row[1] or payload.get("episode_id") or "").strip()
-        strategy_id = str(row[2] or payload.get("strategy_id") or "").strip()
+        market_date = str(row[2] or "")[:10]
+        action = str(row[3] or "").strip().upper()
+        episode_id = str(row[6] or payload.get("episode_id") or "").strip()
+        strategy_id = str(row[7] or payload.get("strategy_id") or "").strip()
         account_id = str(
-            row[3]
+            row[8]
             or payload.get("account_id")
             or payload.get("simulated_account_id")
             or ""
         ).strip()
+        claim_key = (market_date, account_id, strategy_id, episode_id)
+        if (
+            episode_id
+            and action in {"ENTER_LONG", "ENTER_SHORT"}
+            and claim_key in claimed_episodes
+        ):
+            episode_id = ""
+        elif episode_id and action in {"ENTER_LONG", "ENTER_SHORT"}:
+            claimed_episodes.add(claim_key)
         if (episode_id, strategy_id, account_id) != (
-            str(row[1] or ""),
-            str(row[2] or ""),
-            str(row[3] or ""),
+            str(row[6] or ""),
+            str(row[7] or ""),
+            str(row[8] or ""),
         ):
             connection.execute(
                 "UPDATE trade_intents SET episode_id = ?, strategy_id = ?, account_id = ? "
                 "WHERE intent_id = ?",
-                (episode_id, strategy_id, account_id, row[0]),
+                (episode_id, strategy_id, account_id, row[1]),
             )
 
 
