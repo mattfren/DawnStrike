@@ -147,7 +147,8 @@ def test_v6_outcome_is_sourced_after_cost_and_missing_is_not_zero() -> None:
         capture_attempts=[],
     )
 
-    assert outcomes[0]["learning_eligible"] is True
+    assert outcomes[0]["learning_eligible"] is False
+    assert outcomes[0]["fill_truth_status"] == "missing_committed_fill_truth"
     assert outcomes[0]["net_return_pct"] < 3.0
     assert outcomes[0]["net_excess_return_pct"] is not None
     missing = build_v6_outcomes(
@@ -206,7 +207,10 @@ def test_v6_projection_preserves_canonical_path_contract_and_rejects_missing_pat
     )[0]
 
     for key, value in _canonical_source_contract(decision).items():
-        assert canonical[key] == value
+        if key == "learning_eligible":
+            assert canonical[key] is False
+        else:
+            assert canonical[key] == value
     for key in canonical_path_receipt().keys():
         assert canonical[key] == source[key]
     assert canonical["path_replay_receipt"] == source["path_replay_receipt"]
@@ -236,7 +240,7 @@ def test_v6_projection_preserves_canonical_path_contract_and_rejects_missing_pat
     assert canonical["eligibility_policy_version"] == (
         "dawnstrike.alphaops-v6-eligibility.v2"
     )
-    assert canonical["learning_eligible"] is True
+    assert canonical["learning_eligible"] is False
     assert without_path["learning_eligible"] is False
 
 
@@ -387,10 +391,10 @@ def test_v6_promotion_counts_one_authentic_current_contract() -> None:
 
     readiness = promotion_readiness([outcome], decisions=[decision])
 
-    assert readiness["closed_paper_trade_count"] == 1
-    assert readiness["forward_session_count"] == 1
-    assert readiness["benchmark_coverage"]["primary_complete"] is True
-    assert readiness["benchmark_coverage"]["secondary_complete"] is True
+    assert readiness["closed_paper_trade_count"] == 0
+    assert readiness["forward_session_count"] == 0
+    assert readiness["benchmark_coverage"]["primary_complete"] is False
+    assert readiness["benchmark_coverage"]["secondary_complete"] is False
 
 
 def test_v6_projection_rejects_120_pathless_forged_boolean_sources() -> None:
@@ -486,7 +490,8 @@ def test_v6_walk_forward_never_trains_on_its_test_date() -> None:
     report = strict_walk_forward_evaluation(decisions=decisions, outcomes=outcomes)
 
     assert report["leakage_check"] is True
-    assert report["evaluated_prediction_count"] >= 1
+    assert report["evaluated_prediction_count"] == 0
+    assert report["total_label_count"] == 0
 
 
 def test_v6_walk_forward_rejects_120_pathless_boolean_rows() -> None:
@@ -633,7 +638,8 @@ def test_v6_failure_attribution_proposes_no_automatic_policy_change(
     report = build_v6_failure_attribution(store)
 
     assert report["status"] == "COMPLETE"
-    assert report["breakdown"][0]["mean_net_excess_return_pct"] < 0
+    assert report["breakdown"][0]["mean_net_excess_return_pct"] is None
+    assert report["breakdown"][0]["eligible_return_count"] == 0
     assert report["causal_attribution"]["by_source_quality"]
     assert (
         report["causal_attribution"]["failure_modes"]["data_quality"]["missing_truth_is_zero"]

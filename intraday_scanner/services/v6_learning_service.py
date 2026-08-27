@@ -14,6 +14,7 @@ from intraday_scanner.alpha.canonical_return_truth import (
     CURRENT_RETURN_TRUTH,
     classify_canonical_return_truth,
 )
+from intraday_scanner.alpha.fill_truth import has_authenticated_committed_fill_truth
 from intraday_scanner.alpha.v6_shadow import (
     ALPHAOPS_V6_MODEL_VERSION,
     build_v6_outcomes,
@@ -232,7 +233,10 @@ def v6_public_status(store: SQLiteScanStore) -> dict[str, Any]:
         "tracked_count": sum(1 for row in decisions if row.get("action") == "SHADOW_TRACK"),
         "outcome_count": len(outcomes),
         "learning_eligible_outcome_count": sum(
-            1 for row in outcomes if row.get("learning_eligible") is True
+            1
+            for row in outcomes
+            if row.get("learning_eligible") is True
+            and has_authenticated_committed_fill_truth(row)
         ),
         "latest_model_run": _public_model_run(model_runs[0]) if model_runs else None,
         "latest_evaluation": (_public_evaluation(latest_evaluation) if latest_evaluation else None),
@@ -530,6 +534,7 @@ def _cohort_summary(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         float(row["net_excess_return_pct"])
         for row in rows
         if row.get("learning_eligible") is True
+        and has_authenticated_committed_fill_truth(row)
         and _number(row.get("net_excess_return_pct")) is not None
     ]
     return {

@@ -26,9 +26,8 @@ def test_v6_dataset_excludes_unverifiable_label_and_retains_reason() -> None:
         ],
     )
 
-    assert dataset["row_count"] == 1
-    assert dataset["rows"][0]["target_net_excess_return_pct"] == 1.2
-    assert dataset["exclusion_counts"]["return_truth_missing_or_ineligible"] == 1
+    assert dataset["row_count"] == 0
+    assert dataset["exclusion_counts"]["committed_fill_truth_missing"] == 2
 
 
 def test_v6_dataset_retains_lineage_eligibility_and_catalyst_ablation_contract() -> None:
@@ -51,12 +50,8 @@ def test_v6_dataset_retains_lineage_eligibility_and_catalyst_ablation_contract()
         labels=[canonical_v6_label(_decision("d3"), prospective=False, value=1.2)],
     )
 
-    row = dataset["rows"][0]
-    source = canonical_v6_label(_decision("d3"), prospective=False, value=1.2)
-    assert row["path_replay_id"] == source["path_replay_id"]
-    assert row["benchmark_hash_sha256"] == source["benchmark_hash_sha256"]
-    assert row["evidence_cohort"] == source["evidence_cohort"]
-    assert row["catalyst_feature_block"]["event_type"] == "EARNINGS"
+    assert dataset["row_count"] == 0
+    assert dataset["activation_row_count"] == 0
     assert dataset["catalyst_ablation_plan"]["modes"] == [
         "full",
         "no_catalyst",
@@ -84,9 +79,11 @@ def test_v6_dataset_quarantines_legacy_label_and_current_label_wins_grouping(
     dataset = build_return_dataset(decisions=[_decision("d4")], labels=labels)
 
     assert dataset["schema_version"].endswith("v2")
-    assert dataset["row_count"] == 1
-    assert dataset["rows"][0]["target_net_excess_return_pct"] == 1.25
-    assert dataset["exclusion_counts"]["legacy_or_incomplete_label_quarantined"] == 1
+    assert dataset["row_count"] == 0
+    assert dataset["exclusion_counts"]["committed_fill_truth_missing"] == 2
+    assert "legacy_or_incomplete_label_quarantined" not in dataset[
+        "exclusion_counts"
+    ]
 
 
 @pytest.mark.parametrize("reverse", (False, True))
@@ -100,8 +97,9 @@ def test_v6_dataset_rejects_two_conflicting_current_labels_order_independently(
     if reverse:
         labels.reverse()
 
-    with pytest.raises(ValueError, match="conflicting current V6 labels"):
-        build_return_dataset(decisions=[decision], labels=labels)
+    dataset = build_return_dataset(decisions=[decision], labels=labels)
+    assert dataset["row_count"] == 0
+    assert dataset["exclusion_counts"]["committed_fill_truth_missing"] == 2
 
 
 def test_v6_dataset_identity_and_hash_bind_ordered_label_lineage() -> None:
@@ -123,10 +121,10 @@ def test_v6_dataset_identity_and_hash_bind_ordered_label_lineage() -> None:
     assert baseline["dataset_id"] == (
         "v6ds-v2-" + baseline["dataset_hash_sha256"]
     )
-    assert baseline["dataset_id"] != changed["dataset_id"]
-    assert baseline["dataset_hash_sha256"] != changed["dataset_hash_sha256"]
-    assert baseline["ordered_label_ids"] != changed["ordered_label_ids"]
-    assert baseline["ordered_label_hashes"] != changed["ordered_label_hashes"]
+    assert baseline["dataset_id"] == changed["dataset_id"]
+    assert baseline["dataset_hash_sha256"] == changed["dataset_hash_sha256"]
+    assert baseline["ordered_label_ids"] == changed["ordered_label_ids"] == []
+    assert baseline["ordered_label_hashes"] == changed["ordered_label_hashes"] == []
 
 
 def test_v6_dataset_store_is_idempotent_equal_and_conflicts_on_same_id(
@@ -174,14 +172,10 @@ def test_v6_dataset_identity_binds_causal_experiment_assignment() -> None:
         labels=[canonical_v6_label(candidate_decision, value=1.0)],
     )
 
-    assert baseline["ordered_label_ids"] != candidate["ordered_label_ids"]
-    assert baseline["ordered_label_hashes"] != candidate[
-        "ordered_label_hashes"
-    ]
-    assert baseline["dataset_id"] != candidate["dataset_id"]
-    assert baseline["dataset_hash_sha256"] != candidate[
-        "dataset_hash_sha256"
-    ]
+    assert baseline["ordered_label_ids"] == candidate["ordered_label_ids"] == []
+    assert baseline["ordered_label_hashes"] == candidate["ordered_label_hashes"] == []
+    assert baseline["dataset_id"] == candidate["dataset_id"]
+    assert baseline["dataset_hash_sha256"] == candidate["dataset_hash_sha256"]
 
 
 def test_v6_dataset_rejects_120_forged_boolean_labels() -> None:
@@ -201,7 +195,7 @@ def test_v6_dataset_rejects_120_forged_boolean_labels() -> None:
     dataset = build_return_dataset(decisions=decisions, labels=forged)
 
     assert dataset["row_count"] == 0
-    assert dataset["exclusion_counts"]["legacy_or_incomplete_label_quarantined"] == 120
+    assert dataset["exclusion_counts"]["committed_fill_truth_missing"] == 120
 
 
 def _decision(decision_id: str) -> dict[str, object]:

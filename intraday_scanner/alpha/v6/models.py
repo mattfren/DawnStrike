@@ -9,6 +9,10 @@ from intraday_scanner.alpha.canonical_return_truth import (
     CURRENT_RETURN_TRUTH,
     classify_canonical_return_truth,
 )
+from intraday_scanner.alpha.fill_truth import (
+    MISSING_COMMITTED_FILL_TRUTH,
+    has_authenticated_committed_fill_truth,
+)
 from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash
 
@@ -61,6 +65,10 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
         if quarantine
         else ()
     )
+    if quarantine and any(
+        not has_authenticated_committed_fill_truth(row) for row in dataset_rows
+    ):
+        quarantine_reasons = (*quarantine_reasons, MISSING_COMMITTED_FILL_TRUTH)
     if labels < MIN_RETURN_MODEL_LABELS:
         return ModelEligibility(
             status="NOT_TRAINED_INSUFFICIENT_LABELS",
@@ -133,6 +141,7 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
                 row.get("target_net_excess_return_pct"),
                 label.get("label_value"),
             )
+            and has_authenticated_committed_fill_truth({**row, **label, **decision})
         ):
             continue
         accepted.append(row)

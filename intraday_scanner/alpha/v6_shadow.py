@@ -22,6 +22,10 @@ from intraday_scanner.alpha.canonical_return_truth import (
     canonical_return_truth_projection,
     classify_canonical_return_truth,
 )
+from intraday_scanner.alpha.fill_truth import (
+    MISSING_COMMITTED_FILL_TRUTH,
+    has_authenticated_committed_fill_truth,
+)
 from intraday_scanner.alpha.v6.contracts import (
     ALPHAOPS_V6_MODEL_VERSION,
     ALPHAOPS_V6_STRATEGY_VERSION,
@@ -301,6 +305,7 @@ def strict_walk_forward_evaluation(
             classify_canonical_return_truth(outcome, decision=decision)
             != CURRENT_RETURN_TRUTH
             or outcome.get("learning_eligible") is not True
+            or not has_authenticated_committed_fill_truth(outcome)
         ):
             continue
         rows.append({**outcome, "decision": decision})
@@ -367,6 +372,7 @@ def promotion_readiness(
             and classify_canonical_return_truth(row, decision=decision)
             == CURRENT_RETURN_TRUTH
             and row.get("learning_eligible") is True
+            and has_authenticated_committed_fill_truth(row)
             and row.get("prospective_promotion_eligible") is True
         ):
             valid.append(row)
@@ -566,6 +572,7 @@ def _v6_outcome_from_source(
     attempt: dict[str, Any] | None,
 ) -> dict[str, Any]:
     source_or_attempt = source or attempt or {}
+    fill_truth_present = has_authenticated_committed_fill_truth(source_or_attempt)
     observed_at = str(
         (source or attempt or {}).get("captured_at")
         or (source or attempt or {}).get("attempted_at")
@@ -604,6 +611,14 @@ def _v6_outcome_from_source(
         "counterfactual_policy": (source or {}).get("counterfactual_policy"),
         "learning_eligible": bool(
             current_return and projection.get("learning_eligible") is True
+            and fill_truth_present
+        ),
+        "fill_truth_required": True,
+        "fill_truth_status": (
+            "committed" if fill_truth_present else "missing_committed_fill_truth"
+        ),
+        "return_learning_quarantine_reason": (
+            None if fill_truth_present else MISSING_COMMITTED_FILL_TRUTH
         ),
         "no_lookahead": bool(projection.get("no_lookahead")),
         "cost_model_version": decision.get("cost_model_version"),

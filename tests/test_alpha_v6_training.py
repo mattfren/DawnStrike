@@ -87,7 +87,7 @@ def test_v6_training_independently_rejects_120_forged_dataset_rows() -> None:
     ]["exact_exclusions"]
 
 
-def test_v6_model_eligibility_accepts_120_authentic_current_rows() -> None:
+def test_v6_model_eligibility_quarantines_replay_rows_without_fill_truth() -> None:
     rows = []
     for index in range(120):
         market_date = (date(2026, 1, 2) + timedelta(days=index % 60)).isoformat()
@@ -104,9 +104,10 @@ def test_v6_model_eligibility_accepts_120_authentic_current_rows() -> None:
 
     eligibility = model_eligibility(rows)
 
-    assert eligibility.status == "RESEARCH_BASELINES_ONLY"
-    assert eligibility.eligible_label_count == 120
-    assert eligibility.forward_date_count == 60
+    assert eligibility.status == "NOT_TRAINED_INSUFFICIENT_LABELS"
+    assert eligibility.eligible_label_count == 0
+    assert eligibility.forward_date_count == 0
+    assert "committed_point_in_time_fill_truth_required" in eligibility.exact_exclusions
 
 
 def test_v6_training_receipt_records_exact_lineage_gate_exclusions() -> None:

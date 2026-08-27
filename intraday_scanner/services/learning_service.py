@@ -6,6 +6,10 @@ import math
 import uuid
 from typing import Any
 
+from intraday_scanner.alpha.fill_truth import (
+    MISSING_COMMITTED_FILL_TRUTH,
+    has_authenticated_committed_fill_truth,
+)
 from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.setup_memory import build_setup_memory
 from intraday_scanner.models import utc_now_iso
@@ -112,6 +116,9 @@ def run_alpha_learning(store: SQLiteScanStore) -> dict[str, Any]:
         if activation_labels
         else "insufficient_real_outcomes"
     )
+    quarantined_return_count = int(
+        canonical_diagnostics.get("excluded_missing_committed_fill_truth", 0)
+    )
     payload = {
         "run_id": f"alpha-learn-{uuid.uuid4().hex[:12]}",
         "created_at": now,
@@ -128,6 +135,15 @@ def run_alpha_learning(store: SQLiteScanStore) -> dict[str, Any]:
         "legacy_outcomes_excluded_from_production_learning": True,
         "return_label_contract": "exact_delivered_reconciled_net_after_cost_v1",
         "canonical_return_label_diagnostics": canonical_diagnostics,
+        "return_learning_quarantine": {
+            "status": (
+                "QUARANTINED_MISSING_COMMITTED_FILL_TRUTH"
+                if quarantined_return_count
+                else "NOT_APPLICABLE"
+            ),
+            "reason": MISSING_COMMITTED_FILL_TRUTH,
+            "count": quarantined_return_count,
+        },
         "selected_signals_considered": len(exact_selections),
         "selection_evidence_status": selection_evidence_status,
         "activation_labels_considered": len(activation_labels),
@@ -160,6 +176,7 @@ def load_production_alpha_learning_labels(
         and str(row.get("return_label_contract") or "")
         == "exact_delivered_reconciled_net_after_cost_v1"
         and str(row.get("label_family") or "") == "trade_return"
+        and has_authenticated_committed_fill_truth(row)
     ]
 
 
@@ -220,6 +237,7 @@ def _canonical_return_labels(
         "excluded_not_closed": 0,
         "excluded_missing_trade": 0,
         "excluded_integrity_mismatch": 0,
+        "excluded_missing_committed_fill_truth": 0,
     }
     output: dict[str, dict[str, Any]] = {}
     for label in strategy_labels:
@@ -271,6 +289,11 @@ def _canonical_return_labels(
             and trade.get("slippage_cost") is not None
         ):
             diagnostics["excluded_integrity_mismatch"] += 1
+            continue
+        if not has_authenticated_committed_fill_truth(
+            {**label, **evaluation, **trade}
+        ):
+            diagnostics["excluded_missing_committed_fill_truth"] += 1
             continue
         signal_id = str(label.get("signal_id") or "")
         signal = signal_by_id.get(signal_id, {})

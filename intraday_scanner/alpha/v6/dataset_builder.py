@@ -9,6 +9,7 @@ from intraday_scanner.alpha.canonical_return_truth import (
     CURRENT_RETURN_TRUTH,
     classify_canonical_return_truth,
 )
+from intraday_scanner.alpha.fill_truth import has_authenticated_committed_fill_truth
 from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.v6.contracts import (
     DATASET_SCHEMA_VERSION,
@@ -20,6 +21,19 @@ from intraday_scanner.alpha.v6.contracts import (
 )
 from intraday_scanner.alpha.v6.models import evidence_lineage
 from intraday_scanner.alpha.v6.validation import catalyst_ablation_plan
+
+_RETURN_LABEL_FAMILIES = frozenset(
+    {
+        "simulated_fill_feasibility",
+        "net_return_after_cost",
+        "benchmark_relative_excess_return",
+        "stop_first_target_first",
+        "mfe_pct",
+        "mae_pct",
+        "tail_loss_event",
+        "rejected_candidate_regret",
+    }
+)
 
 
 def build_return_dataset(
@@ -33,8 +47,19 @@ def build_return_dataset(
     for label in labels:
         decision_id = str(label.get("decision_id") or "")
         decision = decisions_by_id.get(decision_id)
+        if (
+            decision is not None
+            and str(label.get("label_family") or "") in _RETURN_LABEL_FAMILIES
+            and not has_authenticated_committed_fill_truth(label)
+        ):
+            exclusions["committed_fill_truth_missing"] += 1
         if decision is None or not _current_label(label, decision=decision):
-            exclusions["legacy_or_incomplete_label_quarantined"] += 1
+            if not (
+                decision is not None
+                and str(label.get("label_family") or "") in _RETURN_LABEL_FAMILIES
+                and not has_authenticated_committed_fill_truth(label)
+            ):
+                exclusions["legacy_or_incomplete_label_quarantined"] += 1
             continue
         family = str(label.get("label_family") or "")
         existing = grouped[decision_id].get(family)
@@ -153,6 +178,11 @@ def build_return_dataset(
 def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     """Accept only labels projected from authenticated current return truth."""
 
+    family = str(label.get("label_family") or "")
+    if family in {"activation", "data_quality_failure"}:
+        # These labels are diagnostic projections, not return observations.
+        # Keep them visible even when the associated return is quarantined.
+        return _diagnostic_label_valid(label)
     truth = dict(label)
     # Label-family eligibility is narrower than the underlying return receipt.
     # Restore only the receipt's bound eligibility bit for classification; no
@@ -160,7 +190,7 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     truth["learning_eligible"] = (
         truth.get("retrospective_research_eligible") is True
     )
-    return bool(
+    current = bool(
         label.get("label_schema_version") == LABEL_SCHEMA_VERSION
         and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
         and classify_canonical_return_truth(truth, decision=decision)
@@ -168,6 +198,35 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
         and str(label.get("label_id") or "").startswith("v6l-v2-")
         and str(label.get("truth_lineage_hash_sha256") or "")
         and str(label.get("label_payload_hash_sha256") or "")
+    )
+    if not current:
+        return False
+    # Activation/data-quality labels remain available for diagnostics.  Return
+    # families require a private authenticated closed FillTruth join; replay
+    # lineage and self-asserted hashes are not sufficient.
+    if family in {
+        "simulated_fill_feasibility",
+        "net_return_after_cost",
+        "benchmark_relative_excess_return",
+        "stop_first_target_first",
+        "mfe_pct",
+        "mae_pct",
+        "tail_loss_event",
+        "rejected_candidate_regret",
+    }:
+        return has_authenticated_committed_fill_truth(label)
+    return True
+
+
+def _diagnostic_label_valid(label: dict[str, Any]) -> bool:
+    return bool(
+        label.get("label_schema_version") == LABEL_SCHEMA_VERSION
+        and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
+        and str(label.get("label_id") or "").startswith("v6l-v2-")
+        and str(label.get("truth_lineage_hash_sha256") or "")
+        and str(label.get("label_payload_hash_sha256") or "")
+        and label.get("learning_eligible") is True
+        and _number(label.get("label_value")) in {0.0, 1.0}
     )
 
 

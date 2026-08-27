@@ -74,7 +74,11 @@ def test_v6_return_labels_carry_lineage_and_require_complete_truth_contract() ->
         row for row in labels if row["label_family"] == "net_return_after_cost"
     )
 
-    assert return_label["learning_eligible"] is True
+    assert return_label["learning_eligible"] is False
+    assert return_label["fill_truth_status"] == "missing_committed_fill_truth"
+    assert return_label["exclusion_reason"] == (
+        "committed_point_in_time_fill_truth_required"
+    )
     assert return_label["source_artifact_hash_sha256"] == outcome[
         "source_bar_hash_sha256"
     ]

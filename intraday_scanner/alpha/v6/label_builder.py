@@ -11,6 +11,10 @@ from intraday_scanner.alpha.canonical_return_truth import (
     LEGACY_OR_INCOMPLETE,
     classify_canonical_return_truth,
 )
+from intraday_scanner.alpha.fill_truth import (
+    MISSING_COMMITTED_FILL_TRUTH,
+    has_authenticated_committed_fill_truth,
+)
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, utc_now
 from intraday_scanner.alpha.v6.models import evidence_lineage
 
@@ -46,6 +50,7 @@ def build_label_families(
     prospective_eligible = outcome.get("prospective_promotion_eligible") is True
     lineage = evidence_lineage({**outcome, **decision})
     return_truth = _return_truth_contract(decision=decision, outcome=outcome)
+    fill_truth_present = has_authenticated_committed_fill_truth(outcome)
     classification = return_truth["classification"]
     current_return = classification == CURRENT_RETURN_TRUTH
     current_not_triggered = classification == CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED
@@ -59,6 +64,7 @@ def build_label_families(
         and retrospective_eligible
         and current_return
         and return_truth["eligible"]
+        and fill_truth_present
     )
     observed_at = str(outcome.get("observed_at") or utc_now())
     base = {
@@ -87,6 +93,10 @@ def build_label_families(
         "missing_truth_is_zero": False,
         "research_only": True,
         "broker_execution_enabled": False,
+        "fill_truth_status": (
+            "committed" if fill_truth_present else "missing_committed_fill_truth"
+        ),
+        "fill_truth_bound": fill_truth_present,
     }
     truth_lineage = _truth_lineage(outcome)
     base["truth_lineage_hash_sha256"] = canonical_hash(truth_lineage)
@@ -138,7 +148,7 @@ def build_label_families(
     for family in _RETURN_FAMILIES:
         value = values[family]
         allowed = conclusive and bool(source_hash) and (not activated or value is not None)
-        eligible = allowed and eligible_return
+        eligible = allowed and eligible_return and fill_truth_present
         labels.append(
             _label(
                 base,
@@ -146,7 +156,13 @@ def build_label_families(
                 value=value,
                 eligible=eligible,
                 exclusion=(
-                    None if eligible else "return_truth_missing_or_ineligible"
+                    None
+                    if eligible
+                    else (
+                        MISSING_COMMITTED_FILL_TRUTH
+                        if not fill_truth_present
+                        else "return_truth_missing_or_ineligible"
+                    )
                 ),
             )
         )
@@ -160,7 +176,11 @@ def build_label_families(
                 exclusion=(
                     None
                     if eligible_return and _sampled_rejected_candidate(decision)
-                    else "rejected_candidate_not_in_frozen_sampling_policy"
+                    else (
+                        MISSING_COMMITTED_FILL_TRUTH
+                        if not fill_truth_present
+                        else "rejected_candidate_not_in_frozen_sampling_policy"
+                    )
                 ),
             )
         )
@@ -182,6 +202,19 @@ def _label(
         "learning_eligible": eligible,
         "exclusion_reason": exclusion,
     }
+    if family in {*_RETURN_FAMILIES, "rejected_candidate_regret"}:
+        fill_truth_present = base.get("fill_truth_bound") is True
+        payload.update(
+            {
+                "fill_truth_required": True,
+                "fill_truth_status": (
+                    "committed" if fill_truth_present else "missing_committed_fill_truth"
+                ),
+                "return_learning_quarantine_reason": (
+                    None if fill_truth_present else MISSING_COMMITTED_FILL_TRUTH
+                ),
+            }
+        )
     identity = {
         "schema_version": payload["label_schema_version"],
         "decision_id": payload["decision_id"],

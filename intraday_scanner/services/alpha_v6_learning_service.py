@@ -11,6 +11,7 @@ import math
 from collections import defaultdict
 from typing import Any
 
+from intraday_scanner.alpha.fill_truth import MISSING_COMMITTED_FILL_TRUTH
 from intraday_scanner.alpha.v6.calibration import calibration_report, interval_coverage
 from intraday_scanner.alpha.v6.contracts import canonical_hash, utc_now
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
@@ -85,6 +86,17 @@ def run_alpha_v6_daily_monitor(
     persisted_labels = store.load_alpha_v6_labels()
     dataset = build_return_dataset(decisions=decisions, labels=persisted_labels)
     dataset_inserted = store.persist_alpha_v6_dataset(dataset)
+    quarantined_return_count = int(
+        dataset["exclusion_counts"].get("committed_fill_truth_missing", 0)
+    )
+    label_generation = {
+        "generated_count": len(labels),
+        "persistence": label_stats,
+        "quarantined_return_count": quarantined_return_count,
+        "quarantine_reason": (
+            MISSING_COMMITTED_FILL_TRUTH if quarantined_return_count else None
+        ),
+    }
     drift = _drift(decisions)
     drift_inserted = store.persist_alpha_v6_drift_report(drift)
     receipt = _operational_receipt(
@@ -92,7 +104,7 @@ def run_alpha_v6_daily_monitor(
         market_date=market_date,
         dataset=dataset,
         outcome_count=len(outcomes),
-        label_generation={"generated_count": len(labels)},
+        label_generation=label_generation,
         drift=drift,
     )
     receipt_inserted = store.persist_alpha_v6_operational_receipt(receipt)
@@ -101,7 +113,7 @@ def run_alpha_v6_daily_monitor(
         "status": "COMPLETE",
         "outcome_sync": outcome_sync,
         "decision_contract": validate_decision_batch(decisions),
-        "label_generation": {"generated_count": len(labels), "persistence": label_stats},
+        "label_generation": label_generation,
         "dataset": {**_dataset_summary(dataset), "inserted": dataset_inserted},
         "drift": {**drift, "inserted": drift_inserted},
         "operational_receipt": {**receipt, "inserted": receipt_inserted},
