@@ -4994,6 +4994,18 @@ class SQLiteScanStore:
                         )
                     account_id = row_account_id or scoped_account_id
                     cap_date = str(portfolio_market_date or market_date)[:10]
+                    if (
+                        action in {"ENTER_LONG", "ENTER_SHORT"}
+                        and (
+                            cap_date != market_date
+                            or not account_id
+                            or account_id != "alphaops_v5_simulated"
+                        )
+                    ):
+                        raise StorageError(
+                            "trade intent account/date conflicts with paper portfolio: "
+                            f"{intent_id}"
+                        )
                     if existing_intent is None and action in {"ENTER_LONG", "ENTER_SHORT"}:
                         rejection = _entry_admission_rejection(
                             connection,
@@ -5090,13 +5102,6 @@ class SQLiteScanStore:
                     for row in intents
                     if str(row.get("intent_id") or "") in admitted_intent_ids
                 }
-                monitor_stats = _persist_bound_monitor_receipts(
-                    connection,
-                    monitor_rows,
-                    admitted_intents_by_id=admitted_intents_by_id,
-                    candidate_fills=paper_fills,
-                )
-
                 for row in paper_positions:
                     position_id = str(row.get("position_id") or "")
                     ticker = str(row.get("ticker") or "").upper()
@@ -5229,6 +5234,44 @@ class SQLiteScanStore:
                         continue
                     if intent_id not in admitted_intent_ids:
                         continue
+                    admitted_intent = admitted_intents_by_id.get(intent_id)
+                    if admitted_intent is None or not _valid_intent_fill(
+                        admitted_intent, row, position_id=position_id
+                    ):
+                        raise StorageError(
+                            "paper fill is not bound to an admitted intent: " f"{fill_id}"
+                        )
+                    durable_position = connection.execute(
+                        "SELECT * FROM paper_positions WHERE position_id = ?",
+                        (position_id,),
+                    ).fetchone()
+                    if durable_position is None:
+                        raise StorageError(
+                            "paper fill requires a durable bound position: " f"{fill_id}"
+                        )
+                    position_status = str(durable_position["status"] or "").upper()
+                    action = _trade_intent_action(admitted_intent)
+                    bound_position_intent = str(
+                        durable_position[
+                            "entry_intent_id"
+                            if action in {"ENTER_LONG", "ENTER_SHORT"}
+                            else "exit_intent_id"
+                        ]
+                        or ""
+                    )
+                    expected_statuses = (
+                        {"OPEN", "PENDING", "CLOSED"}
+                        if action in {"ENTER_LONG", "ENTER_SHORT"}
+                        else {"CLOSED"}
+                    )
+                    if (
+                        bound_position_intent != intent_id
+                        or position_status not in expected_statuses
+                    ):
+                        raise StorageError(
+                            "paper fill does not match durable position lifecycle: "
+                            f"{fill_id}"
+                        )
                     claimed_fills = connection.execute(
                         "SELECT * FROM paper_trade_fills WHERE intent_id = ?",
                         (intent_id,),
@@ -5281,6 +5324,13 @@ class SQLiteScanStore:
                         fill_stats["inserted"] += 1
                     else:
                         fill_stats["skipped"] += 1
+
+                monitor_stats = _persist_bound_monitor_receipts(
+                    connection,
+                    monitor_rows,
+                    admitted_intents_by_id=admitted_intents_by_id,
+                    candidate_fills=paper_fills,
+                )
 
                 for row in signal_events:
                     event_id = str(row.get("event_id") or "")
@@ -8416,6 +8466,14 @@ def _persist_bound_monitor_receipts(
             continue
         trace = intent.get("decision_trace")
         trace = trace if isinstance(trace, dict) else {}
+        proof = intent.get("watcher_current_proof")
+        proof = proof if isinstance(proof, dict) else {}
+        quote = proof.get("quote_receipt")
+        portfolio = proof.get("portfolio_receipt")
+        quote = quote if isinstance(quote, dict) else {}
+        portfolio = portfolio if isinstance(portfolio, dict) else {}
+        frozen_lineage = intent.get("monitor_proof_lineage")
+        frozen_lineage = frozen_lineage if isinstance(frozen_lineage, dict) else {}
         intent_account = _trade_intent_account_id(intent)
         canonical_without_hash = {
             key: value for key, value in row.items() if key != "content_hash_sha256"
@@ -8428,6 +8486,30 @@ def _persist_bound_monitor_receipts(
                 ensure_ascii=True,
             ).encode()
         ).hexdigest()
+        quote_hash = _canonical_sha256(quote)
+        portfolio_hash = _canonical_sha256(portfolio)
+        proof_hash = _canonical_sha256(
+            {key: value for key, value in proof.items() if key != "proof_hash_sha256"}
+        )
+        expected_receipt_id = "monitor-publication-" + hashlib.sha256(
+            (
+                f"{intent.get('signal_id')}:{intent_id}:"
+                f"{trace.get('plan_hash_sha256')}:{proof_hash}"
+            ).encode()
+        ).hexdigest()[:24]
+        validation_row = intent.get("watcher_validation_row")
+        if not isinstance(validation_row, dict):
+            raise StorageError(
+                "monitor publication receipt requires strict watcher validation envelope"
+            )
+        from intraday_scanner.services.luna_research_slate_service import (
+            validate_watcher_current_proof,
+        )
+
+        if not validate_watcher_current_proof(validation_row):
+            raise StorageError(
+                "monitor publication receipt requires strict watcher validation envelope"
+            )
         if (
             not receipt_id
             or not content_hash
@@ -8452,6 +8534,32 @@ def _persist_bound_monitor_receipts(
                 or trace.get("decision_fingerprint")
                 or ""
             )
+            or not proof
+            or str(proof.get("proof_hash_sha256") or "") != proof_hash
+            or str(proof.get("quote_hash_sha256") or "") != quote_hash
+            or str(proof.get("portfolio_hash_sha256") or "") != portfolio_hash
+            or str(row.get("watcher_proof_hash_sha256") or "") != proof_hash
+            or str(row.get("quote_receipt_hash_sha256") or "") != quote_hash
+            or str(row.get("portfolio_receipt_hash_sha256") or "") != portfolio_hash
+            or receipt_id != expected_receipt_id
+            or str(row.get("checked_at") or "") != str(proof.get("checked_at") or "")
+            or any(
+                not str(row.get(key) or "")
+                or str(row.get(key) or "") != str(proof.get(key) or "")
+                or str(row.get(key) or "") != str(frozen_lineage.get(key) or "")
+                for key in (
+                    "selection_id",
+                    "cohort",
+                    "source_scan_id",
+                    "frozen_slate_id",
+                    "frozen_slate_content_hash_sha256",
+                    "frozen_research_selection_id",
+                )
+            )
+            or str(quote.get("signal_id") or "") != str(intent.get("signal_id") or "")
+            or str(portfolio.get("signal_id") or "")
+            != str(intent.get("signal_id") or "")
+            or str(portfolio.get("simulated_account_id") or "") != intent_account
             or content_hash != recomputed_hash
         ):
             raise StorageError("monitor publication receipt is not bound to admitted intent")
@@ -8530,6 +8638,14 @@ def _persist_bound_monitor_receipts(
                 raise StorageError("monitor publication receipt identity collision")
             reused += 1
     return {"inserted": inserted, "reused": reused, "count": inserted + reused}
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode()
+    ).hexdigest()
 
 
 def _entry_admission_rejection(

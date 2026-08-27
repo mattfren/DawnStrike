@@ -287,6 +287,25 @@ def run_trade_watcher(
             continue
         intent["created_at"] = created_at
         intent["notification_event_key"] = f"trade_intent:{intent['intent_id']}"
+        if proof is not None:
+            intent["watcher_current_proof"] = proof
+            quote = proof.get("quote_receipt") or {}
+            intent["watcher_validation_row"] = {
+                **signal,
+                "current_price": quote.get("last"),
+                "watcher_current_proof": proof,
+            }
+            intent["monitor_proof_lineage"] = {
+                key: proof.get(key)
+                for key in (
+                    "selection_id",
+                    "cohort",
+                    "source_scan_id",
+                    "frozen_slate_id",
+                    "frozen_slate_content_hash_sha256",
+                    "frozen_research_selection_id",
+                )
+            }
         intent["payload_json"] = dict(intent)
         if intent["intent_id"] in existing_intent_ids:
             # Crash repair: replay the exact durable intent through storage's
@@ -1804,6 +1823,9 @@ def _open_paper_position(
         "cost_model_version": intent.get("cost_model_version"),
         "decision_fingerprint": intent.get("decision_fingerprint"),
         "official_paper_eligible": intent.get("official_paper_eligible"),
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
     }
     position["payload_json"] = dict(position)
     fill = _fill(
@@ -1908,6 +1930,10 @@ def _fill(
         "execution_policy_version": intent.get("execution_policy_version"),
         "cost_model_version": intent.get("cost_model_version"),
         "decision_fingerprint": intent.get("decision_fingerprint"),
+        "episode_id": intent.get("episode_id"),
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
     }
     fill["payload_json"] = dict(fill)
     return fill

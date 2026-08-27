@@ -13,10 +13,52 @@ import pytest
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore, StorageError
 
 
+def _hash_mapping(value: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
+def _watcher_proof(suffix: str) -> dict:
+    common = {
+        "signal_id": f"signal-{suffix}",
+        "ticker": "NOVA",
+        "plan_hash_sha256": "a" * 64,
+        "selection_id": f"selection-{suffix}",
+        "cohort": "TIER3",
+        "source_scan_id": f"scan-{suffix}",
+        "frozen_slate_id": f"slate-{suffix}",
+        "frozen_slate_content_hash_sha256": "b" * 64,
+        "frozen_research_selection_id": f"research-{suffix}",
+    }
+    checked_at = "2026-08-27T14:35:00+00:00"
+    quote = {**common, "status": "CURRENT", "checked_at": checked_at}
+    portfolio = {
+        **common,
+        "status": "ADMITTED",
+        "simulated_account_id": "alphaops_v5_simulated",
+        "checked_at": checked_at,
+    }
+    proof = {
+        **common,
+        "schema_version": "alphaops.watcher_current.v1",
+        "status": "CURRENT",
+        "checked_at": checked_at,
+        "quote_receipt": quote,
+        "quote_hash_sha256": _hash_mapping(quote),
+        "portfolio_receipt": portfolio,
+        "portfolio_hash_sha256": _hash_mapping(portfolio),
+        "evaluate_v5_official_paper": {"decision_fingerprint": "fingerprint-v1"},
+    }
+    proof["proof_hash_sha256"] = _hash_mapping(proof)
+    return proof
+
+
 def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[dict], list[dict]]:
     intent_id = f"intent-{suffix}"
     position_id = f"position-{suffix}"
     fill_id = f"fill-{suffix}"
+    proof = _watcher_proof(suffix)
     intent = {
         "intent_id": intent_id,
         "signal_id": f"signal-{suffix}",
@@ -24,7 +66,7 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "ticker": "NOVA",
         "episode_id": episode_id,
         "strategy_id": "alphaops_v5",
-        "account_id": "alphaops_paper_v5",
+        "account_id": "alphaops_v5_simulated",
         "mode": "paper_execute",
         "lifecycle_state": "ENTRY_TRIGGERED",
         "action": "ENTER_LONG",
@@ -34,9 +76,21 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "created_at": "2026-08-27T14:35:00+00:00",
         "decision_fingerprint": "fingerprint-v1",
         "decision_trace": {
-            "account_id": "alphaops_paper_v5",
+            "account_id": "alphaops_v5_simulated",
             "plan_hash_sha256": "a" * 64,
             "decision_fingerprint": "fingerprint-v1",
+        },
+        "watcher_current_proof": proof,
+        "monitor_proof_lineage": {
+            key: proof[key]
+            for key in (
+                "selection_id",
+                "cohort",
+                "source_scan_id",
+                "frozen_slate_id",
+                "frozen_slate_content_hash_sha256",
+                "frozen_research_selection_id",
+            )
         },
     }
     position = {
@@ -85,16 +139,20 @@ def _persist(db_path: Path, suffix: str) -> dict:
                 "payload_json": {"intent_id": intent_id},
             }
         ],
-        monitor_publication_receipts=[_monitor_receipt(intent_id, suffix)],
     )
 
 
 def _monitor_receipt(intent_id: str, suffix: str) -> dict:
+    proof = _watcher_proof(suffix)
+    proof_hash = proof["proof_hash_sha256"]
     receipt = {
         "schema_version": "dawnstrike.alphaops.monitor_publication_receipt.v1",
-        "receipt_id": f"monitor-{suffix}",
+        "receipt_id": "monitor-publication-"
+        + hashlib.sha256(
+            f"signal-{suffix}:{intent_id}:{'a' * 64}:{proof_hash}".encode()
+        ).hexdigest()[:24],
         "intent_id": intent_id,
-        "simulated_account_id": "alphaops_paper_v5",
+        "simulated_account_id": "alphaops_v5_simulated",
         "market_date": "2026-08-27",
         "ticker": "NOVA",
         "signal_id": f"signal-{suffix}",
@@ -105,6 +163,15 @@ def _monitor_receipt(intent_id: str, suffix: str) -> dict:
         "broker_execution": "disabled",
         "checked_at": "2026-08-27T14:35:00+00:00",
         "decision_trace_fingerprint": "fingerprint-v1",
+        "selection_id": f"selection-{suffix}",
+        "cohort": "TIER3",
+        "source_scan_id": f"scan-{suffix}",
+        "frozen_slate_id": f"slate-{suffix}",
+        "frozen_slate_content_hash_sha256": "b" * 64,
+        "frozen_research_selection_id": f"research-{suffix}",
+        "watcher_proof_hash_sha256": proof_hash,
+        "quote_receipt_hash_sha256": proof["quote_hash_sha256"],
+        "portfolio_receipt_hash_sha256": proof["portfolio_hash_sha256"],
     }
     receipt["content_hash_sha256"] = hashlib.sha256(
         json.dumps(
@@ -126,7 +193,7 @@ def _exit_rows(
         "ticker": position["ticker"],
         "episode_id": "episode:closed-retry",
         "strategy_id": "alphaops_v5",
-        "account_id": "alphaops_paper_v5",
+        "account_id": "alphaops_v5_simulated",
         "mode": "paper_execute",
         "lifecycle_state": "EXIT_TRIGGERED",
         "action": "EXIT_LONG",
@@ -170,7 +237,6 @@ def test_episode_claim_blocks_losing_position_and_fill_side_effects(tmp_path: Pa
 
     assert first["intents"]["inserted"] == 1
     assert first["paper_fills"]["inserted"] == 1
-    assert first["monitor_publication_receipts"]["inserted"] == 1
     assert second["intents"] == {"inserted": 0, "skipped": 1, "row_count": 1}
     assert second["paper_positions"]["inserted"] == 0
     assert second["paper_fills"] == {"inserted": 0, "skipped": 0, "row_count": 1}
@@ -180,7 +246,7 @@ def test_episode_claim_blocks_losing_position_and_fill_side_effects(tmp_path: Pa
     assert len(store.load_paper_trade_fills(market_date="2026-08-27")) == 1
     assert len(store.load_signal_events(signal_id="signal-first")) == 1
     assert not store.load_signal_events(signal_id="signal-second")
-    assert len(store.load_monitor_publication_receipts(market_date="2026-08-27")) == 1
+    assert not store.load_monitor_publication_receipts(market_date="2026-08-27")
 
 
 def test_normalized_entry_action_cannot_evade_episode_claim(tmp_path: Path) -> None:
@@ -272,7 +338,7 @@ def test_exact_retry_with_fill_drift_fails_closed(tmp_path: Path) -> None:
     )
     drifted_fill = [dict(fills[0], fill_price=999)]
 
-    with pytest.raises(StorageError, match="paper fill identity conflict"):
+    with pytest.raises(StorageError, match="paper fill (identity conflict|is not bound)"):
         store.persist_trade_watcher_lifecycle(
             intents=intents,
             paper_positions=positions,
@@ -542,6 +608,64 @@ def test_brand_new_open_position_requires_bound_entry_fill(tmp_path: Path) -> No
     assert not store.load_paper_positions(market_date="2026-08-27")
 
 
+def test_entry_fill_and_receipt_without_position_roll_back(tmp_path: Path) -> None:
+    db_path = tmp_path / "watcher.sqlite"
+    intents, _, fills = _lifecycle_rows(
+        suffix="orphan-receipt", episode_id="episode:orphan-receipt"
+    )
+    store = SQLiteScanStore(db_path)
+    with pytest.raises(StorageError, match="durable bound position"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=[],
+            paper_fills=fills,
+            signal_events=[],
+            monitor_publication_receipts=[
+                _monitor_receipt("intent-orphan-receipt", "orphan-receipt")
+            ],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+    assert not store.load_paper_trade_fills(market_date="2026-08-27")
+    assert not store.load_monitor_publication_receipts(market_date="2026-08-27")
+
+
+def test_stand_down_cannot_persist_arbitrary_fill(tmp_path: Path) -> None:
+    db_path = tmp_path / "watcher.sqlite"
+    intents, positions, fills = _lifecycle_rows(
+        suffix="stand-down-fill", episode_id="episode:stand-down-fill"
+    )
+    intents[0]["action"] = "STAND_DOWN"
+    positions[0]["entry_intent_id"] = intents[0]["intent_id"]
+    store = SQLiteScanStore(db_path)
+    with pytest.raises(StorageError, match="not bound to an admitted intent"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+
+
+def test_scoped_portfolio_date_must_match_entry_date(tmp_path: Path) -> None:
+    db_path = tmp_path / "watcher.sqlite"
+    intents, positions, fills = _lifecycle_rows(
+        suffix="wrong-cap-date", episode_id="episode:wrong-cap-date"
+    )
+    store = SQLiteScanStore(db_path)
+    with pytest.raises(StorageError, match="account/date conflicts"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+            portfolio_account_id="alphaops_v5_simulated",
+            portfolio_market_date="2026-08-26",
+            max_daily_entries=1,
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+
+
 def test_entry_fill_price_is_bound_to_entry_intent(tmp_path: Path) -> None:
     db_path = tmp_path / "watcher.sqlite"
     intents, positions, fills = _lifecycle_rows(
@@ -574,10 +698,9 @@ def test_overlapping_watcher_claims_are_serialized_by_sqlite(tmp_path: Path) -> 
     assert sorted(result["intents"]["inserted"] for result in results) == [0, 1]
     assert sum(result["paper_positions"]["inserted"] for result in results) == 1
     assert sum(result["paper_fills"]["inserted"] for result in results) == 1
-    assert sum(result["monitor_publication_receipts"]["inserted"] for result in results) == 1
     assert len(store.load_trade_intents(market_date="2026-08-27")) == 1
     assert len(store.load_paper_trade_fills(market_date="2026-08-27")) == 1
-    assert len(store.load_monitor_publication_receipts(market_date="2026-08-27")) == 1
+    assert not store.load_monitor_publication_receipts(market_date="2026-08-27")
 
 
 def _reticker(rows: tuple[list[dict], list[dict], list[dict]], ticker: str) -> None:
@@ -603,7 +726,7 @@ def _persist_with_caps(
         paper_positions=positions,
         paper_fills=fills,
         signal_events=[],
-        portfolio_account_id="alphaops_paper_v5",
+        portfolio_account_id="alphaops_v5_simulated",
         portfolio_market_date="2026-08-27",
         max_open_positions=max_open_positions,
         max_daily_entries=max_daily_entries,
@@ -687,28 +810,25 @@ def test_same_intent_retry_remains_idempotently_reusable(tmp_path: Path) -> None
     db_path = tmp_path / "watcher.sqlite"
     intents, positions, fills = _lifecycle_rows(suffix="retry", episode_id="episode:retry")
     store = SQLiteScanStore(db_path)
-    receipt = _monitor_receipt("intent-retry", "retry")
     first = store.persist_trade_watcher_lifecycle(
         intents=intents,
         paper_positions=positions,
         paper_fills=fills,
         signal_events=[],
-        monitor_publication_receipts=[receipt],
     )
     retry = store.persist_trade_watcher_lifecycle(
         intents=intents,
         paper_positions=positions,
         paper_fills=fills,
         signal_events=[],
-        monitor_publication_receipts=[receipt],
     )
 
     assert first["intents"]["inserted"] == 1
     assert retry["intents"]["skipped"] == 1
     assert retry["paper_positions"]["inserted"] == 1
     assert retry["paper_fills"]["inserted"] == 0
-    assert first["monitor_publication_receipts"]["inserted"] == 1
-    assert retry["monitor_publication_receipts"]["reused"] == 1
+    assert first["monitor_publication_receipts"]["count"] == 0
+    assert retry["monitor_publication_receipts"]["count"] == 0
     assert len(store.load_paper_positions(market_date="2026-08-27")) == 1
     assert len(store.load_paper_trade_fills(market_date="2026-08-27")) == 1
 
@@ -735,6 +855,26 @@ def test_monitor_receipt_failure_rolls_back_intent_claim(tmp_path: Path) -> None
     assert not store.load_monitor_publication_receipts(market_date="2026-08-27")
 
 
+def test_minimal_self_hashed_watcher_proof_cannot_publish_receipt(tmp_path: Path) -> None:
+    db_path = tmp_path / "watcher.sqlite"
+    intents, positions, fills = _lifecycle_rows(
+        suffix="self-hashed-proof", episode_id="episode:self-hashed-proof"
+    )
+    store = SQLiteScanStore(db_path)
+    with pytest.raises(StorageError, match="strict watcher validation envelope"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+            monitor_publication_receipts=[
+                _monitor_receipt("intent-self-hashed-proof", "self-hashed-proof")
+            ],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+    assert not store.load_monitor_publication_receipts(market_date="2026-08-27")
+
+
 def test_monitor_receipt_must_match_admitted_intent_dimensions(tmp_path: Path) -> None:
     db_path = tmp_path / "watcher.sqlite"
     intents, positions, fills = _lifecycle_rows(
@@ -744,7 +884,7 @@ def test_monitor_receipt_must_match_admitted_intent_dimensions(tmp_path: Path) -
     receipt["signal_id"] = "signal-other"
     store = SQLiteScanStore(db_path)
 
-    with pytest.raises(StorageError, match="not bound to admitted intent"):
+    with pytest.raises(StorageError, match="monitor publication receipt"):
         store.persist_trade_watcher_lifecycle(
             intents=intents,
             paper_positions=positions,
@@ -783,7 +923,7 @@ def test_monitor_receipt_rejects_forged_hash_plan_or_account(
         ).hexdigest()
     store = SQLiteScanStore(db_path)
 
-    with pytest.raises(StorageError, match="not bound to admitted intent"):
+    with pytest.raises(StorageError, match="monitor publication receipt"):
         store.persist_trade_watcher_lifecycle(
             intents=intents,
             paper_positions=positions,
@@ -861,7 +1001,7 @@ def test_existing_trade_intents_are_backfilled_during_migration(tmp_path: Path) 
                         {
                             "episode_id": "episode:legacy",
                             "strategy_id": "alphaops_v5",
-                            "account_id": "alphaops_paper_v5",
+                            "account_id": "alphaops_v5_simulated",
                         }
                     ),
                 ),
@@ -877,7 +1017,7 @@ def test_existing_trade_intents_are_backfilled_during_migration(tmp_path: Path) 
     assert by_id["legacy-late"]["columns"]["episode_id"] == ""
     for record in records:
         assert record["columns"]["strategy_id"] == "alphaops_v5"
-        assert record["columns"]["account_id"] == "alphaops_paper_v5"
+        assert record["columns"]["account_id"] == "alphaops_v5_simulated"
         assert record["payload_json"]["episode_id"] == "episode:legacy"
 
     effective_rows = store.load_trade_intents(

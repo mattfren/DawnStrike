@@ -249,6 +249,11 @@ def test_trade_watcher_enters_once_and_persists_paper_fill(tmp_path: Path) -> No
     assert intents[0]["action"] == "ENTER_LONG"
     assert positions[0]["status"] == "OPEN"
     assert fills[0]["side"] == "BUY"
+    assert fills[0]["episode_id"] == intents[0]["episode_id"]
+    assert fills[0]["research_only"] is True
+    assert fills[0]["broker_execution_enabled"] is False
+    assert positions[0]["research_only"] is True
+    assert positions[0]["broker_execution_enabled"] is False
     body = notifications[0]["body"]
     assert "PAPER INTENT ONLY - ENTRY SIGNAL" in body
     assert "Research/watchlist only. No broker order was placed." in body
@@ -782,6 +787,7 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "signal_id": "signal-atomic",
                     "market_date": "2026-06-22",
                     "ticker": "NOVA",
+                    "account_id": "alphaops_v5_simulated",
                     "mode": "paper_execute",
                     "lifecycle_state": "ENTRY_TRIGGERED",
                     "action": "ENTER_LONG",
