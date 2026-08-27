@@ -539,7 +539,15 @@ def test_paper_ops_warningful_empty_materialization_cannot_mint_zero_receipts(
         ledger_hash_sha256="b" * 64,
         warnings=["orphan fill for order missing-order"],
         input_generation={
-            "files": [{"path": "ledger/paper_ledger.jsonl", "sha256": "c" * 64, "size": 0}]
+            "files": [
+                {"path": path, "sha256": "c" * 64, "size": 0}
+                for path in (
+                    "ledger/paper_ledger.jsonl",
+                    "state/paper_ops_config.json",
+                    "state/strategy_registry.json",
+                    "state/execution_policy_manifest.json",
+                )
+            ]
         },
     )
     args = SimpleNamespace(market_date="2026-08-20", cutoff="2026-08-20T14:30:00+00:00")
