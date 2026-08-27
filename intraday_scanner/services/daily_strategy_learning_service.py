@@ -8,8 +8,11 @@ proposals.  A miss-attribution implementation can be supplied through the
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -25,8 +28,11 @@ from intraday_scanner.v2.strategies.catalog import describe_strategy
 
 DAILY_LEARNING_SCHEMA = "dawnstrike.strategy_learning_daily.v1"
 PROPOSAL_SCHEMA = "dawnstrike.strategy_remediation_proposals.v1"
-EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES = (
-    ("alphaops_v5", "dawnstrike-alphaops-v5.0.0"),
+COMMIT_MANIFEST_SCHEMA = "dawnstrike.strategy_learning_commit_manifest.v1"
+EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES = (("alphaops_v5", "dawnstrike-alphaops-v5.0.0"),)
+EXPECTED_V6_DECISION_IDENTITY = (
+    "alphaops_v6",
+    "dawnstrike-alphaops-v6-shadow",
 )
 _UNRESOLVED_STATUSES = frozenset(
     {
@@ -65,6 +71,12 @@ _EVIDENCE_TIMESTAMP_FIELDS = (
 # marker field.  The readonly DB adapter creates this envelope below.
 _TRUSTED_RECEIPT_TOKEN = object()
 _TRUSTED_V6_TOKEN = object()
+_TRUSTED_NO_EVIDENCE_TOKEN = object()
+_LEARNING_MANIFEST_KEY_ENV = "DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY"
+_LEARNING_MANIFEST_KEY_FILE_ENV = "DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY_FILE"
+_LEARNING_MANIFEST_FALLBACK_KEY_ENV = "DAWNSTRIKE_FORWARD_GAP_HMAC_KEY"
+_LEARNING_RESERVATION_DOMAIN = b"dawnstrike/strategy-learning/invocation-reservation/v1\0"
+_LEARNING_COMMIT_DOMAIN = b"dawnstrike/strategy-learning/commit-manifest/v1\0"
 
 
 class _PersistedStrategyDecisionReceipt(dict[str, Any]):
@@ -82,32 +94,64 @@ class _PersistedStrategyDecisionReceipt(dict[str, Any]):
         *,
         envelope: Mapping[str, Any],
         token: object,
+        schema_validated: bool = False,
     ) -> None:
         if token is not _TRUSTED_RECEIPT_TOKEN:
             raise TypeError("persisted receipt provenance is private")
         super().__init__(payload)
         self._envelope = dict(envelope)
+        self._schema_validated = bool(schema_validated)
 
 
 def _persisted_receipt(
-    payload: Mapping[str, Any], *, envelope: Mapping[str, Any]
+    payload: Mapping[str, Any],
+    *,
+    envelope: Mapping[str, Any],
+    schema_validated: bool = False,
 ) -> _PersistedStrategyDecisionReceipt:
     return _PersistedStrategyDecisionReceipt(
-        payload, envelope=envelope, token=_TRUSTED_RECEIPT_TOKEN
+        payload,
+        envelope=envelope,
+        token=_TRUSTED_RECEIPT_TOKEN,
+        schema_validated=schema_validated,
     )
 
 
 class _PersistedV6Decision(dict[str, Any]):
     """Private envelope for decisions loaded from alpha_v6_decisions."""
 
-    def __init__(self, payload: Mapping[str, Any], *, token: object) -> None:
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        envelope: Mapping[str, Any] | None = None,
+        token: object,
+    ) -> None:
         if token is not _TRUSTED_V6_TOKEN:
             raise TypeError("V6 persisted provenance is private")
         super().__init__(payload)
+        self._envelope = dict(envelope or {})
 
 
-def _persisted_v6_decision(payload: Mapping[str, Any]) -> _PersistedV6Decision:
-    return _PersistedV6Decision(payload, token=_TRUSTED_V6_TOKEN)
+def _persisted_v6_decision(
+    payload: Mapping[str, Any], *, envelope: Mapping[str, Any] | None = None
+) -> _PersistedV6Decision:
+    return _PersistedV6Decision(payload, envelope=envelope, token=_TRUSTED_V6_TOKEN)
+
+
+class _AuthenticatedNoEvidenceReceipts(tuple):
+    """Private acquisition-manifest-bound zero-evidence receipt batch."""
+
+    def __new__(cls, values: Sequence[Mapping[str, Any]], *, token: object):
+        if token is not _TRUSTED_NO_EVIDENCE_TOKEN:
+            raise TypeError("no-evidence provenance is private")
+        return super().__new__(cls, tuple(dict(value) for value in values))
+
+
+def _authenticated_no_evidence_receipts(
+    values: Sequence[Mapping[str, Any]],
+) -> _AuthenticatedNoEvidenceReceipts:
+    return _AuthenticatedNoEvidenceReceipts(values, token=_TRUSTED_NO_EVIDENCE_TOKEN)
 
 
 class StrategyEvidenceAnalyzer(Protocol):
@@ -144,8 +188,8 @@ class DailyLearningContext:
             raise ValueError("cutoff must be an ISO datetime") from exc
         if cutoff.tzinfo is None:
             raise ValueError("cutoff must include a timezone")
-        if len(self.source_hash_sha256) != 64:
-            raise ValueError("source_hash_sha256 must be a SHA-256 hex digest")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_hash_sha256):
+            raise ValueError("source_hash_sha256 must be a canonical lowercase SHA-256 hex digest")
         if self.input_hash_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.input_hash_sha256):
             raise ValueError("input_hash_sha256 must be a canonical lowercase SHA-256 hex digest")
 
@@ -328,6 +372,52 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _learning_manifest_key(root: Path) -> bytes:
+    """Load the persistent daily-learning MAC key without exposing it."""
+
+    configured = os.environ.get(_LEARNING_MANIFEST_KEY_ENV) or os.environ.get(
+        _LEARNING_MANIFEST_FALLBACK_KEY_ENV
+    )
+    if configured:
+        key = configured.encode("utf-8")
+    else:
+        configured_path = os.environ.get(_LEARNING_MANIFEST_KEY_FILE_ENV)
+        if not configured_path:
+            raise ValueError(
+                f"{_LEARNING_MANIFEST_KEY_ENV}, {_LEARNING_MANIFEST_FALLBACK_KEY_ENV}, or "
+                f"{_LEARNING_MANIFEST_KEY_FILE_ENV} is required"
+            )
+        key_path = Path(configured_path).expanduser().resolve()
+        try:
+            key_path.relative_to(root.parent.resolve())
+        except ValueError:
+            pass
+        else:
+            raise ValueError("daily-learning signing key must be outside the output tree")
+        try:
+            key = key_path.read_bytes()
+        except OSError as exc:
+            raise ValueError("daily-learning signing key file is unreadable") from exc
+    if len(key) < 32:
+        raise ValueError("daily-learning signing key is too short")
+    return key
+
+
+def _verify_hmac_signature(
+    payload: Mapping[str, Any], *, body: Mapping[str, Any], domain: bytes, root: Path
+) -> None:
+    signature = str(payload.get("signature_hmac_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        raise ValueError("daily-learning signed artifact signature is missing")
+    expected = hmac.new(
+        _learning_manifest_key(root),
+        domain + _canonical_json(body).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("daily-learning signed artifact signature mismatch")
+
+
 def _write_json_idempotent(path: Path, payload: Mapping[str, Any]) -> bool:
     encoded = _canonical_json(payload) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,13 +430,215 @@ def _write_json_idempotent(path: Path, payload: Mapping[str, Any]) -> bool:
     return False
 
 
+def _artifact_bytes(payload: Mapping[str, Any]) -> bytes:
+    return (_canonical_json(payload) + "\n").encode("utf-8")
+
+
+def _atomic_bytes_once(path: Path, payload: bytes) -> bool:
+    """Durably install one immutable file without replacing a winner."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ValueError(f"immutable daily-learning path is a symlink: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+            return False
+        except FileExistsError:
+            if path.is_symlink():
+                raise ValueError(f"immutable daily-learning path is a symlink: {path}") from None
+            if path.read_bytes() != payload:
+                raise ValueError(
+                    f"immutable daily-learning artifact changed: {path}"
+                ) from None
+            return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_link_once(source: Path, destination: Path) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink() or destination.is_symlink():
+        raise ValueError(
+            f"immutable daily-learning generation path is a symlink: {destination}"
+        )
+    try:
+        os.link(source, destination)
+        return False
+    except FileExistsError:
+        if destination.is_symlink():
+            raise ValueError(
+                f"immutable daily-learning generation path is a symlink: {destination}"
+            ) from None
+        if destination.read_bytes() != source.read_bytes():
+            raise ValueError(
+                f"immutable daily-learning artifact changed: {destination}"
+            ) from None
+        return True
+
+
+def _commit_manifest_body(
+    root: Path,
+    *,
+    receipt: Mapping[str, Any],
+    proposals: Mapping[str, Any],
+    generation_id: str,
+) -> dict[str, Any]:
+    files = {}
+    for name, payload in (
+        ("daily_learning_receipt.json", receipt),
+        ("remediation_proposals.json", proposals),
+    ):
+        encoded = _artifact_bytes(payload)
+        files[name] = {
+            "generation_path": f".generations/{generation_id}/{name}",
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "size": len(encoded),
+        }
+    return {
+        "schema_version": COMMIT_MANIFEST_SCHEMA,
+        "generation_id": generation_id,
+        "run_id": str(receipt.get("run_id") or ""),
+        "market_date": str(receipt.get("market_date") or ""),
+        "cutoff": str(receipt.get("cutoff") or ""),
+        "input_hash_sha256": str(receipt.get("input_hash_sha256") or ""),
+        "code_sha": str(receipt.get("code_sha") or ""),
+        "files": files,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _validate_commit_manifest(root: Path) -> dict[str, Any] | None:
+    path = root / "daily_learning_commit_manifest.json"
+    if path.is_symlink():
+        raise ValueError(f"daily-learning commit manifest is a symlink: {root}")
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"daily-learning commit manifest is unreadable: {root}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != COMMIT_MANIFEST_SCHEMA:
+        raise ValueError(f"daily-learning commit manifest is malformed: {root}")
+    if (
+        payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+    ):
+        raise ValueError(f"daily-learning commit manifest safety boundary mismatch: {root}")
+    commit_hash = payload.get("manifest_sha256")
+    body = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"manifest_sha256", "signature_hmac_sha256"}
+    }
+    if commit_hash != _sha256(body):
+        raise ValueError(f"daily-learning commit manifest hash mismatch: {root}")
+    signed_body = {
+        key: value for key, value in payload.items() if key != "signature_hmac_sha256"
+    }
+    _verify_hmac_signature(
+        payload,
+        body=signed_body,
+        domain=_LEARNING_COMMIT_DOMAIN,
+        root=root,
+    )
+    files = body.get("files")
+    if not isinstance(files, Mapping) or set(files) != {
+        "daily_learning_receipt.json",
+        "remediation_proposals.json",
+    }:
+        raise ValueError(f"daily-learning commit manifest file set mismatch: {root}")
+    for name, metadata in files.items():
+        if not isinstance(metadata, Mapping):
+            raise ValueError(f"daily-learning commit manifest entry malformed: {name}")
+        relative = str(metadata.get("generation_path") or "")
+        source = root / relative
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or source.resolve().parent.parent != (root / ".generations").resolve()
+        ):
+            raise ValueError(f"daily-learning committed generation file missing: {name}")
+        encoded = source.read_bytes()
+        if len(encoded) != int(metadata.get("size") or -1) or hashlib.sha256(
+            encoded
+        ).hexdigest() != metadata.get("sha256"):
+            raise ValueError(f"daily-learning committed generation file hash mismatch: {name}")
+        destination = root / name
+        if destination.is_symlink():
+            raise ValueError(f"daily-learning committed artifact is a symlink: {name}")
+        if destination.is_file() and destination.read_bytes() != encoded:
+            raise ValueError(f"daily-learning committed artifact mismatch: {name}")
+        if not destination.exists():
+            _atomic_link_once(source, destination)
+    return body
+
+
+def _stage_and_publish_artifacts(
+    root: Path,
+    *,
+    receipt: Mapping[str, Any],
+    proposals: Mapping[str, Any],
+) -> tuple[Path, Path]:
+    receipt_bytes = _artifact_bytes(receipt)
+    proposal_bytes = _artifact_bytes(proposals)
+    generation_id = hashlib.sha256(
+        b"daily-learning-generation-v1\0"
+        + hashlib.sha256(receipt_bytes).digest()
+        + hashlib.sha256(proposal_bytes).digest()
+    ).hexdigest()
+    generation = root / ".generations" / generation_id
+    _atomic_bytes_once(generation / "daily_learning_receipt.json", receipt_bytes)
+    _atomic_bytes_once(generation / "remediation_proposals.json", proposal_bytes)
+    # Artifact names are materialized before the commit marker, but the
+    # marker is the sole publication authority.  A crash at any prior point
+    # is recoverable by rebuilding this same content-addressed generation.
+    receipt_path = root / "daily_learning_receipt.json"
+    proposal_path = root / "remediation_proposals.json"
+    _atomic_link_once(generation / receipt_path.name, receipt_path)
+    _atomic_link_once(generation / proposal_path.name, proposal_path)
+    body = _commit_manifest_body(
+        root,
+        receipt=receipt,
+        proposals=proposals,
+        generation_id=generation_id,
+    )
+    payload = {**body, "manifest_sha256": _sha256(body)}
+    payload["signature_hmac_sha256"] = hmac.new(
+        _learning_manifest_key(root),
+        _LEARNING_COMMIT_DOMAIN + _canonical_json(payload).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    _atomic_bytes_once(
+        root / "daily_learning_commit_manifest.json",
+        _artifact_bytes(payload),
+    )
+    return receipt_path, proposal_path
+
+
 def _reuse_immutable_artifacts(
     root: Path,
     context: DailyLearningContext,
 ) -> dict[str, Any] | None:
+    committed = _validate_commit_manifest(root)
     receipt_path = root / "daily_learning_receipt.json"
     proposal_path = root / "remediation_proposals.json"
     if not receipt_path.exists() and not proposal_path.exists():
+        return None
+    if committed is None:
+        # Staged or legacy files without the final commit marker are not
+        # authority.  The caller deterministically rebuilds the same
+        # generation and publishes a new marker after every intermediate
+        # crash window; an immutable path conflict then fails closed.
         return None
     if not receipt_path.is_file() or not proposal_path.is_file():
         raise ValueError(f"immutable daily-learning artifact set is incomplete: {root}")
@@ -361,14 +653,37 @@ def _reuse_immutable_artifacts(
     receipt_hash = str(receipt.get("receipt_sha256") or "")
     receipt_body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     proposal_hash = str(proposals.get("artifact_sha256") or "")
-    proposal_body = {
-        key: value for key, value in proposals.items() if key != "artifact_sha256"
-    }
+    proposal_body = {key: value for key, value in proposals.items() if key != "artifact_sha256"}
     if receipt_hash != _sha256(receipt_body) or proposal_hash != _sha256(proposal_body):
         raise ValueError(f"immutable daily-learning artifact hash mismatch: {root}")
-    coverage = (receipt.get("decision_receipt_learning") or {}).get(
-        "expected_strategy_coverage"
-    )
+    if committed is not None:
+        for key in (
+            "run_id",
+            "market_date",
+            "cutoff",
+            "input_hash_sha256",
+            "code_sha",
+        ):
+            if committed.get(key) != receipt.get(key):
+                raise ValueError(f"daily-learning commit manifest identity mismatch: {key}")
+        committed_files = committed.get("files")
+        if not isinstance(committed_files, Mapping):
+            raise ValueError(f"daily-learning commit manifest files are malformed: {root}")
+        for name, artifact in (
+            ("daily_learning_receipt.json", receipt),
+            ("remediation_proposals.json", proposals),
+        ):
+            metadata = committed_files.get(name)
+            encoded = _artifact_bytes(artifact)
+            expected_path = f".generations/{committed.get('generation_id')}/{name}"
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("generation_path") != expected_path
+                or metadata.get("sha256") != hashlib.sha256(encoded).hexdigest()
+                or metadata.get("size") != len(encoded)
+            ):
+                raise ValueError(f"daily-learning commit manifest artifact mismatch: {name}")
+    coverage = (receipt.get("decision_receipt_learning") or {}).get("expected_strategy_coverage")
     if isinstance(coverage, Mapping):
         coverage_body = {
             key: value for key, value in coverage.items() if key != "coverage_hash_sha256"
@@ -385,8 +700,11 @@ def _reuse_immutable_artifacts(
         "input_hash_sha256": context.input_hash_sha256 or context.source_hash_sha256,
         "code_sha": context.code_sha,
     }
-    if any(receipt.get(key) != value for key, value in expected_identity.items()):
-        raise ValueError(f"immutable daily-learning invocation identity changed: {root}")
+    for key, value in expected_identity.items():
+        if receipt.get(key) != value:
+            raise ValueError(
+                f"immutable daily-learning invocation identity conflict: {key}: {root}"
+            )
     if proposals.get("schema_version") != PROPOSAL_SCHEMA or any(
         proposals.get(key) != receipt.get(key)
         for key in ("run_id", "market_date", "cutoff", "input_hash_sha256")
@@ -478,11 +796,7 @@ def _populated_timestamps(
 ) -> tuple[tuple[str, Any], ...]:
     """Return every populated timestamp alias, preserving field identity."""
 
-    return tuple(
-        (field, row.get(field))
-        for field in fields
-        if row.get(field) not in (None, "")
-    )
+    return tuple((field, row.get(field)) for field in fields if row.get(field) not in (None, ""))
 
 
 def _cutoff_violation(
@@ -570,9 +884,11 @@ def _normalize_analysis(
     for row in _as_sequence(raw.get("outcomes"), "outcomes", strategy.strategy_id):
         status = str(row.get("status", "")).upper()
         eligibility = str(row.get("eligibility") or "").lower()
-        if status in _UNRESOLVED_STATUSES or (
-            eligibility and eligibility != "eligible"
-        ) or str(row.get("classification") or "") == "closed_provisional":
+        if (
+            status in _UNRESOLVED_STATUSES
+            or (eligibility and eligibility != "eligible")
+            or str(row.get("classification") or "") == "closed_provisional"
+        ):
             excluded_unresolved += 1
             excluded_ineligible += int(bool(eligibility and eligibility != "eligible"))
             continue
@@ -591,19 +907,25 @@ def _normalize_analysis(
             continue
         if cutoff_reason in {"missing_terminal_timestamp", "unparseable_terminal_timestamp"}:
             terminal_timestamp_quarantined += 1
-            quarantined_closed = (*quarantined_closed, {
-                **dict(row),
-                "status": "QUARANTINED_TERMINAL_TIMESTAMP",
-                "quarantine_reason": cutoff_reason,
-            })
+            quarantined_closed = (
+                *quarantined_closed,
+                {
+                    **dict(row),
+                    "status": "QUARANTINED_TERMINAL_TIMESTAMP",
+                    "quarantine_reason": cutoff_reason,
+                },
+            )
             continue
         if cutoff_reason:
             terminal_timestamp_quarantined += 1
-            quarantined_closed = (*quarantined_closed, {
-                **dict(row),
-                "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
-                "quarantine_reason": cutoff_reason,
-            })
+            quarantined_closed = (
+                *quarantined_closed,
+                {
+                    **dict(row),
+                    "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
+                    "quarantine_reason": cutoff_reason,
+                },
+            )
             continue
         normalized = dict(row)
         normalized.pop("synthetic_return", None)
@@ -616,11 +938,14 @@ def _normalize_analysis(
         # can order them.  Historical dates have an unambiguous date boundary.
         if _requires_orderable_evidence(row, context) and not _has_valid_ordering_timestamp(row):
             evidence_timestamp_quarantined += 1
-            quarantined_evidence = (*quarantined_evidence, {
-                **dict(row),
-                "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
-                "quarantine_reason": "missing_same_day_evidence_timestamp",
-            })
+            quarantined_evidence = (
+                *quarantined_evidence,
+                {
+                    **dict(row),
+                    "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
+                    "quarantine_reason": "missing_same_day_evidence_timestamp",
+                },
+            )
             continue
         cutoff_reason = _cutoff_violation(row, context)
         if cutoff_reason:
@@ -630,11 +955,14 @@ def _normalize_analysis(
                 excluded_future += 1
             else:
                 evidence_timestamp_quarantined += 1
-                quarantined_evidence = (*quarantined_evidence, {
-                    **dict(row),
-                    "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
-                    "quarantine_reason": cutoff_reason,
-                })
+                quarantined_evidence = (
+                    *quarantined_evidence,
+                    {
+                        **dict(row),
+                        "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
+                        "quarantine_reason": cutoff_reason,
+                    },
+                )
             continue
         misses.append(dict(row))
 
@@ -726,9 +1054,7 @@ def _validate_persisted_decision_receipt(
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         return False, "receipt_hash_missing_or_noncanonical"
     body = {
-        key: item
-        for key, item in value.items()
-        if key not in {"receipt_id", "receipt_hash_sha256"}
+        key: item for key, item in value.items() if key not in {"receipt_id", "receipt_hash_sha256"}
     }
     try:
         expected = _sha256(body)
@@ -749,6 +1075,34 @@ def _validate_persisted_decision_receipt(
         return False, "research_only_required"
     if value.get("broker_execution_enabled") is not False:
         return False, "broker_execution_must_be_false"
+    if getattr(value, "_schema_validated", False):
+        # Read-only database ingress reconstructs the typed receipt before it
+        # creates this envelope.  Re-run that assertion after a frozen
+        # snapshot restore so a tampered nested condition cannot become
+        # learning evidence merely because its outer hash was copied.
+        try:
+            from intraday_scanner.decisioning.contracts import (
+                ConditionResult,
+                StrategyDecisionReceipt,
+            )
+
+            raw_conditions = value.get("condition_results")
+            if not isinstance(raw_conditions, list) or any(
+                not isinstance(item, Mapping) for item in raw_conditions
+            ):
+                return False, "receipt_schema_invalid"
+            typed_receipt = StrategyDecisionReceipt(
+                **{
+                    **dict(value),
+                    "condition_results": tuple(
+                        ConditionResult(**dict(item)) for item in raw_conditions
+                    ),
+                }
+            )
+            if typed_receipt.canonical_json() != _canonical_json(dict(value)):
+                return False, "receipt_schema_invalid"
+        except (TypeError, ValueError, KeyError):
+            return False, "receipt_schema_invalid"
     envelope = value._envelope
     for field in (
         "receipt_id",
@@ -817,16 +1171,19 @@ def _validate_decision_receipt_ingress(
 
 
 def _freeze_invocation_identity(root: Path, context: DailyLearningContext) -> DailyLearningContext:
-    """Persist the first cutoff before any analyzer work starts.
+    """Honor a CLI-owned signed reservation before analyzer work starts.
 
     This reservation closes the crash window between invoking the stage and
     writing its final receipt.  Retries reuse the original point-in-time
     boundary; conflicting source/input/code identity remains a named failure.
+    Direct library calls do not create an unsigned persisted authority.
     """
 
     path = root / "daily_learning_invocation.json"
     body = {
         "schema_version": DAILY_LEARNING_SCHEMA,
+        "reservation_phase": 1,
+        "reserved_at": datetime.now(UTC).isoformat(),
         "market_date": context.market_date,
         "cutoff": context.cutoff,
         "source_identity": context.source_identity,
@@ -834,6 +1191,8 @@ def _freeze_invocation_identity(root: Path, context: DailyLearningContext) -> Da
         "input_hash_sha256": context.input_hash_sha256,
         "code_sha": context.code_sha,
     }
+    if path.is_symlink():
+        raise ValueError("daily-learning invocation reservation is a symlink")
     if path.exists():
         try:
             persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -841,34 +1200,48 @@ def _freeze_invocation_identity(root: Path, context: DailyLearningContext) -> Da
             raise ValueError("daily-learning invocation reservation is unreadable") from exc
         if not isinstance(persisted, dict):
             raise ValueError("daily-learning invocation reservation is not an object")
+        if not re.fullmatch(
+            r"[0-9a-f]{64}", str(persisted.get("signature_hmac_sha256") or "")
+        ):
+            raise ValueError("daily-learning invocation reservation is unauthenticated")
         reservation_hash = persisted.get("reservation_sha256")
         stored_body = {
             key: value
             for key, value in persisted.items()
-            if key != "reservation_sha256"
+            if key not in {"reservation_sha256", "signature_hmac_sha256"}
         }
         if reservation_hash != _sha256(stored_body):
             raise ValueError("daily-learning invocation reservation hash mismatch")
+        _verify_hmac_signature(
+            persisted,
+            body=stored_body,
+            domain=_LEARNING_RESERVATION_DOMAIN,
+            root=root,
+        )
         for key in (
             "market_date",
             "source_identity",
             "source_hash_sha256",
-            "input_hash_sha256",
             "code_sha",
         ):
             if persisted.get(key) != body[key]:
                 raise ValueError(f"daily-learning invocation identity conflict: {key}")
+        persisted_input_hash = str(persisted.get("input_hash_sha256") or "")
+        if persisted_input_hash and persisted_input_hash != context.input_hash_sha256:
+            raise ValueError("daily-learning invocation identity conflict: input_hash_sha256")
         frozen = DailyLearningContext(
             market_date=str(persisted["market_date"]),
             cutoff=str(persisted["cutoff"]),
             source_identity=str(persisted["source_identity"]),
             code_sha=str(persisted["code_sha"]),
             source_hash_sha256=str(persisted["source_hash_sha256"]),
-            input_hash_sha256=str(persisted["input_hash_sha256"]),
+            input_hash_sha256=str(persisted.get("input_hash_sha256") or context.input_hash_sha256),
         )
         return frozen
-    root.mkdir(parents=True, exist_ok=True)
-    _write_json_idempotent(path, {**body, "reservation_sha256": _sha256(body)})
+    # The governed CLI installs the signed phase-1 reservation before calling
+    # this service.  Library callers without that acquisition boundary may
+    # still produce research-only artifacts, but must not mint an unsigned
+    # persisted invocation authority here.
     return context
 
 
@@ -884,6 +1257,80 @@ def _external_input_identity(value: Sequence[Mapping[str, Any]] | None) -> Any:
     }
 
 
+def _authenticated_zero_receipt(
+    receipts: Sequence[Mapping[str, Any]] | None,
+    *,
+    lane: str,
+    strategy_id: str,
+    strategy_version: str,
+    market_date: str,
+    cutoff: str,
+) -> Mapping[str, Any] | None:
+    """Return a matching manifest-bound zero receipt, if one was supplied."""
+
+    if not isinstance(receipts, _AuthenticatedNoEvidenceReceipts):
+        return None
+    for receipt in receipts:
+        query = receipt.get("query")
+        body = {
+            key: value for key, value in receipt.items() if key != "receipt_sha256"
+        }
+        digest = str(receipt.get("receipt_sha256") or "")
+        if (
+            receipt.get("schema_version") == "dawnstrike.strategy_learning_no_evidence.v1"
+            and receipt.get("receipt_type") == "no_evidence"
+            and receipt.get("lane") == lane
+            and receipt.get("strategy_id") == strategy_id
+            and receipt.get("strategy_version") == strategy_version
+            and receipt.get("market_date") == market_date
+            and receipt.get("cutoff") == cutoff
+            and receipt.get("zero_count") == 0
+            and receipt.get("no_trade") is True
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+            and digest == _sha256(body)
+            and re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("reservation_sha256") or ""))
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(receipt.get("acquisition_manifest_sha256") or "")
+            )
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(receipt.get("source_component_hash_sha256") or "")
+            )
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(receipt.get("source_generation_hash_sha256") or "")
+            )
+            and isinstance(query, Mapping)
+            and query.get("kind") == "point_in_time_zero_query"
+            and query.get("market_date") == market_date
+            and query.get("cutoff") == cutoff
+            and query.get("strategy_id") == strategy_id
+            and query.get("strategy_version") == strategy_version
+        ):
+            return receipt
+    return None
+
+
+def _has_authenticated_zero_receipt(
+    receipts: Sequence[Mapping[str, Any]] | None,
+    *,
+    lane: str,
+    strategy_id: str,
+    strategy_version: str,
+    market_date: str,
+    cutoff: str,
+) -> bool:
+    return (
+        _authenticated_zero_receipt(
+            receipts,
+            lane=lane,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            market_date=market_date,
+            cutoff=cutoff,
+        )
+        is not None
+    )
+
+
 def run_daily_strategy_learning(
     *,
     market_date: str,
@@ -896,6 +1343,7 @@ def run_daily_strategy_learning(
     analyzer: StrategyEvidenceAnalyzer | None = None,
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
     v6_decisions: Sequence[Mapping[str, Any]] | None = None,
+    no_evidence_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Inventory the catalog and write one immutable research-only daily run."""
 
@@ -923,6 +1371,11 @@ def run_daily_strategy_learning(
         source_hash_sha256=source_hash,
         input_hash_sha256=input_hash_sha256 or source_hash,
     )
+    authenticated_zero_receipts = (
+        no_evidence_receipts
+        if isinstance(no_evidence_receipts, _AuthenticatedNoEvidenceReceipts)
+        else None
+    )
     root = Path(out_dir) / context.market_date
     context = _freeze_invocation_identity(root, context)
     reused = _reuse_immutable_artifacts(root, context)
@@ -933,9 +1386,7 @@ def run_daily_strategy_learning(
         market_date=context.market_date,
         cutoff=_cutoff_datetime(context),
     )
-    valid_v6 = tuple(
-        row for row in (v6_decisions or ()) if isinstance(row, _PersistedV6Decision)
-    )
+    valid_v6 = tuple(row for row in (v6_decisions or ()) if isinstance(row, _PersistedV6Decision))
     v6_invalid_count = len(tuple(v6_decisions or ())) - len(valid_v6)
     v6_invalid_reasons = dict(getattr(v6_decisions, "invalid_reasons", {}))
     if v6_invalid_count:
@@ -952,6 +1403,18 @@ def run_daily_strategy_learning(
         if not valid_v6
         else "PROVIDED"
     )
+    if (
+        v6_source_status == "NO_EVIDENCE"
+        and _has_authenticated_zero_receipt(
+            authenticated_zero_receipts,
+            lane="v6",
+            strategy_id=EXPECTED_V6_DECISION_IDENTITY[0],
+            strategy_version=EXPECTED_V6_DECISION_IDENTITY[1],
+            market_date=context.market_date,
+            cutoff=context.cutoff,
+        )
+    ):
+        v6_source_status = "CHECKED_ZERO_AUTHENTICATED"
     analyzer = analyzer or EmptyEvidenceAnalyzer()
     strategies = sorted(
         _build_daily_strategy_catalog(), key=lambda item: (item.strategy_id, item.version)
@@ -969,16 +1432,60 @@ def run_daily_strategy_learning(
             raise ValueError(f"analyzer result for {strategy.strategy_id} must be an object")
         evidence, strategy_proposals = _normalize_analysis(strategy, context, raw)
         raw_status = str(raw.get("status") or "").upper()
+        # Keep the two predicates separate.  Raw evidence proves that the
+        # source was non-empty, while retained evidence proves that at least
+        # one point-in-time row survived normalization.  In particular, a
+        # source containing only malformed/future/quarantined rows is not an
+        # authenticated zero cohort; it remains incomplete unless the CLI's
+        # private acquisition receipt explicitly proves zero rows.
+        raw_evidence_present = any(
+            bool(raw.get(field))
+            for field in (
+                "outcomes",
+                "misses",
+                "proposals",
+                "remediation_proposals",
+                "quarantined_closed",
+                "quarantined_evidence",
+                "quarantined_proposals",
+            )
+        )
+        retained_evidence_present = bool(
+            evidence.get("outcomes")
+            or evidence.get("misses")
+            or strategy_proposals
+        )
         if raw.get("source_status"):
-            source_status = str(raw["source_status"])
+            source_status = str(raw["source_status"]).upper()
         elif raw_status in {"NO_ANALYSIS", ""} and isinstance(analyzer, EmptyEvidenceAnalyzer):
             source_status = "NOT_PROVIDED"
         elif raw_status in {"NO_RETAINED_ROWS", "NO_EVIDENCE"}:
             source_status = "CHECKED_ZERO"
         elif not raw:
             source_status = "NOT_PROVIDED"
+        elif not raw_evidence_present:
+            source_status = "NOT_PROVIDED"
+        elif not retained_evidence_present:
+            source_status = "CHECKED_ZERO"
         else:
             source_status = "CHECKED"
+        # A status supplied inside an analyzer mapping is descriptive only;
+        # it cannot turn an empty or entirely quarantined result into a
+        # checked source.  Only the private acquisition-manifest receipt can
+        # authenticate an explicit zero cohort.
+        if source_status == "CHECKED_ZERO_AUTHENTICATED":
+            source_status = "CHECKED_ZERO"
+        if not retained_evidence_present and source_status == "CHECKED":
+            source_status = "CHECKED_ZERO"
+        if source_status == "CHECKED_ZERO" and _has_authenticated_zero_receipt(
+            authenticated_zero_receipts,
+            lane="strategy",
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version,
+            market_date=context.market_date,
+            cutoff=context.cutoff,
+        ):
+            source_status = "CHECKED_ZERO_AUTHENTICATED"
         evidence["source_status"] = source_status
         strategy_evidence.append(
             {
@@ -1004,6 +1511,9 @@ def run_daily_strategy_learning(
     receipt_coverage = _decision_receipt_coverage(
         valid_receipts if decision_receipts is not None else None,
         ingress=receipt_ingress,
+        no_evidence_receipts=authenticated_zero_receipts,
+        market_date=context.market_date,
+        cutoff=context.cutoff,
     )
     receipt_coverage["ingress"] = receipt_ingress
     receipt_learning["expected_strategy_coverage"] = receipt_coverage
@@ -1015,17 +1525,73 @@ def run_daily_strategy_learning(
         {key: value for key, value in receipt_coverage.items() if key != "coverage_hash_sha256"}
     )
     strategy_source_statuses = [
-        str(item["evidence"].get("source_status") or "INCOMPLETE")
-        for item in strategy_evidence
+        str(item["evidence"].get("source_status") or "INCOMPLETE") for item in strategy_evidence
     ]
     strategy_coverage_incomplete = any(
-        status in {"NOT_PROVIDED", "INTEGRITY_FAILURE", "INCOMPLETE"}
+        status not in {"CHECKED", "CHECKED_ZERO_AUTHENTICATED"}
         for status in strategy_source_statuses
+    )
+    strategy_coverage = {
+        "schema_version": "dawnstrike.strategy_learning_strategy_coverage.v1",
+        "required_strategy_count": len(strategies),
+        "required": [
+            {"strategy_id": item["strategy_id"], "strategy_version": item["strategy_version"]}
+            for item in inventory
+        ],
+        "observed": [
+            {
+                "strategy_id": item["strategy_id"],
+                "strategy_version": item["strategy_version"],
+                "source_status": item["evidence"].get("source_status"),
+                "evidence_count": int(
+                    sum(
+                        int(item["evidence"].get("counts", {}).get(field) or 0)
+                        for field in ("outcomes_retained", "misses_retained", "proposals_retained")
+                    )
+                ),
+            }
+            for item in strategy_evidence
+        ],
+        "status": "INCOMPLETE" if strategy_coverage_incomplete else "COMPLETE",
+        "missing": [
+            {
+                "strategy_id": item["strategy_id"],
+                "strategy_version": item["strategy_version"],
+                "reason": "checked_zero_requires_authenticated_no_evidence_receipt"
+                if item["evidence"].get("source_status") == "CHECKED_ZERO"
+                else "source_not_checked",
+            }
+            for item in strategy_evidence
+            if item["evidence"].get("source_status")
+            not in {"CHECKED", "CHECKED_ZERO_AUTHENTICATED"}
+        ],
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    strategy_coverage["coverage_hash_sha256"] = _sha256(
+        {key: value for key, value in strategy_coverage.items() if key != "coverage_hash_sha256"}
+    )
+    receipt_learning["strategy_coverage"] = strategy_coverage
+    receipt_coverage["strategy_coverage"] = strategy_coverage
+    receipt_coverage["v6_identity"] = {
+        "strategy_id": EXPECTED_V6_DECISION_IDENTITY[0],
+        "strategy_version": EXPECTED_V6_DECISION_IDENTITY[1],
+    }
+    receipt_coverage["status"] = (
+        "INCOMPLETE"
+        if receipt_coverage.get("status") != "COMPLETE"
+        or v6_source_status in {"NOT_PROVIDED", "NO_EVIDENCE", "INTEGRITY_FAILURE"}
+        or strategy_coverage_incomplete
+        else "COMPLETE"
+    )
+    receipt_coverage["coverage_hash_sha256"] = _sha256(
+        {key: value for key, value in receipt_coverage.items() if key != "coverage_hash_sha256"}
     )
     run_status = (
         "complete"
         if receipt_coverage["status"] == "COMPLETE"
-        and v6_source_status not in {"NOT_PROVIDED", "INTEGRITY_FAILURE"}
+        and v6_source_status
+        not in {"NOT_PROVIDED", "NO_EVIDENCE", "INTEGRITY_FAILURE"}
         and not strategy_coverage_incomplete
         else "incomplete"
     )
@@ -1091,8 +1657,13 @@ def run_daily_strategy_learning(
     receipt["receipt_sha256"] = _sha256(receipt)
     receipt_path = root / "daily_learning_receipt.json"
     proposal_path = root / "remediation_proposals.json"
-    reused_receipt = _write_json_idempotent(receipt_path, receipt)
-    reused_proposals = _write_json_idempotent(proposal_path, proposal_payload)
+    _stage_and_publish_artifacts(
+        root,
+        receipt=receipt,
+        proposals=proposal_payload,
+    )
+    reused_receipt = False
+    reused_proposals = False
     return {
         "status": run_status,
         "run_id": run_id,
@@ -1178,14 +1749,10 @@ def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[
         strategy_row["paper_entry_eligible_count"] += int(paper_eligible)
 
         blocking_ids = {
-            str(item)
-            for item in receipt.get("all_blocking_failures") or ()
-            if str(item).strip()
+            str(item) for item in receipt.get("all_blocking_failures") or () if str(item).strip()
         }
         disclosed_ids = {
-            str(item)
-            for item in receipt.get("disclosed_gaps") or ()
-            if str(item).strip()
+            str(item) for item in receipt.get("disclosed_gaps") or () if str(item).strip()
         }
         for condition_id in blocking_ids:
             blocking_key = (strategy_id, strategy_version, condition_id)
@@ -1277,9 +1844,10 @@ def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[
                 )
                 winner_row["eventual_winner_count"] += 1
 
-            if raw.get("ai_claim_contradicted") is True or raw.get(
-                "contradicted_by_authoritative_source"
-            ) is True:
+            if (
+                raw.get("ai_claim_contradicted") is True
+                or raw.get("contradicted_by_authoritative_source") is True
+            ):
                 contradiction_key = (strategy_id, strategy_version, condition_id)
                 contradiction_row = authoritative_contradictions.setdefault(
                     contradiction_key,
@@ -1335,8 +1903,8 @@ def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[
             {"condition_id": condition_id, "status_counts": {}, "receipt_count": 0},
         )
         status = str(observation["condition_status"])
-        summary["status_counts"][status] = (
-            summary["status_counts"].get(status, 0) + int(observation["receipt_count"])
+        summary["status_counts"][status] = summary["status_counts"].get(status, 0) + int(
+            observation["receipt_count"]
         )
         summary["receipt_count"] += int(observation["receipt_count"])
     return {
@@ -1357,8 +1925,7 @@ def _aggregate_decision_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[
             winner_exclusions[key] for key in sorted(winner_exclusions)
         ],
         "ai_claims_later_contradicted": [
-            authoritative_contradictions[key]
-            for key in sorted(authoritative_contradictions)
+            authoritative_contradictions[key] for key in sorted(authoritative_contradictions)
         ],
         "research_only": True,
         "automatic_policy_change": False,
@@ -1392,14 +1959,16 @@ def _decision_receipt_coverage(
     receipts: Sequence[Mapping[str, Any]] | None,
     *,
     ingress: Mapping[str, Any] | None = None,
+    no_evidence_receipts: Sequence[Mapping[str, Any]] | None = None,
+    market_date: str | None = None,
+    cutoff: str | None = None,
 ) -> dict[str, Any]:
     """Emit an immutable expected-cohort coverage receipt.
 
     ``None`` means the caller did not provide a persisted receipt source.  An
-    explicit empty sequence means that source was checked and yielded zero
-    AlphaOps evidence: ``COMPLETE`` for the checked lane with a governed
-    ``NO_EVIDENCE`` source result.  The overall run still requires actual
-    strategy evidence before it can be complete.
+    An explicit empty sequence is incomplete unless the authenticated
+    acquisition manifest supplied a matching no-evidence receipt for the
+    required AlphaOps V5 identity/date.
     """
 
     expected = [
@@ -1454,6 +2023,18 @@ def _decision_receipt_coverage(
             for strategy_id, strategy_version in EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES
         ]
         invalid_count = int((ingress or {}).get("invalid_count") or 0)
+        zero_authenticated = (
+            not invalid_count
+            and not any(row["receipt_count"] for row in observed)
+            and _has_authenticated_zero_receipt(
+                no_evidence_receipts,
+                lane="v5",
+                strategy_id=EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES[0][0],
+                strategy_version=EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES[0][1],
+                market_date=str(market_date or ""),
+                cutoff=str(cutoff or ""),
+            )
+        )
         missing = []
         if invalid_count:
             missing = [
@@ -1467,14 +2048,34 @@ def _decision_receipt_coverage(
             ]
         body = {
             "schema_version": "dawnstrike.strategy_decision_coverage.v1",
-            "status": "INCOMPLETE" if invalid_count else "COMPLETE",
+            "status": (
+                "INCOMPLETE"
+                if invalid_count
+                or (not any(row["receipt_count"] for row in observed) and not zero_authenticated)
+                else "COMPLETE"
+            ),
             "expected": expected,
             "observed": observed,
-            "missing": missing,
+            "missing": []
+            if zero_authenticated
+            else missing
+            or [
+                {
+                    "strategy_id": row["strategy_id"],
+                    "strategy_version": row["strategy_version"],
+                    "reason": "no_authenticated_explicit_no_evidence_receipt",
+                }
+                for row in observed
+                if row["receipt_count"] == 0
+            ],
             "research_only": True,
             "broker_execution_enabled": False,
             "v6_source_status": "NOT_PROVIDED",
-            "source_result": "INTEGRITY_FAILURE" if invalid_count else (
+            "source_result": "INTEGRITY_FAILURE"
+            if invalid_count
+            else "CHECKED_ZERO_AUTHENTICATED"
+            if zero_authenticated
+            else (
                 "NO_EVIDENCE" if not any(row["receipt_count"] for row in observed) else "PROVIDED"
             ),
         }

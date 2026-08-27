@@ -85,11 +85,13 @@ class ReadOnlyBlotterRows(list[dict[str, object]]):
         input_hash_sha256: str,
         ledger_hash_sha256: str,
         warnings: list[str],
+        input_generation: dict[str, object] | None = None,
     ) -> None:
         super().__init__(values)
         self.read_only_input_hash_sha256 = input_hash_sha256
         self.ledger_source_hash_sha256 = ledger_hash_sha256
         self.blotter_warnings = tuple(warnings)
+        self.read_only_input_generation = dict(input_generation or {})
 
 
 def build_trade_blotter(
@@ -198,15 +200,14 @@ def load_trade_blotter_readonly(
     from intraday_scanner.v2.paper_ops.observer_safety import require_observer_command
 
     require_observer_command(output_root, "blotter")
-    input_hash_before = hash_trade_blotter_readonly_inputs(output_root)
+    input_generation = describe_trade_blotter_readonly_inputs(output_root)
+    input_hash_before = _hash_trade_blotter_input_description(input_generation)
     rows, warnings = _materialize_rows_unchecked(output_root)
     ledger_path = output_root / "ledger" / "paper_ledger.jsonl"
     ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
     input_hash_after = hash_trade_blotter_readonly_inputs(output_root)
     if input_hash_before != input_hash_after:
-        raise ValueError(
-            "PaperOps immutable inputs changed during read-only materialization"
-        )
+        raise ValueError("PaperOps immutable inputs changed during read-only materialization")
     input_hash = input_hash_after
     selected: list[dict[str, object]] = []
     for row in rows:
@@ -237,6 +238,7 @@ def load_trade_blotter_readonly(
         input_hash_sha256=input_hash,
         ledger_hash_sha256=ledger_hash,
         warnings=warnings,
+        input_generation=input_generation,
     )
 
 
@@ -255,30 +257,96 @@ def hash_trade_blotter_readonly_inputs(output_root: Path) -> str:
     are materializer outputs rather than inputs.
     """
 
-    root = Path(output_root).resolve()
+    descriptions = describe_trade_blotter_readonly_inputs(output_root)
+    return _hash_trade_blotter_input_description(descriptions)
+
+
+def _hash_trade_blotter_input_description(descriptions: dict[str, object]) -> str:
+    """Hash one stable input description without re-reading its files."""
+
+    digest = hashlib.sha256()
+    files = descriptions.get("files")
+    if not isinstance(files, list):
+        raise ValueError("PaperOps immutable input description is malformed")
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("PaperOps immutable input description entry is malformed")
+        relative = str(item["path"]).encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        payload_hash = str(item.get("sha256") or "<missing>").encode("ascii")
+        digest.update(len(payload_hash).to_bytes(8, "big"))
+        digest.update(payload_hash)
+        digest.update(int(item.get("size") or 0).to_bytes(8, "big"))
+    return digest.hexdigest()
+
+
+def describe_trade_blotter_readonly_inputs(output_root: Path) -> dict[str, object]:
+    """Describe the exact immutable PaperOps bytes used by materialization."""
+
+    requested_root = Path(output_root)
+    if requested_root.is_symlink():
+        raise ValueError(f"PaperOps immutable input root is a symlink: {requested_root}")
+    root = requested_root.resolve()
     candidates = [
         root / "ledger" / "paper_ledger.jsonl",
         root / "state" / "paper_ops_config.json",
         root / "state" / "strategy_registry.json",
+        root / "state" / "execution_policy_manifest.json",
     ]
     manifests = root / "manifests"
     if manifests.is_dir():
         candidates.extend(sorted(manifests.glob("*.json")))
     if not any(path.is_file() for path in candidates if path.parent != manifests):
         raise FileNotFoundError(f"PaperOps immutable input root is missing: {root}")
-
-    digest = hashlib.sha256()
+    files: list[dict[str, object]] = []
     for path in sorted(set(candidates), key=lambda item: item.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        if not path.is_file():
-            digest.update(b"<missing>")
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"PaperOps immutable input escapes its root: {path}") from exc
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError(f"PaperOps immutable input is a symlink: {path}")
+        try:
+            before = path.stat()
+        except FileNotFoundError:
+            files.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "sha256": None,
+                    "size": 0,
+                    "mtime_ns": None,
+                }
+            )
             continue
         payload = path.read_bytes()
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return digest.hexdigest()
+        after = path.stat()
+        if (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ino,
+        ) != (
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ino,
+        ):
+            raise ValueError(f"PaperOps immutable input changed during read: {path}")
+        files.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+                "mtime_ns": int(after.st_mtime_ns),
+            }
+        )
+    ledger = next((item for item in files if item["path"] == "ledger/paper_ledger.jsonl"), None)
+    return {
+        "root": str(root),
+        "files": files,
+        "ledger_head_sha256": ledger.get("sha256") if ledger else None,
+        "ledger_size": int(ledger.get("size") or 0) if ledger else 0,
+    }
 
 
 def _materialize_rows(output_root: Path) -> tuple[list[dict[str, object]], list[str]]:

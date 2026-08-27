@@ -2,12 +2,16 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+import intraday_scanner.services.daily_strategy_learning_service as learning_service
 from intraday_scanner.performance.strategy_miss_attribution import (
     attribute_strategy_misses,
 )
 from intraday_scanner.services.daily_strategy_learning_service import (
     AttributionReportAnalyzer,
     DailyLearningContext,
+    MappingEvidenceAnalyzer,
     _normalize_analysis,
     _persisted_receipt,
     run_daily_strategy_learning,
@@ -15,6 +19,11 @@ from intraday_scanner.services.daily_strategy_learning_service import (
 from intraday_scanner.v2.strategies import build_strategy_catalog
 
 FIXTURE_INPUT_HASH = "f" * 64
+
+
+@pytest.fixture(autouse=True)
+def _daily_learning_hmac_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY", "test-learning-key-" + "x" * 32)
 
 
 class FixtureAnalyzer:
@@ -110,6 +119,58 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
     assert second["run_id"] == first["run_id"]
     assert second["idempotent_reused"] is True
     assert receipt_path.read_bytes() == receipt_bytes
+
+
+def test_daily_learning_recovers_after_crash_before_final_commit_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_atomic_bytes_once = learning_service._atomic_bytes_once
+
+    def crash_before_commit_marker(path: Path, payload: bytes) -> bool:
+        if path.name == "daily_learning_commit_manifest.json":
+            raise RuntimeError("simulated crash before final commit publication")
+        return original_atomic_bytes_once(path, payload)
+
+    monkeypatch.setattr(learning_service, "_atomic_bytes_once", crash_before_commit_marker)
+    with pytest.raises(RuntimeError, match="before final commit"):
+        run_daily_strategy_learning(
+            market_date="2026-08-20",
+            cutoff="2026-08-20T22:00:00+00:00",
+            source_identity="fixture-crash-recovery",
+            code_sha="fixture-code-sha",
+            out_dir=tmp_path,
+            input_hash_sha256=FIXTURE_INPUT_HASH,
+            analyzer=FixtureAnalyzer(),
+        )
+
+    root = tmp_path / "2026-08-20"
+    assert (root / "daily_learning_receipt.json").is_file()
+    assert (root / "remediation_proposals.json").is_file()
+    assert not (root / "daily_learning_commit_manifest.json").exists()
+
+    monkeypatch.setattr(learning_service, "_atomic_bytes_once", original_atomic_bytes_once)
+    recovered = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-crash-recovery",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=FixtureAnalyzer(),
+    )
+    assert recovered["idempotent_reused"] is False
+    assert (root / "daily_learning_commit_manifest.json").is_file()
+
+    reused = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-crash-recovery",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=FixtureAnalyzer(),
+    )
+    assert reused["idempotent_reused"] is True
 
 
 def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanalysis(
@@ -285,6 +346,66 @@ def test_attribution_adapter_quarantines_closed_rows_without_fill_truth(tmp_path
     assert result["status"] == "incomplete"
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_source_status"),
+    [
+        (
+            {
+                "outcomes": [
+                    {
+                        "market_date": "2026-08-20",
+                        "status": "RESOLVED",
+                        "terminal_event_at": "2026-08-20T21:00:00+00:00",
+                        "return_pct": 1.0,
+                    }
+                ],
+                "misses": [],
+            },
+            "CHECKED",
+        ),
+        (
+            {
+                "outcomes": [
+                    {
+                        "market_date": "2026-08-20",
+                        "status": "RESOLVED",
+                    }
+                ],
+                "misses": [],
+            },
+            "CHECKED_ZERO",
+        ),
+        (
+            {
+                "outcomes": [],
+                "misses": [],
+                "quarantined_closed": [{"record_id": "quarantined"}],
+            },
+            "CHECKED_ZERO",
+        ),
+    ],
+)
+def test_daily_learning_distinguishes_raw_and_retained_evidence(
+    tmp_path: Path,
+    payload: dict[str, object],
+    expected_source_status: str,
+) -> None:
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-raw-retained-status",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path / expected_source_status.lower(),
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=MappingEvidenceAnalyzer({"default": payload}),
+    )
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = receipt["strategy_evidence"][0]["evidence"]
+    assert evidence["source_status"] == expected_source_status
+    if expected_source_status == "CHECKED_ZERO":
+        assert receipt["decision_receipt_learning"]["strategy_coverage"]["status"] == "INCOMPLETE"
+
+
 def test_attribution_adapter_quarantines_provisional_closed_rows() -> None:
     report = attribute_strategy_misses(
         [
@@ -370,9 +491,15 @@ def test_daily_learning_marks_explicit_zero_alphaops_receipts_checked_empty(
     )
     assert result["status"] == "incomplete"
     coverage = result["decision_receipt_learning"]["expected_strategy_coverage"]
-    assert coverage["status"] == "COMPLETE"
+    assert coverage["status"] == "INCOMPLETE"
     assert coverage["source_result"] == "NO_EVIDENCE"
-    assert coverage["missing"] == []
+    assert coverage["missing"] == [
+        {
+            "strategy_id": "alphaops_v5",
+            "strategy_version": "dawnstrike-alphaops-v5.0.0",
+            "reason": "no_authenticated_explicit_no_evidence_receipt",
+        }
+    ]
     assert coverage["expected"] == [
         {
             "strategy_id": "alphaops_v5",

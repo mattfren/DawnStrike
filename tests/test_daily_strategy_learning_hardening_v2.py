@@ -1,13 +1,16 @@
 """Adversarial point-in-time and provenance checks for daily learning."""
 
+import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import intraday_scanner.cli as cli_module
-from intraday_scanner.cli import _hash_strategy_learning_inputs, main
+from intraday_scanner.cli import _hash_strategy_learning_inputs, _no_evidence_candidates, main
 from intraday_scanner.config import load_config
 from intraday_scanner.performance.strategy_miss_attribution import (
     attribute_strategy_misses,
@@ -23,10 +26,20 @@ from intraday_scanner.services.daily_strategy_learning_service import (
 )
 from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
-from intraday_scanner.v2.paper_ops.trade_blotter import ReadOnlyBlotterRows
+from intraday_scanner.v2.paper_ops.trade_blotter import (
+    ReadOnlyBlotterRows,
+    hash_trade_blotter_readonly_inputs,
+)
 from intraday_scanner.v2.strategies import build_strategy_catalog
 from tests._alpha_path_truth import canonical_v6_decision
 from tests.test_alpha_strategy_decision_integration import _supported_signal
+
+
+@pytest.fixture(autouse=True)
+def _daily_learning_hmac_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Production imports the persistent key from runtime.env.  Keep these
+    # CLI tests deterministic without ever putting a key in an output tree.
+    monkeypatch.setenv("DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY", "test-learning-key-" + "x" * 32)
 
 
 def _context() -> DailyLearningContext:
@@ -320,9 +333,16 @@ def test_checked_empty_v5_and_v6_report_no_evidence_without_certifying_run(
     learning = artifact["decision_receipt_learning"]
     coverage = learning["expected_strategy_coverage"]
     assert result["status"] == "incomplete"
-    assert coverage["status"] == "COMPLETE"
+    assert coverage["status"] == "INCOMPLETE"
     assert coverage["source_result"] == "NO_EVIDENCE"
     assert coverage["v6_source_status"] == "NO_EVIDENCE"
+    assert coverage["missing"] == [
+        {
+            "strategy_id": "alphaops_v5",
+            "strategy_version": "dawnstrike-alphaops-v5.0.0",
+            "reason": "no_authenticated_explicit_no_evidence_receipt",
+        }
+    ]
 
 
 def test_valid_v6_is_accepted_only_through_stored_at_governed_lane(tmp_path: Path) -> None:
@@ -413,6 +433,203 @@ def test_db_retry_uses_frozen_cutoff_when_later_row_is_added(tmp_path: Path, cap
     assert result["idempotent_reused"] is True
 
 
+def test_db_acquisition_holds_one_write_blocking_snapshot_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "held-snapshot.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, reconciled_at TEXT, payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?)",
+            ("before", "2026-08-20", "2026-08-20T14:00:00+00:00", "{}"),
+        )
+    args = SimpleNamespace(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T14:30:00+00:00",
+        source_identity="held-snapshot-source",
+        source_hash_sha256=None,
+        code_sha="test-code",
+        out_dir=str(tmp_path / "learning"),
+        paper_ops_root=None,
+        evidence_file=None,
+        db_path=str(database_path),
+    )
+    writer_result: dict[str, str] = {}
+    writer_done = threading.Event()
+
+    def writer() -> None:
+        try:
+            with sqlite3.connect(database_path, timeout=0.1) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?, ?)",
+                    ("during", "2026-08-20", "2026-08-20T14:15:00+00:00", "{}"),
+                )
+                connection.commit()
+            writer_result["status"] = "committed"
+        except sqlite3.OperationalError as exc:
+            writer_result["status"] = "blocked" if "locked" in str(exc).lower() else str(exc)
+        finally:
+            writer_done.set()
+
+    original_acquire = cli_module._acquire_strategy_learning_evidence
+
+    def gated_acquire(current_args):
+        connection = current_args._learning_db_connection
+        assert connection.in_transaction
+        writer_thread = threading.Thread(target=writer)
+        writer_thread.start()
+        assert writer_done.wait(timeout=5)
+        writer_thread.join(timeout=5)
+        assert not writer_thread.is_alive()
+        return original_acquire(current_args)
+
+    monkeypatch.setattr(cli_module, "_acquire_strategy_learning_evidence", gated_acquire)
+    assert cli_module._run_strategy_learning_daily(args) == 1
+    assert writer_result == {"status": "blocked"}
+
+
+def test_missing_database_tables_cannot_mint_authenticated_zero_receipts(
+    tmp_path: Path, capsys
+) -> None:
+    database_path = tmp_path / "missing-lanes.sqlite"
+    sqlite3.connect(database_path).close()
+    arguments = [
+        "strategy-learning-daily",
+        "--market-date",
+        "2026-08-20",
+        "--cutoff",
+        "2026-08-20T14:30:00+00:00",
+        "--source-identity",
+        "missing-lanes-source",
+        "--code-sha",
+        "test-code",
+        "--out-dir",
+        str(tmp_path / "learning"),
+        "--db-path",
+        str(database_path),
+    ]
+    assert main(arguments) == 1
+    result = json.loads(capsys.readouterr().out)
+    snapshot = json.loads(
+        (
+            tmp_path
+            / "learning"
+            / "2026-08-20"
+            / "daily_learning_evidence_snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert result["status"] == "incomplete"
+    assert snapshot["no_evidence_receipts"] == []
+    assert all(
+        bound["exists"] is False
+        for bound in snapshot["source_generation"]["table_bounds"].values()
+    )
+
+
+def test_paper_ops_warningful_empty_materialization_cannot_mint_zero_receipts(
+    tmp_path: Path,
+) -> None:
+    paper_rows = ReadOnlyBlotterRows(
+        [],
+        input_hash_sha256="a" * 64,
+        ledger_hash_sha256="b" * 64,
+        warnings=["orphan fill for order missing-order"],
+        input_generation={
+            "files": [{"path": "ledger/paper_ledger.jsonl", "sha256": "c" * 64, "size": 0}]
+        },
+    )
+    args = SimpleNamespace(market_date="2026-08-20", cutoff="2026-08-20T14:30:00+00:00")
+    candidates = _no_evidence_candidates(
+        args,
+        rows=(),
+        decision_receipts=None,
+        v6_decisions=None,
+        paper_ops_rows=paper_rows,
+        source_generation={"mode": "database", "paper_ops": paper_rows.read_only_input_generation},
+        component_hashes={"paper_ops_lifecycle_rows": "d" * 64},
+    )
+    assert candidates == []
+
+
+@pytest.mark.parametrize("forged_artifact", ["reservation", "acquisition"])
+def test_self_hashed_but_unsigned_learning_boundary_is_rejected(
+    tmp_path: Path, capsys, forged_artifact: str
+) -> None:
+    evidence_path = tmp_path / "boundary-evidence.json"
+    evidence_path.write_text(
+        json.dumps({"default": {"outcomes": [], "misses": [], "proposals": []}}),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "learning"
+    arguments = [
+        "strategy-learning-daily",
+        "--market-date",
+        "2026-08-20",
+        "--cutoff",
+        "2026-08-20T14:30:00+00:00",
+        "--source-identity",
+        "boundary-forgery-source",
+        "--code-sha",
+        "test-code",
+        "--out-dir",
+        str(out_dir),
+        "--evidence-file",
+        str(evidence_path),
+    ]
+    assert main(arguments) == 1
+    capsys.readouterr()
+    root = out_dir / "2026-08-20"
+    snapshot_path = root / "daily_learning_evidence_snapshot.json"
+    if forged_artifact == "reservation":
+        target_path = root / "daily_learning_invocation.json"
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+        payload["source_identity"] = "forged-source"
+        body = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"reservation_sha256", "signature_hmac_sha256"}
+        }
+        payload["reservation_sha256"] = hashlib.sha256(
+            cli_module._canonical_input_bytes(body)
+        ).hexdigest()
+    else:
+        target_path = root / "daily_learning_acquisition_manifest.json"
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+        payload["input_hash_sha256"] = "0" * 64
+        body = {
+            key: value
+            for key, value in payload.items()
+            if key
+            not in {
+                "snapshot_sha256",
+                "acquisition_manifest_sha256",
+                "no_evidence_receipts",
+                "signature_hmac_sha256",
+            }
+        }
+        payload["acquisition_manifest_sha256"] = hashlib.sha256(
+            cli_module._canonical_input_bytes(body)
+        ).hexdigest()
+    target_path.write_text(json.dumps(payload), encoding="utf-8")
+    args = SimpleNamespace(
+        out_dir=str(out_dir),
+        market_date="2026-08-20",
+        cutoff="2026-08-20T14:30:00+00:00",
+        source_identity="boundary-forgery-source",
+        source_hash_sha256=None,
+        code_sha="test-code",
+        evidence_file=str(evidence_path),
+        db_path=None,
+        paper_ops_root=None,
+    )
+    with pytest.raises(cli_module.SnapshotValidationError, match="signature"):
+        cli_module._read_strategy_learning_evidence_snapshot(snapshot_path, args)
+
+
 def test_paper_ops_retry_consumes_frozen_cohort_without_rereading_grown_ledger(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
@@ -424,6 +641,11 @@ def test_paper_ops_retry_consumes_frozen_cohort_without_rereading_grown_ledger(
         )
     paper_root = tmp_path / "paper-ops"
     paper_root.mkdir()
+    (paper_root / "ledger").mkdir()
+    (paper_root / "state").mkdir()
+    (paper_root / "ledger" / "paper_ledger.jsonl").write_text("", encoding="utf-8")
+    (paper_root / "state" / "paper_ops_config.json").write_text("{}", encoding="utf-8")
+    (paper_root / "state" / "strategy_registry.json").write_text("{}", encoding="utf-8")
     calls = 0
 
     def first_materialization(*, output_root, mode):
@@ -444,7 +666,7 @@ def test_paper_ops_retry_consumes_frozen_cohort_without_rereading_grown_ledger(
                     "order_id": "paper-order-1",
                 }
             ],
-            input_hash_sha256="b" * 64,
+            input_hash_sha256=hash_trade_blotter_readonly_inputs(paper_root),
             ledger_hash_sha256="c" * 64,
             warnings=[],
         )
@@ -524,7 +746,7 @@ def test_snapshot_before_reservation_recovers_with_original_cutoff_and_source(
         out_dir / "2026-08-20" / "daily_learning_evidence_snapshot.json"
     )
     assert snapshot_path.is_file()
-    assert not (out_dir / "2026-08-20" / "daily_learning_invocation.json").exists()
+    assert (out_dir / "2026-08-20" / "daily_learning_invocation.json").is_file()
 
     monkeypatch.setattr(cli_module, "run_daily_strategy_learning", original_service)
     retry_arguments = list(first_arguments)
@@ -567,7 +789,7 @@ def test_migration_032_adds_v6_stored_at_to_preexisting_schema_31_db(tmp_path: P
 
 
 def test_retry_reuses_first_cutoff_reservation(tmp_path: Path) -> None:
-    first = run_daily_strategy_learning(
+    run_daily_strategy_learning(
         market_date="2026-08-20",
         cutoff="2026-08-20T10:00:00+00:00",
         source_identity="retry-source",
@@ -581,18 +803,17 @@ def test_retry_reuses_first_cutoff_reservation(tmp_path: Path) -> None:
         def analyze(self, strategy, context):
             raise AssertionError("retry reused no frozen cutoff")
 
-    second = run_daily_strategy_learning(
-        market_date="2026-08-20",
-        cutoff="2026-08-20T11:00:00+00:00",
-        source_identity="retry-source",
-        code_sha="test-code",
-        out_dir=tmp_path,
-        analyzer=RetryMustNotAnalyze(),
-        decision_receipts=(),
-        v6_decisions=(),
-    )
-    assert second["run_id"] == first["run_id"]
-    assert second["idempotent_reused"] is True
+    with pytest.raises(ValueError, match="invocation identity conflict: cutoff"):
+        run_daily_strategy_learning(
+            market_date="2026-08-20",
+            cutoff="2026-08-20T11:00:00+00:00",
+            source_identity="retry-source",
+            code_sha="test-code",
+            out_dir=tmp_path,
+            analyzer=RetryMustNotAnalyze(),
+            decision_receipts=(),
+            v6_decisions=(),
+        )
 
 
 def test_direct_retry_with_changed_receipt_evidence_cannot_reuse_artifact(tmp_path: Path) -> None:
@@ -609,7 +830,7 @@ def test_direct_retry_with_changed_receipt_evidence_cannot_reuse_artifact(tmp_pa
     try:
         run_daily_strategy_learning(
             market_date="2026-08-20",
-            cutoff="2026-08-20T11:00:00+00:00",
+            cutoff="2026-08-20T10:00:00+00:00",
             source_identity="direct-retry-source",
             code_sha="test-code",
             out_dir=tmp_path,
@@ -619,6 +840,76 @@ def test_direct_retry_with_changed_receipt_evidence_cannot_reuse_artifact(tmp_pa
         assert "invocation identity conflict: input_hash_sha256" in str(exc)
     else:
         raise AssertionError("changed direct evidence reused a frozen artifact")
+
+
+def test_phase_two_input_binding_is_first_writer_wins_under_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        out_dir=str(tmp_path / "learning"),
+        market_date="2026-08-20",
+        cutoff="2026-08-20T14:30:00+00:00",
+        source_identity="race-source",
+        source_hash_sha256=None,
+        code_sha="test-code",
+        evidence_file=str(evidence_path),
+        db_path=None,
+        paper_ops_root=None,
+    )
+    cli_module._reserve_learning_invocation(args)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    original_unlocked = cli_module._bind_learning_invocation_input_hash_unlocked
+
+    def gated_unlocked(current_args, input_hash_sha256):
+        if input_hash_sha256 == "a" * 64:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_entered.set()
+        return original_unlocked(current_args, input_hash_sha256)
+
+    monkeypatch.setattr(
+        cli_module,
+        "_bind_learning_invocation_input_hash_unlocked",
+        gated_unlocked,
+    )
+    outcomes: dict[str, tuple[str, object]] = {}
+
+    def bind(label: str, input_hash_sha256: str) -> None:
+        try:
+            outcomes[label] = (
+                "ok",
+                cli_module._bind_learning_invocation_input_hash(args, input_hash_sha256),
+            )
+        except Exception as exc:  # pragma: no cover - assertion below reports the race result
+            outcomes[label] = ("error", exc)
+
+    first = threading.Thread(target=bind, args=("first", "a" * 64))
+    second = threading.Thread(target=bind, args=("second", "b" * 64))
+    first.start()
+    try:
+        assert first_entered.wait(timeout=5)
+        second.start()
+        assert not second_entered.wait(timeout=0.25)
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert outcomes["first"][0] == "ok"
+    assert outcomes["second"][0] == "error"
+    assert isinstance(outcomes["second"][1], cli_module.SnapshotValidationError)
+    assert "input_hash_sha256" in str(outcomes["second"][1])
+    reservation = json.loads(
+        cli_module._strategy_learning_reservation_path(args).read_text(encoding="utf-8")
+    )
+    assert reservation["input_hash_sha256"] == "a" * 64
 
 
 def test_aggregate_record_type_self_label_does_not_exempt_fill_truth() -> None:

@@ -2,9 +2,18 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.cli import main
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+
+@pytest.fixture(autouse=True)
+def _daily_learning_hmac_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Production imports this persistent key from runtime.env. Keep CLI tests
+    # deterministic without ever placing a key in an output tree.
+    monkeypatch.setenv("DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY", "test-learning-key-" + "x" * 32)
 
 
 def test_cli_init_db_creates_sqlite(tmp_path):

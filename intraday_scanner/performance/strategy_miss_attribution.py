@@ -20,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.v6.contracts import ALPHAOPS_V6_STRATEGY_VERSION
 from intraday_scanner.performance.contracts import Cohort, normalize_cohort, safe_float
 
 
@@ -321,19 +322,16 @@ def attribute_strategy_misses(
         # aggregate return across an unknown number of trades.
         lifecycle_rows = _expand_lifecycle_rows(row, date_cutoff=cutoff)
         for lifecycle_row in lifecycle_rows:
-            if lifecycle_row.get("_lifecycle_child") or str(
-                lifecycle_row.get("record_type") or ""
-            ) == "paper_ops_blotter_lifecycle":
+            if (
+                lifecycle_row.get("_lifecycle_child")
+                or str(lifecycle_row.get("record_type") or "") == "paper_ops_blotter_lifecycle"
+            ):
                 lifecycle_key = (
                     _cohort(lifecycle_row),
                     str(lifecycle_row.get("series_role") or "").lower(),
                     str(lifecycle_row.get("strategy_id") or "unknown"),
                     str(lifecycle_row.get("strategy_version") or ""),
-                    str(
-                        lifecycle_row.get("lifecycle_id")
-                        or lifecycle_row.get("record_id")
-                        or ""
-                    ),
+                    str(lifecycle_row.get("lifecycle_id") or lifecycle_row.get("record_id") or ""),
                 )
                 if lifecycle_key in seen_lifecycles:
                     continue
@@ -374,13 +372,15 @@ def load_portfolio_performance_rows_readonly(
     database_path: str | Path,
     *,
     date_cutoff: str | None = None,
+    _connection: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Load retained performance rows through a query-only SQLite connection."""
 
     path = Path(database_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"strategy-learning database is missing: {path}")
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    owns_connection = _connection is None
+    connection = _connection or sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA query_only = ON")
@@ -446,7 +446,8 @@ def load_portfolio_performance_rows_readonly(
             loaded = [row for row in loaded if _within_cutoff(row, str(date_cutoff))]
         return tuple(loaded)
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
 
 def load_strategy_decision_receipts_readonly(
@@ -454,6 +455,7 @@ def load_strategy_decision_receipts_readonly(
     *,
     market_date: str,
     date_cutoff: str,
+    _connection: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], ...] | None:
     """Load only hash-valid, point-in-time decision receipts without writes.
 
@@ -468,7 +470,8 @@ def load_strategy_decision_receipts_readonly(
     cutoff = _parse_timestamp(date_cutoff)
     if cutoff is None:
         raise ValueError("date_cutoff must be an aware ISO datetime")
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    owns_connection = _connection is None
+    connection = _connection or sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA query_only = ON")
@@ -486,7 +489,8 @@ def load_strategy_decision_receipts_readonly(
             (market_date,),
         ).fetchall()
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
     # Keep loader diagnostics attached to the tuple so the service can expose
     # quarantined rows without accepting them as evidence.  The payloads are
@@ -499,6 +503,7 @@ def load_strategy_decision_receipts_readonly(
             result.invalid_identities = ()
             return result
 
+    from intraday_scanner.decisioning.contracts import ConditionResult, StrategyDecisionReceipt
     from intraday_scanner.services.daily_strategy_learning_service import _persisted_receipt
 
     result: list[dict[str, Any]] = []
@@ -512,9 +517,7 @@ def load_strategy_decision_receipts_readonly(
             invalid_identities.append(current_identity)
 
     for row in rows:
-        current_identity = hashlib.sha256(
-            str(row["canonical_json"]).encode("utf-8")
-        ).hexdigest()
+        current_identity = hashlib.sha256(str(row["canonical_json"]).encode("utf-8")).hexdigest()
         try:
             payload = json.loads(str(row["canonical_json"]))
         except (TypeError, ValueError):
@@ -522,6 +525,29 @@ def load_strategy_decision_receipts_readonly(
             continue
         if not isinstance(payload, dict):
             reject("receipt_payload_not_object")
+            continue
+        # The row hash and append-only envelope are not enough by themselves:
+        # a caller with write access to SQLite could insert a sparse payload
+        # and recompute both values.  Reconstruct the typed receipt contract
+        # before allowing this row to become learning evidence.
+        try:
+            raw_conditions = payload.get("condition_results")
+            if not isinstance(raw_conditions, list) or any(
+                not isinstance(item, Mapping) for item in raw_conditions
+            ):
+                raise ValueError("condition_results must be a list of objects")
+            typed_receipt = StrategyDecisionReceipt(
+                **{
+                    **payload,
+                    "condition_results": tuple(
+                        ConditionResult(**dict(item)) for item in raw_conditions
+                    ),
+                }
+            )
+            if typed_receipt.canonical_json() != str(row["canonical_json"]):
+                raise ValueError("persisted receipt JSON is not canonical")
+        except (TypeError, ValueError, KeyError):
+            reject("receipt_schema_invalid")
             continue
         digest = str(payload.get("receipt_hash_sha256") or "")
         receipt_id = str(payload.get("receipt_id") or "")
@@ -621,7 +647,13 @@ def load_strategy_decision_receipts_readonly(
         if mismatch:
             reject("persisted_envelope_payload_mismatch")
             continue
-        result.append(_persisted_receipt(payload, envelope=envelope_fields))
+        result.append(
+            _persisted_receipt(
+                payload,
+                envelope=envelope_fields,
+                schema_validated=True,
+            )
+        )
     batch = _ReceiptBatch(result, invalid_reasons=invalid_reasons)
     batch.invalid_identities = tuple(sorted(invalid_identities))
     return batch
@@ -632,6 +664,7 @@ def load_alpha_v6_decisions_readonly(
     *,
     market_date: str,
     date_cutoff: str,
+    _connection: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], ...] | None:
     """Load V6 decisions through their own governed, point-in-time lane.
 
@@ -645,9 +678,12 @@ def load_alpha_v6_decisions_readonly(
 
     path = Path(database_path).resolve()
     cutoff = _parse_timestamp(date_cutoff)
-    if not path.is_file() or cutoff is None:
-        raise ValueError("database path and date_cutoff must be valid")
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    if not path.is_file():
+        raise FileNotFoundError(f"strategy-learning database is missing: {path}")
+    if cutoff is None:
+        raise ValueError("date_cutoff must be an aware ISO datetime")
+    owns_connection = _connection is None
+    connection = _connection or sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA query_only = ON")
@@ -659,10 +695,33 @@ def load_alpha_v6_decisions_readonly(
         columns = {
             str(item[1]) for item in connection.execute("PRAGMA table_info(alpha_v6_decisions)")
         }
-        if "stored_at" not in columns:
+        required_columns = {
+            "decision_id",
+            "scan_id",
+            "source_signal_id",
+            "shadow_signal_id",
+            "market_date",
+            "decision_at",
+            "ticker",
+            "strategy_version",
+            "model_version",
+            "action",
+            "setup_key",
+            "regime_key",
+            "safety_vetoes_json",
+            "input_hash_sha256",
+            "source_lineage_hash_sha256",
+            "stored_at",
+            "payload_json",
+        }
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+
             class _LegacyV6Batch(tuple):
-                invalid_count = 1
-                invalid_reasons = {"stored_at_column_missing": 1}
+                invalid_count = len(missing_columns)
+                invalid_reasons = {
+                    f"column_missing_{column}": 1 for column in missing_columns
+                }
                 invalid_identities = ()
 
             return _LegacyV6Batch()
@@ -675,8 +734,10 @@ def load_alpha_v6_decisions_readonly(
             (market_date,),
         ).fetchall()
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
     valid: list[dict[str, Any]] = []
+    envelope_by_decision: dict[str, dict[str, Any]] = {}
     invalid: list[str] = []
     all_identities: list[str] = []
     identity_by_decision: dict[str, str] = {}
@@ -701,6 +762,9 @@ def load_alpha_v6_decisions_readonly(
             continue
         if payload.get("market_date") != market_date:
             invalid.append("market_date_mismatch")
+            continue
+        if payload.get("strategy_version") != ALPHAOPS_V6_STRATEGY_VERSION:
+            invalid.append("strategy_version_mismatch")
             continue
         if decision_at is None or decision_at > cutoff:
             invalid.append("decision_after_cutoff")
@@ -733,7 +797,15 @@ def load_alpha_v6_decisions_readonly(
             invalid.append("persisted_safety_vetoes_mismatch")
             continue
         valid.append(payload)
-        identity_by_decision[str(payload.get("decision_id") or "")] = row_identity
+        decision_key = str(payload.get("decision_id") or "")
+        identity_by_decision[decision_key] = row_identity
+        envelope_by_decision[decision_key] = {
+            **envelope_fields,
+            "safety_vetoes": stored_vetoes,
+            "stored_at": str(row["stored_at"]),
+            "payload_hash_sha256": row_identity,
+        }
+
     class _V6Batch(tuple):
         def __new__(cls, values, *, invalid_reasons):
             result = super().__new__(cls, values)
@@ -744,17 +816,13 @@ def load_alpha_v6_decisions_readonly(
 
     batch = validate_decision_batch(valid)
     if not batch["valid"]:
-        invalid_ids = {
-            str(item.get("decision_id") or "") for item in batch["invalid"]
-        }
+        invalid_ids = {str(item.get("decision_id") or "") for item in batch["invalid"]}
         invalid.extend(
             str(violation)
             for item in batch["invalid"]
             for violation in item.get("violations") or ()
         )
-        valid = [
-            item for item in valid if str(item.get("decision_id") or "") not in invalid_ids
-        ]
+        valid = [item for item in valid if str(item.get("decision_id") or "") not in invalid_ids]
     accepted_identities = {
         identity_by_decision[str(item.get("decision_id") or "")]
         for item in valid
@@ -762,12 +830,120 @@ def load_alpha_v6_decisions_readonly(
     }
 
     batch_result = _V6Batch(
-        [_persisted_v6_decision(item) for item in valid], invalid_reasons=invalid
+        [
+            _persisted_v6_decision(
+                item,
+                envelope=envelope_by_decision.get(str(item.get("decision_id") or ""), {}),
+            )
+            for item in valid
+        ],
+        invalid_reasons=invalid,
     )
     batch_result.invalid_identities = tuple(
         sorted(identity for identity in all_identities if identity not in accepted_identities)
     )
     return batch_result
+
+
+def load_strategy_learning_database_snapshot_readonly(
+    database_path: str | Path,
+    *,
+    market_date: str,
+    date_cutoff: str,
+    _connection: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """Read all daily-learning SQLite lanes from one point-in-time snapshot.
+
+    The individual loaders remain available for callers that only need one
+    lane.  Daily learning uses this coordinator so portfolio rows, persisted
+    V5 receipts, and V6 decisions share one SQLite read transaction.  A
+    writer that inserts, backdates, or updates a row after ``BEGIN`` cannot
+    enter this acquisition; the captured table bounds make that fact explicit
+    in the acquisition manifest.
+    """
+
+    path = Path(database_path).resolve()
+    cutoff = _parse_timestamp(date_cutoff)
+    if not path.is_file():
+        raise FileNotFoundError(f"strategy-learning database is missing: {path}")
+    if cutoff is None:
+        raise ValueError("date_cutoff must be an aware ISO datetime")
+    owns_connection = _connection is None
+    connection = _connection or sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    started_transaction = False
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        if not connection.in_transaction:
+            connection.execute("BEGIN")
+            started_transaction = True
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        table_generations: dict[str, dict[str, Any]] = {}
+        for table in (
+            "portfolio_performance_rows",
+            "strategy_decision_receipts",
+            "alpha_v6_decisions",
+        ):
+            if table not in tables:
+                table_generations[table] = {
+                    "exists": False,
+                    "row_count": 0,
+                    "max_rowid": None,
+                }
+                continue
+            try:
+                count, max_rowid = connection.execute(
+                    f"SELECT count(*), max(rowid) FROM {table}"
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                max_rowid = None
+            table_generations[table] = {
+                "exists": True,
+                "row_count": int(count or 0),
+                "max_rowid": int(max_rowid) if max_rowid is not None else None,
+            }
+        rows = (
+            load_portfolio_performance_rows_readonly(
+                path, date_cutoff=date_cutoff, _connection=connection
+            )
+            if table_generations["portfolio_performance_rows"]["exists"]
+            else ()
+        )
+        receipts = load_strategy_decision_receipts_readonly(
+            path,
+            market_date=market_date,
+            date_cutoff=date_cutoff,
+            _connection=connection,
+        )
+        v6_decisions = load_alpha_v6_decisions_readonly(
+            path,
+            market_date=market_date,
+            date_cutoff=date_cutoff,
+            _connection=connection,
+        )
+        generation = {
+            "database_path": str(path),
+            "transaction": "sqlite_begin_read",
+            "table_bounds": table_generations,
+            "data_version": int(connection.execute("PRAGMA data_version").fetchone()[0]),
+        }
+        return {
+            "portfolio_rows": rows,
+            "decision_receipts": receipts,
+            "v6_decisions": v6_decisions,
+            "generation": generation,
+        }
+    finally:
+        if started_transaction and not owns_connection:
+            connection.rollback()
+        if owns_connection:
+            connection.close()
 
 
 def _mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
@@ -875,9 +1051,7 @@ def _blotter_mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
         item["_blotter_integrity_failed"] = True
         item["record_status"] = "quarantined"
         item["return_pct"] = None
-        item["eligibility_reason"] = (
-            "paper_ops_blotter_integrity_warning; attribution_quarantined"
-        )
+        item["eligibility_reason"] = "paper_ops_blotter_integrity_warning; attribution_quarantined"
     return item
 
 
@@ -898,14 +1072,18 @@ def _superseded_forward_aggregate(
     if not strategy or (strategy, version) not in blotter_pairs:
         return False
     status = str(item.get("record_status") or item.get("outcome_status") or "").lower()
-    has_outcome = status in _CLOSED_STATES or status in _OPEN_STATES or status in {
-        "missing_outcome",
-        "quarantined",
-    }
-    has_counts = (
-        (_safe_nonnegative_int(item.get("trade_count")) or 0) > 0
-        or (_safe_nonnegative_int(item.get("open_position_count")) or 0) > 0
+    has_outcome = (
+        status in _CLOSED_STATES
+        or status in _OPEN_STATES
+        or status
+        in {
+            "missing_outcome",
+            "quarantined",
+        }
     )
+    has_counts = (_safe_nonnegative_int(item.get("trade_count")) or 0) > 0 or (
+        _safe_nonnegative_int(item.get("open_position_count")) or 0
+    ) > 0
     if not (has_outcome or has_counts):
         return False
     role = _aggregate_series_role(item, cohort)
@@ -1141,9 +1319,9 @@ def _expand_lifecycle_rows(
             if isinstance(values, list):
                 source.extend(item for item in values if isinstance(item, Mapping))
     if not source:
-        mixed = (
-            _safe_nonnegative_int(row.get("trade_count")) or 0
-        ) > 0 and (_safe_nonnegative_int(row.get("open_position_count")) or 0) > 0
+        mixed = (_safe_nonnegative_int(row.get("trade_count")) or 0) > 0 and (
+            _safe_nonnegative_int(row.get("open_position_count")) or 0
+        ) > 0
         if mixed:
             unresolved = dict(row)
             unresolved["_aggregate_mixed_lifecycle"] = True
@@ -1357,14 +1535,11 @@ def _attribute_row(
     # FillTruth and remains provisional.
     aggregate_fill_exempt = False
     requires_fill_truth = (
-        status in _CLOSED_STATES
-        and return_pct is not None
-        and not aggregate_fill_exempt
+        status in _CLOSED_STATES and return_pct is not None and not aggregate_fill_exempt
     )
     provisional_fill = (
-        (requires_fill_truth or fill_evidence_present or bool(fill_truth_status))
-        and not _has_committed_fill_truth({**dict(payload), **row})
-    )
+        requires_fill_truth or fill_evidence_present or bool(fill_truth_status)
+    ) and not _has_committed_fill_truth({**dict(payload), **row})
     if fill_truth_status and not _has_committed_fill_truth({**dict(payload), **row}):
         provisional_fill = True
     if provisional_fill and not fill_truth_status:
