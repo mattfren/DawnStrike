@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -1866,75 +1868,22 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
 
 
 def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
-    analyzer: StrategyEvidenceAnalyzer | None = None
-    input_hash_sha256: str | None = None
-    decision_receipts: Sequence[Mapping[str, Any]] | None = None
-    v6_decisions: Sequence[Mapping[str, Any]] | None = None
-    if args.evidence_file:
-        payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise SnapshotValidationError("strategy learning evidence must be a JSON object")
-        analyzer = MappingEvidenceAnalyzer(payload)
-        receipt_key = (
-            "decision_receipts"
-            if "decision_receipts" in payload
-            else "strategy_decision_receipts"
-            if "strategy_decision_receipts" in payload
-            else None
+    analyzer: StrategyEvidenceAnalyzer | None
+    input_hash_sha256: str | None
+    decision_receipts: Sequence[Mapping[str, Any]] | None
+    v6_decisions: Sequence[Mapping[str, Any]] | None
+    if args.paper_ops_root and not args.db_path:
+        raise SnapshotValidationError("--paper-ops-root requires --db-path")
+    if args.evidence_file or args.db_path:
+        snapshot = _load_or_freeze_strategy_learning_evidence(args)
+        analyzer, input_hash_sha256, decision_receipts, v6_decisions = (
+            _restore_strategy_learning_evidence(snapshot)
         )
-        if receipt_key is not None:
-            raw_receipts = payload[receipt_key]
-            if not isinstance(raw_receipts, list) or any(
-                not isinstance(item, Mapping) for item in raw_receipts
-            ):
-                raise SnapshotValidationError(
-                    "strategy learning decision_receipts must be a list of objects"
-                )
-            # Keep every supplied row for the central ingress to quarantine and
-            # report.  Filtering future/malformed rows here would hide forged
-            # evidence and could incorrectly certify an empty source.
-            decision_receipts = tuple(raw_receipts)
-        input_hash_sha256 = _hash_strategy_learning_inputs(
-            evidence_payload=payload,
-            decision_receipts=decision_receipts,
-        )
-    elif args.db_path:
-        rows = load_portfolio_performance_rows_readonly(
-            args.db_path,
-            date_cutoff=args.cutoff,
-        )
-        paper_ops_rows = None
-        if args.paper_ops_root:
-            from intraday_scanner.v2.paper_ops.trade_blotter import load_trade_blotter_readonly
-
-            paper_ops_rows = load_trade_blotter_readonly(
-                output_root=Path(args.paper_ops_root),
-                mode="forward",
-            )
-        decision_receipts = load_strategy_decision_receipts_readonly(
-            args.db_path,
-            market_date=args.market_date,
-            date_cutoff=args.cutoff,
-        )
-        v6_decisions = load_alpha_v6_decisions_readonly(
-            args.db_path,
-            market_date=args.market_date,
-            date_cutoff=args.cutoff,
-        )
-        input_hash_sha256 = _hash_strategy_learning_inputs(
-            database_rows=rows,
-            paper_ops_rows=paper_ops_rows,
-            paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
-            decision_receipts=decision_receipts,
-            v6_decisions=v6_decisions,
-        )
-        analyzer = AttributionReportAnalyzer(
-            attribute_strategy_misses(
-                rows,
-                date_cutoff=args.cutoff,
-                paper_ops_rows=paper_ops_rows,
-            )
-        )
+    else:
+        analyzer = None
+        input_hash_sha256 = None
+        decision_receipts = None
+        v6_decisions = None
     result = run_daily_strategy_learning(
         market_date=args.market_date,
         cutoff=args.cutoff,
@@ -1974,11 +1923,15 @@ def _hash_strategy_learning_inputs(
     if paper_ops_rows is not None:
         parts.append(("paper_ops_lifecycle_rows", _canonical_input_bytes(paper_ops_rows)))
     if paper_ops_root is not None:
-        from intraday_scanner.v2.paper_ops.trade_blotter import (
-            hash_trade_blotter_readonly_inputs,
+        paper_hash = str(
+            getattr(paper_ops_rows, "read_only_input_hash_sha256", "") or ""
         )
+        if not re.fullmatch(r"[0-9a-f]{64}", paper_hash):
+            from intraday_scanner.v2.paper_ops.trade_blotter import (
+                hash_trade_blotter_readonly_inputs,
+            )
 
-        paper_hash = hash_trade_blotter_readonly_inputs(paper_ops_root)
+            paper_hash = hash_trade_blotter_readonly_inputs(paper_ops_root)
         parts.append(("paper_ops_materializer_inputs", paper_hash.encode("ascii")))
     if evidence_payload is not None:
         parts.append(("evidence_payload", _canonical_input_bytes(evidence_payload)))
@@ -2012,6 +1965,401 @@ def _canonical_input_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
+
+
+_STRATEGY_LEARNING_EVIDENCE_SNAPSHOT_SCHEMA = (
+    "dawnstrike.strategy_learning_evidence_snapshot.v1"
+)
+
+
+class _FrozenLearningBatch(tuple):
+    """Restored immutable input batch with retained rejection diagnostics."""
+
+    def __new__(
+        cls,
+        values: Sequence[Mapping[str, Any]],
+        *,
+        invalid_reasons: Mapping[str, Any],
+        invalid_identities: Sequence[Any],
+    ):
+        result = super().__new__(cls, values)
+        result.invalid_reasons = {
+            str(key): int(value) for key, value in sorted(invalid_reasons.items())
+        }
+        result.invalid_count = sum(result.invalid_reasons.values())
+        result.invalid_identities = tuple(str(value) for value in invalid_identities)
+        return result
+
+
+def _strategy_learning_snapshot_request(args: argparse.Namespace) -> dict[str, Any]:
+    mode = "evidence_file" if args.evidence_file else "database"
+    return {
+        "mode": mode,
+        "database_path": str(Path(args.db_path).resolve()) if args.db_path else None,
+        "evidence_file": (
+            str(Path(args.evidence_file).resolve()) if args.evidence_file else None
+        ),
+        "paper_ops_root": (
+            str(Path(args.paper_ops_root).resolve()) if args.paper_ops_root else None
+        ),
+    }
+
+
+def _strategy_learning_source_hash(args: argparse.Namespace) -> str:
+    return str(
+        args.source_hash_sha256
+        or hashlib.sha256(str(args.source_identity).encode("utf-8")).hexdigest()
+    )
+
+
+def _strategy_learning_snapshot_path(args: argparse.Namespace) -> Path:
+    return (
+        Path(args.out_dir)
+        / str(args.market_date)
+        / "daily_learning_evidence_snapshot.json"
+    )
+
+
+def _load_or_freeze_strategy_learning_evidence(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Freeze the analyzer cohort before the daily-learning reservation.
+
+    PaperOps has immutable append-only events but legacy events do not carry a
+    trustworthy append timestamp. Re-reading a larger ledger on a retry can
+    therefore never reproduce the first invocation exactly. This snapshot is
+    the point-in-time boundary: subsequent attempts validate and consume its
+    exact analyzer payload and authenticated receipt envelopes without touching
+    the now-larger database or ledger.
+    """
+
+    path = _strategy_learning_snapshot_path(args)
+    if path.exists():
+        return _read_strategy_learning_evidence_snapshot(path, args)
+    body = _acquire_strategy_learning_evidence(args)
+    payload = {
+        **body,
+        "snapshot_sha256": hashlib.sha256(_canonical_input_bytes(body)).hexdigest(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = _read_strategy_learning_evidence_snapshot(path, args)
+        if existing != body:
+            raise SnapshotValidationError(
+                "daily-learning frozen evidence conflicts with concurrent writer"
+            ) from None
+        return existing
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return _read_strategy_learning_evidence_snapshot(path, args)
+
+
+def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    decision_receipts: Sequence[Mapping[str, Any]] | None = None
+    v6_decisions: Sequence[Mapping[str, Any]] | None = None
+    component_hashes: dict[str, str] = {}
+    if args.evidence_file:
+        payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise SnapshotValidationError("strategy learning evidence must be a JSON object")
+        receipt_key = (
+            "decision_receipts"
+            if "decision_receipts" in payload
+            else "strategy_decision_receipts"
+            if "strategy_decision_receipts" in payload
+            else None
+        )
+        if receipt_key is not None:
+            raw_receipts = payload[receipt_key]
+            if not isinstance(raw_receipts, list) or any(
+                not isinstance(item, Mapping) for item in raw_receipts
+            ):
+                raise SnapshotValidationError(
+                    "strategy learning decision_receipts must be a list of objects"
+                )
+            decision_receipts = tuple(raw_receipts)
+        input_hash_sha256 = _hash_strategy_learning_inputs(
+            evidence_payload=payload,
+            decision_receipts=decision_receipts,
+        )
+        analysis_kind = "mapping_evidence"
+        analysis_payload: Mapping[str, Any] = payload
+        serialized_receipts = _serialize_learning_batch(
+            decision_receipts, provenance="untrusted_external"
+        )
+        serialized_v6 = _serialize_learning_batch(None, provenance="not_provided")
+        component_hashes["evidence_payload"] = hashlib.sha256(
+            _canonical_input_bytes(payload)
+        ).hexdigest()
+    else:
+        rows = load_portfolio_performance_rows_readonly(
+            args.db_path,
+            date_cutoff=args.cutoff,
+        )
+        paper_ops_rows = None
+        if args.paper_ops_root:
+            from intraday_scanner.v2.paper_ops.trade_blotter import (
+                load_trade_blotter_readonly,
+            )
+
+            paper_ops_rows = load_trade_blotter_readonly(
+                output_root=Path(args.paper_ops_root),
+                mode="forward",
+            )
+        decision_receipts = load_strategy_decision_receipts_readonly(
+            args.db_path,
+            market_date=args.market_date,
+            date_cutoff=args.cutoff,
+        )
+        v6_decisions = load_alpha_v6_decisions_readonly(
+            args.db_path,
+            market_date=args.market_date,
+            date_cutoff=args.cutoff,
+        )
+        input_hash_sha256 = _hash_strategy_learning_inputs(
+            database_rows=rows,
+            paper_ops_rows=paper_ops_rows,
+            paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
+            decision_receipts=decision_receipts,
+            v6_decisions=v6_decisions,
+        )
+        report = attribute_strategy_misses(
+            rows,
+            date_cutoff=args.cutoff,
+            paper_ops_rows=paper_ops_rows,
+        )
+        analysis_kind = "attribution_report"
+        analysis_payload = report.to_dict()
+        serialized_receipts = _serialize_learning_batch(
+            decision_receipts, provenance="persisted_v5"
+        )
+        serialized_v6 = _serialize_learning_batch(
+            v6_decisions, provenance="persisted_v6"
+        )
+        component_hashes["portfolio_performance_rows"] = hashlib.sha256(
+            _canonical_input_bytes(rows)
+        ).hexdigest()
+        if paper_ops_rows is not None:
+            component_hashes["paper_ops_lifecycle_rows"] = hashlib.sha256(
+                _canonical_input_bytes(paper_ops_rows)
+            ).hexdigest()
+            component_hashes["paper_ops_materializer_inputs"] = str(
+                getattr(paper_ops_rows, "read_only_input_hash_sha256", "")
+            )
+            component_hashes["paper_ops_ledger"] = str(
+                getattr(paper_ops_rows, "ledger_source_hash_sha256", "")
+            )
+    if not isinstance(input_hash_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", input_hash_sha256
+    ):
+        raise SnapshotValidationError("strategy learning input hash is unavailable")
+    component_hashes["analysis_payload"] = hashlib.sha256(
+        _canonical_input_bytes(analysis_payload)
+    ).hexdigest()
+    return {
+        "schema_version": _STRATEGY_LEARNING_EVIDENCE_SNAPSHOT_SCHEMA,
+        "market_date": str(args.market_date),
+        "cutoff": str(args.cutoff),
+        "source_identity": str(args.source_identity),
+        "source_hash_sha256": _strategy_learning_source_hash(args),
+        "code_sha": str(args.code_sha),
+        "request": _strategy_learning_snapshot_request(args),
+        "analysis_kind": analysis_kind,
+        "analysis_payload": analysis_payload,
+        "decision_receipts": serialized_receipts,
+        "v6_decisions": serialized_v6,
+        "input_hash_sha256": input_hash_sha256,
+        "component_hashes": dict(sorted(component_hashes.items())),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _serialize_learning_batch(
+    values: Sequence[Mapping[str, Any]] | None,
+    *,
+    provenance: str,
+) -> dict[str, Any]:
+    if values is None:
+        return {
+            "provided": False,
+            "provenance": "not_provided",
+            "items": [],
+            "invalid_reasons": {},
+            "invalid_identities": [],
+        }
+    items: list[dict[str, Any]] = []
+    for value in values:
+        item: dict[str, Any] = {"payload": dict(value)}
+        if provenance == "persisted_v5":
+            envelope = getattr(value, "_envelope", None)
+            if not isinstance(envelope, Mapping):
+                raise SnapshotValidationError(
+                    "daily-learning v5 receipt lacks persisted envelope"
+                )
+            item["envelope"] = dict(envelope)
+        items.append(item)
+    return {
+        "provided": True,
+        "provenance": provenance,
+        "items": items,
+        "invalid_reasons": dict(getattr(values, "invalid_reasons", {})),
+        "invalid_identities": list(getattr(values, "invalid_identities", ())),
+    }
+
+
+def _read_strategy_learning_evidence_snapshot(
+    path: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if not path.is_file():
+        raise SnapshotValidationError("daily-learning frozen evidence path is not a file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SnapshotValidationError(
+            "daily-learning frozen evidence is unreadable"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SnapshotValidationError("daily-learning frozen evidence is not an object")
+    snapshot_hash = payload.get("snapshot_sha256")
+    body = {key: value for key, value in payload.items() if key != "snapshot_sha256"}
+    expected_hash = hashlib.sha256(_canonical_input_bytes(body)).hexdigest()
+    if snapshot_hash != expected_hash:
+        raise SnapshotValidationError("daily-learning frozen evidence hash mismatch")
+    expected = {
+        "schema_version": _STRATEGY_LEARNING_EVIDENCE_SNAPSHOT_SCHEMA,
+        "market_date": str(args.market_date),
+        "cutoff": str(args.cutoff),
+        "source_identity": str(args.source_identity),
+        "source_hash_sha256": _strategy_learning_source_hash(args),
+        "code_sha": str(args.code_sha),
+        "request": _strategy_learning_snapshot_request(args),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    for field, value in expected.items():
+        if body.get(field) != value:
+            raise SnapshotValidationError(
+                f"daily-learning frozen evidence identity conflict: {field}"
+            )
+    if not re.fullmatch(r"[0-9a-f]{64}", str(body.get("input_hash_sha256") or "")):
+        raise SnapshotValidationError("daily-learning frozen input hash is malformed")
+    analysis_payload = body.get("analysis_payload")
+    component_hashes = body.get("component_hashes")
+    if not isinstance(analysis_payload, Mapping) or not isinstance(component_hashes, Mapping):
+        raise SnapshotValidationError("daily-learning frozen analyzer payload is malformed")
+    if component_hashes.get("analysis_payload") != hashlib.sha256(
+        _canonical_input_bytes(analysis_payload)
+    ).hexdigest():
+        raise SnapshotValidationError("daily-learning frozen analyzer hash mismatch")
+    return body
+
+
+def _restore_strategy_learning_evidence(
+    snapshot: Mapping[str, Any],
+) -> tuple[
+    StrategyEvidenceAnalyzer,
+    str,
+    Sequence[Mapping[str, Any]] | None,
+    Sequence[Mapping[str, Any]] | None,
+]:
+    analysis_kind = snapshot.get("analysis_kind")
+    analysis_payload = snapshot.get("analysis_payload")
+    if not isinstance(analysis_payload, Mapping):
+        raise SnapshotValidationError("daily-learning frozen analyzer payload is malformed")
+    if analysis_kind == "mapping_evidence":
+        analyzer: StrategyEvidenceAnalyzer = MappingEvidenceAnalyzer(analysis_payload)
+        allowed_receipt_provenance = "untrusted_external"
+    elif analysis_kind == "attribution_report":
+        analyzer = AttributionReportAnalyzer(analysis_payload)
+        allowed_receipt_provenance = "persisted_v5"
+    else:
+        raise SnapshotValidationError("daily-learning frozen analyzer kind is unsupported")
+    decision_receipts = _restore_learning_batch(
+        snapshot.get("decision_receipts"),
+        allowed_provenance=allowed_receipt_provenance,
+    )
+    v6_decisions = _restore_learning_batch(
+        snapshot.get("v6_decisions"),
+        allowed_provenance="persisted_v6",
+    )
+    return (
+        analyzer,
+        str(snapshot["input_hash_sha256"]),
+        decision_receipts,
+        v6_decisions,
+    )
+
+
+def _restore_learning_batch(
+    value: Any,
+    *,
+    allowed_provenance: str,
+) -> Sequence[Mapping[str, Any]] | None:
+    if not isinstance(value, Mapping):
+        raise SnapshotValidationError("daily-learning frozen batch is malformed")
+    provided = value.get("provided")
+    provenance = value.get("provenance")
+    items = value.get("items")
+    invalid_reasons = value.get("invalid_reasons")
+    invalid_identities = value.get("invalid_identities")
+    if (
+        not isinstance(provided, bool)
+        or not isinstance(items, list)
+        or not isinstance(invalid_reasons, Mapping)
+        or not isinstance(invalid_identities, list)
+    ):
+        raise SnapshotValidationError("daily-learning frozen batch fields are malformed")
+    if not provided:
+        if provenance != "not_provided" or items or invalid_reasons or invalid_identities:
+            raise SnapshotValidationError("daily-learning absent batch has evidence")
+        return None
+    if provenance != allowed_provenance:
+        raise SnapshotValidationError("daily-learning frozen batch provenance mismatch")
+    restored: list[Mapping[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping) or not isinstance(item.get("payload"), Mapping):
+            raise SnapshotValidationError("daily-learning frozen batch item is malformed")
+        payload = dict(item["payload"])
+        if provenance == "persisted_v5":
+            envelope = item.get("envelope")
+            if not isinstance(envelope, Mapping):
+                raise SnapshotValidationError(
+                    "daily-learning frozen v5 envelope is malformed"
+                )
+            from intraday_scanner.services.daily_strategy_learning_service import (
+                _persisted_receipt,
+            )
+
+            restored.append(_persisted_receipt(payload, envelope=dict(envelope)))
+        elif provenance == "persisted_v6":
+            from intraday_scanner.services.daily_strategy_learning_service import (
+                _persisted_v6_decision,
+            )
+
+            restored.append(_persisted_v6_decision(payload))
+        else:
+            restored.append(payload)
+    return _FrozenLearningBatch(
+        restored,
+        invalid_reasons=invalid_reasons,
+        invalid_identities=invalid_identities,
+    )
 
 
 def _receipts_at_or_before_cutoff(

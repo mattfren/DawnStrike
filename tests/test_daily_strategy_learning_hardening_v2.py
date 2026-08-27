@@ -20,6 +20,7 @@ from intraday_scanner.services.daily_strategy_learning_service import (
 )
 from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from intraday_scanner.v2.paper_ops.trade_blotter import ReadOnlyBlotterRows
 from intraday_scanner.v2.strategies import build_strategy_catalog
 from tests._alpha_path_truth import canonical_v6_decision
 from tests.test_alpha_strategy_decision_integration import _supported_signal
@@ -407,6 +408,80 @@ def test_db_retry_uses_frozen_cutoff_when_later_row_is_added(tmp_path: Path, cap
     assert main(arguments) == 1
     result = json.loads(capsys.readouterr().out)
     assert result["idempotent_reused"] is True
+
+
+def test_paper_ops_retry_consumes_frozen_cohort_without_rereading_grown_ledger(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    database_path = tmp_path / "paper-retry.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, reconciled_at TEXT, payload_json TEXT)"
+        )
+    paper_root = tmp_path / "paper-ops"
+    paper_root.mkdir()
+    calls = 0
+
+    def first_materialization(*, output_root, mode):
+        nonlocal calls
+        assert Path(output_root) == paper_root
+        assert mode == "forward"
+        calls += 1
+        return ReadOnlyBlotterRows(
+            [
+                {
+                    "mode": "forward",
+                    "signal_date": "2026-08-20",
+                    "strategy_id": "ts_momentum_sma_atr",
+                    "strategy_version": "v1.0",
+                    "series_role": "champion",
+                    "symbol": "NOVA",
+                    "lifecycle_status": "blocked",
+                    "order_id": "paper-order-1",
+                }
+            ],
+            input_hash_sha256="b" * 64,
+            ledger_hash_sha256="c" * 64,
+            warnings=[],
+        )
+
+    monkeypatch.setattr(
+        "intraday_scanner.v2.paper_ops.trade_blotter.load_trade_blotter_readonly",
+        first_materialization,
+    )
+    arguments = [
+        "strategy-learning-daily",
+        "--market-date",
+        "2026-08-20",
+        "--cutoff",
+        "2026-08-20T14:30:00+00:00",
+        "--source-identity",
+        "paper-retry-source",
+        "--code-sha",
+        "test-code",
+        "--out-dir",
+        str(tmp_path / "learning"),
+        "--db-path",
+        str(database_path),
+        "--paper-ops-root",
+        str(paper_root),
+    ]
+    assert main(arguments) == 1
+    capsys.readouterr()
+    assert calls == 1
+
+    def forbidden_reread(**_kwargs):
+        raise AssertionError("retry reread the grown PaperOps ledger")
+
+    monkeypatch.setattr(
+        "intraday_scanner.v2.paper_ops.trade_blotter.load_trade_blotter_readonly",
+        forbidden_reread,
+    )
+    assert main(arguments) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["idempotent_reused"] is True
+    assert calls == 1
 
 
 def test_migration_032_adds_v6_stored_at_to_preexisting_schema_31_db(tmp_path: Path) -> None:

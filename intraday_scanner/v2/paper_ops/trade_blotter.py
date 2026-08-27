@@ -69,6 +69,29 @@ BLOTTER_FIELDS = (
 )
 
 
+class ReadOnlyBlotterRows(list[dict[str, object]]):
+    """Materialized rows plus the exact immutable-input identity consumed.
+
+    An empty blotter still needs a source identity. Carrying it on the batch,
+    rather than only on individual rows, also lets daily learning freeze one
+    internally consistent point-in-time cohort without re-reading a ledger
+    that may have grown after the cutoff.
+    """
+
+    def __init__(
+        self,
+        values: list[dict[str, object]],
+        *,
+        input_hash_sha256: str,
+        ledger_hash_sha256: str,
+        warnings: list[str],
+    ) -> None:
+        super().__init__(values)
+        self.read_only_input_hash_sha256 = input_hash_sha256
+        self.ledger_source_hash_sha256 = ledger_hash_sha256
+        self.blotter_warnings = tuple(warnings)
+
+
 def build_trade_blotter(
     *,
     output_root: Path,
@@ -163,7 +186,7 @@ def load_trade_blotter_readonly(
     strategy_id: str | None = None,
     strategy_version: str | None = None,
     series_role: str | None = None,
-) -> list[dict[str, object]]:
+) -> ReadOnlyBlotterRows:
     """Materialize PaperOps lifecycle rows without writing any artifact.
 
     The regular blotter command writes exports and is therefore unsuitable for
@@ -177,14 +200,13 @@ def load_trade_blotter_readonly(
     require_observer_command(output_root, "blotter")
     input_hash_before = hash_trade_blotter_readonly_inputs(output_root)
     rows, warnings = _materialize_rows_unchecked(output_root)
-    input_hash_after = hash_trade_blotter_readonly_inputs(output_root)
-    if input_hash_before != input_hash_after:
-        warnings = [
-            *warnings,
-            "PaperOps immutable inputs changed during read-only materialization",
-        ]
     ledger_path = output_root / "ledger" / "paper_ledger.jsonl"
     ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    input_hash_after = hash_trade_blotter_readonly_inputs(output_root)
+    if input_hash_before != input_hash_after:
+        raise ValueError(
+            "PaperOps immutable inputs changed during read-only materialization"
+        )
     input_hash = input_hash_after
     selected: list[dict[str, object]] = []
     for row in rows:
@@ -210,7 +232,12 @@ def load_trade_blotter_readonly(
                 "read_only_materialization": True,
             }
         )
-    return selected
+    return ReadOnlyBlotterRows(
+        selected,
+        input_hash_sha256=input_hash,
+        ledger_hash_sha256=ledger_hash,
+        warnings=warnings,
+    )
 
 
 # Explicitly named alias for callers that use the source vocabulary.

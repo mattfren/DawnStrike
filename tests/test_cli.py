@@ -2,8 +2,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from intraday_scanner.cli import main
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -281,7 +279,7 @@ def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows
     assert evidence["counts"]["terminal_timestamp_quarantined"] == 1
 
 
-def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path, capsys):
+def test_cli_strategy_learning_reuses_frozen_evidence_when_database_grows(tmp_path, capsys):
     database_path = tmp_path / "mutable-performance.sqlite"
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -342,8 +340,16 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
                 "{}",
             ),
         )
-    with pytest.raises(ValueError, match="invocation identity conflict: input_hash_sha256"):
-        main(arguments)
+    assert main(arguments) == 1
+    reused = json.loads(capsys.readouterr().out)
+    assert reused["idempotent_reused"] is True
+    snapshot = json.loads(
+        (out_dir / "2026-08-20" / "daily_learning_evidence_snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert snapshot["input_hash_sha256"] == reused["input_hash_sha256"]
+    assert snapshot["component_hashes"]["portfolio_performance_rows"]
 
 
 def test_cli_live_scan_without_keys_fails_gracefully(monkeypatch, capsys):
