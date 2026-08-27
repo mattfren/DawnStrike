@@ -59,6 +59,25 @@ def _aware_utc(value: datetime | str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _provider_timestamp(value: Any, *, lane: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise DataProviderError(
+            f"STALE_MOVER_DISCOVERY_SOURCE: {lane} source timestamp is missing"
+        )
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DataProviderError(
+            f"STALE_MOVER_DISCOVERY_SOURCE: {lane} source timestamp is invalid"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise DataProviderError(
+            f"STALE_MOVER_DISCOVERY_SOURCE: {lane} source timestamp is timezone-naive"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
 class AlpacaScreenerProvider:
     """Return a point-in-time, liquid US-equity research universe."""
 
@@ -104,6 +123,26 @@ class AlpacaScreenerProvider:
             {"top": str(max(1, min(mover_limit, 50)))},
             self.config,
         )
+        source_reference = requested_at or _aware_utc(utc_now_iso())
+        source_times = {
+            "most_actives": _provider_timestamp(
+                most_active.get("last_updated"), lane="most_actives"
+            ),
+            "movers": _provider_timestamp(movers.get("last_updated"), lane="movers"),
+        }
+        source_ages = {
+            lane: (source_reference - source_time).total_seconds()
+            for lane, source_time in source_times.items()
+        }
+        maximum_source_age = max(int(maximum_observation_skew_seconds), 0)
+        if any(
+            age < -30.0 or age > maximum_source_age
+            for age in source_ages.values()
+        ):
+            raise DataProviderError(
+                "STALE_MOVER_DISCOVERY_SOURCE: Alpaca screener source timestamps "
+                "do not match the requested current snapshot"
+            )
         assets = self._active_assets()
         asset_by_symbol = {
             str(row.get("symbol") or "").upper(): row
@@ -229,6 +268,10 @@ class AlpacaScreenerProvider:
             "point_in_time_status": (
                 "CURRENT_SNAPSHOT_BOUND" if requested_at is not None else "CURRENT_SNAPSHOT"
             ),
+            "source_timestamp_status": "FRESH_BOUND",
+            "source_timestamp_age_seconds": {
+                lane: round(age, 6) for lane, age in source_ages.items()
+            },
             "universe_evidence": {
                 "provider_id": "alpaca",
                 "dataset_id": "stocks-screener-plus-active-assets",
