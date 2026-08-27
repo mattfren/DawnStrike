@@ -5,7 +5,6 @@ import pytest
 
 import intraday_scanner.services.trade_watcher_service as watcher_module
 from intraday_scanner.alpha.v5_policy import (
-    ALPHAOPS_V5_ACCOUNT_ID,
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
@@ -308,7 +307,7 @@ def test_trade_watcher_live_execute_is_locked(tmp_path: Path) -> None:
         )
 
 
-def test_v5_trade_watcher_risk_sizes_an_official_entry(tmp_path: Path) -> None:
+def test_v5_csv_bar_only_stands_down_without_authenticated_quote(tmp_path: Path) -> None:
     db_path = tmp_path / "scanner.sqlite"
     bars = _write_minute_bars(
         tmp_path / "bars.csv",
@@ -331,20 +330,13 @@ def test_v5_trade_watcher_risk_sizes_an_official_entry(tmp_path: Path) -> None:
     fills = store.load_paper_trade_fills(market_date="2026-07-31")
     intents = store.load_trade_intents(market_date="2026-07-31")
 
-    assert result["paper_fill_stats"]["inserted"] == 1
-    assert positions[0]["quantity"] == 216
-    assert positions[0]["notional"] <= 10_000
-    assert positions[0]["account_id"] == ALPHAOPS_V5_ACCOUNT_ID
-    assert positions[0]["official_paper_eligible"] is True
-    assert fills[0]["quantity"] == 216
-    assert intents[0]["strategy_id"] == ALPHAOPS_V5_STRATEGY_ID
-    assert intents[0]["strategy_version"] == ALPHAOPS_V5_STRATEGY_VERSION
-    assert intents[0]["risk_amount"] <= 250
-    assert len(intents[0]["decision_fingerprint"]) == 64
-    assert intents[0]["decision_trace"]["feasibility_score"] == 100
+    assert result["paper_fill_stats"]["inserted"] == 0
+    assert positions == []
+    assert fills == []
+    assert intents == []
 
 
-def test_v5_trade_watcher_intent_uses_authenticated_decision_boundary(
+def test_v5_csv_bar_only_does_not_create_decision_intent(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "decision-boundary.sqlite"
@@ -365,19 +357,11 @@ def test_v5_trade_watcher_intent_uses_authenticated_decision_boundary(
     )
 
     store = SQLiteScanStore(db_path)
-    intent = store.load_trade_intents(market_date="2026-07-31")[0]
+    intents = store.load_trade_intents(market_date="2026-07-31")
     observation = store.load_price_observations(market_date="2026-07-31")[0]
-    trace = intent["decision_trace"]
-    assert intent["decision_time"] == "2026-07-31T14:00:00+00:00"
-    assert intent["decision_time"] == trace["computed"]["decision_time"]
-    assert intent["decision_time"] == observation["requested_at"]
-    assert intent["source_observed_at"] == observation["observed_at"]
-    assert intent["source_bar_completed_at"] == observation["bar_completed_at"]
-    assert intent["source_bar_completed_at"] == intent["decision_time"]
-    assert intent["source_observation_id"] == observation["observation_id"]
-    assert intent["source_bar_hash_sha256"] == observation[
-        "source_bar_hash_sha256"
-    ]
+    assert intents == []
+    assert observation["requested_at"] == "2026-07-31T14:00:00+00:00"
+    assert observation["bar_completed_at"] == "2026-07-31T14:00:00+00:00"
 
 
 def test_v5_trade_watcher_preserves_subminute_causal_decision_time(
@@ -401,15 +385,12 @@ def test_v5_trade_watcher_preserves_subminute_causal_decision_time(
     )
 
     store = SQLiteScanStore(db_path)
-    intent = store.load_trade_intents(market_date="2026-07-31")[0]
+    intents = store.load_trade_intents(market_date="2026-07-31")
     observation = store.load_price_observations(market_date="2026-07-31")[0]
-    assert intent["decision_time"] == "2026-07-31T14:00:30+00:00"
-    assert intent["decision_time"] == intent["decision_trace"]["computed"][
-        "decision_time"
-    ]
-    assert intent["source_observed_at"] == "2026-07-31T13:59:00+00:00"
-    assert intent["source_bar_completed_at"] == "2026-07-31T14:00:00+00:00"
-    assert observation["requested_at"] == intent["decision_time"]
+    assert intents == []
+    assert observation["requested_at"] == "2026-07-31T14:00:30+00:00"
+    assert observation["observed_at"] == "2026-07-31T13:59:00+00:00"
+    assert observation["bar_completed_at"] == "2026-07-31T14:00:00+00:00"
 
 
 def test_v5_trade_watcher_never_fills_a_watch_only_selection(
@@ -440,10 +421,7 @@ def test_v5_trade_watcher_never_fills_a_watch_only_selection(
     intents = store.load_trade_intents(market_date="2026-07-31")
     assert result["paper_fill_stats"]["inserted"] == 0
     assert store.load_paper_positions(market_date="2026-07-31") == []
-    assert intents[0]["action"] == "STAND_DOWN"
-    assert intents[0]["official_paper_eligible"] is False
-    assert "selection_not_clean_edge" in intents[0]["decision_trace"]["reasons"]
-    assert "manual_confirmation_required" in intents[0]["decision_trace"]["reasons"]
+    assert intents == []
 
 
 def test_trade_watcher_fails_closed_without_exact_session_selection(

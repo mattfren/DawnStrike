@@ -8,9 +8,10 @@ import os
 import re
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.ai.strategy_gap_resolver import StrategyGapResolver
 from intraday_scanner.alpha.alert_gate import apply_alert_gates
@@ -107,6 +108,7 @@ from intraday_scanner.services.strategy_decision_service import StrategyDecision
 from intraday_scanner.services.web_collection_service import web_auto_collect, web_source_doctor
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
+EASTERN = ZoneInfo("America/New_York")
 DEFAULT_DB_PATH = "data/shadow_real.sqlite"
 DEFAULT_WEB_CONFIG = "config/web_sources.yaml"
 LEGACY_ALPHAOPS_STRATEGY_ID = "alphaops_v4"
@@ -2153,6 +2155,38 @@ def _attach_authenticated_alpaca_structure(
                 ensure_ascii=True,
             )
             raw_bars = raw_premarket.get("bars") if isinstance(raw_premarket, dict) else None
+            requested_dt = _parse_structure_time(
+                raw_premarket.get("requested_at") if isinstance(raw_premarket, dict) else None
+            )
+            decision_dt = _parse_structure_time(decision_at)
+            bar_times = [
+                _parse_structure_time(item.get("timestamp"))
+                for item in raw_bars or []
+                if isinstance(item, dict)
+            ]
+            valid_bar_times = all(item is not None for item in bar_times)
+            ordered_bar_times = bool(bar_times) and all(
+                left < right for left, right in zip(bar_times, bar_times[1:], strict=False)
+            )
+            session_date = decision_dt.astimezone(EASTERN).date() if decision_dt else None
+            session_valid = bool(session_date) and all(
+                item is not None
+                and item.astimezone(EASTERN).date() == session_date
+                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute)
+                >= (4, 0)
+                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute)
+                < (9, 30)
+                for item in bar_times
+            )
+            complete_by_request = bool(requested_dt) and all(
+                item is not None and item + timedelta(minutes=1) <= requested_dt
+                for item in bar_times
+            )
+            latest_matches_aggregate = bool(bar_times) and (
+                bar_times[-1] == _parse_structure_time(observed)
+                and bar_times[-1] + timedelta(minutes=1)
+                == _parse_structure_time(completed)
+            )
             high_values = [
                 _number(item.get("high"))
                 for item in raw_bars or []
@@ -2173,6 +2207,21 @@ def _attach_authenticated_alpaca_structure(
                 ).upper()
                 and str(raw_premarket.get("feed") or "").lower()
                 == source.rsplit("_", 1)[-1]
+                and requested_dt is not None
+                and decision_dt is not None
+                and requested_dt == decision_dt
+                and isinstance(raw_bars, list)
+                and raw_bars
+                and valid_bar_times
+                and ordered_bar_times
+                and session_valid
+                and complete_by_request
+                and latest_matches_aggregate
+                and all(
+                    str(item.get("ticker") or "").upper() == ticker
+                    for item in raw_bars
+                    if isinstance(item, dict)
+                )
                 and high_values
                 and low_values
                 and all(value is not None and value > 0 for value in high_values + low_values)
@@ -2345,6 +2394,16 @@ def _strict_structure_observation(
 
 def _valid_sha256(value: str) -> bool:
     return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _parse_structure_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _apply_strategy_decision_receipts(

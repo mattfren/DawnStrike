@@ -1051,7 +1051,12 @@ def _decision_for_signal(
 ) -> dict[str, Any]:
     if not observation:
         return {"state": STATE_STALE_DATA, "reason": "No usable current price observation."}
-    observation = _side_aware_quote_observation(signal, observation)
+    # Entries cross the spread on the executable side; exits cross it in the
+    # opposite direction.  Bar-only observations remain usable for existing
+    # position monitoring, while v5 new entries still require a quote.
+    observation = _side_aware_quote_observation(
+        signal, observation, for_exit=bool(open_position)
+    )
     price = _number(observation.get("price"))
     if price is None or price <= 0:
         return {"state": STATE_STALE_DATA, "reason": "Current price is missing or invalid."}
@@ -1085,7 +1090,7 @@ def _decision_for_signal(
 
 
 def _side_aware_quote_observation(
-    signal: dict[str, Any], observation: dict[str, Any]
+    signal: dict[str, Any], observation: dict[str, Any], *, for_exit: bool = False
 ) -> dict[str, Any]:
     """Use the executable side of a fresh Alpaca quote for v5 decisions."""
 
@@ -1097,12 +1102,17 @@ def _side_aware_quote_observation(
     direction = str(plan.get("direction") or "").lower() if isinstance(plan, dict) else ""
     if bid is None or ask is None or direction not in {"long", "short"}:
         return observation
-    selected = ask if direction == "long" else bid
+    if for_exit:
+        selected = bid if direction == "long" else ask
+        side = "bid" if direction == "long" else "ask"
+    else:
+        selected = ask if direction == "long" else bid
+        side = "ask" if direction == "long" else "bid"
     return {
         **observation,
         "price": selected,
         "current_price": selected,
-        "price_type": f"quote_{direction}_side",
+        "price_type": f"quote_{side}_side",
     }
 
 

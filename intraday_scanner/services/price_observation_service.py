@@ -275,17 +275,20 @@ def _load_quotes(
 
     if source != "alpaca":
         return {}
-    scanner_config = config or load_config()
-    provider = AlpacaProvider(scanner_config)
-    provider.validate_credentials()
-    reader = getattr(provider, "get_latest_quotes", None)
-    if not callable(reader):
-        return {}
     try:
+        # Keep quote outages isolated from the completed-bar path.  In
+        # particular, credentials may be revalidated by this second reader
+        # after bars have already been collected successfully.
+        scanner_config = config or load_config()
+        provider = AlpacaProvider(scanner_config)
+        provider.validate_credentials()
+        reader = getattr(provider, "get_latest_quotes", None)
+        if not callable(reader):
+            return {}
         return reader(
             sorted({target.ticker for target in targets if target.ticker}), scanner_config
         ) or {}
-    except (DataProviderError, OSError, TypeError, ValueError):
+    except (DataProviderError, OSError, TypeError, ValueError, SnapshotValidationError):
         # A quote outage must not erase usable completed-bar observations (and
         # existing-position exits); v5 new entries fail closed at the watcher.
         return {}
