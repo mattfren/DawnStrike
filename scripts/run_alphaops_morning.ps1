@@ -103,6 +103,31 @@ try {
         throw "Market calendar failed with exit code $calendarExit"
     }
 
+    # Refresh the governed current-session core generation before Morning.
+    # Failure is lane-local: the refresh script leaves the active generation
+    # untouched, while this run omits the core manifest so AlphaOps records a
+    # DATA_UNAVAILABLE core lane/shortfall and can still evaluate movers.
+    try {
+        $coreRefresh = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @(
+                "scripts\refresh_luna_core_universe.py",
+                "--state-root", $state,
+                "--market-date", $MarketDate
+            ) `
+            -LogRoot $logRoot `
+            -LogName "luna_core_refresh-$MarketDate"
+    }
+    catch {
+        $coreRefresh = [pscustomobject]@{ exit_code = 2 }
+    }
+    if ($coreRefresh.exit_code -eq 0) {
+        $CoreUniverseManifest = $defaultCoreUniverseManifest
+    }
+    else {
+        $CoreUniverseManifest = ""
+    }
+
     $configPath = $sourceConfigPath
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         $stageExit = 2
@@ -134,11 +159,23 @@ try {
     $scenarioExitCode = $null
     if ($coreStageExit -eq 0) {
         try {
-            $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
-                -ArtifactPath $alphaCyclePath `
-                -ProcessReceipt $alphaCycle `
-                -MarketDate $MarketDate `
-                -RequireCoreCoverage
+            if ($CoreUniverseManifest) {
+                $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
+                    -ArtifactPath $alphaCyclePath `
+                    -ProcessReceipt $alphaCycle `
+                    -MarketDate $MarketDate `
+                    -RequireCoreCoverage
+            }
+            else {
+                # A governed core refresh outage is lane-local.  The run
+                # contract must retain DATA_UNAVAILABLE/shortfall truth while
+                # the independent mover lane remains publishable.
+                $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
+                    -ArtifactPath $alphaCyclePath `
+                    -ProcessReceipt $alphaCycle `
+                    -MarketDate $MarketDate `
+                    -AllowCoreShortfall
+            }
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
             $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
             $selectionOutcome = [string]$alphaArtifact.selection_outcome

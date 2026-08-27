@@ -50,7 +50,8 @@ function Test-DawnstrikeAlphaCycleArtifact {
         [Parameter(Mandatory = $true)][string]$ArtifactPath,
         [AllowNull()][object]$ProcessReceipt = $null,
         [Parameter(Mandatory = $true)][string]$MarketDate,
-        [switch]$RequireCoreCoverage
+        [switch]$RequireCoreCoverage,
+        [switch]$AllowCoreShortfall
     )
     if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
         throw "Current AlphaOps cycle artifact is missing: $ArtifactPath"
@@ -104,7 +105,9 @@ function Test-DawnstrikeAlphaCycleArtifact {
         throw "AlphaOps cycle artifact source_status is not successful."
     }
     $coreFieldsPresent = $contract.PSObject.Properties.Name -contains "core_universe_status"
-    if ($RequireCoreCoverage -or $coreFieldsPresent) {
+    $coreCoverageUnavailable = $coreFieldsPresent -and [string]$contract.core_universe_status -eq "DATA_UNAVAILABLE"
+    $coreCoverageRequired = $RequireCoreCoverage -or ($coreFieldsPresent -and -not $coreCoverageUnavailable) -or ($coreCoverageUnavailable -and -not $AllowCoreShortfall)
+    if ($coreCoverageRequired) {
         if ([string]$contract.core_universe_status -ne "READY") {
             throw "AlphaOps cycle artifact core universe is not READY; full core coverage is unavailable."
         }

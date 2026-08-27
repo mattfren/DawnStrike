@@ -27,6 +27,7 @@ from intraday_scanner.models import SNAPSHOT_COLUMNS
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 
 SCHEMA_VERSION = "dawnstrike.luna.core_universe.v1"
+ACTIVE_POINTER_SCHEMA_VERSION = "dawnstrike.luna.core_universe_active_pointer.v1"
 CORE_INDEXES = ("S&P 500", "Nasdaq-100")
 DEFAULT_MAX_AGE_DAYS = 31
 MIN_PRODUCTION_COUNTS = {"S&P 500": 503, "Nasdaq-100": 100}
@@ -40,6 +41,45 @@ NASDAQ_NDX_SOD_URL_TEMPLATE = (
 )
 NASDAQ_NDX_SOD_2026_08_27_URL = NASDAQ_NDX_SOD_URL_TEMPLATE.format(
     month="08", day="27", year="2026"
+)
+
+# The Nasdaq export is an XLSX/ZIP.  ZIP container metadata (for example
+# timestamps) changes between otherwise identical official downloads, so a
+# raw archive SHA is not a stable trust root.  These are the decompressed
+# member hashes and canonical member-list digest from the authenticated
+# 2026-08-27 workbook.  The strict parser below requires this exact workbook
+# structure and binds every member's content before it derives any cells.
+_NDX_CANONICAL_ZIP_MEMBER_NAMES = (
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "docProps/app.xml",
+    "docProps/core.xml",
+    "docProps/custom.xml",
+    "xl/_rels/workbook.xml.rels",
+    "xl/sharedStrings.xml",
+    "xl/styles.xml",
+    "xl/workbook.xml",
+    "xl/worksheets/sheet1.xml",
+)
+_NDX_CANONICAL_ZIP_MEMBER_HASHES = {
+    "[Content_Types].xml": "995c7bc44e933d5ba24f893039d8a84dfcc0a12f2f5a3976e415f8324db0c89b",
+    "_rels/.rels": "ea5fee20de01f0a4088506a54dc82f632d5cacd5e271b9f348fcea583d818d5b",
+    "docProps/app.xml": "72afb5a0b44b3e20d04a41957246fd430e702b1841307752f9397411bdbaa2f7",
+    "docProps/core.xml": "79af568221e1a17b8e59f618591359eb00991d86542a1784e2cd7700ee223d1c",
+    "docProps/custom.xml": "18d57b34d4d3e2b37bc15406cd59124d2b461d905fe0775466e079611297c77b",
+    "xl/_rels/workbook.xml.rels": (
+        "995a125c59b9d23ca13e3b07d920b456ba47eabc42dd3e88dd7867cef1c83799"
+    ),
+    "xl/sharedStrings.xml": "26c260aa1da7b109d97440724126d9cbf660c7c52a5d007f468c75cd1896e840",
+    "xl/styles.xml": "26c3e73e2f2ab9946a6e1f0d7128e9a0e8ea49b0448a410a49421844ae619996",
+    "xl/workbook.xml": "6d246f4609966d5069771e0fd94f102ebe479f63557a7c6b7469f8bdd3bf4ce6",
+    "xl/worksheets/sheet1.xml": "cf8166d6a12a68c6600c37a497521fa789e9f7e1c869b28b5cb3c3ea07dcb50a",
+}
+_NDX_CANONICAL_ZIP_CONTENT_DIGEST_SHA256 = (
+    "6c8fe9543904412a8ceed93c9554ebad4b64213603e3b1cdccf09ec8ca8a269b"
+)
+_NDX_CANONICAL_MEMBER_SET_HASH_SHA256 = (
+    "c5e8bb1294642e0812f8a8d20f8c015548d41c64bfc6bef0aa0187994828a0ed"
 )
 
 # These are release trust roots for the currently mounted point-in-time
@@ -56,6 +96,7 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "transformation_id": "state-street-spy-holdings-parser-v1",
         "lineage_builder_id": "state-street-spy-holdings-parser-v1",
         "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
         "reconstitution_id": "spy-holdings-2026-08-24",
         "membership_authority": "tracker_holdings_proxy",
         "official_index_authority": False,
@@ -76,6 +117,7 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "transformation_id": "nasdaq-ndx-reconstitution-replay-v1",
         "lineage_builder_id": "nasdaq-ndx-reconstitution-builder-v1",
         "lineage_transformation_id": "ordered-official-notice-application-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
         "reconstitution_id": "ndx-through-2026-07-07",
         "membership_authority": "official_index_source",
         "official_index_authority": True,
@@ -87,13 +129,19 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
     "nasdaq-ndx-point-in-time-2026-08-27": {
         "index": "Nasdaq-100",
         "effective_date": "2026-08-27",
-        "raw_artifact_hashes": (
-            "42b2f48f1365a54cca3109efcd084b47303f6d7877534737dccd455b7eda0ffc",
-        ),
+        # Do not pin the raw ZIP SHA: official downloads preserve the same
+        # decompressed workbook while changing archive metadata.  The stable
+        # trust root below pins every decompressed member and the derived set.
+        "raw_artifact_hashes": (),
         "raw_artifact_byte_counts": (8439,),
+        "canonical_zip_member_names": _NDX_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_zip_member_hashes": _NDX_CANONICAL_ZIP_MEMBER_HASHES,
+        "canonical_content_digest_sha256": _NDX_CANONICAL_ZIP_CONTENT_DIGEST_SHA256,
+        "canonical_member_set_hash_sha256": _NDX_CANONICAL_MEMBER_SET_HASH_SHA256,
         "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
         "lineage_builder_id": "nasdaq-ndx-sod-weightings-parser-v1",
         "lineage_transformation_id": "official-sod-weightings-export-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
         "reconstitution_id": "ndx-sod-2026-08-27",
         "membership_authority": "official_index_source",
         "official_index_authority": True,
@@ -249,7 +297,7 @@ def build_core_universe_contract(
         if explicit and explicit not in {"COMPLETE", "PASS", "READY"}:
             manifest_errors.append("source_completeness_failed")
 
-        raw_hashes, raw_errors = _validate_raw_artifacts(manifest)
+        raw_hashes, raw_errors, captured_artifacts = _capture_raw_artifacts(manifest)
         raw_hash = raw_hashes[0] if len(raw_hashes) == 1 else ""
         if production:
             manifest_errors.extend(raw_errors)
@@ -367,6 +415,7 @@ def build_core_universe_contract(
                 index_name=_index_name(manifest_index),
                 effective_date=effective,
                 artifact_hashes=raw_hashes,
+                artifact_bytes=captured_artifacts,
                 declared_members=local_members,
             )
             manifest_errors.extend(binding_errors)
@@ -374,11 +423,10 @@ def build_core_universe_contract(
             {
                 "source_id": source_id,
                 "source_uri": source_uri,
-                "source_scope": (
-                    str(manifest.get("source_scope") or "").strip()
-                    or source_binding.get("source_scope")
-                    or None
-                ),
+                # Production scope is always emitted from the trusted root;
+                # a manifest cannot relabel an official feed or proxy.
+                "source_scope": source_binding.get("source_scope")
+                or (str(manifest.get("source_scope") or "").strip() if not production else None),
                 "raw_artifact_sha256": raw_hash,
                 "raw_artifact_hashes": list(raw_hashes),
                 "canonical_member_set_hash_sha256": computed_member_hash,
@@ -448,13 +496,29 @@ def build_core_universe_contract(
         else "UNKNOWN"
     )
     index_verdicts: dict[str, dict[str, Any]] = {}
+    # A source-binding failure is a contract-wide provenance failure.  Keep
+    # that failure visible on every index verdict so a valid-looking sibling
+    # cannot be reported READY while the overall source is forged or stale.
+    generic_source_binding_errors = sorted(
+        {
+            error.split(":", 1)[1]
+            if error.startswith("manifest_") and ":" in error
+            else error
+            for error in errors
+            if "source_binding_" in error
+        }
+    )
     for index in CORE_INDEXES:
-        index_errors = [error for error in errors if f":{index}" in error or error.endswith(index)]
+        index_errors = [
+            error for error in errors if f":{index}" in error or error.endswith(index)
+        ]
+        index_errors.extend(generic_source_binding_errors)
         ready = (
             bool(per_index[index])
             and expected[index] is not None
             and len(per_index[index]) == expected[index]
             and freshness == "FRESH"
+            and not generic_source_binding_errors
             and not any(index in error for error in errors)
         )
         index_verdicts[index] = {
@@ -1126,11 +1190,61 @@ def _manifest_list(value: Any) -> list[Any]:
 def _read_manifest(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
-    raw = Path(value).read_text(encoding="utf-8")
-    parsed = json.loads(raw)
+    return _read_manifest_path(Path(value), seen=set())
+
+
+def _read_manifest_path(path: Path, *, seen: set[Path]) -> dict[str, Any]:
+    """Read a manifest, resolving and authenticating an active generation pointer."""
+
+    resolved_path = path.resolve()
+    if resolved_path in seen:
+        raise ValueError("universe manifest active pointer cycle")
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"universe manifest JSON invalid: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError("universe manifest must be a JSON object")
-    return parsed
+    if parsed.get("schema_version") != ACTIVE_POINTER_SCHEMA_VERSION:
+        return parsed
+    target = _active_pointer_target(path, parsed)
+    target_raw = target.read_bytes()
+    expected_hash = str(parsed.get("manifest_sha256") or "").strip().lower()
+    if not _valid_digest(expected_hash):
+        raise ValueError("active pointer manifest SHA-256 missing or invalid")
+    if hashlib.sha256(target_raw).hexdigest() != expected_hash:
+        raise ValueError("active pointer manifest SHA-256 mismatch")
+    try:
+        target_parsed = json.loads(target_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"active target manifest JSON invalid: {exc}") from exc
+    if not isinstance(target_parsed, dict):
+        raise ValueError("active target manifest must be a JSON object")
+    if target_parsed.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION:
+        return _read_manifest_path(target, seen={*seen, resolved_path})
+    return target_parsed
+
+
+def _active_pointer_target(path: Path, pointer: dict[str, Any]) -> Path:
+    target_text = pointer.get("manifest_path")
+    if not isinstance(target_text, str) or not target_text.strip():
+        raise ValueError("active pointer manifest path missing")
+    target_value = Path(target_text)
+    if target_value.is_absolute():
+        raise ValueError("active pointer manifest path must be relative")
+    root = path.resolve().parent
+    target = (root / target_value).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("active pointer target escapes config root") from exc
+    if not target.is_file():
+        raise ValueError(f"active pointer target missing: {target}")
+    return target
 
 
 def _read_manifest_entries(value: Any) -> list[dict[str, Any]]:
@@ -1142,6 +1256,18 @@ def _read_manifest_entries(value: Any) -> list[dict[str, Any]]:
     """
 
     base = Path(value).parent if isinstance(value, (str, Path)) else None
+    if base is not None:
+        pointer_path = Path(value)
+        try:
+            pointer_bytes = pointer_path.read_bytes()
+            pointer = json.loads(pointer_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pointer = None
+        if (
+            isinstance(pointer, dict)
+            and pointer.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION
+        ):
+            base = _active_pointer_target(pointer_path, pointer).parent
     parsed = _read_manifest(value)
     children = parsed.get("manifests")
     if not isinstance(children, list):
@@ -1322,117 +1448,103 @@ def _snapshot_freshness_status(
 
 
 def _validate_raw_artifact(manifest: dict[str, Any]) -> tuple[str, str | None]:
-    """Validate a declared raw artifact digest and, where possible, its bytes."""
+    """Compatibility wrapper over the one-read capture path."""
 
-    declared = (
-        str(
-            manifest.get("raw_artifact_sha256")
-            or manifest.get("raw_sha256")
-            or manifest.get("raw_artifact_hash_sha256")
-            or manifest.get("raw_artifact_hash")
+    entries = _declared_artifact_entries(manifest)
+    declared = ""
+    if entries:
+        declared = str(
+            entries[0].get("sha256")
+            or entries[0].get("raw_artifact_sha256")
+            or entries[0].get("raw_artifact_hash")
             or ""
+        ).strip().lower()
+    hashes, errors, _captured = _capture_raw_artifacts(manifest)
+    return (hashes[0] if hashes else declared), (errors[0] if errors else None)
+
+
+def _capture_raw_artifacts(
+    manifest: dict[str, Any],
+) -> tuple[list[str], list[str], list[bytes]]:
+    """Capture, hash, and validate each source artifact exactly once.
+
+    The returned byte snapshots are the only bytes the production source
+    binding/replay path may consume.  Keeping the hash and parser input in one
+    tuple prevents a source path that changes between reads from becoming a
+    falsely trusted READY manifest.
+    """
+
+    entries = _declared_artifact_entries(manifest)
+    if not entries:
+        return [], ["raw_artifact_entries_missing"], []
+    if (
+        len(entries) == 1
+        and set(entries[0]) == {"sha256"}
+        and not (manifest.get("source_artifacts") or manifest.get("raw_artifacts"))
+    ):
+        return [], ["raw_artifact_bytes_missing"], []
+    hashes: list[str] = []
+    errors: list[str] = []
+    captured: list[bytes] = []
+    for number, entry in enumerate(entries, start=1):
+        digest = (
+            str(
+                entry.get("sha256")
+                or entry.get("raw_artifact_sha256")
+                or entry.get("raw_artifact_hash")
+                or ""
+            )
+            .strip()
+            .lower()
         )
-        .strip()
-        .lower()
-    )
-    artifact = manifest.get("raw_artifact") or manifest.get("raw_artifact_path")
-    if isinstance(artifact, dict):
-        declared = str(artifact.get("sha256") or declared).strip().lower()
-        artifact = artifact.get("path") or artifact.get("file") or artifact.get("content")
-    if not _valid_digest(declared):
-        return declared, "raw_artifact_sha256_missing_or_invalid"
-    if artifact and isinstance(artifact, (str, Path)):
-        artifact_path = Path(artifact)
-        if artifact_path.is_file():
+        path = entry.get("path") or entry.get("file") or entry.get("local_path")
+        content = entry.get("content")
+        artifact_bytes: bytes | None = None
+        if not _valid_digest(digest):
+            errors.append(f"raw_artifact_sha256_missing_or_invalid:{number}")
+            continue
+        if path:
+            artifact_path = Path(path)
+            if not artifact_path.is_file():
+                errors.append(f"raw_artifact_missing:{number}")
+                continue
             try:
-                actual = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-            except OSError as exc:
-                return declared, f"raw_artifact_unreadable:{exc}"
-            if actual != declared:
-                return declared, "raw_artifact_sha256_mismatch"
+                # This is the one and only read of this declared path for the
+                # entire build.  Hashing and replay use this same object.
+                artifact_bytes = artifact_path.read_bytes()
+            except OSError:
+                errors.append(f"raw_artifact_unreadable:{number}")
+                continue
+        elif isinstance(content, bytes):
+            artifact_bytes = content
+        elif isinstance(content, str):
+            artifact_bytes = content.encode("utf-8")
         else:
-            return declared, "raw_artifact_bytes_missing"
-    else:
-        content = manifest.get("raw_artifact_content")
-        if isinstance(content, str):
-            actual = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            if actual != declared:
-                return declared, "raw_artifact_sha256_mismatch"
-        else:
-            return declared, "raw_artifact_bytes_missing"
-    return declared, None
+            errors.append(f"raw_artifact_bytes_missing:{number}")
+            continue
+        actual = hashlib.sha256(artifact_bytes).hexdigest()
+        if actual != digest:
+            errors.append(f"raw_artifact_sha256_mismatch:{number}")
+            continue
+        declared_size = entry.get("byte_count")
+        if declared_size is not None:
+            try:
+                if isinstance(declared_size, bool) or int(declared_size) != len(artifact_bytes):
+                    errors.append(f"raw_artifact_byte_count_mismatch:{number}")
+                    continue
+            except (TypeError, ValueError):
+                errors.append(f"raw_artifact_byte_count_invalid:{number}")
+                continue
+        hashes.append(digest)
+        captured.append(artifact_bytes)
+    return hashes, errors, captured
 
 
 def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Validate every raw artifact receipt, including rebalance lineages."""
 
-    entries = manifest.get("source_artifacts") or manifest.get("raw_artifacts")
-    if isinstance(entries, dict):
-        entries = list(entries.values())
-    if isinstance(entries, list):
-        hashes: list[str] = []
-        errors: list[str] = []
-        for number, entry in enumerate(entries, start=1):
-            if not isinstance(entry, dict):
-                errors.append(f"raw_artifact_entry_invalid:{number}")
-                continue
-            digest = (
-                str(
-                    entry.get("sha256")
-                    or entry.get("raw_artifact_sha256")
-                    or entry.get("raw_artifact_hash")
-                    or ""
-                )
-                .strip()
-                .lower()
-            )
-            path = entry.get("path") or entry.get("file") or entry.get("local_path")
-            content = entry.get("content")
-            artifact_bytes: bytes | None = None
-            if not _valid_digest(digest):
-                errors.append(f"raw_artifact_sha256_missing_or_invalid:{number}")
-                continue
-            if path:
-                artifact_path = Path(path)
-                if not artifact_path.is_file():
-                    errors.append(f"raw_artifact_missing:{number}")
-                    continue
-                try:
-                    artifact_bytes = artifact_path.read_bytes()
-                    actual = hashlib.sha256(artifact_bytes).hexdigest()
-                except OSError:
-                    errors.append(f"raw_artifact_unreadable:{number}")
-                    continue
-                if actual != digest:
-                    errors.append(f"raw_artifact_sha256_mismatch:{number}")
-                    continue
-            elif isinstance(content, str):
-                artifact_bytes = content.encode("utf-8")
-                if hashlib.sha256(artifact_bytes).hexdigest() != digest:
-                    errors.append(f"raw_artifact_sha256_mismatch:{number}")
-                    continue
-            else:
-                errors.append(f"raw_artifact_bytes_missing:{number}")
-                continue
-            declared_size = entry.get("byte_count")
-            if declared_size is not None:
-                try:
-                    if (
-                        isinstance(declared_size, bool)
-                        or artifact_bytes is None
-                        or int(declared_size) != len(artifact_bytes)
-                    ):
-                        errors.append(f"raw_artifact_byte_count_mismatch:{number}")
-                        continue
-                except (TypeError, ValueError):
-                    errors.append(f"raw_artifact_byte_count_invalid:{number}")
-                    continue
-            hashes.append(digest)
-        if not entries:
-            errors.append("raw_artifact_entries_missing")
-        return hashes, errors
-    digest, error = _validate_raw_artifact(manifest)
-    return ([digest] if not error else []), ([error] if error else [])
+    hashes, errors, _captured = _capture_raw_artifacts(manifest)
+    return hashes, errors
 
 
 def _validate_source_binding(
@@ -1441,6 +1553,7 @@ def _validate_source_binding(
     index_name: str,
     effective_date: str | None,
     artifact_hashes: list[str],
+    artifact_bytes: list[bytes],
     declared_members: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], list[str]]:
     """Replay a release-trusted source artifact and compare exact members.
@@ -1448,9 +1561,9 @@ def _validate_source_binding(
     Member-set and raw-byte hashes supplied by the same manifest are not a
     trust root: an operator could change both and recompute both digests. The
     currently supported production sources therefore have code-pinned roots
-    (source identity, ordered bytes, transformer, and effective date).  The
-    transformer then derives the membership from those bytes and compares the
-    full canonical rows, not only a count or self-declared hash.
+    (source identity, authenticated URI, stable workbook content, transformer,
+    and effective date). The transformer then derives membership from the
+    already captured bytes and compares the full canonical rows.
     """
 
     source_id = str(manifest.get("source_id") or manifest.get("id") or "").strip()
@@ -1473,6 +1586,11 @@ def _validate_source_binding(
         return binding, ["source_binding_trust_root_unknown"]
     if index_name != root["index"]:
         errors.append("source_binding_index_mismatch")
+    declared_index_label = str(
+        manifest.get("index_name") or manifest.get("index") or ""
+    ).strip()
+    if declared_index_label != str(root["index"]):
+        errors.append("source_binding_index_label_not_trusted")
     trusted_uri = str(root.get("source_uri") or "").strip()
     source_uri = str(
         manifest.get("source_uri") or manifest.get("uri") or manifest.get("url") or ""
@@ -1488,7 +1606,15 @@ def _validate_source_binding(
             errors.append("source_binding_artifact_uri_not_trusted")
     if effective_date != root["effective_date"]:
         errors.append("source_binding_effective_date_not_trusted")
-    if list(artifact_hashes) != list(root["raw_artifact_hashes"]):
+    trusted_scope = str(root.get("source_scope") or "").strip()
+    declared_scope = str(manifest.get("source_scope") or "").strip()
+    if trusted_scope and declared_scope != trusted_scope:
+        errors.append("source_binding_source_scope_not_trusted")
+    declared_reconstitution = str(manifest.get("reconstitution_id") or "").strip()
+    if declared_reconstitution != str(root.get("reconstitution_id") or "").strip():
+        errors.append("source_binding_reconstitution_id_not_trusted")
+    trusted_raw_hashes = root.get("raw_artifact_hashes")
+    if trusted_raw_hashes and list(artifact_hashes) != list(trusted_raw_hashes):
         errors.append("source_binding_raw_artifact_hashes_not_trusted")
     lineage = (
         manifest.get("reconstitution_lineage")
@@ -1498,40 +1624,121 @@ def _validate_source_binding(
     if not isinstance(lineage, dict):
         errors.append("source_binding_lineage_missing")
     else:
-        if str(lineage.get("builder_id") or lineage.get("builder") or "").strip() != root[
-            "lineage_builder_id"
-        ]:
+        expected_schema = str(
+            root.get("lineage_schema_version") or "dawnstrike.core_universe_lineage.v1"
+        ).strip()
+        if str(lineage.get("schema_version") or "").strip() != expected_schema:
+            errors.append("source_binding_lineage_schema_mismatch")
+        if str(lineage.get("builder_id") or "").strip() != root["lineage_builder_id"]:
             errors.append("source_binding_lineage_builder_mismatch")
-        if str(
-            lineage.get("transformation_id") or lineage.get("transformation") or ""
-        ).strip() != root["lineage_transformation_id"]:
+        if str(lineage.get("transformation_id") or "").strip() != root[
+            "lineage_transformation_id"
+        ]:
             errors.append("source_binding_lineage_transformation_mismatch")
-        if str(
-            lineage.get("reconstitution_id") or lineage.get("lineage_id") or ""
-        ).strip() != root["reconstitution_id"]:
+        if str(lineage.get("reconstitution_id") or "").strip() != root[
+            "reconstitution_id"
+        ]:
             errors.append("source_binding_lineage_reconstitution_mismatch")
-    if errors:
-        return binding, errors
-
-    raw_bytes, read_errors = _read_declared_artifact_bytes(manifest)
-    if read_errors:
-        return binding, [*errors, *read_errors]
+        if _date_text(lineage.get("effective_date")) != root["effective_date"]:
+            errors.append("source_binding_lineage_effective_date_mismatch")
+        lineage_input_hashes = lineage.get("input_artifact_hashes")
+        if not isinstance(lineage_input_hashes, list) or [
+            str(item).lower() for item in lineage_input_hashes
+        ] != artifact_hashes:
+            errors.append("source_binding_lineage_input_hashes_mismatch")
+        lineage_member_hash = str(
+            lineage.get("canonical_member_set_hash_sha256") or ""
+        ).lower()
+        if lineage_member_hash != _canonical_member_hash(declared_members):
+            errors.append("source_binding_lineage_member_set_mismatch")
     trusted_sizes = root.get("raw_artifact_byte_counts")
     if (
         isinstance(trusted_sizes, (list, tuple))
-        and list(map(len, raw_bytes)) != list(trusted_sizes)
+        and not root.get("canonical_content_digest_sha256")
+        and list(map(len, artifact_bytes)) != list(trusted_sizes)
     ):
         errors.append("source_binding_raw_artifact_sizes_not_trusted")
-        return binding, errors
+    if not artifact_bytes:
+        return binding, [*errors, "source_binding_artifacts_missing"]
+    if index_name == "Nasdaq-100" and root.get(
+        "transformation_id"
+    ) == "nasdaq-ndx-sod-weightings-parser-v1" and len(artifact_bytes) != 1:
+        return binding, [*errors, "source_binding_artifact_count_not_trusted"]
     try:
         if index_name == "S&P 500":
-            derived_members, derived_effective = _replay_spy_holdings_xlsx(raw_bytes)
+            derived_members, derived_effective = _replay_spy_holdings_xlsx(artifact_bytes)
         elif index_name == "Nasdaq-100":
             if root.get("transformation_id") == "nasdaq-ndx-sod-weightings-parser-v1":
-                derived_members = _parse_nasdaq_sod_weightings_xlsx(raw_bytes[0])
+                derived_members, workbook_attestation = (
+                    _parse_nasdaq_sod_weightings_xlsx_with_attestation(artifact_bytes[0])
+                )
+                binding["workbook_attestation"] = workbook_attestation
+                expected_names = root.get("canonical_zip_member_names")
+                if expected_names and list(workbook_attestation["member_names"]) != list(
+                    expected_names
+                ):
+                    errors.append("source_binding_workbook_structure_not_trusted")
+                declared_names = manifest.get("canonical_zip_member_names")
+                if declared_names is not None and list(
+                    workbook_attestation["member_names"]
+                ) != list(declared_names):
+                    errors.append("source_binding_declared_workbook_structure_mismatch")
+                expected_hashes = root.get("canonical_zip_member_hashes")
+                if expected_hashes and workbook_attestation["member_hashes"] != dict(
+                    expected_hashes
+                ):
+                    errors.append("source_binding_workbook_members_not_trusted")
+                declared_hashes = manifest.get("canonical_zip_member_hashes")
+                if declared_hashes is not None and workbook_attestation["member_hashes"] != dict(
+                    declared_hashes
+                ):
+                    errors.append("source_binding_declared_workbook_members_mismatch")
+                expected_content = str(
+                    root.get("canonical_content_digest_sha256") or ""
+                ).lower()
+                if (
+                    expected_content
+                    and workbook_attestation["content_digest_sha256"] != expected_content
+                ):
+                    errors.append("source_binding_workbook_content_not_trusted")
+                declared_content = str(
+                    manifest.get("canonical_content_digest_sha256") or ""
+                ).lower()
+                if (
+                    declared_content
+                    and workbook_attestation["content_digest_sha256"] != declared_content
+                ):
+                    errors.append("source_binding_declared_workbook_content_mismatch")
+                expected_member_set = str(
+                    root.get("canonical_member_set_hash_sha256") or ""
+                ).lower()
+                if expected_member_set:
+                    derived_set = _canonical_member_hash(
+                        [
+                            {
+                                "symbol": symbol,
+                                "provider_symbol": symbol,
+                                "asset_class": "common_stock",
+                                "index": "Nasdaq-100",
+                                "valid_from": root["effective_date"],
+                                "valid_to": None,
+                            }
+                            for symbol in derived_members
+                        ]
+                    )
+                    if derived_set != expected_member_set:
+                        errors.append("source_binding_member_set_not_trusted")
+                declared_member_set = str(
+                    manifest.get("canonical_member_set_hash_sha256") or ""
+                ).lower()
+                if (
+                    declared_member_set
+                    and workbook_attestation["member_set_hash_sha256"] != declared_member_set
+                ):
+                    errors.append("source_binding_declared_member_set_mismatch")
                 derived_effective = root["effective_date"]
             else:
-                derived_members, derived_effective = _replay_nasdaq_reconstitution(raw_bytes)
+                derived_members, derived_effective = _replay_nasdaq_reconstitution(artifact_bytes)
         else:
             return binding, ["source_binding_transformer_unavailable"]
     except (OSError, ValueError, TypeError, zipfile.BadZipFile) as exc:
@@ -1570,34 +1777,36 @@ def _declared_artifact_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]
     if isinstance(artifact, dict):
         return [dict(artifact)]
     if artifact:
-        return [{"path": artifact}]
+        entry: dict[str, Any] = {"path": artifact}
+        digest = (
+            manifest.get("raw_artifact_sha256")
+            or manifest.get("raw_sha256")
+            or manifest.get("raw_artifact_hash_sha256")
+            or manifest.get("raw_artifact_hash")
+        )
+        if digest:
+            entry["sha256"] = digest
+        return [entry]
     if isinstance(manifest.get("raw_artifact_content"), str):
-        return [{"content": manifest["raw_artifact_content"]}]
+        entry = {"content": manifest["raw_artifact_content"]}
+        digest = (
+            manifest.get("raw_artifact_sha256")
+            or manifest.get("raw_sha256")
+            or manifest.get("raw_artifact_hash_sha256")
+            or manifest.get("raw_artifact_hash")
+        )
+        if digest:
+            entry["sha256"] = digest
+        return [entry]
+    digest = (
+        manifest.get("raw_artifact_sha256")
+        or manifest.get("raw_sha256")
+        or manifest.get("raw_artifact_hash_sha256")
+        or manifest.get("raw_artifact_hash")
+    )
+    if digest:
+        return [{"sha256": digest}]
     return []
-
-
-def _read_declared_artifact_bytes(
-    manifest: dict[str, Any],
-) -> tuple[list[bytes], list[str]]:
-    payloads: list[bytes] = []
-    errors: list[str] = []
-    for number, entry in enumerate(_declared_artifact_entries(manifest), start=1):
-        path = entry.get("path") or entry.get("file") or entry.get("local_path")
-        content = entry.get("content")
-        if path:
-            try:
-                payloads.append(Path(path).read_bytes())
-            except (OSError, TypeError) as exc:
-                errors.append(f"source_binding_artifact_unreadable:{number}:{exc}")
-        elif isinstance(content, bytes):
-            payloads.append(content)
-        elif isinstance(content, str):
-            payloads.append(content.encode("utf-8"))
-        else:
-            errors.append(f"source_binding_artifact_bytes_missing:{number}")
-    if not payloads:
-        errors.append("source_binding_artifacts_missing")
-    return payloads, errors
 
 
 def _replay_spy_holdings_xlsx(payloads: list[bytes]) -> tuple[list[str], str]:
@@ -1702,40 +1911,60 @@ def _xlsx_cell_text(cell: ElementTree.Element, shared_strings: list[str]) -> str
     return str(text).strip()
 
 
-def _parse_nasdaq_sod_weightings_xlsx(payload: bytes) -> list[str]:
-    """Parse the official Nasdaq SOD export's strict two-column schema.
+def _canonical_zip_content_digest(member_hashes: dict[str, str]) -> str:
+    canonical = {
+        "members": [
+            {"name": name, "sha256": member_hashes[name]}
+            for name in sorted(member_hashes)
+        ]
+    }
+    encoded = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
-    The export is intentionally treated as a raw, independently hashed
-    artifact.  We only accept a worksheet with the expected header and one
-    contiguous 102-row symbol block.  A broad Nasdaq listing file, a partial
-    workbook, or a changed layout therefore cannot become membership truth.
-    """
+
+def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
+    payload: bytes,
+) -> tuple[list[str], dict[str, Any]]:
+    """Parse and attest the exact authenticated Nasdaq SOD workbook shape."""
 
     namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            names = set(archive.namelist())
-            if "xl/sharedStrings.xml" not in names:
-                raise ValueError("Nasdaq SOD shared strings missing")
-            worksheet_names = sorted(
-                name
-                for name in names
-                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
-            )
-            if not worksheet_names:
-                raise ValueError("Nasdaq SOD worksheet missing")
-            shared_root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
-            shared = [
-                "".join(item.itertext()).strip()
-                for item in shared_root.findall("main:si", namespace)
-            ]
-            sheet_root = ElementTree.fromstring(archive.read(worksheet_names[0]))
+            names = tuple(sorted(archive.namelist()))
+            if len(names) != len(set(names)):
+                raise ValueError("Nasdaq SOD workbook contains duplicate members")
+            if names != _NDX_CANONICAL_ZIP_MEMBER_NAMES:
+                raise ValueError("Nasdaq SOD workbook structure is unknown")
+            contents = {name: archive.read(name) for name in names}
     except zipfile.BadZipFile as exc:
         raise ValueError("Nasdaq SOD export is not a valid XLSX") from exc
     except KeyError as exc:
         raise ValueError("Nasdaq SOD workbook member missing") from exc
-    except ElementTree.ParseError as exc:
-        raise ValueError("Nasdaq SOD workbook XML invalid") from exc
+
+    # Parse every XML member before using any cell.  This both rejects a
+    # malformed unused member and makes the stable digest cover the complete
+    # workbook, not merely the two cells used for membership.
+    for content in contents.values():
+        try:
+            ElementTree.fromstring(content)
+        except ElementTree.ParseError as exc:
+            raise ValueError("Nasdaq SOD workbook XML invalid") from exc
+    member_hashes = {
+        name: hashlib.sha256(contents[name]).hexdigest() for name in names
+    }
+    attestation: dict[str, Any] = {
+        "member_names": list(names),
+        "member_hashes": member_hashes,
+        "content_digest_sha256": _canonical_zip_content_digest(member_hashes),
+    }
+    shared_root = ElementTree.fromstring(contents["xl/sharedStrings.xml"])
+    shared = [
+        "".join(item.itertext()).strip()
+        for item in shared_root.findall("main:si", namespace)
+    ]
+    sheet_root = ElementTree.fromstring(contents["xl/worksheets/sheet1.xml"])
 
     rows: dict[int, dict[str, str]] = {}
     for row in sheet_root.findall(".//main:row", namespace):
@@ -1787,6 +2016,26 @@ def _parse_nasdaq_sod_weightings_xlsx(payload: bytes) -> list[str]:
         raise ValueError("Nasdaq SOD rows continue after member block")
     if len(symbols) != 102 or len(set(symbols)) != len(symbols):
         raise ValueError("Nasdaq SOD membership count or uniqueness invalid")
+    attestation["member_set_hash_sha256"] = _canonical_member_hash(
+        [
+            {
+                "symbol": symbol,
+                "provider_symbol": symbol,
+                "asset_class": "common_stock",
+                "index": "Nasdaq-100",
+                "valid_from": "2026-08-27",
+                "valid_to": None,
+            }
+            for symbol in symbols
+        ]
+    )
+    return symbols, attestation
+
+
+def _parse_nasdaq_sod_weightings_xlsx(payload: bytes) -> list[str]:
+    """Parse the official Nasdaq SOD export's strict two-column schema."""
+
+    symbols, _attestation = _parse_nasdaq_sod_weightings_xlsx_with_attestation(payload)
     return symbols
 
 

@@ -397,3 +397,9 @@ def test_production_scheduler_exposes_governed_core_manifest_path():
     assert "$CoreUniverseManifest" in script
     assert "--core-universe-manifest" in script
     assert "config\\luna_core_universe.json" in script
+    assert "refresh_luna_core_universe.py" in script
+    assert "luna_core_refresh-$MarketDate" in script
+    assert '"--market-date", $MarketDate' in script
+    assert "if ($CoreUniverseManifest)" in script
+    assert "lane-local" in script
+    assert "$CoreUniverseManifest = \"\"" in script

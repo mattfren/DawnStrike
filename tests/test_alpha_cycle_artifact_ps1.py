@@ -46,6 +46,7 @@ def _validate(
     payload: dict[str, Any] | str | None,
     *,
     started_at: datetime | None = None,
+    allow_core_shortfall: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     artifact = tmp_path / "alpha_cycle.json"
     receipt = tmp_path / "receipt.json"
@@ -64,12 +65,13 @@ def _validate(
         ),
         encoding="utf-8",
     )
+    core_switch = "-AllowCoreShortfall " if allow_core_shortfall else ""
     command = (
         f". '{HELPER}'; "
         f"$receipt = Get-Content -LiteralPath '{receipt}' -Raw | ConvertFrom-Json; "
         "try { "
         f"$result = Test-DawnstrikeAlphaCycleArtifact -ArtifactPath '{artifact}' "
-        f"-ProcessReceipt $receipt -MarketDate '{MARKET_DATE}'; "
+        f"-ProcessReceipt $receipt -MarketDate '{MARKET_DATE}' {core_switch}; "
         "$result | ConvertTo-Json -Compress; exit 0 "
         "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
     )
@@ -133,6 +135,21 @@ def test_artifact_accepts_current_zero_and_positive_counts(
     assert json.loads(result.stdout)["signal_count"] == signal_count
     assert json.loads(result.stdout)["research_symbols"] == ["NOVA"]
     assert json.loads(result.stdout)["selection_outcome"] == "data_ineligible"
+
+
+def test_artifact_accepts_lane_local_core_data_unavailable_shortfall(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_payload()
+    payload["run_contract"]["core_universe_status"] = "DATA_UNAVAILABLE"
+
+    strict = _validate(tmp_path, payload)
+    assert strict.returncode == 1
+    assert "core universe is not READY" in strict.stderr
+
+    result = _validate(tmp_path, payload, allow_core_shortfall=True)
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_artifact_rejects_inconsistent_research_candidate_universe(tmp_path: Path) -> None:
