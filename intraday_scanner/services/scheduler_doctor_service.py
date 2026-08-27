@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.providers.web_source_base import validate_web_source_config
 
@@ -47,6 +48,50 @@ EXPECTED_EXECUTION_LIMITS = {
 }
 SCHED_S_TASK_RUNNING = 0x00041301
 SCHED_S_TASK_HAS_NOT_RUN = 0x00041303
+SCHEDULER_QUERY_TIMEOUT_SECONDS = 30
+EXPECTED_TASK_EXECUTABLE = "powershell.exe"
+EXPECTED_WINDOWS_TIMEZONE_ID = "Central Standard Time"
+EXPECTED_VERCEL_PROJECT_ID = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy"
+EXPECTED_MULTIPLE_INSTANCES = "IgnoreNew"
+EXPECTED_TRIGGER_TYPES = {
+    **{
+        name: "MSFT_TaskWeeklyTrigger"
+        for name in EXPECTED_TASKS
+        if name != CANONICAL_TASK_NAME
+    },
+    CANONICAL_TASK_NAME: "MSFT_TaskDailyTrigger",
+}
+EXPECTED_TRIGGER_DAYS_OF_WEEK = {
+    "Dawnstrike AlphaOps Morning": 62,
+    "Dawnstrike AlphaOps Monitor 5m": 62,
+    "Dawnstrike AlphaOps EOD Full Report": 62,
+    "Dawnstrike AlphaOps V6 Weekly Training": 2,
+    CANONICAL_TASK_NAME: None,
+}
+EXPECTED_TRIGGER_WEEKS_INTERVAL = {
+    name: 1 for name in EXPECTED_TASKS if name != CANONICAL_TASK_NAME
+}
+EXPECTED_TRIGGER_DAYS_INTERVAL = {CANONICAL_TASK_NAME: 1}
+EXPECTED_REPETITION_INTERVALS = {"Dawnstrike AlphaOps Monitor 5m": "PT5M"}
+EXPECTED_REPETITION_STOP_AT_DURATION_END = {
+    name: name == "Dawnstrike AlphaOps Monitor 5m" for name in EXPECTED_TASKS
+}
+EXPECTED_RESTART_COUNTS = {
+    "Dawnstrike AlphaOps Morning": 3,
+    "Dawnstrike AlphaOps Monitor 5m": 3,
+    "Dawnstrike AlphaOps EOD Full Report": 3,
+    "Dawnstrike AlphaOps V6 Weekly Training": 4,
+    CANONICAL_TASK_NAME: 2,
+}
+EXPECTED_RESTART_INTERVALS = {
+    "Dawnstrike AlphaOps Morning": "PT5M",
+    "Dawnstrike AlphaOps Monitor 5m": "PT5M",
+    "Dawnstrike AlphaOps EOD Full Report": "PT5M",
+    "Dawnstrike AlphaOps V6 Weekly Training": "PT15M",
+    CANONICAL_TASK_NAME: "PT15M",
+}
+EXPECTED_RUN_LEVEL = "Limited"
+SCHEDULE_TIMEZONE = ZoneInfo("America/Chicago")
 ACCEPTABLE_LAST_RESULTS = {
     None,
     0,
@@ -84,7 +129,13 @@ def scheduler_doctor(
     source_config = validate_web_source_config(required["durable_source_config"])
     queried = _query_scheduled_tasks()
     task_rows = _normalize_task_rows(queried)
-    by_name = {str(row.get("name") or ""): row for row in task_rows}
+    observation_date = datetime.now(SCHEDULE_TIMEZONE).date()
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in task_rows:
+        name = str(row.get("name") or "")
+        task_path = str(row.get("task_path") or "\\")
+        if name not in by_name or task_path == "\\":
+            by_name[name] = row
     checks: list[dict[str, Any]] = []
     for name, script_name in EXPECTED_TASKS.items():
         task = by_name.get(name) or _missing_task(name)
@@ -97,14 +148,20 @@ def scheduler_doctor(
                 expected_start=EXPECTED_TASK_STARTS[name],
                 expected_repetition=EXPECTED_TASK_REPETITIONS.get(name),
                 expected_execution_limit=EXPECTED_EXECUTION_LIMITS[name],
+                observation_date=observation_date,
             )
         )
     unexpected_enabled = [
         row
         for row in task_rows
-        if str(row.get("name") or "") not in EXPECTED_TASKS
-        and row.get("enabled") is True
-        and str(runtime / "scripts").lower() in str(row.get("arguments") or "").lower()
+        if (
+            row.get("enabled") is True
+            or str(row.get("state") or "") in {"Queued", "Running"}
+        )
+        and (
+            str(row.get("name") or "") not in EXPECTED_TASKS
+            or str(row.get("task_path") or "\\") != "\\"
+        )
     ]
     failed_checks = [
         check
@@ -172,24 +229,36 @@ def _task_check(
     expected_start: str,
     expected_repetition: str | None,
     expected_execution_limit: str,
+    observation_date: date,
 ) -> dict[str, Any]:
+    task_name = str(task.get("name") or "")
     state = str(task.get("state") or "unknown")
+    execute = str(task.get("execute") or "")
     arguments = str(task.get("arguments") or "")
     working_directory = str(task.get("working_directory") or "")
     action_text = " ".join(
         (
-            str(task.get("execute") or ""),
+            execute,
             arguments,
             working_directory,
         )
     )
     runner_ok = str(expected_runner).lower() in arguments.lower()
+    executable_ok = execute.lower() == EXPECTED_TASK_EXECUTABLE
+    expected_arguments = _expected_action_arguments(
+        task_name,
+        expected_runner=expected_runner,
+        runtime_root=runtime_root,
+        state_root=state_root,
+    )
+    action_arguments_match = arguments == expected_arguments
+    action_count = task.get("action_count")
+    action_count_matches = type(action_count) is int and action_count == 1
+    trigger_count = task.get("trigger_count")
+    trigger_count_matches = type(trigger_count) is int and trigger_count == 1
     runtime_ok = (
         str(runtime_root).lower() in arguments.lower()
-        and (
-            not working_directory
-            or str(runtime_root).lower() == working_directory.lower()
-        )
+        and str(runtime_root).lower() == working_directory.lower()
     )
     state_ok = str(state_root).lower() in arguments.lower()
     legacy_free = FORBIDDEN_LEGACY_ROOT.lower() not in action_text.lower()
@@ -206,22 +275,75 @@ def _task_check(
         last_result in ACCEPTABLE_LAST_RESULTS or history_superseded
     )
     expected_hour, expected_minute = (int(value) for value in expected_start.split(":"))
-    scheduled_time_matches = (
-        trigger_start is not None
-        and trigger_start.hour == expected_hour
-        and trigger_start.minute == expected_minute
-        and trigger_start.second == 0
-        and trigger_start.microsecond == 0
+    trigger_start_local = (
+        trigger_start.astimezone(SCHEDULE_TIMEZONE)
+        if trigger_start is not None
+        else None
     )
+    scheduled_time_matches = (
+        trigger_start_local is not None
+        and trigger_start_local.hour == expected_hour
+        and trigger_start_local.minute == expected_minute
+        and trigger_start_local.second == 0
+        and trigger_start_local.microsecond == 0
+    )
+    trigger_active = (
+        trigger_start_local is not None
+        and trigger_start_local.date() <= observation_date
+    )
+    trigger_end_boundary_absent = not str(task.get("trigger_end_boundary") or "")
+    trigger_random_delay_absent = not str(task.get("trigger_random_delay") or "")
     repetition_duration = str(task.get("repetition_duration") or "")
-    repetition_matches = (
-        expected_repetition is None or repetition_duration == expected_repetition
+    expected_repetition_duration = expected_repetition or ""
+    repetition_matches = repetition_duration == expected_repetition_duration
+    repetition_interval = str(task.get("repetition_interval") or "")
+    expected_repetition_interval = EXPECTED_REPETITION_INTERVALS.get(task_name, "")
+    repetition_interval_matches = (
+        repetition_interval == expected_repetition_interval
+    )
+    expected_repetition_stop = EXPECTED_REPETITION_STOP_AT_DURATION_END.get(
+        task_name
+    )
+    repetition_stop_matches = (
+        type(task.get("repetition_stop_at_duration_end")) is bool
+        and task.get("repetition_stop_at_duration_end") is expected_repetition_stop
+    )
+    expected_trigger_type = EXPECTED_TRIGGER_TYPES.get(task_name)
+    trigger_type_matches = task.get("trigger_type") == expected_trigger_type
+    trigger_enabled = task.get("trigger_enabled") is True
+    expected_days_of_week = EXPECTED_TRIGGER_DAYS_OF_WEEK.get(task_name)
+    trigger_days_of_week_matches = _optional_int_matches(
+        task.get("trigger_days_of_week"), expected_days_of_week
+    )
+    expected_weeks_interval = EXPECTED_TRIGGER_WEEKS_INTERVAL.get(task_name)
+    trigger_weeks_interval_matches = _optional_int_matches(
+        task.get("trigger_weeks_interval"), expected_weeks_interval
+    )
+    expected_days_interval = EXPECTED_TRIGGER_DAYS_INTERVAL.get(task_name)
+    trigger_days_interval_matches = _optional_int_matches(
+        task.get("trigger_days_interval"), expected_days_interval
+    )
+    host_timezone_matches = (
+        task.get("host_timezone_id") == EXPECTED_WINDOWS_TIMEZONE_ID
+    )
+    multiple_instances_matches = (
+        task.get("multiple_instances") == EXPECTED_MULTIPLE_INSTANCES
     )
     execution_time_limit = str(task.get("execution_time_limit") or "")
     execution_limit_matches = execution_time_limit == expected_execution_limit
+    expected_restart_count = EXPECTED_RESTART_COUNTS.get(task_name)
+    restart_count_matches = _optional_int_matches(
+        task.get("restart_count"), expected_restart_count
+    )
+    expected_restart_interval = EXPECTED_RESTART_INTERVALS.get(task_name, "")
+    restart_interval_matches = (
+        str(task.get("restart_interval") or "") == expected_restart_interval
+    )
     logon_type = str(task.get("logon_type") or "")
     noninteractive = logon_type in NONINTERACTIVE_LOGON_TYPES
+    run_level_matches = task.get("run_level") == EXPECTED_RUN_LEVEL
     start_when_available = task.get("start_when_available") is True
+    wake_to_run = task.get("wake_to_run") is True
     battery_safe = (
         task.get("stop_if_going_on_batteries") is False
         and task.get("disallow_start_if_on_batteries") is False
@@ -230,28 +352,57 @@ def _task_check(
         (
             enabled,
             healthy_state,
+            executable_ok,
+            action_arguments_match,
+            action_count_matches,
+            trigger_count_matches,
             runner_ok,
             runtime_ok,
             state_ok,
             legacy_free,
             noninteractive,
+            run_level_matches,
             start_when_available,
+            wake_to_run,
             battery_safe,
             scheduled_time_matches,
+            trigger_active,
+            trigger_end_boundary_absent,
+            trigger_random_delay_absent,
+            trigger_enabled,
+            trigger_type_matches,
+            trigger_days_of_week_matches,
+            trigger_weeks_interval_matches,
+            trigger_days_interval_matches,
             repetition_matches,
+            repetition_interval_matches,
+            repetition_stop_matches,
+            host_timezone_matches,
+            multiple_instances_matches,
             execution_limit_matches,
+            restart_count_matches,
+            restart_interval_matches,
             last_run_result_acceptable,
         )
     )
     return {
         **task,
         "expected_runner": str(expected_runner),
+        "expected_executable": EXPECTED_TASK_EXECUTABLE,
+        "executable_matches": executable_ok,
+        "expected_arguments": expected_arguments,
+        "action_arguments_match": action_arguments_match,
+        "action_count_matches": action_count_matches,
+        "trigger_count_matches": trigger_count_matches,
         "runner_matches": runner_ok,
         "runtime_root_matches": runtime_ok,
         "state_root_matches": state_ok,
         "legacy_root_absent": legacy_free,
         "noninteractive": noninteractive,
+        "expected_run_level": EXPECTED_RUN_LEVEL,
+        "run_level_matches": run_level_matches,
         "start_when_available": start_when_available,
+        "wake_to_run_matches": wake_to_run,
         "battery_safe": battery_safe,
         "last_run_result_acceptable": last_run_result_acceptable,
         "last_run_status": (
@@ -264,12 +415,143 @@ def _task_check(
         "history_superseded_by_current_definition": history_superseded,
         "expected_start_local": expected_start,
         "scheduled_time_matches": scheduled_time_matches,
-        "expected_repetition_duration": expected_repetition,
+        "trigger_active_on_observation_date": trigger_active,
+        "trigger_end_boundary_absent": trigger_end_boundary_absent,
+        "trigger_random_delay_absent": trigger_random_delay_absent,
+        "expected_host_timezone_id": EXPECTED_WINDOWS_TIMEZONE_ID,
+        "host_timezone_matches": host_timezone_matches,
+        "expected_trigger_type": expected_trigger_type,
+        "trigger_enabled_matches": trigger_enabled,
+        "trigger_type_matches": trigger_type_matches,
+        "expected_trigger_days_of_week": expected_days_of_week,
+        "trigger_days_of_week_matches": trigger_days_of_week_matches,
+        "expected_trigger_weeks_interval": expected_weeks_interval,
+        "trigger_weeks_interval_matches": trigger_weeks_interval_matches,
+        "expected_trigger_days_interval": expected_days_interval,
+        "trigger_days_interval_matches": trigger_days_interval_matches,
+        "expected_repetition_duration": expected_repetition_duration,
         "repetition_duration_matches": repetition_matches,
+        "expected_repetition_interval": expected_repetition_interval,
+        "repetition_interval_matches": repetition_interval_matches,
+        "expected_repetition_stop_at_duration_end": expected_repetition_stop,
+        "repetition_stop_at_duration_end_matches": repetition_stop_matches,
+        "expected_multiple_instances": EXPECTED_MULTIPLE_INSTANCES,
+        "multiple_instances_matches": multiple_instances_matches,
         "expected_execution_time_limit": expected_execution_limit,
         "execution_time_limit_matches": execution_limit_matches,
+        "expected_restart_count": expected_restart_count,
+        "restart_count_matches": restart_count_matches,
+        "expected_restart_interval": expected_restart_interval,
+        "restart_interval_matches": restart_interval_matches,
         "status": "LOCAL_VERIFIED" if verified else "FAILED",
     }
+
+
+def _expected_action_arguments(
+    task_name: str,
+    *,
+    expected_runner: Path,
+    runtime_root: Path,
+    state_root: Path,
+) -> str:
+    arguments = (
+        f'-NoProfile -ExecutionPolicy Bypass -File "{expected_runner}" '
+        f'-RuntimeRoot "{runtime_root}" -StateRoot "{state_root}"'
+    )
+    if task_name == CANONICAL_TASK_NAME:
+        arguments += (
+            " -PublicationMode Production "
+            f'-VercelProjectId "{EXPECTED_VERCEL_PROJECT_ID}"'
+        )
+    return arguments
+
+
+def _optional_int_matches(value: Any, expected: int | None) -> bool:
+    if expected is None:
+        return value is None
+    return type(value) is int and value == expected
+
+
+def _scheduler_query_script() -> str:
+    return (
+        # Ask the Task Scheduler provider for the narrow Dawnstrike name
+        # range. Enumerating every system task and filtering client-side can
+        # exceed the bounded doctor timeout on otherwise healthy hosts.
+        "$ErrorActionPreference = 'Stop'; "
+        "$hostTimeZoneId = [TimeZoneInfo]::Local.Id; "
+        "$tasks = @(Get-ScheduledTask -TaskPath '\\*' "
+        "-TaskName 'Dawnstrike*' -ErrorAction Stop); "
+        # Explicitly preserve missing canonical rows in the output; querying all
+        # similarly named tasks also exposes enabled duplicate runners.
+        f"$expected = ConvertFrom-Json '{json.dumps(list(EXPECTED_TASKS))}'; "
+        "$canonicalNames = @($tasks | Where-Object { $_.TaskPath -eq '\\' } | "
+        "Select-Object -ExpandProperty TaskName); "
+        "$rows = foreach ($task in $tasks) { "
+        "$info = Get-ScheduledTaskInfo -TaskName $task.TaskName "
+        "-TaskPath $task.TaskPath -ErrorAction Stop; "
+        "$actions = @($task.Actions); $action = $actions[0]; "
+        "$triggers = @($task.Triggers); $trigger = $triggers[0]; "
+        "[pscustomobject]@{name=$task.TaskName; task_path=$task.TaskPath; "
+        "state=$task.State.ToString(); enabled=[bool]$task.Settings.Enabled; "
+        "action_count=$actions.Count; trigger_count=$triggers.Count; "
+        "host_timezone_id=$hostTimeZoneId; "
+        "logon_type=$task.Principal.LogonType.ToString(); "
+        "run_level=$task.Principal.RunLevel.ToString(); "
+        "start_when_available=[bool]$task.Settings.StartWhenAvailable; "
+        "wake_to_run=[bool]$task.Settings.WakeToRun; "
+        "stop_if_going_on_batteries=[bool]$task.Settings.StopIfGoingOnBatteries; "
+        "disallow_start_if_on_batteries=[bool]$task.Settings.DisallowStartIfOnBatteries; "
+        "execution_time_limit=[string]$task.Settings.ExecutionTimeLimit; "
+        "restart_count=[int]$task.Settings.RestartCount; "
+        "restart_interval=[string]$task.Settings.RestartInterval; "
+        "multiple_instances=[string]$task.Settings.MultipleInstances; "
+        "trigger_type=if ($trigger) {$trigger.CimClass.CimClassName} else {$null}; "
+        "trigger_enabled=if ($null -ne $trigger.Enabled) "
+        "{[bool]$trigger.Enabled} else {$null}; "
+        "trigger_days_of_week=if ($null -ne $trigger.DaysOfWeek) "
+        "{[int]$trigger.DaysOfWeek} else {$null}; "
+        "trigger_weeks_interval=if ($null -ne $trigger.WeeksInterval) "
+        "{[int]$trigger.WeeksInterval} else {$null}; "
+        "trigger_days_interval=if ($null -ne $trigger.DaysInterval) "
+        "{[int]$trigger.DaysInterval} else {$null}; "
+        "trigger_start_boundary=if ($trigger.StartBoundary) "
+        "{[string]$trigger.StartBoundary} else {$null}; "
+        "trigger_end_boundary=if ($trigger.EndBoundary) "
+        "{[string]$trigger.EndBoundary} else {$null}; "
+        "trigger_random_delay=if ($trigger.RandomDelay) "
+        "{[string]$trigger.RandomDelay} else {$null}; "
+        "repetition_duration=if ($trigger.Repetition) "
+        "{[string]$trigger.Repetition.Duration} else {$null}; "
+        "repetition_interval=if ($trigger.Repetition) "
+        "{[string]$trigger.Repetition.Interval} else {$null}; "
+        "repetition_stop_at_duration_end=if ($null -ne "
+        "$trigger.Repetition.StopAtDurationEnd) "
+        "{[bool]$trigger.Repetition.StopAtDurationEnd} else {$null}; "
+        "last_task_result=$info.LastTaskResult; "
+        "last_run_time=if ($info.LastRunTime) "
+        "{$info.LastRunTime.ToString('o')} else {$null}; "
+        "next_run_time=if ($info.NextRunTime) "
+        "{$info.NextRunTime.ToString('o')} else {$null}; "
+        "execute=$action.Execute; arguments=$action.Arguments; "
+        "working_directory=$action.WorkingDirectory} }; "
+        "$missing = foreach ($name in ($expected | "
+        "Where-Object { $_ -notin $canonicalNames })) { "
+        "[pscustomobject]@{name=$name; state='missing'; enabled=$null; "
+        "task_path='\\'; "
+        "action_count=$null; trigger_count=$null; "
+        "host_timezone_id=$hostTimeZoneId; multiple_instances=$null; "
+        "run_level=$null; wake_to_run=$null; restart_count=$null; "
+        "restart_interval=$null; "
+        "trigger_type=$null; trigger_enabled=$null; "
+        "trigger_days_of_week=$null; trigger_weeks_interval=$null; "
+        "trigger_days_interval=$null; trigger_end_boundary=$null; "
+        "trigger_random_delay=$null; repetition_interval=$null; "
+        "repetition_stop_at_duration_end=$null; "
+        "last_task_result=$null; last_run_time=$null; next_run_time=$null; "
+        "execute=$null; arguments=$null; working_directory=$null; "
+        "execution_time_limit=$null; repetition_duration=$null} }; "
+        "@(@($rows) + @($missing)) | ConvertTo-Json -Compress"
+    )
 
 
 def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
@@ -282,52 +564,14 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
             }
             for name in EXPECTED_TASKS
         ]
-    script = (
-        "$names = @(Get-ScheduledTask | Where-Object { "
-        "$_.TaskName -like 'Dawnstrike AlphaOps*' -or "
-        "$_.TaskName -eq 'Dawnstrike 10of10 Daily Finalize' "
-        "} | Select-Object -ExpandProperty TaskName); "
-        # Explicitly preserve missing canonical rows in the output; querying all
-        # similarly named tasks also exposes enabled duplicate runners.
-        f"$expected = ConvertFrom-Json '{json.dumps(list(EXPECTED_TASKS))}'; "
-        "$names = @($names + ($expected | Where-Object { $_ -notin $names })); "
-        "$rows = foreach ($name in $names) { "
-        "$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; "
-        "if ($null -eq $task) { "
-        "[pscustomobject]@{name=$name; state='missing'; enabled=$null; "
-        "last_task_result=$null; last_run_time=$null; next_run_time=$null; "
-        "execute=$null; arguments=$null; working_directory=$null; "
-        "execution_time_limit=$null; repetition_duration=$null} "
-        "} else { "
-        "$info = Get-ScheduledTaskInfo -TaskName $task.TaskName; "
-        "$action = @($task.Actions)[0]; "
-        "[pscustomobject]@{name=$task.TaskName; state=$task.State.ToString(); "
-        "enabled=[bool]$task.Settings.Enabled; "
-        "logon_type=$task.Principal.LogonType.ToString(); "
-        "start_when_available=[bool]$task.Settings.StartWhenAvailable; "
-        "stop_if_going_on_batteries=[bool]$task.Settings.StopIfGoingOnBatteries; "
-        "disallow_start_if_on_batteries=[bool]$task.Settings.DisallowStartIfOnBatteries; "
-        "execution_time_limit=[string]$task.Settings.ExecutionTimeLimit; "
-        "trigger_start_boundary=if (@($task.Triggers)[0].StartBoundary) "
-        "{[string]@($task.Triggers)[0].StartBoundary} else {$null}; "
-        "repetition_duration=if (@($task.Triggers)[0].Repetition) "
-        "{[string]@($task.Triggers)[0].Repetition.Duration} else {$null}; "
-        "last_task_result=$info.LastTaskResult; "
-        "last_run_time=if ($info.LastRunTime) "
-        "{$info.LastRunTime.ToString('o')} else {$null}; "
-        "next_run_time=if ($info.NextRunTime) "
-        "{$info.NextRunTime.ToString('o')} else {$null}; "
-        "execute=$action.Execute; arguments=$action.Arguments; "
-        "working_directory=$action.WorkingDirectory} } }; "
-        "@($rows) | ConvertTo-Json -Compress"
-    )
+    script = _scheduler_query_script()
     try:
         completed = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", script],
             capture_output=True,
             check=False,
             text=True,
-            timeout=15,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [
@@ -376,8 +620,26 @@ def _normalize_task_rows(
 def _missing_task(name: str) -> dict[str, Any]:
     return {
         "name": name,
+        "task_path": "\\",
         "state": "missing",
         "enabled": None,
+        "action_count": None,
+        "trigger_count": None,
+        "host_timezone_id": None,
+        "multiple_instances": None,
+        "run_level": None,
+        "wake_to_run": None,
+        "restart_count": None,
+        "restart_interval": None,
+        "trigger_type": None,
+        "trigger_enabled": None,
+        "trigger_days_of_week": None,
+        "trigger_weeks_interval": None,
+        "trigger_days_interval": None,
+        "trigger_end_boundary": None,
+        "trigger_random_delay": None,
+        "repetition_interval": None,
+        "repetition_stop_at_duration_end": None,
         "logon_type": None,
         "start_when_available": None,
         "stop_if_going_on_batteries": None,
@@ -418,9 +680,11 @@ def _parse_aware_datetime(value: str) -> datetime | None:
 __all__ = [
     "CANONICAL_TASK_NAME",
     "EXPECTED_TASKS",
+    "EXPECTED_TASK_EXECUTABLE",
     "FORBIDDEN_LEGACY_ROOT",
     "NONINTERACTIVE_LOGON_TYPES",
     "SCHED_S_TASK_HAS_NOT_RUN",
     "SCHED_S_TASK_RUNNING",
+    "SCHEDULER_QUERY_TIMEOUT_SECONDS",
     "scheduler_doctor",
 ]
