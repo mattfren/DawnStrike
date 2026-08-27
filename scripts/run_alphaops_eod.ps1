@@ -265,12 +265,27 @@ try {
     if ($v6Research.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $v6Research.exit_code
     }
-    # Freeze the EOD evidence boundary to the actual invocation instant.  A
-    # synthetic 23:59 cutoff can import returns that were not observable when
-    # this run started and makes retries silently non-point-in-time.
-    $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
-    $strategyLearningCutoff = $strategyLearningInvocationUtc
-    $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;mode=ro;query_only=on"
+    # Freeze the EOD evidence boundary to the actual invocation instant.  The
+    # service writes a reservation before analysis; reuse its cutoff/source on
+    # retries so a later retry cannot broaden the evidence window.
+    $strategyLearningRoot = Join-Path $outputRoot "strategy_learning"
+    $strategyLearningReservation = Join-Path (Join-Path $strategyLearningRoot $MarketDate) "daily_learning_invocation.json"
+    if (Test-Path -LiteralPath $strategyLearningReservation -PathType Leaf) {
+        try {
+            $reservation = Get-Content -LiteralPath $strategyLearningReservation -Raw | ConvertFrom-Json
+            if ($reservation.market_date -ne $MarketDate -or [string]::IsNullOrWhiteSpace([string]$reservation.cutoff) -or [string]::IsNullOrWhiteSpace([string]$reservation.source_identity)) {
+                throw "daily-learning invocation reservation identity conflict"
+            }
+            $strategyLearningCutoff = [string]$reservation.cutoff
+            $strategyLearningSource = [string]$reservation.source_identity
+        } catch {
+            throw "daily-learning invocation reservation invalid: $($_.Exception.Message)"
+        }
+    } else {
+        $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
+        $strategyLearningCutoff = $strategyLearningInvocationUtc
+        $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;mode=ro;query_only=on"
+    }
     $strategyLearning = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList @(

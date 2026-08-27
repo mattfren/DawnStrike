@@ -27,7 +27,6 @@ DAILY_LEARNING_SCHEMA = "dawnstrike.strategy_learning_daily.v1"
 PROPOSAL_SCHEMA = "dawnstrike.strategy_remediation_proposals.v1"
 EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES = (
     ("alphaops_v5", "dawnstrike-alphaops-v5.0.0"),
-    ("alphaops_v6_shadow", "dawnstrike-alphaops-v6-shadow"),
 )
 _UNRESOLVED_STATUSES = frozenset(
     {
@@ -57,7 +56,58 @@ _EVIDENCE_TIMESTAMP_FIELDS = (
     "decision_at",
     "generated_at",
     "created_at",
+    "proposal_at",
+    "proposed_at",
 )
+
+# The token is intentionally private.  A JSON/evidence-file mapping cannot
+# claim that it came from the append-only receipt table merely by adding a
+# marker field.  The readonly DB adapter creates this envelope below.
+_TRUSTED_RECEIPT_TOKEN = object()
+_TRUSTED_V6_TOKEN = object()
+
+
+class _PersistedStrategyDecisionReceipt(dict[str, Any]):
+    """Receipt payload plus authenticated readonly-row provenance.
+
+    This is a private boundary: callers can pass ordinary mappings for
+    diagnostics, but only this envelope can contribute to certification.
+    ``created_at`` and the row envelope are kept out of the canonical payload
+    so the receipt hash remains the hash produced by StrategyDecisionReceipt.
+    """
+
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        envelope: Mapping[str, Any],
+        token: object,
+    ) -> None:
+        if token is not _TRUSTED_RECEIPT_TOKEN:
+            raise TypeError("persisted receipt provenance is private")
+        super().__init__(payload)
+        self._envelope = dict(envelope)
+
+
+def _persisted_receipt(
+    payload: Mapping[str, Any], *, envelope: Mapping[str, Any]
+) -> _PersistedStrategyDecisionReceipt:
+    return _PersistedStrategyDecisionReceipt(
+        payload, envelope=envelope, token=_TRUSTED_RECEIPT_TOKEN
+    )
+
+
+class _PersistedV6Decision(dict[str, Any]):
+    """Private envelope for decisions loaded from alpha_v6_decisions."""
+
+    def __init__(self, payload: Mapping[str, Any], *, token: object) -> None:
+        if token is not _TRUSTED_V6_TOKEN:
+            raise TypeError("V6 persisted provenance is private")
+        super().__init__(payload)
+
+
+def _persisted_v6_decision(payload: Mapping[str, Any]) -> _PersistedV6Decision:
+    return _PersistedV6Decision(payload, token=_TRUSTED_V6_TOKEN)
 
 
 class StrategyEvidenceAnalyzer(Protocol):
@@ -423,12 +473,16 @@ def _cutoff_datetime(context: DailyLearningContext) -> datetime:
     return parsed
 
 
-def _first_timestamp(row: Mapping[str, Any], fields: Sequence[str]) -> Any:
-    for field in fields:
-        value = row.get(field)
-        if value not in (None, ""):
-            return value
-    return None
+def _populated_timestamps(
+    row: Mapping[str, Any], fields: Sequence[str]
+) -> tuple[tuple[str, Any], ...]:
+    """Return every populated timestamp alias, preserving field identity."""
+
+    return tuple(
+        (field, row.get(field))
+        for field in fields
+        if row.get(field) not in (None, "")
+    )
 
 
 def _cutoff_violation(
@@ -439,22 +493,29 @@ def _cutoff_violation(
 ) -> str | None:
     """Return a deterministic quarantine reason for point-in-time evidence."""
 
-    if _date_is_after(row.get("market_date"), context.market_date):
+    market_value = row.get("market_date")
+    if market_value not in (None, ""):
+        try:
+            date.fromisoformat(str(market_value))
+        except ValueError:
+            return "malformed_market_date"
+    if _date_is_after(market_value, context.market_date):
         return "future_market_date"
     cutoff = _cutoff_datetime(context)
-    terminal_value = _first_timestamp(row, _TERMINAL_TIMESTAMP_FIELDS)
-    terminal_present = terminal_value not in (None, "")
-    if require_terminal_timestamp and not terminal_present:
+    terminal_values = _populated_timestamps(row, _TERMINAL_TIMESTAMP_FIELDS)
+    if require_terminal_timestamp and not terminal_values:
         return "missing_terminal_timestamp"
-    if terminal_present:
-        parsed = _parse_aware_timestamp(terminal_value)
+    # Never use the first alias as authority.  A conflicting populated alias
+    # may be malformed or after the cutoff even when an earlier alias looks
+    # valid; every alias must therefore be parseable and before the boundary.
+    for _field, value in terminal_values:
+        parsed = _parse_aware_timestamp(value)
         if parsed is None:
             return "unparseable_terminal_timestamp"
         if parsed > cutoff:
             return "terminal_after_cutoff"
-    for field in _EVIDENCE_TIMESTAMP_FIELDS:
-        value = row.get(field)
-        if value in (None, "") or field in _TERMINAL_TIMESTAMP_FIELDS:
+    for field, value in _populated_timestamps(row, _EVIDENCE_TIMESTAMP_FIELDS):
+        if field in _TERMINAL_TIMESTAMP_FIELDS:
             continue
         parsed = _parse_aware_timestamp(value)
         if parsed is None:
@@ -464,6 +525,26 @@ def _cutoff_violation(
         if parsed > cutoff:
             return f"{field}_after_cutoff"
     return None
+
+
+def _requires_orderable_evidence(row: Mapping[str, Any], context: DailyLearningContext) -> bool:
+    """Whether a non-terminal observation needs an event timestamp.
+
+    A historical, explicitly dated row is ordered by its date.  Same-day and
+    undated rows must carry at least one aware event timestamp so they cannot
+    be smuggled into a point-in-time run as if their observation time were
+    known.
+    """
+
+    row_date = str(row.get("market_date") or "").strip()[:10]
+    return not row_date or row_date == context.market_date
+
+
+def _has_valid_ordering_timestamp(row: Mapping[str, Any]) -> bool:
+    return any(
+        _parse_aware_timestamp(value) is not None
+        for _field, value in _populated_timestamps(row, _EVIDENCE_TIMESTAMP_FIELDS)
+    )
 
 
 def _normalize_analysis(
@@ -503,7 +584,9 @@ def _normalize_analysis(
             # same-day current-state row from becoming a historical return.
             require_terminal_timestamp=True,
         )
-        if cutoff_reason in {"future_market_date", "terminal_after_cutoff"}:
+        if cutoff_reason and (
+            cutoff_reason == "future_market_date" or cutoff_reason.endswith("_after_cutoff")
+        ):
             excluded_future += 1
             continue
         if cutoff_reason in {"missing_terminal_timestamp", "unparseable_terminal_timestamp"}:
@@ -531,10 +614,7 @@ def _normalize_analysis(
     for row in _as_sequence(raw.get("misses"), "misses", strategy.strategy_id):
         # Same-day misses need an event/evidence timestamp so the exact cutoff
         # can order them.  Historical dates have an unambiguous date boundary.
-        row_date = str(row.get("market_date") or "")[:10]
-        if row_date == context.market_date and _first_timestamp(
-            row, _EVIDENCE_TIMESTAMP_FIELDS
-        ) in (None, ""):
+        if _requires_orderable_evidence(row, context) and not _has_valid_ordering_timestamp(row):
             evidence_timestamp_quarantined += 1
             quarantined_evidence = (*quarantined_evidence, {
                 **dict(row),
@@ -544,7 +624,9 @@ def _normalize_analysis(
             continue
         cutoff_reason = _cutoff_violation(row, context)
         if cutoff_reason:
-            if cutoff_reason in {"future_market_date", "terminal_after_cutoff"}:
+            if cutoff_reason and (
+                cutoff_reason == "future_market_date" or cutoff_reason.endswith("_after_cutoff")
+            ):
                 excluded_future += 1
             else:
                 evidence_timestamp_quarantined += 1
@@ -557,6 +639,7 @@ def _normalize_analysis(
         misses.append(dict(row))
 
     proposals: list[dict[str, Any]] = []
+    quarantined_proposals: list[dict[str, Any]] = []
     for raw_proposal in _as_sequence(
         raw.get("proposals", raw.get("remediation_proposals")),
         "proposals",
@@ -574,6 +657,34 @@ def _normalize_analysis(
         proposal["missing_outcomes_are_zero"] = False
         proposal.pop("proposal_id", None)
         proposal["proposal_id"] = "rem-" + _sha256(proposal)[:24]
+        if _requires_orderable_evidence(proposal, context) and not _has_valid_ordering_timestamp(
+            proposal
+        ):
+            quarantined_proposals.append(
+                {
+                    **proposal,
+                    "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
+                    "quarantine_reason": "missing_same_day_or_undated_proposal_timestamp",
+                }
+            )
+            evidence_timestamp_quarantined += 1
+            continue
+        proposal_cutoff_reason = _cutoff_violation(proposal, context)
+        if proposal_cutoff_reason:
+            if proposal_cutoff_reason in {"future_market_date"} or proposal_cutoff_reason.endswith(
+                "_after_cutoff"
+            ):
+                excluded_future += 1
+            else:
+                evidence_timestamp_quarantined += 1
+            quarantined_proposals.append(
+                {
+                    **proposal,
+                    "status": "QUARANTINED_EVIDENCE_TIMESTAMP",
+                    "quarantine_reason": proposal_cutoff_reason,
+                }
+            )
+            continue
         proposals.append(proposal)
 
     evidence = {
@@ -591,12 +702,174 @@ def _normalize_analysis(
             "evidence_timestamp_quarantined": evidence_timestamp_quarantined,
             "outcomes_without_return_excluded_from_return_metrics": missing_return,
             "closed_provisional_quarantined": len(quarantined_closed),
+            "proposals_quarantined": len(quarantined_proposals),
         },
         "evidence_contract": str(raw.get("evidence_contract", "injected_unattributed_v1")),
         "quarantined_closed": [dict(row) for row in quarantined_closed],
         "quarantined_evidence": [dict(row) for row in quarantined_evidence],
+        "quarantined_proposals": quarantined_proposals,
     }
     return evidence, proposals
+
+
+def _validate_persisted_decision_receipt(
+    value: Mapping[str, Any],
+    *,
+    market_date: str,
+    cutoff: datetime,
+) -> tuple[bool, str]:
+    """Validate the authenticated receipt ingress used by daily learning."""
+
+    if not isinstance(value, _PersistedStrategyDecisionReceipt):
+        return False, "receipt_not_from_persisted_readonly_source"
+    digest = str(value.get("receipt_hash_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False, "receipt_hash_missing_or_noncanonical"
+    body = {
+        key: item
+        for key, item in value.items()
+        if key not in {"receipt_id", "receipt_hash_sha256"}
+    }
+    try:
+        expected = _sha256(body)
+    except (TypeError, ValueError):
+        return False, "receipt_payload_not_canonical"
+    if digest != expected:
+        return False, "receipt_hash_mismatch"
+    if str(value.get("receipt_id") or "") != "sdr-" + digest[:24]:
+        return False, "receipt_id_not_derived_from_hash"
+    decision_at = _parse_aware_timestamp(value.get("decision_at"))
+    if decision_at is None:
+        return False, "decision_at_missing_or_unparseable"
+    if decision_at > cutoff:
+        return False, "decision_after_cutoff"
+    if value.get("market_date") != market_date:
+        return False, "market_date_mismatch"
+    if value.get("research_only") is not True:
+        return False, "research_only_required"
+    if value.get("broker_execution_enabled") is not False:
+        return False, "broker_execution_must_be_false"
+    envelope = value._envelope
+    for field in (
+        "receipt_id",
+        "receipt_hash_sha256",
+        "strategy_id",
+        "strategy_version",
+        "symbol",
+        "market_date",
+        "pick_tier",
+        "research_pick_eligible",
+        "paper_entry_eligible",
+        "source_identity",
+        "input_hash_sha256",
+    ):
+        if field not in envelope or field not in value:
+            return False, f"persisted_envelope_{field}_mismatch"
+        if field in {"research_pick_eligible", "paper_entry_eligible"}:
+            if (
+                not isinstance(value.get(field), bool)
+                or isinstance(envelope[field], bool)
+                or envelope[field] not in (0, 1)
+            ):
+                return False, f"persisted_envelope_{field}_mismatch"
+            if bool(envelope[field]) != value.get(field):
+                return False, f"persisted_envelope_{field}_mismatch"
+        elif not isinstance(value.get(field), str) or not isinstance(envelope[field], str):
+            return False, f"persisted_envelope_{field}_mismatch"
+        elif envelope[field] != value.get(field):
+            return False, f"persisted_envelope_{field}_mismatch"
+    created_at = _parse_aware_timestamp(envelope.get("created_at"))
+    if created_at is None:
+        return False, "persisted_created_at_missing_or_unparseable"
+    if created_at > cutoff:
+        return False, "persisted_created_at_after_cutoff"
+    return True, ""
+
+
+def _validate_decision_receipt_ingress(
+    receipts: Sequence[Mapping[str, Any]] | None,
+    *,
+    market_date: str,
+    cutoff: datetime,
+) -> tuple[tuple[Mapping[str, Any], ...], dict[str, Any]]:
+    """Validate every supplied receipt and expose rejected rows by reason."""
+
+    if receipts is None:
+        return (), {"source_status": "NOT_PROVIDED", "invalid_count": 0, "invalid_reasons": {}}
+    accepted: list[Mapping[str, Any]] = []
+    reasons: dict[str, int] = {}
+    for receipt in receipts:
+        valid, reason = _validate_persisted_decision_receipt(
+            receipt, market_date=market_date, cutoff=cutoff
+        )
+        if valid:
+            accepted.append(receipt)
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    persisted_invalid_reasons = getattr(receipts, "invalid_reasons", {})
+    for reason, count in dict(persisted_invalid_reasons).items():
+        reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
+    return tuple(accepted), {
+        "source_status": "CHECKED",
+        "invalid_count": sum(reasons.values()),
+        "invalid_reasons": dict(sorted(reasons.items())),
+    }
+
+
+def _freeze_invocation_identity(root: Path, context: DailyLearningContext) -> DailyLearningContext:
+    """Persist the first cutoff before any analyzer work starts.
+
+    This reservation closes the crash window between invoking the stage and
+    writing its final receipt.  Retries reuse the original point-in-time
+    boundary; conflicting source/input/code identity remains a named failure.
+    """
+
+    path = root / "daily_learning_invocation.json"
+    body = {
+        "schema_version": DAILY_LEARNING_SCHEMA,
+        "market_date": context.market_date,
+        "cutoff": context.cutoff,
+        "source_identity": context.source_identity,
+        "source_hash_sha256": context.source_hash_sha256,
+        "input_hash_sha256": context.input_hash_sha256,
+        "code_sha": context.code_sha,
+    }
+    if path.exists():
+        try:
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("daily-learning invocation reservation is unreadable") from exc
+        if not isinstance(persisted, dict):
+            raise ValueError("daily-learning invocation reservation is not an object")
+        reservation_hash = persisted.get("reservation_sha256")
+        stored_body = {
+            key: value
+            for key, value in persisted.items()
+            if key != "reservation_sha256"
+        }
+        if reservation_hash != _sha256(stored_body):
+            raise ValueError("daily-learning invocation reservation hash mismatch")
+        for key in (
+            "market_date",
+            "source_identity",
+            "source_hash_sha256",
+            "input_hash_sha256",
+            "code_sha",
+        ):
+            if persisted.get(key) != body[key]:
+                raise ValueError(f"daily-learning invocation identity conflict: {key}")
+        frozen = DailyLearningContext(
+            market_date=str(persisted["market_date"]),
+            cutoff=str(persisted["cutoff"]),
+            source_identity=str(persisted["source_identity"]),
+            code_sha=str(persisted["code_sha"]),
+            source_hash_sha256=str(persisted["source_hash_sha256"]),
+            input_hash_sha256=str(persisted["input_hash_sha256"]),
+        )
+        return frozen
+    root.mkdir(parents=True, exist_ok=True)
+    _write_json_idempotent(path, {**body, "reservation_sha256": _sha256(body)})
+    return context
 
 
 def run_daily_strategy_learning(
@@ -610,6 +883,7 @@ def run_daily_strategy_learning(
     input_hash_sha256: str | None = None,
     analyzer: StrategyEvidenceAnalyzer | None = None,
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
+    v6_decisions: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Inventory the catalog and write one immutable research-only daily run."""
 
@@ -623,9 +897,34 @@ def run_daily_strategy_learning(
         input_hash_sha256=input_hash_sha256 or source_hash,
     )
     root = Path(out_dir) / context.market_date
+    context = _freeze_invocation_identity(root, context)
     reused = _reuse_immutable_artifacts(root, context)
     if reused is not None:
         return reused
+    valid_receipts, receipt_ingress = _validate_decision_receipt_ingress(
+        decision_receipts,
+        market_date=context.market_date,
+        cutoff=_cutoff_datetime(context),
+    )
+    valid_v6 = tuple(
+        row for row in (v6_decisions or ()) if isinstance(row, _PersistedV6Decision)
+    )
+    v6_invalid_count = len(tuple(v6_decisions or ())) - len(valid_v6)
+    v6_invalid_reasons = dict(getattr(v6_decisions, "invalid_reasons", {}))
+    if v6_invalid_count:
+        v6_invalid_reasons["decision_not_from_persisted_readonly_source"] = (
+            v6_invalid_reasons.get("decision_not_from_persisted_readonly_source", 0)
+            + v6_invalid_count
+        )
+    v6_source_status = (
+        "NOT_PROVIDED"
+        if v6_decisions is None
+        else "INTEGRITY_FAILURE"
+        if v6_invalid_count or int(getattr(v6_decisions, "invalid_count", 0) or 0)
+        else "NO_EVIDENCE"
+        if not valid_v6
+        else "PROVIDED"
+    )
     analyzer = analyzer or EmptyEvidenceAnalyzer()
     strategies = sorted(
         _build_daily_strategy_catalog(), key=lambda item: (item.strategy_id, item.version)
@@ -642,6 +941,18 @@ def run_daily_strategy_learning(
         if not isinstance(raw, Mapping):
             raise ValueError(f"analyzer result for {strategy.strategy_id} must be an object")
         evidence, strategy_proposals = _normalize_analysis(strategy, context, raw)
+        raw_status = str(raw.get("status") or "").upper()
+        if raw.get("source_status"):
+            source_status = str(raw["source_status"])
+        elif raw_status in {"NO_ANALYSIS", ""} and isinstance(analyzer, EmptyEvidenceAnalyzer):
+            source_status = "NOT_PROVIDED"
+        elif raw_status in {"NO_RETAINED_ROWS", "NO_EVIDENCE"}:
+            source_status = "CHECKED_ZERO"
+        elif not raw:
+            source_status = "NOT_PROVIDED"
+        else:
+            source_status = "CHECKED"
+        evidence["source_status"] = source_status
         strategy_evidence.append(
             {
                 "strategy_id": strategy.strategy_id,
@@ -651,10 +962,46 @@ def run_daily_strategy_learning(
         )
         proposals.extend(strategy_proposals)
 
-    receipt_learning = _aggregate_decision_receipts(decision_receipts or ())
-    receipt_coverage = _decision_receipt_coverage(decision_receipts)
+    # Keep raw receipt observations visible for diagnostics, but only the
+    # authenticated persisted subset can contribute to certification.
+    receipt_learning = _aggregate_decision_receipts(valid_receipts)
+    receipt_learning["valid_receipt_count"] = len(valid_receipts)
+    receipt_learning["invalid_receipt_count"] = int(receipt_ingress["invalid_count"])
+    receipt_learning["invalid_receipt_reasons"] = receipt_ingress["invalid_reasons"]
+    receipt_learning["v6_source_status"] = v6_source_status
+    receipt_learning["v6_decision_count"] = len(valid_v6)
+    receipt_learning["v6_invalid_count"] = v6_invalid_count + int(
+        getattr(v6_decisions, "invalid_count", 0) or 0
+    )
+    receipt_learning["v6_invalid_reasons"] = dict(sorted(v6_invalid_reasons.items()))
+    receipt_coverage = _decision_receipt_coverage(
+        valid_receipts if decision_receipts is not None else None,
+        ingress=receipt_ingress,
+    )
+    receipt_coverage["ingress"] = receipt_ingress
     receipt_learning["expected_strategy_coverage"] = receipt_coverage
-    run_status = "complete" if receipt_coverage["status"] == "COMPLETE" else "incomplete"
+    receipt_coverage["v6_source_status"] = v6_source_status
+    receipt_coverage["v6_decision_count"] = len(valid_v6)
+    receipt_coverage["v6_invalid_count"] = receipt_learning["v6_invalid_count"]
+    receipt_coverage["v6_invalid_reasons"] = receipt_learning["v6_invalid_reasons"]
+    receipt_coverage["coverage_hash_sha256"] = _sha256(
+        {key: value for key, value in receipt_coverage.items() if key != "coverage_hash_sha256"}
+    )
+    strategy_source_statuses = [
+        str(item["evidence"].get("source_status") or "INCOMPLETE")
+        for item in strategy_evidence
+    ]
+    strategy_coverage_incomplete = any(
+        status in {"NOT_PROVIDED", "INTEGRITY_FAILURE", "INCOMPLETE"}
+        for status in strategy_source_statuses
+    )
+    run_status = (
+        "complete"
+        if receipt_coverage["status"] == "COMPLETE"
+        and v6_source_status not in {"NOT_PROVIDED", "INTEGRITY_FAILURE"}
+        and not strategy_coverage_incomplete
+        else "incomplete"
+    )
 
     immutable_identity = {
         "schema_version": DAILY_LEARNING_SCHEMA,
@@ -1016,12 +1363,16 @@ def _receipt_outcome_state(receipt: Mapping[str, Any]) -> str:
 
 def _decision_receipt_coverage(
     receipts: Sequence[Mapping[str, Any]] | None,
+    *,
+    ingress: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Emit an immutable expected-cohort coverage receipt.
 
     ``None`` means the caller did not provide a persisted receipt source.  An
     explicit empty sequence means that source was checked and yielded zero
-    AlphaOps evidence; that is incomplete, never silently treated as covered.
+    AlphaOps evidence: ``COMPLETE`` for the checked lane with a governed
+    ``NO_EVIDENCE`` source result.  The overall run still requires actual
+    strategy evidence before it can be complete.
     """
 
     expected = [
@@ -1052,6 +1403,10 @@ def _decision_receipt_coverage(
             ],
             "research_only": True,
             "broker_execution_enabled": False,
+            # V6 decisions are persisted in alpha_v6_decisions, not this
+            # receipt table.  Keep that producer lane explicit rather than
+            # inventing an impossible V6 StrategyDecisionReceipt cohort.
+            "v6_source_status": "NOT_PROVIDED",
         }
     else:
         observed_counts: dict[tuple[str, str], int] = {}
@@ -1071,23 +1426,30 @@ def _decision_receipt_coverage(
             }
             for strategy_id, strategy_version in EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES
         ]
-        missing = [
-            {
-                "strategy_id": row["strategy_id"],
-                "strategy_version": row["strategy_version"],
-                "reason": "zero_exact_persisted_receipts",
-            }
-            for row in observed
-            if row["receipt_count"] == 0
-        ]
+        invalid_count = int((ingress or {}).get("invalid_count") or 0)
+        missing = []
+        if invalid_count:
+            missing = [
+                {
+                    "strategy_id": row["strategy_id"],
+                    "strategy_version": row["strategy_version"],
+                    "reason": "invalid_or_quarantined_persisted_receipts",
+                }
+                for row in observed
+                if row["receipt_count"] == 0
+            ]
         body = {
             "schema_version": "dawnstrike.strategy_decision_coverage.v1",
-            "status": "COMPLETE" if not missing else "INCOMPLETE",
+            "status": "INCOMPLETE" if invalid_count else "COMPLETE",
             "expected": expected,
             "observed": observed,
             "missing": missing,
             "research_only": True,
             "broker_execution_enabled": False,
+            "v6_source_status": "NOT_PROVIDED",
+            "source_result": "INTEGRITY_FAILURE" if invalid_count else (
+                "NO_EVIDENCE" if not any(row["receipt_count"] for row in observed) else "PROVIDED"
+            ),
         }
     body["coverage_hash_sha256"] = _sha256(body)
     return body

@@ -15,7 +15,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -399,7 +399,52 @@ def load_portfolio_performance_rows_readonly(
                 "WHERE market_date <= ? ORDER BY market_date, record_id",
                 (query_cutoff,),
             )
-        return tuple(dict(row) for row in cursor.fetchall())
+        loaded = [dict(row) for row in cursor.fetchall()]
+        if date_cutoff is not None:
+            cutoff_at = _parse_timestamp(date_cutoff)
+            if cutoff_at is None:
+                raise ValueError("date_cutoff must be an aware ISO datetime")
+            # ``reconciled_at`` is the persisted availability boundary for
+            # portfolio performance.  Rows materialized after the frozen EOD
+            # cutoff must not perturb retry input hashes, even if their
+            # market_date is historical.
+            loaded = [
+                row
+                for row in loaded
+                if (available := _parse_timestamp(row.get("reconciled_at"))) is not None
+                and available <= cutoff_at
+            ]
+            evidence_timestamp_fields = (
+                "terminal_event_at",
+                "_terminal_event_at",
+                "closed_at",
+                "close_time",
+                "exit_time",
+                "exit_timestamp",
+                "resolved_at",
+                "completed_at",
+                "evidence_at",
+                "observed_at",
+                "event_at",
+                "decision_at",
+                "generated_at",
+                "created_at",
+            )
+            loaded = [
+                row
+                for row in loaded
+                if not any(
+                    (event_at := _parse_timestamp(row.get(field))) is not None
+                    and event_at > cutoff_at
+                    for field in evidence_timestamp_fields
+                )
+            ]
+            # Apply the same all-alias point-in-time gate used by attribution
+            # before the CLI hashes its database input.  Rows that the
+            # normalizer will exclude (including malformed aliases) must not
+            # become invisible hash inputs on a retry.
+            loaded = [row for row in loaded if _within_cutoff(row, str(date_cutoff))]
+        return tuple(loaded)
     finally:
         connection.close()
 
@@ -433,21 +478,50 @@ def load_strategy_decision_receipts_readonly(
         if exists is None:
             return None
         rows = connection.execute(
-            "SELECT receipt_id, receipt_hash_sha256, strategy_id, strategy_version, "
-            "market_date, canonical_json FROM strategy_decision_receipts "
+            "SELECT receipt_id, receipt_hash_sha256, strategy_id, strategy_version, symbol, "
+            "market_date, pick_tier, research_pick_eligible, paper_entry_eligible, "
+            "source_identity, input_hash_sha256, canonical_json, created_at "
+            "FROM strategy_decision_receipts "
             "WHERE market_date = ? ORDER BY created_at, receipt_id",
             (market_date,),
         ).fetchall()
     finally:
         connection.close()
 
+    # Keep loader diagnostics attached to the tuple so the service can expose
+    # quarantined rows without accepting them as evidence.  The payloads are
+    # private authenticated envelopes, not ordinary JSON mappings.
+    class _ReceiptBatch(tuple):
+        def __new__(cls, values, *, invalid_reasons):
+            result = super().__new__(cls, values)
+            result.invalid_reasons = dict(sorted(invalid_reasons.items()))
+            result.invalid_count = sum(result.invalid_reasons.values())
+            result.invalid_identities = ()
+            return result
+
+    from intraday_scanner.services.daily_strategy_learning_service import _persisted_receipt
+
     result: list[dict[str, Any]] = []
+    invalid_reasons: dict[str, int] = {}
+    invalid_identities: list[str] = []
+    current_identity = ""
+
+    def reject(reason: str) -> None:
+        invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+        if current_identity:
+            invalid_identities.append(current_identity)
+
     for row in rows:
+        current_identity = hashlib.sha256(
+            str(row["canonical_json"]).encode("utf-8")
+        ).hexdigest()
         try:
-            payload = json.loads(str(row[5]))
+            payload = json.loads(str(row["canonical_json"]))
         except (TypeError, ValueError):
+            reject("receipt_payload_not_json")
             continue
         if not isinstance(payload, dict):
+            reject("receipt_payload_not_object")
             continue
         digest = str(payload.get("receipt_hash_sha256") or "")
         receipt_id = str(payload.get("receipt_id") or "")
@@ -466,24 +540,234 @@ def load_strategy_decision_receipts_readonly(
             ).encode("utf-8")
         ).hexdigest()
         decision_at = _parse_timestamp(payload.get("decision_at"))
+        created_at = _parse_timestamp(row["created_at"])
+        if created_at is None:
+            reject("persisted_created_at_missing_or_unparseable")
+            continue
+        if created_at > cutoff:
+            reject("persisted_created_at_after_cutoff")
+            continue
         if (
             not re.fullmatch(r"[0-9a-f]{64}", digest)
             or digest != expected
             or receipt_id != "sdr-" + digest[:24]
-            or str(row[0]) != receipt_id
-            or str(row[1]) != digest
-            or str(row[2]) != str(payload.get("strategy_id") or "")
-            or str(row[3]) != str(payload.get("strategy_version") or "")
-            or str(row[4]) != str(payload.get("market_date") or "")
+            or str(row["receipt_id"]) != receipt_id
+            or str(row["receipt_hash_sha256"]) != digest
+            or str(row["strategy_id"]) != str(payload.get("strategy_id") or "")
+            or str(row["strategy_version"]) != str(payload.get("strategy_version") or "")
+            or str(row["market_date"]) != str(payload.get("market_date") or "")
             or payload.get("market_date") != market_date
             or decision_at is None
             or decision_at > cutoff
             or payload.get("research_only") is not True
             or payload.get("broker_execution_enabled") is not False
         ):
+            # Preserve one deterministic reason for common corruption while
+            # the service performs the complete authenticated check as well.
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                reject("receipt_hash_missing_or_noncanonical")
+            elif digest != expected:
+                reject("receipt_hash_mismatch")
+            elif receipt_id != "sdr-" + digest[:24]:
+                reject("receipt_id_not_derived_from_hash")
+            elif decision_at is None:
+                reject("decision_at_missing_or_unparseable")
+            elif decision_at > cutoff:
+                reject("decision_after_cutoff")
+            else:
+                reject("receipt_envelope_or_safety_mismatch")
             continue
-        result.append(payload)
-    return tuple(result)
+        # Bind the complete persisted row envelope.  Any mismatch is rejected
+        # here and again at the central service ingress.
+        envelope_fields = {
+            field: row[field]
+            for field in (
+                "receipt_id",
+                "receipt_hash_sha256",
+                "strategy_id",
+                "strategy_version",
+                "symbol",
+                "market_date",
+                "pick_tier",
+                "research_pick_eligible",
+                "paper_entry_eligible",
+                "source_identity",
+                "input_hash_sha256",
+                "created_at",
+            )
+        }
+        mismatch = False
+        for field, envelope_value in envelope_fields.items():
+            if field == "created_at":
+                continue
+            if field not in payload:
+                mismatch = True
+                break
+            if field in {"research_pick_eligible", "paper_entry_eligible"}:
+                mismatch = (
+                    not isinstance(payload[field], bool)
+                    or isinstance(envelope_value, bool)
+                    or envelope_value not in (0, 1)
+                    or bool(envelope_value) != payload[field]
+                )
+            else:
+                mismatch = (
+                    not isinstance(envelope_value, str)
+                    or not isinstance(payload[field], str)
+                    or envelope_value != payload[field]
+                )
+            if mismatch:
+                break
+        if mismatch:
+            reject("persisted_envelope_payload_mismatch")
+            continue
+        result.append(_persisted_receipt(payload, envelope=envelope_fields))
+    batch = _ReceiptBatch(result, invalid_reasons=invalid_reasons)
+    batch.invalid_identities = tuple(sorted(invalid_identities))
+    return batch
+
+
+def load_alpha_v6_decisions_readonly(
+    database_path: str | Path,
+    *,
+    market_date: str,
+    date_cutoff: str,
+) -> tuple[dict[str, Any], ...] | None:
+    """Load V6 decisions through their own governed, point-in-time lane.
+
+    V6 is not a ``StrategyDecisionReceipt`` cohort.  Rows must pass the
+    canonical V6 batch validator, match every persisted envelope column, and
+    carry a non-empty ``stored_at`` at or before the frozen cutoff.
+    """
+
+    from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
+    from intraday_scanner.services.daily_strategy_learning_service import _persisted_v6_decision
+
+    path = Path(database_path).resolve()
+    cutoff = _parse_timestamp(date_cutoff)
+    if not path.is_file() or cutoff is None:
+        raise ValueError("database path and date_cutoff must be valid")
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alpha_v6_decisions'"
+        ).fetchone()
+        if exists is None:
+            return None
+        columns = {
+            str(item[1]) for item in connection.execute("PRAGMA table_info(alpha_v6_decisions)")
+        }
+        if "stored_at" not in columns:
+            class _LegacyV6Batch(tuple):
+                invalid_count = 1
+                invalid_reasons = {"stored_at_column_missing": 1}
+                invalid_identities = ()
+
+            return _LegacyV6Batch()
+        rows = connection.execute(
+            "SELECT decision_id, scan_id, source_signal_id, shadow_signal_id, market_date, "
+            "decision_at, ticker, strategy_version, model_version, action, setup_key, "
+            "regime_key, safety_vetoes_json, input_hash_sha256, source_lineage_hash_sha256, "
+            "stored_at, payload_json FROM alpha_v6_decisions WHERE market_date = ? "
+            "ORDER BY decision_at, decision_id",
+            (market_date,),
+        ).fetchall()
+    finally:
+        connection.close()
+    valid: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    all_identities: list[str] = []
+    identity_by_decision: dict[str, str] = {}
+    for row in rows:
+        row_identity = hashlib.sha256(str(row["payload_json"]).encode("utf-8")).hexdigest()
+        all_identities.append(row_identity)
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError):
+            invalid.append("payload_not_json")
+            continue
+        if not isinstance(payload, dict):
+            invalid.append("payload_not_object")
+            continue
+        available = _parse_timestamp(row["stored_at"])
+        decision_at = _parse_timestamp(payload.get("decision_at"))
+        if available is None:
+            invalid.append("stored_at_missing_or_unparseable")
+            continue
+        if available > cutoff:
+            invalid.append("stored_at_after_cutoff")
+            continue
+        if payload.get("market_date") != market_date:
+            invalid.append("market_date_mismatch")
+            continue
+        if decision_at is None or decision_at > cutoff:
+            invalid.append("decision_after_cutoff")
+            continue
+        envelope_fields = {
+            "decision_id": row["decision_id"],
+            "scan_id": row["scan_id"],
+            "source_signal_id": row["source_signal_id"],
+            "shadow_signal_id": row["shadow_signal_id"],
+            "market_date": row["market_date"],
+            "decision_at": row["decision_at"],
+            "ticker": row["ticker"],
+            "strategy_version": row["strategy_version"],
+            "model_version": row["model_version"],
+            "action": row["action"],
+            "setup_key": row["setup_key"],
+            "regime_key": row["regime_key"],
+            "input_hash_sha256": row["input_hash_sha256"],
+            "source_lineage_hash_sha256": row["source_lineage_hash_sha256"],
+        }
+        if any(str(value) != str(payload.get(field)) for field, value in envelope_fields.items()):
+            invalid.append("persisted_envelope_payload_mismatch")
+            continue
+        try:
+            stored_vetoes = json.loads(str(row["safety_vetoes_json"]))
+        except (TypeError, ValueError):
+            invalid.append("safety_vetoes_not_json")
+            continue
+        if stored_vetoes != payload.get("safety_vetoes"):
+            invalid.append("persisted_safety_vetoes_mismatch")
+            continue
+        valid.append(payload)
+        identity_by_decision[str(payload.get("decision_id") or "")] = row_identity
+    class _V6Batch(tuple):
+        def __new__(cls, values, *, invalid_reasons):
+            result = super().__new__(cls, values)
+            result.invalid_reasons = dict(sorted(Counter(invalid_reasons).items()))
+            result.invalid_count = sum(result.invalid_reasons.values())
+            result.invalid_identities = ()
+            return result
+
+    batch = validate_decision_batch(valid)
+    if not batch["valid"]:
+        invalid_ids = {
+            str(item.get("decision_id") or "") for item in batch["invalid"]
+        }
+        invalid.extend(
+            str(violation)
+            for item in batch["invalid"]
+            for violation in item.get("violations") or ()
+        )
+        valid = [
+            item for item in valid if str(item.get("decision_id") or "") not in invalid_ids
+        ]
+    accepted_identities = {
+        identity_by_decision[str(item.get("decision_id") or "")]
+        for item in valid
+        if str(item.get("decision_id") or "") in identity_by_decision
+    }
+
+    batch_result = _V6Batch(
+        [_persisted_v6_decision(item) for item in valid], invalid_reasons=invalid
+    )
+    batch_result.invalid_identities = tuple(
+        sorted(identity for identity in all_identities if identity not in accepted_identities)
+    )
+    return batch_result
 
 
 def _mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
@@ -705,38 +989,56 @@ def _within_cutoff(row: dict[str, Any], cutoff: str | None) -> bool:
         return True
     if row.get("_point_in_time_unreconstructable"):
         return False
-    cutoff_date, _cutoff_at = _cutoff_parts(cutoff)
-    date = str(row.get("market_date") or "").strip()
-    if not date or date[:10] > cutoff_date:
+    cutoff_date, cutoff_at = _cutoff_parts(cutoff)
+    payload = row.get("_payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+
+    def values(fields: Iterable[str]) -> tuple[str, ...]:
+        return tuple(
+            str(value).strip()
+            for field in fields
+            for value in (row.get(field), payload.get(field))
+            if value not in (None, "") and str(value).strip()
+        )
+
+    date_value = str(row.get("market_date") or payload.get("market_date") or "").strip()
+    try:
+        date.fromisoformat(date_value)
+    except ValueError:
         return False
-    entry_event = _first_timestamp(
-        row,
-        (
-            "_entry_event_at",
-            "fill_time",
-            "opened_at",
-            "signal_time",
-            "_entry_event_date",
-        ),
+    if date_value > cutoff_date:
+        return False
+    timestamp_fields = (
+        "_entry_event_at",
+        "fill_time",
+        "opened_at",
+        "signal_time",
+        "_entry_event_date",
+        "_terminal_event_at",
+        "close_time",
+        "closed_at",
+        "exit_time",
+        "exit_timestamp",
+        "_terminal_event_date",
+        "terminal_event_at",
+        "resolved_at",
+        "completed_at",
+        "evidence_at",
+        "observed_at",
+        "event_at",
+        "decision_at",
+        "generated_at",
+        "created_at",
     )
-    terminal_event = _first_timestamp(
-        row,
-        (
-            "_terminal_event_at",
-            "close_time",
-            "closed_at",
-            "exit_time",
-            "exit_timestamp",
-            "_terminal_event_date",
-        ),
-    )
-    # A materialized current open/pending row is usable only when its entry is
-    # known by the cutoff and no terminal event is known after it.  We do not
-    # back-project a future close into a historical open state.
-    return not (
-        _event_after_cutoff(entry_event, cutoff)
-        or _event_after_cutoff(terminal_event, cutoff)
-    )
+    # Every populated alias is independently ordered.  A valid first alias
+    # cannot mask a malformed or future conflicting alias later in the row.
+    for event in values(timestamp_fields):
+        parsed = _parse_timestamp(event)
+        if parsed is None:
+            return False
+        if cutoff_at is not None and parsed > cutoff_at:
+            return False
+    return True
 
 
 def _benchmark_index(
@@ -1038,10 +1340,12 @@ def _attribute_row(
     # are explicit governed account/portfolio/benchmark aggregates.  An
     # omitted record_type is intentionally treated as a trade-like record so
     # an official row cannot smuggle an aggregate return through this gate.
-    aggregate_fill_exempt = (
-        not bool(row.get("_lifecycle_child"))
-        and record_type in _FILL_TRUTH_EXEMPT_RECORD_TYPES
-    )
+    # ``record_type`` is caller-controlled data and cannot authenticate an
+    # aggregate.  Until a private readonly materializer supplies an
+    # authenticated aggregate envelope, every closed return (including
+    # portfolio/account/benchmark-looking mappings) requires governed
+    # FillTruth and remains provisional.
+    aggregate_fill_exempt = False
     requires_fill_truth = (
         status in _CLOSED_STATES
         and return_pct is not None

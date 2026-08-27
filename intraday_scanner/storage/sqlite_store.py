@@ -6074,8 +6074,8 @@ class SQLiteScanStore:
                          market_date, decision_at, ticker, strategy_version,
                          model_version, action, setup_key, regime_key,
                          safety_vetoes_json, input_hash_sha256,
-                         source_lineage_hash_sha256, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         source_lineage_hash_sha256, stored_at, payload_json)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             str(row.get("decision_id") or ""),
@@ -6093,6 +6093,7 @@ class SQLiteScanStore:
                             json.dumps(row.get("safety_vetoes") or [], sort_keys=True),
                             str(row.get("input_hash_sha256") or ""),
                             str(row.get("source_lineage_hash_sha256") or ""),
+                            datetime.now(UTC).replace(microsecond=0).isoformat(),
                             json.dumps(row, sort_keys=True),
                         ),
                     )

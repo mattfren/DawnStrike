@@ -57,7 +57,7 @@ def run_migrations(connection: sqlite3.Connection) -> int:
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
             continue
-        if target_version == 31:
+        if target_version in {31, 32}:
             missing_tables = {
                 name
                 for name in _STRATEGY_RECEIPT_TABLES
@@ -78,7 +78,18 @@ def run_migrations(connection: sqlite3.Connection) -> int:
                 ).fetchone()
                 is None
             }
-            if not missing_tables and not missing_triggers:
+            v6_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(alpha_v6_decisions)").fetchall()
+            }
+            missing_v6_availability = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alpha_v6_decisions'"
+                ).fetchone()
+                is not None
+                and "stored_at" not in v6_columns
+            )
+            if not missing_tables and not missing_triggers and not missing_v6_availability:
                 continue
             migration(connection)
             # Do not advance schema_version: older governed stores validate
@@ -2387,6 +2398,17 @@ def _migration_031_strategy_decision_receipts(connection: sqlite3.Connection) ->
     )
 
 
+def _migration_032_v6_decision_availability(connection: sqlite3.Connection) -> None:
+    """Add the immutable V6 persisted-availability boundary sidecar."""
+
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alpha_v6_decisions'"
+    ).fetchone():
+        _add_column_if_missing(
+            connection, "alpha_v6_decisions", "stored_at TEXT NOT NULL DEFAULT ''"
+        )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -2428,4 +2450,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (29, _migration_029_opportunity_research),
     (30, _migration_030_opportunity_validation),
     (31, _migration_031_strategy_decision_receipts),
+    (32, _migration_032_v6_decision_availability),
 )

@@ -34,6 +34,7 @@ from intraday_scanner.paper_audit import main as paper_audit_main
 from intraday_scanner.performance.cli import main as performance_reconcile_main
 from intraday_scanner.performance.strategy_miss_attribution import (
     attribute_strategy_misses,
+    load_alpha_v6_decisions_readonly,
     load_portfolio_performance_rows_readonly,
     load_strategy_decision_receipts_readonly,
 )
@@ -1868,6 +1869,7 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
     analyzer: StrategyEvidenceAnalyzer | None = None
     input_hash_sha256: str | None = None
     decision_receipts: Sequence[Mapping[str, Any]] | None = None
+    v6_decisions: Sequence[Mapping[str, Any]] | None = None
     if args.evidence_file:
         payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -1888,7 +1890,10 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
                 raise SnapshotValidationError(
                     "strategy learning decision_receipts must be a list of objects"
                 )
-            decision_receipts = _receipts_at_or_before_cutoff(raw_receipts, args.cutoff)
+            # Keep every supplied row for the central ingress to quarantine and
+            # report.  Filtering future/malformed rows here would hide forged
+            # evidence and could incorrectly certify an empty source.
+            decision_receipts = tuple(raw_receipts)
         input_hash_sha256 = _hash_strategy_learning_inputs(
             evidence_payload=payload,
             decision_receipts=decision_receipts,
@@ -1896,7 +1901,7 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
     elif args.db_path:
         rows = load_portfolio_performance_rows_readonly(
             args.db_path,
-            date_cutoff=args.market_date,
+            date_cutoff=args.cutoff,
         )
         paper_ops_rows = None
         if args.paper_ops_root:
@@ -1911,11 +1916,17 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
             market_date=args.market_date,
             date_cutoff=args.cutoff,
         )
+        v6_decisions = load_alpha_v6_decisions_readonly(
+            args.db_path,
+            market_date=args.market_date,
+            date_cutoff=args.cutoff,
+        )
         input_hash_sha256 = _hash_strategy_learning_inputs(
             database_rows=rows,
             paper_ops_rows=paper_ops_rows,
             paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
             decision_receipts=decision_receipts,
+            v6_decisions=v6_decisions,
         )
         analyzer = AttributionReportAnalyzer(
             attribute_strategy_misses(
@@ -1934,6 +1945,7 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         input_hash_sha256=input_hash_sha256,
         analyzer=analyzer,
         decision_receipts=decision_receipts,
+        v6_decisions=v6_decisions,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "complete" else 1
@@ -1946,6 +1958,7 @@ def _hash_strategy_learning_inputs(
     paper_ops_root: Path | None = None,
     evidence_payload: Mapping[str, Any] | None = None,
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
+    v6_decisions: Sequence[Mapping[str, Any]] | None = None,
 ) -> str | None:
     """Bind reuse to the exact evidence objects consumed by the analyzer.
 
@@ -1971,6 +1984,8 @@ def _hash_strategy_learning_inputs(
         parts.append(("evidence_payload", _canonical_input_bytes(evidence_payload)))
     if decision_receipts is not None:
         parts.append(("strategy_decision_receipts", _canonical_input_bytes(decision_receipts)))
+    if v6_decisions is not None:
+        parts.append(("alpha_v6_decisions", _canonical_input_bytes(v6_decisions)))
     if not parts:
         return None
     digest = hashlib.sha256()
@@ -1984,6 +1999,12 @@ def _hash_strategy_learning_inputs(
 
 
 def _canonical_input_bytes(value: Any) -> bytes:
+    if hasattr(value, "invalid_identities") or hasattr(value, "invalid_reasons"):
+        value = {
+            "accepted": list(value),
+            "invalid_identities": list(getattr(value, "invalid_identities", ())),
+            "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
+        }
     return json.dumps(
         value,
         ensure_ascii=False,
