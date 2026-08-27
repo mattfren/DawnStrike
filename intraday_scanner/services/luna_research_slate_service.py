@@ -168,6 +168,11 @@ def apply_publication_semantics(
             or (slate_row or {}).get("signal_id")
             or ""
         )
+        immutable_frozen_source = bool(
+            (slate_row or {}).get("research_source_signal_id")
+            and (slate_row or {}).get("research_selection_id")
+            and (slate_row or {}).get("research_row_hash_sha256")
+        )
         current_source_signal_ids = [
             str(value)
             for value in (
@@ -178,16 +183,22 @@ def apply_publication_semantics(
         ]
         exact_frozen_source = slate_row is not None and (
             (
-                bool(current_source_signal_ids)
-                and all(
-                    value == frozen_source_signal_id
-                    for value in current_source_signal_ids
+                immutable_frozen_source
+                and (
+                    (
+                        bool(current_source_signal_ids)
+                        and all(
+                            value == frozen_source_signal_id
+                            for value in current_source_signal_ids
+                        )
+                    )
+                    or (
+                        not current_source_signal_ids
+                        and _matches_synthesized_frozen_source(row, slate_row)
+                    )
                 )
             )
-            or (
-                not current_source_signal_ids
-                and _matches_synthesized_frozen_source(row, slate_row)
-            )
+            or (not immutable_frozen_source and row == slate_row)
         )
         selected_and_safe = exact_frozen_source and _safe_for_research(
             row, require_safety=require_watcher_proof
@@ -200,7 +211,8 @@ def apply_publication_semantics(
             enriched["entry_state"] = "RESEARCH_ONLY"
             row_ceiling_block = _row_promotion_limited(row, coverage_payload)
             qualified = (
-                _plan_qualified(row, receipt_verifier=receipt_verifier)
+                immutable_frozen_source
+                and _plan_qualified(row, receipt_verifier=receipt_verifier)
                 and not row_ceiling_block
             )
             enriched["execution_cost_status"] = (

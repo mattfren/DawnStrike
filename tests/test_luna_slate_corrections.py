@@ -808,6 +808,20 @@ def test_publication_rejects_contradictory_forged_source_identity_fields():
     assert published["entry_state"] == "NOT_PUBLISHED"
 
 
+def test_raw_legacy_slate_requires_exact_row_and_cannot_promote(monkeypatch):
+    from intraday_scanner.services import luna_research_slate_service as slate_service
+
+    raw = {"ticker": "LEGACY", "signal_id": "legacy-id", "alpha_score": 10}
+    monkeypatch.setattr(slate_service, "_plan_qualified", lambda row, **_: True)
+    exact = apply_publication_semantics([raw], slate={"rows": [raw]})[0]
+    altered = apply_publication_semantics(
+        [{**raw, "alpha_score": 99}], slate={"rows": [raw]}
+    )[0]
+
+    assert exact["publication_tier"] == TIER1
+    assert altered["publication_tier"] is None
+
+
 def test_slate_selection_requires_the_declared_evidence_lane_to_be_eligible() -> None:
     rows = [
         {"ticker": "CORE", "universe_lane": "core", "evidence_lane": "core"},
