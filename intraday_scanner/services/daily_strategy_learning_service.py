@@ -864,13 +864,14 @@ def _has_valid_ordering_timestamp(row: Mapping[str, Any]) -> bool:
 def _is_untrusted_financial_field(field: Any) -> bool:
     """Identify realized-return/P&L/R fields that cannot cross diagnostics."""
 
-    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(field or "").strip())
+    name = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", str(field or "").strip())
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
     name = re.sub(r"[\s&-]+", "_", name.lower())
     if not name:
         return False
     return bool(
         re.search(
-            r"(?:^|_)(?:return|roi|pnl|p_and_l|profit|loss|gain|expectancy|"
+            r"(?:^|_)(?:return|roi|pnl|pn_l|p_and_l|profit|loss|gain|expectancy|"
             r"p_l|profit_factor|win_rate|loss_rate|drawdown|r|r_multiple|"
             r"risk_reward|risk_reward_ratio)(?:_|$)",
             name,

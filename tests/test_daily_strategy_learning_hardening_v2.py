@@ -22,6 +22,7 @@ from intraday_scanner.performance.strategy_miss_attribution import (
 from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
 from intraday_scanner.services.daily_strategy_learning_service import (
     DailyLearningContext,
+    _is_untrusted_financial_field,
     _normalize_analysis,
     run_daily_strategy_learning,
 )
@@ -521,6 +522,28 @@ def test_database_snapshot_reports_its_actual_transaction_boundary(tmp_path: Pat
         assert reserved["generation"]["transaction"] == (
             "sqlite_existing_query_only_transaction"
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("PnL", True),
+        ("totalPnL", True),
+        ("realizedPnL", True),
+        ("RMultiple", True),
+        ("ROI", True),
+        ("returnPct", True),
+        ("profitFactor", True),
+        ("winRate", True),
+        ("riskReward", True),
+        ("ordinary_note", False),
+        ("printer", False),
+    ],
+)
+def test_camel_acronym_financial_aliases_are_untrusted_without_broad_matching(
+    field: str, expected: bool
+) -> None:
+    assert _is_untrusted_financial_field(field) is expected
 
 
 def test_missing_database_tables_cannot_mint_authenticated_zero_receipts(

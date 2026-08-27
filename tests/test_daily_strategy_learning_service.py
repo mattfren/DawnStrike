@@ -649,7 +649,14 @@ def test_mapping_evidence_retains_only_scrubbed_untrusted_diagnostics(tmp_path: 
                             "return_pct": 999.0,
                             "metrics": {
                                 "ROI": 999.0,
-                                "nested": {"expectancy": 999.0, "note": "diagnostic"},
+                                "nested": {
+                                    "expectancy": 999.0,
+                                    "PnL": 999000.0,
+                                    "totalPnL": 999000.0,
+                                    "realizedPnL": 999000.0,
+                                    "RMultiple": 999.0,
+                                    "note": "diagnostic",
+                                },
                             },
                         }
                     ],
@@ -662,6 +669,9 @@ def test_mapping_evidence_retains_only_scrubbed_untrusted_diagnostics(tmp_path: 
                             "performance": {
                                 "R Multiple": 999.0,
                                 "profit_factor": 999.0,
+                                "totalPnL": 999000.0,
+                                "realizedPnL": 999000.0,
+                                "RMultiple": 999.0,
                                 "note": "diagnostic",
                             },
                         }
