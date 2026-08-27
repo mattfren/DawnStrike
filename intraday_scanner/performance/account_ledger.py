@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
@@ -30,6 +31,7 @@ ACCOUNT_COHORT = Cohort.OFFICIAL_FORWARD_PAPER.value
 ACCOUNT_CURRENCY = "USD"
 ACCOUNT_TYPE = "simulated_paper"
 ACCOUNT_OPENING_EQUITY_CENTS = money_to_cents(DEFAULT_V5_POLICY.simulated_opening_equity)
+V5_FEE_BPS = 1.0
 if ACCOUNT_OPENING_EQUITY_CENTS is None:  # pragma: no cover - frozen policy invariant
     raise RuntimeError("AlphaOps v5 simulated opening equity is invalid")
 
@@ -38,6 +40,7 @@ def build_v5_account_ledger(
     *,
     trades: list[dict[str, Any]],
     positions: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
     scorecards: list[dict[str, Any]],
     intents: list[dict[str, Any]],
     selections: list[dict[str, Any]],
@@ -129,14 +132,18 @@ def build_v5_account_ledger(
             trades=day_trades,
             open_positions=open_positions,
         )
-        complete_trades = bool(day_trades) and all(_trade_is_complete(row) for row in day_trades)
+        complete_trades = bool(day_trades) and all(
+            _trade_is_complete(row, positions=v5_positions, fills=fills, intents=intents)
+            for row in day_trades
+        )
+        realized_trades = day_trades if complete_trades else []
 
-        gross = _sum_trade_money(day_trades, "gross_pnl")
-        fees = _sum_trade_money(day_trades, "fees")
-        slippage = _sum_trade_money(day_trades, "slippage_cost")
-        net = _sum_trade_money(day_trades, "net_pnl")
+        gross = _sum_trade_money(realized_trades, "gross_pnl")
+        fees = _sum_trade_money(realized_trades, "fees")
+        slippage = _sum_trade_money(realized_trades, "slippage_cost")
+        net = _sum_trade_money(realized_trades, "net_pnl")
         if (
-            day_trades
+            realized_trades
             and gross is None
             and net is not None
             and fees is not None
@@ -463,16 +470,414 @@ def _has_canonical_trade(
     )
 
 
-def _trade_is_complete(row: dict[str, Any]) -> bool:
-    return bool(
+def _trade_is_complete(
+    row: dict[str, Any],
+    *,
+    positions: Iterable[dict[str, Any]] = (),
+    fills: Iterable[dict[str, Any]] = (),
+    intents: Iterable[dict[str, Any]] = (),
+) -> bool:
+    """Require an exact durable paper lifecycle before official realization.
+
+    ``strategy_paper_trades`` is an EOD/model projection and is not FillTruth
+    by itself.  A realized v5 trade must join one closed paper position and its
+    durable entry/exit fills on immutable identity and prices.  This deliberately
+    ignores caller-supplied ``committed`` booleans in payloads.
+    """
+
+    if not bool(
         safe_float(row.get("entry_fill_price")) is not None
         and safe_float(row.get("exit_fill_price")) is not None
         and safe_float(row.get("quantity")) is not None
         and money_to_cents(row.get("net_pnl")) is not None
         and money_to_cents(row.get("fees")) is not None
         and money_to_cents(row.get("slippage_cost")) is not None
-        and str(row.get("source_bar_hash_sha256") or "").strip()
+        and _valid_sha256(row.get("source_bar_hash_sha256"))
+    ):
+        return False
+    trade_date = str(row.get("market_date") or "")[:10]
+    trade_ticker = str(row.get("ticker") or "").strip().upper()
+    trade_signal = str(row.get("signal_id") or "").strip()
+    trade_selection = str(row.get("selection_id") or "").strip()
+    trade_quantity = safe_float(row.get("quantity"))
+    trade_entry = safe_float(row.get("entry_fill_price"))
+    trade_exit = safe_float(row.get("exit_fill_price"))
+    trade_direction = str(row.get("direction") or "").strip().lower()
+    trade_account = str(_payload(row).get("account_id") or row.get("account_id") or "").strip()
+    for position in positions:
+        position_payload = _payload(position)
+        if str(position.get("status") or "").strip().upper() not in {
+            "CLOSED",
+            "REALIZED",
+            "COMPLETE",
+        }:
+            continue
+        if (
+            str(position.get("market_date") or "")[:10] != trade_date
+            or str(position.get("ticker") or "").strip().upper() != trade_ticker
+            or str(position.get("signal_id") or "").strip() != trade_signal
+            or not _same_number(position.get("quantity"), trade_quantity)
+            or not _same_number(position.get("entry_price"), trade_entry)
+            or not _same_number(position.get("exit_price"), trade_exit)
+        ):
+            continue
+        position_selection = str(
+            position.get("selection_id") or position_payload.get("selection_id") or ""
+        ).strip()
+        position_account = str(
+            position.get("account_id") or position_payload.get("account_id") or ""
+        ).strip()
+        trade_strategy = str(
+            row.get("strategy_id") or _payload(row).get("strategy_id") or ""
+        ).strip()
+        trade_version = str(
+            row.get("strategy_version") or _payload(row).get("strategy_version") or ""
+        ).strip()
+        trade_cohort = str(row.get("cohort") or _payload(row).get("cohort") or "").strip()
+        trade_episode = str(_payload(row).get("episode_id") or "").strip()
+        position_strategy = str(
+            position.get("strategy_id") or position_payload.get("strategy_id") or ""
+        ).strip()
+        position_version = str(
+            position.get("strategy_version") or position_payload.get("strategy_version") or ""
+        ).strip()
+        position_cohort = str(
+            position.get("cohort") or position_payload.get("cohort") or ""
+        ).strip()
+        position_episode = str(position_payload.get("episode_id") or "").strip()
+        position_eligible = position_payload.get("official_paper_eligible")
+        if (
+            not trade_selection
+            or not trade_account
+            or not trade_strategy
+            or not trade_version
+            or not trade_cohort
+            or not trade_episode
+            or not position_selection
+            or not position_account
+            or not position_strategy
+            or not position_version
+            or not position_cohort
+            or not position_episode
+            or trade_selection != position_selection
+            or trade_account != position_account
+            or trade_strategy != position_strategy
+            or trade_version != position_version
+            or trade_cohort != position_cohort
+            or trade_episode != position_episode
+            or position_eligible is not True
+            or position_payload.get("research_only") is not True
+            or position_payload.get("broker_execution_enabled") is not False
+            or trade_account != ALPHAOPS_V5_ACCOUNT_ID
+            or trade_strategy != ALPHAOPS_V5_STRATEGY_ID
+            or trade_version != ALPHAOPS_V5_STRATEGY_VERSION
+            or normalize_cohort(trade_cohort, default=Cohort.ALPHAOPS_SIGNAL_RESEARCH)
+            != Cohort.OFFICIAL_FORWARD_PAPER
+        ):
+            continue
+        if _is_reconciliation_derived(position, position_payload):
+            continue
+        position_id = str(position.get("position_id") or "").strip()
+        entry_intent = str(position.get("entry_intent_id") or "").strip()
+        exit_intent = str(position.get("exit_intent_id") or "").strip()
+        if not position_id or not entry_intent or not exit_intent:
+            continue
+        linked_fills = [
+            fill
+            for fill in fills
+            if str(fill.get("position_id") or "").strip() == position_id
+        ]
+        if len(linked_fills) != 2:
+            continue
+        entries = [
+            fill
+            for fill in linked_fills
+            if str(fill.get("side") or "").strip().upper()
+            == ("SELL_SHORT" if trade_direction == "short" else "BUY")
+        ]
+        exits = [
+            fill
+            for fill in linked_fills
+            if str(fill.get("side") or "").strip().upper()
+            in {"SELL", "BUY_TO_COVER"}
+        ]
+        if len(entries) != 1 or len(exits) != 1:
+            continue
+        entry_fill, exit_fill = entries[0], exits[0]
+        if _is_reconciliation_derived(
+            entry_fill, _payload(entry_fill)
+        ) or _is_reconciliation_derived(exit_fill, _payload(exit_fill)):
+            continue
+        if trade_direction not in {"long", "short"}:
+            continue
+        if (
+            trade_direction == "short"
+            and str(exit_fill.get("side") or "").strip().upper() != "BUY_TO_COVER"
+        ):
+            continue
+        if trade_direction == "long" and str(exit_fill.get("side") or "").strip().upper() != "SELL":
+            continue
+        if not _fill_matches(
+            entry_fill,
+            position_id=position_id,
+            intent_id=entry_intent,
+            trade=row,
+            price=trade_entry,
+            expected_time=str(row.get("entry_time") or ""),
+            expected_action="ENTER_SHORT" if trade_direction == "short" else "ENTER_LONG",
+            expected_episode=str(position_payload.get("episode_id") or "").strip(),
+            intents=intents,
+        ) or not _fill_matches(
+            exit_fill,
+            position_id=position_id,
+            intent_id=exit_intent,
+            trade=row,
+            price=trade_exit,
+            expected_time=str(row.get("exit_time") or ""),
+            expected_action="EXIT_SHORT" if trade_direction == "short" else "EXIT_LONG",
+            expected_episode=str(position_payload.get("episode_id") or "").strip(),
+            intents=intents,
+        ):
+            continue
+        if not _trade_math_matches(
+            row, position, entry_fill, exit_fill, trade_direction, intents=intents
+        ):
+            continue
+        return True
+    return False
+
+
+def _fill_matches(
+    fill: dict[str, Any],
+    *,
+    position_id: str,
+    intent_id: str,
+    trade: dict[str, Any],
+    price: float | None,
+    expected_time: str,
+    expected_action: str,
+    expected_episode: str,
+    intents: Iterable[dict[str, Any]],
+) -> bool:
+    payload = _payload(fill)
+    trade_hash = str(trade.get("source_bar_hash_sha256") or "").strip().lower()
+    fill_hash = str(
+        fill.get("source_bar_hash_sha256") or payload.get("source_bar_hash_sha256") or ""
+    ).strip().lower()
+    intent = next(
+        (
+            candidate
+            for candidate in intents
+            if str(candidate.get("intent_id") or "").strip() == intent_id
+        ),
+        None,
     )
+    intent_payload = _payload(intent or {})
+    fingerprint = str(intent_payload.get("decision_fingerprint") or "").strip()
+    intent_source_hash = str(
+        intent_payload.get("source_bar_hash_sha256") or ""
+    ).strip().lower()
+    fill_fingerprint = str(
+        fill.get("decision_fingerprint") or payload.get("decision_fingerprint") or ""
+    ).strip()
+    expected_slippage_bps = (
+        DEFAULT_V5_POLICY.entry_slippage_bps
+        if expected_action in {"ENTER_LONG", "ENTER_SHORT"}
+        else DEFAULT_V5_POLICY.exit_slippage_bps
+    )
+    fill_slippage_bps = safe_float(
+        fill.get("slippage_bps") or payload.get("slippage_bps")
+    )
+    trade_payload = _payload(trade)
+    trade_cohort = str(trade.get("cohort") or trade_payload.get("cohort") or "").strip()
+    return bool(
+        str(fill.get("fill_id") or "").strip()
+        and str(fill.get("position_id") or "").strip() == position_id
+        and str(fill.get("intent_id") or "").strip() == intent_id
+        and str(fill.get("signal_id") or "").strip()
+        == str(trade.get("signal_id") or "").strip()
+        and str(fill.get("market_date") or "")[:10]
+        == str(trade.get("market_date") or "")[:10]
+        and str(fill.get("ticker") or "").strip().upper()
+        == str(trade.get("ticker") or "").strip().upper()
+        and _same_number(fill.get("quantity"), safe_float(trade.get("quantity")))
+        and _same_number(fill.get("fill_price"), price)
+        and fill_slippage_bps is not None
+        and abs(fill_slippage_bps - expected_slippage_bps) <= 1e-9
+        and str(fill.get("fill_time") or "") == expected_time
+        and intent is not None
+        and str(intent.get("decision_time") or "") == expected_time
+        and str(intent.get("action") or "").strip().upper() == expected_action
+        and str(intent.get("signal_id") or "").strip()
+        == str(trade.get("signal_id") or "").strip()
+        and str(intent.get("market_date") or "")[:10]
+        == str(trade.get("market_date") or "")[:10]
+        and str(intent.get("ticker") or "").strip().upper()
+        == str(trade.get("ticker") or "").strip().upper()
+        and str(intent.get("strategy_id") or intent_payload.get("strategy_id") or "").strip()
+        == str(trade.get("strategy_id") or _payload(trade).get("strategy_id") or "").strip()
+        and str(
+            intent.get("strategy_version") or intent_payload.get("strategy_version") or ""
+        ).strip()
+        == str(
+            trade.get("strategy_version") or _payload(trade).get("strategy_version") or ""
+        ).strip()
+        and str(intent.get("account_id") or intent_payload.get("account_id") or "").strip()
+        == str(trade.get("account_id") or _payload(trade).get("account_id") or "").strip()
+        and str(intent_payload.get("selection_id") or "").strip()
+        == str(trade.get("selection_id") or _payload(trade).get("selection_id") or "").strip()
+        and str(intent_payload.get("episode_id") or "").strip() == expected_episode
+        and str(payload.get("account_id") or "").strip()
+        == str(trade.get("account_id") or _payload(trade).get("account_id") or "").strip()
+        and str(payload.get("strategy_id") or "").strip()
+        == str(trade.get("strategy_id") or _payload(trade).get("strategy_id") or "").strip()
+        and str(payload.get("strategy_version") or "").strip()
+        == str(
+            trade.get("strategy_version") or _payload(trade).get("strategy_version") or ""
+        ).strip()
+        and str(payload.get("selection_id") or "").strip()
+        == str(trade.get("selection_id") or _payload(trade).get("selection_id") or "").strip()
+        and str(payload.get("cohort") or "").strip() == trade_cohort
+        and str(payload.get("episode_id") or "").strip() == expected_episode
+        and str(
+            intent.get("source_observation_id")
+            or intent_payload.get("source_observation_id")
+            or ""
+        ).strip()
+        and _valid_sha256(fingerprint)
+        and _valid_sha256(intent_source_hash)
+        and intent_source_hash == trade_hash
+        and str(intent.get("mode") or "").strip() == "paper_execute"
+        and str(intent.get("lifecycle_state") or "").strip().upper()
+        in {"ENTRY_TRIGGERED", "EXIT_TRIGGERED"}
+        and intent_payload.get("official_paper_eligible") is True
+        and intent_payload.get("research_only") is True
+        and intent_payload.get("broker_execution_enabled") is False
+        and fingerprint
+        and fill_fingerprint == fingerprint
+        and (not fill_hash or fill_hash == trade_hash)
+    )
+
+
+def _trade_math_matches(
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    entry_fill: dict[str, Any],
+    exit_fill: dict[str, Any],
+    direction: str,
+    *,
+    intents: Iterable[dict[str, Any]],
+) -> bool:
+    quantity = safe_float(trade.get("quantity"))
+    entry = safe_float(entry_fill.get("fill_price"))
+    exit_price = safe_float(exit_fill.get("fill_price"))
+    if quantity is None or entry is None or exit_price is None or quantity <= 0:
+        return False
+    gross = (
+        (entry - exit_price) * quantity
+        if direction == "short"
+        else (exit_price - entry) * quantity
+    )
+    payload = _payload(trade)
+    entry_intent = next(
+        (
+            item
+            for item in intents
+            if str(item.get("intent_id") or "").strip()
+            == str(entry_fill.get("intent_id") or "").strip()
+        ),
+        None,
+    )
+    exit_intent = next(
+        (
+            item
+            for item in intents
+            if str(item.get("intent_id") or "").strip()
+            == str(exit_fill.get("intent_id") or "").strip()
+        ),
+        None,
+    )
+    raw_entry = safe_float((entry_intent or {}).get("decision_price"))
+    raw_exit = safe_float((exit_intent or {}).get("decision_price"))
+    if raw_entry is None or raw_exit is None:
+        return False
+    if not _cost_model_identity_matches(trade, payload):
+        return False
+    if direction == "long" and not (entry >= raw_entry and raw_exit >= exit_price):
+        return False
+    if direction == "short" and not (entry <= raw_entry and raw_exit <= exit_price):
+        return False
+    expected_fees_float = (
+        (entry * quantity + exit_price * quantity) * V5_FEE_BPS / 10_000.0
+        + quantity * DEFAULT_V5_POLICY.commission_per_share_per_side * 2.0
+    )
+    expected_slippage_float = (
+        ((entry - raw_entry) + (raw_exit - exit_price)) * quantity
+        if direction == "long"
+        else ((raw_entry - entry) + (exit_price - raw_exit)) * quantity
+    )
+    fees = money_to_cents(trade.get("fees"))
+    slippage = money_to_cents(trade.get("slippage_cost"))
+    net = money_to_cents(trade.get("net_pnl"))
+    notional = money_to_cents(trade.get("notional"))
+    if fees is None or slippage is None or net is None or notional is None:
+        return False
+    expected_gross = money_to_cents(gross)
+    expected_notional = money_to_cents(entry * quantity)
+    expected_return = round(net / notional * 100.0, 4) if notional else None
+    position_gross = money_to_cents(position.get("realized_pnl"))
+    reported_return = safe_float(trade.get("net_return_pct"))
+    return bool(
+        expected_gross is not None
+        and abs((fees or 0) - (money_to_cents(expected_fees_float) or 0)) <= 1
+        and abs((slippage or 0) - (money_to_cents(expected_slippage_float) or 0)) <= 1
+        and abs(net + fees + slippage - expected_gross) <= 1
+        and expected_notional is not None
+        and abs(notional - expected_notional) <= 1
+        and position_gross is not None
+        and abs(position_gross - expected_gross) <= 1
+        and expected_return is not None
+        and reported_return is not None
+        and abs(reported_return - expected_return) <= 0.01
+        and _same_number(entry_fill.get("quantity"), quantity)
+        and _same_number(exit_fill.get("quantity"), quantity)
+    )
+
+
+def _cost_model_identity_matches(trade: dict[str, Any], payload: dict[str, Any]) -> bool:
+    version = str(
+        trade.get("cost_model_version") or payload.get("cost_model_version") or ""
+    ).strip()
+    fee_bps = safe_float(trade.get("fee_bps") or payload.get("fee_bps"))
+    commission = safe_float(
+        trade.get("commission_per_share_per_side")
+        or payload.get("commission_per_share_per_side")
+    )
+    return bool(
+        version == ALPHAOPS_V5_COST_MODEL_VERSION
+        and fee_bps is not None
+        and abs(fee_bps - V5_FEE_BPS) <= 1e-9
+        and commission is not None
+        and abs(commission - DEFAULT_V5_POLICY.commission_per_share_per_side) <= 1e-9
+    )
+
+
+def _is_reconciliation_derived(row: dict[str, Any], payload: dict[str, Any]) -> bool:
+    return bool(
+        payload.get("canonical_eod_repair") is True
+        or payload.get("source_reconciliation_trade_id")
+        or row.get("canonical_eod_repair") is True
+        or row.get("source_reconciliation_trade_id")
+    )
+
+
+def _same_number(left: Any, right: float | None) -> bool:
+    value = safe_float(left)
+    return value is not None and right is not None and abs(value - right) <= 1e-6
+
+
+def _valid_sha256(value: Any) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", str(value or "").strip()))
 
 
 def _is_explicit_account_no_trade(

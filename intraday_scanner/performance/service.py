@@ -18,6 +18,8 @@ from intraday_scanner.performance.account_comparison import (
     public_account_comparison,
 )
 from intraday_scanner.performance.account_ledger import (
+    _is_reconciliation_derived,
+    _trade_is_complete,
     build_v5_account_ledger,
     ledger_equity_observations,
     persist_v5_account_ledger,
@@ -86,6 +88,7 @@ class CanonicalPerformanceService:
             ledger = build_v5_account_ledger(
                 trades=inputs["strategy_trades"],
                 positions=inputs["positions"],
+                fills=inputs["fills"],
                 scorecards=inputs["scorecards"],
                 intents=inputs["intents"],
                 selections=inputs["selections"],
@@ -110,7 +113,14 @@ class CanonicalPerformanceService:
                 *self._research_rows(
                     inputs["signals"], inputs["outcomes"], benchmark, calculated_at
                 ),
-                *self._strategy_trade_rows(inputs["strategy_trades"], benchmark, calculated_at),
+                    *self._strategy_trade_rows(
+                        inputs["strategy_trades"],
+                        inputs["positions"],
+                        inputs["fills"],
+                        inputs["intents"],
+                        benchmark,
+                        calculated_at,
+                    ),
                 *self._paper_ops_rows(inputs["paper_ops"]["rows"], benchmark, calculated_at),
                 *_account_observation_rows(ledger, calculated_at),
             ]
@@ -392,6 +402,13 @@ class CanonicalPerformanceService:
                 raw, market_date, ticker, quantity, notional_cents
             )
             if status in {"CLOSED", "REALIZED", "COMPLETE"}:
+                if _is_reconciliation_derived(raw, payload) or any(
+                    _is_reconciliation_derived(fill, _payload(fill))
+                    for fill in position_fills
+                ):
+                    quarantine_reason = quarantine_reason or (
+                        "reconciliation_derived_fill_truth_not_publishable"
+                    )
                 if fill_gross_pnl_cents is None:
                     quarantine_reason = quarantine_reason or "missing_fill_pnl_reconciliation"
                 elif (
@@ -569,6 +586,9 @@ class CanonicalPerformanceService:
     def _strategy_trade_rows(
         self,
         trades: list[dict[str, Any]],
+        positions: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        intents: list[dict[str, Any]],
         benchmark: dict[str, float],
         calculated_at: str,
     ) -> list[PerformanceRow]:
@@ -581,12 +601,16 @@ class CanonicalPerformanceService:
             entry = safe_float(raw.get("entry_fill_price"))
             exit_price = safe_float(raw.get("exit_fill_price"))
             quantity = safe_float(raw.get("quantity"))
-            status = (
-                RecordStatus.REALIZED
-                if exit_price is not None and entry is not None
-                else RecordStatus.UNREALIZED
+            committed = _trade_is_complete(
+                raw, positions=positions, fills=fills, intents=intents
             )
+            status = RecordStatus.REALIZED if committed else RecordStatus.UNREALIZED
             if not str(raw.get("trade_id") or "") or not market_date or not ticker:
+                status = RecordStatus.QUARANTINED
+            elif exit_price is not None and entry is not None and not committed:
+                # The EOD/model row is retained for diagnosis but cannot
+                # publish an official-forward return without the durable
+                # closed-position and FillTruth join.
                 status = RecordStatus.QUARANTINED
             fees_cents = money_to_cents(raw.get("fees"))
             slippage_cents = money_to_cents(raw.get("slippage_cost"))
@@ -641,9 +665,13 @@ class CanonicalPerformanceService:
                     input_hash_sha256="",
                     observed_at=str(raw.get("exit_time") or raw.get("created_at") or "") or None,
                     reconciled_at=calculated_at,
-                    quarantine_reason="missing_trade_identity"
-                    if status == RecordStatus.QUARANTINED
-                    else None,
+                    quarantine_reason=(
+                        "missing_trade_identity"
+                        if not str(raw.get("trade_id") or "") or not market_date or not ticker
+                        else "missing_committed_fill_truth"
+                        if status == RecordStatus.QUARANTINED
+                        else None
+                    ),
                     execution_policy_version=str(
                         raw.get("execution_policy_version")
                         or payload.get("execution_policy_version")
