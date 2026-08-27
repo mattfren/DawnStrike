@@ -173,13 +173,21 @@ def apply_publication_semantics(
             and (slate_row or {}).get("research_selection_id")
             and (slate_row or {}).get("research_row_hash_sha256")
         )
+        # Reproduce the source-ID precedence used by `_annotate`: an upstream
+        # signal_id owns identity, otherwise the operational signal_key does.
+        # A carried research_source_signal_id is an assertion about that
+        # primary identity and must agree with it; it cannot mask a changed
+        # signal_id/signal_key on a same-ticker replacement.
+        current_primary_source_signal_id = str(
+            row.get("signal_id") or row.get("signal_key") or ""
+        )
         current_source_signal_ids = [
-            str(value)
+            value
             for value in (
-                row.get("research_source_signal_id"),
-                row.get("signal_id"),
+                str(row.get("research_source_signal_id") or ""),
+                current_primary_source_signal_id,
             )
-            if str(value or "")
+            if value
         ]
         exact_frozen_source = slate_row is not None and (
             (

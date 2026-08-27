@@ -808,6 +808,34 @@ def test_publication_rejects_contradictory_forged_source_identity_fields():
     assert published["entry_state"] == "NOT_PUBLISHED"
 
 
+@pytest.mark.parametrize(
+    "frozen",
+    [
+        {"ticker": "KEYED", "signal_key": "scan:1:KEYED", "alpha_score": 10},
+        {
+            "ticker": "KEYED",
+            "signal_id": "upstream-primary",
+            "signal_key": "scan:1:KEYED",
+            "alpha_score": 10,
+        },
+    ],
+)
+def test_publication_replays_source_identity_precedence_for_operational_signal_keys(
+    frozen,
+):
+    slate = build_ranked_research_slate(
+        [frozen],
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        scan_id="scan-keyed",
+    )
+
+    published = apply_publication_semantics([frozen], slate=slate)[0]
+
+    assert published["publication_tier"] == TIER1
+    assert published["research_selection_id"] == slate["selection_ids"][0]
+
+
 def test_raw_legacy_slate_requires_exact_row_and_cannot_promote(monkeypatch):
     from intraday_scanner.services import luna_research_slate_service as slate_service
 
