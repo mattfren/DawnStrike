@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -261,13 +263,20 @@ def official_publication_rows(
 
 
 def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path) -> Path:
-    """Persist the exact slate artifact; no database or broker side effects."""
+    """Persist one immutable slate artifact; no database or broker side effects.
+
+    The destination is a first-writer-wins boundary.  A fully flushed
+    temporary file is installed with an exclusive hard-link, which is atomic
+    and cannot replace a concurrent winner.  A loser validates and reuses the
+    frozen winner; malformed existing bytes always fail closed.
+    """
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     validate_ranked_research_slate(slate, market_date=str(slate.get("market_date") or ""))
     serialized = json.dumps(slate, indent=2, sort_keys=True) + "\n"
-    if path.exists():
+
+    def _load_existing() -> dict[str, Any]:
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -278,8 +287,33 @@ def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path
             existing,
             market_date=str(slate.get("market_date") or ""),
         )
+        return existing
+
+    if path.exists():
+        _load_existing()
         return path
-    path.write_text(serialized, encoding="utf-8")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            # Hard-link installation is atomic and exclusive: it cannot
+            # replace an already-frozen slate.  The temporary inode is removed
+            # after the destination name has won publication.
+            os.link(temporary, path)
+        except FileExistsError:
+            _load_existing()
+            return path
+    finally:
+        # This also removes a fully flushed but unpublished temp after an
+        # injected pre-publication failure; no partial destination is exposed.
+        temporary.unlink(missing_ok=True)
     return path
 
 

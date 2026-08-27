@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -363,6 +364,76 @@ def test_slate_has_immutable_identity_and_persistence(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("tampered slate must fail integrity validation")
+
+
+def test_slate_persistence_reuses_valid_concurrent_winner(tmp_path: Path) -> None:
+    path = tmp_path / "slate.json"
+    winner = build_ranked_research_slate(
+        [{"ticker": "AAA", "signal_id": "signal-1"}],
+        generated_at="2026-08-26T13:00:00Z",
+        market_date="2026-08-26",
+        scan_id="scan-1",
+    )
+    loser = build_ranked_research_slate(
+        [{"ticker": "BBB", "signal_id": "signal-2"}],
+        generated_at="2026-08-26T14:00:00Z",
+        market_date="2026-08-26",
+        scan_id="scan-2",
+    )
+    persist_ranked_research_slate(winner, path)
+    original = path.read_bytes()
+
+    # The loser must consume the validated frozen winner, leaving its bytes
+    # and inode untouched rather than replacing it with its own candidate.
+    persist_ranked_research_slate(loser, path)
+    assert path.read_bytes() == original
+    assert json.loads(path.read_text(encoding="utf-8"))["slate_id"] == winner["slate_id"]
+
+
+def test_slate_persistence_prepublication_failure_leaves_no_partial_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "slate.json"
+    slate = build_ranked_research_slate(
+        [{"ticker": "AAA", "signal_id": "signal-1"}],
+        generated_at="2026-08-26T13:00:00Z",
+        market_date="2026-08-26",
+        scan_id="scan-1",
+    )
+
+    def crash_before_publication(*_args, **_kwargs):
+        raise RuntimeError("injected pre-publication crash")
+
+    monkeypatch.setattr(os, "link", crash_before_publication)
+    try:
+        persist_ranked_research_slate(slate, path)
+    except RuntimeError as exc:
+        assert str(exc) == "injected pre-publication crash"
+    else:
+        raise AssertionError("injected publication crash must propagate")
+
+    assert not path.exists()
+    assert list(tmp_path.glob(".slate.json.*.tmp")) == []
+
+
+def test_slate_persistence_rejects_existing_invalid_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "slate.json"
+    path.write_text("{\"schema_version\": \"broken\"}\n", encoding="utf-8")
+    slate = build_ranked_research_slate(
+        [{"ticker": "AAA", "signal_id": "signal-1"}],
+        generated_at="2026-08-26T13:00:00Z",
+        market_date="2026-08-26",
+        scan_id="scan-1",
+    )
+
+    try:
+        persist_ranked_research_slate(slate, path)
+    except ValueError as exc:
+        assert "schema" in str(exc)
+    else:
+        raise AssertionError("invalid existing slate must fail closed")
+
+    assert path.read_text(encoding="utf-8") == '{"schema_version": "broken"}\n'
 
 
 def test_lane_local_fallback_ceiling_does_not_demote_independent_core(
