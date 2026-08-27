@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $expectedSourceSha = (& git.exe -C $resolvedRoot rev-parse HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $expectedSourceSha -notmatch '^[0-9a-f]{40}$') {
@@ -101,83 +102,29 @@ function Invoke-VercelProcess {
         [int]$TimeoutSeconds
     )
     $allArguments = @($npxCliPath) + $vercel + $Arguments + $vercelAuth
-    $argumentLine = @(
-        $allArguments | ForEach-Object {
-            $value = [string]$_
-            if ($value -match '[\r\n"]') {
-                throw "$Label contains an unsupported native-process argument."
-            }
-            '"' + $value + '"'
-        }
-    ) -join " "
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $nodePath
-    $startInfo.Arguments = $argumentLine
-    $startInfo.WorkingDirectory = [string](Get-Location).Path
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.EnvironmentVariables["CI"] = "1"
-    $startInfo.EnvironmentVariables["NO_COLOR"] = "1"
-    $startInfo.EnvironmentVariables["FORCE_COLOR"] = "0"
-    $startInfo.EnvironmentVariables["VERCEL_TELEMETRY_DISABLED"] = "1"
-    $startInfo.EnvironmentVariables["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
-    $startInfo.EnvironmentVariables["NPM_CONFIG_FUND"] = "false"
-    $startInfo.EnvironmentVariables["NPM_CONFIG_AUDIT"] = "false"
-    $startInfo.EnvironmentVariables["NPM_CONFIG_YES"] = "true"
-    $process = $null
-    $stdoutTask = $null
-    $stderrTask = $null
-    try {
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $startInfo
-        if (-not $process.Start()) {
-            throw "$Label could not start the bounded Vercel process."
-        }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            $previousErrorActionPreference = $ErrorActionPreference
-            try {
-                # The npx CLI can launch build and network descendants. Kill
-                # only the exact tree created above so a timed-out deploy
-                # cannot keep mutating external state after this boundary.
-                $ErrorActionPreference = "Continue"
-                & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
-            }
-            finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
-            if (-not $process.HasExited) {
-                $process.Kill()
-            }
-            $process.WaitForExit()
-            throw "$Label timed out after $TimeoutSeconds seconds."
-        }
-        # A second parameterless wait flushes redirected output on Windows
-        # PowerShell 5.1 after the process handle has signaled completion.
-        $process.WaitForExit()
-        if (-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)) {
-            throw "$Label output drain timed out after process exit."
-        }
-        $stdoutText = ([string]$stdoutTask.Result).Trim()
-        $stderrText = ([string]$stderrTask.Result).Trim()
-        if ($process.ExitCode -ne 0) {
-            $detail = if ($stderrText) { " stderr: $stderrText" } else { "" }
-            throw "$Label failed with exit code $($process.ExitCode).$detail"
-        }
-        return [pscustomobject]@{
-            Stdout = $stdoutText
-            Stderr = $stderrText
-            ExitCode = [int]$process.ExitCode
-        }
+    $environment = @{
+        CI = "1"
+        NO_COLOR = "1"
+        FORCE_COLOR = "0"
+        VERCEL_TELEMETRY_DISABLED = "1"
+        NPM_CONFIG_UPDATE_NOTIFIER = "false"
+        NPM_CONFIG_FUND = "false"
+        NPM_CONFIG_AUDIT = "false"
+        NPM_CONFIG_YES = "true"
     }
-    finally {
-        if ($null -ne $process) {
-            $process.Dispose()
-        }
+    $result = Invoke-DawnstrikeJobProcess `
+        -FilePath $nodePath `
+        -ArgumentList $allArguments `
+        -WorkingDirectory ([string](Get-Location).Path) `
+        -Label $Label `
+        -TimeoutSeconds $TimeoutSeconds `
+        -OutputDrainTimeoutSeconds 5 `
+        -EnvironmentOverrides $environment
+    if ($result.ExitCode -ne 0) {
+        $detail = if ($result.Stderr) { " stderr: $($result.Stderr)" } else { "" }
+        throw "$Label failed with exit code $($result.ExitCode).$detail"
     }
+    return $result
 }
 
 function Get-OptionalJsonProperty {

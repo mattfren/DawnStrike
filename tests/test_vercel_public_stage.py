@@ -81,6 +81,7 @@ def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> 
 
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
+    runner = Path("scripts/dawnstrike_job_process.ps1").read_text(encoding="utf-8")
 
     assert "vercel@58.4.0" in script
     assert "sysconfig.get_path('scripts')" in script
@@ -104,25 +105,24 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "function Invoke-VercelProcess" in script
     assert "Get-Command node.exe" in script
     assert '"node_modules\\npm\\bin\\npx-cli.js"' in script
-    assert "System.Diagnostics.ProcessStartInfo" in script
-    assert "$startInfo.UseShellExecute = $false" in script
-    assert "$startInfo.CreateNoWindow = $true" in script
-    assert "$process.StandardOutput.ReadToEndAsync()" in script
-    assert "$process.StandardError.ReadToEndAsync()" in script
-    assert "WaitForExit($TimeoutSeconds * 1000)" in script
-    assert "$stdoutTask.Wait(5000)" in script
-    assert "$stderrTask.Wait(5000)" in script
-    assert "output drain timed out after process exit" in script
-    assert "taskkill.exe /PID $process.Id /T /F" in script
+    assert '. (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")' in script
+    assert "Invoke-DawnstrikeJobProcess" in script
     assert "VercelBuildTimeoutSeconds = 600" in script
     assert "VercelCommandTimeoutSeconds = 180" in script
-    assert '$startInfo.EnvironmentVariables["CI"] = "1"' in script
-    assert '$startInfo.EnvironmentVariables["VERCEL_TELEMETRY_DISABLED"] = "1"' in script
-    assert '$startInfo.EnvironmentVariables["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"' in script
+    assert 'CI = "1"' in script
+    assert 'VERCEL_TELEMETRY_DISABLED = "1"' in script
+    assert 'NPM_CONFIG_UPDATE_NOTIFIER = "false"' in script
     assert "& npx" not in script
-    assert "$stdoutTask.Result" in script
-    assert "$stderrTask.Result" in script
     assert "curl progress can otherwise be interleaved" in script
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in runner
+    assert "CREATE_SUSPENDED" in runner
+    assert "AssignProcessToJobObject" in runner
+    assert "TerminateJobObject" in runner
+    assert "QueryInformationJobObject" in runner
+    assert "QuoteArgument" in runner
+    assert "active_job_members_after_cleanup" in runner
+    assert "taskkill.exe" not in script
+    assert "taskkill.exe" not in runner
     assert "Promoted deployment does not match the verified preview" in script
     assert "Production does not match the verified preview" in script
     assert "A timeout can occur after Vercel accepted the promotion" in script
