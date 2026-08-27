@@ -283,9 +283,93 @@ def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows
         for item in receipt["strategy_evidence"]
         if item["strategy_id"] == "ts_momentum_sma_atr"
     )
-    assert [row["record_id"] for row in evidence["outcomes"]] == ["before"]
-    assert evidence["counts"]["future_evidence_excluded"] == 1
-    assert evidence["counts"]["terminal_timestamp_quarantined"] == 1
+    assert evidence["outcomes"] == []
+    assert evidence["counts"]["untrusted_outcomes_quarantined"] == 3
+    assert evidence["source_status"] == "QUARANTINED_UNTRUSTED"
+    assert evidence["counts"]["future_evidence_excluded"] == 0
+    assert evidence["counts"]["terminal_timestamp_quarantined"] == 0
+
+
+def test_cli_evidence_file_fabricated_return_cannot_become_learning_or_proposal(
+    tmp_path, capsys
+):
+    evidence_path = tmp_path / "hostile-evidence.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "ts_momentum_sma_atr": {
+                    "source_status": "CHECKED",
+                    "status": "COMPLETE",
+                    "evidence_contract": "governed.official.v1",
+                    "outcomes": [
+                        {
+                            "record_id": "forged-999-percent",
+                            "market_date": "2026-08-20",
+                            "status": "RESOLVED",
+                            "terminal_event_at": "2026-08-20T21:00:00+00:00",
+                            "return_pct": 999.0,
+                            "net_pnl": 999000.0,
+                            "r_multiple": 999.0,
+                            "metrics": {
+                                "returnPct": 999.0,
+                                "nested": {"profitFactor": 999.0, "note": "diagnostic"},
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_dir = tmp_path / "learning"
+    status = main(
+        [
+            "strategy-learning-daily",
+            "--market-date",
+            "2026-08-20",
+            "--cutoff",
+            "2026-08-20T22:00:00+00:00",
+            "--source-identity",
+            "hostile-evidence-file:2026-08-20",
+            "--code-sha",
+            "fixture-code-sha",
+            "--out-dir",
+            str(result_dir),
+            "--evidence-file",
+            str(evidence_path),
+        ]
+    )
+    assert status == 1
+    result = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    proposals = json.loads(Path(result["proposals_path"]).read_text(encoding="utf-8"))
+
+    assert evidence["outcomes"] == []
+    assert evidence["counts"]["outcomes_retained"] == 0
+    assert evidence["counts"]["untrusted_outcomes_quarantined"] == 1
+    assert evidence["source_status"] == "QUARANTINED_UNTRUSTED"
+    assert evidence["status"] == "UNTRUSTED_EXTERNAL_DIAGNOSTICS"
+    assert evidence["provenance"] == "untrusted_external"
+    assert evidence["evidence_contract"] == "dawnstrike.untrusted_external_mapping.v1"
+    assert evidence["claimed_status"] == "COMPLETE"
+    assert evidence["claimed_evidence_contract"] == "governed.official.v1"
+    assert evidence["quarantined_untrusted_outcomes"][0]["quarantine_reason"] == (
+        "committed_point_in_time_fill_truth_required"
+    )
+    assert evidence["quarantined_untrusted_outcomes"][0]["metrics"] == {
+        "nested": {"note": "diagnostic"}
+    }
+    assert "+999" not in Path(result["receipt_path"]).read_text(encoding="utf-8")
+    assert proposals["proposals"] == []
+    assert result["proposal_count"] == 0
+    assert receipt["automatic_policy_change"] is False
+    assert receipt["automatic_promotion"] is False
+    assert receipt["champion_mutated"] is False
 
 
 def test_cli_strategy_learning_reuses_frozen_evidence_when_database_grows(tmp_path, capsys):

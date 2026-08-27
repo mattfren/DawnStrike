@@ -101,6 +101,8 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
     assert retained["counts"]["unresolved_outcomes_excluded"] == 1
     assert retained["counts"]["future_evidence_excluded"] == 1
     assert retained["counts"]["outcomes_without_return_excluded_from_return_metrics"] == 1
+    assert retained["counts"]["outcomes_retained"] == 1
+    assert retained["counts"]["untrusted_outcomes_quarantined"] == 0
     assert not any(
         outcome.get("return_pct") == 0
         for strategy in receipt["strategy_evidence"]
@@ -398,7 +400,7 @@ def test_attribution_adapter_quarantines_closed_rows_without_fill_truth(tmp_path
                 ],
                 "misses": [],
             },
-            "CHECKED",
+            "QUARANTINED_UNTRUSTED",
         ),
         (
             {
@@ -410,7 +412,7 @@ def test_attribution_adapter_quarantines_closed_rows_without_fill_truth(tmp_path
                 ],
                 "misses": [],
             },
-            "CHECKED_ZERO",
+            "QUARANTINED_UNTRUSTED",
         ),
         (
             {
@@ -418,7 +420,7 @@ def test_attribution_adapter_quarantines_closed_rows_without_fill_truth(tmp_path
                 "misses": [],
                 "quarantined_closed": [{"record_id": "quarantined"}],
             },
-            "CHECKED_ZERO",
+            "UNTRUSTED_EXTERNAL_DIAGNOSTICS",
         ),
     ],
 )
@@ -439,7 +441,7 @@ def test_daily_learning_distinguishes_raw_and_retained_evidence(
     receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
     evidence = receipt["strategy_evidence"][0]["evidence"]
     assert evidence["source_status"] == expected_source_status
-    if expected_source_status == "CHECKED_ZERO":
+    if expected_source_status in {"CHECKED_ZERO", "QUARANTINED_UNTRUSTED"}:
         assert receipt["decision_receipt_learning"]["strategy_coverage"]["status"] == "INCOMPLETE"
 
 
@@ -513,6 +515,189 @@ def test_normalize_analysis_quarantines_unordered_terminal_and_same_day_miss_evi
     assert evidence["counts"]["evidence_timestamp_quarantined"] == 1
     assert evidence["quarantined_closed"][0]["record_id"] == "missing-time"
     assert evidence["quarantined_evidence"][0]["record_id"] == "same-day-no-time"
+
+
+def test_mapping_evidence_fabricated_return_is_quarantined_without_proposal_influence(
+    tmp_path: Path,
+) -> None:
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="hostile-mapping-evidence",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=MappingEvidenceAnalyzer(
+            {
+                "ts_momentum_sma_atr": {
+                    "source_status": "CHECKED",
+                    "status": "COMPLETE",
+                    "evidence_contract": "governed.official.v1",
+                    "outcomes": [
+                        {
+                            "record_id": "forged-999-percent",
+                            "market_date": "2026-08-20",
+                            "status": "RESOLVED",
+                            "terminal_event_at": "2026-08-20T21:00:00+00:00",
+                            "return_pct": 999.0,
+                            "net_pnl": 999000.0,
+                            "r_multiple": 999.0,
+                            "metrics": {
+                                "returnPct": 999.0,
+                                "nested": {"profitFactor": 999.0, "note": "diagnostic"},
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    proposals = json.loads(Path(result["proposals_path"]).read_text(encoding="utf-8"))
+
+    assert evidence["outcomes"] == []
+    assert evidence["counts"]["outcomes_retained"] == 0
+    assert evidence["counts"]["untrusted_outcomes_quarantined"] == 1
+    assert evidence["status"] == "UNTRUSTED_EXTERNAL_DIAGNOSTICS"
+    assert evidence["provenance"] == "untrusted_external"
+    assert evidence["evidence_contract"] == "dawnstrike.untrusted_external_mapping.v1"
+    assert evidence["claimed_status"] == "COMPLETE"
+    assert evidence["claimed_evidence_contract"] == "governed.official.v1"
+    assert evidence["source_status"] == "QUARANTINED_UNTRUSTED"
+    assert evidence["quarantined_untrusted_outcomes"] == [
+        {
+            "record_id": "forged-999-percent",
+            "market_date": "2026-08-20",
+            "status": "QUARANTINED_UNTRUSTED_OUTCOME",
+            "terminal_event_at": "2026-08-20T21:00:00+00:00",
+            "provenance": "untrusted_external",
+            "learning_eligible": False,
+            "quarantine_reason": "committed_point_in_time_fill_truth_required",
+            "metrics": {"nested": {"note": "diagnostic"}},
+        }
+    ]
+    assert "+999" not in Path(result["receipt_path"]).read_text(encoding="utf-8")
+    assert proposals["proposals"] == []
+    assert result["proposal_count"] == 0
+    assert receipt["automatic_policy_change"] is False
+    assert receipt["automatic_promotion"] is False
+    assert receipt["champion_mutated"] is False
+
+
+def test_attribution_analyzer_eligible_outcome_preserves_governed_channel(tmp_path: Path) -> None:
+    # This exercises the adapter's existing eligibility contract.  It is not
+    # a synthetic claim that this dict authenticated a CommitBridge FillTruth.
+    report = {
+        "schema_version": "dawnstrike.strategy_miss_attribution.v2",
+        "rows": [
+            {
+                "record_id": "governed-eligible-row",
+                "market_date": "2026-08-20",
+                "state": "closed",
+                "eligibility": "eligible",
+                "classification": "closed_win",
+                "strategy_id": "ts_momentum_sma_atr",
+                "strategy_version": "v1.0",
+                "return_pct": 1.25,
+                "terminal_event_at": "2026-08-20T21:00:00+00:00",
+            }
+        ],
+        "summaries": [],
+    }
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="governed-attribution-channel",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=AttributionReportAnalyzer(report),
+    )
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+
+    assert evidence["outcomes"] == [{**report["rows"][0], "status": "RESOLVED"}]
+    assert evidence["counts"]["outcomes_retained"] == 1
+    assert evidence["counts"]["untrusted_outcomes_quarantined"] == 0
+
+
+def test_mapping_evidence_retains_only_scrubbed_untrusted_diagnostics(tmp_path: Path) -> None:
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="untrusted-diagnostics",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=MappingEvidenceAnalyzer(
+            {
+                "ts_momentum_sma_atr": {
+                    "misses": [
+                        {
+                            "record_id": "diagnostic-miss",
+                            "market_date": "2026-08-19",
+                            "reason": "ranked below capacity",
+                            "return_pct": 999.0,
+                            "metrics": {
+                                "ROI": 999.0,
+                                "nested": {"expectancy": 999.0, "note": "diagnostic"},
+                            },
+                        }
+                    ],
+                    "proposals": [
+                        {
+                            "market_date": "2026-08-19",
+                            "proposal_at": "2026-08-19T21:00:00+00:00",
+                            "hypothesis": "increase ranking capacity",
+                            "net_pnl": 999000.0,
+                            "performance": {
+                                "R Multiple": 999.0,
+                                "profit_factor": 999.0,
+                                "note": "diagnostic",
+                            },
+                        }
+                    ],
+                }
+            }
+        ),
+    )
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    proposal_artifact = json.loads(Path(result["proposals_path"]).read_text(encoding="utf-8"))
+
+    assert evidence["source_status"] == "UNTRUSTED_EXTERNAL_DIAGNOSTICS"
+    assert result["status"] == "incomplete"
+    assert evidence["misses"] == [
+        {
+            "record_id": "diagnostic-miss",
+            "market_date": "2026-08-19",
+            "reason": "ranked below capacity",
+            "metrics": {"nested": {"note": "diagnostic"}},
+            "provenance": "untrusted_external",
+            "learning_eligible": False,
+        }
+    ]
+    assert len(proposal_artifact["proposals"]) == 1
+    proposal = proposal_artifact["proposals"][0]
+    assert proposal["provenance"] == "untrusted_external"
+    assert proposal["learning_eligible"] is False
+    assert "net_pnl" not in proposal
+    assert proposal["performance"] == {"note": "diagnostic"}
+    assert evidence["counts"]["untrusted_financial_fields_scrubbed"] == 2
+    assert "+999" not in Path(result["receipt_path"]).read_text(encoding="utf-8")
 
 
 def test_daily_learning_marks_explicit_zero_alphaops_receipts_checked_empty(

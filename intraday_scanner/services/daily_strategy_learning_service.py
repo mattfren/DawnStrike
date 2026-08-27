@@ -861,10 +861,104 @@ def _has_valid_ordering_timestamp(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_untrusted_financial_field(field: Any) -> bool:
+    """Identify realized-return/P&L/R fields that cannot cross diagnostics."""
+
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(field or "").strip())
+    name = re.sub(r"[\s&-]+", "_", name.lower())
+    if not name:
+        return False
+    return bool(
+        re.search(
+            r"(?:^|_)(?:return|roi|pnl|p_and_l|profit|loss|gain|expectancy|"
+            r"p_l|profit_factor|win_rate|loss_rate|drawdown|r|r_multiple|"
+            r"risk_reward|risk_reward_ratio)(?:_|$)",
+            name,
+        )
+    )
+
+
+def _contains_untrusted_financial_field(value: Any) -> bool:
+    """Report whether a diagnostic row contains a financial field at any depth."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _is_untrusted_financial_field(key) or _contains_untrusted_financial_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_untrusted_financial_field(item) for item in value)
+    return False
+
+
+def _strip_untrusted_financial_fields(value: Any) -> Any:
+    """Copy diagnostics while removing caller-authored performance numbers."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_untrusted_financial_fields(item)
+            for key, item in value.items()
+            if not _is_untrusted_financial_field(key)
+        }
+    if isinstance(value, list):
+        return [_strip_untrusted_financial_fields(item) for item in value]
+    if isinstance(value, tuple):
+        return [_strip_untrusted_financial_fields(item) for item in value]
+    return value
+
+
+def _untrusted_diagnostic_row(
+    row: Mapping[str, Any],
+    *,
+    provenance: str,
+    reason: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Make an explicitly untrusted, non-learning copy of one source row."""
+
+    diagnostic = _strip_untrusted_financial_fields(dict(row))
+    if not isinstance(diagnostic, dict):  # pragma: no cover - defensive typing guard
+        diagnostic = {}
+    diagnostic["provenance"] = provenance
+    diagnostic["learning_eligible"] = False
+    if status:
+        diagnostic["status"] = status
+    if reason:
+        diagnostic["quarantine_reason"] = reason
+    return diagnostic
+
+
+def _diagnostic_row(
+    row: Mapping[str, Any],
+    *,
+    external_untrusted: bool,
+    provenance: str,
+    reason: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Preserve governed analyzer diagnostics; scrub only external mappings."""
+
+    if external_untrusted:
+        return _untrusted_diagnostic_row(
+            row,
+            provenance=provenance,
+            reason=reason,
+            status=status,
+        )
+    diagnostic = dict(row)
+    if status:
+        diagnostic["status"] = status
+    if reason:
+        diagnostic["quarantine_reason"] = reason
+    return diagnostic
+
+
 def _normalize_analysis(
     strategy: StrategySpec,
     context: DailyLearningContext,
     raw: Mapping[str, Any],
+    *,
+    external_untrusted: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     outcomes: list[dict[str, Any]] = []
     misses: list[dict[str, Any]] = []
@@ -874,6 +968,10 @@ def _normalize_analysis(
     excluded_ineligible = 0
     terminal_timestamp_quarantined = 0
     evidence_timestamp_quarantined = 0
+    untrusted_outcomes_quarantined = 0
+    untrusted_financial_fields_scrubbed = 0
+    diagnostic_provenance = "untrusted_external" if external_untrusted else "governed_analyzer"
+    quarantined_untrusted_outcomes: list[dict[str, Any]] = []
     quarantined_closed = _as_sequence(
         raw.get("quarantined_closed"), "quarantined_closed", strategy.strategy_id
     )
@@ -882,6 +980,20 @@ def _normalize_analysis(
     )
 
     for row in _as_sequence(raw.get("outcomes"), "outcomes", strategy.strategy_id):
+        if external_untrusted:
+            untrusted_outcomes_quarantined += 1
+            if _contains_untrusted_financial_field(row):
+                untrusted_financial_fields_scrubbed += 1
+            quarantined_untrusted_outcomes.append(
+                _diagnostic_row(
+                    row,
+                    external_untrusted=external_untrusted,
+                    provenance=diagnostic_provenance,
+                    reason="committed_point_in_time_fill_truth_required",
+                    status="QUARANTINED_UNTRUSTED_OUTCOME",
+                )
+            )
+            continue
         status = str(row.get("status", "")).upper()
         eligibility = str(row.get("eligibility") or "").lower()
         if (
@@ -964,7 +1076,15 @@ def _normalize_analysis(
                     },
                 )
             continue
-        misses.append(dict(row))
+        if external_untrusted and _contains_untrusted_financial_field(row):
+            untrusted_financial_fields_scrubbed += 1
+        misses.append(
+            _diagnostic_row(
+                row,
+                external_untrusted=external_untrusted,
+                provenance=diagnostic_provenance,
+            )
+        )
 
     proposals: list[dict[str, Any]] = []
     quarantined_proposals: list[dict[str, Any]] = []
@@ -973,7 +1093,15 @@ def _normalize_analysis(
         "proposals",
         strategy.strategy_id,
     ):
-        proposal = dict(raw_proposal)
+        if external_untrusted and _contains_untrusted_financial_field(raw_proposal):
+            untrusted_financial_fields_scrubbed += 1
+        proposal = (
+            _diagnostic_row(
+                raw_proposal,
+                external_untrusted=external_untrusted,
+                provenance=diagnostic_provenance,
+            )
+        )
         proposal["strategy_id"] = strategy.strategy_id
         proposal["strategy_version"] = strategy.version
         proposal["status"] = "PROPOSED_NOT_APPLIED"
@@ -1015,14 +1143,22 @@ def _normalize_analysis(
             continue
         proposals.append(proposal)
 
+    claimed_status = str(raw.get("status", "ANALYZED"))
+    claimed_evidence_contract = str(raw.get("evidence_contract", "injected_unattributed_v1"))
     evidence = {
-        "status": str(raw.get("status", "ANALYZED")),
+        "status": (
+            "UNTRUSTED_EXTERNAL_DIAGNOSTICS" if external_untrusted else claimed_status
+        ),
+        "provenance": diagnostic_provenance,
+        "outcome_learning_contract": "committed_point_in_time_fill_truth_required",
         "outcomes": outcomes,
         "misses": misses,
         "counts": {
             "outcomes_retained": len(outcomes),
             "misses_retained": len(misses),
             "proposals_retained": len(proposals),
+            "untrusted_outcomes_quarantined": untrusted_outcomes_quarantined,
+            "untrusted_financial_fields_scrubbed": untrusted_financial_fields_scrubbed,
             "unresolved_outcomes_excluded": excluded_unresolved,
             "ineligible_outcomes_excluded": excluded_ineligible,
             "future_evidence_excluded": excluded_future,
@@ -1032,11 +1168,35 @@ def _normalize_analysis(
             "closed_provisional_quarantined": len(quarantined_closed),
             "proposals_quarantined": len(quarantined_proposals),
         },
-        "evidence_contract": str(raw.get("evidence_contract", "injected_unattributed_v1")),
-        "quarantined_closed": [dict(row) for row in quarantined_closed],
-        "quarantined_evidence": [dict(row) for row in quarantined_evidence],
+        "evidence_contract": (
+            "dawnstrike.untrusted_external_mapping.v1"
+            if external_untrusted
+            else claimed_evidence_contract
+        ),
+        "quarantined_closed": [
+            _diagnostic_row(
+                row,
+                external_untrusted=external_untrusted,
+                provenance=diagnostic_provenance,
+            )
+            for row in quarantined_closed
+        ],
+        "quarantined_untrusted_outcomes": quarantined_untrusted_outcomes,
+        "quarantined_evidence": [
+            _diagnostic_row(
+                row,
+                external_untrusted=external_untrusted,
+                provenance=diagnostic_provenance,
+            )
+            for row in quarantined_evidence
+        ],
         "quarantined_proposals": quarantined_proposals,
     }
+    if external_untrusted:
+        if "status" in raw:
+            evidence["claimed_status"] = claimed_status
+        if "evidence_contract" in raw:
+            evidence["claimed_evidence_contract"] = claimed_evidence_contract
     return evidence, proposals
 
 
@@ -1430,7 +1590,13 @@ def run_daily_strategy_learning(
         raw = analyzer.analyze(strategy, context)
         if not isinstance(raw, Mapping):
             raise ValueError(f"analyzer result for {strategy.strategy_id} must be an object")
-        evidence, strategy_proposals = _normalize_analysis(strategy, context, raw)
+        external_untrusted = isinstance(analyzer, MappingEvidenceAnalyzer)
+        evidence, strategy_proposals = _normalize_analysis(
+            strategy,
+            context,
+            raw,
+            external_untrusted=external_untrusted,
+        )
         raw_status = str(raw.get("status") or "").upper()
         # Keep the two predicates separate.  Raw evidence proves that the
         # source was non-empty, while retained evidence proves that at least
@@ -1469,6 +1635,15 @@ def run_daily_strategy_learning(
             source_status = "CHECKED_ZERO"
         else:
             source_status = "CHECKED"
+        if external_untrusted and raw_evidence_present:
+            # Caller-authored mappings are diagnostics only: neither rejected
+            # outcomes nor retained misses/proposals authenticate a cohort.
+            # A supplied source_status cannot upgrade this boundary.
+            source_status = (
+                "QUARANTINED_UNTRUSTED"
+                if evidence["counts"]["untrusted_outcomes_quarantined"]
+                else "UNTRUSTED_EXTERNAL_DIAGNOSTICS"
+            )
         # A status supplied inside an analyzer mapping is descriptive only;
         # it cannot turn an empty or entirely quarantined result into a
         # checked source.  Only the private acquisition-manifest receipt can
