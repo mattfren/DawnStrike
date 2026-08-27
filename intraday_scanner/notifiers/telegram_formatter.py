@@ -424,7 +424,10 @@ def format_alpha_no_trade(
     research_total: int | None = None,
     max_chars: int = DEFAULT_ALERT_MAX_CHARS,
 ) -> str:
-    radar = list(research_signals or [])[:3]
+    # The immutable daily slate targets five distinct research names.  Show
+    # all five when Telegram length permits so a no-official-plan day is not
+    # mistaken for a no-research-candidate day.
+    radar = list(research_signals or [])[:5]
     total = int(research_total if research_total is not None else len(research_signals or []))
     lines = [
         "📡 Dawnstrike Alpha Check",

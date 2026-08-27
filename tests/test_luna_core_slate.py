@@ -3,7 +3,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
+from intraday_scanner.notifiers.telegram_formatter import (
+    format_alpha_no_trade,
+    format_alpha_watch,
+)
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
@@ -199,6 +202,29 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
     assert "FROZEN" in text
     assert "CURRENT" not in text
     assert "Research slate: 1 of 1 shown" in text
+
+
+def test_alpha_no_trade_shows_all_five_frozen_research_candidates():
+    rows = [
+        {
+            "ticker": f"RANK{index}",
+            "publication_tier": TIER1,
+            "research_only": True,
+            "broker_execution": "disabled",
+        }
+        for index in range(1, 6)
+    ]
+
+    text = format_alpha_no_trade(
+        reason="No plan passed current entry gates.",
+        next_action="Keep the frozen research slate under observation.",
+        research_signals=rows,
+        research_total=5,
+    )
+
+    assert "Research slate: 5 of 5 shown" in text
+    for index in range(1, 6):
+        assert f"RANK{index}" in text
 
 
 def test_alpha_watch_keeps_explicit_empty_slate_authoritative():
