@@ -429,3 +429,54 @@ def test_production_scheduler_exposes_governed_core_manifest_path():
     assert "if ($CoreUniverseManifest)" in script
     assert "lane-local" in script
     assert "$CoreUniverseManifest = \"\"" in script
+
+
+def test_alpha_watch_length_limit_preserves_slate_blockers_and_no_broker_footer():
+    def verbose_row(ticker: str) -> dict:
+        return {
+            "ticker": ticker,
+            "publication_tier": TIER1,
+            "research_only": True,
+            "broker_execution": "disabled",
+            "alpha_score": 80,
+            "receipt_id": f"receipt-{ticker}-" + ("r" * 120),
+            "pick_tier": "PICK_WITH_DISCLOSED_GAPS",
+            "strategy_id": "strategy-" + ("s" * 80),
+            "strategy_version": "version-" + ("v" * 80),
+            "receipt_reason": "qualified evidence " + ("e" * 180),
+            "core_conditions_passed": [f"condition-{index}-" + ("c" * 30) for index in range(6)],
+            "ai_resolved_evidence": [
+                {
+                    "condition_id": f"ai-{index}-" + ("a" * 30),
+                    "source_urls": [f"https://example.test/{ticker}/{index}/" + ("u" * 80)],
+                }
+                for index in range(3)
+            ],
+            "disclosed_gaps": ["gap-" + ("g" * 80) for _ in range(4)],
+        }
+
+    slate_rows = [verbose_row(f"SAFE{index}") for index in range(1, 6)]
+    blocked_rows = [
+        {
+            **verbose_row(f"BLOCK{index}"),
+            "no_trade_reason": f"reason-{index}-" + ("x" * 180),
+        }
+        for index in range(1, 4)
+    ]
+    body = format_alpha_watch(
+        signals=slate_rows,
+        edge_label="research",
+        blocked_signals=blocked_rows,
+        source_summary={
+            "ranked_research_slate": {"published_count": 5, "rows": slate_rows},
+            "ranked_research_publication_rows": slate_rows,
+        },
+        max_chars=4096,
+    )
+
+    assert len(body) <= 4096
+    assert body.endswith("No orders placed. Research only.")
+    assert "Slate symbols (5/5): SAFE1, SAFE2, SAFE3, SAFE4, SAFE5" in body
+    assert "Blocked rows: 3" in body
+    for ticker in ("BLOCK1", "BLOCK2", "BLOCK3"):
+        assert ticker in body

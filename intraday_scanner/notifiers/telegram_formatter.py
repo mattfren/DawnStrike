@@ -374,16 +374,8 @@ def format_alpha_watch(
     lines.extend(["", "NO TRADE / BLOCKED REASONS"])
     if blocked_signals:
         for row in blocked_signals[:3]:
-            reason = (
-                row.get("no_trade_reason")
-                or row.get("alert_gate_reasons")
-                or row.get("avoid_reasons")
-                or row.get("risk_flags")
-                or "blocked by deterministic policy"
-            )
-            if isinstance(reason, list):
-                reason = "; ".join(str(item) for item in reason)
-            lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(str(reason), 100)}")
+            reason = _blocked_reason_text(row)
+            lines.append(f"- {_text(row.get('ticker'), 'n/a')}: {_truncate(reason, 100)}")
             for receipt_line in _decision_receipt_lines(row):
                 lines.append(f"  {receipt_line}")
     else:
@@ -396,9 +388,29 @@ def format_alpha_watch(
         )
     if not official_candidates and not research_watchlist:
         lines.extend(["", "No clean edge today."])
-    lines.append("")
-    lines.append("No orders placed. Research only.")
-    return _clip("\n".join(lines).strip(), max_chars)
+    slate_symbols = [
+        str(row.get("ticker") or "").strip().upper()
+        for row in slate_candidates
+        if str(row.get("ticker") or "").strip()
+    ]
+    blocked_truth = [
+        f"{_text(row.get('ticker'), 'n/a')}: {_truncate(_blocked_reason_text(row), 60)}"
+        for row in blocked_signals[:3]
+    ]
+    invariant_lines = [
+        (
+            f"Slate symbols ({slate_shown}/{slate_total}): "
+            + (", ".join(slate_symbols) if slate_symbols else "None")
+        ),
+        f"Blocked rows: {len(blocked_signals)}"
+        + (f" | {' | '.join(blocked_truth)}" if blocked_truth else ""),
+        "No orders placed. Research only.",
+    ]
+    return _clip_preserving_suffix(
+        "\n".join(lines).strip(),
+        "\n".join(invariant_lines),
+        max_chars,
+    )
 
 
 def _operator_time_label(timezone: str, generated_at: str | datetime | None) -> str:
@@ -798,6 +810,41 @@ def _text(value: Any, default: str = "n/a") -> str:
 
 def _truncate(value: str, max_chars: int) -> str:
     return value if len(value) <= max_chars else value[: max_chars - 3].rstrip() + "..."
+
+
+def _blocked_reason_text(row: dict[str, Any]) -> str:
+    reason = (
+        row.get("no_trade_reason")
+        or row.get("alert_gate_reasons")
+        or row.get("avoid_reasons")
+        or row.get("risk_flags")
+        or "blocked by deterministic policy"
+    )
+    if isinstance(reason, list):
+        reason = "; ".join(str(item) for item in reason)
+    return str(reason)
+
+
+def _clip_preserving_suffix(prefix: str, suffix: str, max_chars: int) -> str:
+    """Trim optional detail while retaining compact publication invariants."""
+
+    limit = max(int(max_chars), 0)
+    if limit == 0:
+        return ""
+    prefix = prefix.strip()
+    suffix = suffix.strip()
+    separator = "\n\n" if prefix and suffix else ""
+    body = prefix + separator + suffix
+    if len(body) <= limit:
+        return body
+    if len(suffix) >= limit:
+        # Tiny non-production limits cannot hold every invariant. Preserve the
+        # terminal research-only statement rather than returning optional
+        # candidate detail with the execution boundary removed.
+        return suffix[-limit:]
+    available = limit - len(separator) - len(suffix)
+    clipped_prefix = _clip(prefix, available) if available >= 4 else ""
+    return clipped_prefix + (separator if clipped_prefix else "") + suffix
 
 
 def _clip(value: str, max_chars: int) -> str:

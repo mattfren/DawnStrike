@@ -387,8 +387,9 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         def __init__(self, _provider, store=None):
             self.store = store
 
-        def run(self, _config, *, persist=False):
+        def run(self, _config, *, persist=False, as_of=None):
             assert persist is True
+            assert as_of == cycle_at
             return FakeScanResult(candidate)
 
     class FakeModel:
