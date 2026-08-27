@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -105,6 +106,7 @@ def build_alpha_run_contract(
     notification_channel: str = "unknown",
     notification_dry_run: bool = False,
     notification_status_override: str = "",
+    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
 ) -> AlphaRunContract:
     decision = dict(review.get("decision") or {})
     diagnostics = dict(review.get("selection_diagnostics") or {})
@@ -131,6 +133,13 @@ def build_alpha_run_contract(
             require_safety=bool(source_summary.get("require_watcher_proof")),
         )
     frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
+    derived_publication_rows = apply_publication_semantics(
+        list(slate.get("rows") or []),
+        slate=slate,
+        coverage={"lanes": slate.get("lane_statuses") or {}},
+        require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
+        receipt_verifier=receipt_verifier,
+    )
     if isinstance(frozen_publication_rows, list):
         published_signals = [dict(row) for row in frozen_publication_rows]
         expected_selection_ids = list(slate.get("selection_ids") or [])
@@ -141,16 +150,16 @@ def build_alpha_run_contract(
             raise ValueError(
                 "Run-contract publication rows do not match the immutable slate cohort."
             )
+        if published_signals != derived_publication_rows:
+            raise ValueError(
+                "Run-contract publication rows do not match exact authenticated "
+                "frozen-slate publication semantics."
+            )
     else:
         # A standalone contract build has no database-backed receipt resolver,
-        # so it may reconstruct Tier 1 only. Tier 2/3 promotion is copied only
-        # from the exact publication rows produced by the operational cycle.
-        published_signals = apply_publication_semantics(
-            list(slate.get("rows") or []),
-            slate=slate,
-            coverage={"lanes": slate.get("lane_statuses") or {}},
-            require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
-        )
+        # so it may reconstruct Tier 1 only. Operational Tier 2/3 survives
+        # only when rederived with the cycle's persisted-receipt resolver.
+        published_signals = derived_publication_rows
     authoritative_slate = bool(persisted_slate) or isinstance(
         frozen_publication_rows, list
     )

@@ -162,11 +162,27 @@ def apply_publication_semantics(
         enriched["research_only"] = True
         enriched["broker_execution"] = "disabled"
         enriched["broker_execution_enabled"] = False
-        selected_and_safe = ticker in slate_symbols and _safe_for_research(
+        slate_row = slate_by_symbol.get(ticker)
+        frozen_source_signal_id = str(
+            (slate_row or {}).get("research_source_signal_id")
+            or (slate_row or {}).get("signal_id")
+            or ""
+        )
+        current_source_signal_id = str(
+            row.get("research_source_signal_id") or row.get("signal_id") or ""
+        )
+        exact_frozen_source = slate_row is not None and (
+            current_source_signal_id == frozen_source_signal_id
+            or (
+                not current_source_signal_id
+                and _matches_synthesized_frozen_source(row, slate_row)
+            )
+        )
+        selected_and_safe = exact_frozen_source and _safe_for_research(
             row, require_safety=require_watcher_proof
         )
         if selected_and_safe:
-            slate_row = slate_by_symbol[ticker]
+            assert slate_row is not None
             enriched["research_rank"] = slate_row.get("research_rank")
             enriched["research_selection_id"] = slate_row.get("research_selection_id")
             enriched["publication_tier"] = TIER1
@@ -212,6 +228,37 @@ def apply_publication_semantics(
             enriched["entry_state"] = "NOT_PUBLISHED"
         output.append(enriched)
     return output
+
+
+def _matches_synthesized_frozen_source(
+    row: dict[str, Any], frozen_row: dict[str, Any]
+) -> bool:
+    """Bind legacy ID-less inputs by their complete pre-annotation content."""
+
+    ticker = str(frozen_row.get("ticker") or "").upper()
+    rank = frozen_row.get("research_rank")
+    if str(frozen_row.get("research_source_signal_id") or "") != (
+        f"luna-research:{ticker}:{rank}"
+    ):
+        return False
+    annotation_fields = {
+        "research_rank",
+        "research_source_signal_id",
+        "research_selection_id",
+        "publication_tier",
+        "plan_qualification_status",
+        "entry_state",
+        "research_only",
+        "broker_execution",
+        "research_row_hash_sha256",
+    }
+    frozen_source = {
+        key: value for key, value in frozen_row.items() if key not in annotation_fields
+    }
+    current_source = {
+        key: value for key, value in row.items() if key not in annotation_fields
+    }
+    return current_source == frozen_source
 
 
 def publication_counts(

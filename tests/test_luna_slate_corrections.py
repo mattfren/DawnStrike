@@ -473,6 +473,23 @@ def test_lane_local_fallback_ceiling_does_not_demote_independent_core(
     assert by_ticker["CORE"]["publication_tier"] == TIER2
 
 
+def test_publication_does_not_graft_frozen_identity_onto_new_same_ticker_signal():
+    frozen = {"ticker": "SAME", "signal_id": "signal-frozen", "alpha_score": 10}
+    slate = build_ranked_research_slate(
+        [frozen],
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        scan_id="scan-frozen",
+    )
+    replacement = {"ticker": "SAME", "signal_id": "signal-new", "alpha_score": 99}
+
+    published = apply_publication_semantics([replacement], slate=slate)[0]
+
+    assert published["publication_tier"] is None
+    assert "research_selection_id" not in published
+    assert published["entry_state"] == "NOT_PUBLISHED"
+
+
 def test_slate_selection_requires_the_declared_evidence_lane_to_be_eligible() -> None:
     rows = [
         {"ticker": "CORE", "universe_lane": "core", "evidence_lane": "core"},

@@ -1066,6 +1066,7 @@ def alpha_cycle(
         "review": publication_review,
         "source_summary": source_summary,
         "enrichment_summary": dict(enrichment["summary"]),
+        "receipt_verifier": receipt_verifier,
     }
     _persist_run_contract(
         output_dir,
@@ -1703,6 +1704,7 @@ def _persist_run_contract(
     notification_channel: str,
     notification_dry_run: bool,
     notification_status_override: str = "",
+    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
 ) -> AlphaRunContract:
     contract = build_alpha_run_contract(
         scan_id=scan_id,
@@ -1716,6 +1718,7 @@ def _persist_run_contract(
         notification_channel=notification_channel,
         notification_dry_run=notification_dry_run,
         notification_status_override=notification_status_override,
+        receipt_verifier=receipt_verifier,
     )
     _write_json(output_dir / "alpha_run_contract.json", contract.to_dict())
     return contract
