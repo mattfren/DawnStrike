@@ -2683,6 +2683,62 @@ def _govern_frozen_official_cohort_retry(
             "FROZEN_COHORT_CONFLICT: retry members differ from the immutable cohort"
         )
 
+    # A producer-attempt scan may change, but the source scan represented by
+    # each selected signal may not.  Stable signal IDs alone are insufficient:
+    # an adversarial retry can otherwise reuse an ID with a different source
+    # payload and silently cross-join the watcher to new historical truth.
+    if decision_name != "no_trade":
+        frozen_by_signal_id = {
+            str(row.get("signal_id") or ""): row for row in rows
+        }
+        for signal in selected_signals:
+            signal_id = _selection_signal_id(signal, scan_id)
+            frozen_row = frozen_by_signal_id.get(signal_id)
+            if frozen_row is None:
+                continue
+            frozen_payload = frozen_row.get("payload_json")
+            frozen_signal = (
+                frozen_payload.get("signal")
+                if isinstance(frozen_payload, dict)
+                else None
+            )
+            frozen_source_scan_id = (
+                str(frozen_signal.get("scan_id") or "")
+                if isinstance(frozen_signal, dict)
+                else ""
+            )
+            if not frozen_source_scan_id and isinstance(frozen_payload, dict):
+                frozen_source_scan_id = str(
+                    frozen_payload.get("source_scan_id")
+                    or (
+                        frozen_payload.get("frozen_slate_lineage", {}).get(
+                            "frozen_source_scan_id"
+                        )
+                        if isinstance(frozen_payload.get("frozen_slate_lineage"), dict)
+                        else ""
+                    )
+                    or ""
+                )
+            current_lineage = signal.get("frozen_slate_lineage")
+            current_source_scan_id = str(
+                signal.get("source_scan_id")
+                or (
+                    current_lineage.get("frozen_source_scan_id")
+                    if isinstance(current_lineage, dict)
+                    else ""
+                )
+                or signal.get("scan_id")
+                or ""
+            )
+            if (
+                frozen_source_scan_id
+                and current_source_scan_id != frozen_source_scan_id
+            ):
+                raise SnapshotValidationError(
+                    "FROZEN_COHORT_CONFLICT: retry source scan differs from the "
+                    "immutable official selection"
+                )
+
     body_hash = _body_sha256(event.body)
     if body_hash != str(existing.get("body_sha256") or ""):
         raise SnapshotValidationError(
@@ -2706,6 +2762,8 @@ def _govern_frozen_official_cohort_retry(
             or _body_sha256(frozen_body) != str(existing.get("body_sha256") or "")
             or str(notification_manifest.get("title") or "") != event.title
             or str(notification_manifest.get("channel_hint") or "") != event.channel_hint
+            or notification_manifest.get("research_only") is not True
+            or notification_manifest.get("broker_execution_enabled") is not False
         ):
             raise SnapshotValidationError(
                 "FROZEN_COHORT_CONFLICT: immutable notification manifest is invalid"
@@ -2861,6 +2919,14 @@ def _persist_official_selections(
                 "frozen_slate_lineage": frozen_lineage,
                 "frozen_ranked_research_slate": frozen_slate,
             }
+        if (
+            not is_no_trade
+            and not str(signal_payload.get("scan_id") or "").strip()
+            and not frozen_source_scan_id.strip()
+        ):
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: official selection lacks a source scan identity"
+            )
         identity = f"{strategy_id}|{strategy_version}|{ALPHAOPS_OFFICIAL_COHORT}|{signal_id}"
         selection_id = f"selection:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
         row = {
@@ -2939,7 +3005,18 @@ def _persist_research_radar_selections(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Persist the exact conditional radar plans represented in Telegram."""
 
+    existing_rows = store.load_signal_selections(
+        scan_id=scan_id,
+        event_key=event.event_key,
+        strategy_id=ALPHAOPS_RADAR_COHORT,
+        cohort=ALPHAOPS_RADAR_COHORT,
+        limit=max(100, len(radar) * 2, 1),
+    )
     if not radar:
+        if existing_rows:
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: retry removed immutable research radar members"
+            )
         return [], {
             "inserted": 0,
             "skipped": 0,
@@ -3018,44 +3095,82 @@ def _persist_research_radar_selections(
             "broker_execution_enabled": False,
         }
         rows.append(row)
-    persisted = store.persist_signal_selections(rows)
-    stored_rows = store.load_signal_selections(
-        scan_id=scan_id,
-        event_key=event.event_key,
-        strategy_id=ALPHAOPS_RADAR_COHORT,
-        cohort=ALPHAOPS_RADAR_COHORT,
-        limit=max(100, len(rows) * 2),
-    )
-    if len(stored_rows) != len(rows):
-        raise SnapshotValidationError(
-            "FROZEN_COHORT_CONFLICT: research selection persistence is incomplete"
-        )
-    stored_by_id = {str(row.get("selection_id") or ""): row for row in stored_rows}
-    for expected in rows:
-        actual = stored_by_id.get(str(expected.get("selection_id") or ""))
-        expected_stored = {
-            key: expected.get(key)
-            for key in (
-                "selection_id",
-                "scan_id",
-                "signal_id",
-                "ticker",
-                "rank",
-                "strategy_id",
-                "strategy_version",
-                "cohort",
-                "decision",
-                "selected_at",
-                "event_key",
-                "body_sha256",
-                "payload_json",
-            )
-        }
-        if actual is None or canonical_json(actual) != canonical_json(expected_stored):
+    if existing_rows:
+        # Validate before INSERT OR IGNORE.  This keeps a conflicting retry
+        # from leaving replacement rows beside the original frozen radar.
+        if len(existing_rows) != len(rows):
             raise SnapshotValidationError(
-                "FROZEN_COHORT_CONFLICT: research selection identity was already "
-                "persisted with different immutable truth"
+                "FROZEN_COHORT_CONFLICT: research selection membership changed"
             )
+        stored_by_id = {
+            str(row.get("selection_id") or ""): row for row in existing_rows
+        }
+        for expected in rows:
+            actual = stored_by_id.get(str(expected.get("selection_id") or ""))
+            expected_stored = {
+                key: expected.get(key)
+                for key in (
+                    "selection_id",
+                    "scan_id",
+                    "signal_id",
+                    "ticker",
+                    "rank",
+                    "strategy_id",
+                    "strategy_version",
+                    "cohort",
+                    "decision",
+                    "selected_at",
+                    "event_key",
+                    "body_sha256",
+                    "payload_json",
+                )
+            }
+            if actual is None or canonical_json(actual) != canonical_json(expected_stored):
+                raise SnapshotValidationError(
+                    "FROZEN_COHORT_CONFLICT: research selection identity was already "
+                    "persisted with different immutable truth"
+                )
+        stored_rows = existing_rows
+        persisted = {"inserted": 0, "skipped": len(rows)}
+    else:
+        persisted = store.persist_signal_selections(rows)
+        stored_rows = store.load_signal_selections(
+            scan_id=scan_id,
+            event_key=event.event_key,
+            strategy_id=ALPHAOPS_RADAR_COHORT,
+            cohort=ALPHAOPS_RADAR_COHORT,
+            limit=max(100, len(rows) * 2),
+        )
+        if len(stored_rows) != len(rows):
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: research selection persistence is incomplete"
+            )
+        stored_by_id = {str(row.get("selection_id") or ""): row for row in stored_rows}
+        for expected in rows:
+            actual = stored_by_id.get(str(expected.get("selection_id") or ""))
+            expected_stored = {
+                key: expected.get(key)
+                for key in (
+                    "selection_id",
+                    "scan_id",
+                    "signal_id",
+                    "ticker",
+                    "rank",
+                    "strategy_id",
+                    "strategy_version",
+                    "cohort",
+                    "decision",
+                    "selected_at",
+                    "event_key",
+                    "body_sha256",
+                    "payload_json",
+                )
+            }
+            if actual is None or canonical_json(actual) != canonical_json(expected_stored):
+                raise SnapshotValidationError(
+                    "FROZEN_COHORT_CONFLICT: research selection identity was already "
+                    "persisted with different immutable truth"
+                )
     return stored_rows, {
         **persisted,
         "cohort": ALPHAOPS_RADAR_COHORT,

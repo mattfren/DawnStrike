@@ -10,6 +10,10 @@ from intraday_scanner.services.alpha_cycle_service import (
     _govern_frozen_official_cohort_retry,
     _persist_notification_delivery_memberships,
     _persist_official_selections,
+    _persist_research_radar_selections,
+)
+from intraday_scanner.services.luna_research_slate_service import (
+    build_ranked_research_slate,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -174,3 +178,141 @@ def test_frozen_retry_rejects_membership_or_body_substitution(
             selected_at="2026-08-26T13:05:00+00:00",
             event=_event("scan-retry", body),
         )
+
+
+@pytest.mark.parametrize(
+    ("title", "channel_hint", "match"),
+    [
+        ("Changed title", "alpha_morning_watch", "immutable notification manifest"),
+        ("Dawnstrike Alpha Watch", "changed_channel", "immutable notification manifest"),
+    ],
+)
+def test_frozen_retry_rejects_title_or_channel_substitution(
+    tmp_path: Path,
+    title: str,
+    channel_hint: str,
+    match: str,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-manifest-conflict.sqlite")
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[_signal()],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=_event("scan-original"),
+    )
+
+    with pytest.raises(SnapshotValidationError, match=f"FROZEN_COHORT_CONFLICT.*{match}"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[_signal()],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=NotificationEvent(
+                event_key="alphaops:scan-retry:alpha_morning_watch",
+                title=title,
+                body="OFFICIAL PAPER CANDIDATES\n1. AAA",
+                channel_hint=channel_hint,
+            ),
+        )
+
+
+def test_frozen_retry_rejects_source_scan_substitution(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-source-conflict.sqlite")
+    original = _signal()
+    original["scan_id"] = "frozen-source"
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[original],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=_event("scan-original"),
+    )
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT.*source scan"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[{**_signal(), "scan_id": "replacement-source"}],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=_event("scan-retry"),
+        )
+
+
+def test_frozen_retry_rejects_missing_source_scan_identity(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-source-missing.sqlite")
+    original = _signal()
+    original["scan_id"] = "frozen-source"
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[original],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=_event("scan-original"),
+    )
+    retry_signal = _signal()
+    retry_signal.pop("scan_id")
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT.*source scan"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[retry_signal],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=_event("scan-retry"),
+        )
+
+
+def test_radar_retry_conflict_does_not_insert_replacement_rows(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-radar-conflict.sqlite")
+    source = _signal()
+    source["scan_id"] = "scan-original"
+    slate = build_ranked_research_slate(
+        [source],
+        generated_at=SELECTED_AT,
+        market_date="2026-08-26",
+        scan_id="scan-original",
+    )
+    frozen = slate["rows"][0]
+    event = _event("scan-original", body="OFFICIAL PAPER CANDIDATES\n1. AAA")
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[frozen],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=event,
+        slate=slate,
+    )
+    _persist_research_radar_selections(
+        store,
+        scan_id="scan-original",
+        radar=[frozen],
+        slate=slate,
+        selected_at=SELECTED_AT,
+        event=event,
+    )
+    before = store.load_signal_selections(cohort="research_radar")
+
+    replacement = dict(frozen)
+    replacement["ticker"] = "BBB"
+    replacement["research_selection_id"] = "research-selection-replacement"
+    replacement["research_row_hash_sha256"] = "0" * 64
+    changed_slate = dict(slate)
+    changed_slate["rows"] = [replacement]
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT"):
+        _persist_research_radar_selections(
+            store,
+            scan_id="scan-original",
+            radar=[replacement],
+            slate=changed_slate,
+            selected_at=SELECTED_AT,
+            event=event,
+        )
+    assert store.load_signal_selections(cohort="research_radar") == before
