@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_STRATEGY_VERSION
 from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.notifiers import NotificationEvent
+from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.services.alpha_cycle_service import (
     _govern_frozen_official_cohort_retry,
     _persist_notification_delivery_memberships,
@@ -14,6 +18,9 @@ from intraday_scanner.services.alpha_cycle_service import (
 )
 from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
+)
+from intraday_scanner.services.return_attribution_service import (
+    record_alpha_historical_signals,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -269,6 +276,83 @@ def test_frozen_retry_rejects_missing_source_scan_identity(tmp_path: Path) -> No
         )
 
 
+def test_official_missing_source_scan_rejects_without_artifacts(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "official-source-missing.sqlite")
+    source_less = _signal()
+    source_less.pop("scan_id")
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT.*source scan"):
+        _persist_official_selections(
+            store,
+            scan_id="scan-original",
+            selected_signals=[source_less],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at=SELECTED_AT,
+            event=_event("scan-original"),
+        )
+
+    assert store.load_signal_selections() == []
+    assert store.load_official_strategy_cohort(
+        market_date=SELECTED_AT[:10],
+        strategy_id="alphaops_v5",
+        strategy_version=ALPHAOPS_V5_STRATEGY_VERSION,
+        cohort="official_telegram",
+    ) is None
+    assert store.load_strategy_versions() == []
+
+
+def test_mutated_manifest_safety_flags_reject_without_replacing_artifacts(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "manifest-safety-conflict.sqlite")
+    event = _event("scan-original")
+    original_rows, _ = _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[_signal()],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=event,
+    )
+    original_cohort = store.load_official_strategy_cohort(
+        market_date=SELECTED_AT[:10],
+        strategy_id="alphaops_v5",
+        strategy_version=ALPHAOPS_V5_STRATEGY_VERSION,
+        cohort="official_telegram",
+    )
+    assert original_cohort is not None
+    payload = dict(original_cohort["payload_json"])
+    manifest = dict(payload["notification_manifest"])
+    manifest["broker_execution_enabled"] = True
+    payload["notification_manifest"] = manifest
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE official_strategy_cohorts SET payload_json = ? "
+            "WHERE official_cohort_id = ?",
+            (json.dumps(payload, sort_keys=True), original_cohort["official_cohort_id"]),
+        )
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT.*manifest"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[_signal()],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=event,
+        )
+
+    assert store.load_signal_selections(cohort="official_telegram") == original_rows
+    persisted = store.load_official_strategy_cohort(
+        market_date=SELECTED_AT[:10],
+        strategy_id="alphaops_v5",
+        strategy_version=ALPHAOPS_V5_STRATEGY_VERSION,
+        cohort="official_telegram",
+    )
+    assert persisted is not None
+    assert persisted["payload_json"]["notification_manifest"]["broker_execution_enabled"] is True
+
+
 def test_radar_retry_conflict_does_not_insert_replacement_rows(tmp_path: Path) -> None:
     store = SQLiteScanStore(tmp_path / "frozen-radar-conflict.sqlite")
     source = _signal()
@@ -316,3 +400,135 @@ def test_radar_retry_conflict_does_not_insert_replacement_rows(tmp_path: Path) -
             event=event,
         )
     assert store.load_signal_selections(cohort="research_radar") == before
+
+
+def test_duplicate_official_and_radar_signal_has_one_canonical_delivery(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "delivery-overlap.sqlite")
+    event = _event("scan-original")
+    official, _ = _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[_signal()],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=event,
+    )
+    radar = dict(official[0])
+    radar["selection_id"] = "radar-selection-overlap"
+    radar["strategy_id"] = "research_radar"
+    radar["strategy_version"] = "dawnstrike-research-radar-v1"
+    radar["cohort"] = "research_radar"
+    radar["decision"] = "conditional_paper_watch"
+    radar["payload_json"] = {**radar, "signal": _signal()}
+    store.record_notification(
+        event_key=f"{event.event_key}:telegram",
+        channel="telegram",
+        run_id="scan-original",
+        payload={"title": event.title, "body": event.body, "channel_hint": event.channel_hint},
+    )
+
+    deliveries = _persist_notification_delivery_memberships(
+        store,
+        selections=[*official, radar],
+        events=[event],
+        notify="telegram",
+        preexisting_notification_keys=set(),
+    )
+
+    assert len(deliveries) == 1
+    assert deliveries[0]["cohort"] == "official_telegram"
+    assert deliveries[0]["selection_id"] == official[0]["selection_id"]
+    assert len(store.load_notification_deliveries(event_key=event.event_key)) == 1
+
+
+def test_retry_manifest_body_is_stable_across_producer_minute(tmp_path: Path) -> None:
+    from intraday_scanner.services.alpha_cycle_service import (
+        _load_frozen_official_notification_manifest,
+    )
+
+    store = SQLiteScanStore(tmp_path / "stable-body.sqlite")
+    first_at = "2026-08-26T13:00:00+00:00"
+    retry_at = "2026-08-26T13:05:00+00:00"
+    first_body = format_alpha_watch(
+        signals=[], edge_label="NONE", generated_at=first_at
+    )
+    retry_render = format_alpha_watch(
+        signals=[], edge_label="NONE", generated_at=retry_at
+    )
+    assert retry_render != first_body
+    _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[_signal()],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=first_at,
+        event=_event("scan-original", body=first_body),
+    )
+
+    manifest = _load_frozen_official_notification_manifest(
+        store, selected_at=retry_at
+    )
+    assert manifest is not None
+    assert manifest["body"] == first_body
+
+
+def test_historical_retry_merge_preserves_alert_linkage(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "historical-merge.sqlite")
+    original = {
+        **_signal(),
+        "signal_key": "stable-historical-signal",
+        "scan_id": "scan-original",
+        "timestamp": SELECTED_AT,
+        "alert_sent": True,
+    }
+    record_alpha_historical_signals(store, [original])
+    store.link_historical_signal_notification(
+        scan_id="scan-original",
+        telegram_event_key="alphaops:scan-original:alpha_morning_watch:telegram",
+        was_alerted=True,
+        signal_ids=["stable-historical-signal"],
+    )
+    retry = {
+        **original,
+        "scan_id": "scan-retry",
+        "timestamp": "2026-08-26T13:05:00+00:00",
+        "alert_sent": False,
+    }
+    record_alpha_historical_signals(store, [retry])
+
+    row = next(
+        row
+        for row in store.load_historical_signals(scan_id="scan-original")
+        if row["signal_id"] == "stable-historical-signal"
+    )
+    assert row["scan_id"] == "scan-original"
+    assert row["was_alerted"] is True
+    assert row["telegram_event_key"] == (
+        "alphaops:scan-original:alpha_morning_watch:telegram"
+    )
+
+
+def test_radar_duplicate_set_rolls_back_without_partial_rows(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "radar-atomic.sqlite")
+    source = _signal()
+    source["scan_id"] = "scan-original"
+    slate = build_ranked_research_slate(
+        [source],
+        generated_at=SELECTED_AT,
+        market_date="2026-08-26",
+        scan_id="scan-original",
+    )
+    frozen = slate["rows"][0]
+    event = _event("scan-original")
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT"):
+        _persist_research_radar_selections(
+            store,
+            scan_id="scan-original",
+            radar=[frozen, frozen],
+            slate=slate,
+            selected_at=SELECTED_AT,
+            event=event,
+        )
+    assert store.load_signal_selections(cohort="research_radar") == []

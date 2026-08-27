@@ -31,7 +31,7 @@ from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
 from intraday_scanner.decisioning.contracts import canonical_json
-from intraday_scanner.errors import DataProviderError, SnapshotValidationError
+from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
     core_session_phase,
@@ -94,6 +94,7 @@ from intraday_scanner.services.luna_research_slate_service import (
 from intraday_scanner.services.premarket_enrichment_service import enrich_premarket_rows
 from intraday_scanner.services.price_observation_service import collect_price_observations
 from intraday_scanner.services.return_attribution_service import (
+    _build_no_trade_historical_signal,
     record_alpha_historical_signals,
     record_monitor_signal_events,
     record_no_trade_historical_signal,
@@ -283,8 +284,7 @@ def alpha_cycle(
         review = review_alpha_signals([], source_summary=source_summary)
         no_data_scan_id = f"{cycle_name}:source_failure:{utc_now_iso()[:10]}"
         no_data_generated_at = utc_now_iso()
-        no_data_no_trade_row = record_no_trade_historical_signal(
-            store,
+        no_data_no_trade_row = _build_no_trade_historical_signal(
             scan_id=no_data_scan_id,
             generated_at=no_data_generated_at,
             reason=str(review["decision"]["reason"]),
@@ -320,10 +320,17 @@ def alpha_cycle(
                 else "GOVERNED_DAILY_FREEZE_REUSE"
             ),
         }
-        message = format_alpha_no_trade(
-            reason=str(review["decision"]["reason"]),
-            next_action=str(review["decision"]["next_action"]),
-            research_total=int(luna_research_slate.get("published_count") or 0),
+        frozen_manifest = _load_frozen_official_notification_manifest(
+            store, selected_at=no_data_generated_at
+        )
+        message = (
+            str(frozen_manifest.get("body") or "")
+            if frozen_manifest is not None
+            else format_alpha_no_trade(
+                reason=str(review["decision"]["reason"]),
+                next_action=str(review["decision"]["next_action"]),
+                research_total=int(luna_research_slate.get("published_count") or 0),
+            )
         )
         events = [
             _official_selection_notification_event(
@@ -350,6 +357,14 @@ def alpha_cycle(
                 decision=dict(review["decision"]),
                 selected_at=no_data_generated_at,
                 event=events[0],
+            )
+            record_no_trade_historical_signal(
+                store,
+                scan_id=no_data_scan_id,
+                generated_at=no_data_generated_at,
+                reason=str(review["decision"]["reason"]),
+                source_summary=source_summary,
+                candidate_count=int(source_summary.get("candidate_count") or 0),
             )
             selection_scan_id = no_data_scan_id
         else:
@@ -875,18 +890,9 @@ def alpha_cycle(
         "decision": publication_decision,
         "watchlist": selected_signals,
     }
-    historical_rows = record_alpha_historical_signals(
-        store,
-        _historical_publication_rows(signals, slate_publication_rows),
-        source_summary=source_summary,
-        no_trade_reason=(
-            str(publication_decision.get("reason") or "") if official_no_trade else ""
-        ),
-    )
     no_trade_row: dict[str, Any] | None = None
     if official_no_trade:
-        no_trade_row = record_no_trade_historical_signal(
-            store,
+        no_trade_row = _build_no_trade_historical_signal(
             scan_id=scan_result.run_id,
             generated_at=timestamp,
             reason=str(publication_decision.get("reason") or ""),
@@ -894,11 +900,18 @@ def alpha_cycle(
             candidate_count=len(ranked),
         )
     if official_no_trade:
-        message = format_alpha_no_trade(
-            reason=str(publication_decision.get("reason") or ""),
-            next_action=str(publication_decision.get("next_action") or ""),
-            research_signals=slate_publication_rows,
-            research_total=int(luna_research_slate.get("published_count") or 0),
+        frozen_manifest = _load_frozen_official_notification_manifest(
+            store, selected_at=timestamp
+        )
+        message = (
+            str(frozen_manifest.get("body") or "")
+            if frozen_manifest is not None
+            else format_alpha_no_trade(
+                reason=str(publication_decision.get("reason") or ""),
+                next_action=str(publication_decision.get("next_action") or ""),
+                research_signals=slate_publication_rows,
+                research_total=int(luna_research_slate.get("published_count") or 0),
+            )
         )
         hint = "alpha_no_trade"
         title = "Dawnstrike Alpha Check"
@@ -908,11 +921,19 @@ def alpha_cycle(
             if str(decision.get("decision_tier") or "") == "probability_fallback"
             else _edge_label(selected_signals)
         )
-        message = format_alpha_watch(
-            signals=slate_publication_rows,
-            edge_label=edge_label,
-            source_summary=source_summary,
-            blocked_signals=list(review["blocked"]),
+        frozen_manifest = _load_frozen_official_notification_manifest(
+            store, selected_at=timestamp
+        )
+        message = (
+            str(frozen_manifest.get("body") or "")
+            if frozen_manifest is not None
+            else format_alpha_watch(
+                signals=slate_publication_rows,
+                edge_label=edge_label,
+                source_summary=source_summary,
+                blocked_signals=list(review["blocked"]),
+                generated_at=timestamp,
+            )
         )
         hint = "alpha_morning_watch"
         title = "Dawnstrike Alpha Watch"
@@ -964,7 +985,50 @@ def alpha_cycle(
         selected_at=selection_selected_at,
         event=events[0],
     )
-    delivery_selection_rows = [*selected_rows, *radar_selection_rows]
+    official_signal_ids = {
+        str(row.get("signal_id") or "") for row in selected_rows
+    }
+    delivery_radar_rows = [
+        row
+        for row in radar_selection_rows
+        if str(row.get("signal_id") or "") not in official_signal_ids
+    ]
+    radar_selection_stats["delivery_overlap_excluded"] = len(
+        radar_selection_rows
+    ) - len(delivery_radar_rows)
+    delivery_selection_rows = [*selected_rows, *delivery_radar_rows]
+    if frozen_cohort_retry is None:
+        historical_rows = record_alpha_historical_signals(
+            store,
+            _historical_publication_rows(signals, slate_publication_rows),
+            source_summary=source_summary,
+            no_trade_reason=(
+                str(publication_decision.get("reason") or "") if official_no_trade else ""
+            ),
+        )
+        if official_no_trade:
+            record_no_trade_historical_signal(
+                store,
+                scan_id=scan_result.run_id,
+                generated_at=timestamp,
+                reason=str(publication_decision.get("reason") or ""),
+                source_summary=source_summary,
+                candidate_count=len(ranked),
+            )
+    else:
+        frozen_signal_ids = {
+            str(row.get("signal_id") or "")
+            for row in delivery_selection_rows
+            if str(row.get("signal_id") or "")
+        }
+        historical_rows = [
+            row
+            for row in store.load_historical_signals(
+                scan_id=selection_scan_id,
+                limit=max(100, len(frozen_signal_ids) * 2, 1),
+            )
+            if str(row.get("signal_id") or "") in frozen_signal_ids
+        ]
     selected_signal_ids = [str(row["signal_id"]) for row in delivery_selection_rows]
     preexisting_notification_keys = _existing_notification_keys(
         store,
@@ -2991,6 +3055,27 @@ def _official_selection_notification_event(
     )
 
 
+def _load_frozen_official_notification_manifest(
+    store: SQLiteScanStore,
+    *,
+    selected_at: str,
+) -> dict[str, Any] | None:
+    """Load the persisted notification body before rendering a retry."""
+
+    strategy_id, strategy_version = alphaops_strategy_contract(selected_at)
+    existing = store.load_official_strategy_cohort(
+        market_date=selected_at[:10],
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        cohort=ALPHAOPS_OFFICIAL_COHORT,
+    )
+    payload = existing.get("payload_json") if isinstance(existing, dict) else None
+    manifest = payload.get("notification_manifest") if isinstance(payload, dict) else None
+    if not isinstance(manifest, dict) or not str(manifest.get("body") or ""):
+        return None
+    return dict(manifest)
+
+
 def _govern_frozen_official_cohort_retry(
     store: SQLiteScanStore,
     *,
@@ -3213,32 +3298,6 @@ def _persist_official_selections(
     """Freeze the exact signal identities represented by one operator message."""
 
     strategy_id, strategy_version = alphaops_strategy_contract(selected_at)
-    strategy_stats = store.persist_strategy_versions(
-        [
-            {
-                "strategy_id": strategy_id,
-                "strategy_version": strategy_version,
-                "registered_at": selected_at,
-                "definition_json": {
-                    "name": "AlphaOps v5" if strategy_id == "alphaops_v5" else "AlphaOps v4",
-                    "cohort": ALPHAOPS_OFFICIAL_COHORT,
-                    "decision_source": "governed_official_cohort",
-                    "model_version": ALPHA_MODEL_VERSION,
-                    "prospective_contract": strategy_id == "alphaops_v5",
-                    "research_only": True,
-                    "broker_execution_enabled": False,
-                },
-                "payload_json": {
-                    "strategy_id": strategy_id,
-                    "strategy_version": strategy_version,
-                    "model_version": ALPHA_MODEL_VERSION,
-                    "cohort": ALPHAOPS_OFFICIAL_COHORT,
-                    "registered_at": selected_at,
-                    "research_only": True,
-                },
-            }
-        ]
-    )
     decision_name = (
         "no_trade" if decision.get("no_trade") else str(decision.get("decision_tier") or "selected")
     )
@@ -3342,6 +3401,32 @@ def _persist_official_selections(
             "broker_execution_enabled": False,
         }
         rows.append(row)
+    strategy_stats = store.persist_strategy_versions(
+        [
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "registered_at": selected_at,
+                "definition_json": {
+                    "name": "AlphaOps v5" if strategy_id == "alphaops_v5" else "AlphaOps v4",
+                    "cohort": ALPHAOPS_OFFICIAL_COHORT,
+                    "decision_source": "governed_official_cohort",
+                    "model_version": ALPHA_MODEL_VERSION,
+                    "prospective_contract": strategy_id == "alphaops_v5",
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                },
+                "payload_json": {
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "model_version": ALPHA_MODEL_VERSION,
+                    "cohort": ALPHAOPS_OFFICIAL_COHORT,
+                    "registered_at": selected_at,
+                    "research_only": True,
+                },
+            }
+        ]
+    )
     cohort_row = build_official_cohort_row(
         market_date=selected_at[:10],
         strategy_id=strategy_id,
@@ -3407,30 +3492,6 @@ def _persist_research_radar_selections(
             "cohort": ALPHAOPS_RADAR_COHORT,
             "strategy_version": ALPHAOPS_RADAR_VERSION,
         }
-    strategy_stats = store.persist_strategy_versions(
-        [
-            {
-                "strategy_id": ALPHAOPS_RADAR_COHORT,
-                "strategy_version": ALPHAOPS_RADAR_VERSION,
-                "registered_at": selected_at,
-                "definition_json": {
-                    "name": "Dawnstrike conditional research radar",
-                    "cohort": ALPHAOPS_RADAR_COHORT,
-                    "minimum_reward_risk": 1.5,
-                    "maximum_stop_distance_pct": 8.0,
-                    "maximum_spread_pct": 3.0,
-                    "research_only": True,
-                    "broker_execution_enabled": False,
-                },
-                "payload_json": {
-                    "strategy_id": ALPHAOPS_RADAR_COHORT,
-                    "strategy_version": ALPHAOPS_RADAR_VERSION,
-                    "registered_at": selected_at,
-                    "research_only": True,
-                },
-            }
-        ]
-    )
     body_sha256 = _body_sha256(event.body)
     frozen_source_scan_id = str(slate.get("scan_id") or "")
     if not frozen_source_scan_id:
@@ -3517,7 +3578,13 @@ def _persist_research_radar_selections(
         stored_rows = existing_rows
         persisted = {"inserted": 0, "skipped": len(rows)}
     else:
-        persisted = store.persist_signal_selections(rows)
+        try:
+            persisted = store.persist_signal_selections(rows, require_exact=True)
+        except StorageError as exc:
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: research selection persistence rejected "
+                "an incomplete or conflicting immutable set"
+            ) from exc
         stored_rows = store.load_signal_selections(
             scan_id=scan_id,
             event_key=event.event_key,
@@ -3555,6 +3622,30 @@ def _persist_research_radar_selections(
                     "FROZEN_COHORT_CONFLICT: research selection identity was already "
                     "persisted with different immutable truth"
                 )
+    strategy_stats = store.persist_strategy_versions(
+        [
+            {
+                "strategy_id": ALPHAOPS_RADAR_COHORT,
+                "strategy_version": ALPHAOPS_RADAR_VERSION,
+                "registered_at": selected_at,
+                "definition_json": {
+                    "name": "Dawnstrike conditional research radar",
+                    "cohort": ALPHAOPS_RADAR_COHORT,
+                    "minimum_reward_risk": 1.5,
+                    "maximum_stop_distance_pct": 8.0,
+                    "maximum_spread_pct": 3.0,
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                },
+                "payload_json": {
+                    "strategy_id": ALPHAOPS_RADAR_COHORT,
+                    "strategy_version": ALPHAOPS_RADAR_VERSION,
+                    "registered_at": selected_at,
+                    "research_only": True,
+                },
+            }
+        ]
+    )
     return stored_rows, {
         **persisted,
         "cohort": ALPHAOPS_RADAR_COHORT,
@@ -3625,6 +3716,7 @@ def _persist_notification_delivery_memberships(
 ) -> list[dict[str, Any]]:
     """Record exact members and preserve delivery truth across deduplicated runs."""
 
+    selections = _canonical_delivery_selections(selections)
     attempted_at = utc_now_iso()
     rows: list[dict[str, Any]] = []
     for event in events:
@@ -3700,6 +3792,44 @@ def _persist_notification_delivery_memberships(
         )
         if row["event_key"] in event_keys
     ]
+
+
+def _canonical_delivery_selections(
+    selections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep one immutable delivery member per event/channel/signal.
+
+    Official membership is the canonical notification identity when the same
+    ticker is also present in the research radar.  Radar persistence remains
+    separate; only its duplicate delivery projection is excluded.
+    """
+
+    by_event_signal: dict[tuple[str, str], dict[str, Any]] = {}
+    for selection in selections:
+        key = (
+            str(selection.get("event_key") or ""),
+            str(selection.get("signal_id") or ""),
+        )
+        if not key[0] or not key[1]:
+            continue
+        previous = by_event_signal.get(key)
+        if previous is None:
+            by_event_signal[key] = selection
+            continue
+        previous_cohort = str(previous.get("cohort") or "")
+        current_cohort = str(selection.get("cohort") or "")
+        if previous_cohort == ALPHAOPS_OFFICIAL_COHORT:
+            if current_cohort == ALPHAOPS_RADAR_COHORT:
+                continue
+        elif current_cohort == ALPHAOPS_OFFICIAL_COHORT:
+            by_event_signal[key] = selection
+            continue
+        if canonical_json(previous) != canonical_json(selection):
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: duplicate notification membership has "
+                "different immutable selection truth"
+            )
+    return list(by_event_signal.values())
 
 
 def _body_sha256(body: str) -> str:

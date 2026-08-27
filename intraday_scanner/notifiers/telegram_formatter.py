@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -250,6 +251,7 @@ def format_alpha_watch(
     source_summary: dict[str, Any] | None = None,
     blocked_signals: list[dict[str, Any]] | None = None,
     timezone: str = "America/Chicago",
+    generated_at: str | datetime | None = None,
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
 ) -> str:
     source_summary = dict(source_summary or {})
@@ -317,7 +319,7 @@ def format_alpha_watch(
     lines = [
         "🚀 Dawnstrike Alpha Watch",
         (
-            f"⏱ {get_operator_time_label(timezone)} | Edge: {edge_label} | "
+            f"⏱ {_operator_time_label(timezone, generated_at)} | Edge: {edge_label} | "
             f"{len(official_candidates)} official candidates | "
             f"{len(research_watchlist)} research"
         ),
@@ -397,6 +399,21 @@ def format_alpha_watch(
     lines.append("")
     lines.append("No orders placed. Research only.")
     return _clip("\n".join(lines).strip(), max_chars)
+
+
+def _operator_time_label(timezone: str, generated_at: str | datetime | None) -> str:
+    """Render a stable operator timestamp for persisted notification bodies."""
+
+    if generated_at is None:
+        return get_operator_time_label(timezone)
+    if isinstance(generated_at, datetime):
+        parsed = generated_at
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return get_operator_time_label(timezone)
+    return get_operator_time_label(timezone, now=parsed)
 
 
 def format_alpha_no_trade(

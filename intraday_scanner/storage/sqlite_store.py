@@ -1727,8 +1727,19 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load strategy versions: {exc}") from exc
 
-    def persist_signal_selections(self, rows: list[dict[str, Any]]) -> dict[str, int]:
-        """Persist an immutable, exact set of selected signal identities."""
+    def persist_signal_selections(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        require_exact: bool = False,
+    ) -> dict[str, int]:
+        """Persist an immutable, exact set of selected signal identities.
+
+        ``require_exact`` is used by frozen radar persistence.  It validates
+        duplicate identities and existing unique-key conflicts inside the same
+        transaction as the inserts, so a rejected set cannot leave partial
+        selection rows behind.
+        """
 
         self.initialize()
         inserted = 0
@@ -1747,6 +1758,68 @@ class SQLiteScanStore:
         )
         try:
             with self._connect() as connection:
+                if require_exact:
+                    connection.row_factory = sqlite3.Row
+                if require_exact:
+                    valid_rows: list[dict[str, Any]] = []
+                    seen_selection_ids: set[str] = set()
+                    seen_signal_keys: set[tuple[str, str, str, str]] = set()
+                    for row in rows:
+                        if any(not str(row.get(field) or "").strip() for field in required):
+                            raise StorageError(
+                                "Exact signal selection is missing required immutable identity"
+                            )
+                        selection_id = str(row["selection_id"])
+                        signal_key = (
+                            str(row["strategy_id"]),
+                            str(row["strategy_version"]),
+                            str(row["cohort"]),
+                            str(row["signal_id"]),
+                        )
+                        if selection_id in seen_selection_ids or signal_key in seen_signal_keys:
+                            raise StorageError(
+                                "Exact signal selection set contains duplicate immutable identity"
+                            )
+                        seen_selection_ids.add(selection_id)
+                        seen_signal_keys.add(signal_key)
+                        valid_rows.append(row)
+                    for row in valid_rows:
+                        selection_id = str(row["selection_id"])
+                        signal_key = (
+                            str(row["strategy_id"]),
+                            str(row["strategy_version"]),
+                            str(row["cohort"]),
+                            str(row["signal_id"]),
+                        )
+                        existing_by_id = connection.execute(
+                            "SELECT * FROM signal_selections WHERE selection_id = ? LIMIT 1",
+                            (selection_id,),
+                        ).fetchone()
+                        if existing_by_id is not None:
+                            actual = _selection_identity_row(existing_by_id)
+                            if _selection_semantics(actual) != _selection_semantics(row):
+                                raise StorageError(
+                                    "Exact signal selection identity conflicts with prior truth: "
+                                    + selection_id
+                                )
+                        existing_by_signal = connection.execute(
+                            """
+                            SELECT * FROM signal_selections
+                            WHERE strategy_id = ? AND strategy_version = ?
+                              AND cohort = ? AND signal_id = ?
+                            LIMIT 1
+                            """,
+                            signal_key,
+                        ).fetchone()
+                        if (
+                            existing_by_signal is not None
+                            and str(existing_by_signal["selection_id"]) != selection_id
+                        ):
+                            raise StorageError(
+                                "Exact signal selection signal identity conflicts "
+                                "with prior truth: "
+                                + str(row["signal_id"])
+                            )
                 for row in rows:
                     if any(not str(row.get(field) or "").strip() for field in required):
                         skipped += 1
@@ -1779,6 +1852,21 @@ class SQLiteScanStore:
                         inserted += 1
                     else:
                         skipped += 1
+                if require_exact:
+                    for row in rows:
+                        actual_row = connection.execute(
+                            "SELECT * FROM signal_selections WHERE selection_id = ? LIMIT 1",
+                            (str(row["selection_id"]),),
+                        ).fetchone()
+                        if (
+                            actual_row is None
+                            or _selection_semantics(_selection_identity_row(actual_row))
+                            != _selection_semantics(row)
+                        ):
+                            raise StorageError(
+                                "Exact signal selection persistence is incomplete: "
+                                + str(row["selection_id"])
+                            )
             return {"inserted": inserted, "skipped": skipped}
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist signal selections: {exc}") from exc
@@ -7882,6 +7970,26 @@ def _selection_identity_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _selection_semantics(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Normalize immutable selection columns for exact transactional checks."""
+
+    return (
+        str(row.get("selection_id") or ""),
+        str(row.get("scan_id") or ""),
+        str(row.get("signal_id") or ""),
+        str(row.get("ticker") or "").upper(),
+        _int_or_none(row.get("rank")),
+        str(row.get("strategy_id") or ""),
+        str(row.get("strategy_version") or ""),
+        str(row.get("cohort") or ""),
+        str(row.get("decision") or ""),
+        str(row.get("selected_at") or ""),
+        str(row.get("event_key") or ""),
+        str(row.get("body_sha256") or ""),
+        _json_value(row.get("payload_json")),
+    )
+
+
 def _notification_delivery_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "membership_id": str(row["membership_id"]),
@@ -8045,7 +8153,7 @@ def _ensure_columns(
 def _json_value(value: Any, *, default: Any | None = None) -> Any:
     if default is None:
         default = {}
-    if value in {None, ""}:
+    if value is None or value == "":
         return default
     if isinstance(value, (dict, list)):
         return value

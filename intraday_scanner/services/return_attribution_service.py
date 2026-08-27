@@ -74,7 +74,9 @@ def record_alpha_historical_signals(
     ]
     if not rows:
         return []
-    store.persist_historical_signals(rows)
+    # Historical signal identity is immutable.  A retry must not replace a
+    # row whose notification linkage was already proven delivered.
+    store.persist_historical_signals(rows, replace=False)
     store.persist_signal_events(
         [
             _signal_event(
@@ -105,6 +107,40 @@ def record_no_trade_historical_signal(
     candidate_count: int = 0,
 ) -> dict[str, Any]:
     """Persist a day-level no-clean-edge decision when no watchlist is produced."""
+    source_summary = dict(source_summary or {})
+    row = _build_no_trade_historical_signal(
+        scan_id=scan_id,
+        generated_at=generated_at,
+        reason=reason,
+        source_summary=source_summary,
+        candidate_count=candidate_count,
+    )
+    store.persist_historical_signals([row], replace=False)
+    store.persist_signal_events(
+        [
+            _signal_event(
+                signal_id=str(row["signal_id"]),
+                event_type=SIGNAL_EVENT_NO_EDGE,
+                event_timestamp=generated_at,
+                source="alphaops",
+                notes=reason,
+                payload=row,
+            )
+        ]
+    )
+    return row
+
+
+def _build_no_trade_historical_signal(
+    *,
+    scan_id: str,
+    generated_at: str,
+    reason: str,
+    source_summary: dict[str, Any] | None = None,
+    candidate_count: int = 0,
+) -> dict[str, Any]:
+    """Build a no-trade row without mutating durable historical state."""
+
     source_summary = dict(source_summary or {})
     market_date = _date_key(generated_at)
     row = {
@@ -146,19 +182,6 @@ def record_no_trade_historical_signal(
             "research_only": True,
         },
     }
-    store.persist_historical_signals([row])
-    store.persist_signal_events(
-        [
-            _signal_event(
-                signal_id=str(row["signal_id"]),
-                event_type=SIGNAL_EVENT_NO_EDGE,
-                event_timestamp=generated_at,
-                source="alphaops",
-                notes=reason,
-                payload=row,
-            )
-        ]
-    )
     return row
 
 
