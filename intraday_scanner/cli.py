@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -1879,16 +1880,22 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         analyzer, input_hash_sha256, decision_receipts, v6_decisions = (
             _restore_strategy_learning_evidence(snapshot)
         )
+        frozen_cutoff = str(snapshot["cutoff"])
+        frozen_source_identity = str(snapshot["source_identity"])
+        frozen_source_hash = str(snapshot["source_hash_sha256"])
     else:
         analyzer = None
         input_hash_sha256 = None
         decision_receipts = None
         v6_decisions = None
+        frozen_cutoff = str(args.cutoff)
+        frozen_source_identity = str(args.source_identity)
+        frozen_source_hash = args.source_hash_sha256
     result = run_daily_strategy_learning(
         market_date=args.market_date,
-        cutoff=args.cutoff,
-        source_identity=args.source_identity,
-        source_hash_sha256=args.source_hash_sha256,
+        cutoff=frozen_cutoff,
+        source_identity=frozen_source_identity,
+        source_hash_sha256=frozen_source_hash,
         code_sha=args.code_sha,
         out_dir=args.out_dir,
         input_hash_sha256=input_hash_sha256,
@@ -2052,19 +2059,29 @@ def _load_or_freeze_strategy_learning_evidence(
         )
         + "\n"
     )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        existing = _read_strategy_learning_evidence_snapshot(path, args)
-        if existing != body:
-            raise SnapshotValidationError(
-                "daily-learning frozen evidence conflicts with concurrent writer"
-            ) from None
-        return existing
-    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            # A hard-link install is atomic and cannot replace an already
+            # frozen cohort. The temporary inode is removed after the durable
+            # destination name exists.
+            os.link(temporary, path)
+        except FileExistsError:
+            existing = _read_strategy_learning_evidence_snapshot(path, args)
+            if existing != body:
+                raise SnapshotValidationError(
+                    "daily-learning frozen evidence conflicts with concurrent writer"
+                ) from None
+            return existing
+    finally:
+        temporary.unlink(missing_ok=True)
     return _read_strategy_learning_evidence_snapshot(path, args)
 
 
@@ -2244,9 +2261,6 @@ def _read_strategy_learning_evidence_snapshot(
     expected = {
         "schema_version": _STRATEGY_LEARNING_EVIDENCE_SNAPSHOT_SCHEMA,
         "market_date": str(args.market_date),
-        "cutoff": str(args.cutoff),
-        "source_identity": str(args.source_identity),
-        "source_hash_sha256": _strategy_learning_source_hash(args),
         "code_sha": str(args.code_sha),
         "request": _strategy_learning_snapshot_request(args),
         "research_only": True,

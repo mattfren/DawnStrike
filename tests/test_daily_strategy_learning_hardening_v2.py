@@ -4,6 +4,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+import intraday_scanner.cli as cli_module
 from intraday_scanner.cli import _hash_strategy_learning_inputs, main
 from intraday_scanner.config import load_config
 from intraday_scanner.performance.strategy_miss_attribution import (
@@ -482,6 +485,65 @@ def test_paper_ops_retry_consumes_frozen_cohort_without_rereading_grown_ledger(
     result = json.loads(capsys.readouterr().out)
     assert result["idempotent_reused"] is True
     assert calls == 1
+
+
+def test_snapshot_before_reservation_recovers_with_original_cutoff_and_source(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    database_path = tmp_path / "crash-window.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows ("
+            "record_id TEXT, market_date TEXT, reconciled_at TEXT, payload_json TEXT)"
+        )
+    out_dir = tmp_path / "learning"
+    first_arguments = [
+        "strategy-learning-daily",
+        "--market-date",
+        "2026-08-20",
+        "--cutoff",
+        "2026-08-20T14:30:00+00:00",
+        "--source-identity",
+        "first-source-cutoff-14:30",
+        "--code-sha",
+        "test-code",
+        "--out-dir",
+        str(out_dir),
+        "--db-path",
+        str(database_path),
+    ]
+    original_service = cli_module.run_daily_strategy_learning
+
+    def interrupt_after_snapshot(**_kwargs):
+        raise RuntimeError("simulated crash after frozen evidence")
+
+    monkeypatch.setattr(cli_module, "run_daily_strategy_learning", interrupt_after_snapshot)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        main(first_arguments)
+    snapshot_path = (
+        out_dir / "2026-08-20" / "daily_learning_evidence_snapshot.json"
+    )
+    assert snapshot_path.is_file()
+    assert not (out_dir / "2026-08-20" / "daily_learning_invocation.json").exists()
+
+    monkeypatch.setattr(cli_module, "run_daily_strategy_learning", original_service)
+    retry_arguments = list(first_arguments)
+    retry_arguments[retry_arguments.index("--cutoff") + 1] = (
+        "2026-08-20T14:31:00+00:00"
+    )
+    retry_arguments[retry_arguments.index("--source-identity") + 1] = (
+        "retry-source-cutoff-14:31"
+    )
+    assert main(retry_arguments) == 1
+    result = json.loads(capsys.readouterr().out)
+    reservation = json.loads(
+        (out_dir / "2026-08-20" / "daily_learning_invocation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert reservation["cutoff"] == "2026-08-20T14:30:00+00:00"
+    assert reservation["source_identity"] == "first-source-cutoff-14:30"
+    assert result["input_hash_sha256"] == reservation["input_hash_sha256"]
 
 
 def test_migration_032_adds_v6_stored_at_to_preexisting_schema_31_db(tmp_path: Path) -> None:
