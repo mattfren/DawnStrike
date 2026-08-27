@@ -583,6 +583,8 @@ def test_empty_authoritative_slate_has_no_radar_notification_or_selection_rows(t
     assert store.load_signal_selections(cohort="research_radar") == []
     assert "Research slate: 0 of 0 shown" in body
     assert "No clean edge today." in body
+    assert "No safe/current Tier 1 research rows were available: DATA_UNAVAILABLE" in body
+    assert "1.5R research floor" not in body
 
 
 def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkeypatch):

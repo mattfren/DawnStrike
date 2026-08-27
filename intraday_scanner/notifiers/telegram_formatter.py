@@ -462,7 +462,10 @@ def format_alpha_no_trade(
         "RESEARCH WATCHLIST / RADAR — CONDITIONAL PAPER STUDY",
     ]
     if not radar:
-        lines.append("- None passed the liquid 1.5R research floor")
+        lines.append(
+            "- No safe/current Tier 1 research rows were available: "
+            + _truncate(_text(reason, "reason unavailable"), 120)
+        )
     for index, row in enumerate(radar, start=1):
         radar_target = row.get("radar_target") or row.get("target_1") or row.get("first_target")
         lines.append(
