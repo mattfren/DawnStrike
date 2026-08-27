@@ -2256,6 +2256,9 @@ def _validate_intent_column_projection(
         "official_paper_eligible",
         "decision_trace",
         "direction",
+        "watcher_current_proof",
+        "watcher_validation_row",
+        "monitor_proof_lineage",
     }
     if set(columns) != column_keys or set(payload) != payload_keys:
         raise ValueError("trade intent raw record has an unexpected schema")
