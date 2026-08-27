@@ -284,7 +284,7 @@ try {
     } else {
         $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
         $strategyLearningCutoff = $strategyLearningInvocationUtc
-        $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;mode=ro;query_only=on"
+        $strategyLearningSource = "sqlite-query-only-reserved-snapshot:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;lock=reserved;query_only=on"
     }
     $strategyLearning = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `

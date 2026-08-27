@@ -25,8 +25,9 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert '"strategy-learning-daily"' in eod
     assert '"--source-identity", $strategyLearningSource' in eod
     assert '"--db-path", $dbPath' in eod
-    assert "sqlite-readonly:" in eod
-    assert "mode=ro;query_only=on" in eod
+    assert "sqlite-query-only-reserved-snapshot:" in eod
+    assert "lock=reserved;query_only=on" in eod
+    assert "mode=ro" not in eod
     assert '"strategy_learning_daily_failed"' in eod
     assert "Write-DawnstrikeLockDenialReceipt" in runner
 
