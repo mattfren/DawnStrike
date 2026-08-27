@@ -60,6 +60,8 @@ class AlphaRunContract:
     alertable_trade: int = 0
     official_selected: int = 0
     slate_shortfall_reason: str = ""
+    pre_watcher_alert_gate_count: int = 0
+    alertable_count_semantics: str = "legacy_pre_watcher_alert_gate"
     source_collected_count: int = 0
     enrichment_selected_count: int = 0
     primary_verified_count: int = 0
@@ -368,6 +370,10 @@ def build_alpha_run_contract(
         alertable_trade=publication["alertable_trade"],
         official_selected=publication["official_selected"],
         slate_shortfall_reason=str(slate.get("slate_shortfall_reason") or ""),
+        pre_watcher_alert_gate_count=alertable_count,
+        alertable_count_semantics=(
+            "legacy_pre_watcher_alert_gate; authoritative_tier3=alertable_trade_count"
+        ),
         source_collected_count=source_collected,
         enrichment_selected_count=coverage.selected_count,
         primary_verified_count=primary_verified,

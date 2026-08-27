@@ -92,6 +92,21 @@ def test_contract_accepts_exact_rederived_frozen_publication_rows():
     assert contract.ranked_research_count == 1
 
 
+def test_contract_labels_legacy_pre_watcher_alert_count_separately_from_tier_three():
+    signal, slate, publication_rows, lineage = _frozen_contract_inputs()
+    contract = _build_frozen_contract(
+        publication_rows=publication_rows,
+        frozen_inputs=({**signal, "can_alert": True}, slate, publication_rows, lineage),
+    )
+
+    assert contract.alertable_count == 1
+    assert contract.pre_watcher_alert_gate_count == 1
+    assert contract.alertable_trade_count == 0
+    assert contract.alertable_count_semantics == (
+        "legacy_pre_watcher_alert_gate; authoritative_tier3=alertable_trade_count"
+    )
+
+
 def test_contract_preserves_tier_two_only_with_authenticated_receipt_resolver(
     monkeypatch,
 ):
