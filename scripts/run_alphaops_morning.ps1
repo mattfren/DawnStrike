@@ -153,11 +153,17 @@ try {
             -ArgumentList $alphaArguments `
             -LogRoot $logRoot `
             -LogName "alpha_morning-$MarketDate"
-        Restore-DawnstrikePriorAlphaCycleArtifact `
-            -ArtifactPath $alphaCyclePath `
-            -ArchivePath $priorAlphaCyclePath | Out-Null
         $stageExit = $alphaCycle.exit_code
         $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
+        if ($stageExit -ne 0) {
+            # A failed child is allowed to leave a partial/invalid file. Keep
+            # that attempt in the archive, then restore the prior canonical
+            # artifact so downstream readers never see failed-attempt bytes.
+            Restore-DawnstrikePriorAlphaCycleArtifact `
+                -ArtifactPath $alphaCyclePath `
+                -ArchivePath $priorAlphaCyclePath `
+                -QuarantineReplacement | Out-Null
+        }
     }
     $coreStageExit = $stageExit
     $coreErrorCode = $errorCode
@@ -192,6 +198,12 @@ try {
         catch {
             $coreStageExit = 2
             $coreErrorCode = "alpha_cycle_artifact_invalid"
+            # Validation is the promotion gate. If the child wrote malformed
+            # or stale bytes, quarantine them and restore the prior artifact.
+            Restore-DawnstrikePriorAlphaCycleArtifact `
+                -ArtifactPath $alphaCyclePath `
+                -ArchivePath $priorAlphaCyclePath `
+                -QuarantineReplacement | Out-Null
         }
     }
     if (

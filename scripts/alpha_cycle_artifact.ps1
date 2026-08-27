@@ -16,10 +16,27 @@ function Move-DawnstrikePriorAlphaCycleArtifact {
 function Restore-DawnstrikePriorAlphaCycleArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactPath,
-        [AllowNull()][string]$ArchivePath
+        [AllowNull()][string]$ArchivePath,
+        [switch]$QuarantineReplacement
     )
     if (Test-Path -LiteralPath $ArtifactPath -PathType Leaf) {
-        return $false
+        if (-not $QuarantineReplacement) {
+            return $false
+        }
+        # A failed attempt may have left an invalid replacement in the
+        # canonical location. Preserve it for diagnosis, but clear the path
+        # before restoring the last known-good artifact. Move-Item is used
+        # with literal, bounded paths so this remains recoverable and does
+        # not silently overwrite either artifact.
+        $quarantineRoot = if (-not [string]::IsNullOrWhiteSpace($ArchivePath)) {
+            Split-Path -Parent $ArchivePath
+        } else {
+            Join-Path (Split-Path -Parent $ArtifactPath) "attempt_archive"
+        }
+        New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null
+        $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffffffZ")
+        $quarantinePath = Join-Path $quarantineRoot "alpha_cycle.invalid.$stamp.$([guid]::NewGuid().ToString('N')).json"
+        Move-Item -LiteralPath $ArtifactPath -Destination $quarantinePath
     }
     if (
         [string]::IsNullOrWhiteSpace($ArchivePath) -or

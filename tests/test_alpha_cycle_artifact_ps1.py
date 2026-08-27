@@ -230,6 +230,38 @@ def test_prior_artifact_is_restored_only_when_attempt_produced_no_replacement(
     assert archive.read_text(encoding="utf-8") == "older"
 
 
+def test_invalid_replacement_is_quarantined_before_prior_artifact_is_restored(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "alpha_cycle.json"
+    archive = tmp_path / "attempt_archive" / "alpha_cycle.prior.json"
+    archive.parent.mkdir()
+    artifact.write_text("invalid replacement", encoding="utf-8")
+    archive.write_text("prior canonical", encoding="utf-8")
+    command = (
+        f". '{HELPER}'; "
+        f"$restored = Restore-DawnstrikePriorAlphaCycleArtifact -ArtifactPath '{artifact}' "
+        f"-ArchivePath '{archive}' -QuarantineReplacement; "
+        "$restored | ConvertTo-Json -Compress"
+    )
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) is True
+    assert artifact.read_text(encoding="utf-8") == "prior canonical"
+    assert not archive.exists()
+    quarantined = list(archive.parent.glob("alpha_cycle.invalid.*.json"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding="utf-8") == "invalid replacement"
+
+
 def test_artifact_rejects_identity_and_source_failures(tmp_path: Path) -> None:
     payload = _valid_payload()
     payload["run_contract"]["producer_run_id"] = "different-scan"
