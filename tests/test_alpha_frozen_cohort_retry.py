@@ -16,6 +16,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     _persist_official_selections,
     _persist_research_radar_selections,
 )
+from intraday_scanner.services.alpha_official_cohort_service import membership_sha256
 from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
 )
@@ -270,6 +271,95 @@ def test_frozen_retry_rejects_missing_source_scan_identity(tmp_path: Path) -> No
             store,
             scan_id="scan-retry",
             selected_signals=[retry_signal],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=_event("scan-retry"),
+        )
+
+
+def test_frozen_membership_hash_binds_stored_signal_payload(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-payload-conflict.sqlite")
+    original = _signal()
+    rows, _ = _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[original],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=_event("scan-original"),
+    )
+    cohort = store.load_official_strategy_cohort(
+        market_date=SELECTED_AT[:10],
+        strategy_id="alphaops_v5",
+        strategy_version=ALPHAOPS_V5_STRATEGY_VERSION,
+        cohort="official_telegram",
+    )
+    assert cohort is not None
+    payload = dict(rows[0]["payload_json"])
+    signal = dict(payload["signal"])
+    signal["ticker"] = "ATTACKED"
+    signal.pop("scan_id")
+    payload["signal"] = signal
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE signal_selections SET payload_json = ? WHERE selection_id = ?",
+            (json.dumps(payload, sort_keys=True), rows[0]["selection_id"]),
+        )
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[original],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:05:00+00:00",
+            event=_event("scan-retry"),
+        )
+
+
+def test_frozen_retry_requires_source_scan_even_if_attacker_rehashes_payload(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "frozen-source-rehash-conflict.sqlite")
+    original = _signal()
+    rows, _ = _persist_official_selections(
+        store,
+        scan_id="scan-original",
+        selected_signals=[original],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=_event("scan-original"),
+    )
+    cohort = store.load_official_strategy_cohort(
+        market_date=SELECTED_AT[:10],
+        strategy_id="alphaops_v5",
+        strategy_version=ALPHAOPS_V5_STRATEGY_VERSION,
+        cohort="official_telegram",
+    )
+    assert cohort is not None
+    payload = dict(rows[0]["payload_json"])
+    signal = dict(payload["signal"])
+    signal.pop("scan_id")
+    payload["signal"] = signal
+    mutated = dict(rows[0])
+    mutated["payload_json"] = payload
+    replacement_hash = membership_sha256([mutated])
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE signal_selections SET payload_json = ? WHERE selection_id = ?",
+            (json.dumps(payload, sort_keys=True), rows[0]["selection_id"]),
+        )
+        connection.execute(
+            "UPDATE official_strategy_cohorts SET membership_sha256 = ? "
+            "WHERE official_cohort_id = ?",
+            (replacement_hash, cohort["official_cohort_id"]),
+        )
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT.*source scan"):
+        _govern_frozen_official_cohort_retry(
+            store,
+            scan_id="scan-retry",
+            selected_signals=[original],
             decision={"no_trade": False, "decision_tier": "clean_edge"},
             selected_at="2026-08-26T13:05:00+00:00",
             event=_event("scan-retry"),

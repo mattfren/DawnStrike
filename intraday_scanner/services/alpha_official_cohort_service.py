@@ -63,6 +63,46 @@ def _membership_projection(row: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             projection[field] = str(value or "")
+    # The relational selection columns intentionally carry only the stable
+    # identity.  The actual signal and frozen-slate lineage live in the
+    # immutable JSON envelope, so bind both to the cohort hash as well.  This
+    # prevents a direct SQL edit from changing the published signal while
+    # leaving the old membership hash valid.
+    payload = row.get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = {"_invalid_payload_json": payload}
+    projection["payload_json"] = payload
+    if isinstance(payload, dict):
+        signal = payload.get("signal")
+        lineage = payload.get("frozen_slate_lineage")
+        projection["source_lineage"] = {
+            "source_scan_id": str(
+                row.get("source_scan_id")
+                or payload.get("source_scan_id")
+                or (signal.get("scan_id") if isinstance(signal, dict) else "")
+                or (
+                    lineage.get("frozen_source_scan_id")
+                    if isinstance(lineage, dict)
+                    else ""
+                )
+                or ""
+            ),
+            "scan_lineage_status": str(
+                row.get("scan_lineage_status")
+                or payload.get("scan_lineage_status")
+                or ""
+            ),
+            "frozen_slate_lineage": lineage,
+        }
+    else:
+        projection["source_lineage"] = {
+            "source_scan_id": str(row.get("source_scan_id") or ""),
+            "scan_lineage_status": str(row.get("scan_lineage_status") or ""),
+            "frozen_slate_lineage": None,
+        }
     return projection
 
 

@@ -3328,10 +3328,12 @@ def _govern_frozen_official_cohort_retry(
                 or signal.get("scan_id")
                 or ""
             )
-            if (
-                frozen_source_scan_id
-                and current_source_scan_id != frozen_source_scan_id
-            ):
+            if not frozen_source_scan_id or not current_source_scan_id:
+                raise SnapshotValidationError(
+                    "FROZEN_COHORT_CONFLICT: frozen and retry source scan "
+                    "identities are required for every official selection"
+                )
+            if current_source_scan_id != frozen_source_scan_id:
                 raise SnapshotValidationError(
                     "FROZEN_COHORT_CONFLICT: retry source scan differs from the "
                     "immutable official selection"
