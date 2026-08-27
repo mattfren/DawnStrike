@@ -3,11 +3,13 @@
 ## Verdict
 
 The 08:00 CT Morning task did not crash and the authenticated discovery feeds were not empty.
-The registered runtime completed collection and ranking, but the publication boundary correctly
-failed closed after the core-row CSV/model round-trip discarded the freshness proof required for
-Tier 1 research publication. The mover lane was independently limited by above-ceiling fallback
-data. The resulting zero-name slate was therefore a publication-integrity defect, not evidence
-that the S&P 500 and Nasdaq-100 contained no research candidates.
+The registered runtime completed collection and ranking, but two freshness-lineage defects
+prevented safe Tier 1 publication. The scheduled path converted the local market date to noon UTC,
+so valid near-08:00 CT core observations were classified as future. Separately, the mover path did
+not carry a verified enrichment-freshness verdict through the snapshot model. The mover lane was
+also limited by above-ceiling fallback data. The resulting zero-name slate was therefore a
+publication-integrity defect, not evidence that the S&P 500 and Nasdaq-100 contained no research
+candidates.
 
 This audit is read-only. Morning was not rerun. Broker execution remained disabled.
 
@@ -35,19 +37,28 @@ This audit is read-only. Morning was not rerun. Broker execution remained disabl
 2. The point-in-time core-universe contract was `READY`. Eleven authenticated Alpaca batch
    receipts requested and returned all 519 unique members with no missing, unknown, or duplicate
    symbols.
-3. The cycle produced seven signals, but the frozen five-name research slate published zero.
-4. The exact slate safety blocker was `freshness_missing_or_not_current`. Its coverage limitations
+3. The daily cycle started at `2026-08-27T13:00:06.1432111Z`, but `--market-date 2026-08-27`
+   caused the Alpha cycle to use `2026-08-27T12:00:00Z` as its observation time. All 519 core rows
+   were consequently marked stale/future. Ten source timestamps—including AAPL, MSFT, GOOGL,
+   AMZN, AMD, and MU—were actually within the configured 600-second window relative to the real
+   cycle start (including the allowed 60-second provider-clock tolerance).
+4. The cycle produced seven mover signals, but those rows had no authenticated freshness verdict
+   after enrichment/model serialization, so the frozen five-name research slate published zero.
+5. The exact slate safety blocker was `freshness_missing_or_not_current`. Its coverage limitations
    were `core_enrichment_not_data_eligible` and
    `mover_secondary_fallback_above_ceiling`.
-5. The run contract consequently reported zero ranked-research, paper-plan-qualified,
+6. The run contract consequently reported zero ranked-research, paper-plan-qualified,
    alertable, and official selections. It retained `research_only=true` and
    `broker_execution=disabled`.
 
-The production path writes core discovery rows to CSV and reloads them through `SnapshotRow`
-before safety-qualified slate construction. At the registered SHA, `freshness_status` was not a
-snapshot/candidate model field, so an in-memory `FRESH` row became freshness-unknown after the
-round-trip. The slate gate then rejected it exactly as designed. A separate global mover-fallback
-ceiling also limited otherwise independent core evidence at this old runtime.
+The scheduled wrapper supplied only a market date. At the registered SHA, `alpha_cycle` converted
+that date to noon UTC rather than receiving one actual cycle observation timestamp; premarket
+quotes collected during the following hour therefore looked future-dated. The production path
+also writes rows to CSV and reloads them through `SnapshotRow` before safety-qualified slate
+construction. `freshness_status` was not a snapshot/candidate model field, and the mover
+enrichment path did not derive a freshness verdict from its current content-hashed observation.
+The slate gate rejected the resulting unknown rows exactly as designed. A separate global
+mover-fallback ceiling also limited otherwise independent core evidence at this old runtime.
 
 ## Separate operational blocker
 
@@ -58,9 +69,11 @@ by a legitimate scheduled Finalize result before production proof can close.
 
 ## Remediation and acceptance boundary
 
-The strategy-remediation candidate must preserve freshness and lane provenance through the exact
-CSV/model path, bind the row contents ranked under each core coverage receipt, and keep failure
-and replay identities on one immutable cycle timestamp. Acceptance requires hostile regressions,
-the cross-lane suite, full repository verification, an independent P0/P1 audit, a clean exact SHA
-on `main`, and evidence from the next legitimate scheduled Morning-to-Finalize chain. An
-out-of-window Morning replay is not valid evidence.
+The strategy-remediation candidate must pass one actual observation timestamp from the scheduled
+wrapper, preserve freshness and lane provenance through the exact CSV/model path, derive mover
+freshness only from a current content-hashed enrichment observation, bind the row contents ranked
+under each core coverage receipt, and keep failure and replay identities on the same immutable
+cycle timestamp. Acceptance requires hostile regressions, the cross-lane suite, full repository
+verification, an independent P0/P1 audit, a clean exact SHA on `main`, and evidence from the next
+legitimate scheduled Morning-to-Finalize chain. An out-of-window Morning replay is not valid
+evidence.
