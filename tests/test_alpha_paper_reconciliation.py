@@ -624,13 +624,17 @@ def test_reconciliation_correction_atomically_removes_stale_trade_and_return_lab
         ]
     )
     first_learning = run_alpha_learning(store)
-    assert first_learning["total_return_labels"] == 1
+    assert first_learning["total_return_labels"] == 0
     assert first_learning["manual_outcomes_considered"] == 1
     assert first_learning["legacy_outcomes_excluded_from_production_learning"] is True
+    assert first_learning["return_learning_eligible"] is False
+    assert first_learning["return_learning_quarantine"] == {
+        "status": "QUARANTINED_MISSING_COMMITTED_FILL_TRUTH",
+        "reason": "committed_point_in_time_fill_truth_required",
+        "count": 1,
+    }
     canonical = load_production_alpha_learning_labels(store)
-    assert len(canonical) == 1
-    assert canonical[0]["planned_first_touch_return_pct"] != 9_890.0
-    assert canonical[0]["return_measure"] == "reconciled_net_after_cost_return_pct"
+    assert canonical == []
     assert store.load_strategy_paper_trades()
     assert any(
         row["label_family"] == "trade_return"
@@ -899,11 +903,10 @@ def test_v5_reconciliation_uses_risk_sized_entry_not_fixed_notional(
     intent = store.load_trade_intents(market_date=day, action="ENTER_LONG")[0]
     assert trade["decision_fingerprint"] == intent["decision_fingerprint"]
     learning = run_alpha_learning(store)
-    assert learning["total_return_labels"] == 1
-    assert learning["return_learning_eligible"] is True
-    production_label = load_production_alpha_learning_labels(store)[0]
-    assert production_label["strategy_id"] == ALPHAOPS_V5_STRATEGY_ID
-    assert production_label["trade_id"] == trade["trade_id"]
+    assert learning["total_return_labels"] == 0
+    assert learning["return_learning_eligible"] is False
+    assert learning["return_learning_quarantine"]["count"] == 1
+    assert load_production_alpha_learning_labels(store) == []
 
 
 def _seed_selection(
