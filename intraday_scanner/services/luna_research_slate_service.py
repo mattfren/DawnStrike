@@ -12,8 +12,6 @@ from zoneinfo import ZoneInfo
 
 from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID, DEFAULT_V5_POLICY
 
-from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID
-
 TIER1 = "RANKED_RESEARCH_CANDIDATE"
 TIER2 = "PAPER_PLAN_QUALIFIED"
 TIER2_WAITING = "WAITING_CURRENT_CHECKS"
