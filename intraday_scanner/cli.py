@@ -456,6 +456,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_morning_parser.add_argument("--dry-run", action="store_true")
     alpha_morning_parser.add_argument("--market-date", default=None)
     alpha_morning_parser.add_argument(
+        "--as-of",
+        default=None,
+        help="UTC cycle observation timestamp (defaults to the current time)",
+    )
+    alpha_morning_parser.add_argument(
         "--core-universe-manifest",
         default=None,
         help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
@@ -470,6 +475,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_cycle_parser.add_argument("--notify", default="console")
     alpha_cycle_parser.add_argument("--dry-run", action="store_true")
     alpha_cycle_parser.add_argument("--market-date", default=None)
+    alpha_cycle_parser.add_argument(
+        "--as-of",
+        default=None,
+        help="UTC cycle observation timestamp (defaults to the current time)",
+    )
     alpha_cycle_parser.add_argument(
         "--core-universe-manifest",
         default=None,
@@ -1790,6 +1800,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
+        as_of=_optional_iso_datetime(args.as_of),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1804,6 +1815,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
+        as_of=_optional_iso_datetime(args.as_of),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

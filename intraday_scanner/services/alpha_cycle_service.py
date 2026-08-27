@@ -296,8 +296,8 @@ def alpha_cycle(
             }
     if collection.get("status") != "success":
         review = review_alpha_signals([], source_summary=source_summary)
-        no_data_scan_id = f"{cycle_name}:source_failure:{utc_now_iso()[:10]}"
-        no_data_generated_at = utc_now_iso()
+        no_data_scan_id = f"{cycle_name}:source_failure:{cycle_decision_timestamp[:10]}"
+        no_data_generated_at = cycle_decision_timestamp
         no_data_no_trade_row = _build_no_trade_historical_signal(
             scan_id=no_data_scan_id,
             generated_at=no_data_generated_at,

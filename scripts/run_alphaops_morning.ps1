@@ -137,7 +137,16 @@ try {
         $priorAlphaCyclePath = Move-DawnstrikePriorAlphaCycleArtifact `
             -ArtifactPath $alphaCyclePath `
             -ArchiveRoot (Join-Path $outputRoot "attempt_archive")
-        $alphaArguments = @("-m", "intraday_scanner.cli", "alpha-cycle", "--config", $configPath, "--db-path", $dbPath, "--out-dir", $outputRoot, "--notify", $Notify, "--market-date", $MarketDate)
+        $cycleObservedAt = (Get-Date).ToUniversalTime().ToString("o")
+        $alphaArguments = @(
+            "-m", "intraday_scanner.cli", "alpha-cycle",
+            "--config", $configPath,
+            "--db-path", $dbPath,
+            "--out-dir", $outputRoot,
+            "--notify", $Notify,
+            "--market-date", $MarketDate,
+            "--as-of", $cycleObservedAt
+        )
         if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
         $alphaCycle = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
