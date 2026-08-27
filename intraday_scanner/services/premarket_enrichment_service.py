@@ -214,6 +214,8 @@ def enrich_premarket_rows(
                 str(row.get("ticker") or "").upper(),
                 "not_applicable",
             ),
+            requested_at=at,
+            max_age_seconds=config.premarket_enrichment_max_age_seconds,
         )
         for row in copied
     ]
@@ -616,6 +618,8 @@ def _apply_observation(
     selected: bool,
     primary_source: str,
     fallback_status: str,
+    requested_at: datetime | None = None,
+    max_age_seconds: int | None = None,
 ) -> dict[str, Any]:
     output = dict(row)
     discovery_source = str(
@@ -644,6 +648,15 @@ def _apply_observation(
     output["enrichment_fallback_status"] = fallback_status
     output["enrichment_fallback_source"] = ""
     output["enrichment_was_fallback"] = False
+    # Freshness is a producer-owned verdict.  Never carry a caller's prior
+    # value across a disabled, unselected, failed, stale, or incomplete
+    # observation; those paths must remain fail-closed at the slate gate.  A
+    # core row is the one deliberate exception: its independently validated
+    # coverage receipt owns Tier 1 freshness even if optional range enrichment
+    # is unavailable.
+    output["freshness_status"] = (
+        "FRESH" if _validated_core_freshness(row) else ""
+    )
     output["enrichment_observed_at"] = ""
     output["enrichment_bar_completed_at"] = ""
     output["enrichment_is_complete"] = False
@@ -675,10 +688,23 @@ def _apply_observation(
     output["enrichment_observed_at"] = observation.observed_at
     output["enrichment_bar_completed_at"] = observation.bar_completed_at
     output["enrichment_is_complete"] = observation.is_complete
-    output["enrichment_observation_sha256"] = _observation_sha256(observation)
-    output["enrichment_observation_payload_json"] = json.dumps(
-        asdict(observation), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    observation_sha256, observation_payload_json = _canonical_observation_payload(
+        observation
     )
+    output["enrichment_observation_sha256"] = observation_sha256
+    output["enrichment_observation_payload_json"] = observation_payload_json
+    if (
+        requested_at is not None
+        and max_age_seconds is not None
+        and _fresh_observation_binding_valid(
+            observation,
+            requested_at=requested_at,
+            max_age_seconds=max_age_seconds,
+            observation_sha256=observation_sha256,
+            observation_payload_json=observation_payload_json,
+        )
+    ):
+        output["freshness_status"] = "FRESH"
     output["prior_daily_high"] = observation.prior_daily_high
     output["prior_daily_high_observed_at"] = observation.prior_daily_high_observed_at
     output["prior_daily_high_completed_at"] = observation.prior_daily_high_completed_at
@@ -1022,13 +1048,173 @@ def _warning_tokens(value: Any) -> set[str]:
 
 
 def _observation_sha256(observation: PremarketObservation) -> str:
+    return _canonical_observation_payload(observation)[0]
+
+
+def _canonical_observation_payload(
+    observation: PremarketObservation,
+) -> tuple[str, str]:
     payload = json.dumps(
         asdict(observation),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest(), payload
+
+
+def _fresh_observation_binding_valid(
+    observation: PremarketObservation,
+    *,
+    requested_at: datetime,
+    max_age_seconds: int,
+    observation_sha256: str,
+    observation_payload_json: str,
+) -> bool:
+    """Return whether one observation can authoritatively claim ``FRESH``.
+
+    ``PremarketObservation.is_usable`` covers the value/range contract, while
+    this seam additionally binds freshness to the requested clock and to the
+    exact canonical observation payload persisted beside the row.  Alpaca
+    observations also carry a raw-bar digest; validate that content binding so
+    a row cannot claim freshness after its underlying market-data artifact is
+    changed without updating its digest.
+    """
+
+    if not observation.is_usable:
+        return False
+    # FRESH currently certifies the authenticated Alpaca path only.  Yahoo
+    # observations remain research/fallback evidence because this service does
+    # not bind their completed-bar close into the row's current-price field.
+    if not observation.source.startswith("alpaca_market_data_"):
+        return False
+    if observation.latest_price is None or observation.latest_price <= 0:
+        return False
+    if observation.age_seconds is None or not (
+        0 <= observation.age_seconds <= max(int(max_age_seconds), 0)
+    ):
+        return False
+    observed_epoch = _bar_epoch(observation.observed_at)
+    completed_epoch = _bar_epoch(observation.bar_completed_at)
+    requested_epoch = int(_as_utc(requested_at).timestamp())
+    if (
+        observed_epoch is None
+        or completed_epoch is None
+        or completed_epoch != observed_epoch + ONE_MINUTE_SECONDS
+        or completed_epoch > requested_epoch
+        or requested_epoch - completed_epoch != observation.age_seconds
+    ):
+        return False
+    expected_hash, expected_payload = _canonical_observation_payload(observation)
+    if (
+        observation_sha256 != expected_hash
+        or observation_payload_json != expected_payload
+    ):
+        return False
+    if observation.source.startswith("alpaca_market_data_") and not _alpaca_raw_binding_valid(
+        observation,
+        requested_at=requested_at,
+    ):
+        return False
+    return True
+
+
+def _validated_core_freshness(row: dict[str, Any]) -> bool:
+    """Keep an independently receipt-bound core verdict during enrichment.
+
+    Core discovery freshness is independent of the optional premarket range
+    enrichment.  Import lazily to avoid a module cycle while reusing the
+    canonical core receipt validator as the authority for this exception.
+    """
+
+    if str(row.get("freshness_status") or "").strip().upper() != "FRESH":
+        return False
+    if str(row.get("evidence_lane") or "").strip().lower() != "core":
+        return False
+    try:
+        from intraday_scanner.services.luna_core_universe_service import (
+            _core_coverage_binding_valid,
+        )
+    except ImportError:
+        return False
+    return _core_coverage_binding_valid(row)
+
+
+def _alpaca_raw_binding_valid(
+    observation: PremarketObservation,
+    *,
+    requested_at: datetime,
+) -> bool:
+    raw_payload_json = str(observation.premarket_raw_payload_json or "").strip()
+    source_hash = str(observation.premarket_source_hash_sha256 or "").strip().lower()
+    if not raw_payload_json or len(source_hash) != 64:
+        return False
+    try:
+        raw_payload = json.loads(raw_payload_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(raw_payload, dict):
+        return False
+    canonical_payload = json.dumps(
+        raw_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    if hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest() != source_hash:
+        return False
+    raw_bars = raw_payload.get("bars")
+    bar_epochs = [
+        _bar_epoch(bar.get("timestamp"))
+        for bar in raw_bars
+        if isinstance(bar, dict)
+    ] if isinstance(raw_bars, list) else []
+    high_values = [
+        _float(bar.get("high"))
+        for bar in raw_bars
+        if isinstance(bar, dict)
+    ] if isinstance(raw_bars, list) else []
+    low_values = [
+        _float(bar.get("low"))
+        for bar in raw_bars
+        if isinstance(bar, dict)
+    ] if isinstance(raw_bars, list) else []
+    session_start, session_end = _premarket_session_bounds({}, requested_at)
+    requested_epoch = int(_as_utc(requested_at).timestamp())
+    latest_epoch = max(bar_epochs) if bar_epochs and all(bar_epochs) else None
+    aggregate_matches = (
+        latest_epoch is not None
+        and latest_epoch == _bar_epoch(observation.observed_at)
+        and bool(high_values)
+        and bool(low_values)
+        and all(
+            value is not None and value > 0 for value in high_values + low_values
+        )
+        and observation.premarket_high is not None
+        and observation.premarket_low is not None
+        and abs(max(high_values) - observation.premarket_high) <= 1e-9
+        and abs(min(low_values) - observation.premarket_low) <= 1e-9
+        and all(
+            session_start <= epoch < session_end
+            and epoch + ONE_MINUTE_SECONDS <= requested_epoch
+            for epoch in bar_epochs
+        )
+    )
+    return (
+        str(raw_payload.get("ticker") or "").upper() == observation.ticker.upper()
+        and str(raw_payload.get("feed") or "").lower()
+        == observation.source.rsplit("_", 1)[-1].lower()
+        and str(raw_payload.get("requested_at") or "")
+        == _as_utc(requested_at).isoformat()
+        and isinstance(raw_bars, list)
+        and bool(raw_bars)
+        and all(
+            isinstance(bar, dict)
+            and str(bar.get("ticker") or "").upper() == observation.ticker.upper()
+            for bar in raw_bars
+        )
+        and aggregate_matches
+    )
 
 
 def _source_if_present(value: Any, source: str) -> str:

@@ -1,5 +1,7 @@
 import csv
+import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,11 @@ import pytest
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
+from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot
+from intraday_scanner.services import premarket_enrichment_service as enrichment_service
+from intraday_scanner.services.luna_core_universe_service import write_snapshot_rows
+from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
 from intraday_scanner.services.premarket_enrichment_service import (
     PremarketObservation,
     enrich_premarket_rows,
@@ -150,6 +156,7 @@ def test_enrichment_replaces_only_missing_plan_facts_with_sourced_observation(tm
     assert row["gap_pct"] == 60.0
     assert row["premarket_range_source"] == "yahoo_finance_chart"
     assert row["enrichment_status"] == "verified"
+    assert row["freshness_status"] == ""
     assert "premarket_range_unavailable_price_used" not in row["coverage_warning"]
     assert "previous_close_unavailable" not in row["coverage_warning"]
     assert "sec_risk_unverified" in row["coverage_warning"]
@@ -175,6 +182,7 @@ def test_stale_observation_keeps_missing_truth_ineligible():
 
     assert result["summary"]["status"] == "unavailable"
     assert row["enrichment_status"] == "stale_observation"
+    assert row["freshness_status"] == ""
     assert row["premarket_high"] == 8.0
     assert row["premarket_low"] == 8.0
     assert "premarket_range_unavailable_price_used" in row["coverage_warning"]
@@ -305,6 +313,226 @@ def test_alphaops_alpaca_enrichment_replaces_public_page_price_facts():
     assert row["premarket_range_source"] == "alpaca_market_data_iex"
     assert row["enrichment_is_complete"] is True
     assert row["enrichment_was_fallback"] is False
+    assert row["freshness_status"] == "FRESH"
+
+
+def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip(
+    tmp_path: Path,
+):
+    requested_at = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
+    source_timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    class CurrentAlpacaProvider:
+        def validate_credentials(self):
+            return None
+
+        def get_minute_bars(self, symbols, start, end, config):
+            return [
+                {
+                    "ticker": "NOVA",
+                    "timestamp": "2026-07-13T12:58:00Z",
+                    "high": 8.2,
+                    "low": 7.8,
+                    "close": 8.1,
+                    "volume": 1500,
+                }
+            ]
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [SimpleNamespace(ticker="NOVA", previous_close=5.0)]
+
+    result = enrich_premarket_rows(
+        [
+            _row(
+                source="alpaca_iex",
+                preferred_source="alpaca_iex",
+                as_of_timestamp=source_timestamp,
+                source_timestamp=source_timestamp,
+                source_quality_status="VERIFIED",
+                source_count=1,
+                halt_status="CLEAR",
+                sec_risk_status="CLEAR",
+                corporate_action_status="CLEAR",
+                universe_lane="mover",
+                evidence_lane="mover",
+            )
+        ],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_candidates=5,
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=requested_at,
+        source="alpaca",
+        alpaca_provider=CurrentAlpacaProvider(),
+    )
+    row = result["rows"][0]
+    assert row["enrichment_status"] == "verified"
+    assert row["enrichment_is_complete"] is True
+    assert row["freshness_status"] == "FRESH"
+    assert len(row["enrichment_observation_sha256"]) == 64
+    assert json.loads(row["enrichment_observation_payload_json"])["status"] == "verified"
+
+    snapshot_path = write_snapshot_rows(result["rows"], tmp_path / "mover_snapshot.csv")
+    snapshot = read_snapshot_csv(snapshot_path)[0]
+    assert snapshot.freshness_status == "FRESH"
+    assert snapshot.evidence_lane == "mover"
+    assert snapshot.enrichment_observation_sha256 == row["enrichment_observation_sha256"]
+
+    persisted_tampered = snapshot.to_dict()
+    persisted_observation = json.loads(
+        persisted_tampered["enrichment_observation_payload_json"]
+    )
+    persisted_observation["premarket_high"] = 99.0
+    persisted_tampered["enrichment_observation_payload_json"] = json.dumps(
+        persisted_observation,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    assert SnapshotRow.from_mapping(persisted_tampered).freshness_status == ""
+
+    hostile_fields = {
+        "premarket_price": 99.0,
+        "premarket_volume": 999_999,
+        "previous_close": 99.0,
+        "dollar_volume": 99_999_999.0,
+        "gap_pct": 999.0,
+        "enrichment_observation_sha256": "0" * 64,
+        "premarket_raw_payload_json": "{}",
+        "premarket_source_hash_sha256": "0" * 64,
+        "ticker": "EVIL",
+    }
+    for field, value in hostile_fields.items():
+        hostile = snapshot.to_dict()
+        hostile[field] = value
+        assert SnapshotRow.from_mapping(hostile).freshness_status == ""
+
+    candidate = score_snapshot(snapshot, ScannerConfig()).to_dict()
+    assert candidate["freshness_status"] == "FRESH"
+    assert candidate["evidence_lane"] == "mover"
+    lineage = candidate["source_lineage"]
+    assert lineage["freshness_status"] == "FRESH"
+    assert lineage["premarket_observation"]["freshness_status"] == "FRESH"
+    slate = build_ranked_research_slate(
+        [candidate],
+        target=1,
+        require_safety=True,
+        generated_at=source_timestamp,
+    )
+    assert slate["symbols"] == ["NOVA"]
+
+
+def test_tampered_alpaca_observation_payload_does_not_claim_freshness(monkeypatch):
+    requested_at = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
+    bars = [
+        {
+            "ticker": "NOVA",
+            "timestamp": "2026-07-13T12:58:00Z",
+            "high": 8.2,
+            "low": 7.8,
+            "close": 8.1,
+            "volume": 1500,
+        }
+    ]
+    valid = observation_from_alpaca_bars(
+        "NOVA",
+        bars,
+        previous_close=5.0,
+        requested_at=requested_at,
+        max_age_seconds=1200,
+        feed="iex",
+    )
+    tampered_payload = json.loads(valid.premarket_raw_payload_json)
+    tampered_payload["bars"][0]["high"] = 99.0
+    tampered_raw_json = json.dumps(
+        tampered_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    tampered = replace(
+        valid,
+        premarket_raw_payload_json=tampered_raw_json,
+        premarket_source_hash_sha256=hashlib.sha256(
+            tampered_raw_json.encode("utf-8")
+        ).hexdigest(),
+    )
+    monkeypatch.setattr(
+        enrichment_service,
+        "_observe_alpaca_tickers",
+        lambda tickers, **kwargs: {ticker: tampered for ticker in tickers},
+    )
+
+    result = enrich_premarket_rows(
+        [_row(source="alpaca_iex", preferred_source="alpaca_iex")],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_candidates=5,
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=requested_at,
+        source="alpaca",
+        alpaca_provider=object(),
+    )
+
+    row = result["rows"][0]
+    assert row["enrichment_status"] == "verified"
+    assert row["enrichment_is_complete"] is True
+    assert row["freshness_status"] == ""
+
+
+def test_alpaca_observation_without_current_close_does_not_claim_freshness(
+    monkeypatch,
+):
+    requested_at = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
+    valid = observation_from_alpaca_bars(
+        "NOVA",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-07-13T12:58:00Z",
+                "high": 8.2,
+                "low": 7.8,
+                "close": 8.1,
+                "volume": 1500,
+            }
+        ],
+        previous_close=5.0,
+        requested_at=requested_at,
+        max_age_seconds=1200,
+        feed="iex",
+    )
+    missing_close = replace(valid, latest_price=None)
+    monkeypatch.setattr(
+        enrichment_service,
+        "_observe_alpaca_tickers",
+        lambda tickers, **kwargs: {ticker: missing_close for ticker in tickers},
+    )
+
+    result = enrich_premarket_rows(
+        [
+            _row(
+                source="alpaca_iex",
+                preferred_source="alpaca_iex",
+                premarket_price=8.0,
+            )
+        ],
+        config=ScannerConfig(
+            alpaca_data_feed="iex",
+            premarket_enrichment_max_candidates=5,
+            premarket_enrichment_max_age_seconds=1200,
+        ),
+        requested_at=requested_at,
+        source="alpaca",
+        alpaca_provider=object(),
+    )
+
+    row = result["rows"][0]
+    assert row["enrichment_status"] == "verified"
+    assert row["enrichment_is_complete"] is True
+    assert row["premarket_price"] == 8.0
+    assert row["freshness_status"] == ""
 
 
 def test_alpaca_primary_uses_explicit_provenance_labeled_yahoo_fallback():

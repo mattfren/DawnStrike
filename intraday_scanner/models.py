@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,6 +48,7 @@ SNAPSHOT_COLUMNS = [
     "source_timestamp",
     "extracted_at",
     "stale_data_flag",
+    "freshness_status",
     "source_confidence",
     "field_completeness_score",
     "source_reliability_prior",
@@ -60,6 +62,7 @@ SNAPSHOT_COLUMNS = [
     "row_merge_reason",
     "discovery_context",
     "universe_lane",
+    "evidence_lane",
     "core_universe_memberships",
     "core_lane_score",
     "core_lane_eligible",
@@ -231,6 +234,7 @@ CANDIDATE_COLUMNS = [
     "source_timestamp",
     "extracted_at",
     "stale_data_flag",
+    "freshness_status",
     "source_confidence",
     "field_completeness_score",
     "source_reliability_prior",
@@ -244,6 +248,7 @@ CANDIDATE_COLUMNS = [
     "row_merge_reason",
     "discovery_context",
     "universe_lane",
+    "evidence_lane",
     "core_universe_memberships",
     "core_lane_score",
     "core_lane_eligible",
@@ -366,6 +371,7 @@ class SnapshotRow:
     source_timestamp: str = ""
     extracted_at: str = ""
     stale_data_flag: bool = False
+    freshness_status: str = ""
     source_confidence: float = 0.0
     field_completeness_score: float | None = None
     source_reliability_prior: float | None = None
@@ -393,6 +399,7 @@ class SnapshotRow:
     source_quality_status: str = ""
     discovery_context: str = ""
     universe_lane: str = "mover"
+    evidence_lane: str = ""
     core_universe_memberships: str = ""
     core_lane_score: float | None = None
     core_lane_eligible: bool = False
@@ -459,6 +466,11 @@ class SnapshotRow:
             if row.get("gap_pct") not in {None, ""}
             else _gap_pct(premarket_price, previous_close)
         )
+        universe_lane = str(row.get("universe_lane") or "mover").strip()
+        evidence_lane = str(
+            row.get("evidence_lane")
+            or (universe_lane if universe_lane in {"mover", "core"} else "")
+        ).strip()
         snapshot = cls(
             ticker=ticker,
             company=str(row.get("company") or ticker).strip(),
@@ -498,6 +510,7 @@ class SnapshotRow:
             ).strip(),
             extracted_at=str(row.get("extracted_at") or row.get("imported_at") or "").strip(),
             stale_data_flag=parse_bool(row.get("stale_data_flag")),
+            freshness_status=str(row.get("freshness_status") or "").strip(),
             source_confidence=parse_float(
                 row.get("source_confidence"), "source_confidence", default=0.0
             ),
@@ -547,7 +560,8 @@ class SnapshotRow:
             corporate_action_status=str(row.get("corporate_action_status") or "").strip(),
             source_quality_status=str(row.get("source_quality_status") or "").strip(),
             discovery_context=str(row.get("discovery_context") or "").strip(),
-            universe_lane=str(row.get("universe_lane") or "mover").strip(),
+            universe_lane=universe_lane,
+            evidence_lane=evidence_lane,
             core_universe_memberships=str(row.get("core_universe_memberships") or "").strip(),
             core_lane_score=(
                 None
@@ -650,6 +664,12 @@ class SnapshotRow:
             ).strip(),
         )
         snapshot.validate()
+        if (
+            snapshot.freshness_status.upper() == "FRESH"
+            and snapshot.enrichment_status.lower() == "verified"
+            and not _enrichment_observation_binding_valid(snapshot)
+        ):
+            snapshot = replace(snapshot, freshness_status="")
         return snapshot
 
     def validate(self) -> None:
@@ -705,6 +725,7 @@ class SnapshotRow:
             "source_timestamp": self.source_timestamp,
             "extracted_at": self.extracted_at,
             "stale_data_flag": self.stale_data_flag,
+            "freshness_status": self.freshness_status,
             "source_confidence": self.source_confidence,
             "source_count": self.source_count,
             "score_consensus": self.score_consensus,
@@ -713,6 +734,8 @@ class SnapshotRow:
             "row_merge_reason": self.row_merge_reason,
             "discovery_context": self.discovery_context,
             "universe_lane": self.universe_lane,
+            "evidence_lane": self.evidence_lane
+            or (self.universe_lane if self.universe_lane in {"mover", "core"} else ""),
             "core_universe_memberships": self.core_universe_memberships,
             "core_lane_score": self.core_lane_score,
             "core_lane_eligible": self.core_lane_eligible,
@@ -774,6 +797,217 @@ class SnapshotRow:
         return payload
 
 
+def _enrichment_observation_binding_valid(snapshot: SnapshotRow) -> bool:
+    """Verify the persisted observation envelope before trusting ``FRESH``."""
+
+    source_hash = snapshot.enrichment_observation_sha256.strip().lower()
+    payload_text = snapshot.enrichment_observation_payload_json.strip()
+    if len(source_hash) != 64 or not payload_text:
+        return False
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    canonical_payload = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    if hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest() != source_hash:
+        return False
+    payload_high = _observation_number(payload, "premarket_high")
+    payload_low = _observation_number(payload, "premarket_low")
+    payload_latest_price = _observation_number(payload, "latest_price")
+    payload_previous_close = _observation_number(payload, "previous_close")
+    payload_volume = _observation_integer(payload, "premarket_volume")
+    numeric_fields_valid = all(
+        _observation_number_valid(payload, key)
+        for key in (
+            "premarket_high",
+            "premarket_low",
+            "latest_price",
+            "previous_close",
+            "prior_daily_high",
+        )
+    ) and _observation_integer_valid(payload, "premarket_volume")
+    effective_price = (
+        payload_latest_price
+        if payload_latest_price is not None and payload_latest_price > 0
+        else None
+    )
+    effective_previous_close = (
+        payload_previous_close
+        if payload_previous_close is not None and payload_previous_close > 0
+        else None
+    )
+    values_match = (
+        payload_high is not None
+        and payload_low is not None
+        and numeric_fields_valid
+        and _numbers_equal(payload_high, snapshot.premarket_high)
+        and _numbers_equal(payload_low, snapshot.premarket_low)
+        and _observation_values_match(
+            snapshot,
+            payload_latest_price=effective_price,
+            payload_previous_close=effective_previous_close,
+            payload_volume=payload_volume,
+        )
+    )
+    raw_fields_match = (
+        snapshot.premarket_raw_payload_json
+        == str(payload.get("premarket_raw_payload_json") or "")
+        and snapshot.premarket_source_hash_sha256
+        == str(payload.get("premarket_source_hash_sha256") or "")
+    )
+    prior_fields_match = all(
+        _text_value(getattr(snapshot, snapshot_key))
+        == _text_value(payload.get(payload_key))
+        for snapshot_key, payload_key in (
+            ("prior_daily_high_observed_at", "prior_daily_high_observed_at"),
+            ("prior_daily_high_completed_at", "prior_daily_high_completed_at"),
+            ("prior_daily_high_completion_semantics", "prior_daily_high_completion_semantics"),
+            ("prior_daily_high_source", "prior_daily_high_source"),
+            ("prior_daily_high_source_url", "prior_daily_high_source_url"),
+            ("prior_daily_high_source_hash", "prior_daily_high_source_hash"),
+            ("prior_daily_high_raw_payload_json", "prior_daily_high_raw_payload_json"),
+        )
+    )
+    prior_high = _observation_number(payload, "prior_daily_high")
+    prior_high_matches = (
+        (prior_high is None and snapshot.prior_daily_high is None)
+        or (
+            prior_high is not None
+            and snapshot.prior_daily_high is not None
+            and _numbers_equal(prior_high, snapshot.prior_daily_high)
+        )
+    )
+    observation_source = str(payload.get("source") or "")
+    source_fields_match = (
+        snapshot.premarket_high_source == observation_source
+        and snapshot.premarket_low_source == observation_source
+        and (
+            effective_price is None
+            or snapshot.premarket_price_source == observation_source
+        )
+        and (
+            payload_volume is None
+            or snapshot.premarket_volume_source == observation_source
+        )
+        and (
+            effective_previous_close is None
+            or snapshot.previous_close_source == observation_source
+        )
+        and (
+            effective_price is None
+            or payload_volume is None
+            or snapshot.dollar_volume_source == observation_source
+        )
+        and (
+            effective_price is None
+            or effective_previous_close is None
+            or snapshot.gap_pct_source == observation_source
+        )
+    )
+    return (
+        str(payload.get("ticker") or "").upper() == snapshot.ticker
+        and str(payload.get("status") or "").lower() == "verified"
+        and snapshot.enrichment_is_complete is True
+        and payload.get("is_complete") is True
+        and str(payload.get("source") or "") == snapshot.premarket_range_source
+        and observation_source.startswith("alpaca_market_data_")
+        and effective_price is not None
+        and str(payload.get("source_url") or "") == snapshot.premarket_range_source_url
+        and str(payload.get("observed_at") or "") == snapshot.enrichment_observed_at
+        and str(payload.get("bar_completed_at") or "")
+        == snapshot.enrichment_bar_completed_at
+        and values_match
+        and source_fields_match
+        and raw_fields_match
+        and prior_high_matches
+        and prior_fields_match
+    )
+
+
+def _observation_values_match(
+    snapshot: SnapshotRow,
+    *,
+    payload_latest_price: float | None,
+    payload_previous_close: float | None,
+    payload_volume: int | None,
+) -> bool:
+    if payload_latest_price is not None and not _numbers_equal(
+        payload_latest_price, snapshot.premarket_price
+    ):
+        return False
+    if payload_previous_close is not None and not _numbers_equal(
+        payload_previous_close, snapshot.previous_close
+    ):
+        return False
+    if payload_volume is not None and payload_volume != snapshot.premarket_volume:
+        return False
+    if payload_latest_price is not None and payload_volume is not None:
+        if not _numbers_equal(
+            round(payload_latest_price * payload_volume, 2), snapshot.dollar_volume
+        ):
+            return False
+    if (
+        payload_latest_price is not None
+        and payload_previous_close is not None
+        and payload_previous_close > 0
+        and not _numbers_equal(
+            round(
+                ((payload_latest_price - payload_previous_close) / payload_previous_close)
+                * 100,
+                4,
+            ),
+            snapshot.gap_pct,
+        )
+    ):
+        return False
+    return True
+
+
+def _observation_number(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _observation_integer(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _observation_number_valid(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    return value is None or value == "" or _observation_number(payload, key) is not None
+
+
+def _observation_integer_valid(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    return value is None or value == "" or _observation_integer(payload, key) is not None
+
+
+def _numbers_equal(left: float, right: float) -> bool:
+    return abs(left - right) <= 1e-9
+
+
+def _text_value(value: Any) -> str:
+    return str(value or "")
+
+
 @dataclass(frozen=True)
 class ScoredCandidate:
     rank: int
@@ -812,10 +1046,18 @@ class ScoredCandidate:
             "source_timestamp": self.snapshot.source_timestamp or self.snapshot.as_of_timestamp,
             "extracted_at": self.snapshot.extracted_at or self.snapshot.imported_at,
             "stale_data_flag": self.snapshot.stale_data_flag,
+            "freshness_status": self.snapshot.freshness_status,
             "source_confidence": self.snapshot.source_confidence,
             "source_count": self.snapshot.source_count,
             "preferred_source": self.snapshot.preferred_source or self.snapshot.source,
             "conflict_flags": self.snapshot.conflict_flags,
+            "universe_lane": self.snapshot.universe_lane,
+            "evidence_lane": self.snapshot.evidence_lane
+            or (
+                self.snapshot.universe_lane
+                if self.snapshot.universe_lane in {"mover", "core"}
+                else ""
+            ),
         }
         source_lineage = dict(source_lineage)
         if self.snapshot.field_completeness_score is not None:
@@ -926,6 +1168,7 @@ class ScoredCandidate:
             "source_timestamp": self.snapshot.source_timestamp or self.snapshot.as_of_timestamp,
             "extracted_at": self.snapshot.extracted_at or self.snapshot.imported_at,
             "stale_data_flag": self.snapshot.stale_data_flag,
+            "freshness_status": self.snapshot.freshness_status,
             "source_confidence": self.snapshot.source_confidence,
             "source_count": self.snapshot.source_count,
             "score_consensus": self.snapshot.score_consensus,
@@ -934,6 +1177,12 @@ class ScoredCandidate:
             "row_merge_reason": self.snapshot.row_merge_reason,
             "discovery_context": self.snapshot.discovery_context,
             "universe_lane": self.snapshot.universe_lane,
+            "evidence_lane": self.snapshot.evidence_lane
+            or (
+                self.snapshot.universe_lane
+                if self.snapshot.universe_lane in {"mover", "core"}
+                else ""
+            ),
             "core_universe_memberships": self.snapshot.core_universe_memberships,
             "core_lane_score": self.snapshot.core_lane_score,
             "core_lane_eligible": self.snapshot.core_lane_eligible,

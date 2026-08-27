@@ -5,18 +5,24 @@ import io
 import json
 import os
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.models import SnapshotRow
+from intraday_scanner.providers.csv_provider import read_snapshot_csv
+from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
+from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import _merge_lane_candidates
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
+    write_snapshot_rows,
 )
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
@@ -300,6 +306,154 @@ def test_discovery_freshness_is_bound_to_explicit_cycle_observation_time() -> No
     assert result["status"] == "READY"
     assert result["rows"][0]["freshness_status"] == "FRESH"
     assert result["rows"][0].get("stale_data_flag") is not True
+
+
+def test_core_freshness_and_evidence_lane_survive_snapshot_and_candidate_roundtrip(
+    tmp_path: Path,
+) -> None:
+    observed_at = datetime.now(timezone.utc).replace(microsecond=0)
+    source_timestamp = (observed_at - timedelta(seconds=30)).isoformat()
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                SnapshotRow(
+                    ticker=symbols[0],
+                    company="Core Holdings",
+                    premarket_price=12.0,
+                    previous_close=10.0,
+                    premarket_high=12.5,
+                    premarket_low=11.0,
+                    premarket_volume=250_000,
+                    float_shares=10_000_000,
+                    market_cap=120_000_000,
+                    spread_pct=0.5,
+                    short_float_pct=5.0,
+                    has_news=True,
+                    current_halt=False,
+                    recent_offering=False,
+                    reverse_split_90d=False,
+                    source="alpaca_iex",
+                    as_of_timestamp=source_timestamp,
+                    source_timestamp=source_timestamp,
+                    halt_status="CLEAR",
+                    sec_risk_status="CLEAR",
+                    corporate_action_status="CLEAR",
+                    dollar_volume=3_000_000.0,
+                    gap_pct=20.0,
+                )
+            ]
+
+    discovery = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "content_hash_sha256": "c" * 64,
+            "members": [{"symbol": "CORE", "index_memberships": ["S&P 500"]}],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+    )
+    assert discovery["status"] == "READY"
+    assert discovery["rows"][0]["freshness_status"] == "FRESH"
+    assert discovery["rows"][0]["evidence_lane"] == "core"
+
+    ranked_core_rows = core.rank_core_universe_rows(discovery["rows"])
+    failed_core_enrichment = premarket._apply_observation(
+        ranked_core_rows[0],
+        None,
+        enabled=True,
+        selected=True,
+        primary_source="alpaca_market_data_iex",
+        fallback_status="disabled",
+        requested_at=observed_at,
+        max_age_seconds=600,
+    )
+    assert failed_core_enrichment["freshness_status"] == "FRESH"
+    core_candidate_after_failed_enrichment = score_snapshot(
+        SnapshotRow.from_mapping(failed_core_enrichment), ScannerConfig()
+    ).to_dict()
+    core_slate_after_failed_enrichment = build_ranked_research_slate(
+        [core_candidate_after_failed_enrichment],
+        target=1,
+        require_safety=True,
+        generated_at=observed_at.isoformat(),
+    )
+    assert core_slate_after_failed_enrichment["symbols"] == ["CORE"]
+
+    mover_row = {
+        **ranked_core_rows[0],
+        "freshness_status": "FRESH",
+        "universe_lane": "mover",
+        "evidence_lane": "mover",
+        "core_universe_memberships": "",
+    }
+    mover_failed_enrichment = premarket._apply_observation(
+        mover_row,
+        None,
+        enabled=True,
+        selected=True,
+        primary_source="alpaca_market_data_iex",
+        fallback_status="disabled",
+        requested_at=observed_at,
+        max_age_seconds=600,
+    )
+    assert mover_failed_enrichment["freshness_status"] == ""
+    invalid_core_receipt = {
+        **ranked_core_rows[0],
+        "core_coverage_receipt_hash_sha256": "0" * 64,
+    }
+    invalid_core_enrichment = premarket._apply_observation(
+        invalid_core_receipt,
+        None,
+        enabled=True,
+        selected=True,
+        primary_source="alpaca_market_data_iex",
+        fallback_status="disabled",
+        requested_at=observed_at,
+        max_age_seconds=600,
+    )
+    assert invalid_core_enrichment["freshness_status"] == ""
+
+    snapshot_path = write_snapshot_rows(ranked_core_rows, tmp_path / "core_snapshot.csv")
+    loaded_snapshot = read_snapshot_csv(snapshot_path)
+    assert len(loaded_snapshot) == 1
+    snapshot = loaded_snapshot[0]
+    assert snapshot.freshness_status == "FRESH"
+    assert snapshot.evidence_lane == "core"
+    assert snapshot.source_quality_status == "VERIFIED"
+    assert snapshot.core_coverage_receipt_status == "READY"
+
+    candidate = score_snapshot(snapshot, ScannerConfig()).to_dict()
+    assert candidate["freshness_status"] == "FRESH"
+    assert candidate["evidence_lane"] == "core"
+    assert candidate["source_quality_status"] == "VERIFIED"
+    assert core._core_coverage_binding_valid(candidate)
+
+    slate = build_ranked_research_slate(
+        [candidate], target=1, require_safety=True, generated_at=observed_at.isoformat()
+    )
+    assert slate["symbols"] == ["CORE"]
+
+    stale = build_ranked_research_slate(
+        [{**candidate, "freshness_status": "STALE"}],
+        target=1,
+        require_safety=True,
+        generated_at=observed_at.isoformat(),
+    )
+    missing_source_quality = build_ranked_research_slate(
+        [{**candidate, "source_quality_status": "", "source_count": 0}],
+        target=1,
+        require_safety=True,
+        generated_at=observed_at.isoformat(),
+    )
+    assert stale["symbols"] == []
+    assert "freshness_missing_or_not_current" in stale["safety_blockers"]
+    assert missing_source_quality["symbols"] == []
+    assert "source_evidence_missing_or_nonpositive" in missing_source_quality["safety_blockers"]
 
 
 def test_discovery_does_not_claim_ready_for_stale_or_unverified_batch_rows() -> None:
