@@ -319,6 +319,12 @@ def construct_alphaops_v5_plan(
     leg_tickers = {item.ticker for item in legs.values()}
     if len(leg_tickers) != 1 or not next(iter(leg_tickers)):
         return _invalid(normalized_direction, "observation_ticker_mismatch")
+    signal_ticker = str(signal.get("ticker") or signal.get("symbol") or "").strip().upper()
+    if signal_ticker and leg_tickers != {signal_ticker}:
+        # A plan is constructed in the context of one scored row.  Do not let
+        # three internally consistent observations for another symbol become
+        # the levels for this row merely because their hashes were recomputed.
+        return _invalid(normalized_direction, "observation_ticker_mismatch")
 
     entry = values["entry"]
     stop = values["stop"]
@@ -383,6 +389,7 @@ def _with_assigned_hash(plan: AlphaOpsMarketStructurePlan) -> AlphaOpsMarketStru
 def validate_alphaops_v5_plan(
     contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
     *,
+    expected_ticker: str | None = None,
     raise_on_error: bool = True,
 ) -> bool:
     """Strictly validate an emitted plan contract and its content hashes.
@@ -395,7 +402,7 @@ def validate_alphaops_v5_plan(
     """
 
     try:
-        _validate_alphaops_v5_plan(contract)
+        _validate_alphaops_v5_plan(contract, expected_ticker=expected_ticker)
     except (TypeError, ValueError, KeyError) as exc:
         if raise_on_error:
             raise ValueError(f"invalid AlphaOps v5 plan: {exc}") from exc
@@ -405,14 +412,20 @@ def validate_alphaops_v5_plan(
 
 def is_valid_alphaops_v5_plan(
     contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
+    *,
+    expected_ticker: str | None = None,
 ) -> bool:
     """Boolean companion to :func:`validate_alphaops_v5_plan`."""
 
-    return validate_alphaops_v5_plan(contract, raise_on_error=False)
+    return validate_alphaops_v5_plan(
+        contract, expected_ticker=expected_ticker, raise_on_error=False
+    )
 
 
 def _validate_alphaops_v5_plan(
     contract: AlphaOpsMarketStructurePlan | Mapping[str, Any],
+    *,
+    expected_ticker: str | None = None,
 ) -> None:
     payload = (
         contract.to_dict()
@@ -499,6 +512,12 @@ def _validate_alphaops_v5_plan(
         tickers.add(str(raw.get("ticker") or "").upper())
     if len(tickers) != 1 or "" in tickers:
         raise ValueError("observation ticker identity is inconsistent")
+    if expected_ticker is not None:
+        expected = str(expected_ticker).strip().upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", expected):
+            raise ValueError("expected ticker is invalid")
+        if tickers != {expected}:
+            raise ValueError("observation ticker does not match expected row ticker")
     if payload["target_basis_kind"] != by_role["target"]["observation_kind"]:
         raise ValueError("plan target basis does not match observed structural kind")
     if any(

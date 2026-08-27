@@ -20,10 +20,12 @@ from intraday_scanner.alpha.episode_identity import (
     build_episode_identity,
     deduplicate_episode_candidates,
 )
+from intraday_scanner.alpha.plan_constructor import validate_alphaops_v5_plan
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
     ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
+    V5_DECISION_TRACE_SCHEMA_VERSION,
     alphaops_strategy_contract,
     evaluate_v5_official_paper,
     is_v5_active,
@@ -63,7 +65,11 @@ ALLOWED_MODES = {MODE_OBSERVE, MODE_PAPER, MODE_LIVE}
 
 ACTION_ENTER = "ENTER_LONG"
 ACTION_EXIT = "EXIT_LONG"
+ACTION_ENTER_SHORT = "ENTER_SHORT"
+ACTION_EXIT_SHORT = "EXIT_SHORT"
 ACTION_STAND_DOWN = "STAND_DOWN"
+ENTRY_ACTIONS = frozenset({ACTION_ENTER, ACTION_ENTER_SHORT})
+EXIT_ACTIONS = frozenset({ACTION_EXIT, ACTION_EXIT_SHORT})
 
 STATE_WATCHING = "WATCHING"
 STATE_ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
@@ -216,14 +222,14 @@ def run_trade_watcher(
     prior_entry_signal_ids = {
         str(row.get("signal_id") or "")
         for row in existing_intents
-        if row.get("action") == ACTION_ENTER
+        if row.get("action") in ENTRY_ACTIONS
     }
     open_positions = {str(row.get("signal_id") or ""): dict(row) for row in remaining_open_rows}
     all_position_signal_ids = {str(row.get("signal_id") or "") for row in positions}
     daily_entry_count = sum(
         1
         for row in store.load_paper_trade_fills(market_date=resolved_day, limit=5000)
-        if row.get("side") == "BUY"
+        if row.get("side") in {"BUY", "SELL_SHORT"}
     )
     open_count = len(open_positions)
     observations_by_signal, observations_by_ticker = _latest_observations(observations)
@@ -282,14 +288,14 @@ def run_trade_watcher(
         episode_id = str(intent.get("episode_id") or signal.get("episode_id") or "").strip()
         if (
             episode_id
-            and intent.get("action") == ACTION_ENTER
+            and intent.get("action") in ENTRY_ACTIONS
             and episode_id in existing_episode_ids
         ):
             states[-1]["reason"] = "duplicate_episode_existing_lifecycle"
             states[-1]["episode_id"] = episode_id
             continue
         if (
-            intent.get("action") == ACTION_ENTER
+            intent.get("action") in ENTRY_ACTIONS
             and ticker in existing_symbol_lifecycles
         ):
             states[-1]["reason"] = "duplicate_symbol_existing_open_or_pending_lifecycle"
@@ -304,12 +310,12 @@ def run_trade_watcher(
         existing_intent_ids.add(intent["intent_id"])
         if episode_id:
             existing_episode_ids.add(episode_id)
-        if intent.get("action") == ACTION_ENTER:
+        if intent.get("action") in ENTRY_ACTIONS:
             existing_symbol_lifecycles.add(ticker)
         if _should_notify(intent, settings):
             event = _notification_event(intent)
             notification_events_by_key[event.event_key] = event
-        if normalized_mode == MODE_PAPER and intent["action"] == ACTION_ENTER:
+        if normalized_mode == MODE_PAPER and intent["action"] in ENTRY_ACTIONS:
             position, fill = _open_paper_position(intent, scanner_config)
             open_positions[signal_id] = position
             all_position_signal_ids.add(signal_id)
@@ -318,7 +324,7 @@ def run_trade_watcher(
             paper_positions.append(position)
             paper_fills.append(fill)
             signal_events.append(_signal_event(intent, "ENTRY_SIGNAL"))
-        elif normalized_mode == MODE_PAPER and intent["action"] == ACTION_EXIT and open_position:
+        elif normalized_mode == MODE_PAPER and intent["action"] in EXIT_ACTIONS and open_position:
             position, fill = _close_paper_position(open_position, intent, scanner_config)
             open_positions.pop(signal_id, None)
             open_count = max(0, open_count - 1)
@@ -651,7 +657,7 @@ def _existing_symbol_lifecycles(
         "FAILED",
     }
     for row in intents:
-        if str(row.get("action") or "").upper() != ACTION_ENTER:
+        if str(row.get("action") or "").upper() not in ENTRY_ACTIONS:
             continue
         lifecycle = str(row.get("lifecycle_state") or "").upper()
         if lifecycle in terminal:
@@ -826,6 +832,7 @@ def _signals_for_open_positions(
                 "entry_watch_level": position.get("entry_price"),
                 "invalidation_level": position.get("stop_price"),
                 "target_1": position.get("target_price"),
+                "direction": _position_direction(position),
                 "selection_id": position.get("selection_id"),
                 "strategy_id": position.get("strategy_id") or ALPHAOPS_STRATEGY_ID,
                 "strategy_version": position.get("strategy_version"),
@@ -895,6 +902,7 @@ def _canonical_eod_repairs(
                 :24
             ]
         )
+        direction = _position_direction(position)
         intent = {
             "intent_id": intent_id,
             "signal_id": signal_id,
@@ -902,7 +910,7 @@ def _canonical_eod_repairs(
             "ticker": str(position.get("ticker") or "").upper(),
             "mode": MODE_PAPER,
             "lifecycle_state": STATE_EXIT_TRIGGERED,
-            "action": ACTION_EXIT,
+            "action": ACTION_EXIT_SHORT if direction == "short" else ACTION_EXIT,
             "decision_time": exit_time,
             "decision_price": exit_price,
             "trigger_price": position.get("entry_price"),
@@ -930,9 +938,21 @@ def _canonical_eod_repairs(
         intent["payload_json"] = dict(intent)
         quantity = float(position.get("quantity") or 0.0)
         entry_price = float(position.get("entry_price") or 0.0)
-        realized_pnl = round((exit_price - entry_price) * quantity, 4)
+        realized_pnl = round(
+            ((entry_price - exit_price) if direction == "short" else (exit_price - entry_price))
+            * quantity,
+            4,
+        )
         realized_return = (
-            round(((exit_price - entry_price) / entry_price) * 100.0, 4)
+            round(
+                (
+                    ((entry_price - exit_price) / entry_price)
+                    if direction == "short"
+                    else ((exit_price - entry_price) / entry_price)
+                )
+                * 100.0,
+                4,
+            )
             if entry_price > 0
             else None
         )
@@ -955,7 +975,7 @@ def _canonical_eod_repairs(
         fill = _fill(
             intent,
             position_id=position_id,
-            side="SELL",
+            side="BUY_TO_COVER" if direction == "short" else "SELL",
             fill_price=exit_price,
             quantity=quantity,
             config=config,
@@ -1037,6 +1057,18 @@ def _latest_observations(
     return by_signal, by_ticker
 
 
+def _signal_direction(signal: dict[str, Any]) -> str:
+    plan = signal.get("alphaops_market_structure_plan")
+    value = plan.get("direction") if isinstance(plan, dict) else None
+    value = value or signal.get("direction") or signal.get("trade_direction") or "long"
+    return "short" if str(value).strip().lower() in {"short", "sell"} else "long"
+
+
+def _position_direction(position: dict[str, Any]) -> str:
+    value = position.get("direction") or position.get("trade_direction") or "long"
+    return "short" if str(value).strip().lower() in {"short", "sell"} else "long"
+
+
 def _decision_for_signal(
     *,
     signal: dict[str, Any],
@@ -1055,7 +1087,14 @@ def _decision_for_signal(
     # opposite direction.  Bar-only observations remain usable for existing
     # position monitoring, while v5 new entries still require a quote.
     observation = _side_aware_quote_observation(
-        signal, observation, for_exit=bool(open_position)
+        signal,
+        observation,
+        for_exit=bool(open_position),
+        direction_override=(
+            str(open_position.get("direction") or open_position.get("trade_direction") or "")
+            if open_position
+            else None
+        ),
     )
     price = _number(observation.get("price"))
     if price is None or price <= 0:
@@ -1090,7 +1129,11 @@ def _decision_for_signal(
 
 
 def _side_aware_quote_observation(
-    signal: dict[str, Any], observation: dict[str, Any], *, for_exit: bool = False
+    signal: dict[str, Any],
+    observation: dict[str, Any],
+    *,
+    for_exit: bool = False,
+    direction_override: str | None = None,
 ) -> dict[str, Any]:
     """Use the executable side of a fresh Alpaca quote for v5 decisions."""
 
@@ -1099,7 +1142,14 @@ def _side_aware_quote_observation(
     bid = _number(observation.get("quote_bid"))
     ask = _number(observation.get("quote_ask"))
     plan = signal.get("alphaops_market_structure_plan")
-    direction = str(plan.get("direction") or "").lower() if isinstance(plan, dict) else ""
+    direction = str(
+        direction_override
+        or (plan.get("direction") if isinstance(plan, dict) else "")
+    ).lower()
+    if direction in {"sell", "sell_short"}:
+        direction = "short"
+    elif direction in {"buy", "buy_long"}:
+        direction = "long"
     if bid is None or ask is None or direction not in {"long", "short"}:
         return observation
     if for_exit:
@@ -1113,6 +1163,13 @@ def _side_aware_quote_observation(
         "price": selected,
         "current_price": selected,
         "price_type": f"quote_{side}_side",
+        "bar_observed_at": observation.get("bar_observed_at")
+        or observation.get("observed_at"),
+        # The V5 policy trace must be about the executable quote used for the
+        # decision.  Preserve the completed-bar timestamps separately in the
+        # observation, but expose the authenticated quote timestamp as the
+        # policy observation time so replay cannot silently use a stale bar.
+        "observed_at": observation.get("quote_observed_at"),
     }
 
 
@@ -1143,6 +1200,8 @@ def _entry_decision(
     existing_symbol_notional: float,
 ) -> dict[str, Any]:
     price = float(_number(observation.get("price")) or 0.0)
+    direction = _signal_direction(signal)
+    is_short = direction == "short"
     trigger = _level(
         signal,
         "entry_watch_level",
@@ -1156,6 +1215,19 @@ def _entry_decision(
     if str(signal.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID and is_v5_active(
         decision_time
     ):
+        # Official paper Tier 3 has no authenticated current Alpaca
+        # shortable/easy-to-borrow or locate receipt.  Keep short lifecycle
+        # accounting available to research/paper-plan paths, but fail closed
+        # before creating an ENTER_SHORT intent.
+        if is_short:
+            return {
+                "state": STATE_STAND_DOWN,
+                "reason": (
+                    "AlphaOps v5 short admission blocked: "
+                    "BORROW_TRUTH_UNAVAILABLE."
+                ),
+                "decision_trace": None,
+            }
         if not _quote_observation_ready(observation):
             return {
                 "state": STATE_STAND_DOWN,
@@ -1166,7 +1238,7 @@ def _entry_decision(
             signal,
             observation,
             simulated_equity=settings.simulated_equity,
-            existing_symbol_notional=existing_symbol_notional,
+            existing_symbol_notional=float(existing_symbol_notional),
             decision_time=decision_time,
             policy=DEFAULT_V5_POLICY,
         )
@@ -1198,10 +1270,14 @@ def _entry_decision(
             raise SnapshotValidationError(
                 "AlphaOps v5 policy allowed an entry without complete levels."
             )
-        if price < trigger:
+        if (not is_short and price < trigger) or (is_short and price > trigger):
             return {
                 "state": STATE_WATCHING,
-                "reason": f"Price {price:.4f} has not reached trigger {trigger:.4f}.",
+                "reason": (
+                    f"Price {price:.4f} has not reached short trigger {trigger:.4f}."
+                    if is_short
+                    else f"Price {price:.4f} has not reached trigger {trigger:.4f}."
+                ),
                 "decision_trace": trace,
             }
         if open_count >= settings.max_open_positions:
@@ -1235,7 +1311,7 @@ def _entry_decision(
         intent = _intent(
             signal,
             observation,
-            action=ACTION_ENTER,
+            action=ACTION_ENTER_SHORT if is_short else ACTION_ENTER,
             lifecycle_state=STATE_ENTRY_TRIGGERED,
             reason=(
                 f"AlphaOps v5 official-paper candidate passed at {after_cost_r:.2f}R "
@@ -1265,23 +1341,27 @@ def _entry_decision(
             "missing_levels",
             settings=settings,
         )
-    if price < trigger:
+    if (not is_short and price < trigger) or (is_short and price > trigger):
         return {
             "state": STATE_WATCHING,
-            "reason": f"Price {price:.4f} has not reached trigger {trigger:.4f}.",
+            "reason": (
+                f"Price {price:.4f} has not reached short trigger {trigger:.4f}."
+                if is_short
+                else f"Price {price:.4f} has not reached trigger {trigger:.4f}."
+            ),
         }
-    if price <= stop:
+    if (not is_short and price <= stop) or (is_short and price >= stop):
         return _stand_down(
             signal,
             observation,
-            "Price is already at or below invalidation.",
+            "Price is already beyond invalidation for this direction.",
             "already_invalidated",
             settings=settings,
             trigger=trigger,
             stop=stop,
             target=target,
         )
-    if price >= target:
+    if (not is_short and price >= target) or (is_short and price <= target):
         return _stand_down(
             signal,
             observation,
@@ -1292,8 +1372,8 @@ def _entry_decision(
             stop=stop,
             target=target,
         )
-    reward = target - price
-    risk = price - stop
+    reward = price - target if is_short else target - price
+    risk = stop - price if is_short else price - stop
     reward_risk = reward / risk if risk > 0 else 0.0
     if reward_risk + 1e-9 < settings.min_reward_risk:
         return _stand_down(
@@ -1328,21 +1408,24 @@ def _entry_decision(
             stop=stop,
             target=target,
         )
+    reason_prefix = (
+        f"Price confirmed below short trigger {trigger:.4f}; target {target:.4f}, "
+        if is_short
+        else f"Price confirmed above trigger {trigger:.4f}; target {target:.4f}, "
+    )
+    risk_fraction = (stop - price) / price if is_short else (price - stop) / price
     intent = _intent(
         signal,
         observation,
-        action=ACTION_ENTER,
+        action=ACTION_ENTER_SHORT if is_short else ACTION_ENTER,
         lifecycle_state=STATE_ENTRY_TRIGGERED,
-        reason=(
-            f"Price confirmed above trigger {trigger:.4f}; target {target:.4f}, "
-            f"stop {stop:.4f}, reward/risk {reward_risk:.2f}."
-        ),
+        reason=f"{reason_prefix}stop {stop:.4f}, reward/risk {reward_risk:.2f}.",
         mode=settings.mode,
         trigger=trigger,
         stop=stop,
         target=target,
         notional=settings.notional_per_trade,
-        risk_amount=settings.notional_per_trade * ((price - stop) / price),
+        risk_amount=settings.notional_per_trade * risk_fraction,
     )
     return {"state": STATE_ENTRY_TRIGGERED, "reason": intent["reason"], "intent": intent}
 
@@ -1354,6 +1437,19 @@ def _exit_decision(
     scanner_config: ScannerConfig,
 ) -> dict[str, Any]:
     price = float(_number(observation.get("price")) or 0.0)
+    position_direction = str(
+        open_position.get("direction") or open_position.get("trade_direction") or ""
+    ).strip().lower()
+    # A persisted position direction is authoritative.  Older paper rows may
+    # predate the explicit direction field; only those rows inherit the
+    # selected signal's direction, rather than treating an explicit short as
+    # long because the helper's compatibility default is long.
+    direction = (
+        _position_direction(open_position)
+        if position_direction
+        else _signal_direction(signal)
+    )
+    is_short = direction == "short"
     stop = _number(open_position.get("stop_price")) or _level(
         signal,
         "invalidation_level",
@@ -1365,9 +1461,11 @@ def _exit_decision(
         "first_target",
     )
     decision_time = str(observation.get("observed_at") or observation.get("requested_at") or "")
-    if stop is not None and price <= stop:
+    if stop is not None and ((not is_short and price <= stop) or (is_short and price >= stop)):
         reason = f"Price hit invalidation {stop:.4f}."
-    elif target is not None and price >= target:
+    elif target is not None and (
+        (not is_short and price >= target) or (is_short and price <= target)
+    ):
         reason = f"Price hit target {target:.4f}."
     elif _is_eod(decision_time, scanner_config.close_exit_time):
         reason = f"End-of-day flatten rule at {scanner_config.close_exit_time}."
@@ -1376,7 +1474,7 @@ def _exit_decision(
     intent = _intent(
         signal,
         observation,
-        action=ACTION_EXIT,
+        action=ACTION_EXIT_SHORT if is_short else ACTION_EXIT,
         lifecycle_state=STATE_EXIT_TRIGGERED,
         reason=reason,
         mode=MODE_PAPER,
@@ -1476,6 +1574,7 @@ def _intent(
     raw_signal_payload = signal.get("raw_payload_json")
     if not isinstance(raw_signal_payload, dict):
         raw_signal_payload = {}
+    direction = _signal_direction(signal)
     return {
         "intent_id": intent_id,
         "signal_id": signal_id,
@@ -1484,6 +1583,7 @@ def _intent(
         "mode": mode,
         "lifecycle_state": lifecycle_state,
         "action": action,
+        "direction": direction,
         "decision_time": decision_time,
         "decision_price": price,
         "trigger_price": trigger,
@@ -1550,13 +1650,19 @@ def _open_paper_position(
     config: ScannerConfig,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     decision_price = float(intent.get("decision_price") or 0.0)
+    direction = "short" if str(intent.get("direction") or "").lower() == "short" else "long"
     trace = dict(intent.get("decision_trace") or {})
     computed = dict(trace.get("computed") or {})
     expected_entry = _number(computed.get("expected_entry_price"))
     fill_price = round(
         expected_entry
         if expected_entry is not None
-        else decision_price * (1 + config.slippage_bps / 10000.0),
+        else decision_price
+        * (
+            1 - config.slippage_bps / 10000.0
+            if direction == "short"
+            else 1 + config.slippage_bps / 10000.0
+        ),
         6,
     )
     notional = float(intent.get("notional") or 0.0)
@@ -1580,6 +1686,7 @@ def _open_paper_position(
         "signal_id": intent["signal_id"],
         "market_date": intent["market_date"],
         "ticker": intent["ticker"],
+        "direction": direction,
         "status": "OPEN",
         "quantity": quantity,
         "entry_intent_id": intent["intent_id"],
@@ -1611,7 +1718,7 @@ def _open_paper_position(
     fill = _fill(
         intent,
         position_id=position_id,
-        side="BUY",
+        side="SELL_SHORT" if direction == "short" else "BUY",
         fill_price=fill_price,
         quantity=quantity,
         config=config,
@@ -1625,11 +1732,35 @@ def _close_paper_position(
     config: ScannerConfig,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     decision_price = float(intent.get("decision_price") or 0.0)
-    fill_price = round(decision_price * (1 - config.slippage_bps / 10000.0), 6)
+    direction = _position_direction(position)
+    fill_price = round(
+        decision_price
+        * (
+            1 + config.slippage_bps / 10000.0
+            if direction == "short"
+            else 1 - config.slippage_bps / 10000.0
+        ),
+        6,
+    )
     quantity = float(position.get("quantity") or 0.0)
     entry = float(position.get("entry_price") or 0.0)
-    pnl = round((fill_price - entry) * quantity, 4)
-    return_pct = round(((fill_price - entry) / entry) * 100, 4) if entry > 0 else None
+    pnl = round(
+        ((entry - fill_price) if direction == "short" else (fill_price - entry)) * quantity,
+        4,
+    )
+    return_pct = (
+        round(
+            (
+                ((entry - fill_price) / entry)
+                if direction == "short"
+                else ((fill_price - entry) / entry)
+            )
+            * 100,
+            4,
+        )
+        if entry > 0
+        else None
+    )
     updated = {
         **dict(position),
         "status": "CLOSED",
@@ -1644,7 +1775,7 @@ def _close_paper_position(
     fill = _fill(
         intent,
         position_id=str(position.get("position_id") or ""),
-        side="SELL",
+        side="BUY_TO_COVER" if direction == "short" else "SELL",
         fill_price=fill_price,
         quantity=quantity,
         config=config,
@@ -1740,9 +1871,9 @@ def format_trade_intent_message(intent: dict[str, Any]) -> str:
     action = str(intent.get("action") or "")
     mode = str(intent.get("mode") or "").upper()
     ticker = str(intent.get("ticker") or "n/a")
-    if action == ACTION_ENTER:
+    if action in ENTRY_ACTIONS:
         lead = "PAPER INTENT ONLY - ENTRY SIGNAL"
-    elif action == ACTION_EXIT:
+    elif action in EXIT_ACTIONS:
         lead = "PAPER INTENT ONLY - EXIT SIGNAL"
     else:
         lead = "PAPER INTENT ONLY - STAND DOWN"
@@ -1830,7 +1961,11 @@ def _build_watcher_current_proof(
 ) -> dict[str, Any] | None:
     """Build immutable Tier 3 monitor evidence from the persisted quote/trace."""
 
-    if trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID:
+    if (
+        not isinstance(trace, dict)
+        or trace.get("schema_version") != V5_DECISION_TRACE_SCHEMA_VERSION
+        or trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID
+    ):
         return None
     computed = trace.get("computed")
     if not isinstance(computed, dict):
@@ -1847,9 +1982,27 @@ def _build_watcher_current_proof(
     signal_id = _signal_id(signal)
     ticker = str(signal.get("ticker") or "").upper()
     plan = signal.get("alphaops_market_structure_plan")
-    if not isinstance(plan, dict) or str(plan.get("status") or "") != "COMPLETE":
+    # This module intentionally has no broker asset/borrow adapter.  A
+    # geometry-only short must never produce a Tier 3 current proof.
+    if isinstance(plan, dict) and str(plan.get("direction") or "").lower() == "short":
+        return None
+    try:
+        plan_valid = isinstance(plan, dict) and validate_alphaops_v5_plan(
+            plan, expected_ticker=ticker
+        )
+    except (TypeError, ValueError):
+        plan_valid = False
+    if not plan_valid or str(plan.get("status") or "") != "COMPLETE":
         return None
     plan_hash = str(plan.get("plan_hash_sha256") or "")
+    if (
+        trace.get("signal_id") != signal_id
+        or str(trace.get("ticker") or "").upper() != ticker
+        or trace.get("plan_hash_sha256") != plan_hash
+        or trace.get("strategy_id") != "alphaops_v5"
+        or trace.get("strategy_version") != DEFAULT_V5_POLICY.strategy_version
+    ):
+        return None
     lineage = _selection_lineage(signal)
     selection_id = str(signal.get("selection_id") or lineage.get("selection_id") or "")
     cohort = str(signal.get("cohort") or lineage.get("cohort") or "")
@@ -1891,9 +2044,24 @@ def _build_watcher_current_proof(
         or not quote_raw_json
     ):
         return None
-    checked_at = _utc_now()
     observed_at = str(observation.get("quote_observed_at") or "")
     if not observed_at or str(observation.get("is_usable")).lower() not in {"true", "1"}:
+        return None
+    try:
+        checked_dt = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if checked_dt.tzinfo is None:
+        return None
+    checked_at = checked_dt.astimezone(UTC).isoformat()
+    observed_at = checked_at
+    bar_freshness = _number(observation.get("freshness_seconds"))
+    if bar_freshness is None or bar_freshness < 0:
+        return None
+    quote_freshness = _number(observation.get("quote_freshness_seconds"))
+    if quote_freshness is None:
+        quote_freshness = bar_freshness
+    if quote_freshness < 0 or quote_freshness > DEFAULT_V5_POLICY.maximum_quote_age_seconds:
         return None
     quote = {
         "schema_version": "dawnstrike.alphaops.quote_receipt.v1",
@@ -1909,11 +2077,20 @@ def _build_watcher_current_proof(
             lineage.get("slate_content_hash_sha256") or ""
         ),
         "frozen_research_selection_id": frozen_member_id,
+        "direction": direction,
         "observed_at": observed_at,
         "source": str(observation.get("quote_source") or ""),
         "source_bar_hash_sha256": source_bar_hash,
         "source_quote_hash_sha256": source_quote_hash,
         "quote_raw_payload_json": quote_raw_json,
+        "bar_observed_at": str(
+            observation.get("bar_observed_at")
+            or observation.get("observed_at")
+            or ""
+        ),
+        "bar_completed_at": str(observation.get("bar_completed_at") or ""),
+        "bar_freshness_seconds": bar_freshness,
+        "quote_age_seconds": quote_freshness,
         "bid": bid,
         "ask": ask,
         "last": last,
@@ -1943,6 +2120,7 @@ def _build_watcher_current_proof(
             lineage.get("slate_content_hash_sha256") or ""
         ),
         "frozen_research_selection_id": frozen_member_id,
+        "direction": direction,
         "account_mode": "PAPER",
         "simulated_account_id": ALPHAOPS_V5_ACCOUNT_ID,
         "admission_id": "paper-admission-" + hashlib.sha256(
@@ -1971,6 +2149,7 @@ def _build_watcher_current_proof(
             lineage.get("slate_content_hash_sha256") or ""
         ),
         "frozen_research_selection_id": frozen_member_id,
+        "direction": direction,
         "checked_at": checked_at,
         "quote_receipt": quote,
         "quote_hash_sha256": quote_hash,
@@ -2011,10 +2190,16 @@ def _monitor_publication_receipt(
         raise SnapshotValidationError(
             "monitor publication requires a strict current watcher proof"
         )
+    proof_checked_at = str(proof.get("checked_at") or "")
+    if not proof_checked_at or str(checked_at) != proof_checked_at:
+        raise SnapshotValidationError(
+            "monitor publication checked_at must equal the frozen quote evidence time"
+        )
     signal_id = _signal_id(signal)
     ticker = str(signal.get("ticker") or "").upper()
     plan = signal.get("alphaops_market_structure_plan") or {}
     plan_hash = str(plan.get("plan_hash_sha256") or "")
+    direction = str(plan.get("direction") or "").lower()
     lineage = _selection_lineage(signal)
     frozen_member_id = next(
         (
@@ -2033,6 +2218,7 @@ def _monitor_publication_receipt(
         "signal_id": signal_id,
         "ticker": ticker,
         "plan_hash_sha256": plan_hash,
+        "direction": direction,
         "selection_id": str(
             signal.get("selection_id")
             or lineage.get("selection_id")
@@ -2056,6 +2242,11 @@ def _monitor_publication_receipt(
             or ""
         ),
         "watcher_proof_hash_sha256": str(proof.get("proof_hash_sha256") or ""),
+        "quote_receipt_hash_sha256": str(proof.get("quote_hash_sha256") or ""),
+        "portfolio_receipt_hash_sha256": str(proof.get("portfolio_hash_sha256") or ""),
+        "decision_trace_fingerprint": str(
+            (proof.get("evaluate_v5_official_paper") or {}).get("decision_fingerprint") or ""
+        ),
         "publication_count": 1,
         "publication_tier": "ALERTABLE_PAPER_ENTRY",
         "research_only": True,
@@ -2125,7 +2316,7 @@ def _price_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _should_notify(intent: dict[str, Any], settings: WatcherSettings) -> bool:
-    return intent.get("action") in {ACTION_ENTER, ACTION_EXIT} or settings.notify_blocked
+    return intent.get("action") in ENTRY_ACTIONS | EXIT_ACTIONS or settings.notify_blocked
 
 
 def _signal_id(signal: dict[str, Any]) -> str:

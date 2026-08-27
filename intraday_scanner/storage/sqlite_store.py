@@ -1411,6 +1411,26 @@ class SQLiteScanStore:
                     if cursor.rowcount:
                         inserted += 1
                     else:
+                        # ``INSERT OR IGNORE`` can also be suppressed by the
+                        # unique content hash (rather than by receipt_id).
+                        # Resolve the stored identity explicitly so a
+                        # divergent payload can never be reported as an
+                        # idempotent reuse.
+                        persisted = connection.execute(
+                            """
+                            SELECT content_hash_sha256, payload_json
+                            FROM monitor_publication_receipts WHERE receipt_id = ?
+                            """,
+                            (receipt_id,),
+                        ).fetchone()
+                        if (
+                            persisted is None
+                            or str(persisted[0]) != content_hash
+                            or str(persisted[1]) != canonical_payload
+                        ):
+                            raise StorageError(
+                                "monitor publication receipt identity collision"
+                            )
                         reused += 1
             return {"inserted": inserted, "reused": reused, "count": inserted + reused}
         except sqlite3.Error as exc:

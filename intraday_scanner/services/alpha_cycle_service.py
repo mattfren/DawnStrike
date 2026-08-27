@@ -171,12 +171,23 @@ def alpha_cycle(
         if as_of is None:
             as_of = datetime.fromisoformat(f"{parsed_market_date}T12:00:00+00:00")
     cycle_observed_at = as_of or datetime.now(timezone.utc)
+    # One immutable cycle decision timestamp must cross the collection,
+    # enrichment, scoring, and plan-freeze boundaries.  ``score_universe``
+    # intentionally records its own wall-clock scan creation time (rounded to
+    # seconds), which is not a safe join key for the point-in-time enrichment
+    # receipt when callers provide a microsecond ``as_of``.  Normalize once and
+    # carry this exact value through every AlphaOps decision contract.
+    if cycle_observed_at.tzinfo is None:
+        cycle_decision_at = cycle_observed_at.replace(tzinfo=timezone.utc)
+    else:
+        cycle_decision_at = cycle_observed_at.astimezone(timezone.utc)
+    cycle_decision_timestamp = cycle_decision_at.isoformat()
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     core_universe = build_core_universe_contract(
         core_universe_manifest,
-        observed_at=cycle_observed_at,
-        market_date=market_date or cycle_observed_at.date().isoformat(),
+        observed_at=cycle_decision_at,
+        market_date=market_date or cycle_decision_at.date().isoformat(),
     )
     write_core_universe_contract(core_universe, output_dir / "core_universe_contract.json")
     session_gate = _scheduled_session_gate(notify=notify, as_of=as_of)
@@ -247,7 +258,7 @@ def alpha_cycle(
         recovery = discover_core_universe_rows(
             core_universe,
             config=recovery_config,
-            observed_at=cycle_observed_at,
+            observed_at=cycle_decision_at,
         )
         recovery_rows = rank_core_universe_rows(recovery.get("rows") or [])
         if recovery.get("status") == "READY" and recovery_rows:
@@ -477,7 +488,7 @@ def alpha_cycle(
         discover_core_universe_rows(
             core_universe,
             config=scanner_config,
-            observed_at=cycle_observed_at,
+            observed_at=cycle_decision_at,
         )
         if not fixture_mode
         else {
@@ -533,7 +544,7 @@ def alpha_cycle(
     core_news_enrichment = enrich_candidate_news(
         core_eligible_rows,
         config=scanner_config,
-        requested_at=as_of,
+        requested_at=cycle_decision_at,
         max_symbols=len(core_eligible_rows) or 1,
         rehearsal_mode=fixture_mode,
         out_dir=output_dir / "core_candidate_news",
@@ -543,6 +554,7 @@ def alpha_cycle(
     enrichment = enrich_premarket_rows(
         list(collection.get("rows") or []),
         config=scanner_config,
+        requested_at=cycle_decision_at,
         source=("yahoo" if fixture_mode else "alpaca"),
         allow_yahoo_fallback=not fixture_mode,
         rehearsal_mode=fixture_mode,
@@ -552,7 +564,7 @@ def alpha_cycle(
     news_enrichment = enrich_candidate_news(
         list(enrichment.get("ranking_rows") or []),
         config=scanner_config,
-        requested_at=as_of,
+        requested_at=cycle_decision_at,
         max_symbols=scanner_config.premarket_enrichment_max_candidates,
         rehearsal_mode=fixture_mode,
         out_dir=output_dir / "candidate_news",
@@ -588,6 +600,7 @@ def alpha_cycle(
         core_enrichment = enrich_premarket_rows(
             core_eligible_rows,
             config=core_config,
+            requested_at=cycle_decision_at,
             source="alpaca",
             allow_yahoo_fallback=False,
             rehearsal_mode=False,
@@ -636,7 +649,7 @@ def alpha_cycle(
         },
         "overlap": {"ranked_count": overlap_ranked_count},
     }
-    timestamp = scan_result.created_at
+    timestamp = cycle_decision_timestamp
     ranked, ranked_sec_summary = _verify_ranked_sec_safety(
         ranked,
         source_config=source_config,

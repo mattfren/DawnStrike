@@ -24,7 +24,6 @@ from intraday_scanner.services.alpha_cycle_service import (
 )
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
-    TIER2,
     apply_publication_semantics,
     build_ranked_research_slate,
 )
@@ -485,7 +484,7 @@ def test_alpha_cycle_structural_plan_preserves_hash_levels_through_alert_gate(
     assert gated["strategy_receipt_gate_blocked"] is False
 
 
-def test_strict_plan_and_persisted_receipt_promote_tier_two_but_tampering_does_not(
+def test_strict_plan_without_provider_raw_artifact_stays_tier_one(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "c" * 40)
@@ -536,7 +535,10 @@ def test_strict_plan_and_persisted_receipt_promote_tier_two_but_tampering_does_n
             market_date="2026-08-26",
         ),
     )[0]
-    assert published["publication_tier"] == TIER2
+    # A syntactically valid plan and persisted decision receipt are not an
+    # evidence root.  Tier 2 requires the authenticated provider raw bars to
+    # remain resolvable and bound to all three frozen observations.
+    assert published["publication_tier"] == TIER1
 
     tampered = {**payload, "receipt_hash_sha256": "0" * 64}
     assert (

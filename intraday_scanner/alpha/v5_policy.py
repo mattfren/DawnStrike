@@ -36,6 +36,7 @@ ALPHAOPS_V5_POLICY_VERSION = "alphaops-v5-official-paper-policy-2026-07-31"
 ALPHAOPS_V5_COST_MODEL_VERSION = "alphaops-v5-cost-model-50bps-0.005ps"
 ALPHAOPS_V5_COST_MODEL_STATUS = CostModelStatus.PROVISIONAL.value
 ALPHAOPS_V5_ACTIVATION_TIMESTAMP = "2026-07-31T00:00:00-04:00"
+V5_DECISION_TRACE_SCHEMA_VERSION = "dawnstrike.alphaops.v5_decision_trace.v1"
 
 PASSING_ALERT_GATES = frozenset({"PASS", "ALERT_OK"})
 PASSING_STATUSES = frozenset({"CLEAR", "VERIFIED", "OK", "PASS"})
@@ -234,11 +235,15 @@ class AlphaOpsV5Decision:
     account_id: str
     activation_timestamp: str
     decision_fingerprint: str
+    signal_id: str
+    ticker: str
+    plan_hash_sha256: str
     research_only: bool = True
     broker_execution_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        payload["schema_version"] = V5_DECISION_TRACE_SCHEMA_VERSION
         payload["reasons"] = list(self.reasons)
         payload["checks"] = list(self.checks)
         return payload
@@ -282,8 +287,11 @@ def evaluate_v5_official_paper(
     source = _SignalFacts(signal)
     raw_plan = signal.get("alphaops_market_structure_plan")
     strict_plan = dict(raw_plan) if isinstance(raw_plan, dict) else {}
+    ticker = source.text("ticker").upper()
     try:
-        strict_plan_valid = bool(strict_plan) and validate_alphaops_v5_plan(strict_plan)
+        strict_plan_valid = bool(strict_plan) and validate_alphaops_v5_plan(
+            strict_plan, expected_ticker=ticker
+        )
     except (TypeError, ValueError):
         strict_plan_valid = False
     strict_plan_hash = str(strict_plan.get("plan_hash_sha256") or "")
@@ -324,38 +332,79 @@ def evaluate_v5_official_paper(
             gap_pct = (reference_price - previous_close) / previous_close * 100
     spread_pct = source.number("spread_pct")
     spread_bps = spread_pct * 100 if spread_pct is not None else None
-    quote_age = _number(observation.get("freshness_seconds"))
+    quote_age = _number(observation.get("quote_freshness_seconds"))
+    if quote_age is None:
+        # Legacy/non-Alpaca observations only have bar freshness.  They still
+        # cannot pass the executable quote gate, but retaining the fallback
+        # keeps the policy trace deterministic for those stand-down paths.
+        quote_age = _number(observation.get("freshness_seconds"))
 
-    expected_entry = (
-        entry * (1 + policy.entry_slippage_bps / 10_000)
-        if entry is not None
-        else None
-    )
-    expected_stop_exit = (
-        stop * (1 - policy.exit_slippage_bps / 10_000)
-        if stop is not None
-        else None
-    )
-    expected_target_exit = (
-        target * (1 - policy.exit_slippage_bps / 10_000)
-        if target is not None
-        else None
-    )
+    direction = strict_plan_direction
+    if direction == "short":
+        # A short entry sells at the bid and an exit buys to cover at the ask;
+        # both are adverse relative to the frozen structural levels.
+        expected_entry = (
+            entry * (1 - policy.entry_slippage_bps / 10_000)
+            if entry is not None
+            else None
+        )
+        expected_stop_exit = (
+            stop * (1 + policy.exit_slippage_bps / 10_000)
+            if stop is not None
+            else None
+        )
+        expected_target_exit = (
+            target * (1 + policy.exit_slippage_bps / 10_000)
+            if target is not None
+            else None
+        )
+    else:
+        expected_entry = (
+            entry * (1 + policy.entry_slippage_bps / 10_000)
+            if entry is not None
+            else None
+        )
+        expected_stop_exit = (
+            stop * (1 - policy.exit_slippage_bps / 10_000)
+            if stop is not None
+            else None
+        )
+        expected_target_exit = (
+            target * (1 - policy.exit_slippage_bps / 10_000)
+            if target is not None
+            else None
+        )
     round_trip_commission = policy.commission_per_share_per_side * 2
-    gross_reward = (
-        target - entry if target is not None and entry is not None else None
-    )
-    gross_risk = entry - stop if stop is not None and entry is not None else None
-    reward_per_share = (
-        expected_target_exit - expected_entry - round_trip_commission
-        if expected_target_exit is not None and expected_entry is not None
-        else None
-    )
-    risk_per_share = (
-        expected_entry - expected_stop_exit + round_trip_commission
-        if expected_entry is not None and expected_stop_exit is not None
-        else None
-    )
+    if direction == "short":
+        gross_reward = (
+            entry - target if target is not None and entry is not None else None
+        )
+        gross_risk = stop - entry if stop is not None and entry is not None else None
+        reward_per_share = (
+            expected_entry - expected_target_exit - round_trip_commission
+            if expected_target_exit is not None and expected_entry is not None
+            else None
+        )
+        risk_per_share = (
+            expected_stop_exit - expected_entry + round_trip_commission
+            if expected_entry is not None and expected_stop_exit is not None
+            else None
+        )
+    else:
+        gross_reward = (
+            target - entry if target is not None and entry is not None else None
+        )
+        gross_risk = entry - stop if stop is not None and entry is not None else None
+        reward_per_share = (
+            expected_target_exit - expected_entry - round_trip_commission
+            if expected_target_exit is not None and expected_entry is not None
+            else None
+        )
+        risk_per_share = (
+            expected_entry - expected_stop_exit + round_trip_commission
+            if expected_entry is not None and expected_stop_exit is not None
+            else None
+        )
     after_cost_reward_risk = (
         reward_per_share / risk_per_share
         if reward_per_share is not None
@@ -373,14 +422,29 @@ def evaluate_v5_official_paper(
         else None
     )
     stop_distance_pct = (
-        (expected_entry - stop) / expected_entry * 100
+        (
+            (stop - expected_entry) / expected_entry * 100
+            if direction == "short"
+            else (expected_entry - stop) / expected_entry * 100
+        )
         if expected_entry is not None
         and stop is not None
-        and expected_entry > stop > 0
+        and expected_entry > 0
+        and (
+            (direction == "short" and stop > expected_entry)
+            or (direction != "short" and expected_entry > stop)
+        )
         else None
     )
     chase_pct = (
-        max(0.0, (expected_entry - trigger) / trigger * 100)
+        max(
+            0.0,
+            (
+                (trigger - expected_entry) / trigger * 100
+                if direction == "short"
+                else (expected_entry - trigger) / trigger * 100
+            ),
+        )
         if expected_entry is not None and trigger is not None and trigger > 0
         else None
     )
@@ -433,7 +497,7 @@ def evaluate_v5_official_paper(
     plan_levels_bound = (
         strict_plan_valid
         and strict_plan.get("status") == PLAN_COMPLETE
-        and strict_plan_direction == "long"
+        and strict_plan_direction in {"long", "short"}
         and str(signal.get("plan_hash_sha256") or "") == strict_plan_hash
         and _number(strict_plan.get("entry")) == trigger
         and _number(strict_plan.get("stop")) == stop
@@ -452,7 +516,7 @@ def evaluate_v5_official_paper(
             "plan_hash_sha256": strict_plan_hash,
             "row_plan_hash_sha256": str(signal.get("plan_hash_sha256") or ""),
         },
-        threshold="validated, source-bound AlphaOps v5 long plan with frozen levels",
+        threshold="validated, source-bound AlphaOps v5 directional plan with frozen levels",
         component="contract",
         weight=0,
     )
@@ -657,8 +721,18 @@ def evaluate_v5_official_paper(
         and trigger is not None
         and stop is not None
         and target is not None
-        and target > expected_entry > stop > 0
-        and trigger > stop
+        and (
+            (
+                direction == "long"
+                and target > expected_entry > stop > 0
+                and trigger > stop
+            )
+            or (
+                direction == "short"
+                and target < expected_entry < stop
+                and trigger < stop
+            )
+        )
     )
     check(
         "level_geometry",
@@ -670,7 +744,7 @@ def evaluate_v5_official_paper(
             "stop": stop,
             "target": target,
         },
-        threshold="target > expected entry > stop > 0",
+        threshold="long: target > expected entry > stop; short: target < expected entry < stop",
         component="risk",
         weight=0,
     )
@@ -845,6 +919,8 @@ def evaluate_v5_official_paper(
     }
     computed = {
         "decision_time": at,
+        "direction": direction,
+        "plan_hash_sha256": strict_plan_hash,
         "entry_price_observed": _rounded(entry),
         "expected_entry_price": _rounded(expected_entry),
         "stop_price": _rounded(stop),
@@ -868,7 +944,9 @@ def evaluate_v5_official_paper(
     fingerprint_payload = {
         "signal_id": source.text("signal_id"),
         "selection_id": source.text("selection_id"),
-        "ticker": source.text("ticker").upper(),
+        "ticker": ticker,
+        "plan_hash_sha256": strict_plan_hash,
+        "direction": direction,
         "policy": policy.to_dict(),
         "checks": checks,
         "computed": computed,
@@ -896,6 +974,9 @@ def evaluate_v5_official_paper(
         account_id=policy.account_id,
         activation_timestamp=policy.activation_timestamp,
         decision_fingerprint=fingerprint,
+        signal_id=source.text("signal_id"),
+        ticker=ticker,
+        plan_hash_sha256=strict_plan_hash,
     )
 
 

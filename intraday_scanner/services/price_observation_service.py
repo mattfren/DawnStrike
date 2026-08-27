@@ -525,6 +525,9 @@ def _validated_quote(
         "quote_bid": bid,
         "quote_ask": ask,
         "quote_observed_at": _iso_utc(observed_at),
+        "quote_freshness_seconds": max(
+            0.0, (requested_at - observed_at).total_seconds()
+        ),
         "quote_source": str(quote.get("source") or ""),
         "quote_source_hash_sha256": source_hash,
         "quote_raw_payload_json": canonical_raw,

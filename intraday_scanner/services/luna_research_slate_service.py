@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -555,7 +555,9 @@ def _plan_qualified(
     receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
     market_plan = row.get("alphaops_market_structure_plan")
-    if not isinstance(market_plan, dict) or not _immutable_plan_provenance(row):
+    if not isinstance(market_plan, dict) or not _immutable_plan_provenance(
+        row, expected_ticker=str(row.get("ticker") or row.get("symbol") or "")
+    ):
         return False
     plan_hash = str(
         market_plan.get("plan_hash_sha256") or market_plan.get("strategy_plan_hash_sha256") or ""
@@ -725,6 +727,12 @@ def _valid_modeled_cost_receipt(row: dict[str, Any], plan_hash: str) -> bool:
 
 
 def _alertable(row: dict[str, Any], *, require_watcher_proof: bool = False) -> bool:
+    plan = row.get("alphaops_market_structure_plan")
+    # Short geometry is useful for research and paper-plan accounting, but
+    # there is no authenticated, current Alpaca borrow/locate receipt in this
+    # execution path.  Never promote a short into an alertable paper entry.
+    if isinstance(plan, dict) and str(plan.get("direction") or "").lower() == "short":
+        return False
     return (
         bool(row.get("can_alert"))
         and (not require_watcher_proof or _watcher_current(row))
@@ -740,17 +748,38 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     digest = str(proof.get("proof_hash_sha256") or "").lower()
     signal_id = str(row.get("signal_id") or row.get("signal_key") or "").strip()
     ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    row_symbol = str(row.get("symbol") or "").strip().upper()
     plan = row.get("alphaops_market_structure_plan")
     plan_hash = str(plan.get("plan_hash_sha256") or "") if isinstance(plan, dict) else ""
+    try:
+        from intraday_scanner.alpha.plan_constructor import validate_alphaops_v5_plan
+
+        plan_valid = isinstance(plan, dict) and validate_alphaops_v5_plan(
+            plan, expected_ticker=ticker
+        )
+    except (TypeError, ValueError, ImportError):
+        plan_valid = False
     if (
         not signal_id
         or not ticker
         or not plan_hash
+        or not plan_valid
+        or (row_symbol and row_symbol != ticker)
         or str(proof.get("signal_id") or "") != signal_id
         or str(proof.get("ticker") or proof.get("symbol") or "").upper() != ticker
     ):
         return False
+    if not _source_bound_plan_observations(
+        row,
+        plan,
+        expected_ticker=ticker,
+    ):
+        return False
     if str(proof.get("plan_hash_sha256") or "") != plan_hash:
+        return False
+    if str(proof.get("direction") or "").lower() != str(
+        plan.get("direction") if isinstance(plan, dict) else ""
+    ).lower():
         return False
     lineage = _frozen_lineage_for_validation(row, ticker)
     required_lineage = (
@@ -765,13 +794,23 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         not lineage.get(field) for field in required_lineage
     ):
         return False
+    # Tier 3 short admission requires borrow truth.  This path deliberately
+    # has no broker asset/locate adapter, so a short watcher proof is never
+    # current/alertable even when its geometry and modeled costs are valid.
+    if str(plan.get("direction") or "").lower() == "short":
+        return False
     if lineage.get("cohort") != "official_telegram":
         return False
     for field in required_lineage:
         if str(proof.get(field) or "") != str(lineage[field]):
             return False
     checked_at = _parse_watcher_time(proof.get("checked_at"))
-    if checked_at is None or abs((datetime.now(timezone.utc) - checked_at).total_seconds()) > 900:
+    # ``checked_at`` is the immutable timestamp of the authenticated quote
+    # receipt, not the wall-clock time at which a retry happens.  The quote
+    # receipt and its provider freshness contract below establish causality;
+    # comparing against ``datetime.now()`` would make a valid persisted proof
+    # fail merely because a historical watcher replay runs later.
+    if checked_at is None:
         return False
     row_market_date = str(row.get("market_date") or row.get("generated_at") or "")[:10]
     if row_market_date and checked_at.astimezone(EASTERN).date().isoformat() != row_market_date:
@@ -792,6 +831,8 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         if (
             str(receipt.get("signal_id") or "") != signal_id
             or str(receipt.get("plan_hash_sha256") or "") != plan_hash
+            or str(receipt.get("direction") or "").lower()
+            != str(plan.get("direction") if isinstance(plan, dict) else "").lower()
             or str(receipt.get("ticker") or receipt.get("symbol") or "").upper() != ticker
             or receipt.get("research_only") is not True
             or receipt.get("broker_execution") != "disabled"
@@ -808,7 +849,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     try:
         quote_raw = json.loads(quote_raw_json)
         quote_raw_canonical = json.dumps(
-            quote_raw, sort_keys=True, separators=(",", ":")
+            quote_raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
@@ -816,6 +857,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     quote_time = _parse_watcher_time(quote.get("observed_at"))
     bid = _number(quote.get("bid"))
     ask = _number(quote.get("ask"))
+    quote_age = _number(quote.get("quote_age_seconds"))
     last = _number(quote.get("last") or quote.get("price"))
     current_price = _number(
         row.get("current_price")
@@ -826,6 +868,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     plan_stop = _number(plan.get("stop") if isinstance(plan, dict) else None)
     plan_target = _number(plan.get("target") if isinstance(plan, dict) else None)
     plan_direction = str(plan.get("direction") or "").lower() if isinstance(plan, dict) else ""
+    row_direction = str(row.get("direction") or row.get("trade_direction") or "").lower()
     spread_pct = ((ask - bid) / ((ask + bid) / 2.0) * 100.0) if bid and ask else None
     trigger_consistent = (
         plan_entry is not None
@@ -849,9 +892,13 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         str(quote.get("schema_version") or "") != "dawnstrike.alphaops.quote_receipt.v1"
         or str(quote.get("status") or "").upper() != "USABLE"
         or not str(quote.get("source") or "").lower().startswith("alpaca_market_data_")
+        or str(quote.get("direction") or "").lower() != plan_direction
         or quote_time is None
         or quote_time > checked_at
         or (checked_at - quote_time).total_seconds() > 360
+        or quote_age is None
+        or quote_age < 0
+        or quote_age > DEFAULT_V5_POLICY.maximum_quote_age_seconds
         or bid is None
         or ask is None
         or bid <= 0
@@ -877,6 +924,18 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or _number(raw_quote.get("ap")) != ask
         or _parse_watcher_time(raw_quote.get("t"))
         != _parse_watcher_time(quote.get("observed_at"))
+        or quote_time != checked_at
+        or plan_direction not in {"long", "short"}
+        or (
+            row_direction
+            and row_direction
+            not in {
+                plan_direction,
+                "buy" if plan_direction == "long" else "sell",
+            }
+        )
+        or _number(quote.get("bar_freshness_seconds")) is None
+        or _number(quote.get("bar_freshness_seconds")) < 0
     ):
         return False
     portfolio = proof["portfolio_receipt"]
@@ -904,9 +963,19 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or str(portfolio.get("admission_key") or "")
         != f"paper-admission:{signal_id}:{plan_hash[:16]}"
         or portfolio_time is None
-        or abs((checked_at - portfolio_time).total_seconds()) > 60
+        or portfolio_time != checked_at
         or not isinstance(trace, dict)
         or trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID
+        or proof.get("evaluate_v5_official_paper_trace") != trace
+    ):
+        return False
+    if not _strict_v5_trace(
+        row,
+        trace=trace,
+        quote=quote,
+        signal_id=signal_id,
+        ticker=ticker,
+        plan_hash=plan_hash,
     ):
         return False
     canonical = {key: value for key, value in proof.items() if key != "proof_hash_sha256"}
@@ -923,6 +992,104 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     )
 
 
+def _strict_v5_trace(
+    row: dict[str, Any],
+    *,
+    trace: dict[str, Any],
+    quote: dict[str, Any],
+    signal_id: str,
+    ticker: str,
+    plan_hash: str,
+) -> bool:
+    """Recompute and compare the exact official-paper decision trace.
+
+    The trace is an immutable admission input, not a caller-supplied summary.
+    Replaying the policy from the persisted quote and frozen signal catches a
+    forged self-hash (for example, an attacker changing the after-cost ratio,
+    direction, account, or plan hash and then recomputing only the outer proof
+    digest).
+    """
+
+    if (
+        trace.get("schema_version") != "dawnstrike.alphaops.v5_decision_trace.v1"
+        or trace.get("signal_id") != signal_id
+        or str(trace.get("ticker") or "").upper() != ticker
+        or trace.get("plan_hash_sha256") != plan_hash
+        or trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID
+        or trace.get("strategy_id") != "alphaops_v5"
+        or trace.get("strategy_version") != DEFAULT_V5_POLICY.strategy_version
+        or trace.get("policy_version") != DEFAULT_V5_POLICY.policy_version
+        or trace.get("cost_model_version") != DEFAULT_V5_POLICY.cost_model_version
+        or trace.get("research_only") is not True
+        or trace.get("broker_execution_enabled") is not False
+        or not isinstance(trace.get("computed"), dict)
+        or not isinstance(trace.get("sizing"), dict)
+        or trace.get("eligible_for_official_paper") is not True
+        or trace.get("action") != "OFFICIAL_PAPER_ALLOW"
+        or list(trace.get("reasons") or [])
+    ):
+        return False
+    computed = trace["computed"]
+    sizing = trace["sizing"]
+    decision_time = str(computed.get("decision_time") or "")
+    observed_at = str(quote.get("observed_at") or "")
+    last = _number(quote.get("last") or quote.get("price"))
+    freshness = _number(quote.get("quote_age_seconds"))
+    if freshness is None:
+        freshness = _number(quote.get("bar_freshness_seconds"))
+    simulated_equity = _number(sizing.get("simulated_equity"))
+    existing_notional = _number(sizing.get("existing_symbol_notional"))
+    if (
+        not decision_time
+        or _parse_watcher_time(decision_time) is None
+        or _parse_watcher_time(observed_at) is None
+        or last is None
+        or freshness is None
+        or freshness < 0
+        or simulated_equity is None
+        or existing_notional is None
+    ):
+        return False
+    try:
+        from intraday_scanner.alpha.v5_policy import evaluate_v5_official_paper
+
+        expected = evaluate_v5_official_paper(
+            row,
+            {
+                "ticker": ticker,
+                "price": last,
+                "current_price": last,
+                "observed_at": observed_at,
+                "requested_at": decision_time,
+                "freshness_seconds": freshness,
+                "quote_freshness_seconds": freshness,
+                "is_usable": True,
+            },
+            simulated_equity=simulated_equity,
+            existing_symbol_notional=existing_notional,
+            decision_time=decision_time,
+            policy=DEFAULT_V5_POLICY,
+        )
+    except (TypeError, ValueError, KeyError):
+        return False
+    expected_trace = expected.to_dict()
+    if trace != expected_trace:
+        return False
+    computed_after_cost = _number(computed.get("actual_after_cost_reward_risk"))
+    stop_distance = _number(computed.get("stop_distance_pct"))
+    chase = _number(computed.get("chase_pct"))
+    return (
+        expected.eligible_for_official_paper
+        and not expected.reasons
+        and computed_after_cost is not None
+        and computed_after_cost >= DEFAULT_V5_POLICY.minimum_after_cost_reward_risk
+        and stop_distance is not None
+        and stop_distance <= DEFAULT_V5_POLICY.maximum_stop_distance_pct
+        and chase is not None
+        and chase <= DEFAULT_V5_POLICY.maximum_chase_pct
+    )
+
+
 def _frozen_lineage_for_validation(
     row: dict[str, Any], ticker: str
 ) -> dict[str, str]:
@@ -935,7 +1102,7 @@ def _frozen_lineage_for_validation(
         if isinstance(payload, dict):
             slate = payload.get("frozen_ranked_research_slate")
             lineage = payload.get("frozen_slate_lineage")
-    if not isinstance(slate, dict):
+    if not isinstance(slate, dict) or not isinstance(lineage, dict):
         return {}
     try:
         validate_ranked_research_slate(
@@ -943,6 +1110,26 @@ def _frozen_lineage_for_validation(
         )
     except (TypeError, ValueError):
         return {"_invalid": "frozen ranked slate failed validation"}
+    if (
+        str(lineage.get("schema_version") or "")
+        != "dawnstrike.luna.frozen_slate_selection_lineage.v1"
+        or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
+        or str(lineage.get("slate_content_hash_sha256") or "")
+        != str(slate.get("content_hash_sha256") or "")
+        or str(lineage.get("frozen_source_scan_id") or "")
+        != str(slate.get("scan_id") or "")
+    ):
+        return {"_invalid": "frozen slate lineage envelope is invalid"}
+    current_scan_id = str(row.get("scan_id") or "")
+    if not current_scan_id or str(lineage.get("current_scan_id") or "") != current_scan_id:
+        return {"_invalid": "frozen slate lineage current scan is invalid"}
+    expected_reuse_status = (
+        "CURRENT_SCAN"
+        if current_scan_id == str(slate.get("scan_id") or "")
+        else "GOVERNED_DAILY_FREEZE_REUSE"
+    )
+    if str(lineage.get("reuse_status") or "") != expected_reuse_status:
+        return {"_invalid": "frozen slate lineage reuse status is invalid"}
     rows = slate.get("rows") or []
     member = next(
         (
@@ -954,8 +1141,8 @@ def _frozen_lineage_for_validation(
         "",
     )
     values = {
-        "selection_id": str(row.get("selection_id") or ""),
-        "cohort": str(row.get("cohort") or ""),
+        "selection_id": str(row.get("selection_id") or lineage.get("selection_id") or ""),
+        "cohort": str(row.get("cohort") or lineage.get("cohort") or ""),
         "source_scan_id": str(
             (lineage or {}).get("frozen_source_scan_id")
             if isinstance(lineage, dict)
@@ -970,7 +1157,7 @@ def _frozen_lineage_for_validation(
     if values["source_scan_id"] != str(slate.get("scan_id") or ""):
         return {"_invalid": "frozen source scan does not match slate scan"}
     selection_ids = {str(item) for item in slate.get("selection_ids") or []}
-    if member and selection_ids and member not in selection_ids:
+    if not member or not selection_ids or member not in selection_ids:
         return {"_invalid": "selection member is not in frozen slate"}
     return {key: value for key, value in values.items() if value}
 
@@ -1041,7 +1228,9 @@ def _supported_strategy(row: dict[str, Any]) -> bool:
     } or strategy.startswith("dawnstrike-alphaops")
 
 
-def _immutable_plan_provenance(row: dict[str, Any]) -> bool:
+def _immutable_plan_provenance(
+    row: dict[str, Any], *, expected_ticker: str | None = None
+) -> bool:
     contract = row.get("alphaops_market_structure_plan")
     if not isinstance(contract, dict) or str(contract.get("status") or "").upper() != "COMPLETE":
         return False
@@ -1050,11 +1239,239 @@ def _immutable_plan_provenance(row: dict[str, Any]) -> bool:
     except ImportError:
         return False
     try:
-        if validate_alphaops_v5_plan(contract) is False:
+        if validate_alphaops_v5_plan(
+            contract, expected_ticker=expected_ticker or None
+        ) is False:
             return False
     except (TypeError, ValueError):
         return False
-    return _valid_hash(str(contract.get("plan_hash_sha256") or "").lower())
+    return _valid_hash(str(contract.get("plan_hash_sha256") or "").lower()) and (
+        _source_bound_plan_observations(
+            row,
+            contract,
+            expected_ticker=expected_ticker,
+        )
+    )
+
+
+def _source_bound_plan_observations(
+    row: dict[str, Any],
+    contract: dict[str, Any],
+    *,
+    expected_ticker: str | None = None,
+) -> bool:
+    """Reconcile every frozen plan leg with its persisted provider artifact.
+
+    The AlphaOps plan hash proves only that a plan was serialized
+    consistently.  It is not an evidence root.  Tier 2 and Tier 3 therefore
+    require the exact premarket raw bar set and prior-session raw bar wrapper
+    to still be present, content-addressed, and identical to each role's
+    value, timestamps, source, and hash.
+    """
+
+    ticker = str(
+        expected_ticker or row.get("ticker") or row.get("symbol") or ""
+    ).strip().upper()
+    if not ticker:
+        return False
+    observations = contract.get("observations")
+    if not isinstance(observations, list) or len(observations) != 3:
+        return False
+    by_role = {
+        str(item.get("role") or "").strip().lower(): item
+        for item in observations
+        if isinstance(item, dict)
+    }
+    if set(by_role) != {"entry", "stop", "target"}:
+        return False
+
+    def parsed_time(value: Any) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    def same_time(actual: Any, expected: Any) -> bool:
+        left = parsed_time(actual)
+        right = parsed_time(expected)
+        return left is not None and right is not None and left == right
+
+    def same_number(actual: Any, expected: Any) -> bool:
+        actual_number = _number(actual)
+        expected_number = _number(expected)
+        return (
+            actual_number is not None
+            and expected_number is not None
+            and abs(actual_number - expected_number) <= 1e-9
+        )
+
+    def valid_role(
+        role: str,
+        *,
+        value: Any,
+        observed_at: Any,
+        completed_at: Any,
+        completion_semantics: str,
+        source: str,
+        source_hash: str,
+        observation_kind: str,
+        source_url: Any,
+    ) -> bool:
+        item = by_role[role]
+        return (
+            str(item.get("ticker") or "").strip().upper() == ticker
+            and same_number(item.get("value"), value)
+            and same_number(item.get("raw_value"), value)
+            and same_time(item.get("observed_at"), observed_at)
+            and same_time(item.get("completed_at"), completed_at)
+            and str(item.get("completion_semantics") or "") == completion_semantics
+            and str(item.get("source") or "") == source
+            and str(item.get("source_hash") or "").lower() == source_hash
+            and str(item.get("observation_kind") or "") == observation_kind
+            and str(item.get("derivation_policy") or "") in {"identity", "direct_observation"}
+            and str(item.get("source_url") or "") == str(source_url or "")
+            and item.get("is_complete") is True
+        )
+
+    premarket_source = str(
+        row.get("premarket_range_source")
+        or row.get("enrichment_primary_source")
+        or ""
+    ).strip()
+    premarket_hash = str(row.get("premarket_source_hash_sha256") or "").lower()
+    premarket_raw_json = str(row.get("premarket_raw_payload_json") or "").strip()
+    if (
+        not premarket_source.startswith("alpaca_market_data_")
+        or not _valid_hash(premarket_hash)
+        or not premarket_raw_json
+    ):
+        return False
+    try:
+        premarket_raw = json.loads(premarket_raw_json)
+        canonical_premarket = json.dumps(
+            premarket_raw,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    bars = premarket_raw.get("bars") if isinstance(premarket_raw, dict) else None
+    if (
+        not isinstance(premarket_raw, dict)
+        or hashlib.sha256(canonical_premarket.encode("utf-8")).hexdigest() != premarket_hash
+        or str(premarket_raw.get("ticker") or "").upper() != ticker
+        or str(premarket_raw.get("feed") or "").lower() != premarket_source.rsplit("_", 1)[-1]
+        or not isinstance(bars, list)
+        or not bars
+    ):
+        return False
+    bar_times: list[datetime] = []
+    high_values: list[float] = []
+    low_values: list[float] = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            return False
+        if str(bar.get("ticker") or "").upper() != ticker:
+            return False
+        bar_time = parsed_time(bar.get("timestamp"))
+        high = _number(bar.get("high"))
+        low = _number(bar.get("low"))
+        if bar_time is None or high is None or low is None or high <= 0 or low <= 0:
+            return False
+        bar_times.append(bar_time)
+        high_values.append(high)
+        low_values.append(low)
+    requested_at = parsed_time(premarket_raw.get("requested_at"))
+    observed_at = parsed_time(row.get("enrichment_observed_at"))
+    completed_at = parsed_time(row.get("enrichment_bar_completed_at"))
+    if (
+        requested_at is None
+        or observed_at is None
+        or completed_at is None
+        or any(left >= right for left, right in zip(bar_times, bar_times[1:], strict=False))
+        or any(bar_time + timedelta(minutes=1) > requested_at for bar_time in bar_times)
+        or bar_times[-1] != observed_at
+        or bar_times[-1] + timedelta(minutes=1) != completed_at
+        or same_time(row.get("timestamp"), requested_at) is False
+        or not same_number(max(high_values), row.get("premarket_high"))
+        or not same_number(min(low_values), row.get("premarket_low"))
+    ):
+        return False
+    premarket_url = row.get("premarket_range_source_url") or row.get("enrichment_source_url")
+    if not valid_role(
+        "entry",
+        value=row.get("premarket_high"),
+        observed_at=row.get("enrichment_observed_at"),
+        completed_at=row.get("enrichment_bar_completed_at"),
+        completion_semantics="bar_completion",
+        source=premarket_source,
+        source_hash=premarket_hash,
+        observation_kind="premarket_high",
+        source_url=premarket_url,
+    ) or not valid_role(
+        "stop",
+        value=row.get("premarket_low"),
+        observed_at=row.get("enrichment_observed_at"),
+        completed_at=row.get("enrichment_bar_completed_at"),
+        completion_semantics="bar_completion",
+        source=premarket_source,
+        source_hash=premarket_hash,
+        observation_kind="premarket_low",
+        source_url=premarket_url,
+    ):
+        return False
+
+    prior_source = str(row.get("prior_daily_high_source") or "").strip()
+    prior_hash = str(row.get("prior_daily_high_source_hash") or "").lower()
+    prior_raw_json = str(row.get("prior_daily_high_raw_payload_json") or "").strip()
+    prior_observed = row.get("prior_daily_high_observed_at")
+    prior_completed = row.get("prior_daily_high_completed_at")
+    prior_semantics = str(row.get("prior_daily_high_completion_semantics") or "")
+    if (
+        not prior_source.startswith("alpaca_market_data_")
+        or not _valid_hash(prior_hash)
+        or not prior_raw_json
+        or prior_semantics != "availability_boundary"
+    ):
+        return False
+    try:
+        prior_raw = json.loads(prior_raw_json)
+        canonical_prior = json.dumps(
+            prior_raw,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    prior_bar = prior_raw.get("bar") if isinstance(prior_raw, dict) else None
+    if (
+        not isinstance(prior_raw, dict)
+        or hashlib.sha256(canonical_prior.encode("utf-8")).hexdigest() != prior_hash
+        or str(prior_raw.get("ticker") or "").upper() != ticker
+        or not isinstance(prior_bar, dict)
+        or not same_time(prior_raw.get("timestamp"), prior_observed)
+        or not same_time(prior_bar.get("t"), prior_observed)
+        or not same_number(prior_raw.get("high"), row.get("prior_daily_high"))
+        or not same_number(prior_bar.get("h"), row.get("prior_daily_high"))
+    ):
+        return False
+    target_url = row.get("prior_daily_high_source_url")
+    return valid_role(
+        "target",
+        value=row.get("prior_daily_high"),
+        observed_at=prior_observed,
+        completed_at=prior_completed,
+        completion_semantics=prior_semantics,
+        source=prior_source,
+        source_hash=prior_hash,
+        observation_kind="prior_day_resistance",
+        source_url=target_url,
+    )
 
 
 def _number(value: Any) -> float | None:
