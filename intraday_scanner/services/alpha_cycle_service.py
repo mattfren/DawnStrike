@@ -640,8 +640,24 @@ def alpha_cycle(
         for row in [*core_ranked, *core_all]:
             row["universe_lane"] = "core"
             row["evidence_lane"] = "core"
-        ranked = _merge_lane_candidates(ranked, core_ranked)
-        all_candidates = _merge_lane_candidates(all_candidates, core_all)
+        lane_eligibility = {
+            "mover": (
+                not mover_source_failed
+                and str(enrichment["summary"].get("status") or "").lower()
+                in {"complete", "partial"}
+            ),
+            "core": (
+                core_discovery_data_eligible(core_discovery)
+                and str(core_enrichment_summary.get("status") or "").lower()
+                in {"complete", "partial"}
+            ),
+        }
+        ranked = _merge_lane_candidates(
+            ranked, core_ranked, lane_eligibility=lane_eligibility
+        )
+        all_candidates = _merge_lane_candidates(
+            all_candidates, core_all, lane_eligibility=lane_eligibility
+        )
     core_ranked_count = sum(
         1 for row in ranked if str(row.get("universe_lane") or "") in {"core", "mover+core"}
     )
@@ -1815,7 +1831,10 @@ def _load_frozen_luna_slate(path: Path, *, market_date: str) -> dict[str, Any]:
 
 
 def _merge_lane_candidates(
-    mover_candidates: list[dict[str, Any]], core_candidates: list[dict[str, Any]]
+    mover_candidates: list[dict[str, Any]],
+    core_candidates: list[dict[str, Any]],
+    *,
+    lane_eligibility: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge already-produced lane candidates, preserving overlap metadata."""
 
@@ -1835,15 +1854,31 @@ def _merge_lane_candidates(
             continue
         prior = merged[ticker]
         # Keep one independently collected row intact.  A safe row wins over
-        # an unsafe overlap; core is the deterministic tie-breaker only when
-        # both rows have the same canonical research-admissibility verdict.
+        # an unsafe overlap when lane admission is equal.  A fully admissible
+        # row wins first; core is the deterministic tie-breaker only when both
+        # row safety and lane admission are equal.
+        prior_lane = str(prior.get("evidence_lane") or "mover").strip().lower()
         prior_admissible = row_research_admissible(prior)
         row_admissible = row_research_admissible(row)
-        choose_row = row_admissible or not prior_admissible
-        current = dict(row) if choose_row else dict(prior)
-        evidence_lane = lane if choose_row else str(
-            prior.get("evidence_lane") or "mover"
+        prior_lane_eligible = (
+            lane_eligibility.get(prior_lane, False) if lane_eligibility else True
         )
+        row_lane_eligible = (
+            lane_eligibility.get(lane, False) if lane_eligibility else True
+        )
+        prior_rank = (
+            prior_admissible and prior_lane_eligible,
+            prior_admissible,
+            prior_lane_eligible,
+        )
+        row_rank = (
+            row_admissible and row_lane_eligible,
+            row_admissible,
+            row_lane_eligible,
+        )
+        choose_row = row_rank >= prior_rank
+        current = dict(row) if choose_row else dict(prior)
+        evidence_lane = lane if choose_row else prior_lane
         current["universe_lane"] = "mover+core"
         current["evidence_lane"] = evidence_lane
         merged[ticker] = current

@@ -1128,6 +1128,46 @@ def test_overlap_keeps_safe_core_whole_when_mover_safety_is_unknown() -> None:
     ]
 
 
+def test_overlap_keeps_safe_eligible_mover_when_safe_core_lane_is_ineligible() -> None:
+    mover = _safe_overlap_row("OVER", "mover", receipt="mover-receipt")
+    core_row = _safe_overlap_row("OVER", "core", receipt="core-receipt")
+    lane_statuses = {
+        "mover": {"data_eligible": True},
+        "core": {"data_eligible": False},
+    }
+
+    merged = _merge_lane_candidates(
+        [mover],
+        [core_row],
+        lane_eligibility={"mover": True, "core": False},
+    )
+    mover_only = build_ranked_research_slate(
+        [mover], target=1, require_safety=True, lane_statuses=lane_statuses
+    )
+    merged_slate = build_ranked_research_slate(
+        merged, target=1, require_safety=True, lane_statuses=lane_statuses
+    )
+
+    assert mover_only["symbols"] == ["OVER"]
+    assert merged_slate["symbols"] == ["OVER"]
+    assert merged[0]["evidence_lane"] == "mover"
+    assert merged[0]["lane_receipt"] == "mover-receipt"
+
+
+def test_overlap_keeps_safe_eligible_core_when_safe_mover_lane_is_ineligible() -> None:
+    mover = _safe_overlap_row("OVER", "mover", receipt="mover-receipt")
+    core_row = _safe_overlap_row("OVER", "core", receipt="core-receipt")
+
+    merged = _merge_lane_candidates(
+        [mover],
+        [core_row],
+        lane_eligibility={"mover": False, "core": True},
+    )
+
+    assert merged[0]["evidence_lane"] == "core"
+    assert merged[0]["lane_receipt"] == "core-receipt"
+
+
 @pytest.mark.parametrize("safety_status", ["CLEAR", "UNKNOWN"])
 def test_overlap_safety_tie_retains_deterministic_core_preference(
     safety_status: str,
