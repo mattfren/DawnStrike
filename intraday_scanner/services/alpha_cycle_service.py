@@ -598,7 +598,7 @@ def alpha_cycle(
     scan_result = ScanService(
         CsvSnapshotProvider(enriched_snapshot_path),
         store=store,
-    ).run(scanner_config, persist=True)
+    ).run(scanner_config, persist=True, as_of=cycle_decision_at)
     scan_paths = write_scan_outputs(scan_result, scanner_config.output_dir)
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
@@ -632,7 +632,7 @@ def alpha_cycle(
             dict(core_enrichment.get("paths") or {}).get("snapshot") or core_snapshot
         )
         core_scan = ScanService(CsvSnapshotProvider(core_snapshot_path), store=store).run(
-            core_config, persist=False
+            core_config, persist=False, as_of=cycle_decision_at
         )
         core_ranked = [candidate.to_dict() for candidate in core_scan.ranked_candidates]
         core_all = [candidate.to_dict() for candidate in core_scan.all_candidates]
@@ -670,16 +670,48 @@ def alpha_cycle(
         "overlap": {"ranked_count": overlap_ranked_count},
     }
     timestamp = cycle_decision_timestamp
-    ranked, ranked_sec_summary = _verify_ranked_sec_safety(
-        ranked,
+    scoring_cohort = _alpha_scoring_cohort(all_candidates, ranked)
+    source_summary["alpha_scoring_cohort"] = {
+        "status": "ALL_ALREADY_ENRICHED_ROWS",
+        "total_input_count": len(all_candidates),
+        "non_avoid_count": len(scoring_cohort),
+        "avoided_count": max(0, len(all_candidates) - len(scoring_cohort)),
+        "ranked_presentation_count": len(ranked),
+        "reserve_enabled": True,
+        "reserve_scope": (
+            "all candidates produced from the already-enriched mover/core snapshots; "
+            "downstream gates remain authoritative"
+        ),
+        "mover_enrichment_cap": int(scanner_config.premarket_enrichment_max_candidates),
+        "provider_load_expanded": False,
+        "residual_cap": (
+            "mover collection/enrichment cap plus the independently returned core cohort"
+        ),
+    }
+    scoring_cohort, ranked_sec_summary = _verify_ranked_sec_safety(
+        scoring_cohort,
         source_config=source_config,
         store=store,
         out_dir=output_dir / "ranked_sec_safety",
         as_of=timestamp,
         rehearsal_mode=fixture_mode,
     )
+    ranked = _merge_ranked_safety(ranked, scoring_cohort)
     source_summary["ranked_sec_safety"] = ranked_sec_summary
-    all_candidates = _merge_ranked_safety(all_candidates, ranked)
+    all_candidates = _merge_ranked_safety(all_candidates, scoring_cohort)
+    source_summary["alpha_scoring_cohort"].update(
+        {
+            "total_input_count": len(all_candidates),
+            "non_avoid_count": len(scoring_cohort),
+            "avoided_count": max(0, len(all_candidates) - len(scoring_cohort)),
+            "sec_verified_count": len(
+                set(ranked_sec_summary.get("checked_tickers") or [])
+            ),
+            "sec_unverified_count": len(
+                set(ranked_sec_summary.get("unchecked_tickers") or [])
+            ),
+        }
+    )
     reliability_by_source = {row["source"]: row for row in source_reliability}
     feature_vectors = [
         build_feature_vector(
@@ -695,7 +727,12 @@ def alpha_cycle(
     historical_labels = load_production_alpha_learning_labels(store)
     model = AlphaModel()
     signals = model.score_candidates(
-        ranked,
+        # ``ranked`` is intentionally a presentation slice capped at top_n
+        # (20 in AlphaOps).  Score the full already-enriched cohort so safety
+        # and plan gates can refill the five-name research slate from rows
+        # below that presentation cutoff.  This does not load any additional
+        # provider data and does not bypass downstream gates.
+        scoring_cohort,
         feature_vectors,
         historical_outcomes=historical_labels,
         setup_memory=store.load_alpha_setup_memory(),
@@ -1827,6 +1864,33 @@ def _merge_lane_candidates(
     )
 
 
+def _alpha_scoring_cohort(
+    all_candidates: list[dict[str, Any]], ranked: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the full enriched cohort, retaining a legacy empty-cohort fallback.
+
+    ``ranked`` is capped for presentation by ``ScannerConfig.top_n``.  Alpha
+    scoring must see every row already produced by the mover/core enrichment
+    steps so downstream safety and plan gates can refill the research slate.
+    The fallback keeps callers that provide only a ranked slice compatible and
+    never expands provider work.
+    """
+
+    source = all_candidates if all_candidates else ranked
+    # ``ScanResult.all_candidates`` intentionally contains formula avoids for
+    # analytics.  Keep those out of Alpha scoring as well: only the full
+    # non-avoid cohort is a reserve, and the later publication gates remain
+    # authoritative for current safety/plan eligibility.
+    return [row for row in source if not _has_avoid_reason(row)]
+
+
+def _has_avoid_reason(row: dict[str, Any]) -> bool:
+    value = row.get("avoid_reasons")
+    if isinstance(value, (list, tuple, set)):
+        return any(str(item).strip() for item in value)
+    return str(value or "").strip().lower() not in {"", "none", "false"}
+
+
 def _alphaops_scanner_config(config: Any) -> Any:
     """Use a liquid day-trading universe instead of the legacy penny-gap profile."""
 
@@ -1902,7 +1966,9 @@ def _verify_ranked_sec_safety(
         "checked_tickers": list(summary.get("checked_tickers") or []),
         "unchecked_tickers": list(summary.get("unchecked_tickers") or []),
         "event_count": int(summary.get("event_count") or 0),
-        "ranked_candidate_count": len(tickers),
+        "candidate_count": len(tickers),
+        "verified_count": len(set(summary.get("checked_tickers") or [])),
+        "unverified_count": len(set(summary.get("unchecked_tickers") or [])),
         "research_only": True,
         "broker_execution_enabled": False,
     }

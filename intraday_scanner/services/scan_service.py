@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.models import ScanResult
@@ -33,6 +34,7 @@ class ScanService:
         symbols: Sequence[str] | None = None,
         *,
         persist: bool = False,
+        as_of: datetime | None = None,
     ) -> ScanResult:
         LOGGER.info("Starting scan using provider=%s", config.provider)
         self.provider.validate_credentials()
@@ -46,6 +48,7 @@ class ScanService:
             snapshots,
             config,
             historical_outcomes=self._historical_intelligence_outcomes(),
+            as_of=as_of,
         )
         if persist:
             if self.store is None:

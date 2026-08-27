@@ -19,6 +19,7 @@ from intraday_scanner.services.premarket_intelligence import (
 TARGET_POLICY_VERSION = "alphaops-v5-premarket-range-extension-v1"
 FIRST_TARGET_RANGE_EXTENSION = 1.618
 STRETCH_TARGET_RANGE_EXTENSION = 2.618
+FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 60
 
 
 def score_universe(
@@ -26,9 +27,16 @@ def score_universe(
     config: ScannerConfig,
     *,
     historical_outcomes: list[dict[str, Any]] | None = None,
+    as_of: datetime | None = None,
 ) -> ScanResult:
     scored = [
-        score_snapshot(row, config, historical_outcomes=historical_outcomes) for row in rows
+        score_snapshot(
+            row,
+            config,
+            historical_outcomes=historical_outcomes,
+            as_of=as_of,
+        )
+        for row in rows
     ]
     ranked_candidates = sorted(
         [candidate for candidate in scored if not candidate.is_avoid],
@@ -63,6 +71,7 @@ def score_snapshot(
     config: ScannerConfig,
     *,
     historical_outcomes: list[dict[str, Any]] | None = None,
+    as_of: datetime | None = None,
 ) -> ScoredCandidate:
     formula = evaluate_formula(row, config)
     breakout_trigger = round(row.premarket_high * 1.005, 4)
@@ -121,6 +130,7 @@ def score_snapshot(
             formula=formula,
             config=config,
             intelligence_payload=intelligence_payload,
+            as_of=as_of,
         )
     )
     is_intelligence_avoid = intelligence.action == ACTION_AVOID
@@ -192,12 +202,13 @@ def _v3_payload(
     formula: Any,
     config: ScannerConfig,
     intelligence_payload: dict[str, Any],
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     breakdown = dict(formula.score_breakdown or {})
     risk_penalty = _num(breakdown.get("risk_penalty"))
     data_confidence = _num(intelligence_payload.get("data_confidence_score"))
     source_confidence = _source_confidence(row, data_confidence)
-    stale = _stale_data_flag(row, intelligence_payload)
+    stale = _stale_data_flag(row, intelligence_payload, as_of=as_of)
     catalyst_confidence = _num(intelligence_payload.get("catalyst_confidence"))
     sample_size = int(_num(intelligence_payload.get("similar_setup_count")))
     payload = {
@@ -358,7 +369,12 @@ def _source_confidence(row: SnapshotRow, data_confidence: float) -> float:
     return round(_clamp(base, 0, 100), 2)
 
 
-def _stale_data_flag(row: SnapshotRow, intelligence_payload: dict[str, Any]) -> bool:
+def _stale_data_flag(
+    row: SnapshotRow,
+    intelligence_payload: dict[str, Any],
+    *,
+    as_of: datetime | None = None,
+) -> bool:
     if row.stale_data_flag:
         return True
     warnings = str(intelligence_payload.get("data_warnings") or "")
@@ -373,9 +389,13 @@ def _stale_data_flag(row: SnapshotRow, intelligence_payload: dict[str, Any]) -> 
         return True
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return (datetime.now(tz=timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() > (
-        18 * 60 * 60
-    )
+    reference_at = as_of or datetime.now(tz=timezone.utc)
+    if reference_at.tzinfo is None:
+        reference_at = reference_at.replace(tzinfo=timezone.utc)
+    age_seconds = (
+        reference_at.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)
+    ).total_seconds()
+    return age_seconds < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS or age_seconds > (18 * 60 * 60)
 
 
 def _config_hash(config: ScannerConfig) -> str:

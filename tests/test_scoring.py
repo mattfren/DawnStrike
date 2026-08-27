@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from intraday_scanner.alpha.feature_factory import build_feature_vector, feature_for_model
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
@@ -36,6 +38,39 @@ def test_scoring_ranks_expected_ticker_first():
         row["premarket_high"] - row["premarket_low"]
     ) * 1.618
     assert row["first_target"] == round(expected_target, 4)
+
+
+def test_scoring_uses_immutable_as_of_for_staleness_under_hostile_clock():
+    row = read_snapshot_csv("sample_data/premarket_snapshot_sample.csv")[0]
+    current = type(row)(
+        **{
+            **row.to_dict(),
+            "as_of_timestamp": "2026-08-27T12:00:00+00:00",
+            "source_timestamp": "2026-08-27T12:00:00+00:00",
+            "stale_data_flag": False,
+        }
+    )
+
+    fresh = score_snapshot(
+        current,
+        ScannerConfig(),
+        as_of=datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc),
+    )
+    stale = score_snapshot(
+        current,
+        ScannerConfig(),
+        as_of=datetime(2026, 8, 28, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert fresh.intelligence["stale_data_flag"] is False
+    assert stale.intelligence["stale_data_flag"] is True
+
+    future = score_snapshot(
+        current,
+        ScannerConfig(),
+        as_of=datetime(2026, 8, 27, 11, 58, tzinfo=timezone.utc),
+    )
+    assert future.intelligence["stale_data_flag"] is True
 
 
 def test_scoring_edge_cases_are_flagged():
