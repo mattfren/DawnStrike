@@ -16,6 +16,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "strategy_version": "v1.0",
         "config_identity": "config-a",
         "record_status": "realized",
+        "record_type": "portfolio_observation",
         "return_pct": 0.25,
         "source_hash_sha256": "a" * 64,
         "open_position_count": 0,

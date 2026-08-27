@@ -32,9 +32,9 @@ def test_cli_strategy_learning_daily_writes_research_only_receipts(tmp_path, cap
             str(out_dir),
         ]
     )
-    assert status == 0
+    assert status == 1
     result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "complete"
+    assert result["status"] == "incomplete"
     receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
     assert receipt["research_only"] is True
     assert receipt["automatic_promotion"] is False
@@ -63,7 +63,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
                     1.0,
                     None,
                     0,
-                    "{}",
+                    '{"record_type":"portfolio_observation","close_time":"2026-08-20T15:00:00+00:00"}',
                 ),
                 (
                     "loss",
@@ -75,7 +75,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
                     -0.5,
                     None,
                     0,
-                    "{}",
+                    '{"record_type":"portfolio_observation","close_time":"2026-08-20T15:00:00+00:00"}',
                 ),
             ],
         )
@@ -99,7 +99,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
         ]
     )
 
-    assert status == 0
+    assert status == 1
     result = json.loads(capsys.readouterr().out)
     receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
     evidence = next(
@@ -130,7 +130,8 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
                 "close_time": "2026-08-20T15:00:00+00:00",
                 "return_pct": 2.0,
             },
-        ]
+        ],
+        "record_type": "portfolio_observation",
     }
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -174,7 +175,7 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
         ]
     )
 
-    assert status == 0
+    assert status == 1
     result = json.loads(capsys.readouterr().out)
     receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
     evidence = next(
@@ -182,12 +183,77 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
         for item in receipt["strategy_evidence"]
         if item["strategy_id"] == "ts_momentum_sma_atr"
     )
-    assert [row["record_id"] for row in evidence["outcomes"]] == ["before-cutoff"]
-    assert {row["record_id"] for row in evidence["misses"]} == {
-        "before-cutoff",
-        "after-cutoff",
-    }
+    # Lifecycle returns remain provisional without a committed FillTruth join;
+    # the before-cutoff lifecycle is still retained as a miss, while the late
+    # close is excluded from this point-in-time run.
+    assert evidence["outcomes"] == []
+    assert {row["record_id"] for row in evidence["misses"]} == {"before-cutoff"}
     assert all(row["record_id"] != "after-cutoff" for row in evidence["outcomes"])
+
+
+def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows(
+    tmp_path, capsys
+):
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "ts_momentum_sma_atr": {
+                    "outcomes": [
+                        {
+                            "record_id": "before",
+                            "status": "RESOLVED",
+                            "market_date": "2026-08-20",
+                            "terminal_event_at": "2026-08-20T14:00:00+00:00",
+                            "return_pct": 1.0,
+                        },
+                        {
+                            "record_id": "after",
+                            "status": "RESOLVED",
+                            "market_date": "2026-08-20",
+                            "terminal_event_at": "2026-08-20T15:00:00+00:00",
+                            "return_pct": 2.0,
+                        },
+                        {
+                            "record_id": "missing-time",
+                            "status": "RESOLVED",
+                            "market_date": "2026-08-20",
+                            "return_pct": 3.0,
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = main(
+        [
+            "strategy-learning-daily",
+            "--market-date",
+            "2026-08-20",
+            "--cutoff",
+            "2026-08-20T14:30:00+00:00",
+            "--source-identity",
+            "fixture-evidence-file:2026-08-20",
+            "--code-sha",
+            "fixture-code-sha",
+            "--out-dir",
+            str(tmp_path / "learning"),
+            "--evidence-file",
+            str(evidence_path),
+        ]
+    )
+    assert status == 1
+    result = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    evidence = next(
+        item["evidence"]
+        for item in receipt["strategy_evidence"]
+        if item["strategy_id"] == "ts_momentum_sma_atr"
+    )
+    assert [row["record_id"] for row in evidence["outcomes"]] == ["before"]
+    assert evidence["counts"]["future_evidence_excluded"] == 1
+    assert evidence["counts"]["terminal_timestamp_quarantined"] == 1
 
 
 def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path, capsys):
@@ -230,7 +296,7 @@ def test_cli_strategy_learning_rejects_reuse_when_database_bytes_change(tmp_path
         "--db-path",
         str(database_path),
     ]
-    assert main(arguments) == 0
+    assert main(arguments) == 1
     capsys.readouterr()
     with sqlite3.connect(database_path) as connection:
         connection.execute(

@@ -265,8 +265,12 @@ try {
     if ($v6Research.exit_code -ne 0) {
         Set-OverallFailure -ExitCode $v6Research.exit_code
     }
-    $strategyLearningCutoff = "${MarketDate}T23:59:59+00:00"
-    $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};mode=ro;query_only=on"
+    # Freeze the EOD evidence boundary to the actual invocation instant.  A
+    # synthetic 23:59 cutoff can import returns that were not observable when
+    # this run started and makes retries silently non-point-in-time.
+    $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
+    $strategyLearningCutoff = $strategyLearningInvocationUtc
+    $strategyLearningSource = "sqlite-readonly:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;mode=ro;query_only=on"
     $strategyLearning = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList @(

@@ -41,7 +41,8 @@ def test_mixed_aggregate_expands_closed_and_open_once() -> None:
     assert sum(item.state is AttributionState.CLOSED for item in report.rows) == 1
     assert sum(item.state is AttributionState.OPEN_MTM for item in report.rows) == 1
     assert {item.lifecycle_id for item in report.rows} == {"closed-1", "open-1"}
-    assert report.summaries[0].closed_loss_count == 1
+    assert report.summaries[0].closed_loss_count == 0
+    assert report.summaries[0].provisional_closed_count == 1
 
 
 def test_replayed_aggregate_does_not_repeat_lifecycle() -> None:
@@ -188,6 +189,73 @@ def test_forged_fill_truth_receipt_stays_provisional_and_ineligible() -> None:
     )
     row = report.rows[0]
     assert row.state is AttributionState.CLOSED
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+
+
+def test_official_closed_return_without_explicit_aggregate_record_type_is_provisional() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "official-omitted-record-type",
+                "market_date": "2026-08-21",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "strategy_version": "dawnstrike-alphaops-v5.0.0",
+                "record_status": "realized",
+                "return_pct": 2.0,
+                "close_time": "2026-08-21T15:00:00Z",
+            }
+        ],
+        date_cutoff="2026-08-21T16:00:00+00:00",
+    )
+    row = report.rows[0]
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+    assert row.fill_truth_status == "missing_committed_fill_truth"
+
+
+def test_explicit_portfolio_aggregate_may_omit_trade_fill_truth() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "governed-aggregate",
+                "market_date": "2026-08-21",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "strategy_version": "dawnstrike-alphaops-v5.0.0",
+                "record_type": "portfolio_observation",
+                "record_status": "realized",
+                "return_pct": 2.0,
+                "close_time": "2026-08-21T15:00:00Z",
+            }
+        ],
+        date_cutoff="2026-08-21T16:00:00+00:00",
+    )
+    row = report.rows[0]
+    assert row.classification == "closed_win"
+    assert row.eligibility is Eligibility.ELIGIBLE
+
+
+def test_spoofed_fill_truth_on_aggregate_is_not_accepted() -> None:
+    report = attribute_strategy_misses(
+        [
+            {
+                "record_id": "spoofed-aggregate",
+                "market_date": "2026-08-21",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "strategy_version": "dawnstrike-alphaops-v5.0.0",
+                "record_type": "portfolio_observation",
+                "record_status": "realized",
+                "return_pct": 2.0,
+                "fill_truth_status": "committed",
+                "fill_truth_hash_sha256": "a" * 64,
+            }
+        ],
+        date_cutoff="2026-08-21T16:00:00+00:00",
+    )
+    row = report.rows[0]
     assert row.classification == "closed_provisional"
     assert row.eligibility is Eligibility.INELIGIBLE
 

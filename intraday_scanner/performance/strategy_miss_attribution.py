@@ -126,6 +126,8 @@ class StrategyMissAttributionRow:
     # hashes or record IDs.
     series_role: str | None = None
     record_type: str | None = None
+    terminal_event_at: str | None = None
+    evidence_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,6 +152,8 @@ class StrategyMissAttributionRow:
             "eligibility_reason": self.eligibility_reason,
             "series_role": self.series_role,
             "record_type": self.record_type,
+            "terminal_event_at": self.terminal_event_at,
+            "evidence_at": self.evidence_at,
         }
 
 
@@ -398,6 +402,88 @@ def load_portfolio_performance_rows_readonly(
         return tuple(dict(row) for row in cursor.fetchall())
     finally:
         connection.close()
+
+
+def load_strategy_decision_receipts_readonly(
+    database_path: str | Path,
+    *,
+    market_date: str,
+    date_cutoff: str,
+) -> tuple[dict[str, Any], ...] | None:
+    """Load only hash-valid, point-in-time decision receipts without writes.
+
+    ``None`` means the legacy database has no receipt table.  Once the table is
+    present, malformed, forged, or future-dated rows are fail-closed (omitted),
+    allowing the daily-learning coverage receipt to expose the resulting gap.
+    """
+
+    path = Path(database_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"strategy-learning database is missing: {path}")
+    cutoff = _parse_timestamp(date_cutoff)
+    if cutoff is None:
+        raise ValueError("date_cutoff must be an aware ISO datetime")
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='strategy_decision_receipts'"
+        ).fetchone()
+        if exists is None:
+            return None
+        rows = connection.execute(
+            "SELECT receipt_id, receipt_hash_sha256, strategy_id, strategy_version, "
+            "market_date, canonical_json FROM strategy_decision_receipts "
+            "WHERE market_date = ? ORDER BY created_at, receipt_id",
+            (market_date,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row[5]))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        digest = str(payload.get("receipt_hash_sha256") or "")
+        receipt_id = str(payload.get("receipt_id") or "")
+        body = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"receipt_hash_sha256", "receipt_id"}
+        }
+        expected = hashlib.sha256(
+            json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        decision_at = _parse_timestamp(payload.get("decision_at"))
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or digest != expected
+            or receipt_id != "sdr-" + digest[:24]
+            or str(row[0]) != receipt_id
+            or str(row[1]) != digest
+            or str(row[2]) != str(payload.get("strategy_id") or "")
+            or str(row[3]) != str(payload.get("strategy_version") or "")
+            or str(row[4]) != str(payload.get("market_date") or "")
+            or payload.get("market_date") != market_date
+            or decision_at is None
+            or decision_at > cutoff
+            or payload.get("research_only") is not True
+            or payload.get("broker_execution_enabled") is not False
+        ):
+            continue
+        result.append(payload)
+    return tuple(result)
 
 
 def _mapping(row: Mapping[str, Any] | Any) -> dict[str, Any]:
@@ -694,6 +780,16 @@ _LIFECYCLE_LIST_FIELDS = (
 )
 _CLOSED_STATES = {"closed", "realized", "complete", "resolved", "filled_and_closed"}
 _OPEN_STATES = {"open", "held", "unrealized", "open_mtm", "pending"}
+_FILL_TRUTH_EXEMPT_RECORD_TYPES = frozenset(
+    {
+        "account_observation",
+        "account_aggregate",
+        "benchmark_observation",
+        "benchmark_aggregate",
+        "portfolio_observation",
+        "portfolio_aggregate",
+    }
+)
 
 
 def _expand_lifecycle_rows(
@@ -932,15 +1028,33 @@ def _attribute_row(
     }
     explicit_conflict = _truthy(row, payload, ("conflicting_outcome", "outcome_conflict"))
     fill_truth_status = _optional_text(row, payload, "fill_truth_status")
+    record_type = _optional_text(row, payload, "record_type")
     fill_evidence_present = any(
         _optional_text(row, payload, field)
         for field in ("fill_id", "fill_price", "quantity_filled")
     )
-    provisional_fill = fill_evidence_present and not _has_committed_fill_truth(
-        {**dict(payload), **row}
+    # Closed trade/lifecycle/official-forward rows are not learnable from a
+    # return number alone.  The only schemas allowed to omit trade FillTruth
+    # are explicit governed account/portfolio/benchmark aggregates.  An
+    # omitted record_type is intentionally treated as a trade-like record so
+    # an official row cannot smuggle an aggregate return through this gate.
+    aggregate_fill_exempt = (
+        not bool(row.get("_lifecycle_child"))
+        and record_type in _FILL_TRUTH_EXEMPT_RECORD_TYPES
+    )
+    requires_fill_truth = (
+        status in _CLOSED_STATES
+        and return_pct is not None
+        and not aggregate_fill_exempt
+    )
+    provisional_fill = (
+        (requires_fill_truth or fill_evidence_present or bool(fill_truth_status))
+        and not _has_committed_fill_truth({**dict(payload), **row})
     )
     if fill_truth_status and not _has_committed_fill_truth({**dict(payload), **row}):
         provisional_fill = True
+    if provisional_fill and not fill_truth_status:
+        fill_truth_status = "missing_committed_fill_truth"
     eligibility_reason = _optional_text(row, payload, "eligibility_reason")
     conflict = explicit_conflict or benchmark_conflict
     if no_trade and (return_pct is not None and return_pct != 0.0):
@@ -1038,7 +1152,24 @@ def _attribute_row(
         fill_truth_status=fill_truth_status,
         eligibility_reason=eligibility_reason,
         series_role=_optional_text(row, payload, "series_role"),
-        record_type=_optional_text(row, payload, "record_type"),
+        record_type=record_type,
+        terminal_event_at=_first_text(
+            row,
+            payload,
+            (
+                "_terminal_event_at",
+                "terminal_event_at",
+                "closed_at",
+                "close_time",
+                "exit_time",
+                "exit_timestamp",
+            ),
+        ),
+        evidence_at=_first_text(
+            row,
+            payload,
+            ("evidence_at", "observed_at", "event_at", "decision_at"),
+        ),
     )
 
 
@@ -1370,6 +1501,7 @@ __all__ = [
     "StrategyMissAttributionSummary",
     "attribute_strategy_misses",
     "from_portfolio_rows",
+    "load_strategy_decision_receipts_readonly",
     "load_portfolio_performance_rows_readonly",
     "summarize_strategy_misses",
 ]

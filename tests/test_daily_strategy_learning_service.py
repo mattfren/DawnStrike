@@ -6,6 +6,8 @@ from intraday_scanner.performance.strategy_miss_attribution import (
 )
 from intraday_scanner.services.daily_strategy_learning_service import (
     AttributionReportAnalyzer,
+    DailyLearningContext,
+    _normalize_analysis,
     run_daily_strategy_learning,
 )
 from intraday_scanner.v2.strategies import build_strategy_catalog
@@ -19,10 +21,20 @@ class FixtureAnalyzer:
             "evidence_contract": "fixture-miss-analysis-v1",
             "outcomes": [
                 {"market_date": "2026-08-20", "status": "UNRESOLVED", "return_pct": 4.0},
-                {"market_date": "2026-08-20", "status": "COMPLETE_SOURCED"},
+                {
+                    "market_date": "2026-08-20",
+                    "status": "COMPLETE_SOURCED",
+                    "terminal_event_at": "2026-08-20T21:00:00+00:00",
+                },
                 {"market_date": "2026-08-21", "status": "COMPLETE_SOURCED", "return_pct": 9.0},
             ],
-            "misses": [{"market_date": "2026-08-20", "root_cause": "ranking_capacity"}],
+            "misses": [
+                {
+                    "market_date": "2026-08-20",
+                    "root_cause": "ranking_capacity",
+                    "evidence_at": "2026-08-20T21:00:00+00:00",
+                }
+            ],
             "proposals": [
                 {
                     "hypothesis": f"one controlled change for {strategy.strategy_id}",
@@ -49,10 +61,10 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
     proposals = json.loads(proposal_path.read_text(encoding="utf-8"))
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
 
-    assert first["status"] == "complete"
+    assert first["status"] == "incomplete"
     assert first["idempotent_reused"] is False
-    assert first["strategy_count"] == len(build_strategy_catalog())
-    assert receipt["strategy_count"] == len(build_strategy_catalog())
+    assert first["strategy_count"] == len(build_strategy_catalog()) + 1
+    assert receipt["strategy_count"] == len(build_strategy_catalog()) + 1
     assert receipt["daily_fit_performed"] is False
     assert receipt["challenger_evaluation_performed"] is False
     assert receipt["champion_mutated"] is False
@@ -205,9 +217,11 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
             "cohort": "shadow_challenger",
             "strategy_id": "benchmark_buy_hold_equal_weight",
             "strategy_version": "v1.0",
-            "record_status": "realized",
-            "return_pct": 1.0,
-            "open_position_count": 0,
+                "record_status": "realized",
+                "return_pct": 1.0,
+                "open_position_count": 0,
+                "record_type": "portfolio_observation",
+                "close_time": "2026-08-20T15:00:00+00:00",
         },
         {
             "record_id": "no-trade",
@@ -216,8 +230,9 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
             "strategy_id": "ts_momentum_sma_atr",
             "strategy_version": "v1.0",
             "record_status": "no_trade",
-            "return_pct": 0.0,
-            "open_position_count": 0,
+                "return_pct": 0.0,
+                "open_position_count": 0,
+                "decision_at": "2026-08-20T15:00:00+00:00",
         },
         {
             "record_id": "closed-loss",
@@ -225,9 +240,11 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
             "cohort": "shadow_challenger",
             "strategy_id": "ts_momentum_sma_atr",
             "strategy_version": "v1.0",
-            "record_status": "realized",
-            "return_pct": -0.5,
-            "open_position_count": 0,
+                "record_status": "realized",
+                "return_pct": -0.5,
+                "open_position_count": 0,
+                "record_type": "portfolio_observation",
+                "close_time": "2026-08-20T15:00:00+00:00",
         },
     ]
     report = attribute_strategy_misses(rows)
@@ -284,6 +301,67 @@ def test_attribution_adapter_quarantines_provisional_closed_rows() -> None:
     assert len(result["quarantined_closed"]) == 1
     assert result["quarantined_closed"][0]["status"] == "CLOSED_PROVISIONAL"
     assert result["misses"][0]["classification"] == "closed_provisional"
+
+
+def test_normalize_analysis_quarantines_unordered_terminal_and_same_day_miss_evidence() -> None:
+    strategy = build_strategy_catalog()[0]
+    context = DailyLearningContext(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T14:30:00+00:00",
+        source_identity="fixture-cutoff",
+        code_sha="fixture-code",
+        source_hash_sha256="a" * 64,
+    )
+    evidence, _ = _normalize_analysis(
+        strategy,
+        context,
+        {
+            "outcomes": [
+                {
+                    "record_id": "before",
+                    "status": "RESOLVED",
+                    "market_date": "2026-08-20",
+                    "terminal_event_at": "2026-08-20T14:00:00+00:00",
+                    "return_pct": 1.0,
+                },
+                {
+                    "record_id": "after",
+                    "status": "RESOLVED",
+                    "market_date": "2026-08-20",
+                    "terminal_event_at": "2026-08-20T15:00:00+00:00",
+                    "return_pct": 2.0,
+                },
+                {"record_id": "missing-time", "status": "RESOLVED", "return_pct": 3.0},
+            ],
+            "misses": [{"record_id": "same-day-no-time", "market_date": "2026-08-20"}],
+        },
+    )
+    assert [row["record_id"] for row in evidence["outcomes"]] == ["before"]
+    assert evidence["counts"]["future_evidence_excluded"] == 1
+    assert evidence["counts"]["terminal_timestamp_quarantined"] == 1
+    assert evidence["counts"]["evidence_timestamp_quarantined"] == 1
+    assert evidence["quarantined_closed"][0]["record_id"] == "missing-time"
+    assert evidence["quarantined_evidence"][0]["record_id"] == "same-day-no-time"
+
+
+def test_daily_learning_marks_explicit_zero_alphaops_receipt_coverage_incomplete(
+    tmp_path: Path,
+) -> None:
+    result = run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-empty-receipts",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        decision_receipts=(),
+    )
+    assert result["status"] == "incomplete"
+    coverage = result["decision_receipt_learning"]["expected_strategy_coverage"]
+    assert coverage["status"] == "INCOMPLETE"
+    assert {row["strategy_id"] for row in coverage["missing"]} == {
+        "alphaops_v5",
+        "alphaops_v6_shadow",
+    }
 
 
 def _decision_condition(condition_id: str, status: str, **fields: object) -> dict[str, object]:

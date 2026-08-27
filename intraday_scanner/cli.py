@@ -35,6 +35,7 @@ from intraday_scanner.performance.cli import main as performance_reconcile_main
 from intraday_scanner.performance.strategy_miss_attribution import (
     attribute_strategy_misses,
     load_portfolio_performance_rows_readonly,
+    load_strategy_decision_receipts_readonly,
 )
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_enrichment_provider import CsvEnrichmentProvider
@@ -565,7 +566,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     daily_strategy_evidence.add_argument(
         "--evidence-file",
         default=None,
-        help="Optional JSON mapping keyed by strategy ID for injected evidence/proposals",
+        help=(
+            "Optional JSON mapping keyed by strategy ID for injected evidence/proposals; "
+            "decision_receipts, when present, must be exact persisted receipts"
+        ),
     )
     daily_strategy_evidence.add_argument(
         "--db-path",
@@ -1863,13 +1867,31 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
 def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
     analyzer: StrategyEvidenceAnalyzer | None = None
     input_hash_sha256: str | None = None
+    decision_receipts: Sequence[Mapping[str, Any]] | None = None
     if args.evidence_file:
         payload = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise SnapshotValidationError("strategy learning evidence must be a JSON object")
         analyzer = MappingEvidenceAnalyzer(payload)
+        receipt_key = (
+            "decision_receipts"
+            if "decision_receipts" in payload
+            else "strategy_decision_receipts"
+            if "strategy_decision_receipts" in payload
+            else None
+        )
+        if receipt_key is not None:
+            raw_receipts = payload[receipt_key]
+            if not isinstance(raw_receipts, list) or any(
+                not isinstance(item, Mapping) for item in raw_receipts
+            ):
+                raise SnapshotValidationError(
+                    "strategy learning decision_receipts must be a list of objects"
+                )
+            decision_receipts = _receipts_at_or_before_cutoff(raw_receipts, args.cutoff)
         input_hash_sha256 = _hash_strategy_learning_inputs(
             evidence_payload=payload,
+            decision_receipts=decision_receipts,
         )
     elif args.db_path:
         rows = load_portfolio_performance_rows_readonly(
@@ -1884,10 +1906,16 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
                 output_root=Path(args.paper_ops_root),
                 mode="forward",
             )
+        decision_receipts = load_strategy_decision_receipts_readonly(
+            args.db_path,
+            market_date=args.market_date,
+            date_cutoff=args.cutoff,
+        )
         input_hash_sha256 = _hash_strategy_learning_inputs(
             database_rows=rows,
             paper_ops_rows=paper_ops_rows,
             paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
+            decision_receipts=decision_receipts,
         )
         analyzer = AttributionReportAnalyzer(
             attribute_strategy_misses(
@@ -1905,6 +1933,7 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         out_dir=args.out_dir,
         input_hash_sha256=input_hash_sha256,
         analyzer=analyzer,
+        decision_receipts=decision_receipts,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "complete" else 1
@@ -1916,6 +1945,7 @@ def _hash_strategy_learning_inputs(
     paper_ops_rows: Sequence[Mapping[str, Any]] | None = None,
     paper_ops_root: Path | None = None,
     evidence_payload: Mapping[str, Any] | None = None,
+    decision_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> str | None:
     """Bind reuse to the exact evidence objects consumed by the analyzer.
 
@@ -1939,6 +1969,8 @@ def _hash_strategy_learning_inputs(
         parts.append(("paper_ops_materializer_inputs", paper_hash.encode("ascii")))
     if evidence_payload is not None:
         parts.append(("evidence_payload", _canonical_input_bytes(evidence_payload)))
+    if decision_receipts is not None:
+        parts.append(("strategy_decision_receipts", _canonical_input_bytes(decision_receipts)))
     if not parts:
         return None
     digest = hashlib.sha256()
@@ -1959,6 +1991,30 @@ def _canonical_input_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
+
+
+def _receipts_at_or_before_cutoff(
+    receipts: Sequence[Mapping[str, Any]], cutoff: str
+) -> tuple[Mapping[str, Any], ...]:
+    """Keep only aware, exact-date decision receipts known at the cutoff."""
+
+    try:
+        cutoff_at = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SnapshotValidationError("strategy learning cutoff must be an ISO datetime") from exc
+    if cutoff_at.tzinfo is None:
+        raise SnapshotValidationError("strategy learning cutoff must include a timezone")
+    result: list[Mapping[str, Any]] = []
+    for receipt in receipts:
+        try:
+            decision_at = datetime.fromisoformat(
+                str(receipt.get("decision_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if decision_at.tzinfo is not None and decision_at <= cutoff_at:
+            result.append(receipt)
+    return tuple(result)
 
 
 def _run_strategy_challenger_backtest(args: argparse.Namespace) -> int:
