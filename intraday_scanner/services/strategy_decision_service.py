@@ -16,6 +16,10 @@ from intraday_scanner.alpha.plan_constructor import (
     construct_alphaops_v5_plan,
     is_valid_alphaops_v5_plan,
 )
+from intraday_scanner.alpha.v5_policy import (
+    DEFAULT_V5_POLICY,
+    modeled_alphaops_v5_plan_metrics,
+)
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.decisioning.contracts import (
     ConditionResult,
@@ -80,8 +84,7 @@ class StrategyDecisionService:
                 plan_integrity = (
                     isinstance(declared_plan, Mapping)
                     and is_valid_alphaops_v5_plan(declared_plan)
-                    and canonical_json(dict(declared_plan))
-                    == canonical_json(expected_contract)
+                    and canonical_json(dict(declared_plan)) == canonical_json(expected_contract)
                     and declared_hash == expected_contract["plan_hash_sha256"]
                 )
             if "plan_hash_sha256" in candidate:
@@ -91,17 +94,27 @@ class StrategyDecisionService:
             candidate_payload["alphaops_market_structure_plan"] = plan.to_dict()
             candidate_payload["plan_hash_sha256"] = plan.plan_hash_sha256
             candidate_payload["market_structure_plan"] = plan.status == COMPLETE and plan_integrity
-            candidate_payload["entry_observation_provenance"] = plan.status == COMPLETE and plan_integrity
-            candidate_payload["stop_observation_provenance"] = plan.status == COMPLETE and plan_integrity
-            candidate_payload["target_observation_provenance"] = plan.status == COMPLETE and plan_integrity
+            candidate_payload["entry_observation_provenance"] = (
+                plan.status == COMPLETE and plan_integrity
+            )
+            candidate_payload["stop_observation_provenance"] = (
+                plan.status == COMPLETE and plan_integrity
+            )
+            candidate_payload["target_observation_provenance"] = (
+                plan.status == COMPLETE and plan_integrity
+            )
             prior_levels = (
                 _number(candidate.get("entry_reference") or candidate.get("entry_watch_level")),
                 _number(candidate.get("stop") or candidate.get("invalidation_level")),
                 _number(candidate.get("target") or candidate.get("target_1")),
             )
-            candidate_payload["plan_levels_frozen"] = plan.status == COMPLETE and plan_integrity and (
-                prior_levels == (None, None, None)
-                or prior_levels == (plan.entry, plan.stop, plan.target)
+            candidate_payload["plan_levels_frozen"] = (
+                plan.status == COMPLETE
+                and plan_integrity
+                and (
+                    prior_levels == (None, None, None)
+                    or prior_levels == (plan.entry, plan.stop, plan.target)
+                )
             )
             if plan.status == COMPLETE:
                 # The values are intentionally copied from the frozen plan;
@@ -152,9 +165,7 @@ class StrategyDecisionService:
             )
             for spec in specs
         )
-        base_score_value = _first_present(
-            candidate, "base_strategy_score", "score", "alpha_score"
-        )
+        base_score_value = _first_present(candidate, "base_strategy_score", "score", "alpha_score")
         base_score = _number(base_score_value)
         score_adjustment = _number(_first_present(candidate, "score_adjustment"), 0.0) or 0.0
         explicit_final_score = _number(_first_present(candidate, "final_score"))
@@ -177,9 +188,7 @@ class StrategyDecisionService:
         stop = _number(
             _first_present(candidate, "stop", "invalidation_level", "invalidation", "exit_line")
         )
-        target = _number(
-            _first_present(candidate, "target", "first_target", "target_1")
-        )
+        target = _number(_first_present(candidate, "target", "first_target", "target_1"))
         rr = _number(candidate.get("reward_risk_ratio"))
         if (
             rr is None
@@ -189,12 +198,41 @@ class StrategyDecisionService:
             and entry != stop
         ):
             rr = abs(target - entry) / abs(entry - stop)
+        plan_hash = ""
+        gross_reward_risk = rr
+        after_cost_reward_risk: float | None = None
+        stop_distance_pct: float | None = None
+        paper_entry_blockers: list[str] = []
+        paper_entry_allowed = True
+        if strategy_id == "alphaops_v5":
+            strict_plan = candidate.get("alphaops_market_structure_plan")
+            metrics = modeled_alphaops_v5_plan_metrics(
+                dict(strict_plan) if isinstance(strict_plan, Mapping) else {}
+            )
+            plan_hash = str(
+                strict_plan.get("plan_hash_sha256") if isinstance(strict_plan, Mapping) else ""
+            )
+            gross_reward_risk = _number(metrics.get("gross_reward_risk"))
+            after_cost_reward_risk = _number(metrics.get("actual_after_cost_reward_risk"))
+            stop_distance_pct = _number(metrics.get("stop_distance_pct"))
+            if (
+                after_cost_reward_risk is None
+                or after_cost_reward_risk + 1e-12 < DEFAULT_V5_POLICY.minimum_after_cost_reward_risk
+            ):
+                paper_entry_blockers.append("after_cost_reward_risk_below_policy")
+            if (
+                stop_distance_pct is None
+                or stop_distance_pct > DEFAULT_V5_POLICY.maximum_stop_distance_pct
+            ):
+                paper_entry_blockers.append("stop_distance_exceeds_policy")
+            paper_entry_allowed = not paper_entry_blockers
         policy = evaluate_policy(
             strategy_id,
             results,
             reward_risk_ratio=rr,
             base_score=final_score,
             score_threshold=self.score_threshold,
+            paper_entry=paper_entry_allowed,
             score_available=base_score is not None,
         )
         input_payload = _json_safe(
@@ -204,9 +242,10 @@ class StrategyDecisionService:
                 if key not in {"receipt_id", "receipt_hash_sha256"}
             }
         )
-        input_hash = hashlib.sha256(canonical_json(input_payload).encode("utf-8")).hexdigest()
+        input_payload_json = canonical_json(input_payload)
+        input_hash = hashlib.sha256(input_payload_json.encode("utf-8")).hexdigest()
         return StrategyDecisionReceipt(
-            schema_version="dawnstrike.strategy_decision_receipt.v1",
+            schema_version="dawnstrike.strategy_decision_receipt.v2",
             receipt_id="",
             strategy_id=strategy_id,
             strategy_version=str(candidate.get("strategy_version") or "unversioned").strip(),
@@ -233,6 +272,12 @@ class StrategyDecisionService:
             input_hash_sha256=input_hash,
             research_only=research_only,
             broker_execution_enabled=False,
+            input_payload_json=input_payload_json,
+            plan_hash_sha256=plan_hash,
+            gross_reward_risk_ratio=gross_reward_risk,
+            after_cost_reward_risk_ratio=after_cost_reward_risk,
+            stop_distance_pct=stop_distance_pct,
+            paper_entry_blockers=tuple(paper_entry_blockers),
         )
 
     def evaluate_candidates(

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
+from intraday_scanner.alpha.plan_constructor import COMPLETE, is_valid_alphaops_v5_plan
+from intraday_scanner.alpha.v5_policy import (
+    DEFAULT_V5_POLICY,
+    modeled_alphaops_v5_plan_metrics,
+)
 from intraday_scanner.decisioning.contracts import canonical_json
 
 ALERT_OK = "ALERT_OK"
@@ -459,9 +465,7 @@ def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
         }
 
     tier = str(row.get("strategy_receipt_tier") or row.get("pick_tier") or "").upper()
-    research_eligible = _bool_or_none(
-        row.get("strategy_receipt_research_pick_eligible")
-    )
+    research_eligible = _bool_or_none(row.get("strategy_receipt_research_pick_eligible"))
     paper_eligible = _bool_or_none(row.get("strategy_receipt_paper_entry_eligible"))
     disagreements = _unique(
         [
@@ -471,9 +475,7 @@ def _strategy_receipt_gate_state(row: dict[str, Any]) -> dict[str, Any]:
     blocking_reasons: list[str] = []
     receipt_id = str(row.get("receipt_id") or "").strip()
     receipt_valid = validate_strategy_receipt_envelope(row)
-    construction_status = str(
-        row.get("strategy_receipt_construction_status") or ""
-    ).upper()
+    construction_status = str(row.get("strategy_receipt_construction_status") or "").upper()
     if not receipt_id or construction_status != "COMPLETE" or not receipt_valid:
         _append_unique(disagreements, "strategy_receipt_construction_failed")
         blocking_reasons.append("strategy decision receipt unavailable or unauthenticated")
@@ -520,12 +522,21 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
     if receipt_hash != expected_hash or receipt_id != "sdr-" + receipt_hash[:24]:
         return False
     ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+    schema_version = str(payload.get("schema_version") or "")
+    strategy_id = str(payload.get("strategy_id") or "")
     if (
-        payload.get("schema_version") != "dawnstrike.strategy_decision_receipt.v1"
+        schema_version
+        not in {
+            "dawnstrike.strategy_decision_receipt.v1",
+            "dawnstrike.strategy_decision_receipt.v2",
+        }
+        or (
+            strategy_id == "alphaops_v5"
+            and schema_version != "dawnstrike.strategy_decision_receipt.v2"
+        )
         or str(payload.get("symbol") or "").upper() != ticker
-        or str(payload.get("strategy_id") or "") != str(row.get("strategy_id") or "")
-        or str(payload.get("strategy_version") or "")
-        != str(row.get("strategy_version") or "")
+        or strategy_id != str(row.get("strategy_id") or "")
+        or str(payload.get("strategy_version") or "") != str(row.get("strategy_version") or "")
         or receipt_hash != str(row.get("receipt_hash_sha256") or "").lower()
         or receipt_id != str(row.get("receipt_id") or "")
         or str(row.get("strategy_receipt_persistence_status") or "").upper()
@@ -540,6 +551,25 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
         or payload.get("broker_execution_enabled") is not False
     ):
         return False
+    if schema_version == "dawnstrike.strategy_decision_receipt.v2":
+        input_payload_text = payload.get("input_payload_json")
+        if not isinstance(input_payload_text, str) or not input_payload_text:
+            return False
+        try:
+            input_payload = json.loads(input_payload_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            not isinstance(input_payload, dict)
+            or canonical_json(input_payload) != input_payload_text
+            or hashlib.sha256(input_payload_text.encode("utf-8")).hexdigest()
+            != str(payload.get("input_hash_sha256") or "")
+        ):
+            return False
+        if strategy_id == "alphaops_v5" and not _valid_v5_receipt_plan_binding(
+            row, payload, input_payload
+        ):
+            return False
     for payload_key, row_keys in (
         ("entry_reference", ("entry_reference", "entry_watch_level", "entry_trigger")),
         ("stop", ("stop", "invalidation_level", "invalidation")),
@@ -550,6 +580,53 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
         if _optional_float(payload.get(payload_key)) != _optional_float(row_value):
             return False
     return True
+
+
+def _valid_v5_receipt_plan_binding(
+    row: dict[str, Any], receipt: dict[str, Any], input_payload: dict[str, Any]
+) -> bool:
+    row_plan = row.get("alphaops_market_structure_plan")
+    input_plan = input_payload.get("alphaops_market_structure_plan")
+    if not isinstance(row_plan, dict) or not isinstance(input_plan, dict):
+        return False
+    if not is_valid_alphaops_v5_plan(row_plan) or canonical_json(row_plan) != canonical_json(
+        input_plan
+    ):
+        return False
+    plan_hash = str(row_plan.get("plan_hash_sha256") or "")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", plan_hash)
+        or str(row.get("plan_hash_sha256") or "") != plan_hash
+        or str(receipt.get("plan_hash_sha256") or "") != plan_hash
+        or str(input_payload.get("plan_hash_sha256") or "") != plan_hash
+    ):
+        return False
+    input_observations = input_payload.get("market_structure_observations")
+    row_observations = row.get("market_structure_observations")
+    if canonical_json(input_observations) != canonical_json(row_observations):
+        return False
+    if str(row_plan.get("status") or "") == COMPLETE and (
+        not isinstance(input_observations, dict) or not input_observations
+    ):
+        return False
+    metrics = modeled_alphaops_v5_plan_metrics(row_plan)
+    for receipt_key, metric_key in (
+        ("gross_reward_risk_ratio", "gross_reward_risk"),
+        ("after_cost_reward_risk_ratio", "actual_after_cost_reward_risk"),
+        ("stop_distance_pct", "stop_distance_pct"),
+    ):
+        if _optional_float(receipt.get(receipt_key)) != _optional_float(metrics.get(metric_key)):
+            return False
+    after_cost = _optional_float(metrics.get("actual_after_cost_reward_risk"))
+    stop_distance = _optional_float(metrics.get("stop_distance_pct"))
+    expected_blockers: list[str] = []
+    if after_cost is None or after_cost + 1e-12 < DEFAULT_V5_POLICY.minimum_after_cost_reward_risk:
+        expected_blockers.append("after_cost_reward_risk_below_policy")
+    if stop_distance is None or stop_distance > DEFAULT_V5_POLICY.maximum_stop_distance_pct:
+        expected_blockers.append("stop_distance_exceeds_policy")
+    if list(receipt.get("paper_entry_blockers") or []) != expected_blockers:
+        return False
+    return not (receipt.get("paper_entry_eligible") is True and expected_blockers)
 
 
 def _append_unique(target: list[str], value: str) -> None:

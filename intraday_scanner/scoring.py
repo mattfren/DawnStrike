@@ -102,6 +102,7 @@ def score_snapshot(
         first_target=round(first_target, 4),
         stretch_target=round(stretch_target, 4),
         historical_outcomes=historical_outcomes,
+        as_of=as_of,
     )
     intelligence_payload = intelligence.to_dict()
     intelligence_payload.update(

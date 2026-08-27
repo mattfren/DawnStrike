@@ -310,6 +310,12 @@ class StrategyDecisionReceipt:
     receipt_hash_sha256: str = ""
     research_only: bool = True
     broker_execution_enabled: bool = False
+    input_payload_json: str = ""
+    plan_hash_sha256: str = ""
+    gross_reward_risk_ratio: float | None = None
+    after_cost_reward_risk_ratio: float | None = None
+    stop_distance_pct: float | None = None
+    paper_entry_blockers: tuple[str, ...] = ()
 
     _HASH_FIELDS: ClassVar[set[str]] = {"receipt_hash_sha256", "receipt_id"}
 
@@ -333,8 +339,27 @@ class StrategyDecisionReceipt:
             raise ValueError("condition_results must contain typed ConditionResult values")
         for field_name in ("all_blocking_failures", "disclosed_gaps"):
             object.__setattr__(self, field_name, _tuple(getattr(self, field_name)))
+        object.__setattr__(self, "paper_entry_blockers", _tuple(self.paper_entry_blockers))
         if not _SHA256.fullmatch(self.input_hash_sha256):
             raise ValueError("input_hash_sha256 must be a SHA-256 hex digest")
+        if self.schema_version == "dawnstrike.strategy_decision_receipt.v2":
+            if not self.input_payload_json:
+                raise ValueError("v2 receipt requires canonical input_payload_json")
+            try:
+                input_payload = json.loads(self.input_payload_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("input_payload_json must be valid JSON") from exc
+            if canonical_json(input_payload) != self.input_payload_json:
+                raise ValueError("input_payload_json must be canonical JSON")
+            expected_input_hash = hashlib.sha256(
+                self.input_payload_json.encode("utf-8")
+            ).hexdigest()
+            if self.input_hash_sha256 != expected_input_hash:
+                raise ValueError("input_hash_sha256 does not match input_payload_json")
+        if self.plan_hash_sha256 and not _SHA256.fullmatch(self.plan_hash_sha256):
+            raise ValueError("plan_hash_sha256 must be a SHA-256 hex digest")
+        if self.paper_entry_eligible and self.paper_entry_blockers:
+            raise ValueError("paper-entry eligible receipt cannot carry paper blockers")
         if self.broker_execution_enabled:
             raise ValueError("broker execution must remain disabled")
         if not self.research_only:
@@ -360,6 +385,18 @@ class StrategyDecisionReceipt:
         result = asdict(self)
         result["condition_results"] = [item.to_dict() for item in self.condition_results]
         result["pick_tier"] = getattr(self.pick_tier, "value", str(self.pick_tier))
+        if self.schema_version == "dawnstrike.strategy_decision_receipt.v1":
+            # Preserve the canonical identity of historical v1 receipts while
+            # v2 carries replayable input and explicit frozen-plan cost truth.
+            for key in (
+                "input_payload_json",
+                "plan_hash_sha256",
+                "gross_reward_risk_ratio",
+                "after_cost_reward_risk_ratio",
+                "stop_distance_pct",
+                "paper_entry_blockers",
+            ):
+                result.pop(key, None)
         if not include_hash:
             result.pop("receipt_hash_sha256", None)
             result.pop("receipt_id", None)

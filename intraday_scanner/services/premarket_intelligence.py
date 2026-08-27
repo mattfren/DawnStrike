@@ -160,6 +160,7 @@ def build_premarket_intelligence(
     first_target: float,
     stretch_target: float,
     historical_outcomes: list[dict[str, Any]] | None = None,
+    as_of: datetime | None = None,
 ) -> IntelligenceResult:
     catalyst = classify_catalyst(row.catalyst_headline, has_news=row.has_news)
     structure = classify_premarket_structure(row, formula)
@@ -167,7 +168,7 @@ def build_premarket_intelligence(
     liquidity_risks = liquidity_and_spread_risks(row, formula, config, catalyst)
     action = classify_trade_action(row, formula, catalyst, structure, liquidity_risks)
     risk_level = _risk_level(action, liquidity_risks, formula.avoid_reasons)
-    warnings = data_quality_warnings(row, catalyst, float_rotation)
+    warnings = data_quality_warnings(row, catalyst, float_rotation, as_of=as_of)
     confidence = data_confidence_score(row, warnings)
     probability = probability_summary(
         similar_historical_outcomes(
@@ -457,6 +458,8 @@ def data_quality_warnings(
     row: SnapshotRow,
     catalyst: CatalystAssessment,
     float_rotation: FloatRotationAssessment,
+    *,
+    as_of: datetime | None = None,
 ) -> list[str]:
     warnings: list[str] = []
     if float_rotation.float_rotation is None:
@@ -471,7 +474,7 @@ def data_quality_warnings(
         warnings.append("stale_data")
     if not row.as_of_timestamp:
         warnings.append("missing_timestamp")
-    elif _is_stale_timestamp(row.as_of_timestamp):
+    elif _is_stale_timestamp(row.as_of_timestamp, as_of=as_of):
         warnings.append("stale_data")
     if row.missing_enrichment_count > 0:
         warnings.append(f"missing_enrichment_count:{row.missing_enrichment_count}")
@@ -771,15 +774,20 @@ def _money(value: Any) -> str:
     return "n/a" if number <= 0 else f"${number:.2f}"
 
 
-def _is_stale_timestamp(value: str) -> bool:
+def _is_stale_timestamp(value: str, *, as_of: datetime | None = None) -> bool:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return True
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(tz=timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-    return age_seconds > 18 * 60 * 60
+    reference_at = as_of or datetime.now(tz=timezone.utc)
+    if reference_at.tzinfo is None:
+        reference_at = reference_at.replace(tzinfo=timezone.utc)
+    age_seconds = (
+        reference_at.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)
+    ).total_seconds()
+    return age_seconds < -60 or age_seconds > 18 * 60 * 60
 
 
 def _num(value: Any) -> float:

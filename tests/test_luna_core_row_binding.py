@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
+from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
 from intraday_scanner.services.premarket_enrichment_service import _apply_observation
 
@@ -87,9 +89,10 @@ def test_core_row_binding_survives_json_and_csv_string_numeric_roundtrip(tmp_pat
     path = core.write_snapshot_rows([original], tmp_path / "core.csv")
     loaded = read_snapshot_csv(path)[0].to_dict()
 
-    assert loaded[core.CORE_COVERAGE_ROW_BINDING_FIELD] == original[
-        core.CORE_COVERAGE_ROW_BINDING_FIELD
-    ]
+    assert (
+        loaded[core.CORE_COVERAGE_ROW_BINDING_FIELD]
+        == original[core.CORE_COVERAGE_ROW_BINDING_FIELD]
+    )
     assert loaded["premarket_price"] == 10.0
     assert loaded["premarket_volume"] == 100
     assert loaded["gap_pct"] == pytest.approx(11.1111111111)
@@ -126,9 +129,54 @@ def test_merge_preserves_core_row_binding_field() -> None:
         [{"ticker": "BOUND", "discovery_context": "mover"}], [core_row]
     )
 
-    assert merged[0][core.CORE_COVERAGE_ROW_BINDING_FIELD] == core_row[
-        core.CORE_COVERAGE_ROW_BINDING_FIELD
-    ]
+    assert (
+        merged[0][core.CORE_COVERAGE_ROW_BINDING_FIELD]
+        == core_row[core.CORE_COVERAGE_ROW_BINDING_FIELD]
+    )
+
+
+def test_core_binding_rejects_source_confidence_mutation() -> None:
+    row = dict(_discovery_result()["rows"][0])
+    assert row["source_confidence"] == 80.0
+    assert core._core_coverage_binding_valid(row)
+
+    row["source_confidence"] = 100.0
+
+    assert not core._core_coverage_binding_valid(row)
+    assert core.rank_core_universe_rows([row]) == []
+
+
+def test_scored_core_row_preserves_receipt_bound_source_confidence(tmp_path: Path) -> None:
+    row = dict(_discovery_result()["rows"][0])
+    snapshot = read_snapshot_csv(
+        core.write_snapshot_rows([row], tmp_path / "scored-core.csv")
+    )[0]
+
+    scored = score_snapshot(snapshot, ScannerConfig(), as_of=OBSERVED_AT).to_dict()
+
+    assert scored["source_confidence"] == 80.0
+    assert scored["model_adjusted_source_confidence"] != scored["source_confidence"]
+    assert scored["stale_data_flag"] is False
+    assert "stale_data" not in scored["data_warnings"]
+    assert core._core_coverage_binding_valid(scored)
+
+
+def test_fully_stripped_core_row_cannot_enter_legacy_fallback() -> None:
+    row = dict(_discovery_result()["rows"][0])
+    for key in (
+        "core_coverage_receipt_id",
+        "core_coverage_receipt_hash_sha256",
+        "core_coverage_receipt_status",
+        "core_coverage_receipt_payload_json",
+        core.CORE_COVERAGE_ROW_BINDING_FIELD,
+        "universe_lane",
+        "evidence_lane",
+        "discovery_context",
+        "core_universe_memberships",
+    ):
+        row.pop(key, None)
+
+    assert core.rank_core_universe_rows([row]) == []
 
 
 def test_failed_optional_range_enrichment_preserves_core_binding() -> None:
@@ -146,9 +194,7 @@ def test_failed_optional_range_enrichment_preserves_core_binding() -> None:
 
     assert enriched["enrichment_status"] == "provider_error"
     assert core._core_coverage_binding_valid(enriched)
-    assert [item["ticker"] for item in core.rank_core_universe_rows([enriched])] == [
-        "BOUND"
-    ]
+    assert [item["ticker"] for item in core.rank_core_universe_rows([enriched])] == ["BOUND"]
 
 
 def test_missing_gap_without_previous_close_roundtrips_as_absence(tmp_path: Path) -> None:

@@ -17,9 +17,11 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
     evaluate_v5_official_paper,
 )
-from intraday_scanner.config import load_config
+from intraday_scanner.config import ScannerConfig, load_config
 from intraday_scanner.errors import DataProviderError
+from intraday_scanner.models import SnapshotRow
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
+from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services.alpha_cycle_service import (
     _attach_authenticated_alpaca_structure,
     _build_modeled_cost_receipt,
@@ -89,18 +91,18 @@ def _production_row() -> dict[str, object]:
         "ticker": "NOVA",
         "feed": "iex",
         "requested_at": "2026-08-26T13:30:00+00:00",
-        "bars": [{
-            "ticker": "NOVA",
-            "timestamp": "2026-08-26T13:00:00+00:00",
-            "high": 10.0,
-            "low": 9.0,
-            "close": 9.5,
-            "volume": 1000,
-        }],
+        "bars": [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-08-26T13:00:00+00:00",
+                "high": 10.0,
+                "low": 9.0,
+                "close": 9.5,
+                "volume": 1000,
+            }
+        ],
     }
-    premarket_raw_json = json.dumps(
-        premarket_raw, sort_keys=True, separators=(",", ":")
-    )
+    premarket_raw_json = json.dumps(premarket_raw, sort_keys=True, separators=(",", ":"))
     return {
         "ticker": "NOVA",
         "strategy_id": "alphaops_v5",
@@ -114,14 +116,10 @@ def _production_row() -> dict[str, object]:
         "enrichment_was_fallback": False,
         "enrichment_observed_at": "2026-08-26T13:00:00+00:00",
         "enrichment_bar_completed_at": "2026-08-26T13:01:00+00:00",
-        "enrichment_observation_sha256": hashlib.sha256(
-            observation_json.encode()
-        ).hexdigest(),
+        "enrichment_observation_sha256": hashlib.sha256(observation_json.encode()).hexdigest(),
         "enrichment_observation_payload_json": observation_json,
         "premarket_raw_payload_json": premarket_raw_json,
-        "premarket_source_hash_sha256": hashlib.sha256(
-            premarket_raw_json.encode()
-        ).hexdigest(),
+        "premarket_source_hash_sha256": hashlib.sha256(premarket_raw_json.encode()).hexdigest(),
         "prior_daily_high": 12.0,
         "prior_daily_high_observed_at": "2026-08-25T00:00:00+00:00",
         "prior_daily_high_completed_at": "2026-08-26T00:00:00+00:00",
@@ -163,17 +161,66 @@ def test_authenticated_production_plan_uses_prior_daily_high_only() -> None:
     assert payload["target_basis_kind"] == "prior_day_resistance"
 
 
+def test_scored_candidate_preserves_authenticated_structure_evidence_end_to_end() -> None:
+    production = _production_row()
+    snapshot = SnapshotRow.from_mapping(
+        {
+            **production,
+            "company": "Nova",
+            "premarket_price": 9.5,
+            "previous_close": 8.0,
+            "premarket_volume": 1_000,
+            "dollar_volume": 9_500,
+            "gap_pct": 18.75,
+            "float_shares": 10_000_000,
+            "market_cap": 95_000_000,
+            "spread_pct": 0.5,
+            "short_float_pct": 5.0,
+            "has_news": True,
+            "catalyst_headline": "Authenticated catalyst",
+            "catalyst_url": "https://example.test/catalyst",
+            "current_halt": False,
+            "recent_offering": False,
+            "reverse_split_90d": False,
+            "source": "alpaca_iex",
+            "as_of_timestamp": "2026-08-26T13:00:00+00:00",
+        }
+    )
+
+    scored = score_snapshot(snapshot, ScannerConfig()).to_dict()
+    for field in (
+        "enrichment_observation_payload_json",
+        "premarket_raw_payload_json",
+        "premarket_source_hash_sha256",
+        "prior_daily_high",
+        "prior_daily_high_raw_payload_json",
+        "prior_daily_high_source_hash",
+    ):
+        assert scored[field] == production[field]
+
+    structured = _signal_payload(
+        _attach_authenticated_alpaca_structure(scored, decision_at="2026-08-26T13:30:00+00:00"),
+        "scan",
+        "2026-08-26T13:30:00+00:00",
+        1,
+    )
+    assert structured["plan_construction_status"] == "COMPLETE"
+    assert structured["target_1"] == 12.0
+
+
 def test_target_raw_artifact_mutation_fails_closed() -> None:
     row = _production_row()
     row["prior_daily_high_raw_payload_json"] = json.dumps(
-        {"ticker": "NOVA", "timestamp": "2026-08-25T00:00:00+00:00", "high": 99.0,
-         "bar": {"t": "2026-08-25T00:00:00Z", "h": 99.0}},
+        {
+            "ticker": "NOVA",
+            "timestamp": "2026-08-25T00:00:00+00:00",
+            "high": 99.0,
+            "bar": {"t": "2026-08-25T00:00:00Z", "h": 99.0},
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
-    enriched = _attach_authenticated_alpaca_structure(
-        row, decision_at="2026-08-26T13:30:00+00:00"
-    )
+    enriched = _attach_authenticated_alpaca_structure(row, decision_at="2026-08-26T13:30:00+00:00")
     assert "market_structure_observations" not in enriched
 
 
@@ -204,9 +251,7 @@ def test_premarket_aggregate_rehash_cannot_override_raw_bars() -> None:
 @pytest.mark.parametrize(
     ("mutation",),
     [
-        (
-            lambda raw: raw["bars"].__setitem__(0, {**raw["bars"][0], "ticker": "OTHER"}),
-        ),
+        (lambda raw: raw["bars"].__setitem__(0, {**raw["bars"][0], "ticker": "OTHER"}),),
         (
             lambda raw: raw["bars"].__setitem__(
                 0, {**raw["bars"][0], "timestamp": "2026-08-26T13:31:00+00:00"}
@@ -297,9 +342,7 @@ def test_missing_target_is_no_valid_plan() -> None:
         if key.startswith("prior_daily_high"):
             row[key] = "" if isinstance(row[key], str) else None
     payload = _signal_payload(
-        _attach_authenticated_alpaca_structure(
-            row, decision_at="2026-08-26T13:30:00+00:00"
-        ),
+        _attach_authenticated_alpaca_structure(row, decision_at="2026-08-26T13:30:00+00:00"),
         "scan",
         "2026-08-26T13:30:00+00:00",
         1,
@@ -354,9 +397,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     # being mistaken for the historical second-rounded scan timestamp.
     premarket_raw = json.loads(candidate["premarket_raw_payload_json"])
     premarket_raw["requested_at"] = cycle_timestamp
-    premarket_raw_json = json.dumps(
-        premarket_raw, sort_keys=True, separators=(",", ":")
-    )
+    premarket_raw_json = json.dumps(premarket_raw, sort_keys=True, separators=(",", ":"))
     candidate["premarket_raw_payload_json"] = premarket_raw_json
     candidate["premarket_source_hash_sha256"] = hashlib.sha256(
         premarket_raw_json.encode()
@@ -458,7 +499,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     monkeypatch.setattr(
         alpha_cycle_module,
         "_persisted_strategy_receipt_verifier",
-        lambda *args, **kwargs: (lambda _row: True),
+        lambda *args, **kwargs: lambda _row: True,
     )
     monkeypatch.setattr(
         alpha_cycle_module,
@@ -516,9 +557,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     monkeypatch.setattr(
         alpha_cycle_module,
         "_persist_run_contract",
-        lambda *args, **kwargs: SimpleNamespace(
-            to_dict=lambda: {"status": "ok"}
-        ),
+        lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"status": "ok"}),
     )
     monkeypatch.setattr(
         alpha_cycle_module,
@@ -544,9 +583,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
 
     assert enrichment_requested_at == [cycle_timestamp]
     assert result["top_signal"]["timestamp"] == cycle_timestamp
-    persisted = SQLiteScanStore(db_path).load_alpha_signals(
-        scan_id="scan-alpha-cycle-e2e"
-    )
+    persisted = SQLiteScanStore(db_path).load_alpha_signals(scan_id="scan-alpha-cycle-e2e")
     assert len(persisted) == 1
     assert persisted[0]["timestamp"] == cycle_timestamp
     assert persisted[0]["alphaops_market_structure_plan"]["status"] == "COMPLETE"
@@ -583,21 +620,21 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     _, quote_observation = _watcher_signal()
     quote_observation = dict(quote_observation)
     quote_observation.update(
-            {
-                "observation_id": "obs-alpha-cycle-e2e",
-                "signal_id": persisted[0]["signal_key"],
-                "market_date": "2026-08-26",
-                "ticker": "NOVA",
-                "requested_at": cycle_timestamp,
-                "price_type": "quote_ask",
-                "source_kind": "alpaca_market_data",
-                "provider": "alpaca",
-                "provider_status": "verified",
-                "tolerance_seconds": 360,
-                "is_usable": True,
-                "created_at": cycle_timestamp,
-                "quote_freshness_seconds": 0.123456,
-            }
+        {
+            "observation_id": "obs-alpha-cycle-e2e",
+            "signal_id": persisted[0]["signal_key"],
+            "market_date": "2026-08-26",
+            "ticker": "NOVA",
+            "requested_at": cycle_timestamp,
+            "price_type": "quote_ask",
+            "source_kind": "alpaca_market_data",
+            "provider": "alpaca",
+            "provider_status": "verified",
+            "tolerance_seconds": 360,
+            "is_usable": True,
+            "created_at": cycle_timestamp,
+            "quote_freshness_seconds": 0.123456,
+        }
     )
     quote_observation["payload_json"] = dict(quote_observation)
     store.persist_price_observations([quote_observation])
@@ -605,9 +642,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         market_date="2026-08-26", ticker="NOVA", usable_only=True
     )[0]
     assert loaded_quote["quote_ask"] == 10.0
-    watch_signal = trade_watcher_module._watch_signals(
-        store, market_date="2026-08-26"
-    )[0]
+    watch_signal = trade_watcher_module._watch_signals(store, market_date="2026-08-26")[0]
     assert luna_slate_module._source_bound_plan_observations(
         watch_signal,
         watch_signal["alphaops_market_structure_plan"],
@@ -615,9 +650,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     ), json.dumps(watch_signal, indent=2, sort_keys=True)
     lineage = trade_watcher_module._selection_lineage(watch_signal)
     assert lineage.get("selection_ids"), json.dumps(lineage, indent=2, sort_keys=True)
-    strict_lineage = luna_slate_module._frozen_lineage_for_validation(
-        watch_signal, "NOVA"
-    )
+    strict_lineage = luna_slate_module._frozen_lineage_for_validation(watch_signal, "NOVA")
     assert "_invalid" not in strict_lineage, json.dumps(
         {
             "strict_lineage": strict_lineage,
@@ -635,9 +668,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         existing_symbol_notional=0.0,
         decision_time=cycle_timestamp,
     ).to_dict()
-    direct_proof = _build_watcher_current_proof(
-        watch_signal, loaded_quote, direct_trace
-    )
+    direct_proof = _build_watcher_current_proof(watch_signal, loaded_quote, direct_trace)
     assert direct_proof is not None, json.dumps(direct_trace, indent=2, sort_keys=True)
     monkeypatch.setattr(
         trade_watcher_module,
@@ -670,16 +701,12 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     )
     assert watcher["intents"], json.dumps(watcher, indent=2, sort_keys=True)
     assert watcher["intents"][0]["action"] == "ENTER_LONG"
-    assert watcher["monitor_publication_receipt"]["publication_tier"] == (
-        "ALERTABLE_PAPER_ENTRY"
-    )
+    assert watcher["monitor_publication_receipt"]["publication_tier"] == ("ALERTABLE_PAPER_ENTRY")
     assert len(store.load_monitor_publication_receipts(market_date="2026-08-26")) == 1
 
 
 def test_gross_only_ratio_cannot_qualify_tier_two() -> None:
-    assert _valid_modeled_cost_receipt(
-        {"reward_risk_ratio": 1.5}, "a" * 64
-    ) is False
+    assert _valid_modeled_cost_receipt({"reward_risk_ratio": 1.5}, "a" * 64) is False
 
 
 def test_alpaca_daily_bar_completion_is_after_interval_start(monkeypatch) -> None:
@@ -689,11 +716,7 @@ def test_alpaca_daily_bar_completion_is_after_interval_start(monkeypatch) -> Non
     monkeypatch.setattr(
         provider,
         "_request_json",
-        lambda *_args, **_kwargs: {
-            "bars": {
-                "NOVA": [{"t": "2026-08-25T00:00:00Z", "h": 12.0}]
-            }
-        },
+        lambda *_args, **_kwargs: {"bars": {"NOVA": [{"t": "2026-08-25T00:00:00Z", "h": 12.0}]}},
     )
     result = provider.get_previous_daily_highs(
         ["NOVA"],
@@ -835,24 +858,24 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
         },
     }
     quote_raw_json = json.dumps(quote_raw, sort_keys=True, separators=(",", ":"))
-    return payload, {"quote_bid": 9.9, "quote_ask": 10.0, "price": 10.0,
-                     "observed_at": quote_raw["quote"]["t"],
-                     "quote_observed_at": quote_raw["quote"]["t"],
-                     "requested_at": "2026-08-26T13:30:00+00:00",
-                     "freshness_seconds": 0,
-                     "source": "alpaca_market_data_iex",
-                     "quote_source": "alpaca_market_data_iex",
-                     "source_bar_hash_sha256": "c" * 64,
-                     "quote_source_hash_sha256": hashlib.sha256(
-                         quote_raw_json.encode()
-                     ).hexdigest(),
-                     "quote_raw_payload_json": quote_raw_json,
-                     "is_usable": True}
+    return payload, {
+        "quote_bid": 9.9,
+        "quote_ask": 10.0,
+        "price": 10.0,
+        "observed_at": quote_raw["quote"]["t"],
+        "quote_observed_at": quote_raw["quote"]["t"],
+        "requested_at": "2026-08-26T13:30:00+00:00",
+        "freshness_seconds": 0,
+        "source": "alpaca_market_data_iex",
+        "quote_source": "alpaca_market_data_iex",
+        "source_bar_hash_sha256": "c" * 64,
+        "quote_source_hash_sha256": hashlib.sha256(quote_raw_json.encode()).hexdigest(),
+        "quote_raw_payload_json": quote_raw_json,
+        "is_usable": True,
+    }
 
 
-def _watcher_trace(
-    signal: dict[str, object], observation: dict[str, object]
-) -> dict[str, object]:
+def _watcher_trace(signal: dict[str, object], observation: dict[str, object]) -> dict[str, object]:
     decision = evaluate_v5_official_paper(
         signal,
         observation,
@@ -877,9 +900,7 @@ def test_watcher_proof_requires_valid_frozen_lineage_and_strict_identity() -> No
         {**signal, "current_price": observation["quote_ask"], "watcher_current_proof": tampered}
     )
     no_lineage = {
-        key: value
-        for key, value in signal.items()
-        if key != "frozen_ranked_research_slate"
+        key: value for key, value in signal.items() if key != "frozen_ranked_research_slate"
     }
     assert _build_watcher_current_proof(no_lineage, observation, trace) is None
     bad_slate = dict(signal["frozen_ranked_research_slate"])
@@ -915,8 +936,10 @@ def test_watcher_rejects_wrong_account_quote_ticker_plan_and_entry_window() -> N
                 mutated["evaluate_v5_official_paper_trace"]["plan_hash_sha256"] = mutation[
                     "plan_hash_sha256"
                 ]
-        for key, hash_key in (("quote_receipt", "quote_hash_sha256"),
-                              ("portfolio_receipt", "portfolio_hash_sha256")):
+        for key, hash_key in (
+            ("quote_receipt", "quote_hash_sha256"),
+            ("portfolio_receipt", "portfolio_hash_sha256"),
+        ):
             mutated[hash_key] = hashlib.sha256(
                 json.dumps(mutated[key], sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
@@ -956,14 +979,16 @@ def test_alpaca_quote_contract_survives_collect_persist_load(monkeypatch, tmp_pa
             return None
 
         def get_minute_bars(self, symbols, start, end, config):
-            return [{
-                "ticker": symbols[0],
-                "timestamp": "2026-08-26T12:59:00Z",
-                "high": 10.0,
-                "low": 9.0,
-                "close": 10.0,
-                "volume": 100,
-            }]
+            return [
+                {
+                    "ticker": symbols[0],
+                    "timestamp": "2026-08-26T12:59:00Z",
+                    "high": 10.0,
+                    "low": 9.0,
+                    "close": 10.0,
+                    "volume": 100,
+                }
+            ]
 
         def get_latest_quotes(self, symbols, config):
             raw = {"t": "2026-08-26T13:00:00Z", "bp": 10.0, "ap": 10.1}
@@ -1023,9 +1048,12 @@ def test_alpaca_quote_contract_survives_collect_persist_load(monkeypatch, tmp_pa
         persist=True,
     )
     assert degraded["usable_count"] == 1
-    assert "quote_bid" not in SQLiteScanStore(db_path).load_price_observations(
-        market_date="2026-08-26", ticker="NOVA", usable_only=True
-    )[0]
+    assert (
+        "quote_bid"
+        not in SQLiteScanStore(db_path).load_price_observations(
+            market_date="2026-08-26", ticker="NOVA", usable_only=True
+        )[0]
+    )
 
 
 def test_quote_credential_validation_failure_preserves_bar_monitoring(
@@ -1043,14 +1071,16 @@ def test_quote_credential_validation_failure_preserves_bar_monitoring(
                 raise DataProviderError("quote credentials unavailable")
 
         def get_minute_bars(self, symbols, start, end, config):
-            return [{
-                "ticker": symbols[0],
-                "timestamp": "2026-08-26T12:59:00Z",
-                "high": 10.0,
-                "low": 9.0,
-                "close": 10.0,
-                "volume": 100,
-            }]
+            return [
+                {
+                    "ticker": symbols[0],
+                    "timestamp": "2026-08-26T12:59:00Z",
+                    "high": 10.0,
+                    "low": 9.0,
+                    "close": 10.0,
+                    "volume": 100,
+                }
+            ]
 
     monkeypatch.setattr(price_observation_module, "AlpacaProvider", FailingQuoteCredentialsAlpaca)
     db_path = tmp_path / "credential-outage.sqlite"
@@ -1095,9 +1125,7 @@ def test_quote_credential_validation_failure_preserves_bar_monitoring(
     assert exit_decision["state"] == "PAPER_OPEN"
 
 
-def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(
-    monkeypatch, tmp_path
-) -> None:
+def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, tmp_path) -> None:
     signal, _ = _watcher_signal()
     signal["scan_id"] = "scan-watcher"
     signal["market_date"] = "2026-08-26"
@@ -1134,30 +1162,32 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(
     store = SQLiteScanStore(tmp_path / "operational.sqlite")
     store.persist_historical_signals([{**signal, "raw_payload_json": signal}])
     store.persist_signal_selections(
-        [{
-            "selection_id": signal["selection_id"],
-            "scan_id": "scan-watcher",
-            "signal_id": signal["signal_id"],
-            "ticker": "NOVA",
-            "rank": 1,
-            "strategy_id": "alphaops_v5",
-            "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
-            "cohort": "official_telegram",
-            "decision": "clean_edge",
-            "selected_at": "2026-08-26T13:20:00+00:00",
-            "event_key": "alphaops:scan-watcher:alpha_morning_watch",
-            "body_sha256": "watcher-body",
-            "payload_json": {
-                "signal": signal,
-                "frozen_ranked_research_slate": slate,
-                "frozen_slate_lineage": lineage,
-            },
-        }]
+        [
+            {
+                "selection_id": signal["selection_id"],
+                "scan_id": "scan-watcher",
+                "signal_id": signal["signal_id"],
+                "ticker": "NOVA",
+                "rank": 1,
+                "strategy_id": "alphaops_v5",
+                "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
+                "cohort": "official_telegram",
+                "decision": "clean_edge",
+                "selected_at": "2026-08-26T13:20:00+00:00",
+                "event_key": "alphaops:scan-watcher:alpha_morning_watch",
+                "body_sha256": "watcher-body",
+                "payload_json": {
+                    "signal": signal,
+                    "frozen_ranked_research_slate": slate,
+                    "frozen_slate_lineage": lineage,
+                },
+            }
+        ]
     )
     persisted_signal = store.load_historical_signals(market_date="2026-08-26")[0]
-    assert (
-        persisted_signal["raw_payload_json"].get("previous_close") == 8.0
-    ), persisted_signal["raw_payload_json"]
+    assert persisted_signal["raw_payload_json"].get("previous_close") == 8.0, persisted_signal[
+        "raw_payload_json"
+    ]
 
     class FakeAlpaca:
         def __init__(self, _config):
@@ -1167,14 +1197,16 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(
             return None
 
         def get_minute_bars(self, symbols, start, end, config):
-            return [{
-                "ticker": symbols[0],
-                "timestamp": "2026-08-26T13:29:00Z",
-                "high": 10.2,
-                "low": 9.8,
-                "close": 10.1,
-                "volume": 100,
-            }]
+            return [
+                {
+                    "ticker": symbols[0],
+                    "timestamp": "2026-08-26T13:29:00Z",
+                    "high": 10.2,
+                    "low": 9.8,
+                    "close": 10.1,
+                    "volume": 100,
+                }
+            ]
 
         def get_latest_quotes(self, symbols, config):
             raw = {
@@ -1415,9 +1447,7 @@ def _short_watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
         source_observations[role]["raw_value"] = value
         source_observations[role].pop("observation_hash", None)
         source_observations[role]["observation_hash"] = hashlib.sha256(
-            json.dumps(
-                source_observations[role], sort_keys=True, separators=(",", ":")
-            ).encode()
+            json.dumps(source_observations[role], sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     short_plan = construct_alphaops_v5_plan(
         {
@@ -1504,9 +1534,7 @@ def test_short_policy_and_paper_lifecycle_is_direction_aware(tmp_path) -> None:
     )
     assert exit_decision["state"] == "EXIT_TRIGGERED"
     assert exit_decision["intent"]["action"] == ACTION_EXIT_SHORT
-    closed, target_fill = _close_paper_position(
-        position, exit_decision["intent"], load_config()
-    )
+    closed, target_fill = _close_paper_position(position, exit_decision["intent"], load_config())
     assert target_fill["side"] == "BUY_TO_COVER"
     assert closed["realized_pnl"] > 0
 
@@ -1533,9 +1561,7 @@ def test_short_policy_and_paper_lifecycle_is_direction_aware(tmp_path) -> None:
         scanner_config=load_config(),
     )
     assert stop_decision["state"] == "EXIT_TRIGGERED"
-    stopped, stop_fill = _close_paper_position(
-        position, stop_decision["intent"], load_config()
-    )
+    stopped, stop_fill = _close_paper_position(position, stop_decision["intent"], load_config())
     assert stop_fill["side"] == "BUY_TO_COVER"
     assert stopped["realized_pnl"] < 0
 

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 
-from intraday_scanner.alpha.alert_gate import apply_alert_gates
+from intraday_scanner.alpha.alert_gate import (
+    apply_alert_gates,
+    validate_strategy_receipt_envelope,
+)
 from intraday_scanner.alpha.plan_constructor import (
     COMPLETE,
     NO_VALID_PLAN,
@@ -62,9 +66,7 @@ def _signal(target: float = 12.75) -> dict[str, object]:
             "entry": _observation(10.0, "a" * 64),
             "stop": _observation(9.0, "b" * 64, observation_kind="sourced_stop"),
             "target": {
-                **_observation(
-                    target, "c" * 64, observation_kind="prior_day_resistance"
-                ),
+                **_observation(target, "c" * 64, observation_kind="prior_day_resistance"),
                 "target_basis_kind": "sourced_resistance",
             },
         },
@@ -100,9 +102,7 @@ def test_signal_direction_overrides_constructor_default_for_short_plan() -> None
     signal["direction"] = "short"
     signal["entry_watch_level"] = 10.0
     signal["invalidation_level"] = 11.0
-    signal["market_structure_observations"]["entry"] = _observation(
-        10.0, "a" * 64
-    )
+    signal["market_structure_observations"]["entry"] = _observation(10.0, "a" * 64)
     signal["market_structure_observations"]["stop"] = _observation(
         11.0, "b" * 64, observation_kind="sourced_stop"
     )
@@ -116,6 +116,55 @@ def test_signal_direction_overrides_constructor_default_for_short_plan() -> None
     assert plan.status == COMPLETE
     assert plan.direction == "short"
     assert (plan.entry, plan.stop, plan.target) == (10.0, 11.0, 8.0)
+
+
+def test_v5_receipt_blocks_gross_only_reward_risk_from_paper_entry() -> None:
+    signal = _signal(target=11.75)
+    signal.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+
+    receipt = StrategyDecisionService(
+        code_sha="a" * 40,
+        source_identity="completed-market-feed",
+        score_threshold=0,
+    ).build_receipt(signal, decision_at="2026-08-26T13:30:00+00:00")
+
+    assert receipt.gross_reward_risk_ratio is not None
+    assert receipt.gross_reward_risk_ratio > 1.5
+    assert receipt.after_cost_reward_risk_ratio is not None
+    assert receipt.after_cost_reward_risk_ratio < 1.5
+    assert receipt.paper_entry_eligible is False
+    assert receipt.paper_entry_blockers == ("after_cost_reward_risk_below_policy",)
+
+
+def test_v2_receipt_binds_plan_and_market_structure_observations(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "b" * 40)
+    source = _signal()
+    source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+    payload = _signal_payload(source, "scan-receipt-binding", "2026-08-26T13:30:00+00:00", 1)
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=SQLiteScanStore(tmp_path / "receipt-binding.sqlite"),
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "completed-market-feed"},
+    )
+
+    assert payload["strategy_decision_receipt"]["schema_version"] == (
+        "dawnstrike.strategy_decision_receipt.v2"
+    )
+    assert validate_strategy_receipt_envelope(payload)
+
+    observations_removed = deepcopy(payload)
+    observations_removed.pop("market_structure_observations")
+    assert not validate_strategy_receipt_envelope(observations_removed)
+
+    plan_replaced = deepcopy(payload)
+    plan_replaced["alphaops_market_structure_plan"]["plan_hash_sha256"] = "0" * 64
+    plan_replaced["plan_hash_sha256"] = "0" * 64
+    assert not validate_strategy_receipt_envelope(plan_replaced)
 
 
 def test_structural_target_requires_raw_level_and_non_risk_derivation() -> None:
@@ -183,9 +232,7 @@ def test_timezone_naive_observation_timestamps_fail_closed() -> None:
 
 
 def test_timezone_naive_decision_timestamp_fails_closed() -> None:
-    plan = construct_alphaops_v5_plan(
-        _signal(), decision_at="2026-08-26T13:30:00"
-    )
+    plan = construct_alphaops_v5_plan(_signal(), decision_at="2026-08-26T13:30:00")
 
     assert plan.status == NO_VALID_PLAN
     assert plan.reason == "decision_time_invalid"
@@ -233,20 +280,18 @@ def test_every_identity_level_must_equal_raw_observation_after_hash_recompute() 
             plan = construct_alphaops_v5_plan(valid_signal)
             assert plan.status == COMPLETE
             emitted = plan.to_dict()
-            forged = dict(
-                emitted["observations"][{"entry": 0, "stop": 1, "target": 2}[role]]
-            )
+            forged = dict(emitted["observations"][{"entry": 0, "stop": 1, "target": 2}[role]])
             forged["value"] = float(forged["value"]) + 0.25
             forged.pop("observation_hash", None)
-            forged["observation_hash"] = __import__("hashlib").sha256(
-                canonical_json(forged).encode("utf-8")
-            ).hexdigest()
+            forged["observation_hash"] = (
+                __import__("hashlib").sha256(canonical_json(forged).encode("utf-8")).hexdigest()
+            )
             emitted["observations"][{"entry": 0, "stop": 1, "target": 2}[role]] = forged
             emitted[role] = forged["value"]
             emitted.pop("plan_hash_sha256", None)
-            emitted["plan_hash_sha256"] = __import__("hashlib").sha256(
-                canonical_json(emitted).encode("utf-8")
-            ).hexdigest()
+            emitted["plan_hash_sha256"] = (
+                __import__("hashlib").sha256(canonical_json(emitted).encode("utf-8")).hexdigest()
+            )
             assert is_valid_alphaops_v5_plan(emitted) is False
 
 
@@ -484,9 +529,7 @@ def test_alpha_cycle_structural_plan_preserves_hash_levels_through_alert_gate(
     assert gated["strategy_receipt_gate_blocked"] is False
 
 
-def test_strict_plan_without_provider_raw_artifact_stays_tier_one(
-    tmp_path, monkeypatch
-) -> None:
+def test_strict_plan_without_provider_raw_artifact_stays_tier_one(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "c" * 40)
     source = _signal()
     source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
@@ -522,10 +565,7 @@ def test_strict_plan_without_provider_raw_artifact_stays_tier_one(
         require_safety=True,
     )
 
-    assert (
-        apply_publication_semantics([payload], slate=slate)[0]["publication_tier"]
-        == TIER1
-    )
+    assert apply_publication_semantics([payload], slate=slate)[0]["publication_tier"] == TIER1
     published = apply_publication_semantics(
         [payload],
         slate=slate,
@@ -554,9 +594,7 @@ def test_strict_plan_without_provider_raw_artifact_stays_tier_one(
     )
 
 
-def test_tier_two_requires_the_exact_alphaops_v5_strategy_version(
-    tmp_path, monkeypatch
-) -> None:
+def test_tier_two_requires_the_exact_alphaops_v5_strategy_version(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "d" * 40)
     source = _signal()
     source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})

@@ -287,6 +287,17 @@ CANDIDATE_COLUMNS = [
     "enrichment_bar_completed_at",
     "enrichment_is_complete",
     "enrichment_observation_sha256",
+    "enrichment_observation_payload_json",
+    "prior_daily_high",
+    "prior_daily_high_observed_at",
+    "prior_daily_high_completed_at",
+    "prior_daily_high_completion_semantics",
+    "prior_daily_high_source",
+    "prior_daily_high_source_url",
+    "prior_daily_high_source_hash",
+    "prior_daily_high_raw_payload_json",
+    "premarket_raw_payload_json",
+    "premarket_source_hash_sha256",
     "raw_file_path",
     "imported_at",
 ]
@@ -533,9 +544,7 @@ class SnapshotRow:
                     "reconciliation_confidence_score",
                 )
             ),
-            evidence_confidence_version=str(
-                row.get("evidence_confidence_version") or ""
-            ).strip(),
+            evidence_confidence_version=str(row.get("evidence_confidence_version") or "").strip(),
             source_count=parse_int(row.get("source_count"), "source_count", default=1),
             score_consensus=str(row.get("score_consensus") or "single_source").strip(),
             conflict_flags=str(row.get("conflict_flags") or "").strip(),
@@ -569,15 +578,11 @@ class SnapshotRow:
                 else parse_float(row.get("core_lane_score"), "core_lane_score")
             ),
             core_lane_eligible=parse_bool(row.get("core_lane_eligible")),
-            core_coverage_receipt_id=str(
-                row.get("core_coverage_receipt_id") or ""
-            ).strip(),
+            core_coverage_receipt_id=str(row.get("core_coverage_receipt_id") or "").strip(),
             core_coverage_receipt_hash_sha256=str(
                 row.get("core_coverage_receipt_hash_sha256") or ""
             ).strip(),
-            core_coverage_receipt_status=str(
-                row.get("core_coverage_receipt_status") or ""
-            ).strip(),
+            core_coverage_receipt_status=str(row.get("core_coverage_receipt_status") or "").strip(),
             core_coverage_receipt_payload_json=str(
                 row.get("core_coverage_receipt_payload_json") or ""
             ).strip(),
@@ -596,35 +601,21 @@ class SnapshotRow:
             raw_file_path=str(row.get("raw_file_path") or "").strip(),
             imported_at=str(row.get("imported_at") or "").strip(),
             premarket_range_source=str(row.get("premarket_range_source") or "").strip(),
-            premarket_range_source_url=str(
-                row.get("premarket_range_source_url") or ""
-            ).strip(),
+            premarket_range_source_url=str(row.get("premarket_range_source_url") or "").strip(),
             premarket_price_source=str(row.get("premarket_price_source") or "").strip(),
             previous_close_source=str(row.get("previous_close_source") or "").strip(),
             premarket_high_source=str(row.get("premarket_high_source") or "").strip(),
             premarket_low_source=str(row.get("premarket_low_source") or "").strip(),
-            premarket_volume_source=str(
-                row.get("premarket_volume_source") or ""
-            ).strip(),
+            premarket_volume_source=str(row.get("premarket_volume_source") or "").strip(),
             gap_pct_source=str(row.get("gap_pct_source") or "").strip(),
             dollar_volume_source=str(row.get("dollar_volume_source") or "").strip(),
             enrichment_status=str(row.get("enrichment_status") or "").strip(),
-            enrichment_primary_source=str(
-                row.get("enrichment_primary_source") or ""
-            ).strip(),
-            enrichment_fallback_status=str(
-                row.get("enrichment_fallback_status") or ""
-            ).strip(),
-            enrichment_fallback_source=str(
-                row.get("enrichment_fallback_source") or ""
-            ).strip(),
+            enrichment_primary_source=str(row.get("enrichment_primary_source") or "").strip(),
+            enrichment_fallback_status=str(row.get("enrichment_fallback_status") or "").strip(),
+            enrichment_fallback_source=str(row.get("enrichment_fallback_source") or "").strip(),
             enrichment_was_fallback=parse_bool(row.get("enrichment_was_fallback")),
-            enrichment_observed_at=str(
-                row.get("enrichment_observed_at") or ""
-            ).strip(),
-            enrichment_bar_completed_at=str(
-                row.get("enrichment_bar_completed_at") or ""
-            ).strip(),
+            enrichment_observed_at=str(row.get("enrichment_observed_at") or "").strip(),
+            enrichment_bar_completed_at=str(row.get("enrichment_bar_completed_at") or "").strip(),
             enrichment_is_complete=parse_bool(row.get("enrichment_is_complete")),
             enrichment_observation_sha256=str(
                 row.get("enrichment_observation_sha256") or ""
@@ -637,9 +628,7 @@ class SnapshotRow:
                 if row.get("prior_daily_high") in {None, ""}
                 else parse_float(row.get("prior_daily_high"), "prior_daily_high")
             ),
-            prior_daily_high_observed_at=str(
-                row.get("prior_daily_high_observed_at") or ""
-            ).strip(),
+            prior_daily_high_observed_at=str(row.get("prior_daily_high_observed_at") or "").strip(),
             prior_daily_high_completed_at=str(
                 row.get("prior_daily_high_completed_at") or ""
             ).strip(),
@@ -647,21 +636,13 @@ class SnapshotRow:
                 row.get("prior_daily_high_completion_semantics") or ""
             ).strip(),
             prior_daily_high_source=str(row.get("prior_daily_high_source") or "").strip(),
-            prior_daily_high_source_url=str(
-                row.get("prior_daily_high_source_url") or ""
-            ).strip(),
-            prior_daily_high_source_hash=str(
-                row.get("prior_daily_high_source_hash") or ""
-            ).strip(),
+            prior_daily_high_source_url=str(row.get("prior_daily_high_source_url") or "").strip(),
+            prior_daily_high_source_hash=str(row.get("prior_daily_high_source_hash") or "").strip(),
             prior_daily_high_raw_payload_json=str(
                 row.get("prior_daily_high_raw_payload_json") or ""
             ).strip(),
-            premarket_raw_payload_json=str(
-                row.get("premarket_raw_payload_json") or ""
-            ).strip(),
-            premarket_source_hash_sha256=str(
-                row.get("premarket_source_hash_sha256") or ""
-            ).strip(),
+            premarket_raw_payload_json=str(row.get("premarket_raw_payload_json") or "").strip(),
+            premarket_source_hash_sha256=str(row.get("premarket_source_hash_sha256") or "").strip(),
         )
         snapshot.validate()
         if (
@@ -856,15 +837,13 @@ def _enrichment_observation_binding_valid(snapshot: SnapshotRow) -> bool:
             payload_volume=payload_volume,
         )
     )
-    raw_fields_match = (
-        snapshot.premarket_raw_payload_json
-        == str(payload.get("premarket_raw_payload_json") or "")
-        and snapshot.premarket_source_hash_sha256
-        == str(payload.get("premarket_source_hash_sha256") or "")
+    raw_fields_match = snapshot.premarket_raw_payload_json == str(
+        payload.get("premarket_raw_payload_json") or ""
+    ) and snapshot.premarket_source_hash_sha256 == str(
+        payload.get("premarket_source_hash_sha256") or ""
     )
     prior_fields_match = all(
-        _text_value(getattr(snapshot, snapshot_key))
-        == _text_value(payload.get(payload_key))
+        _text_value(getattr(snapshot, snapshot_key)) == _text_value(payload.get(payload_key))
         for snapshot_key, payload_key in (
             ("prior_daily_high_observed_at", "prior_daily_high_observed_at"),
             ("prior_daily_high_completed_at", "prior_daily_high_completed_at"),
@@ -876,29 +855,19 @@ def _enrichment_observation_binding_valid(snapshot: SnapshotRow) -> bool:
         )
     )
     prior_high = _observation_number(payload, "prior_daily_high")
-    prior_high_matches = (
-        (prior_high is None and snapshot.prior_daily_high is None)
-        or (
-            prior_high is not None
-            and snapshot.prior_daily_high is not None
-            and _numbers_equal(prior_high, snapshot.prior_daily_high)
-        )
+    prior_high_matches = (prior_high is None and snapshot.prior_daily_high is None) or (
+        prior_high is not None
+        and snapshot.prior_daily_high is not None
+        and _numbers_equal(prior_high, snapshot.prior_daily_high)
     )
     observation_source = str(payload.get("source") or "")
     source_fields_match = (
         snapshot.premarket_high_source == observation_source
         and snapshot.premarket_low_source == observation_source
+        and (effective_price is None or snapshot.premarket_price_source == observation_source)
+        and (payload_volume is None or snapshot.premarket_volume_source == observation_source)
         and (
-            effective_price is None
-            or snapshot.premarket_price_source == observation_source
-        )
-        and (
-            payload_volume is None
-            or snapshot.premarket_volume_source == observation_source
-        )
-        and (
-            effective_previous_close is None
-            or snapshot.previous_close_source == observation_source
+            effective_previous_close is None or snapshot.previous_close_source == observation_source
         )
         and (
             effective_price is None
@@ -921,8 +890,7 @@ def _enrichment_observation_binding_valid(snapshot: SnapshotRow) -> bool:
         and effective_price is not None
         and str(payload.get("source_url") or "") == snapshot.premarket_range_source_url
         and str(payload.get("observed_at") or "") == snapshot.enrichment_observed_at
-        and str(payload.get("bar_completed_at") or "")
-        == snapshot.enrichment_bar_completed_at
+        and str(payload.get("bar_completed_at") or "") == snapshot.enrichment_bar_completed_at
         and values_match
         and source_fields_match
         and raw_fields_match
@@ -959,8 +927,7 @@ def _observation_values_match(
         and payload_previous_close > 0
         and not _numbers_equal(
             round(
-                ((payload_latest_price - payload_previous_close) / payload_previous_close)
-                * 100,
+                ((payload_latest_price - payload_previous_close) / payload_previous_close) * 100,
                 4,
             ),
             snapshot.gap_pct,
@@ -1123,12 +1090,10 @@ class ScoredCandidate:
             "catalyst_url": self.snapshot.catalyst_url,
             "catalyst_summary": self.snapshot.catalyst_summary,
             "catalyst_tier": (
-                self.snapshot.catalyst_tier
-                or self.intelligence.get("catalyst_tier", "")
+                self.snapshot.catalyst_tier or self.intelligence.get("catalyst_tier", "")
             ),
             "catalyst_category": (
-                self.snapshot.catalyst_category
-                or self.intelligence.get("catalyst_category", "")
+                self.snapshot.catalyst_category or self.intelligence.get("catalyst_category", "")
             ),
             "catalyst_confidence": (
                 self.snapshot.catalyst_confidence
@@ -1225,6 +1190,21 @@ class ScoredCandidate:
             "enrichment_bar_completed_at": self.snapshot.enrichment_bar_completed_at,
             "enrichment_is_complete": self.snapshot.enrichment_is_complete,
             "enrichment_observation_sha256": self.snapshot.enrichment_observation_sha256,
+            "enrichment_observation_payload_json": (
+                self.snapshot.enrichment_observation_payload_json
+            ),
+            "prior_daily_high": self.snapshot.prior_daily_high,
+            "prior_daily_high_observed_at": self.snapshot.prior_daily_high_observed_at,
+            "prior_daily_high_completed_at": self.snapshot.prior_daily_high_completed_at,
+            "prior_daily_high_completion_semantics": (
+                self.snapshot.prior_daily_high_completion_semantics
+            ),
+            "prior_daily_high_source": self.snapshot.prior_daily_high_source,
+            "prior_daily_high_source_url": self.snapshot.prior_daily_high_source_url,
+            "prior_daily_high_source_hash": self.snapshot.prior_daily_high_source_hash,
+            "prior_daily_high_raw_payload_json": (self.snapshot.prior_daily_high_raw_payload_json),
+            "premarket_raw_payload_json": self.snapshot.premarket_raw_payload_json,
+            "premarket_source_hash_sha256": self.snapshot.premarket_source_hash_sha256,
         }
         if self.snapshot.field_completeness_score is not None:
             payload["field_completeness_score"] = self.snapshot.field_completeness_score
@@ -1239,6 +1219,16 @@ class ScoredCandidate:
         if self.snapshot.evidence_confidence_version:
             payload["evidence_confidence_version"] = self.snapshot.evidence_confidence_version
         payload.update(self.intelligence)
+        if self.snapshot.core_coverage_row_binding_hash_sha256:
+            # A v2 core coverage receipt seals the authenticated source prior.
+            # Keep the model-adjusted confidence visible without allowing it
+            # to overwrite the receipt-bound value consumed by publication.
+            payload["model_adjusted_source_confidence"] = payload.get(
+                "source_confidence", self.snapshot.source_confidence
+            )
+            payload["source_confidence"] = self.snapshot.source_confidence
+            payload["gap_pct"] = self.snapshot.gap_pct
+            payload["dollar_volume"] = self.snapshot.dollar_volume
         return payload
 
 

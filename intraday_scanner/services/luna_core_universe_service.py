@@ -41,9 +41,7 @@ MIN_PRODUCTION_COUNTS = {"S&P 500": 503, "Nasdaq-100": 100}
 # status and exact coverage counts remain visible to every downstream gate.
 MIN_CORE_FRESH_ROWS = 1
 CORE_COVERAGE_RECEIPT_SCHEMA_VERSION = "dawnstrike.luna.core_snapshot_coverage_receipt.v2"
-CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION = (
-    "dawnstrike.luna.core_snapshot_row_projection.v1"
-)
+CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION = "dawnstrike.luna.core_snapshot_row_projection.v1"
 CORE_COVERAGE_ROW_BINDING_FIELD = "core_coverage_row_binding_hash_sha256"
 _SYMBOL_PATTERN = __import__("re").compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 STATE_STREET_SPY_HOLDINGS_URL = (
@@ -1047,6 +1045,7 @@ _CORE_ROW_NUMERIC_FIELDS = (
     "float_shares",
     "market_cap",
     "spread_pct",
+    "source_confidence",
     "short_float_pct",
     "field_completeness_score",
     "source_reliability_prior",
@@ -1233,9 +1232,7 @@ def build_core_row_binding_projection(
         row.get("spread_pct") if row.get("spread_pct") not in {None, ""} else 0
     )
     effective_row["source_confidence"] = (
-        row.get("source_confidence")
-        if row.get("source_confidence") not in {None, ""}
-        else 0
+        row.get("source_confidence") if row.get("source_confidence") not in {None, ""} else 0
     )
     effective_row["source_count"] = (
         row.get("source_count") if row.get("source_count") not in {None, ""} else 1
@@ -1251,9 +1248,7 @@ def build_core_row_binding_projection(
     # authenticated provider source.  Canonicalize the same fallback before
     # sealing discovery so the serializer cannot invalidate an otherwise
     # unchanged receipt merely by making that derived alias explicit.
-    effective_row["preferred_source"] = str(
-        row.get("preferred_source") or row.get("source") or ""
-    )
+    effective_row["preferred_source"] = str(row.get("preferred_source") or row.get("source") or "")
     effective_row["extraction_mode"] = str(
         row.get("extraction_mode") or row.get("data_source_kind") or ""
     )
@@ -1340,12 +1335,8 @@ def build_core_row_binding_projection(
     return projection
 
 
-def core_row_binding_hash(
-    row: dict[str, Any], *, freshness_status: str | None = None
-) -> str:
-    projection = build_core_row_binding_projection(
-        row, freshness_status=freshness_status
-    )
+def core_row_binding_hash(row: dict[str, Any], *, freshness_status: str | None = None) -> str:
+    projection = build_core_row_binding_projection(row, freshness_status=freshness_status)
     return hashlib.sha256(
         json.dumps(
             projection,
@@ -1456,9 +1447,7 @@ def _classify_core_snapshot_batch(
     requested_set = set(requested_symbols)
     if isinstance(snapshots, dict):
         snapshots = [
-            {"ticker": key, **value}
-            for key, value in snapshots.items()
-            if isinstance(value, dict)
+            {"ticker": key, **value} for key, value in snapshots.items() if isinstance(value, dict)
         ]
     batch_rows: list[dict[str, Any]] = []
     for snapshot in snapshots or []:
@@ -1469,11 +1458,7 @@ def _classify_core_snapshot_batch(
 
     returned = [str(row.get("ticker") or "") for row in batch_rows]
     returned_nonempty = [ticker for ticker in returned if ticker]
-    duplicates = sorted(
-        ticker
-        for ticker, count in Counter(returned_nonempty).items()
-        if count > 1
-    )
+    duplicates = sorted(ticker for ticker, count in Counter(returned_nonempty).items() if count > 1)
     unknown = sorted(set(returned_nonempty) - requested_set)
     missing = sorted(requested_set - set(returned_nonempty))
     row_quality: list[dict[str, Any]] = []
@@ -1481,8 +1466,7 @@ def _classify_core_snapshot_batch(
     for index, row in enumerate(batch_rows):
         ticker = str(row.get("ticker") or "")
         source_verified = bool(
-            authenticated
-            and str(row.get("source") or "").lower().startswith("alpaca")
+            authenticated and str(row.get("source") or "").lower().startswith("alpaca")
         )
         freshness = _snapshot_freshness_status(
             row,
@@ -1503,8 +1487,7 @@ def _classify_core_snapshot_batch(
         {
             str(row.get("ticker") or "")
             for index, row in enumerate(batch_rows)
-            if str(row.get("ticker") or "") in requested_set
-            and row_status[index][1] == "FRESH"
+            if str(row.get("ticker") or "") in requested_set and row_status[index][1] == "FRESH"
         }
     )
     fresh_verified_symbols = sorted(
@@ -1520,8 +1503,7 @@ def _classify_core_snapshot_batch(
         {
             str(row.get("ticker") or "")
             for index, row in enumerate(batch_rows)
-            if str(row.get("ticker") or "") in requested_set
-            and row_status[index][1] == "STALE"
+            if str(row.get("ticker") or "") in requested_set and row_status[index][1] == "STALE"
         }
     )
     unknown_freshness_symbols = sorted(
@@ -1536,13 +1518,10 @@ def _classify_core_snapshot_batch(
         {
             str(row.get("ticker") or "")
             for index, row in enumerate(batch_rows)
-            if str(row.get("ticker") or "") in requested_set
-            and not row_status[index][0]
+            if str(row.get("ticker") or "") in requested_set and not row_status[index][0]
         }
     )
-    eligible_symbols = sorted(
-        set(fresh_verified_symbols) - set(duplicates)
-    )
+    eligible_symbols = sorted(set(fresh_verified_symbols) - set(duplicates))
     # A provider response containing explicit stale_data_flag=true is not
     # eligible even if its timestamp is fresh: preserve the stronger source
     # safety declaration rather than overwriting it.
@@ -1550,8 +1529,7 @@ def _classify_core_snapshot_batch(
         symbol
         for symbol in eligible_symbols
         if not any(
-            str(row.get("ticker") or "") == symbol
-            and _truthy(row.get("stale_data_flag"))
+            str(row.get("ticker") or "") == symbol and _truthy(row.get("stale_data_flag"))
             for row in batch_rows
         )
     ]
@@ -1564,14 +1542,22 @@ def _classify_core_snapshot_batch(
         ticker = str(row.get("ticker") or "")
         if ticker not in eligible_symbols or row_status[index][1] != "FRESH":
             continue
-        row["discovery_context"] = "luna_core:" + ",".join(
-            requested_memberships.get(ticker, [])
-        )
+        row["discovery_context"] = "luna_core:" + ",".join(requested_memberships.get(ticker, []))
         row["universe_lane"] = "core"
         row["evidence_lane"] = "core"
         row["core_universe_memberships"] = list(requested_memberships.get(ticker, []))
         row["source_quality_status"] = "VERIFIED"
         row["freshness_status"] = "FRESH"
+        # Authenticated Alpaca is the existing production confidence baseline
+        # in scoring. Materialize that governed prior before sealing the row
+        # so downstream scoring cannot replace an unbound zero with a
+        # decision-changing value. Preserve any explicit provider value.
+        try:
+            source_confidence = float(row.get("source_confidence") or 0.0)
+        except (TypeError, ValueError):
+            source_confidence = 0.0
+        if source_confidence <= 0:
+            row["source_confidence"] = 80.0
         effective_source_timestamp = row.get("source_timestamp") or row.get("as_of_timestamp")
         row["source_timestamp"] = effective_source_timestamp
         row["as_of_timestamp"] = row.get("as_of_timestamp") or effective_source_timestamp
@@ -1830,9 +1816,7 @@ def discover_core_universe_rows(
         rows.extend(eligible_rows)
 
     fresh_count = sum(int(item.get("fresh_count") or 0) for item in receipts)
-    fresh_verified_count = sum(
-        int(item.get("fresh_verified_count") or 0) for item in receipts
-    )
+    fresh_verified_count = sum(int(item.get("fresh_verified_count") or 0) for item in receipts)
     stale_count = sum(int(item.get("stale_count") or 0) for item in receipts)
     missing_count = sum(int(item.get("missing_count") or 0) for item in receipts)
     unknown_count = sum(int(item.get("unknown_count") or 0) for item in receipts)
@@ -1849,15 +1833,15 @@ def discover_core_universe_rows(
     )
     partial = bool(rows) and len(rows) >= minimum_rows
     limitations = sorted(
-        {
-            limitation
-            for item in receipts
-            for limitation in item.get("limitations") or []
-        }
+        {limitation for item in receipts for limitation in item.get("limitations") or []}
     )
     failed_batches = sum(1 for item in receipts if item.get("status") == "FAILED")
-    status = "READY" if complete else "PARTIAL" if partial else (
-        "BLOCKED_EXTERNAL" if failed_batches else "DATA_UNAVAILABLE"
+    status = (
+        "READY"
+        if complete
+        else "PARTIAL"
+        if partial
+        else ("BLOCKED_EXTERNAL" if failed_batches else "DATA_UNAVAILABLE")
     )
     if failed_batches:
         limitations = [
@@ -1887,12 +1871,8 @@ def discover_core_universe_rows(
         "observed_at": discovered_at.isoformat(),
         "max_age_seconds": max_snapshot_age_seconds,
         "batch_receipt_ids": [str(item["coverage_receipt_id"]) for item in receipts],
-        "batch_receipt_hashes": [
-            str(item["coverage_receipt_hash_sha256"]) for item in receipts
-        ],
-        "attempted_count": sum(
-            int(item.get("requested_count") or 0) for item in receipts
-        ),
+        "batch_receipt_hashes": [str(item["coverage_receipt_hash_sha256"]) for item in receipts],
+        "attempted_count": sum(int(item.get("requested_count") or 0) for item in receipts),
         "attempted_batch_count": len(receipts),
         "failed_batch_count": failed_batches,
         "status": status,
@@ -1928,9 +1908,7 @@ def discover_core_universe_rows(
         "duplicate_count": duplicate_count,
         "coverage_receipts": receipts,
         "coverage_receipt_ids": [str(item["coverage_receipt_id"]) for item in receipts],
-        "coverage_receipt_hashes": [
-            str(item["coverage_receipt_hash_sha256"]) for item in receipts
-        ],
+        "coverage_receipt_hashes": [str(item["coverage_receipt_hash_sha256"]) for item in receipts],
         "attempted_count": sum(int(item.get("requested_count") or 0) for item in receipts),
         "attempted_batch_count": len(receipts),
         "failed_batch_count": failed_batches,
@@ -1991,14 +1969,23 @@ def merge_core_universe_rows(
 
 
 def rank_core_universe_rows(
-    rows: Iterable[dict[str, Any]], *, max_rows: int = 100
+    rows: Iterable[dict[str, Any]],
+    *,
+    max_rows: int = 100,
+    allow_legacy_unbound: bool = False,
 ) -> list[dict[str, Any]]:
-    """Cheap core-lane eligibility/rank independent of mover gap predicates."""
+    """Cheap core-lane eligibility/rank independent of mover gap predicates.
+
+    Production callers fail closed unless each row carries the immutable v2
+    coverage receipt. The explicit legacy escape hatch exists only for
+    offline compatibility tools and tests that knowingly rank an unlabeled
+    historical row; it must never be inferred by stripping provenance fields.
+    """
 
     eligible: list[dict[str, Any]] = []
     for raw in rows or []:
         row = dict(raw)
-        if not _core_coverage_binding_valid(row):
+        if not _core_coverage_binding_valid(row, allow_legacy_unbound=allow_legacy_unbound):
             continue
         try:
             price_text = _canonical_row_decimal(row.get("premarket_price"))
@@ -2021,10 +2008,7 @@ def rank_core_universe_rows(
             or score_text is None
             or (
                 bool(row.get(CORE_COVERAGE_ROW_BINDING_FIELD))
-                and (
-                    reported_dollar_volume != score_text
-                    or bound_score != score_text
-                )
+                and (reported_dollar_volume != score_text or bound_score != score_text)
             )
         ):
             continue
@@ -2046,12 +2030,14 @@ def rank_core_universe_rows(
     )[: max(int(max_rows), 0)]
 
 
-def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
+def _core_coverage_binding_valid(
+    row: dict[str, Any], *, allow_legacy_unbound: bool = False
+) -> bool:
     """Verify production core rows still point at an immutable batch receipt.
 
-    Legacy/unit-test rows without a coverage binding remain usable by this
-    pure ranking helper.  Once discovery has attached a binding, however, a
-    missing, mutated, or cross-symbol receipt fails closed before scoring.
+    Unbound historical rows are usable only through the explicit legacy flag.
+    Once discovery has attached a binding, a missing, mutated, or cross-symbol
+    receipt fails closed before scoring.
     """
 
     marker_keys = {
@@ -2066,16 +2052,12 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         discovery_context = str(row.get("discovery_context") or "").strip().lower()
         memberships = row.get("core_universe_memberships")
         membership_marker = bool(
-            memberships
-            and (
-                not isinstance(memberships, str)
-                or bool(memberships.strip())
-            )
+            memberships and (not isinstance(memberships, str) or bool(memberships.strip()))
         )
         # Unmarked legacy rows remain usable only when they are genuinely
         # unlabeled.  A caller cannot strip the immutable receipt from a row
         # that still claims core provenance and then fall back to legacy rank.
-        return not (
+        return bool(allow_legacy_unbound) and not (
             universe_lane in {"core", "mover+core"}
             or evidence_lane == "core"
             or discovery_context.startswith("luna_core:")
@@ -2094,30 +2076,21 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         return False
     if (
         receipt.get("schema_version") != CORE_COVERAGE_RECEIPT_SCHEMA_VERSION
-        or receipt.get("row_binding_schema_version")
-        != CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION
+        or receipt.get("row_binding_schema_version") != CORE_COVERAGE_ROW_PROJECTION_SCHEMA_VERSION
         or receipt.get("coverage_receipt_hash_sha256") != receipt_hash
         or receipt.get("coverage_receipt_id") != receipt_id
         or receipt_hash != _coverage_receipt_digest(receipt)
         or receipt_id != "luna-core-coverage-" + receipt_hash[:24]
-        or str(row.get("core_coverage_receipt_status") or "") != str(
-            receipt.get("status") or ""
-        )
+        or str(row.get("core_coverage_receipt_status") or "") != str(receipt.get("status") or "")
     ):
         return False
     ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
-    requested = {
-        canonical_symbol(value) for value in receipt.get("requested_symbols") or []
-    }
-    eligible = {
-        canonical_symbol(value) for value in receipt.get("eligible_symbols") or []
-    }
+    requested = {canonical_symbol(value) for value in receipt.get("requested_symbols") or []}
+    eligible = {canonical_symbol(value) for value in receipt.get("eligible_symbols") or []}
     fresh_verified = {
         canonical_symbol(value) for value in receipt.get("fresh_verified_symbols") or []
     }
-    duplicates = {
-        canonical_symbol(value) for value in receipt.get("duplicate_symbols") or []
-    }
+    duplicates = {canonical_symbol(value) for value in receipt.get("duplicate_symbols") or []}
     if (
         not ticker
         or ticker not in requested
@@ -2149,8 +2122,7 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         for item in row_bindings
         if isinstance(item, dict)
         and canonical_symbol(item.get("ticker")) == ticker
-        and str(item.get("row_binding_hash_sha256") or "").strip().lower()
-        == binding_hash
+        and str(item.get("row_binding_hash_sha256") or "").strip().lower() == binding_hash
     ]
     if len(matching_bindings) != 1:
         # A duplicate or ambiguous ticker must never be resolved by map
@@ -2186,10 +2158,7 @@ def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
         return False
     if _canonical_row_bool(row.get("core_lane_eligible")) is not True:
         return False
-    if (
-        core_row_binding_hash(row, freshness_status=freshness_status.upper())
-        != binding_hash
-    ):
+    if core_row_binding_hash(row, freshness_status=freshness_status.upper()) != binding_hash:
         return False
     return True
 
@@ -2218,9 +2187,7 @@ def core_discovery_data_eligible(
         return False
     if "fresh_verified_count" in payload:
         try:
-            if int(payload.get("fresh_verified_count") or 0) < max(
-                int(minimum_fresh_rows), 1
-            ):
+            if int(payload.get("fresh_verified_count") or 0) < max(int(minimum_fresh_rows), 1):
                 return False
         except (TypeError, ValueError):
             return False

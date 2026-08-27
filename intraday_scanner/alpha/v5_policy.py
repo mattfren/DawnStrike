@@ -99,6 +99,77 @@ class AlphaOpsV5Policy:
 DEFAULT_V5_POLICY = AlphaOpsV5Policy()
 
 
+def modeled_alphaops_v5_plan_metrics(
+    plan: dict[str, Any],
+    *,
+    policy: AlphaOpsV5Policy = DEFAULT_V5_POLICY,
+) -> dict[str, float | str | None]:
+    """Return the frozen-plan cost and stop metrics used by V5 admission.
+
+    This intentionally excludes current-quote chase and freshness checks. It
+    lets the immutable strategy receipt state the exact static paper boundary
+    without claiming that a later watcher quote has already been observed.
+    """
+
+    direction = str(plan.get("direction") or "").strip().lower()
+    entry = _number(plan.get("entry"))
+    stop = _number(plan.get("stop"))
+    target = _number(plan.get("target"))
+    empty: dict[str, float | str | None] = {
+        "direction": direction,
+        "gross_reward_risk": None,
+        "actual_after_cost_reward_risk": None,
+        "stop_distance_pct": None,
+        "expected_entry_price": None,
+        "expected_stop_exit_price": None,
+        "expected_target_exit_price": None,
+    }
+    if (
+        direction not in {"long", "short"}
+        or entry is None
+        or stop is None
+        or target is None
+        or min(entry, stop, target) <= 0
+    ):
+        return empty
+    if direction == "short":
+        if not (stop > entry > target):
+            return empty
+        expected_entry = entry * (1 - policy.entry_slippage_bps / 10_000)
+        expected_stop = stop * (1 + policy.exit_slippage_bps / 10_000)
+        expected_target = target * (1 + policy.exit_slippage_bps / 10_000)
+        gross_reward = entry - target
+        gross_risk = stop - entry
+        reward = expected_entry - expected_target
+        risk = expected_stop - expected_entry
+        stop_distance_pct = (stop - expected_entry) / expected_entry * 100
+    else:
+        if not (target > entry > stop):
+            return empty
+        expected_entry = entry * (1 + policy.entry_slippage_bps / 10_000)
+        expected_stop = stop * (1 - policy.exit_slippage_bps / 10_000)
+        expected_target = target * (1 - policy.exit_slippage_bps / 10_000)
+        gross_reward = target - entry
+        gross_risk = entry - stop
+        reward = expected_target - expected_entry
+        risk = expected_entry - expected_stop
+        stop_distance_pct = (expected_entry - stop) / expected_entry * 100
+    commission = policy.commission_per_share_per_side * 2
+    reward -= commission
+    risk += commission
+    after_cost = reward / risk if reward > 0 and risk > 0 else None
+    gross = gross_reward / gross_risk if gross_reward > 0 and gross_risk > 0 else None
+    return {
+        "direction": direction,
+        "gross_reward_risk": _rounded(gross),
+        "actual_after_cost_reward_risk": _rounded(after_cost),
+        "stop_distance_pct": _rounded(stop_distance_pct),
+        "expected_entry_price": _rounded(expected_entry),
+        "expected_stop_exit_price": _rounded(expected_stop),
+        "expected_target_exit_price": _rounded(expected_target),
+    }
+
+
 def v5_execution_cost_model(
     *, status: CostModelStatus = CostModelStatus.PROVISIONAL
 ) -> ExecutionCostModel:
@@ -159,8 +230,7 @@ def evaluate_v5_causal_exit(
         post_entry = [
             bar
             for bar in causal_bars
-            if (timestamp := _bar_timestamp(bar)) is not None
-            and timestamp > decision_at
+            if (timestamp := _bar_timestamp(bar)) is not None and timestamp > decision_at
         ]
         if post_entry:
             last = post_entry[-1]
@@ -171,8 +241,7 @@ def evaluate_v5_causal_exit(
         post_entry = [
             bar
             for bar in causal_bars
-            if (timestamp := _bar_timestamp(bar)) is not None
-            and timestamp > decision_at
+            if (timestamp := _bar_timestamp(bar)) is not None and timestamp > decision_at
         ]
         if post_entry:
             selected = post_entry[min(2, len(post_entry) - 1)]
@@ -302,9 +371,7 @@ def evaluate_v5_official_paper(
         or str(observation.get("observed_at") or "")
     )
     equity = (
-        policy.simulated_opening_equity
-        if simulated_equity is None
-        else _number(simulated_equity)
+        policy.simulated_opening_equity if simulated_equity is None else _number(simulated_equity)
     )
     entry = _number(observation.get("price") or observation.get("current_price"))
     trigger = source.number(
@@ -344,41 +411,27 @@ def evaluate_v5_official_paper(
         # A short entry sells at the bid and an exit buys to cover at the ask;
         # both are adverse relative to the frozen structural levels.
         expected_entry = (
-            entry * (1 - policy.entry_slippage_bps / 10_000)
-            if entry is not None
-            else None
+            entry * (1 - policy.entry_slippage_bps / 10_000) if entry is not None else None
         )
         expected_stop_exit = (
-            stop * (1 + policy.exit_slippage_bps / 10_000)
-            if stop is not None
-            else None
+            stop * (1 + policy.exit_slippage_bps / 10_000) if stop is not None else None
         )
         expected_target_exit = (
-            target * (1 + policy.exit_slippage_bps / 10_000)
-            if target is not None
-            else None
+            target * (1 + policy.exit_slippage_bps / 10_000) if target is not None else None
         )
     else:
         expected_entry = (
-            entry * (1 + policy.entry_slippage_bps / 10_000)
-            if entry is not None
-            else None
+            entry * (1 + policy.entry_slippage_bps / 10_000) if entry is not None else None
         )
         expected_stop_exit = (
-            stop * (1 - policy.exit_slippage_bps / 10_000)
-            if stop is not None
-            else None
+            stop * (1 - policy.exit_slippage_bps / 10_000) if stop is not None else None
         )
         expected_target_exit = (
-            target * (1 - policy.exit_slippage_bps / 10_000)
-            if target is not None
-            else None
+            target * (1 - policy.exit_slippage_bps / 10_000) if target is not None else None
         )
     round_trip_commission = policy.commission_per_share_per_side * 2
     if direction == "short":
-        gross_reward = (
-            entry - target if target is not None and entry is not None else None
-        )
+        gross_reward = entry - target if target is not None and entry is not None else None
         gross_risk = stop - entry if stop is not None and entry is not None else None
         reward_per_share = (
             expected_entry - expected_target_exit - round_trip_commission
@@ -391,9 +444,7 @@ def evaluate_v5_official_paper(
             else None
         )
     else:
-        gross_reward = (
-            target - entry if target is not None and entry is not None else None
-        )
+        gross_reward = target - entry if target is not None and entry is not None else None
         gross_risk = entry - stop if stop is not None and entry is not None else None
         reward_per_share = (
             expected_target_exit - expected_entry - round_trip_commission
@@ -486,8 +537,7 @@ def evaluate_v5_official_paper(
     strategy_version = source.text("strategy_version")
     check(
         "strategy_contract",
-        strategy_id == policy.strategy_id
-        and strategy_version == policy.strategy_version,
+        strategy_id == policy.strategy_id and strategy_version == policy.strategy_version,
         "wrong_strategy_contract",
         observed=f"{strategy_id}:{strategy_version}",
         threshold=f"{policy.strategy_id}:{policy.strategy_version}",
@@ -640,10 +690,7 @@ def evaluate_v5_official_paper(
         bool(catalyst_text)
         and catalyst_text.lower() not in {"none", "no clear catalyst"}
         and bool(catalyst_url)
-        and (
-            catalyst_status in PASSING_STATUSES
-            or catalyst_tier in {"A", "B"}
-        )
+        and (catalyst_status in PASSING_STATUSES or catalyst_tier in {"A", "B"})
     )
     check(
         "catalyst_evidence",
@@ -690,9 +737,7 @@ def evaluate_v5_official_paper(
     observed_at = _parse_datetime(str(observation.get("observed_at") or ""))
     requested_at = _parse_datetime(at)
     no_future_bar = (
-        observed_at is not None
-        and requested_at is not None
-        and observed_at <= requested_at
+        observed_at is not None and requested_at is not None and observed_at <= requested_at
     )
     quote_usable = _boolean(observation.get("is_usable"))
     check(
@@ -722,16 +767,8 @@ def evaluate_v5_official_paper(
         and stop is not None
         and target is not None
         and (
-            (
-                direction == "long"
-                and target > expected_entry > stop > 0
-                and trigger > stop
-            )
-            or (
-                direction == "short"
-                and target < expected_entry < stop
-                and trigger < stop
-            )
+            (direction == "long" and target > expected_entry > stop > 0 and trigger > stop)
+            or (direction == "short" and target < expected_entry < stop and trigger < stop)
         )
     )
     check(
@@ -769,8 +806,7 @@ def evaluate_v5_official_paper(
     )
     check(
         "stop_distance",
-        stop_distance_pct is not None
-        and stop_distance_pct <= policy.maximum_stop_distance_pct,
+        stop_distance_pct is not None and stop_distance_pct <= policy.maximum_stop_distance_pct,
         "stop_distance_exceeds_policy",
         observed=_rounded(stop_distance_pct),
         threshold=policy.maximum_stop_distance_pct,
@@ -802,8 +838,7 @@ def evaluate_v5_official_paper(
         and dollar_volume >= policy.minimum_premarket_dollar_volume
         and spread_bps is not None
         and spread_bps <= policy.maximum_spread_bps
-        and liquidity_tier
-        in {"watchable_liquidity", "high_liquidity", "institutional_liquidity"},
+        and liquidity_tier in {"watchable_liquidity", "high_liquidity", "institutional_liquidity"},
         "liquidity_or_spread_outside_policy",
         observed={
             "dollar_volume": _rounded(dollar_volume),
@@ -820,8 +855,7 @@ def evaluate_v5_official_paper(
     check(
         "after_cost_reward_risk",
         after_cost_reward_risk is not None
-        and after_cost_reward_risk + 1e-12
-        >= policy.minimum_after_cost_reward_risk,
+        and after_cost_reward_risk + 1e-12 >= policy.minimum_after_cost_reward_risk,
         "after_cost_reward_risk_below_policy",
         observed=_rounded(after_cost_reward_risk),
         threshold=policy.minimum_after_cost_reward_risk,
@@ -835,9 +869,7 @@ def evaluate_v5_official_paper(
         else None
     )
     symbol_notional_limit = (
-        equity * policy.max_symbol_notional_pct / 100
-        if equity is not None and equity > 0
-        else None
+        equity * policy.max_symbol_notional_pct / 100 if equity is not None and equity > 0 else None
     )
     remaining_notional = (
         max(0.0, symbol_notional_limit - max(0.0, existing_symbol_notional))
@@ -851,9 +883,7 @@ def evaluate_v5_official_paper(
     )
     notional_limited_shares = (
         math.floor(remaining_notional / expected_entry)
-        if remaining_notional is not None
-        and expected_entry is not None
-        and expected_entry > 0
+        if remaining_notional is not None and expected_entry is not None and expected_entry > 0
         else 0
     )
     shares = min(risk_limited_shares, notional_limited_shares)
@@ -890,17 +920,13 @@ def evaluate_v5_official_paper(
 
     reasons = tuple(
         dict.fromkeys(
-            str(item["reason"])
-            for item in checks
-            if not item["passed"] and item["reason"]
+            str(item["reason"]) for item in checks if not item["passed"] and item["reason"]
         )
     )
     eligible = not reasons
     weighted = [item for item in checks if float(item["weight"]) > 0]
     total_weight = sum(float(item["weight"]) for item in weighted)
-    passed_weight = sum(
-        float(item["weight"]) for item in weighted if item["passed"]
-    )
+    passed_weight = sum(float(item["weight"]) for item in weighted if item["passed"])
     feasibility_score = round(
         100 * passed_weight / total_weight if total_weight else 0.0,
         2,
@@ -1006,11 +1032,7 @@ class _SignalFacts:
     def value(self, *names: str) -> Any:
         for source in self._sources:
             for name in names:
-                if (
-                    name in source
-                    and source[name] is not None
-                    and source[name] != ""
-                ):
+                if name in source and source[name] is not None and source[name] != "":
                     return source[name]
         return None
 
@@ -1075,13 +1097,7 @@ def _number(value: Any) -> float | None:
     if value in {None, ""}:
         return None
     try:
-        number = float(
-            str(value)
-            .replace("$", "")
-            .replace(",", "")
-            .replace("%", "")
-            .strip()
-        )
+        number = float(str(value).replace("$", "").replace(",", "").replace("%", "").strip())
     except (TypeError, ValueError):
         return None
     return None if math.isnan(number) or math.isinf(number) else number
@@ -1120,6 +1136,7 @@ __all__ = [
     "AlphaOpsV5Decision",
     "AlphaOpsV5Policy",
     "DEFAULT_V5_POLICY",
+    "modeled_alphaops_v5_plan_metrics",
     "alphaops_strategy_contract",
     "evaluate_v5_official_paper",
     "is_v5_active",

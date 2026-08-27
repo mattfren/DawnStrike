@@ -82,7 +82,9 @@ def evaluate_policy(
             and spec.condition_id != "valid_target_when_required"
         ):
             _append_unique(all_failures, spec.condition_id)
-            target = safety_failures if spec.category == ConditionCategory.HARD_RISK else data_failures
+            target = (
+                safety_failures if spec.category == ConditionCategory.HARD_RISK else data_failures
+            )
             _append_unique(target, spec.condition_id)
             continue
         if (
@@ -124,6 +126,8 @@ def evaluate_policy(
             by_id.get(spec.condition_id) is None or by_id[spec.condition_id].status not in _PASSING
         )
     ]
+    if not paper_entry:
+        _append_unique(paper_blockers, "paper_entry_policy")
     if strategy_id == "bullish_fvg_continuation":
         proxy = by_id.get("daily_ohlc_proxy")
         if proxy is not None and proxy.status != ConditionStatus.NOT_APPLICABLE:

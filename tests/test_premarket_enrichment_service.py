@@ -48,12 +48,8 @@ def _payload(*, timestamps, highs, lows, closes, previous_close=5.0):
                         "exchangeTimezoneName": "America/New_York",
                         "currentTradingPeriod": {
                             "pre": {
-                                "start": int(
-                                    datetime(2026, 7, 13, 8, 0, tzinfo=UTC).timestamp()
-                                ),
-                                "end": int(
-                                    datetime(2026, 7, 13, 13, 30, tzinfo=UTC).timestamp()
-                                ),
+                                "start": int(datetime(2026, 7, 13, 8, 0, tzinfo=UTC).timestamp()),
+                                "end": int(datetime(2026, 7, 13, 13, 30, tzinfo=UTC).timestamp()),
                             }
                         },
                     },
@@ -94,8 +90,7 @@ def _row(**overrides):
         "fixture_only": False,
         "manual_uploaded_data": False,
         "coverage_warning": (
-            "previous_close_unavailable;premarket_range_unavailable_price_used;"
-            "sec_risk_unverified"
+            "previous_close_unavailable;premarket_range_unavailable_price_used;sec_risk_unverified"
         ),
     }
     row.update(overrides)
@@ -380,9 +375,7 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
     assert snapshot.enrichment_observation_sha256 == row["enrichment_observation_sha256"]
 
     persisted_tampered = snapshot.to_dict()
-    persisted_observation = json.loads(
-        persisted_tampered["enrichment_observation_payload_json"]
-    )
+    persisted_observation = json.loads(persisted_tampered["enrichment_observation_payload_json"])
     persisted_observation["premarket_high"] = 99.0
     persisted_tampered["enrichment_observation_payload_json"] = json.dumps(
         persisted_observation,
@@ -411,6 +404,12 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
     candidate = score_snapshot(snapshot, ScannerConfig()).to_dict()
     assert candidate["freshness_status"] == "FRESH"
     assert candidate["evidence_lane"] == "mover"
+    assert (
+        candidate["enrichment_observation_payload_json"]
+        == row["enrichment_observation_payload_json"]
+    )
+    assert candidate["premarket_raw_payload_json"] == row["premarket_raw_payload_json"]
+    assert candidate["premarket_source_hash_sha256"] == row["premarket_source_hash_sha256"]
     lineage = candidate["source_lineage"]
     assert lineage["freshness_status"] == "FRESH"
     assert lineage["premarket_observation"]["freshness_status"] == "FRESH"
@@ -454,9 +453,7 @@ def test_tampered_alpaca_observation_payload_does_not_claim_freshness(monkeypatc
     tampered = replace(
         valid,
         premarket_raw_payload_json=tampered_raw_json,
-        premarket_source_hash_sha256=hashlib.sha256(
-            tampered_raw_json.encode("utf-8")
-        ).hexdigest(),
+        premarket_source_hash_sha256=hashlib.sha256(tampered_raw_json.encode("utf-8")).hexdigest(),
     )
     monkeypatch.setattr(
         enrichment_service,
@@ -694,18 +691,14 @@ def test_ranking_snapshot_contains_only_verified_selected_rows(tmp_path: Path):
 
     with Path(result["paths"]["snapshot"]).open(encoding="utf-8", newline="") as handle:
         ranking_rows = list(csv.DictReader(handle))
-    with Path(result["paths"]["all_rows_snapshot"]).open(
-        encoding="utf-8", newline=""
-    ) as handle:
+    with Path(result["paths"]["all_rows_snapshot"]).open(encoding="utf-8", newline="") as handle:
         audit_rows = list(csv.DictReader(handle))
 
     assert [row["ticker"] for row in ranking_rows] == ["ALFA"]
     assert {row["ticker"] for row in audit_rows} == {"ALFA", "NOVA"}
     source_alfa = next(row for row in audit_rows if row["ticker"] == "ALFA")
     assert source_alfa["premarket_high"] == str(_row(ticker="ALFA")["premarket_high"])
-    assert source_alfa["premarket_volume"] == str(
-        _row(ticker="ALFA")["premarket_volume"]
-    )
+    assert source_alfa["premarket_volume"] == str(_row(ticker="ALFA")["premarket_volume"])
     assert source_alfa["premarket_range_source"] == ""
 
     ranked = SnapshotRow.from_mapping(ranking_rows[0])
@@ -723,15 +716,9 @@ def test_ranking_snapshot_contains_only_verified_selected_rows(tmp_path: Path):
     candidate = score_snapshot(ranked, ScannerConfig()).to_dict()
     lineage = candidate["source_lineage"]
     assert candidate["target_basis_source"].endswith("/v2/stocks/bars")
-    assert json.loads(candidate["field_sources"])["premarket_high"] == (
-        "alpaca_market_data_iex"
-    )
-    assert lineage["premarket_observation"]["source"] == (
-        "alpaca_market_data_iex"
-    )
-    assert lineage["premarket_observation"]["bar_completed_at"] == (
-        "2026-07-13T12:56:00+00:00"
-    )
+    assert json.loads(candidate["field_sources"])["premarket_high"] == ("alpaca_market_data_iex")
+    assert lineage["premarket_observation"]["source"] == ("alpaca_market_data_iex")
+    assert lineage["premarket_observation"]["bar_completed_at"] == ("2026-07-13T12:56:00+00:00")
     assert lineage["premarket_observation"]["observation_sha256"] == (
         ranked.enrichment_observation_sha256
     )
@@ -761,9 +748,7 @@ def test_rehearsal_mode_never_fetches_market_data_and_stays_fixture_only():
 
     assert fetched is False
     assert result["summary"]["status"] == "rehearsal_only"
-    assert result["summary"]["ranking_policy"] == (
-        "fixture_rehearsal_only_non_learning"
-    )
+    assert result["summary"]["ranking_policy"] == ("fixture_rehearsal_only_non_learning")
     assert len(result["ranking_rows"]) == 2
     assert all(row["fixture_only"] is True for row in result["ranking_rows"])
 
@@ -830,9 +815,7 @@ def test_partial_alpaca_observation_preserves_exact_per_field_sources(tmp_path: 
     assert sources["premarket_high"] == "alpaca_market_data_iex"
     assert sources["premarket_low"] == "alpaca_market_data_iex"
     assert sources["premarket_volume"] == "alpaca_market_data_iex"
-    assert sources["dollar_volume"] == (
-        "derived:stockanalysis_premarket+alpaca_market_data_iex"
-    )
+    assert sources["dollar_volume"] == ("derived:stockanalysis_premarket+alpaca_market_data_iex")
 
 
 def test_alpaca_credential_failure_fails_closed_without_calling_yahoo():

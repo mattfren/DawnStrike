@@ -248,9 +248,7 @@ def test_alpha_no_trade_length_limit_preserves_slate_and_research_only_footer():
     )
 
     assert len(text) <= 4096
-    assert text.endswith(
-        "Radar outcomes are tracked after close. No orders placed. Research only."
-    )
+    assert text.endswith("Radar outcomes are tracked after close. No orders placed. Research only.")
     assert "Slate symbols (5/5): RANK1, RANK2, RANK3, RANK4, RANK5" in text
     assert "No-trade reason: current safety gate blocked" in text
 
@@ -441,7 +439,8 @@ def test_core_discovery_uses_only_ready_members_and_merges_lanes():
 
 def test_core_lane_eligibility_does_not_apply_mover_gap_floor():
     ranked = rank_core_universe_rows(
-        [{"ticker": "FLAT", "premarket_price": 10, "premarket_volume": 100, "gap_pct": 0}]
+        [{"ticker": "FLAT", "premarket_price": 10, "premarket_volume": 100, "gap_pct": 0}],
+        allow_legacy_unbound=True,
     )
     assert [row["ticker"] for row in ranked] == ["FLAT"]
 
@@ -456,7 +455,7 @@ def test_production_scheduler_exposes_governed_core_manifest_path():
     assert '"--market-date", $MarketDate' in script
     assert "if ($CoreUniverseManifest)" in script
     assert "lane-local" in script
-    assert "$CoreUniverseManifest = \"\"" in script
+    assert '$CoreUniverseManifest = ""' in script
 
 
 def test_alpha_watch_length_limit_preserves_slate_blockers_and_no_broker_footer():
