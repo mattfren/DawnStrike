@@ -490,12 +490,24 @@ def format_alpha_no_trade(
             "NO TRADE / BLOCKED REASONS",
             f"- {reason}",
             f"Next: {next_action}",
-            "",
-            "Radar outcomes are tracked after close. No orders placed.",
         ]
     )
-    return _clip(
-        "\n".join(lines),
+    radar_symbols = [
+        str(row.get("ticker") or "").strip().upper()
+        for row in radar
+        if str(row.get("ticker") or "").strip()
+    ]
+    invariant_lines = [
+        (
+            f"Slate symbols ({len(radar)}/{total}): "
+            + (", ".join(radar_symbols) if radar_symbols else "None")
+        ),
+        f"No-trade reason: {_truncate(str(reason), 180)}",
+        "Radar outcomes are tracked after close. No orders placed. Research only.",
+    ]
+    return _clip_preserving_suffix(
+        "\n".join(lines).strip(),
+        "\n".join(invariant_lines),
         max_chars,
     )
 

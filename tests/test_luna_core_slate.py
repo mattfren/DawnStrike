@@ -227,6 +227,34 @@ def test_alpha_no_trade_shows_all_five_frozen_research_candidates():
         assert f"RANK{index}" in text
 
 
+def test_alpha_no_trade_length_limit_preserves_slate_and_research_only_footer():
+    rows = [
+        {
+            "ticker": f"RANK{index}",
+            "publication_tier": TIER1,
+            "research_only": True,
+            "broker_execution": "disabled",
+            "radar_reason": "conditional evidence " + ("x" * 200),
+        }
+        for index in range(1, 6)
+    ]
+
+    text = format_alpha_no_trade(
+        reason="current safety gate blocked " + ("r" * 5_000),
+        next_action="wait for verified evidence " + ("n" * 5_000),
+        research_signals=rows,
+        research_total=5,
+        max_chars=4096,
+    )
+
+    assert len(text) <= 4096
+    assert text.endswith(
+        "Radar outcomes are tracked after close. No orders placed. Research only."
+    )
+    assert "Slate symbols (5/5): RANK1, RANK2, RANK3, RANK4, RANK5" in text
+    assert "No-trade reason: current safety gate blocked" in text
+
+
 def test_alpha_watch_keeps_explicit_empty_slate_authoritative():
     candidate = {
         "ticker": "CURRENT",
