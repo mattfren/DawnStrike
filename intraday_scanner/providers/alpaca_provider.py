@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
@@ -305,6 +306,98 @@ class AlpacaProvider(MarketDataProvider):
         snapshots = self.get_premarket_snapshot(symbols, config)
         return {snapshot.ticker: snapshot.previous_close for snapshot in snapshots}
 
+    def get_previous_daily_highs(
+        self,
+        symbols: Sequence[str],
+        *,
+        market_date: str,
+        config: ScannerConfig,
+        available_at: datetime | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return the latest completed daily high before ``market_date``.
+
+        This is a read-only market-data call.  The returned source hash covers
+        the exact ticker/bar payload so a structural target can be traced back
+        to the authenticated Alpaca response and cannot silently become a
+        range- or RR-derived level.
+        """
+
+        clean = sorted({str(symbol).upper() for symbol in symbols if str(symbol).strip()})
+        if not clean:
+            return {}
+        try:
+            current = date.fromisoformat(str(market_date)[:10])
+        except ValueError as exc:
+            raise DataProviderError("Alpaca previous daily high market date is invalid") from exc
+        start = (current - timedelta(days=10)).isoformat()
+        end = current.isoformat()
+        payload = self._request_json(
+            "/v2/stocks/bars",
+            {
+                "symbols": ",".join(clean),
+                "timeframe": "1Day",
+                "start": start,
+                "end": end,
+                "feed": self.feed,
+                "limit": str(config.historical_intraday_page_limit),
+                "sort": "asc",
+            },
+            config,
+        )
+        grouped = payload.get("bars") if isinstance(payload, dict) else {}
+        if not isinstance(grouped, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for symbol in clean:
+            bars = grouped.get(symbol) or grouped.get(symbol.upper()) or []
+            if not isinstance(bars, list):
+                continue
+            candidates = []
+            for bar in bars:
+                if not isinstance(bar, dict):
+                    continue
+                timestamp = str(bar.get("t") or bar.get("timestamp") or "").strip()
+                high = _first_number(bar.get("h"), bar.get("high"), 0.0)
+                if not timestamp or high <= 0:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    parsed = parsed.astimezone(timezone.utc)
+                except ValueError:
+                    continue
+                if parsed.date() >= current:
+                    continue
+                candidates.append((parsed, high, bar))
+            if not candidates:
+                continue
+            parsed, high, bar = max(candidates, key=lambda item: item[0])
+            raw = {"ticker": symbol, "timestamp": parsed.isoformat(), "high": high, "bar": bar}
+            raw_json = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            source_hash = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()
+            # This is the authenticated fetch/availability boundary, not an
+            # assertion that Alpaca's daily interval completed at midnight.
+            if available_at is None:
+                completed_at = datetime.now(timezone.utc)
+            elif available_at.tzinfo is None:
+                completed_at = available_at.replace(tzinfo=timezone.utc)
+            else:
+                completed_at = available_at.astimezone(timezone.utc)
+            result[symbol] = {
+                "ticker": symbol,
+                "high": high,
+                "observed_at": parsed.isoformat(),
+                # Alpaca daily-bar ``t`` is an interval start, not completion.
+                "completed_at": completed_at.isoformat(),
+                "completion_semantics": "availability_boundary",
+                "source": f"alpaca_market_data_{self.feed}",
+                "source_url": f"{self.base_url}/v2/stocks/bars",
+                "source_hash": source_hash,
+                "raw_payload_json": raw_json,
+            }
+        return result
+
     def get_latest_quotes(
         self,
         symbols: Sequence[str],
@@ -332,6 +425,12 @@ class AlpacaProvider(MarketDataProvider):
             ask = _first_number(row.get("ap"), 0.0)
             if bid <= 0 or ask < bid:
                 continue
+            raw_json = json.dumps(
+                {"ticker": symbol, "quote": row},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
             output[symbol] = {
                 "ticker": symbol,
                 "timestamp": str(row.get("t") or ""),
@@ -339,6 +438,8 @@ class AlpacaProvider(MarketDataProvider):
                 "ask": ask,
                 "spread_pct": _spread_pct(bid, ask),
                 "source": f"alpaca_market_data_{self.feed}",
+                "raw_payload_json": raw_json,
+                "source_hash_sha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
             }
         return output
 

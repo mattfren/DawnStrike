@@ -57,6 +57,19 @@ class PremarketObservation:
     source: str = YAHOO_SOURCE_NAME
     source_url: str = ""
     failure_reason: str = ""
+    # The target leg is deliberately a separate, independently observed
+    # completed session high.  It is never inferred from the premarket range
+    # or from reward/risk arithmetic.
+    prior_daily_high: float | None = None
+    prior_daily_high_observed_at: str = ""
+    prior_daily_high_completed_at: str = ""
+    prior_daily_high_completion_semantics: str = ""
+    prior_daily_high_source: str = ""
+    prior_daily_high_source_url: str = ""
+    prior_daily_high_source_hash: str = ""
+    prior_daily_high_raw_payload_json: str = ""
+    premarket_raw_payload_json: str = ""
+    premarket_source_hash_sha256: str = ""
 
     @property
     def is_usable(self) -> bool:
@@ -67,6 +80,17 @@ class PremarketObservation:
             and self.premarket_high is not None
             and self.premarket_low is not None
             and self.premarket_high > self.premarket_low > 0
+        )
+
+    @property
+    def has_prior_daily_high(self) -> bool:
+        return bool(
+            self.prior_daily_high is not None
+            and self.prior_daily_high > 0
+            and self.prior_daily_high_observed_at
+            and self.prior_daily_high_completed_at
+            and self.prior_daily_high_source
+            and self.prior_daily_high_source_hash
         )
 
 
@@ -366,10 +390,12 @@ def observation_from_alpaca_bars(
     requested_at: datetime,
     max_age_seconds: int,
     feed: str,
+    prior_daily_high: dict[str, Any] | None = None,
 ) -> PremarketObservation:
     """Build one point-in-time premarket observation from Alpaca IEX bars."""
 
     source_name = f"alpaca_market_data_{feed.lower()}"
+    prior = _normalize_prior_daily_high(ticker, prior_daily_high, source_name)
     requested_epoch = int(_as_utc(requested_at).timestamp())
     session_start, session_end = _premarket_session_bounds({}, requested_at)
     eligible: list[tuple[int, dict[str, Any]]] = []
@@ -388,7 +414,18 @@ def observation_from_alpaca_bars(
             source=source_name,
             source_url=ALPACA_BARS_URL,
             status="missing_premarket_bars",
+            prior_daily_high=prior,
         )
+    premarket_raw = {
+        "ticker": str(ticker).upper(),
+        "feed": feed.lower(),
+        "requested_at": _as_utc(requested_at).isoformat(),
+        "bars": [row for _, row in sorted(eligible, key=lambda item: item[0])],
+    }
+    premarket_raw_json = json.dumps(
+        premarket_raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    premarket_hash = hashlib.sha256(premarket_raw_json.encode("utf-8")).hexdigest()
     usable_highs = [
         value
         for _, row in eligible
@@ -406,6 +443,7 @@ def observation_from_alpaca_bars(
             source=source_name,
             source_url=ALPACA_BARS_URL,
             status="missing_range_values",
+            prior_daily_high=prior,
         )
     observed_epoch, latest_bar = max(eligible, key=lambda item: item[0])
     completed_epoch = observed_epoch + ONE_MINUTE_SECONDS
@@ -423,6 +461,9 @@ def observation_from_alpaca_bars(
             source=source_name,
             source_url=ALPACA_BARS_URL,
             failure_reason=f"latest Alpaca premarket bar is {age_seconds}s old",
+            premarket_raw_payload_json=premarket_raw_json,
+            premarket_source_hash_sha256=premarket_hash,
+            **prior,
         )
     high = max(usable_highs)
     low = min(usable_lows)
@@ -453,6 +494,9 @@ def observation_from_alpaca_bars(
         source=source_name,
         source_url=ALPACA_BARS_URL,
         failure_reason=("" if status == "verified" else "observed high did not exceed low"),
+        premarket_raw_payload_json=premarket_raw_json,
+        premarket_source_hash_sha256=premarket_hash,
+        **prior,
     )
 
 
@@ -474,6 +518,21 @@ def _observe_alpaca_tickers(
             config,
         )
         snapshots = active_provider.get_premarket_snapshot(tickers, config)
+        prior_daily_highs = {}
+        prior_reader = getattr(active_provider, "get_previous_daily_highs", None)
+        if callable(prior_reader):
+            market_date = _as_utc(requested_at).astimezone(EASTERN).date().isoformat()
+            try:
+                prior_daily_highs = prior_reader(
+                    tickers,
+                    market_date=market_date,
+                    config=config,
+                    available_at=_as_utc(requested_at),
+                ) or {}
+            except TypeError:
+                # Keep compatibility with narrow test/provider adapters while
+                # retaining the same authenticated read-only contract.
+                prior_daily_highs = prior_reader(tickers, market_date, config) or {}
     except (DataProviderError, OSError, TypeError, ValueError) as exc:
         raise DataProviderError(
             "Systemic Alpaca premarket enrichment failure; "
@@ -497,6 +556,7 @@ def _observe_alpaca_tickers(
             requested_at=requested_at,
             max_age_seconds=config.premarket_enrichment_max_age_seconds,
             feed=config.alpaca_data_feed,
+            prior_daily_high=(prior_daily_highs or {}).get(ticker),
         )
         for ticker in tickers
     }
@@ -588,8 +648,19 @@ def _apply_observation(
     output["enrichment_bar_completed_at"] = ""
     output["enrichment_is_complete"] = False
     output["enrichment_observation_sha256"] = ""
+    output["enrichment_observation_payload_json"] = ""
     output["premarket_range_source"] = ""
     output["premarket_range_source_url"] = ""
+    output["prior_daily_high"] = None
+    output["prior_daily_high_observed_at"] = ""
+    output["prior_daily_high_completed_at"] = ""
+    output["prior_daily_high_completion_semantics"] = ""
+    output["prior_daily_high_source"] = ""
+    output["prior_daily_high_source_url"] = ""
+    output["prior_daily_high_source_hash"] = ""
+    output["prior_daily_high_raw_payload_json"] = ""
+    output["premarket_raw_payload_json"] = ""
+    output["premarket_source_hash_sha256"] = ""
     if not enabled:
         output["enrichment_status"] = "disabled"
         return output
@@ -605,6 +676,21 @@ def _apply_observation(
     output["enrichment_bar_completed_at"] = observation.bar_completed_at
     output["enrichment_is_complete"] = observation.is_complete
     output["enrichment_observation_sha256"] = _observation_sha256(observation)
+    output["enrichment_observation_payload_json"] = json.dumps(
+        asdict(observation), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    output["prior_daily_high"] = observation.prior_daily_high
+    output["prior_daily_high_observed_at"] = observation.prior_daily_high_observed_at
+    output["prior_daily_high_completed_at"] = observation.prior_daily_high_completed_at
+    output["prior_daily_high_completion_semantics"] = (
+        observation.prior_daily_high_completion_semantics
+    )
+    output["prior_daily_high_source"] = observation.prior_daily_high_source
+    output["prior_daily_high_source_url"] = observation.prior_daily_high_source_url
+    output["prior_daily_high_source_hash"] = observation.prior_daily_high_source_hash
+    output["prior_daily_high_raw_payload_json"] = observation.prior_daily_high_raw_payload_json
+    output["premarket_raw_payload_json"] = observation.premarket_raw_payload_json
+    output["premarket_source_hash_sha256"] = observation.premarket_source_hash_sha256
     if fallback_status.startswith("applied") and observation.source != primary_source:
         output["enrichment_fallback_source"] = observation.source
         output["enrichment_was_fallback"] = True
@@ -706,7 +792,9 @@ def _failed_observation(
     source: str = YAHOO_SOURCE_NAME,
     source_url: str = "",
     status: str = "provider_error",
+    prior_daily_high: dict[str, Any] | None = None,
 ) -> PremarketObservation:
+    prior = _normalize_prior_daily_high(ticker, prior_daily_high, source)
     return PremarketObservation(
         ticker=ticker,
         status=status,
@@ -716,7 +804,121 @@ def _failed_observation(
             or (yahoo_chart_url(ticker) if source == YAHOO_SOURCE_NAME else "")
         ),
         failure_reason=reason[:500],
+        **prior,
     )
+
+
+def _normalize_prior_daily_high(
+    ticker: str,
+    value: dict[str, Any] | None,
+    default_source: str,
+) -> dict[str, Any]:
+    """Normalize provider evidence without accepting a guessed target."""
+
+    if not isinstance(value, dict):
+        return {}
+    observed = str(
+        value.get("observed_at")
+        or value.get("prior_daily_high_observed_at")
+        or value.get("timestamp")
+        or value.get("time")
+        or ""
+    ).strip()
+    completed = str(
+        value.get("completed_at")
+        or value.get("prior_daily_high_completed_at")
+        or observed
+    ).strip()
+    completion_semantics = str(
+        value.get("completion_semantics")
+        or value.get("prior_daily_high_completion_semantics")
+        or ""
+    ).strip()
+    source = str(
+        value.get("source") or value.get("prior_daily_high_source") or default_source
+    ).strip()
+    source_url = str(
+        value.get("source_url")
+        or value.get("prior_daily_high_source_url")
+        or ALPACA_BARS_URL
+    ).strip()
+    source_hash = str(
+        value.get("source_hash")
+        or value.get("source_hash_sha256")
+        or value.get("prior_daily_high_source_hash")
+        or ""
+    ).strip().lower()
+    high = _float(
+        value.get("high") or value.get("value") or value.get("prior_daily_high")
+    )
+    provider_ticker = str(value.get("ticker") or ticker).upper()
+    raw_payload_json = str(
+        value.get("raw_payload_json")
+        or value.get("prior_daily_high_raw_payload_json")
+        or ""
+    ).strip()
+    raw_payload: dict[str, Any] | None = None
+    if raw_payload_json:
+        try:
+            parsed_raw = json.loads(raw_payload_json)
+            if not isinstance(parsed_raw, dict):
+                return {}
+            raw_payload = parsed_raw
+            canonical_raw = json.dumps(
+                raw_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if hashlib.sha256(canonical_raw.encode("utf-8")).hexdigest() != source_hash:
+            return {}
+        raw_ticker = str(raw_payload.get("ticker") or "").upper()
+        raw_timestamp = str(
+            raw_payload.get("timestamp") or raw_payload.get("observed_at") or ""
+        ).strip()
+        raw_high = _float(raw_payload.get("high"))
+        raw_bar = raw_payload.get("bar")
+        raw_bar_high = (
+            _float(raw_bar.get("h") if isinstance(raw_bar, dict) else None)
+            if isinstance(raw_bar, dict)
+            else None
+        )
+        if (
+            raw_ticker != str(ticker).upper()
+            or raw_timestamp != observed
+            or raw_high is None
+            or high is None
+            or abs(raw_high - high) > 1e-9
+            or not isinstance(raw_bar, dict)
+            or raw_bar_high is None
+            or abs(raw_bar_high - high) > 1e-9
+        ):
+            return {}
+    else:
+        # A syntactic provider digest is not enough to freeze a target.  The
+        # exact ordered/raw bar artifact must survive persistence and replay.
+        return {}
+    if (
+        provider_ticker != str(ticker).upper()
+        or high is None
+        or high <= 0
+        or not observed
+        or not completed
+        or completion_semantics != "availability_boundary"
+        or not source
+        or len(source_hash) != 64
+        or not set(source_hash) <= set("0123456789abcdef")
+    ):
+        return {}
+    return {
+        "prior_daily_high": round(high, 6),
+        "prior_daily_high_observed_at": observed,
+        "prior_daily_high_completed_at": completed,
+        "prior_daily_high_completion_semantics": completion_semantics,
+        "prior_daily_high_source": source,
+        "prior_daily_high_source_url": source_url,
+        "prior_daily_high_source_hash": source_hash,
+        "prior_daily_high_raw_payload_json": raw_payload_json,
+    }
 
 
 def _observe_yahoo_tickers(

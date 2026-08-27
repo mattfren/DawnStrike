@@ -90,6 +90,17 @@ SNAPSHOT_COLUMNS = [
     "enrichment_bar_completed_at",
     "enrichment_is_complete",
     "enrichment_observation_sha256",
+    "enrichment_observation_payload_json",
+    "prior_daily_high",
+    "prior_daily_high_observed_at",
+    "prior_daily_high_completed_at",
+    "prior_daily_high_completion_semantics",
+    "prior_daily_high_source",
+    "prior_daily_high_source_url",
+    "prior_daily_high_source_hash",
+    "prior_daily_high_raw_payload_json",
+    "premarket_raw_payload_json",
+    "premarket_source_hash_sha256",
     "raw_file_path",
     "imported_at",
 ]
@@ -402,6 +413,17 @@ class SnapshotRow:
     enrichment_bar_completed_at: str = ""
     enrichment_is_complete: bool = False
     enrichment_observation_sha256: str = ""
+    enrichment_observation_payload_json: str = ""
+    prior_daily_high: float | None = None
+    prior_daily_high_observed_at: str = ""
+    prior_daily_high_completed_at: str = ""
+    prior_daily_high_completion_semantics: str = ""
+    prior_daily_high_source: str = ""
+    prior_daily_high_source_url: str = ""
+    prior_daily_high_source_hash: str = ""
+    prior_daily_high_raw_payload_json: str = ""
+    premarket_raw_payload_json: str = ""
+    premarket_source_hash_sha256: str = ""
 
     @classmethod
     def from_mapping(cls, row: dict[str, Any], source: str = "snapshot") -> SnapshotRow:
@@ -563,6 +585,39 @@ class SnapshotRow:
             enrichment_observation_sha256=str(
                 row.get("enrichment_observation_sha256") or ""
             ).strip(),
+            enrichment_observation_payload_json=str(
+                row.get("enrichment_observation_payload_json") or ""
+            ).strip(),
+            prior_daily_high=(
+                None
+                if row.get("prior_daily_high") in {None, ""}
+                else parse_float(row.get("prior_daily_high"), "prior_daily_high")
+            ),
+            prior_daily_high_observed_at=str(
+                row.get("prior_daily_high_observed_at") or ""
+            ).strip(),
+            prior_daily_high_completed_at=str(
+                row.get("prior_daily_high_completed_at") or ""
+            ).strip(),
+            prior_daily_high_completion_semantics=str(
+                row.get("prior_daily_high_completion_semantics") or ""
+            ).strip(),
+            prior_daily_high_source=str(row.get("prior_daily_high_source") or "").strip(),
+            prior_daily_high_source_url=str(
+                row.get("prior_daily_high_source_url") or ""
+            ).strip(),
+            prior_daily_high_source_hash=str(
+                row.get("prior_daily_high_source_hash") or ""
+            ).strip(),
+            prior_daily_high_raw_payload_json=str(
+                row.get("prior_daily_high_raw_payload_json") or ""
+            ).strip(),
+            premarket_raw_payload_json=str(
+                row.get("premarket_raw_payload_json") or ""
+            ).strip(),
+            premarket_source_hash_sha256=str(
+                row.get("premarket_source_hash_sha256") or ""
+            ).strip(),
         )
         snapshot.validate()
         return snapshot
@@ -659,6 +714,17 @@ class SnapshotRow:
             "enrichment_bar_completed_at": self.enrichment_bar_completed_at,
             "enrichment_is_complete": self.enrichment_is_complete,
             "enrichment_observation_sha256": self.enrichment_observation_sha256,
+            "enrichment_observation_payload_json": self.enrichment_observation_payload_json,
+            "prior_daily_high": self.prior_daily_high,
+            "prior_daily_high_observed_at": self.prior_daily_high_observed_at,
+            "prior_daily_high_completed_at": self.prior_daily_high_completed_at,
+            "prior_daily_high_completion_semantics": self.prior_daily_high_completion_semantics,
+            "prior_daily_high_source": self.prior_daily_high_source,
+            "prior_daily_high_source_url": self.prior_daily_high_source_url,
+            "prior_daily_high_source_hash": self.prior_daily_high_source_hash,
+            "prior_daily_high_raw_payload_json": self.prior_daily_high_raw_payload_json,
+            "premarket_raw_payload_json": self.premarket_raw_payload_json,
+            "premarket_source_hash_sha256": self.premarket_source_hash_sha256,
         }
         if self.field_completeness_score is not None:
             payload["field_completeness_score"] = self.field_completeness_score

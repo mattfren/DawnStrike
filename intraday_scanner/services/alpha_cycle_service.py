@@ -25,7 +25,7 @@ from intraday_scanner.alpha.plan_constructor import (
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.risk_governor import evaluate_risk
 from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
-from intraday_scanner.alpha.v5_policy import alphaops_strategy_contract
+from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
@@ -652,7 +652,12 @@ def alpha_cycle(
         real_shadow_days=_real_days(historical_labels),
     )
     signals = [
-        _signal_payload(row, scan_result.run_id, timestamp, index)
+        _signal_payload(
+            _attach_authenticated_alpaca_structure(row, decision_at=timestamp),
+            scan_result.run_id,
+            timestamp,
+            index,
+        )
         for index, row in enumerate(signals, 1)
     ]
     strategy_receipt_stats = _apply_strategy_decision_receipts(
@@ -2086,6 +2091,262 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
     return payload
 
 
+def _attach_authenticated_alpaca_structure(
+    row: dict[str, Any], *, decision_at: str
+) -> dict[str, Any]:
+    """Bind v5 legs to completed Alpaca observations at the production seam.
+
+    The scorer only ranks candidates.  Immediately after scoring, this seam
+    turns the authenticated premarket observation into three explicit legs;
+    absent/stale/fallback evidence produces no observations and therefore the
+    constructor emits ``NO_VALID_PLAN``.  No Yahoo value, range extension, or
+    reward/risk search is allowed through this path.
+    """
+
+    output = dict(row)
+    strategy_id = str(output.get("strategy_id") or "")
+    expected_strategy_id, _ = alphaops_strategy_contract(decision_at)
+    primary = str(output.get("enrichment_primary_source") or "").lower()
+    source = str(
+        output.get("enrichment_range_source")
+        or output.get("premarket_range_source")
+        or ""
+    ).lower()
+    observed = str(output.get("enrichment_observed_at") or "").strip()
+    completed = str(output.get("enrichment_bar_completed_at") or "").strip()
+    source_hash = str(output.get("enrichment_observation_sha256") or "").strip().lower()
+    observation_payload_json = str(
+        output.get("enrichment_observation_payload_json") or ""
+    ).strip()
+    observation_payload: dict[str, Any] | None = None
+    observation_payload_hash_ok = False
+    if observation_payload_json:
+        try:
+            parsed_payload = json.loads(observation_payload_json)
+            if isinstance(parsed_payload, dict):
+                canonical_payload = json.dumps(
+                    parsed_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                observation_payload_hash_ok = _valid_sha256(source_hash) and hashlib.sha256(
+                    canonical_payload.encode("utf-8")
+                ).hexdigest() == source_hash
+                if observation_payload_hash_ok:
+                    observation_payload = parsed_payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            observation_payload = None
+    ticker = str(output.get("ticker") or output.get("symbol") or "").upper()
+    high = _number(output.get("premarket_high"))
+    low = _number(output.get("premarket_low"))
+    premarket_raw_json = str(output.get("premarket_raw_payload_json") or "").strip()
+    premarket_hash = str(output.get("premarket_source_hash_sha256") or "").strip().lower()
+    premarket_reconciles = False
+    if premarket_raw_json:
+        try:
+            raw_premarket = json.loads(premarket_raw_json)
+            canonical_premarket = json.dumps(
+                raw_premarket,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            raw_bars = raw_premarket.get("bars") if isinstance(raw_premarket, dict) else None
+            high_values = [
+                _number(item.get("high"))
+                for item in raw_bars or []
+                if isinstance(item, dict)
+            ]
+            low_values = [
+                _number(item.get("low"))
+                for item in raw_bars or []
+                if isinstance(item, dict)
+            ]
+            premarket_reconciles = (
+                _valid_sha256(premarket_hash)
+                and hashlib.sha256(canonical_premarket.encode("utf-8")).hexdigest()
+                == premarket_hash
+                and isinstance(raw_premarket, dict)
+                and str(raw_premarket.get("ticker") or "").upper() == str(
+                    output.get("ticker") or output.get("symbol") or ""
+                ).upper()
+                and str(raw_premarket.get("feed") or "").lower()
+                == source.rsplit("_", 1)[-1]
+                and high_values
+                and low_values
+                and all(value is not None and value > 0 for value in high_values + low_values)
+                and high == max(high_values)
+                and low == min(low_values)
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            premarket_reconciles = False
+    prior_high = _number(output.get("prior_daily_high"))
+    prior_observed = str(output.get("prior_daily_high_observed_at") or "").strip()
+    prior_completed = str(output.get("prior_daily_high_completed_at") or "").strip()
+    prior_completion_semantics = str(
+        output.get("prior_daily_high_completion_semantics") or ""
+    ).strip()
+    prior_source = str(output.get("prior_daily_high_source") or "").strip()
+    prior_url = str(output.get("prior_daily_high_source_url") or "").strip()
+    prior_hash = str(output.get("prior_daily_high_source_hash") or "").strip().lower()
+    prior_raw_json = str(output.get("prior_daily_high_raw_payload_json") or "").strip()
+    prior_raw_hash_ok = False
+    prior_raw_reconciles = False
+    if prior_raw_json:
+        try:
+            parsed_prior_raw = json.loads(prior_raw_json)
+            canonical_prior_raw = json.dumps(
+                parsed_prior_raw,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            prior_raw_hash_ok = _valid_sha256(prior_hash) and hashlib.sha256(
+                canonical_prior_raw.encode("utf-8")
+            ).hexdigest() == prior_hash
+            raw_bar = (
+                parsed_prior_raw.get("bar")
+                if isinstance(parsed_prior_raw, dict)
+                else None
+            )
+            raw_bar_high = (
+                _number(raw_bar.get("h")) if isinstance(raw_bar, dict) else None
+            )
+            raw_high = (
+                _number(parsed_prior_raw.get("high"))
+                if isinstance(parsed_prior_raw, dict)
+                else None
+            )
+            prior_raw_reconciles = (
+                isinstance(parsed_prior_raw, dict)
+                and str(parsed_prior_raw.get("ticker") or "").upper()
+                == str(output.get("ticker") or output.get("symbol") or "").upper()
+                and str(parsed_prior_raw.get("timestamp") or "") == prior_observed
+                and raw_high is not None
+                and abs(raw_high - prior_high) <= 1e-9
+                and raw_bar_high is not None
+                and abs(raw_bar_high - prior_high) <= 1e-9
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            prior_raw_hash_ok = False
+    authenticated = (
+        (strategy_id or expected_strategy_id) == "alphaops_v5"
+        and primary.startswith("alpaca_market_data_")
+        and source.startswith("alpaca_market_data_")
+        and not bool(output.get("enrichment_was_fallback"))
+        and str(output.get("enrichment_status") or "").lower() == "verified"
+        and output.get("enrichment_is_complete") is True
+        and observed
+        and completed
+        and _valid_sha256(source_hash)
+        and prior_high is not None
+        and prior_high > 0
+        and prior_observed
+        and prior_completed
+        and prior_completion_semantics == "availability_boundary"
+        and prior_source.startswith("alpaca_market_data_")
+        and prior_source == source
+        and prior_url
+        and _valid_sha256(prior_hash)
+        and prior_raw_hash_ok
+        and prior_raw_reconciles
+        and premarket_reconciles
+    )
+    if not authenticated:
+        # Deliberately erase any legacy/range-derived plan inputs in a
+        # production AlphaOps v5 row.  Test/fixture callers that already carry
+        # explicit source-bound observations remain supported by _signal_payload.
+        if strategy_id == "alphaops_v5" and primary:
+            output.pop("market_structure_observations", None)
+            output.pop("target_observations", None)
+        return output
+    payload_ticker = str((observation_payload or {}).get("ticker") or "").upper()
+    payload_high = _number((observation_payload or {}).get("premarket_high"))
+    payload_low = _number((observation_payload or {}).get("premarket_low"))
+    payload_source = str((observation_payload or {}).get("source") or "")
+    payload_observed = str((observation_payload or {}).get("observed_at") or "")
+    payload_completed = str((observation_payload or {}).get("bar_completed_at") or "")
+    payload_is_complete = (observation_payload or {}).get("is_complete") is True
+    premarket_receipt_matches = (
+        observation_payload_hash_ok
+        and payload_ticker == ticker
+        and payload_high is not None
+        and payload_low is not None
+        and high is not None
+        and low is not None
+        and abs(payload_high - high) <= 1e-9
+        and abs(payload_low - low) <= 1e-9
+        and payload_source == source
+        and payload_observed == observed
+        and payload_completed == completed
+        and payload_is_complete
+    )
+    if (
+        high is None
+        or low is None
+        or high <= low
+        or high <= 0
+        or low <= 0
+        or not premarket_receipt_matches
+    ):
+        return output
+    output["market_structure_observations"] = {
+        "entry": _strict_structure_observation(
+            ticker=ticker, role="entry", value=high, observed_at=observed,
+            completed_at=completed,
+            source=source,
+            source_url=str(output.get("premarket_range_source_url") or ""),
+            source_hash=premarket_hash, observation_kind="premarket_high",
+        ),
+        "stop": _strict_structure_observation(
+            ticker=ticker, role="stop", value=low, observed_at=observed,
+            completed_at=completed,
+            source=source,
+            source_url=str(output.get("premarket_range_source_url") or ""),
+            source_hash=premarket_hash, observation_kind="premarket_low",
+        ),
+        "target": _strict_structure_observation(
+            ticker=ticker, role="target", value=prior_high, observed_at=prior_observed,
+            completed_at=prior_completed, source=prior_source, source_url=prior_url,
+            source_hash=prior_hash, observation_kind="prior_day_resistance",
+            completion_semantics=prior_completion_semantics,
+        ),
+    }
+    output["entry_watch_level"] = high
+    output["invalidation_level"] = low
+    output["target_1"] = prior_high
+    output["target_basis_kind"] = "prior_day_resistance"
+    output["target_derived_from_risk"] = False
+    return output
+
+
+def _strict_structure_observation(
+    *, ticker: str, role: str, value: float, observed_at: str,
+    completed_at: str, source: str, source_url: str, source_hash: str,
+    observation_kind: str, completion_semantics: str = "bar_completion",
+) -> dict[str, Any]:
+    return {
+        "ticker": ticker,
+        "role": role,
+        "value": value,
+        "raw_value": value,
+        "observed_at": observed_at,
+        "completed_at": completed_at,
+        "completion_semantics": completion_semantics,
+        "source": source,
+        "source_url": source_url,
+        "source_hash": source_hash,
+        "observation_kind": observation_kind,
+        "derivation_policy": "identity",
+        "is_complete": True,
+    }
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
 def _apply_strategy_decision_receipts(
     signals: list[dict[str, Any]],
     *,
@@ -2482,6 +2743,10 @@ def _apply_strategy_decision_receipts(
                 "broker_execution_enabled": receipt.broker_execution_enabled,
             }
         )
+        if receipt.strategy_id == "alphaops_v5" and receipt.paper_entry_eligible:
+            modeled_cost = _build_modeled_cost_receipt(row)
+            if modeled_cost is not None:
+                row["modeled_cost_receipt"] = modeled_cost
         bundle = resolution_bundles.get(index, {})
         run = bundle.get("run")
         if isinstance(run, dict) and str(run.get("status") or "") != "cache_hit":
@@ -2525,6 +2790,66 @@ def _apply_strategy_decision_receipts(
     }
     source_summary["strategy_decision_receipts"] = stats
     return stats
+
+
+def _build_modeled_cost_receipt(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Create an exact-policy after-cost receipt for a frozen v5 plan."""
+
+    plan = row.get("alphaops_market_structure_plan")
+    if not isinstance(plan, dict) or str(plan.get("status") or "") != COMPLETE:
+        return None
+    try:
+        direction = str(plan.get("direction") or "").lower()
+        entry = float(plan["entry"])
+        stop = float(plan["stop"])
+        target = float(plan["target"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    policy = DEFAULT_V5_POLICY
+    if direction == "long":
+        expected_entry = entry * (1 + policy.entry_slippage_bps / 10_000)
+        expected_stop = stop * (1 - policy.exit_slippage_bps / 10_000)
+        expected_target = target * (1 - policy.exit_slippage_bps / 10_000)
+    elif direction == "short":
+        expected_entry = entry * (1 - policy.entry_slippage_bps / 10_000)
+        expected_stop = stop * (1 + policy.exit_slippage_bps / 10_000)
+        expected_target = target * (1 + policy.exit_slippage_bps / 10_000)
+    else:
+        return None
+    commission = policy.commission_per_share_per_side * 2
+    if direction == "long":
+        reward = expected_target - expected_entry - commission
+        risk = expected_entry - expected_stop + commission
+    else:
+        reward = expected_entry - expected_target - commission
+        risk = expected_stop - expected_entry + commission
+    ratio = reward / risk if reward > 0 and risk > 0 else None
+    if ratio is None:
+        return None
+    payload = {
+        "schema_version": "dawnstrike.alphaops.modeled_cost_receipt.v1",
+        "plan_hash_sha256": str(plan.get("plan_hash_sha256") or ""),
+        "direction": direction,
+        "cost_model_version": policy.cost_model_version,
+        "entry_slippage_bps": policy.entry_slippage_bps,
+        "exit_slippage_bps": policy.exit_slippage_bps,
+        "commission_per_share_per_side": policy.commission_per_share_per_side,
+        "entry_price": entry,
+        "stop_price": stop,
+        "target_price": target,
+        "expected_entry_price": round(expected_entry, 8),
+        "expected_stop_exit_price": round(expected_stop, 8),
+        "expected_target_exit_price": round(expected_target, 8),
+        "risk_per_share_after_cost": round(risk, 8),
+        "reward_per_share_after_cost": round(reward, 8),
+        "after_cost_reward_risk": round(ratio, 8),
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    payload["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    return payload
 
 
 def _apply_receipt_risk_gates(

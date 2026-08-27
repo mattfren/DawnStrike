@@ -8,6 +8,7 @@ timestamp so historical checks do not accidentally look into the future.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import sqlite3
@@ -92,6 +93,11 @@ def collect_price_observations(
         minute_bars=minute_bars,
         config=config,
     )
+    quotes = _load_quotes(
+        source=resolved_source,
+        targets=targets,
+        config=config,
+    )
     created_at = _iso_utc(datetime.now(UTC))
     observations = [
         _observation_from_bars(
@@ -102,6 +108,7 @@ def collect_price_observations(
             source=resolved_source,
             max_age_seconds=max_age_seconds,
             created_at=created_at,
+            quote=quotes.get(target.ticker),
         )
         for target in targets
     ]
@@ -261,6 +268,29 @@ def _load_bars(
     raise SnapshotValidationError(f"Unsupported price source: {source}")
 
 
+def _load_quotes(
+    *, source: str, targets: list[PriceTarget], config: ScannerConfig | None
+) -> dict[str, dict[str, Any]]:
+    """Collect authenticated bid/ask evidence only for the Alpaca path."""
+
+    if source != "alpaca":
+        return {}
+    scanner_config = config or load_config()
+    provider = AlpacaProvider(scanner_config)
+    provider.validate_credentials()
+    reader = getattr(provider, "get_latest_quotes", None)
+    if not callable(reader):
+        return {}
+    try:
+        return reader(
+            sorted({target.ticker for target in targets if target.ticker}), scanner_config
+        ) or {}
+    except (DataProviderError, OSError, TypeError, ValueError):
+        # A quote outage must not erase usable completed-bar observations (and
+        # existing-position exits); v5 new entries fail closed at the watcher.
+        return {}
+
+
 def _fetch_yahoo_chart(symbol: str, config: ScannerConfig) -> dict[str, Any]:
     return fetch_yahoo_chart(symbol, config)
 
@@ -304,6 +334,7 @@ def _observation_from_bars(
     source: str,
     max_age_seconds: int,
     created_at: str,
+    quote: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     market_bars = [row for row in bars if row.get("provider_status") != "provider_error"]
     if bars and not market_bars:
@@ -386,7 +417,7 @@ def _observation_from_bars(
     is_complete = bar_completed_at <= requested_at
     safe_bar = _safe_bar_payload(bar)
     source_bar_hash = canonical_hash(safe_bar)
-    return {
+    output = {
         "observation_id": _observation_id(target, source, requested_iso),
         "signal_id": target.signal_id,
         "market_date": market_date,
@@ -415,6 +446,87 @@ def _observation_from_bars(
             "no_lookahead": True,
             "price_rule": "latest minute bar with completion <= requested_at",
         },
+    }
+    validated_quote = _validated_quote(
+        quote, ticker=target.ticker, requested_at=requested_at, max_age_seconds=max_age_seconds
+    )
+    if validated_quote is not None:
+        output.update(validated_quote)
+        output["payload_json"]["quote"] = validated_quote["quote_raw_payload"]
+        output["payload_json"].update(
+            {
+                key: value
+                for key, value in validated_quote.items()
+                if key != "quote_raw_payload"
+            }
+        )
+    return output
+
+
+def _validated_quote(
+    quote: dict[str, Any] | None,
+    *,
+    ticker: str,
+    requested_at: datetime,
+    max_age_seconds: int,
+) -> dict[str, Any] | None:
+    if not isinstance(quote, dict):
+        return None
+    quote_ticker = str(quote.get("ticker") or "").upper()
+    observed_text = str(quote.get("timestamp") or "").strip()
+    try:
+        observed_at = _parse_datetime(observed_text)
+    except ValueError:
+        return None
+    bid = _clean_float(quote.get("bid"))
+    ask = _clean_float(quote.get("ask"))
+    raw_payload = quote.get("raw_payload_json")
+    if isinstance(raw_payload, str):
+        raw_json = raw_payload
+    else:
+        raw_json = json.dumps(quote.get("raw") or {}, sort_keys=True, separators=(",", ":"))
+    try:
+        raw = json.loads(raw_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    canonical_raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+    source_hash = str(quote.get("source_hash_sha256") or "").lower()
+    raw_quote = raw.get("quote") if isinstance(raw, dict) else None
+    try:
+        raw_quote_at = (
+            _parse_datetime(str(raw_quote.get("t") or ""))
+            if isinstance(raw_quote, dict)
+            else None
+        )
+    except ValueError:
+        raw_quote_at = None
+    if (
+        quote_ticker != ticker.upper()
+        or bid is None
+        or ask is None
+        or bid <= 0
+        or ask < bid
+        or not str(quote.get("source") or "").lower().startswith("alpaca_market_data_")
+        or observed_at > requested_at
+        or (requested_at - observed_at).total_seconds() > max_age_seconds
+        or not source_hash
+        or hashlib.sha256(canonical_raw.encode()).hexdigest() != source_hash
+        or not isinstance(raw_quote, dict)
+        or str(raw.get("ticker") or "").upper() != ticker.upper()
+        or _clean_float(raw_quote.get("bp")) != bid
+        or _clean_float(raw_quote.get("ap")) != ask
+        or raw_quote_at != observed_at
+    ):
+        return None
+    return {
+        "quote_bid": bid,
+        "quote_ask": ask,
+        "quote_observed_at": _iso_utc(observed_at),
+        "quote_source": str(quote.get("source") or ""),
+        "quote_source_hash_sha256": source_hash,
+        "quote_raw_payload_json": canonical_raw,
+        "quote_status": "USABLE",
+        "quote_raw_payload": raw,
     }
 
 

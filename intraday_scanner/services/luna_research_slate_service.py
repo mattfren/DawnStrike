@@ -8,6 +8,9 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID, DEFAULT_V5_POLICY
 
 from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID
 
@@ -15,6 +18,8 @@ TIER1 = "RANKED_RESEARCH_CANDIDATE"
 TIER2 = "PAPER_PLAN_QUALIFIED"
 TIER2_WAITING = "WAITING_CURRENT_CHECKS"
 TIER3 = "ALERTABLE_PAPER_ENTRY"
+WAITING_EXECUTION_COSTS = "WAITING_EXECUTION_COSTS"
+EASTERN = ZoneInfo("America/New_York")
 
 
 def build_ranked_research_slate(
@@ -157,6 +162,15 @@ def apply_publication_semantics(
                 _plan_qualified(row, receipt_verifier=receipt_verifier)
                 and not row_ceiling_block
             )
+            enriched["execution_cost_status"] = (
+                "READY"
+                if _valid_modeled_cost_receipt(
+                    row, str(row.get("plan_hash_sha256") or "")
+                )
+                else WAITING_EXECUTION_COSTS
+            )
+            # Preserve the broader publication status vocabulary while making
+            # the missing-cost reason explicit in its own immutable field.
             enriched["plan_qualification_status"] = (
                 "QUALIFIED" if qualified else "WAITING_CURRENT_CHECKS"
             )
@@ -621,17 +635,94 @@ def _plan_qualified(
         return False
     if abs(entry - stop) / entry > 0.15:
         return False
-    qualification_rr = _number(
-        row.get("after_cost_reward_risk_ratio")
-        or row.get("reward_risk_ratio_after_cost")
-        or row.get("after_cost_rr")
-        or row.get("actual_after_cost_reward_risk")
-        or row.get("reward_risk_ratio")
-    )
+    cost_receipt = row.get("modeled_cost_receipt") or row.get("execution_cost_receipt")
+    if not _valid_modeled_cost_receipt(row, plan_hash):
+        return False
+    qualification_rr = _number(cost_receipt.get("after_cost_reward_risk"))
     return (
         row.get("strategy_receipt_paper_entry_eligible") is True
         and qualification_rr is not None
         and qualification_rr >= 1.5
+    )
+
+
+def _valid_modeled_cost_receipt(row: dict[str, Any], plan_hash: str) -> bool:
+    """Validate a content-bound, deterministic cost model receipt.
+
+    A gross ``reward_risk_ratio`` is intentionally never accepted here. The
+    receipt must carry after-cost math, the frozen plan identity, and the
+    exact policy cost-model version.
+    """
+
+    receipt = row.get("modeled_cost_receipt") or row.get("execution_cost_receipt")
+    if not isinstance(receipt, dict) or not plan_hash:
+        return False
+    supplied = str(receipt.get("receipt_hash_sha256") or "").lower()
+    payload = {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+    expected = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    if supplied != expected or receipt.get("plan_hash_sha256") != plan_hash:
+        return False
+    if receipt.get("schema_version") != "dawnstrike.alphaops.modeled_cost_receipt.v1":
+        return False
+    if receipt.get("cost_model_version") != DEFAULT_V5_POLICY.cost_model_version:
+        return False
+    if (
+        receipt.get("entry_slippage_bps") != DEFAULT_V5_POLICY.entry_slippage_bps
+        or receipt.get("exit_slippage_bps") != DEFAULT_V5_POLICY.exit_slippage_bps
+        or receipt.get("commission_per_share_per_side")
+        != DEFAULT_V5_POLICY.commission_per_share_per_side
+        or receipt.get("research_only") is not True
+        or receipt.get("broker_execution") != "disabled"
+    ):
+        return False
+    plan = row.get("alphaops_market_structure_plan")
+    if not isinstance(plan, dict):
+        return False
+    try:
+        direction = str(plan.get("direction") or "").lower()
+        entry = float(plan["entry"])
+        stop = float(plan["stop"])
+        target = float(plan["target"])
+        if direction == "long":
+            expected_entry = entry * (1 + DEFAULT_V5_POLICY.entry_slippage_bps / 10_000)
+            expected_stop = stop * (1 - DEFAULT_V5_POLICY.exit_slippage_bps / 10_000)
+            expected_target = target * (1 - DEFAULT_V5_POLICY.exit_slippage_bps / 10_000)
+        elif direction == "short":
+            expected_entry = entry * (1 - DEFAULT_V5_POLICY.entry_slippage_bps / 10_000)
+            expected_stop = stop * (1 + DEFAULT_V5_POLICY.exit_slippage_bps / 10_000)
+            expected_target = target * (1 + DEFAULT_V5_POLICY.exit_slippage_bps / 10_000)
+        else:
+            return False
+        commission = DEFAULT_V5_POLICY.commission_per_share_per_side * 2
+        if direction == "long":
+            expected_risk = expected_entry - expected_stop + commission
+            expected_reward = expected_target - expected_entry - commission
+        else:
+            expected_risk = expected_stop - expected_entry + commission
+            expected_reward = expected_entry - expected_target - commission
+        expected_ratio = expected_reward / expected_risk
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False
+
+    def matches(name: str, expected_value: float) -> bool:
+        actual = _number(receipt.get(name))
+        return actual is not None and abs(actual - expected_value) <= 1e-7
+
+    return (
+        receipt.get("direction") == direction
+        and
+        matches("entry_price", entry)
+        and matches("stop_price", stop)
+        and matches("target_price", target)
+        and matches("expected_entry_price", expected_entry)
+        and matches("expected_stop_exit_price", expected_stop)
+        and matches("expected_target_exit_price", expected_target)
+        and matches("risk_per_share_after_cost", expected_risk)
+        and matches("reward_per_share_after_cost", expected_reward)
+        and matches("after_cost_reward_risk", expected_ratio)
+        and expected_ratio > 0
     )
 
 
@@ -663,11 +754,29 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         return False
     if str(proof.get("plan_hash_sha256") or "") != plan_hash:
         return False
+    lineage = _frozen_lineage_for_validation(row, ticker)
+    required_lineage = (
+        "selection_id",
+        "cohort",
+        "source_scan_id",
+        "frozen_slate_id",
+        "frozen_slate_content_hash_sha256",
+        "frozen_research_selection_id",
+    )
+    if set(required_lineage) - set(lineage) or any(
+        not lineage.get(field) for field in required_lineage
+    ):
+        return False
+    if lineage.get("cohort") != "official_telegram":
+        return False
+    for field in required_lineage:
+        if str(proof.get(field) or "") != str(lineage[field]):
+            return False
     checked_at = _parse_watcher_time(proof.get("checked_at"))
     if checked_at is None or abs((datetime.now(timezone.utc) - checked_at).total_seconds()) > 900:
         return False
     row_market_date = str(row.get("market_date") or row.get("generated_at") or "")[:10]
-    if row_market_date and checked_at.date().isoformat() != row_market_date:
+    if row_market_date and checked_at.astimezone(EASTERN).date().isoformat() != row_market_date:
         return False
     for receipt_key, hash_key in (
         ("quote_receipt", "quote_hash_sha256"),
@@ -688,9 +797,24 @@ def _watcher_current(row: dict[str, Any]) -> bool:
             or str(receipt.get("ticker") or receipt.get("symbol") or "").upper() != ticker
             or receipt.get("research_only") is not True
             or receipt.get("broker_execution") != "disabled"
+            or (lineage and any(
+                expected
+                and str(receipt.get(field) or "") != str(expected)
+                for field, expected in lineage.items()
+            ))
         ):
             return False
     quote = proof["quote_receipt"]
+    quote_raw_json = str(quote.get("quote_raw_payload_json") or "")
+    quote_source_hash = str(quote.get("source_quote_hash_sha256") or "").lower()
+    try:
+        quote_raw = json.loads(quote_raw_json)
+        quote_raw_canonical = json.dumps(
+            quote_raw, sort_keys=True, separators=(",", ":")
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    raw_quote = quote_raw.get("quote") if isinstance(quote_raw, dict) else None
     quote_time = _parse_watcher_time(quote.get("observed_at"))
     bid = _number(quote.get("bid"))
     ask = _number(quote.get("ask"))
@@ -726,7 +850,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     if (
         str(quote.get("schema_version") or "") != "dawnstrike.alphaops.quote_receipt.v1"
         or str(quote.get("status") or "").upper() != "USABLE"
-        or not str(quote.get("source") or "").strip()
+        or not str(quote.get("source") or "").lower().startswith("alpaca_market_data_")
         or quote_time is None
         or quote_time > checked_at
         or (checked_at - quote_time).total_seconds() > 360
@@ -743,6 +867,18 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or spread_pct is None
         or spread_pct > 2.0
         or not trigger_consistent
+        or quote.get("quote_side")
+        != ("ask" if plan_direction == "long" else "bid")
+        or _number(quote.get("decision_price")) != last
+        or last != (ask if plan_direction == "long" else bid)
+        or not _valid_hash(quote_source_hash)
+        or hashlib.sha256(quote_raw_canonical.encode()).hexdigest() != quote_source_hash
+        or not isinstance(raw_quote, dict)
+        or str(quote_raw.get("ticker") or "").upper() != ticker
+        or _number(raw_quote.get("bp")) != bid
+        or _number(raw_quote.get("ap")) != ask
+        or _parse_watcher_time(raw_quote.get("t"))
+        != _parse_watcher_time(quote.get("observed_at"))
     ):
         return False
     portfolio = proof["portfolio_receipt"]
@@ -755,6 +891,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         if isinstance(decision_trace, dict)
         else ""
     )
+    trace = proof.get("evaluate_v5_official_paper")
     if (
         str(portfolio.get("schema_version") or "")
         != "dawnstrike.alphaops.portfolio_admission.v1"
@@ -770,6 +907,8 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         != f"paper-admission:{signal_id}:{plan_hash[:16]}"
         or portfolio_time is None
         or abs((checked_at - portfolio_time).total_seconds()) > 60
+        or not isinstance(trace, dict)
+        or trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID
     ):
         return False
     canonical = {key: value for key, value in proof.items() if key != "proof_hash_sha256"}
@@ -784,6 +923,64 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         and proof.get("research_only") is True
         and proof.get("broker_execution") == "disabled"
     )
+
+
+def _frozen_lineage_for_validation(
+    row: dict[str, Any], ticker: str
+) -> dict[str, str]:
+    """Extract the authoritative frozen slate identity carried by a signal."""
+
+    slate = row.get("frozen_ranked_research_slate")
+    lineage = row.get("frozen_slate_lineage")
+    if not isinstance(slate, dict):
+        payload = row.get("payload_json") or row.get("selection_payload_json")
+        if isinstance(payload, dict):
+            slate = payload.get("frozen_ranked_research_slate")
+            lineage = payload.get("frozen_slate_lineage")
+    if not isinstance(slate, dict):
+        return {}
+    try:
+        validate_ranked_research_slate(
+            slate, market_date=str(row.get("market_date") or "")[:10]
+        )
+    except (TypeError, ValueError):
+        return {"_invalid": "frozen ranked slate failed validation"}
+    rows = slate.get("rows") or []
+    member = next(
+        (
+            str(item.get("research_selection_id") or "")
+            for item in rows
+            if isinstance(item, dict)
+            and str(item.get("ticker") or item.get("symbol") or "").upper() == ticker
+        ),
+        "",
+    )
+    values = {
+        "selection_id": str(row.get("selection_id") or ""),
+        "cohort": str(row.get("cohort") or ""),
+        "source_scan_id": str(
+            (lineage or {}).get("frozen_source_scan_id")
+            if isinstance(lineage, dict)
+            else row.get("source_scan_id") or row.get("scan_id") or ""
+        ),
+        "frozen_slate_id": str(slate.get("slate_id") or ""),
+        "frozen_slate_content_hash_sha256": str(
+            slate.get("content_hash_sha256") or ""
+        ),
+        "frozen_research_selection_id": member,
+    }
+    if values["source_scan_id"] != str(slate.get("scan_id") or ""):
+        return {"_invalid": "frozen source scan does not match slate scan"}
+    selection_ids = {str(item) for item in slate.get("selection_ids") or []}
+    if member and selection_ids and member not in selection_ids:
+        return {"_invalid": "selection member is not in frozen slate"}
+    return {key: value for key, value in values.items() if value}
+
+
+def validate_watcher_current_proof(row: dict[str, Any]) -> bool:
+    """Public strict validator shared by watcher production and publication."""
+
+    return _watcher_current(dict(row))
 
 
 def _parse_watcher_time(value: Any) -> datetime | None:
@@ -929,11 +1126,13 @@ __all__ = [
     "TIER2",
     "TIER2_WAITING",
     "TIER3",
+    "WAITING_EXECUTION_COSTS",
     "apply_publication_semantics",
     "build_ranked_research_slate",
     "official_publication_rows",
     "persist_ranked_research_slate",
     "publication_counts",
     "validated_frozen_selection_signal",
+    "validate_watcher_current_proof",
     "validate_ranked_research_slate",
 ]

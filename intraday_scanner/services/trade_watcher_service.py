@@ -21,6 +21,7 @@ from intraday_scanner.alpha.episode_identity import (
     deduplicate_episode_candidates,
 )
 from intraday_scanner.alpha.v5_policy import (
+    ALPHAOPS_V5_ACCOUNT_ID,
     ALPHAOPS_V5_STRATEGY_ID,
     DEFAULT_V5_POLICY,
     alphaops_strategy_contract,
@@ -44,6 +45,7 @@ from intraday_scanner.services.alpha_paper_reconciliation_service import (
     recover_legacy_alpha_delivery_membership,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    validate_watcher_current_proof,
     validated_frozen_selection_signal,
 )
 from intraday_scanner.services.price_observation_service import (
@@ -239,6 +241,7 @@ def run_trade_watcher(
             event = _notification_event(_notification_ready_intent(outbox_intent))
             notification_events_by_key[event.event_key] = event
     states: list[dict[str, Any]] = []
+    monitor_receipts: list[dict[str, Any]] = []
 
     created_at = _utc_now()
     for signal in signals:
@@ -263,6 +266,15 @@ def run_trade_watcher(
             existing_symbol_notional=existing_symbol_notional,
             scanner_config=scanner_config,
         )
+        if decision.get("watcher_current_proof"):
+            proof = dict(decision["watcher_current_proof"])
+            monitor_receipts.append(
+                _monitor_publication_receipt(
+                    signal=signal,
+                    proof=proof,
+                    checked_at=str(proof.get("checked_at") or created_at),
+                )
+            )
         states.append(_state_row(signal, observation, decision, open_position))
         intent = decision.get("intent")
         if not intent:
@@ -325,6 +337,7 @@ def run_trade_watcher(
         paper_fills=paper_fills,
         signal_events=signal_events,
     )
+    monitor_stats = store.persist_monitor_publication_receipts(monitor_receipts)
     scenario_link_stats = (
         refresh_scenario_lifecycle_links(
             store,
@@ -360,6 +373,9 @@ def run_trade_watcher(
         "paper_position_stats": position_stats,
         "paper_fill_stats": fill_stats,
         "signal_event_stats": event_stats,
+        "monitor_publication_receipt": monitor_receipts[0] if len(monitor_receipts) == 1 else None,
+        "monitor_publication_receipts": monitor_receipts,
+        "monitor_publication_stats": monitor_stats,
         "scenario_link_stats": scenario_link_stats,
         "notification_stats": notification_stats,
         "notification_outbox": {
@@ -1035,6 +1051,7 @@ def _decision_for_signal(
 ) -> dict[str, Any]:
     if not observation:
         return {"state": STATE_STALE_DATA, "reason": "No usable current price observation."}
+    observation = _side_aware_quote_observation(signal, observation)
     price = _number(observation.get("price"))
     if price is None or price <= 0:
         return {"state": STATE_STALE_DATA, "reason": "Current price is missing or invalid."}
@@ -1067,6 +1084,45 @@ def _decision_for_signal(
     )
 
 
+def _side_aware_quote_observation(
+    signal: dict[str, Any], observation: dict[str, Any]
+) -> dict[str, Any]:
+    """Use the executable side of a fresh Alpaca quote for v5 decisions."""
+
+    if str(signal.get("strategy_id") or "") != ALPHAOPS_V5_STRATEGY_ID:
+        return observation
+    bid = _number(observation.get("quote_bid"))
+    ask = _number(observation.get("quote_ask"))
+    plan = signal.get("alphaops_market_structure_plan")
+    direction = str(plan.get("direction") or "").lower() if isinstance(plan, dict) else ""
+    if bid is None or ask is None or direction not in {"long", "short"}:
+        return observation
+    selected = ask if direction == "long" else bid
+    return {
+        **observation,
+        "price": selected,
+        "current_price": selected,
+        "price_type": f"quote_{direction}_side",
+    }
+
+
+def _quote_observation_ready(observation: dict[str, Any]) -> bool:
+    bid = _number(observation.get("quote_bid"))
+    ask = _number(observation.get("quote_ask"))
+    return bool(
+        bid is not None
+        and ask is not None
+        and bid > 0
+        and ask >= bid
+        and str(observation.get("quote_observed_at") or "").strip()
+        and str(observation.get("quote_source") or "")
+        .lower()
+        .startswith("alpaca_market_data_")
+        and _valid_sha256(str(observation.get("quote_source_hash_sha256") or ""))
+        and str(observation.get("quote_raw_payload_json") or "").strip()
+    )
+
+
 def _entry_decision(
     signal: dict[str, Any],
     observation: dict[str, Any],
@@ -1090,6 +1146,12 @@ def _entry_decision(
     if str(signal.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID and is_v5_active(
         decision_time
     ):
+        if not _quote_observation_ready(observation):
+            return {
+                "state": STATE_STAND_DOWN,
+                "reason": "AlphaOps v5 requires a fresh authenticated bid/ask quote.",
+                "decision_trace": None,
+            }
         v5 = evaluate_v5_official_paper(
             signal,
             observation,
@@ -1113,6 +1175,15 @@ def _entry_decision(
                 target=target,
                 decision_trace=trace,
             )
+        current_proof = _build_watcher_current_proof(signal, observation, trace)
+        if current_proof is None:
+            return {
+                "state": STATE_STAND_DOWN,
+                "reason": (
+                    "AlphaOps v5 watcher proof could not be validated against frozen lineage."
+                ),
+                "decision_trace": trace,
+            }
         if trigger is None or stop is None or target is None:
             raise SnapshotValidationError(
                 "AlphaOps v5 policy allowed an entry without complete levels."
@@ -1174,6 +1245,7 @@ def _entry_decision(
             "reason": intent["reason"],
             "intent": intent,
             "decision_trace": trace,
+            "watcher_current_proof": current_proof,
         }
     if trigger is None or stop is None or target is None:
         return _stand_down(
@@ -1739,7 +1811,294 @@ def _state_row(
             "decision_fingerprint", ""
         ),
         "feasibility_score": dict(decision.get("decision_trace") or {}).get("feasibility_score"),
+        "watcher_current_proof": decision.get("watcher_current_proof"),
     }
+
+
+def _build_watcher_current_proof(
+    signal: dict[str, Any], observation: dict[str, Any], trace: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Build immutable Tier 3 monitor evidence from the persisted quote/trace."""
+
+    if trace.get("account_id") != ALPHAOPS_V5_ACCOUNT_ID:
+        return None
+    computed = trace.get("computed")
+    if not isinstance(computed, dict):
+        return None
+    after_cost = _number(computed.get("actual_after_cost_reward_risk"))
+    stop_distance = _number(computed.get("stop_distance_pct"))
+    chase = _number(computed.get("chase_pct"))
+    if (
+        after_cost is None or after_cost < 1.5
+        or stop_distance is None or stop_distance > 15.0
+        or chase is None or chase > 2.0
+    ):
+        return None
+    signal_id = _signal_id(signal)
+    ticker = str(signal.get("ticker") or "").upper()
+    plan = signal.get("alphaops_market_structure_plan")
+    if not isinstance(plan, dict) or str(plan.get("status") or "") != "COMPLETE":
+        return None
+    plan_hash = str(plan.get("plan_hash_sha256") or "")
+    lineage = _selection_lineage(signal)
+    selection_id = str(signal.get("selection_id") or lineage.get("selection_id") or "")
+    cohort = str(signal.get("cohort") or lineage.get("cohort") or "")
+    source_scan_id = str(lineage.get("source_scan_id") or signal.get("scan_id") or "")
+    selection_members = lineage.get("selection_ids") or []
+    frozen_member_id = next(
+        (
+            str(item.get("research_selection_id") or "")
+            for item in lineage.get("slate_rows") or []
+            if str(item.get("ticker") or "").upper() == ticker
+        ),
+        "",
+    )
+
+
+    if (
+        not selection_id
+        or cohort != "official_telegram"
+        or not source_scan_id
+        or not lineage.get("slate_id")
+        or not lineage.get("slate_content_hash_sha256")
+        or not frozen_member_id
+        or frozen_member_id not in selection_members
+    ):
+        return None
+    bid = _number(observation.get("quote_bid"))
+    ask = _number(observation.get("quote_ask"))
+    direction = str(plan.get("direction") or "").lower()
+    last = ask if direction == "long" else bid if direction == "short" else None
+    # A bar close is not a quote. Providers must persist bid/ask for a Tier 3
+    # admission; no synthetic spread is allowed.
+    source_bar_hash = str(observation.get("source_bar_hash_sha256") or "").lower()
+    source_quote_hash = str(observation.get("quote_source_hash_sha256") or "").lower()
+    quote_raw_json = str(observation.get("quote_raw_payload_json") or "")
+    if (
+        bid is None or ask is None or bid <= 0 or ask < bid or last is None
+        or not _valid_sha256(source_bar_hash)
+        or not _valid_sha256(source_quote_hash)
+        or not quote_raw_json
+    ):
+        return None
+    checked_at = _utc_now()
+    observed_at = str(observation.get("quote_observed_at") or "")
+    if not observed_at or str(observation.get("is_usable")).lower() not in {"true", "1"}:
+        return None
+    quote = {
+        "schema_version": "dawnstrike.alphaops.quote_receipt.v1",
+        "status": "USABLE",
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "plan_hash_sha256": plan_hash,
+        "selection_id": selection_id,
+        "cohort": cohort,
+        "source_scan_id": source_scan_id,
+        "frozen_slate_id": str(lineage.get("slate_id") or ""),
+        "frozen_slate_content_hash_sha256": str(
+            lineage.get("slate_content_hash_sha256") or ""
+        ),
+        "frozen_research_selection_id": frozen_member_id,
+        "observed_at": observed_at,
+        "source": str(observation.get("quote_source") or ""),
+        "source_bar_hash_sha256": source_bar_hash,
+        "source_quote_hash_sha256": source_quote_hash,
+        "quote_raw_payload_json": quote_raw_json,
+        "bid": bid,
+        "ask": ask,
+        "last": last,
+        "decision_price": last,
+        "quote_side": "ask" if direction == "long" else "bid",
+        "entry_reference": _number(plan.get("entry")),
+        "entry_window_status": "OPEN",
+        "trigger_status": "CONFIRMED",
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    quote_hash = hashlib.sha256(
+        json.dumps(quote, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    portfolio = {
+        "schema_version": "dawnstrike.alphaops.portfolio_admission.v1",
+        "status": "ADMITTED",
+        "admitted": True,
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "plan_hash_sha256": plan_hash,
+        "selection_id": selection_id,
+        "cohort": cohort,
+        "source_scan_id": source_scan_id,
+        "frozen_slate_id": str(lineage.get("slate_id") or ""),
+        "frozen_slate_content_hash_sha256": str(
+            lineage.get("slate_content_hash_sha256") or ""
+        ),
+        "frozen_research_selection_id": frozen_member_id,
+        "account_mode": "PAPER",
+        "simulated_account_id": ALPHAOPS_V5_ACCOUNT_ID,
+        "admission_id": "paper-admission-" + hashlib.sha256(
+            f"{signal_id}:{plan_hash}".encode()
+        ).hexdigest()[:24],
+        "admission_key": f"paper-admission:{signal_id}:{plan_hash[:16]}",
+        "blocking_reasons": [],
+        "research_only": True,
+        "broker_execution": "disabled",
+        "checked_at": checked_at,
+    }
+    portfolio_hash = hashlib.sha256(
+        json.dumps(portfolio, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    proof = {
+        "schema_version": "alphaops.watcher_current.v1",
+        "status": "CURRENT",
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "plan_hash_sha256": plan_hash,
+        "selection_id": selection_id,
+        "cohort": cohort,
+        "source_scan_id": source_scan_id,
+        "frozen_slate_id": str(lineage.get("slate_id") or ""),
+        "frozen_slate_content_hash_sha256": str(
+            lineage.get("slate_content_hash_sha256") or ""
+        ),
+        "frozen_research_selection_id": frozen_member_id,
+        "checked_at": checked_at,
+        "quote_receipt": quote,
+        "quote_hash_sha256": quote_hash,
+        "portfolio_receipt": portfolio,
+        "portfolio_hash_sha256": portfolio_hash,
+        "evaluate_v5_official_paper": trace,
+        "evaluate_v5_official_paper_trace": trace,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    proof["proof_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in proof.items() if key != "proof_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    validation_row = {
+        **signal,
+        "current_price": last,
+        "watcher_current_proof": proof,
+    }
+    return proof if validate_watcher_current_proof(validation_row) else None
+
+
+def _monitor_publication_receipt(
+    *, signal: dict[str, Any], proof: dict[str, Any], checked_at: str
+) -> dict[str, Any]:
+    quote = proof.get("quote_receipt")
+    if not isinstance(quote, dict) or not validate_watcher_current_proof(
+        {
+            **signal,
+            "current_price": quote.get("last"),
+            "watcher_current_proof": proof,
+        }
+    ):
+        raise SnapshotValidationError(
+            "monitor publication requires a strict current watcher proof"
+        )
+    signal_id = _signal_id(signal)
+    ticker = str(signal.get("ticker") or "").upper()
+    plan = signal.get("alphaops_market_structure_plan") or {}
+    plan_hash = str(plan.get("plan_hash_sha256") or "")
+    lineage = _selection_lineage(signal)
+    frozen_member_id = next(
+        (
+            str(item.get("research_selection_id") or "")
+            for item in lineage.get("slate_rows") or []
+            if str(item.get("ticker") or "").upper() == ticker
+        ),
+        "",
+    )
+    receipt = {
+        "schema_version": "dawnstrike.alphaops.monitor_publication_receipt.v1",
+        "receipt_id": "monitor-publication-" + hashlib.sha256(
+            f"{signal_id}:{plan_hash}:{proof.get('proof_hash_sha256')}".encode()
+        ).hexdigest()[:24],
+        "market_date": str(signal.get("market_date") or checked_at)[:10],
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "plan_hash_sha256": plan_hash,
+        "selection_id": str(
+            signal.get("selection_id")
+            or lineage.get("selection_id")
+            or proof.get("selection_id")
+            or ""
+        ),
+        "cohort": str(
+            signal.get("cohort") or lineage.get("cohort") or proof.get("cohort") or ""
+        ),
+        "source_scan_id": str(
+            lineage.get("source_scan_id")
+            or signal.get("scan_id")
+            or proof.get("source_scan_id")
+            or ""
+        ),
+        "frozen_research_selection_id": frozen_member_id,
+        "frozen_slate_id": str(lineage.get("slate_id") or proof.get("frozen_slate_id") or ""),
+        "frozen_slate_content_hash_sha256": str(
+            lineage.get("slate_content_hash_sha256")
+            or proof.get("frozen_slate_content_hash_sha256")
+            or ""
+        ),
+        "watcher_proof_hash_sha256": str(proof.get("proof_hash_sha256") or ""),
+        "publication_count": 1,
+        "publication_tier": "ALERTABLE_PAPER_ENTRY",
+        "research_only": True,
+        "broker_execution": "disabled",
+        "checked_at": checked_at,
+    }
+    receipt["content_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in receipt.items() if key != "content_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    return receipt
+
+
+def _selection_lineage(signal: dict[str, Any]) -> dict[str, Any]:
+    """Resolve frozen selection identity without reading or mutating the slate."""
+
+    direct_slate = signal.get("frozen_ranked_research_slate")
+    direct_lineage = signal.get("frozen_slate_lineage")
+    if isinstance(direct_slate, dict):
+        return {
+            "slate_id": direct_slate.get("slate_id"),
+            "slate_content_hash_sha256": direct_slate.get("content_hash_sha256"),
+            "selection_id": signal.get("selection_id"),
+            "cohort": signal.get("cohort"),
+            "source_scan_id": (direct_lineage or {}).get("frozen_source_scan_id")
+            if isinstance(direct_lineage, dict)
+            else signal.get("source_scan_id"),
+            "selection_ids": direct_slate.get("selection_ids") or [],
+            "slate_rows": direct_slate.get("rows") or [],
+        }
+    for key in ("payload_json", "selection_payload_json"):
+        payload = signal.get(key)
+        if not isinstance(payload, dict):
+            continue
+        slate = payload.get("frozen_ranked_research_slate")
+        lineage = payload.get("frozen_slate_lineage")
+        if isinstance(slate, dict):
+            return {
+                "slate_id": slate.get("slate_id"),
+                "slate_content_hash_sha256": slate.get("content_hash_sha256"),
+                "selection_id": payload.get("selection_id"),
+                "cohort": payload.get("cohort"),
+                "source_scan_id": (lineage or {}).get("frozen_source_scan_id")
+                if isinstance(lineage, dict)
+                else payload.get("source_scan_id"),
+                "selection_ids": slate.get("selection_ids") or [],
+                "slate_rows": slate.get("rows") or [],
+            }
+    return {}
 
 
 def _price_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -1801,6 +2160,10 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value == 1
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 def _utc_now() -> str:

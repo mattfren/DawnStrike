@@ -164,6 +164,17 @@ class SQLiteScanStore:
                         created_at TEXT NOT NULL,
                         payload_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS monitor_publication_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        market_date TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        signal_id TEXT NOT NULL,
+                        plan_hash_sha256 TEXT NOT NULL,
+                        content_hash_sha256 TEXT NOT NULL UNIQUE,
+                        publication_count INTEGER NOT NULL,
+                        checked_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS alerts_sent (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         alert_key TEXT NOT NULL UNIQUE,
@@ -1344,6 +1355,97 @@ class SQLiteScanStore:
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load monitor events: {exc}") from exc
+
+    def persist_monitor_publication_receipts(
+        self, rows: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        """Persist immutable watcher publication receipts without touching the slate."""
+
+        self.initialize()
+        inserted = 0
+        reused = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    receipt_id = str(row.get("receipt_id") or "")
+                    content_hash = str(row.get("content_hash_sha256") or "")
+                    if not receipt_id or not content_hash:
+                        continue
+                    canonical_payload = json.dumps(row, sort_keys=True)
+                    existing = connection.execute(
+                        """
+                        SELECT content_hash_sha256, payload_json
+                        FROM monitor_publication_receipts WHERE receipt_id = ?
+                        """,
+                        (receipt_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        if (
+                            str(existing[0]) != content_hash
+                            or str(existing[1]) != canonical_payload
+                        ):
+                            raise StorageError(
+                                "monitor publication receipt identity collision"
+                            )
+                        reused += 1
+                        continue
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO monitor_publication_receipts
+                        (receipt_id, market_date, ticker, signal_id, plan_hash_sha256,
+                         content_hash_sha256, publication_count, checked_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            receipt_id,
+                            str(row.get("market_date") or ""),
+                            str(row.get("ticker") or ""),
+                            str(row.get("signal_id") or ""),
+                            str(row.get("plan_hash_sha256") or ""),
+                            content_hash,
+                            int(row.get("publication_count") or 0),
+                            str(row.get("checked_at") or ""),
+                            canonical_payload,
+                        ),
+                    )
+                    if cursor.rowcount:
+                        inserted += 1
+                    else:
+                        reused += 1
+            return {"inserted": inserted, "reused": reused, "count": inserted + reused}
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not persist monitor publication receipts: {exc}"
+            ) from exc
+
+    def load_monitor_publication_receipts(
+        self, *, market_date: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if market_date:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM monitor_publication_receipts
+                        WHERE market_date = ? ORDER BY checked_at DESC LIMIT ?
+                        """,
+                        (str(market_date)[:10], limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM monitor_publication_receipts
+                        ORDER BY checked_at DESC LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not load monitor publication receipts: {exc}"
+            ) from exc
 
     def load_latest_monitor_checks(self, limit: int = 100) -> list[dict[str, Any]]:
         self.initialize()

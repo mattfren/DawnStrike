@@ -47,6 +47,7 @@ SUPPORTED_OBSERVATION_KINDS = frozenset(
         "sourced_stop",
         "sourced_invalidation",
         "premarket_price",
+        "premarket_high",
         "premarket_low",
         "prior_swing_high",
         "prior_day_resistance",
@@ -81,10 +82,12 @@ _PLAN_FIELDS = frozenset(
 )
 _OBSERVATION_FIELDS = frozenset(
     {
+        "ticker",
         "role",
         "value",
         "observed_at",
         "completed_at",
+        "completion_semantics",
         "source",
         "source_hash",
         "observation_kind",
@@ -105,6 +108,7 @@ class PlanObservation:
     value: float
     observed_at: str
     completed_at: str
+    completion_semantics: str
     source: str
     source_hash: str
     observation_kind: str
@@ -113,6 +117,7 @@ class PlanObservation:
     source_url: str = ""
     observation_hash: str = ""
     is_complete: bool = True
+    ticker: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -309,6 +314,12 @@ def construct_alphaops_v5_plan(
         return _invalid(normalized_direction, "target_observation_or_geometry_invalid")
     legs["target"] = selected
 
+    # Every frozen leg must refer to the same candidate.  This catches a
+    # source/ticker mix-up even when an attacker recomputes all content hashes.
+    leg_tickers = {item.ticker for item in legs.values()}
+    if len(leg_tickers) != 1 or not next(iter(leg_tickers)):
+        return _invalid(normalized_direction, "observation_ticker_mismatch")
+
     entry = values["entry"]
     stop = values["stop"]
     target = selected.value
@@ -474,6 +485,7 @@ def _validate_alphaops_v5_plan(
     if not isinstance(raw_observations, list) or [item.get("role") for item in raw_observations if isinstance(item, Mapping)] != ["entry", "stop", "target"]:
         raise ValueError("complete plan must contain entry, stop, and target observations")
     by_role: dict[str, Mapping[str, Any]] = {}
+    tickers: set[str] = set()
     for raw in raw_observations:
         if not isinstance(raw, Mapping):
             raise ValueError("observation must be an object")
@@ -484,6 +496,9 @@ def _validate_alphaops_v5_plan(
             raise ValueError("duplicate observation role")
         by_role[role] = raw
         _validate_observation(raw, role)
+        tickers.add(str(raw.get("ticker") or "").upper())
+    if len(tickers) != 1 or "" in tickers:
+        raise ValueError("observation ticker identity is inconsistent")
     if payload["target_basis_kind"] != by_role["target"]["observation_kind"]:
         raise ValueError("plan target basis does not match observed structural kind")
     if any(
@@ -498,9 +513,11 @@ def _validate_alphaops_v5_plan(
 
 def _validate_observation(raw: Mapping[str, Any], role: str) -> None:
     for field in (
+        "ticker",
         "role",
         "observed_at",
         "completed_at",
+        "completion_semantics",
         "source",
         "source_hash",
         "observation_kind",
@@ -512,18 +529,30 @@ def _validate_observation(raw: Mapping[str, Any], role: str) -> None:
             raise ValueError(f"{role} {field} must be a string")
     if type(raw["is_complete"]) is not bool:
         raise ValueError(f"{role} is_complete must be a boolean")
+    completion_semantics = raw["completion_semantics"]
+    if completion_semantics not in {"bar_completion", "availability_boundary"}:
+        raise ValueError(f"{role} completion semantics are invalid")
     value = _strict_number(raw.get("value"))
     raw_value = _strict_number(raw.get("raw_value"))
     if value is None or raw_value is None or value <= 0 or raw_value <= 0:
         raise ValueError(f"{role} observation values are invalid")
     if raw.get("is_complete") is not True:
         raise ValueError(f"{role} observation is not complete")
+    ticker = str(raw.get("ticker") or "").strip().upper()
+    if not ticker or not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", ticker):
+        raise ValueError(f"{role} observation ticker is invalid")
     kind = raw["observation_kind"]
+    source = raw["source"]
     if kind not in SUPPORTED_OBSERVATION_KINDS:
         raise ValueError(f"{role} observation kind is unsupported")
     if role == "target":
         if kind not in SUPPORTED_TARGET_BASES or value != raw_value:
             raise ValueError("target must equal its raw observed structural level")
+        if (
+            completion_semantics != "availability_boundary"
+            and source.startswith("alpaca_market_data_")
+        ):
+            raise ValueError("target completion semantics must be availability_boundary")
     derivation = raw["derivation_policy"]
     if derivation not in ALLOWED_DERIVATION_POLICIES:
         raise ValueError("observation derivation policy is not allowlisted")
@@ -640,6 +669,7 @@ def _observation_for(
     decision_at: str | None = None,
 ) -> PlanObservation | None:
     data: dict[str, Any] = dict(raw) if isinstance(raw, Mapping) else {}
+    data.setdefault("ticker", str(signal.get("ticker") or signal.get("symbol") or "").upper())
     if role == "target" and not data:
         data.update(_provenance_aliases(signal, role))
     aliases = _provenance_aliases(signal, role)
@@ -650,6 +680,9 @@ def _observation_for(
         numeric = value
     observed_at = str(_first(data, "observed_at", "observation_time", "source_timestamp", "timestamp") or "").strip()
     completed_at = str(_first(data, "completed_at", "bar_completed_at", "completion_time") or "").strip()
+    completion_semantics = str(
+        _first(data, "completion_semantics") or "bar_completion"
+    ).strip().lower()
     source = str(_first(data, "source", "source_identity", "provider") or "").strip()
     source_url = str(_first(data, "source_url", "url") or "").strip()
     source_hash = str(_first(data, "source_hash", "source_hash_sha256", "observation_sha256", "hash") or "").strip().lower()
@@ -668,6 +701,7 @@ def _observation_for(
     if (
         not observed_at
         or not completed_at
+        or completion_semantics not in {"bar_completion", "availability_boundary"}
         or not source
         or not observation_kind
         or raw_value is None
@@ -677,6 +711,16 @@ def _observation_for(
         or not set(source_hash) <= _SHA256
     ):
         return None
+    ticker = str(
+        _first(data, "ticker", "symbol")
+        or signal.get("ticker")
+        or signal.get("symbol")
+        # Compatibility for the explicit-observation constructor API used by
+        # older research fixtures. Production rows always carry ticker.
+        or ("UNSPECIFIED" if source_url.startswith("internal://") else "")
+    ).strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", ticker):
+        return None
     if observation_kind not in SUPPORTED_OBSERVATION_KINDS:
         return None
     if role == "target" and observation_kind not in SUPPORTED_TARGET_BASES:
@@ -684,6 +728,12 @@ def _observation_for(
     if derivation_policy not in ALLOWED_DERIVATION_POLICIES:
         return None
     if role == "target" and numeric != raw_value:
+        return None
+    if (
+        role == "target"
+        and completion_semantics != "availability_boundary"
+        and source.startswith("alpaca_market_data_")
+    ):
         return None
     # v1 only admits observation-identity policies. Reconcile every leg,
     # including entry and stop, before freezing it into the plan; otherwise a
@@ -710,10 +760,12 @@ def _observation_for(
     if not _source_reference_valid(source_url):
         return None
     observation_payload = {
+        "ticker": ticker,
         "role": role,
         "value": numeric,
         "observed_at": observed_at,
         "completed_at": completed_at,
+        "completion_semantics": completion_semantics,
         "source": source,
         "source_url": source_url,
         "source_hash": source_hash,
@@ -727,10 +779,12 @@ def _observation_for(
     if supplied_observation_hash and supplied_observation_hash != expected_hash:
         return None
     return PlanObservation(
+        ticker=ticker,
         role=role,
         value=numeric,
         observed_at=observed_at,
         completed_at=completed_at,
+        completion_semantics=completion_semantics,
         source=source,
         source_hash=source_hash,
         observation_kind=observation_kind,
