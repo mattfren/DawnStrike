@@ -173,6 +173,43 @@ def test_daily_learning_recovers_after_crash_before_final_commit_publication(
     assert reused["idempotent_reused"] is True
 
 
+def test_self_hashed_but_unsigned_commit_manifest_is_rejected(tmp_path: Path) -> None:
+    run_daily_strategy_learning(
+        market_date="2026-08-20",
+        cutoff="2026-08-20T22:00:00+00:00",
+        source_identity="fixture-commit-signature",
+        code_sha="fixture-code-sha",
+        out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
+        analyzer=FixtureAnalyzer(),
+    )
+    manifest_path = tmp_path / "2026-08-20" / "daily_learning_commit_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["code_sha"] = "forged-code-sha"
+    body = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"manifest_sha256", "signature_hmac_sha256"}
+    }
+    manifest["manifest_sha256"] = learning_service._sha256(body)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="signed artifact signature mismatch"):
+        run_daily_strategy_learning(
+            market_date="2026-08-20",
+            cutoff="2026-08-20T22:00:00+00:00",
+            source_identity="fixture-commit-signature",
+            code_sha="fixture-code-sha",
+            out_dir=tmp_path,
+            input_hash_sha256=FIXTURE_INPUT_HASH,
+            analyzer=FixtureAnalyzer(),
+        )
+
+
 def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanalysis(
     tmp_path: Path,
 ) -> None:
