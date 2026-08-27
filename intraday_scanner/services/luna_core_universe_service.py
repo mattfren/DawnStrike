@@ -1048,7 +1048,6 @@ _CORE_ROW_NUMERIC_FIELDS = (
     "market_cap",
     "spread_pct",
     "short_float_pct",
-    "source_confidence",
     "field_completeness_score",
     "source_reliability_prior",
     "reconciliation_confidence_score",
@@ -1248,6 +1247,13 @@ def build_core_row_binding_projection(
     )
     effective_row["score_consensus"] = str(row.get("score_consensus") or "single_source")
     effective_row["row_merge_reason"] = str(row.get("row_merge_reason") or "single_source")
+    # ScoredCandidate exposes ``preferred_source`` as a stable fallback to the
+    # authenticated provider source.  Canonicalize the same fallback before
+    # sealing discovery so the serializer cannot invalidate an otherwise
+    # unchanged receipt merely by making that derived alias explicit.
+    effective_row["preferred_source"] = str(
+        row.get("preferred_source") or row.get("source") or ""
+    )
     effective_row["extraction_mode"] = str(
         row.get("extraction_mode") or row.get("data_source_kind") or ""
     )
