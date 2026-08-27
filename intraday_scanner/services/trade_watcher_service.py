@@ -75,6 +75,7 @@ EXIT_ACTIONS = frozenset({ACTION_EXIT, ACTION_EXIT_SHORT})
 def _normalized_action(value: Any) -> str:
     return str(value or "").strip().upper()
 
+
 STATE_WATCHING = "WATCHING"
 STATE_ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
 STATE_PAPER_OPEN = "PAPER_OPEN"
@@ -387,9 +388,7 @@ def run_trade_watcher(
         paper_fills=paper_fills,
         signal_events=signal_events,
         monitor_publication_receipts=monitor_receipts,
-        portfolio_account_id=(
-            ALPHAOPS_V5_ACCOUNT_ID if normalized_mode == MODE_PAPER else ""
-        ),
+        portfolio_account_id=(ALPHAOPS_V5_ACCOUNT_ID if normalized_mode == MODE_PAPER else ""),
         portfolio_market_date=resolved_day,
         max_open_positions=settings.max_open_positions,
         max_daily_entries=settings.max_daily_entries,
@@ -398,9 +397,7 @@ def run_trade_watcher(
     rejected_intent_ids = set(rejected_intents)
     if rejected_intent_ids:
         rejected_signal_reasons = {
-            str(intent.get("signal_id") or ""): rejected_intents[
-                str(intent.get("intent_id") or "")
-            ]
+            str(intent.get("signal_id") or ""): rejected_intents[str(intent.get("intent_id") or "")]
             for intent in new_intents
             if str(intent.get("intent_id") or "") in rejected_intent_ids
         }
@@ -616,8 +613,7 @@ def _watch_signals(
     if missing_signal_ids:
         raise SnapshotValidationError(
             "Selected paper signals are only partially persisted; "
-            "missing watchable historical signals: "
-            + ", ".join(sorted(missing_signal_ids))
+            "missing watchable historical signals: " + ", ".join(sorted(missing_signal_ids))
         )
     for selection in selected_rows:
         historical_row = historical_by_id[str(selection.get("signal_id") or "")]
@@ -1035,11 +1031,17 @@ def _canonical_eod_repairs(
             "account_id": str(position.get("account_id") or ALPHAOPS_V5_ACCOUNT_ID),
             "strategy_version": trade.get("strategy_version"),
             "cohort": trade.get("cohort") or position.get("cohort"),
+            "episode_id": position.get("episode_id"),
+            "decision_fingerprint": hashlib.sha256(
+                f"{intent_id}:{exit_time}:{exit_price}".encode()
+            ).hexdigest(),
+            "official_paper_eligible": position.get("official_paper_eligible"),
             "source_reconciliation_trade_id": trade_id,
             "source_bar_hash_sha256": trade.get("source_bar_hash_sha256"),
             "created_at": _utc_now(),
             "notification_event_key": f"trade_intent:{intent_id}",
             "research_only": True,
+            "broker_execution": "disabled",
             "broker_execution_enabled": False,
         }
         intent["payload_json"] = dict(intent)
@@ -1250,8 +1252,7 @@ def _side_aware_quote_observation(
     ask = _number(observation.get("quote_ask"))
     plan = signal.get("alphaops_market_structure_plan")
     direction = str(
-        direction_override
-        or (plan.get("direction") if isinstance(plan, dict) else "")
+        direction_override or (plan.get("direction") if isinstance(plan, dict) else "")
     ).lower()
     if direction in {"sell", "sell_short"}:
         direction = "short"
@@ -1270,8 +1271,7 @@ def _side_aware_quote_observation(
         "price": selected,
         "current_price": selected,
         "price_type": f"quote_{side}_side",
-        "bar_observed_at": observation.get("bar_observed_at")
-        or observation.get("observed_at"),
+        "bar_observed_at": observation.get("bar_observed_at") or observation.get("observed_at"),
         # The V5 policy trace must be about the executable quote used for the
         # decision.  Preserve the completed-bar timestamps separately in the
         # observation, but expose the authenticated quote timestamp as the
@@ -1289,9 +1289,7 @@ def _quote_observation_ready(observation: dict[str, Any]) -> bool:
         and bid > 0
         and ask >= bid
         and str(observation.get("quote_observed_at") or "").strip()
-        and str(observation.get("quote_source") or "")
-        .lower()
-        .startswith("alpaca_market_data_")
+        and str(observation.get("quote_source") or "").lower().startswith("alpaca_market_data_")
         and _valid_sha256(str(observation.get("quote_source_hash_sha256") or ""))
         and str(observation.get("quote_raw_payload_json") or "").strip()
     )
@@ -1329,10 +1327,7 @@ def _entry_decision(
         if is_short:
             return {
                 "state": STATE_STAND_DOWN,
-                "reason": (
-                    "AlphaOps v5 short admission blocked: "
-                    "BORROW_TRUTH_UNAVAILABLE."
-                ),
+                "reason": ("AlphaOps v5 short admission blocked: BORROW_TRUTH_UNAVAILABLE."),
                 "decision_trace": None,
             }
         if not _quote_observation_ready(observation):
@@ -1544,17 +1539,17 @@ def _exit_decision(
     scanner_config: ScannerConfig,
 ) -> dict[str, Any]:
     price = float(_number(observation.get("price")) or 0.0)
-    position_direction = str(
-        open_position.get("direction") or open_position.get("trade_direction") or ""
-    ).strip().lower()
+    position_direction = (
+        str(open_position.get("direction") or open_position.get("trade_direction") or "")
+        .strip()
+        .lower()
+    )
     # A persisted position direction is authoritative.  Older paper rows may
     # predate the explicit direction field; only those rows inherit the
     # selected signal's direction, rather than treating an explicit short as
     # long because the helper's compatibility default is long.
     direction = (
-        _position_direction(open_position)
-        if position_direction
-        else _signal_direction(signal)
+        _position_direction(open_position) if position_direction else _signal_direction(signal)
     )
     is_short = direction == "short"
     stop = _number(open_position.get("stop_price")) or _level(
@@ -1652,15 +1647,10 @@ def _intent(
     trace = dict(decision_trace or {})
     computed = trace.get("computed")
     trace_decision_time = (
-        str(computed.get("decision_time") or "")
-        if isinstance(computed, dict)
-        else ""
+        str(computed.get("decision_time") or "") if isinstance(computed, dict) else ""
     )
     requested_at = str(observation.get("requested_at") or "")
-    decision_time = (
-        trace_decision_time
-        or str(observation.get("observed_at") or requested_at)
-    )
+    decision_time = trace_decision_time or str(observation.get("observed_at") or requested_at)
     if trace_decision_time and trace_decision_time != requested_at:
         raise SnapshotValidationError(
             "AlphaOps v5 decision trace does not match its requested evidence time."
@@ -1705,8 +1695,16 @@ def _intent(
         "source_bar_hash_sha256": str(observation.get("source_bar_hash_sha256") or ""),
         "source_observed_at": str(observation.get("observed_at") or ""),
         "source_bar_completed_at": str(observation.get("bar_completed_at") or ""),
-        "selection_id": str(signal.get("selection_id") or ""),
-        "episode_id": str(signal.get("episode_id") or ""),
+        "selection_id": str(signal.get("selection_id") or f"selection:{signal_id}"),
+        "episode_id": str(
+            signal.get("episode_id")
+            or "episode:"
+            + hashlib.sha256(
+                (
+                    f"{signal_id}:{market_date}:{signal.get('strategy_id') or ALPHAOPS_STRATEGY_ID}"
+                ).encode()
+            ).hexdigest()[:24]
+        ),
         "matched_strategy_ids": list(signal.get("matched_strategy_ids") or []),
         "primary_strategy_id": str(signal.get("primary_strategy_id") or ""),
         "episode_dedup_counts": dict(signal.get("episode_dedup_counts") or {}),
@@ -1718,18 +1716,21 @@ def _intent(
         ),
         "cohort": str(signal.get("cohort") or "algorithm_selected"),
         "account_id": str(
-            trace.get("account_id")
-            or (ALPHAOPS_V5_ACCOUNT_ID if mode == MODE_PAPER else "")
+            trace.get("account_id") or (ALPHAOPS_V5_ACCOUNT_ID if mode == MODE_PAPER else "")
         ),
         "execution_policy_version": str(trace.get("policy_version") or ""),
         "cost_model_version": str(
-            trace.get("cost_model_version")
-            or raw_signal_payload.get("cost_model_version")
-            or ""
+            trace.get("cost_model_version") or raw_signal_payload.get("cost_model_version") or ""
         ),
-        "decision_fingerprint": str(trace.get("decision_fingerprint") or ""),
+        "decision_fingerprint": str(
+            trace.get("decision_fingerprint")
+            or hashlib.sha256(f"{signal_id}:{action}:{decision_time}:{price}".encode()).hexdigest()
+        ),
         "official_paper_eligible": trace.get("eligible_for_official_paper"),
         "decision_trace": trace,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
     }
 
 
@@ -1931,6 +1932,7 @@ def _fill(
         "cost_model_version": intent.get("cost_model_version"),
         "decision_fingerprint": intent.get("decision_fingerprint"),
         "episode_id": intent.get("episode_id"),
+        "official_paper_eligible": intent.get("official_paper_eligible"),
         "research_only": True,
         "broker_execution": "disabled",
         "broker_execution_enabled": False,
@@ -2091,9 +2093,12 @@ def _build_watcher_current_proof(
     stop_distance = _number(computed.get("stop_distance_pct"))
     chase = _number(computed.get("chase_pct"))
     if (
-        after_cost is None or after_cost < 1.5
-        or stop_distance is None or stop_distance > 15.0
-        or chase is None or chase > 2.0
+        after_cost is None
+        or after_cost < 1.5
+        or stop_distance is None
+        or stop_distance > 15.0
+        or chase is None
+        or chase > 2.0
     ):
         return None
     signal_id = _signal_id(signal)
@@ -2134,7 +2139,6 @@ def _build_watcher_current_proof(
         "",
     )
 
-
     if (
         not selection_id
         or cohort != "official_telegram"
@@ -2155,7 +2159,11 @@ def _build_watcher_current_proof(
     source_quote_hash = str(observation.get("quote_source_hash_sha256") or "").lower()
     quote_raw_json = str(observation.get("quote_raw_payload_json") or "")
     if (
-        bid is None or ask is None or bid <= 0 or ask < bid or last is None
+        bid is None
+        or ask is None
+        or bid <= 0
+        or ask < bid
+        or last is None
         or not _valid_sha256(source_bar_hash)
         or not _valid_sha256(source_quote_hash)
         or not quote_raw_json
@@ -2190,9 +2198,7 @@ def _build_watcher_current_proof(
         "cohort": cohort,
         "source_scan_id": source_scan_id,
         "frozen_slate_id": str(lineage.get("slate_id") or ""),
-        "frozen_slate_content_hash_sha256": str(
-            lineage.get("slate_content_hash_sha256") or ""
-        ),
+        "frozen_slate_content_hash_sha256": str(lineage.get("slate_content_hash_sha256") or ""),
         "frozen_research_selection_id": frozen_member_id,
         "direction": direction,
         "observed_at": observed_at,
@@ -2201,9 +2207,7 @@ def _build_watcher_current_proof(
         "source_quote_hash_sha256": source_quote_hash,
         "quote_raw_payload_json": quote_raw_json,
         "bar_observed_at": str(
-            observation.get("bar_observed_at")
-            or observation.get("observed_at")
-            or ""
+            observation.get("bar_observed_at") or observation.get("observed_at") or ""
         ),
         "bar_completed_at": str(observation.get("bar_completed_at") or ""),
         "bar_freshness_seconds": bar_freshness,
@@ -2233,16 +2237,13 @@ def _build_watcher_current_proof(
         "cohort": cohort,
         "source_scan_id": source_scan_id,
         "frozen_slate_id": str(lineage.get("slate_id") or ""),
-        "frozen_slate_content_hash_sha256": str(
-            lineage.get("slate_content_hash_sha256") or ""
-        ),
+        "frozen_slate_content_hash_sha256": str(lineage.get("slate_content_hash_sha256") or ""),
         "frozen_research_selection_id": frozen_member_id,
         "direction": direction,
         "account_mode": "PAPER",
         "simulated_account_id": ALPHAOPS_V5_ACCOUNT_ID,
-        "admission_id": "paper-admission-" + hashlib.sha256(
-            f"{signal_id}:{plan_hash}".encode()
-        ).hexdigest()[:24],
+        "admission_id": "paper-admission-"
+        + hashlib.sha256(f"{signal_id}:{plan_hash}".encode()).hexdigest()[:24],
         "admission_key": f"paper-admission:{signal_id}:{plan_hash[:16]}",
         "blocking_reasons": [],
         "research_only": True,
@@ -2262,9 +2263,7 @@ def _build_watcher_current_proof(
         "cohort": cohort,
         "source_scan_id": source_scan_id,
         "frozen_slate_id": str(lineage.get("slate_id") or ""),
-        "frozen_slate_content_hash_sha256": str(
-            lineage.get("slate_content_hash_sha256") or ""
-        ),
+        "frozen_slate_content_hash_sha256": str(lineage.get("slate_content_hash_sha256") or ""),
         "frozen_research_selection_id": frozen_member_id,
         "direction": direction,
         "checked_at": checked_at,
@@ -2311,9 +2310,7 @@ def _monitor_publication_receipt(
             "watcher_current_proof": proof,
         }
     ):
-        raise SnapshotValidationError(
-            "monitor publication requires a strict current watcher proof"
-        )
+        raise SnapshotValidationError("monitor publication requires a strict current watcher proof")
     proof_checked_at = str(proof.get("checked_at") or "")
     if not proof_checked_at or str(checked_at) != proof_checked_at:
         raise SnapshotValidationError(
@@ -2335,7 +2332,8 @@ def _monitor_publication_receipt(
     )
     receipt = {
         "schema_version": "dawnstrike.alphaops.monitor_publication_receipt.v1",
-        "receipt_id": "monitor-publication-" + hashlib.sha256(
+        "receipt_id": "monitor-publication-"
+        + hashlib.sha256(
             f"{signal_id}:{intent_id}:{plan_hash}:{proof.get('proof_hash_sha256')}".encode()
         ).hexdigest()[:24],
         "market_date": str(signal.get("market_date") or checked_at)[:10],
@@ -2353,9 +2351,7 @@ def _monitor_publication_receipt(
             or proof.get("selection_id")
             or ""
         ),
-        "cohort": str(
-            signal.get("cohort") or lineage.get("cohort") or proof.get("cohort") or ""
-        ),
+        "cohort": str(signal.get("cohort") or lineage.get("cohort") or proof.get("cohort") or ""),
         "source_scan_id": str(
             lineage.get("source_scan_id")
             or signal.get("scan_id")

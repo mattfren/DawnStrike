@@ -66,7 +66,10 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "ticker": "NOVA",
         "episode_id": episode_id,
         "strategy_id": "alphaops_v5",
+        "strategy_version": "dawnstrike-alphaops-v5",
         "account_id": "alphaops_v5_simulated",
+        "selection_id": f"selection-{suffix}",
+        "cohort": "TIER3",
         "mode": "paper_execute",
         "lifecycle_state": "ENTRY_TRIGGERED",
         "action": "ENTER_LONG",
@@ -75,6 +78,10 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "reason": "test",
         "created_at": "2026-08-27T14:35:00+00:00",
         "decision_fingerprint": "fingerprint-v1",
+        "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "decision_trace": {
             "account_id": "alphaops_v5_simulated",
             "plan_hash_sha256": "a" * 64,
@@ -99,6 +106,16 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "market_date": intent["market_date"],
         "ticker": intent["ticker"],
         "direction": "long",
+        "episode_id": episode_id,
+        "strategy_id": intent["strategy_id"],
+        "strategy_version": intent["strategy_version"],
+        "account_id": intent["account_id"],
+        "selection_id": intent["selection_id"],
+        "cohort": intent["cohort"],
+        "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "status": "OPEN",
         "quantity": 10,
         "entry_intent_id": intent_id,
@@ -113,6 +130,17 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
         "market_date": intent["market_date"],
         "ticker": intent["ticker"],
         "side": "BUY",
+        "episode_id": episode_id,
+        "strategy_id": intent["strategy_id"],
+        "strategy_version": intent["strategy_version"],
+        "account_id": intent["account_id"],
+        "selection_id": intent["selection_id"],
+        "cohort": intent["cohort"],
+        "decision_fingerprint": intent["decision_fingerprint"],
+        "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "fill_time": intent["decision_time"],
         "fill_price": 10.0,
         "quantity": 10,
@@ -174,9 +202,9 @@ def _monitor_receipt(intent_id: str, suffix: str) -> dict:
         "portfolio_receipt_hash_sha256": proof["portfolio_hash_sha256"],
     }
     receipt["content_hash_sha256"] = hashlib.sha256(
-        json.dumps(
-            receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        ).encode("utf-8")
+        json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+            "utf-8"
+        )
     ).hexdigest()
     return receipt
 
@@ -191,9 +219,12 @@ def _exit_rows(
         "signal_id": position["signal_id"],
         "market_date": position["market_date"],
         "ticker": position["ticker"],
-        "episode_id": "episode:closed-retry",
+        "episode_id": position["episode_id"],
         "strategy_id": "alphaops_v5",
+        "strategy_version": position["strategy_version"],
         "account_id": "alphaops_v5_simulated",
+        "selection_id": position["selection_id"],
+        "cohort": position["cohort"],
         "mode": "paper_execute",
         "lifecycle_state": "EXIT_TRIGGERED",
         "action": "EXIT_LONG",
@@ -201,6 +232,11 @@ def _exit_rows(
         "decision_price": 11.6,
         "reason": "target reached",
         "created_at": decision_time,
+        "decision_fingerprint": "fingerprint-exit-v1",
+        "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
     }
     closed = {
         **position,
@@ -220,6 +256,17 @@ def _exit_rows(
         "market_date": position["market_date"],
         "ticker": position["ticker"],
         "side": "SELL",
+        "episode_id": intent["episode_id"],
+        "strategy_id": intent["strategy_id"],
+        "strategy_version": intent["strategy_version"],
+        "account_id": intent["account_id"],
+        "selection_id": intent["selection_id"],
+        "cohort": intent["cohort"],
+        "decision_fingerprint": intent["decision_fingerprint"],
+        "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "fill_time": decision_time,
         "fill_price": 11.6,
         "quantity": position["quantity"],
@@ -252,9 +299,7 @@ def test_episode_claim_blocks_losing_position_and_fill_side_effects(tmp_path: Pa
 def test_normalized_entry_action_cannot_evade_episode_claim(tmp_path: Path) -> None:
     db_path = tmp_path / "watcher.sqlite"
     first = _persist(db_path, "canonical")
-    intents, positions, fills = _lifecycle_rows(
-        suffix="padded", episode_id="episode:atomic"
-    )
+    intents, positions, fills = _lifecycle_rows(suffix="padded", episode_id="episode:atomic")
     intents[0]["action"] = "  enter_long "
     result = SQLiteScanStore(db_path).persist_trade_watcher_lifecycle(
         intents=intents,
@@ -569,9 +614,7 @@ def test_close_transition_binds_fill_price_to_exit_intent(tmp_path: Path) -> Non
 
 def test_brand_new_closed_position_is_rejected(tmp_path: Path) -> None:
     db_path = tmp_path / "watcher.sqlite"
-    _, positions, _ = _lifecycle_rows(
-        suffix="new-closed", episode_id="episode:new-closed"
-    )
+    _, positions, _ = _lifecycle_rows(suffix="new-closed", episode_id="episode:new-closed")
     exit_intents, closed_positions, exit_fills = _exit_rows(
         position=positions[0], suffix="new-closed"
     )
@@ -686,6 +729,57 @@ def test_entry_fill_price_is_bound_to_entry_intent(tmp_path: Path) -> None:
 
     assert not store.load_trade_intents(market_date="2026-08-27")
     assert not store.load_paper_positions(market_date="2026-08-27")
+
+
+@pytest.mark.parametrize(("field", "value"), (("episode_id", ""), ("account_id", "other")))
+def test_fill_requires_exact_nonempty_research_identity(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    intents, positions, fills = _lifecycle_rows(
+        suffix=f"fill-{field}", episode_id=f"episode:fill-{field}"
+    )
+    fills[0][field] = value
+    store = SQLiteScanStore(tmp_path / f"{field}.sqlite")
+    with pytest.raises(StorageError, match="valid bound fill"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+
+
+def test_position_requires_exact_research_identity(tmp_path: Path) -> None:
+    intents, positions, fills = _lifecycle_rows(
+        suffix="position-identity", episode_id="episode:position-identity"
+    )
+    positions[0]["selection_id"] = "selection-other"
+    store = SQLiteScanStore(tmp_path / "position.sqlite")
+    with pytest.raises(StorageError, match="valid bound fill"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
+
+
+def test_unknown_position_status_is_rejected(tmp_path: Path) -> None:
+    intents, positions, fills = _lifecycle_rows(
+        suffix="unknown-status", episode_id="episode:unknown-status"
+    )
+    positions[0]["status"] = "UNKNOWN"
+    store = SQLiteScanStore(tmp_path / "unknown.sqlite")
+    with pytest.raises(StorageError, match="unsupported lifecycle status"):
+        store.persist_trade_watcher_lifecycle(
+            intents=intents,
+            paper_positions=positions,
+            paper_fills=fills,
+            signal_events=[],
+        )
+    assert not store.load_trade_intents(market_date="2026-08-27")
 
 
 def test_overlapping_watcher_claims_are_serialized_by_sqlite(tmp_path: Path) -> None:
@@ -909,17 +1003,15 @@ def test_monitor_receipt_rejects_forged_hash_plan_or_account(
     tmp_path: Path, field: str, value: str, recompute_hash: bool
 ) -> None:
     db_path = tmp_path / f"watcher-{field}.sqlite"
-    intents, positions, fills = _lifecycle_rows(
-        suffix=field, episode_id=f"episode:{field}"
-    )
+    intents, positions, fills = _lifecycle_rows(suffix=field, episode_id=f"episode:{field}")
     receipt = _monitor_receipt(f"intent-{field}", field)
     receipt[field] = value
     if recompute_hash:
         unsigned = {key: item for key, item in receipt.items() if key != "content_hash_sha256"}
         receipt["content_hash_sha256"] = hashlib.sha256(
-            json.dumps(
-                unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            ).encode("utf-8")
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "utf-8"
+            )
         ).hexdigest()
     store = SQLiteScanStore(db_path)
 
@@ -1020,9 +1112,7 @@ def test_existing_trade_intents_are_backfilled_during_migration(tmp_path: Path) 
         assert record["columns"]["account_id"] == "alphaops_v5_simulated"
         assert record["payload_json"]["episode_id"] == "episode:legacy"
 
-    effective_rows = store.load_trade_intents(
-        market_date="2026-08-27", action="ENTER_LONG"
-    )
+    effective_rows = store.load_trade_intents(market_date="2026-08-27", action="ENTER_LONG")
     effective_by_id = {row["intent_id"]: row for row in effective_rows}
     assert len(effective_rows) == 2
     assert effective_by_id["legacy-early"]["episode_id"] == "episode:legacy"

@@ -788,6 +788,16 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "market_date": "2026-06-22",
                     "ticker": "NOVA",
                     "account_id": "alphaops_v5_simulated",
+                    "strategy_id": "alphaops_v5",
+                    "strategy_version": "dawnstrike-alphaops-v5",
+                    "episode_id": "episode-atomic",
+                    "selection_id": "selection-atomic",
+                    "cohort": "test",
+                    "decision_fingerprint": "fingerprint-atomic",
+                    "official_paper_eligible": True,
+                    "research_only": True,
+                    "broker_execution": "disabled",
+                    "broker_execution_enabled": False,
                     "mode": "paper_execute",
                     "lifecycle_state": "ENTRY_TRIGGERED",
                     "action": "ENTER_LONG",
@@ -804,6 +814,16 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "market_date": "2026-06-22",
                     "ticker": "NOVA",
                     "direction": "long",
+                    "account_id": "alphaops_v5_simulated",
+                    "strategy_id": "alphaops_v5",
+                    "strategy_version": "dawnstrike-alphaops-v5",
+                    "episode_id": "episode-atomic",
+                    "selection_id": "selection-atomic",
+                    "cohort": "test",
+                    "official_paper_eligible": True,
+                    "research_only": True,
+                    "broker_execution": "disabled",
+                    "broker_execution_enabled": False,
                     "status": "OPEN",
                     "quantity": 10,
                     "entry_intent_id": "intent-atomic",
@@ -820,6 +840,17 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "market_date": "2026-06-22",
                     "ticker": "NOVA",
                     "side": "BUY",
+                    "account_id": "alphaops_v5_simulated",
+                    "strategy_id": "alphaops_v5",
+                    "strategy_version": "dawnstrike-alphaops-v5",
+                    "episode_id": "episode-atomic",
+                    "selection_id": "selection-atomic",
+                    "cohort": "test",
+                    "decision_fingerprint": "fingerprint-atomic",
+                    "official_paper_eligible": True,
+                    "research_only": True,
+                    "broker_execution": "disabled",
+                    "broker_execution_enabled": False,
                     "fill_time": "2026-06-22T13:35:00+00:00",
                     "fill_price": 10.0,
                     "quantity": 10,
@@ -1123,16 +1154,12 @@ def _persist_v5_signal(
         "corporate_action_status": "clear",
         "alert_gate_status": alert_gate_status,
         "manual_confirmation_required": manual_confirmation_required,
-        "classification": (
-            "WATCH ONLY" if manual_confirmation_required else "TRADE SETUP"
-        ),
+        "classification": ("WATCH ONLY" if manual_confirmation_required else "TRADE SETUP"),
         "market_structure_observations": {
             "entry": _watcher_plan_observation(10.0, "a" * 64, "sourced_entry"),
             "stop": _watcher_plan_observation(9.0, "b" * 64, "sourced_stop"),
             "target": {
-                **_watcher_plan_observation(
-                    12.75, "c" * 64, "prior_day_resistance"
-                ),
+                **_watcher_plan_observation(12.75, "c" * 64, "prior_day_resistance"),
                 "target_basis_kind": "sourced_resistance",
             },
         },
@@ -1145,9 +1172,7 @@ def _persist_v5_signal(
         "2026-07-31T13:30:00+00:00",
         1,
     )
-    store.persist_historical_signals(
-        [{**signal, "raw_payload_json": signal}]
-    )
+    store.persist_historical_signals([{**signal, "raw_payload_json": signal}])
     store.persist_signal_selections(
         [
             {

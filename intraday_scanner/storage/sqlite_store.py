@@ -5109,6 +5109,11 @@ class SQLiteScanStore:
                     if not position_id or not ticker or not market_date:
                         continue
                     status = str(row.get("status") or "").upper()
+                    if status not in {"OPEN", "PENDING", "CLOSED"}:
+                        raise StorageError(
+                            "paper position has unsupported lifecycle status: "
+                            f"{position_id}"
+                        )
                     lifecycle_intent_id = str(
                         row.get("entry_intent_id")
                         if status in {"OPEN", "PENDING"}
@@ -8890,6 +8895,8 @@ def _valid_position_close_transition(
         position_id=str(incoming.get("position_id") or ""),
     ):
         return False
+    if not _exact_position_identity(exit_intent, incoming):
+        return False
     for position_key, fill_key in (
         ("position_id", "position_id"),
         ("signal_id", "signal_id"),
@@ -8990,6 +8997,8 @@ def _valid_position_entry_fill(
         )
     ):
         return False
+    if not _exact_position_identity(entry_intent, position):
+        return False
     for position_key, fill_key in (
         ("position_id", "position_id"),
         ("signal_id", "signal_id"),
@@ -9031,6 +9040,8 @@ def _valid_intent_fill(
     }.get(action)
     if expected_side is None or str(fill.get("side") or "").strip().upper() != expected_side:
         return False
+    if not _exact_research_identity(intent, fill):
+        return False
     for intent_key, fill_key in (
         ("intent_id", "intent_id"),
         ("signal_id", "signal_id"),
@@ -9070,6 +9081,48 @@ def _valid_intent_fill(
             1 + slippage_bps / 10000.0 if unfavorable else 1 - slippage_bps / 10000.0
         )
     return fill_price == round(expected_price, 6)
+
+
+def _exact_research_identity(
+    intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]
+) -> bool:
+    for key in (
+        "account_id", "strategy_id", "strategy_version", "episode_id",
+        "selection_id", "cohort", "decision_fingerprint",
+    ):
+        expected = str(intent.get(key) or "").strip()
+        if not expected or str(lifecycle_row.get(key) or "").strip() != expected:
+            return False
+    return _exact_safety_identity(intent, lifecycle_row)
+
+
+def _exact_position_identity(
+    intent: Mapping[str, Any], position: Mapping[str, Any]
+) -> bool:
+    for key in (
+        "account_id", "strategy_id", "strategy_version", "episode_id",
+        "selection_id", "cohort",
+    ):
+        expected = str(intent.get(key) or "").strip()
+        if not expected or str(position.get(key) or "").strip() != expected:
+            return False
+    return _exact_safety_identity(intent, position)
+
+
+def _exact_safety_identity(
+    intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]
+) -> bool:
+    return (
+        intent.get("research_only") is True
+        and lifecycle_row.get("research_only") is True
+        and str(intent.get("broker_execution") or "") == "disabled"
+        and str(lifecycle_row.get("broker_execution") or "") == "disabled"
+        and intent.get("broker_execution_enabled") is False
+        and lifecycle_row.get("broker_execution_enabled") is False
+        and "official_paper_eligible" in intent
+        and lifecycle_row.get("official_paper_eligible")
+        == intent.get("official_paper_eligible")
+    )
 
 
 def _trade_intent_row(row: sqlite3.Row) -> dict[str, Any]:
