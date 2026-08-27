@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -4939,7 +4940,12 @@ class SQLiteScanStore:
         paper_positions: list[dict[str, Any]],
         paper_fills: list[dict[str, Any]],
         signal_events: list[dict[str, Any]],
-    ) -> dict[str, dict[str, int]]:
+        monitor_publication_receipts: list[dict[str, Any]] | None = None,
+        portfolio_account_id: str = "",
+        portfolio_market_date: str = "",
+        max_open_positions: int | None = None,
+        max_daily_entries: int | None = None,
+    ) -> dict[str, Any]:
         """Persist one paper-watcher lifecycle batch in one transaction.
 
         The conflict behavior intentionally matches the focused persistence
@@ -4952,8 +4958,12 @@ class SQLiteScanStore:
         position_stats = {"inserted": 0, "row_count": len(paper_positions)}
         fill_stats = {"inserted": 0, "skipped": 0, "row_count": len(paper_fills)}
         event_stats = {"inserted": 0, "skipped": 0}
+        monitor_rows = list(monitor_publication_receipts or [])
+        monitor_stats = {"inserted": 0, "reused": 0, "count": 0}
+        rejected_intents: dict[str, str] = {}
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 connection.row_factory = sqlite3.Row
                 # The watcher builds lifecycle rows before entering this
                 # transaction.  Treat the intent insert as the durable claim:
@@ -4962,12 +4972,43 @@ class SQLiteScanStore:
                 # in-memory snapshot.  Exact intent-id retries remain
                 # idempotently reusable for crash repair.
                 admitted_intent_ids: set[str] = set()
+                reserved_entry_count = 0
+                reserved_entry_tickers: set[tuple[str, str]] = set()
                 for row in intents:
                     intent_id = str(row.get("intent_id") or "")
                     ticker = str(row.get("ticker") or "").upper()
                     market_date = str(row.get("market_date") or "")[:10]
                     if not intent_id or not ticker or not market_date:
                         continue
+                    existing_intent = connection.execute(
+                        "SELECT intent_id FROM trade_intents WHERE intent_id = ?",
+                        (intent_id,),
+                    ).fetchone()
+                    action = _trade_intent_action(row)
+                    row_account_id = _trade_intent_account_id(row)
+                    scoped_account_id = str(portfolio_account_id or "").strip()
+                    if scoped_account_id and row_account_id != scoped_account_id:
+                        raise StorageError(
+                            "trade intent account conflicts with scoped portfolio: "
+                            f"{intent_id}"
+                        )
+                    account_id = row_account_id or scoped_account_id
+                    cap_date = str(portfolio_market_date or market_date)[:10]
+                    if existing_intent is None and action in {"ENTER_LONG", "ENTER_SHORT"}:
+                        rejection = _entry_admission_rejection(
+                            connection,
+                            account_id=account_id,
+                            market_date=cap_date,
+                            ticker=ticker,
+                            max_open_positions=max_open_positions,
+                            max_daily_entries=max_daily_entries,
+                            reserved_entry_count=reserved_entry_count,
+                            reserved_entry_tickers=reserved_entry_tickers,
+                        )
+                        if rejection:
+                            rejected_intents[intent_id] = rejection
+                            intent_stats["skipped"] += 1
+                            continue
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO trade_intents
@@ -4989,7 +5030,7 @@ class SQLiteScanStore:
                             ticker,
                             _trade_intent_episode_id(row),
                             _trade_intent_strategy_id(row),
-                            _trade_intent_account_id(row),
+                            account_id,
                             str(row.get("mode") or ""),
                             str(row.get("lifecycle_state") or ""),
                             _trade_intent_action(row),
@@ -5012,6 +5053,9 @@ class SQLiteScanStore:
                     if cursor.rowcount:
                         intent_stats["inserted"] += 1
                         admitted_intent_ids.add(intent_id)
+                        if action in {"ENTER_LONG", "ENTER_SHORT"}:
+                            reserved_entry_count += 1
+                            reserved_entry_tickers.add((account_id, ticker))
                     else:
                         intent_stats["skipped"] += 1
                         existing = connection.execute(
@@ -5035,13 +5079,23 @@ class SQLiteScanStore:
                     and _trade_intent_action(row)
                     in {"ENTER_LONG", "ENTER_SHORT"}
                 }
-                admitted_non_entry_intent_ids = {
+                admitted_exit_intent_ids = {
                     str(row.get("intent_id") or "")
                     for row in intents
                     if str(row.get("intent_id") or "") in admitted_intent_ids
-                    and _trade_intent_action(row)
-                    not in {"ENTER_LONG", "ENTER_SHORT"}
+                    and _trade_intent_action(row) in {"EXIT_LONG", "EXIT_SHORT"}
                 }
+                admitted_intents_by_id = {
+                    str(row.get("intent_id") or ""): row
+                    for row in intents
+                    if str(row.get("intent_id") or "") in admitted_intent_ids
+                }
+                monitor_stats = _persist_bound_monitor_receipts(
+                    connection,
+                    monitor_rows,
+                    admitted_intents_by_id=admitted_intents_by_id,
+                    candidate_fills=paper_fills,
+                )
 
                 for row in paper_positions:
                     position_id = str(row.get("position_id") or "")
@@ -5058,32 +5112,76 @@ class SQLiteScanStore:
                     if status in {"OPEN", "PENDING"}:
                         if lifecycle_intent_id not in admitted_entry_intent_ids:
                             continue
-                    elif (
-                        lifecycle_intent_id
-                        and lifecycle_intent_id not in admitted_non_entry_intent_ids
+                    elif status == "CLOSED" and (
+                        not lifecycle_intent_id
+                        or lifecycle_intent_id not in admitted_exit_intent_ids
                     ):
                         # A closed snapshot is an exit side effect.  Do not
-                        # let a losing overlapping entry replace an existing
-                        # position, while retaining legacy rows with no
-                        # linked exit intent.
-                        continue
+                        # admit unbound lifecycle truth through this watcher API.
+                        raise StorageError(
+                            "paper position close requires an admitted exit intent: "
+                            f"{position_id}"
+                        )
                     existing_position = connection.execute(
                         "SELECT * FROM paper_positions WHERE position_id = ?",
                         (position_id,),
                     ).fetchone()
-                    if (
-                        existing_position is not None
-                        and status in {"OPEN", "PENDING"}
-                        and not _lifecycle_semantics_match(
+                    bound_fills = [
+                        fill
+                        for fill in paper_fills
+                        if str(fill.get("intent_id") or "") == lifecycle_intent_id
+                        and str(fill.get("position_id") or "") == position_id
+                    ]
+                    bound_fill = bound_fills[0] if len(bound_fills) == 1 else None
+                    if existing_position is None:
+                        if status == "CLOSED":
+                            raise StorageError(
+                                "paper position close requires an existing open position: "
+                                f"{position_id}"
+                            )
+                        if status in {"OPEN", "PENDING"} and not _valid_position_entry_fill(
+                            row,
+                            bound_fill,
+                            entry_intent=admitted_intents_by_id.get(lifecycle_intent_id),
+                        ):
+                            raise StorageError(
+                                "paper position entry requires one valid bound fill: "
+                                f"{position_id}"
+                            )
+                    elif status == "CLOSED":
+                        existing_status = str(existing_position["status"] or "").upper()
+                        if existing_status == "CLOSED":
+                            if not _lifecycle_semantics_match(
+                                existing_position,
+                                row,
+                                keys=_PAPER_POSITION_SEMANTIC_KEYS,
+                                numeric_keys=_PAPER_POSITION_NUMERIC_KEYS,
+                            ):
+                                raise StorageError(
+                                    "paper position identity conflict: existing lifecycle "
+                                    f"semantics do not match {position_id}"
+                                )
+                            # Exact CLOSED retries reuse immutable stored truth.
+                            continue
+                        if not _valid_position_close_transition(
                             existing_position,
                             row,
-                            keys=_PAPER_POSITION_SEMANTIC_KEYS,
-                            numeric_keys=_PAPER_POSITION_NUMERIC_KEYS,
-                        )
+                            exit_intent=admitted_intents_by_id.get(lifecycle_intent_id),
+                            bound_exit_fill=bound_fill,
+                        ):
+                            raise StorageError(
+                                "paper position close violates transition/fill invariants: "
+                                f"{position_id}"
+                            )
+                    elif existing_position is not None and not _lifecycle_semantics_match(
+                        existing_position,
+                        row,
+                        keys=_PAPER_POSITION_SEMANTIC_KEYS,
+                        numeric_keys=_PAPER_POSITION_NUMERIC_KEYS,
                     ):
                         raise StorageError(
-                            "paper position identity conflict: existing lifecycle semantics "
-                            f"do not match {position_id}"
+                            "paper position identity conflict: existing lifecycle "
+                            f"semantics do not match {position_id}"
                         )
                     connection.execute(
                         """
@@ -5131,6 +5229,16 @@ class SQLiteScanStore:
                         continue
                     if intent_id not in admitted_intent_ids:
                         continue
+                    claimed_fills = connection.execute(
+                        "SELECT * FROM paper_trade_fills WHERE intent_id = ?",
+                        (intent_id,),
+                    ).fetchall()
+                    for claimed_fill in claimed_fills:
+                        if str(claimed_fill["fill_id"] or "") != fill_id:
+                            raise StorageError(
+                                "paper fill claim conflict: intent or position already "
+                                f"owns a different fill for {fill_id}"
+                            )
                     existing_fill = connection.execute(
                         "SELECT * FROM paper_trade_fills WHERE fill_id = ?",
                         (fill_id,),
@@ -5218,6 +5326,8 @@ class SQLiteScanStore:
             "paper_positions": position_stats,
             "paper_fills": fill_stats,
             "signal_events": event_stats,
+            "monitor_publication_receipts": monitor_stats,
+            "rejected_intents": rejected_intents,
         }
 
     def load_trade_intents(
@@ -5242,8 +5352,8 @@ class SQLiteScanStore:
             clauses.append("signal_id = ?")
             params.append(signal_id)
         if action:
-            clauses.append("action = ?")
-            params.append(action)
+            clauses.append("UPPER(TRIM(action)) = ?")
+            params.append(str(action).strip().upper())
         query = "SELECT * FROM trade_intents"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -5277,11 +5387,13 @@ class SQLiteScanStore:
             ("market_date", market_date[:10] if market_date else None),
             ("ticker", ticker.upper() if ticker else None),
             ("signal_id", signal_id),
-            ("action", action),
         ):
             if value:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if action:
+            clauses.append("UPPER(TRIM(action)) = ?")
+            params.append(str(action).strip().upper())
         query = "SELECT * FROM trade_intents"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -8286,6 +8398,195 @@ def _trade_intent_action(row: Mapping[str, Any]) -> str:
     return str(row.get("action") or "").strip().upper()
 
 
+def _persist_bound_monitor_receipts(
+    connection: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    admitted_intents_by_id: Mapping[str, Mapping[str, Any]],
+    candidate_fills: list[dict[str, Any]],
+) -> dict[str, int]:
+    inserted = 0
+    reused = 0
+    for row in rows:
+        intent_id = str(row.get("intent_id") or "").strip()
+        receipt_id = str(row.get("receipt_id") or "").strip()
+        content_hash = str(row.get("content_hash_sha256") or "").strip()
+        intent = admitted_intents_by_id.get(intent_id)
+        if intent is None:
+            continue
+        trace = intent.get("decision_trace")
+        trace = trace if isinstance(trace, dict) else {}
+        intent_account = _trade_intent_account_id(intent)
+        canonical_without_hash = {
+            key: value for key, value in row.items() if key != "content_hash_sha256"
+        }
+        recomputed_hash = hashlib.sha256(
+            json.dumps(
+                canonical_without_hash,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
+        if (
+            not receipt_id
+            or not content_hash
+            or row.get("schema_version")
+            != "dawnstrike.alphaops.monitor_publication_receipt.v1"
+            or row.get("publication_tier") != "ALERTABLE_PAPER_ENTRY"
+            or int(row.get("publication_count") or 0) != 1
+            or row.get("research_only") is not True
+            or row.get("broker_execution") != "disabled"
+            or _trade_intent_action(intent) not in {"ENTER_LONG", "ENTER_SHORT"}
+            or str(row.get("market_date") or "")[:10]
+            != str(intent.get("market_date") or "")[:10]
+            or str(row.get("signal_id") or "") != str(intent.get("signal_id") or "")
+            or str(row.get("ticker") or "").upper()
+            != str(intent.get("ticker") or "").upper()
+            or str(row.get("simulated_account_id") or "") != intent_account
+            or str(row.get("plan_hash_sha256") or "")
+            != str(trace.get("plan_hash_sha256") or "")
+            or str(row.get("decision_trace_fingerprint") or "")
+            != str(
+                intent.get("decision_fingerprint")
+                or trace.get("decision_fingerprint")
+                or ""
+            )
+            or content_hash != recomputed_hash
+        ):
+            raise StorageError("monitor publication receipt is not bound to admitted intent")
+        intent_candidate_fills = [
+            fill
+            for fill in candidate_fills
+            if str(fill.get("intent_id") or "") == intent_id
+        ]
+        matching_fills = [
+            fill
+            for fill in intent_candidate_fills
+            if _valid_intent_fill(
+                intent,
+                fill,
+                position_id=str(fill.get("position_id") or ""),
+            )
+        ]
+        durable_fill_rows = connection.execute(
+            "SELECT * FROM paper_trade_fills WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchall()
+        durable_fills = [_json_row(fill) for fill in durable_fill_rows]
+        durable_fill_valid = len(durable_fills) == 1 and _valid_intent_fill(
+            intent,
+            durable_fills[0],
+            position_id=str(durable_fills[0].get("position_id") or ""),
+        )
+        candidate_fill_valid = (
+            len(intent_candidate_fills) == 1 and len(matching_fills) == 1
+        )
+        if not candidate_fill_valid and not durable_fill_valid:
+            raise StorageError("monitor publication receipt lacks exact admitted fill")
+        canonical_payload = json.dumps(row, sort_keys=True)
+        existing = connection.execute(
+            "SELECT content_hash_sha256, payload_json "
+            "FROM monitor_publication_receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[0]) != content_hash or str(existing[1]) != canonical_payload:
+                raise StorageError("monitor publication receipt identity collision")
+            reused += 1
+            continue
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO monitor_publication_receipts
+            (receipt_id, market_date, ticker, signal_id, plan_hash_sha256,
+             content_hash_sha256, publication_count, checked_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt_id,
+                str(row.get("market_date") or ""),
+                str(row.get("ticker") or ""),
+                str(row.get("signal_id") or ""),
+                str(row.get("plan_hash_sha256") or ""),
+                content_hash,
+                int(row.get("publication_count") or 0),
+                str(row.get("checked_at") or ""),
+                canonical_payload,
+            ),
+        )
+        if cursor.rowcount:
+            inserted += 1
+        else:
+            persisted = connection.execute(
+                "SELECT content_hash_sha256, payload_json "
+                "FROM monitor_publication_receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            ).fetchone()
+            if (
+                persisted is None
+                or str(persisted[0]) != content_hash
+                or str(persisted[1]) != canonical_payload
+            ):
+                raise StorageError("monitor publication receipt identity collision")
+            reused += 1
+    return {"inserted": inserted, "reused": reused, "count": inserted + reused}
+
+
+def _entry_admission_rejection(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    market_date: str,
+    ticker: str,
+    max_open_positions: int | None,
+    max_daily_entries: int | None,
+    reserved_entry_count: int,
+    reserved_entry_tickers: set[tuple[str, str]],
+) -> str:
+    if (account_id, ticker) in reserved_entry_tickers:
+        return "duplicate_symbol_atomic_admission"
+    durable_symbol = connection.execute(
+        """
+        SELECT 1 FROM paper_positions p
+        JOIN trade_intents i ON i.intent_id = p.entry_intent_id
+        WHERE i.account_id = ? AND UPPER(p.ticker) = ?
+          AND UPPER(p.status) IN ('OPEN', 'PENDING')
+        LIMIT 1
+        """,
+        (account_id, ticker),
+    ).fetchone()
+    if durable_symbol is not None:
+        return "duplicate_symbol_atomic_admission"
+    if max_open_positions is not None:
+        open_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM paper_positions p
+                JOIN trade_intents i ON i.intent_id = p.entry_intent_id
+                WHERE i.account_id = ? AND UPPER(p.status) IN ('OPEN', 'PENDING')
+                """,
+                (account_id,),
+            ).fetchone()[0]
+        )
+        if open_count + reserved_entry_count >= max_open_positions:
+            return "max_open_positions_atomic_admission"
+    if max_daily_entries is not None:
+        daily_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM paper_trade_fills f
+                JOIN trade_intents i ON i.intent_id = f.intent_id
+                WHERE i.account_id = ? AND f.market_date = ?
+                  AND UPPER(f.side) IN ('BUY', 'SELL_SHORT')
+                """,
+                (account_id, market_date),
+            ).fetchone()[0]
+        )
+        if daily_count + reserved_entry_count >= max_daily_entries:
+            return "max_daily_entries_atomic_admission"
+    return ""
+
+
 _TRADE_INTENT_SEMANTIC_KEYS = (
     "signal_id", "market_date", "ticker", "episode_id", "strategy_id",
     "account_id", "mode", "lifecycle_state", "action", "decision_time",
@@ -8322,6 +8623,37 @@ _PAPER_POSITION_NUMERIC_KEYS = frozenset(
         "realized_return_pct",
         "max_favorable_excursion",
         "max_adverse_excursion",
+    }
+)
+_PAPER_POSITION_CLOSE_CONTINUITY_KEYS = (
+    "position_id",
+    "signal_id",
+    "market_date",
+    "ticker",
+    "quantity",
+    "entry_intent_id",
+    "opened_at",
+    "entry_price",
+    "stop_price",
+    "target_price",
+    "notional",
+)
+_PAPER_POSITION_CLOSE_MUTABLE_PAYLOAD_KEYS = frozenset(
+    {
+        "status",
+        "exit_intent_id",
+        "closed_at",
+        "exit_price",
+        "realized_pnl",
+        "realized_return_pct",
+        "max_favorable_excursion",
+        "max_adverse_excursion",
+        "updated_at",
+        "source_reconciliation_trade_id",
+        "canonical_net_pnl",
+        "canonical_net_return_pct",
+        "canonical_fees",
+        "canonical_slippage_cost",
     }
 )
 _PAPER_FILL_SEMANTIC_KEYS = (
@@ -8404,14 +8736,241 @@ def _lifecycle_semantics_match(
     return True
 
 
+def _valid_position_close_transition(
+    stored: sqlite3.Row,
+    incoming: Mapping[str, Any],
+    *,
+    exit_intent: Mapping[str, Any] | None,
+    bound_exit_fill: Mapping[str, Any] | None,
+) -> bool:
+    """Allow only one governed OPEN/PENDING to CLOSED lifecycle transition."""
+
+    stored_status = str(stored["status"] or "").strip().upper()
+    incoming_status = str(incoming.get("status") or "").strip().upper()
+    exit_intent_id = str(incoming.get("exit_intent_id") or "").strip()
+    if (
+        stored_status not in {"OPEN", "PENDING"}
+        or incoming_status != "CLOSED"
+        or str(stored["exit_intent_id"] or "").strip()
+        or not exit_intent_id
+        or exit_intent is None
+        or exit_intent_id != str(exit_intent.get("intent_id") or "").strip()
+        or bound_exit_fill is None
+        or not str(bound_exit_fill.get("fill_id") or "").strip()
+    ):
+        return False
+
+    for key in _PAPER_POSITION_CLOSE_CONTINUITY_KEYS:
+        left, right = stored[key], incoming.get(key)
+        if key in _PAPER_POSITION_NUMERIC_KEYS:
+            if _float_or_none(left) != _float_or_none(right):
+                return False
+        elif str(left or "") != str(right or ""):
+            return False
+
+    if not _valid_intent_fill(
+        exit_intent,
+        bound_exit_fill,
+        position_id=str(incoming.get("position_id") or ""),
+    ):
+        return False
+    for position_key, fill_key in (
+        ("position_id", "position_id"),
+        ("signal_id", "signal_id"),
+        ("market_date", "market_date"),
+        ("ticker", "ticker"),
+        ("exit_intent_id", "intent_id"),
+    ):
+        if str(incoming.get(position_key) or "") != str(
+            bound_exit_fill.get(fill_key) or ""
+        ):
+            return False
+    if _float_or_none(incoming.get("quantity")) != _float_or_none(
+        bound_exit_fill.get("quantity")
+    ):
+        return False
+    if str(incoming.get("closed_at") or "") != str(
+        bound_exit_fill.get("fill_time") or ""
+    ):
+        return False
+
+    entry_price = _float_or_none(stored["entry_price"])
+    exit_price = _float_or_none(bound_exit_fill.get("fill_price"))
+    quantity = _float_or_none(bound_exit_fill.get("quantity"))
+    side = str(bound_exit_fill.get("side") or "").strip().upper()
+    stored_payload = _json_value(stored["payload_json"])
+    direction = (
+        str(stored_payload.get("direction") or "").strip().lower()
+        if isinstance(stored_payload, dict)
+        else ""
+    )
+    if (
+        entry_price is None
+        or entry_price <= 0
+        or exit_price is None
+        or exit_price <= 0
+        or quantity is None
+        or quantity <= 0
+        or direction not in {"long", "short"}
+        or side != ("BUY_TO_COVER" if direction == "short" else "SELL")
+        or _float_or_none(incoming.get("exit_price")) != exit_price
+    ):
+        return False
+    expected_pnl = round(
+        ((entry_price - exit_price) if side == "BUY_TO_COVER" else (exit_price - entry_price))
+        * quantity,
+        4,
+    )
+    expected_return = round(
+        (
+            (entry_price - exit_price) / entry_price
+            if side == "BUY_TO_COVER"
+            else (exit_price - entry_price) / entry_price
+        )
+        * 100,
+        4,
+    )
+    if (
+        _float_or_none(incoming.get("realized_pnl")) != expected_pnl
+        or _float_or_none(incoming.get("realized_return_pct")) != expected_return
+    ):
+        return False
+
+    incoming_payload = _json_value(incoming.get("payload_json") or incoming)
+    if not isinstance(stored_payload, dict) or not isinstance(incoming_payload, dict):
+        return False
+    stored_identity = {
+        key: value
+        for key, value in stored_payload.items()
+        if key not in _PAPER_POSITION_CLOSE_MUTABLE_PAYLOAD_KEYS
+    }
+    incoming_identity = {
+        key: value
+        for key, value in incoming_payload.items()
+        if key not in _PAPER_POSITION_CLOSE_MUTABLE_PAYLOAD_KEYS and key != "payload_json"
+    }
+    return stored_identity == incoming_identity
+
+
+def _valid_position_entry_fill(
+    position: Mapping[str, Any],
+    fill: Mapping[str, Any] | None,
+    *,
+    entry_intent: Mapping[str, Any] | None,
+) -> bool:
+    """Bind a new OPEN/PENDING position to one persistable entry fill."""
+
+    if fill is None or not str(fill.get("fill_id") or "").strip():
+        return False
+    entry_intent_id = str(position.get("entry_intent_id") or "").strip()
+    if (
+        not entry_intent_id
+        or entry_intent is None
+        or entry_intent_id != str(entry_intent.get("intent_id") or "").strip()
+        or not _valid_intent_fill(
+            entry_intent,
+            fill,
+            position_id=str(position.get("position_id") or ""),
+        )
+    ):
+        return False
+    for position_key, fill_key in (
+        ("position_id", "position_id"),
+        ("signal_id", "signal_id"),
+        ("market_date", "market_date"),
+        ("ticker", "ticker"),
+        ("entry_intent_id", "intent_id"),
+    ):
+        if str(position.get(position_key) or "") != str(fill.get(fill_key) or ""):
+            return False
+    if _float_or_none(position.get("quantity")) != _float_or_none(fill.get("quantity")):
+        return False
+    side = str(fill.get("side") or "").strip().upper()
+    entry_price = _float_or_none(position.get("entry_price"))
+    fill_price = _float_or_none(fill.get("fill_price"))
+    direction = str(position.get("direction") or "").strip().lower()
+    return (
+        side in {"BUY", "SELL_SHORT"}
+        and direction == ("short" if side == "SELL_SHORT" else "long")
+        and entry_price is not None
+        and entry_price > 0
+        and entry_price == fill_price
+    )
+
+
+def _valid_intent_fill(
+    intent: Mapping[str, Any],
+    fill: Mapping[str, Any],
+    *,
+    position_id: str,
+) -> bool:
+    """Bind a fill to the exact admitted intent and declared slippage model."""
+
+    action = _trade_intent_action(intent)
+    expected_side = {
+        "ENTER_LONG": "BUY",
+        "ENTER_SHORT": "SELL_SHORT",
+        "EXIT_LONG": "SELL",
+        "EXIT_SHORT": "BUY_TO_COVER",
+    }.get(action)
+    if expected_side is None or str(fill.get("side") or "").strip().upper() != expected_side:
+        return False
+    for intent_key, fill_key in (
+        ("intent_id", "intent_id"),
+        ("signal_id", "signal_id"),
+        ("market_date", "market_date"),
+        ("ticker", "ticker"),
+        ("decision_time", "fill_time"),
+    ):
+        if str(intent.get(intent_key) or "") != str(fill.get(fill_key) or ""):
+            return False
+    if (
+        not str(fill.get("fill_id") or "").strip()
+        or str(fill.get("position_id") or "") != position_id
+    ):
+        return False
+    decision_price = _float_or_none(intent.get("decision_price"))
+    fill_price = _float_or_none(fill.get("fill_price"))
+    slippage_bps = _float_or_none(fill.get("slippage_bps"))
+    if decision_price is None or decision_price <= 0 or fill_price is None or slippage_bps is None:
+        return False
+    if fill.get("canonical_eod_repair") is True:
+        reconciliation_id = str(intent.get("source_reconciliation_trade_id") or "").strip()
+        return (
+            bool(reconciliation_id)
+            and reconciliation_id
+            == str(fill.get("source_reconciliation_trade_id") or "").strip()
+            and fill_price == decision_price
+        )
+    expected_price: float | None = None
+    if action in {"ENTER_LONG", "ENTER_SHORT"}:
+        trace = intent.get("decision_trace")
+        computed = trace.get("computed") if isinstance(trace, dict) else None
+        if isinstance(computed, dict):
+            expected_price = _float_or_none(computed.get("expected_entry_price"))
+    if expected_price is None:
+        unfavorable = action in {"ENTER_LONG", "EXIT_SHORT"}
+        expected_price = decision_price * (
+            1 + slippage_bps / 10000.0 if unfavorable else 1 - slippage_bps / 10000.0
+        )
+    return fill_price == round(expected_price, 6)
+
+
 def _trade_intent_row(row: sqlite3.Row) -> dict[str, Any]:
     """Merge intent payloads without allowing them to rewrite claim columns."""
 
     merged = _json_row(row)
-    for key in ("episode_id", "strategy_id", "account_id"):
-        value = row[key]
-        if value not in (None, ""):
-            merged[key] = value
+    for key in (
+        "intent_id",
+        "signal_id",
+        "market_date",
+        "ticker",
+        "episode_id",
+        "strategy_id",
+        "account_id",
+        "action",
+    ):
+        merged[key] = row[key]
     return merged
 
 
@@ -8472,15 +9031,16 @@ def _backfill_trade_intent_identity(connection: sqlite3.Connection) -> None:
             episode_id = ""
         elif episode_id and action in {"ENTER_LONG", "ENTER_SHORT"}:
             claimed_episodes.add(claim_key)
-        if (episode_id, strategy_id, account_id) != (
+        if (action, episode_id, strategy_id, account_id) != (
+            str(row[3] or ""),
             str(row[6] or ""),
             str(row[7] or ""),
             str(row[8] or ""),
         ):
             connection.execute(
-                "UPDATE trade_intents SET episode_id = ?, strategy_id = ?, account_id = ? "
-                "WHERE intent_id = ?",
-                (episode_id, strategy_id, account_id, row[1]),
+                "UPDATE trade_intents SET action = ?, episode_id = ?, strategy_id = ?, "
+                "account_id = ? WHERE intent_id = ?",
+                (action, episode_id, strategy_id, account_id, row[1]),
             )
 
 

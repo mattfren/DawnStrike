@@ -276,18 +276,31 @@ def run_trade_watcher(
             existing_symbol_notional=existing_symbol_notional,
             scanner_config=scanner_config,
         )
-        if decision.get("watcher_current_proof"):
-            proof = dict(decision["watcher_current_proof"])
-            monitor_receipts.append(
-                _monitor_publication_receipt(
-                    signal=signal,
-                    proof=proof,
-                    checked_at=str(proof.get("checked_at") or created_at),
-                )
-            )
+        proof = (
+            dict(decision["watcher_current_proof"])
+            if decision.get("watcher_current_proof")
+            else None
+        )
         states.append(_state_row(signal, observation, decision, open_position))
         intent = decision.get("intent")
         if not intent:
+            continue
+        intent["created_at"] = created_at
+        intent["notification_event_key"] = f"trade_intent:{intent['intent_id']}"
+        intent["payload_json"] = dict(intent)
+        if intent["intent_id"] in existing_intent_ids:
+            # Crash repair: replay the exact durable intent through storage's
+            # semantic check and rebuild only its missing immutable receipt.
+            new_intents.append(intent)
+            if proof is not None:
+                monitor_receipts.append(
+                    _monitor_publication_receipt(
+                        signal=signal,
+                        proof=proof,
+                        intent_id=str(intent["intent_id"]),
+                        checked_at=str(proof.get("checked_at") or created_at),
+                    )
+                )
             continue
         episode_id = str(intent.get("episode_id") or signal.get("episode_id") or "").strip()
         if (
@@ -305,13 +318,17 @@ def run_trade_watcher(
             states[-1]["reason"] = "duplicate_symbol_existing_open_or_pending_lifecycle"
             states[-1]["episode_id"] = episode_id or None
             continue
-        intent["created_at"] = created_at
-        intent["notification_event_key"] = f"trade_intent:{intent['intent_id']}"
-        intent["payload_json"] = dict(intent)
-        if intent["intent_id"] in existing_intent_ids:
-            continue
         new_intents.append(intent)
         existing_intent_ids.add(intent["intent_id"])
+        if proof is not None:
+            monitor_receipts.append(
+                _monitor_publication_receipt(
+                    signal=signal,
+                    proof=proof,
+                    intent_id=str(intent["intent_id"]),
+                    checked_at=str(proof.get("checked_at") or created_at),
+                )
+            )
         if episode_id:
             existing_episode_ids.add(episode_id)
         if _normalized_action(intent.get("action")) in ENTRY_ACTIONS:
@@ -350,8 +367,45 @@ def run_trade_watcher(
         paper_positions=paper_positions,
         paper_fills=paper_fills,
         signal_events=signal_events,
+        monitor_publication_receipts=monitor_receipts,
+        portfolio_account_id=(
+            ALPHAOPS_V5_ACCOUNT_ID if normalized_mode == MODE_PAPER else ""
+        ),
+        portfolio_market_date=resolved_day,
+        max_open_positions=settings.max_open_positions,
+        max_daily_entries=settings.max_daily_entries,
     )
-    monitor_stats = store.persist_monitor_publication_receipts(monitor_receipts)
+    rejected_intents = dict(lifecycle_stats["rejected_intents"])
+    rejected_intent_ids = set(rejected_intents)
+    if rejected_intent_ids:
+        rejected_signal_reasons = {
+            str(intent.get("signal_id") or ""): rejected_intents[
+                str(intent.get("intent_id") or "")
+            ]
+            for intent in new_intents
+            if str(intent.get("intent_id") or "") in rejected_intent_ids
+        }
+        for state in states:
+            reason = rejected_signal_reasons.get(str(state.get("signal_id") or ""))
+            if reason:
+                state["state"] = STATE_STAND_DOWN
+                state["reason"] = reason
+        new_intents = [
+            intent
+            for intent in new_intents
+            if str(intent.get("intent_id") or "") not in rejected_intent_ids
+        ]
+        paper_positions = [
+            position
+            for position in paper_positions
+            if str(position.get("entry_intent_id") or "") not in rejected_intent_ids
+            and str(position.get("exit_intent_id") or "") not in rejected_intent_ids
+        ]
+        paper_fills = [
+            fill
+            for fill in paper_fills
+            if str(fill.get("intent_id") or "") not in rejected_intent_ids
+        ]
     # An overlapping watcher may have built a notification before the SQLite
     # episode claim was attempted.  Only dispatch events whose intent survived
     # the durable insert/claim boundary; exact retries remain eligible because
@@ -361,6 +415,16 @@ def run_trade_watcher(
         for row in store.load_trade_intents(limit=50_000)
         if str(row.get("intent_id") or "").strip()
     }
+    persisted_monitor_ids = {
+        str(receipt.get("receipt_id") or "")
+        for receipt in store.load_monitor_publication_receipts(market_date=resolved_day)
+    }
+    monitor_receipts = [
+        receipt
+        for receipt in monitor_receipts
+        if str(receipt.get("receipt_id") or "") in persisted_monitor_ids
+    ]
+    monitor_stats = lifecycle_stats["monitor_publication_receipts"]
     notification_events_by_key = {
         key: event
         for key, event in notification_events_by_key.items()
@@ -949,6 +1013,7 @@ def _canonical_eod_repairs(
             "source_observation_id": "",
             "selection_id": selection_id or trade.get("selection_id"),
             "strategy_id": trade.get("strategy_id") or ALPHAOPS_STRATEGY_ID,
+            "account_id": str(position.get("account_id") or ALPHAOPS_V5_ACCOUNT_ID),
             "strategy_version": trade.get("strategy_version"),
             "cohort": trade.get("cohort") or position.get("cohort"),
             "source_reconciliation_trade_id": trade_id,
@@ -1633,7 +1698,10 @@ def _intent(
             or "dawnstrike-alphaops-v4"
         ),
         "cohort": str(signal.get("cohort") or "algorithm_selected"),
-        "account_id": str(trace.get("account_id") or ""),
+        "account_id": str(
+            trace.get("account_id")
+            or (ALPHAOPS_V5_ACCOUNT_ID if mode == MODE_PAPER else "")
+        ),
         "execution_policy_version": str(trace.get("policy_version") or ""),
         "cost_model_version": str(
             trace.get("cost_model_version")
@@ -2200,8 +2268,15 @@ def _build_watcher_current_proof(
 
 
 def _monitor_publication_receipt(
-    *, signal: dict[str, Any], proof: dict[str, Any], checked_at: str
+    *,
+    signal: dict[str, Any],
+    proof: dict[str, Any],
+    intent_id: str,
+    checked_at: str,
 ) -> dict[str, Any]:
+    intent_id = str(intent_id or "").strip()
+    if not intent_id:
+        raise SnapshotValidationError("monitor publication requires a durable intent identity")
     quote = proof.get("quote_receipt")
     if not isinstance(quote, dict) or not validate_watcher_current_proof(
         {
@@ -2235,10 +2310,14 @@ def _monitor_publication_receipt(
     receipt = {
         "schema_version": "dawnstrike.alphaops.monitor_publication_receipt.v1",
         "receipt_id": "monitor-publication-" + hashlib.sha256(
-            f"{signal_id}:{plan_hash}:{proof.get('proof_hash_sha256')}".encode()
+            f"{signal_id}:{intent_id}:{plan_hash}:{proof.get('proof_hash_sha256')}".encode()
         ).hexdigest()[:24],
         "market_date": str(signal.get("market_date") or checked_at)[:10],
         "signal_id": signal_id,
+        "intent_id": intent_id,
+        "simulated_account_id": str(
+            (proof.get("portfolio_receipt") or {}).get("simulated_account_id") or ""
+        ),
         "ticker": ticker,
         "plan_hash_sha256": plan_hash,
         "direction": direction,

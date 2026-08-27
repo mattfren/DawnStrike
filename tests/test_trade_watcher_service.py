@@ -786,6 +786,7 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "lifecycle_state": "ENTRY_TRIGGERED",
                     "action": "ENTER_LONG",
                     "decision_time": "2026-06-22T13:35:00+00:00",
+                    "decision_price": 10.0,
                     "reason": "test",
                     "created_at": "2026-06-22T13:35:00+00:00",
                 }
@@ -796,9 +797,11 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
                     "signal_id": "signal-atomic",
                     "market_date": "2026-06-22",
                     "ticker": "NOVA",
+                    "direction": "long",
                     "status": "OPEN",
                     "quantity": 10,
                     "entry_intent_id": "intent-atomic",
+                    "entry_price": 10.0,
                     "updated_at": "2026-06-22T13:35:00+00:00",
                 }
             ],
@@ -854,6 +857,8 @@ def test_trade_watcher_lifecycle_batch_accepts_empty_inputs(tmp_path: Path) -> N
         "paper_positions": {"inserted": 0, "row_count": 0},
         "paper_fills": {"inserted": 0, "skipped": 0, "row_count": 0},
         "signal_events": {"inserted": 0, "skipped": 0},
+        "monitor_publication_receipts": {"inserted": 0, "reused": 0, "count": 0},
+        "rejected_intents": {},
     }
 
 

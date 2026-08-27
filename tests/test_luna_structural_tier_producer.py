@@ -961,7 +961,10 @@ def test_monitor_receipt_binds_frozen_lineage_and_is_research_only() -> None:
     proof = _build_watcher_current_proof(signal, observation, trace)
     assert proof is not None
     receipt = _monitor_publication_receipt(
-        signal=signal, proof=proof, checked_at=proof["checked_at"]
+        signal=signal,
+        proof=proof,
+        intent_id="intent-test",
+        checked_at=proof["checked_at"],
     )
     assert receipt["selection_id"] == signal["selection_id"]
     assert receipt["source_scan_id"] == "scan-watcher"
@@ -1262,7 +1265,8 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, 
         notify="console",
     )
     assert second["intent_stats"]["inserted"] == 0
-    assert second["monitor_publication_stats"]["inserted"] == 0
+    assert second["monitor_publication_receipts"] == []
+    assert second["monitor_publication_stats"] == {"inserted": 0, "reused": 0, "count": 0}
     assert len(store.load_monitor_publication_receipts(market_date="2026-08-26")) == 1
 
 
@@ -1387,10 +1391,16 @@ def test_watcher_proof_and_monitor_receipt_replay_is_deterministic() -> None:
     assert first is not None and second is not None
     assert first["proof_hash_sha256"] == second["proof_hash_sha256"]
     first_receipt = _monitor_publication_receipt(
-        signal=signal, proof=first, checked_at=first["checked_at"]
+        signal=signal,
+        proof=first,
+        intent_id="intent-test",
+        checked_at=first["checked_at"],
     )
     second_receipt = _monitor_publication_receipt(
-        signal=signal, proof=second, checked_at=second["checked_at"]
+        signal=signal,
+        proof=second,
+        intent_id="intent-test",
+        checked_at=second["checked_at"],
     )
     assert first_receipt["receipt_id"] == second_receipt["receipt_id"]
     assert first_receipt["content_hash_sha256"] == second_receipt["content_hash_sha256"]
@@ -1424,10 +1434,16 @@ def test_changed_quote_creates_new_governed_watcher_receipt() -> None:
     assert second is not None
     assert second["checked_at"] != first["checked_at"]
     first_receipt = _monitor_publication_receipt(
-        signal=signal, proof=first, checked_at=first["checked_at"]
+        signal=signal,
+        proof=first,
+        intent_id="intent-test",
+        checked_at=first["checked_at"],
     )
     second_receipt = _monitor_publication_receipt(
-        signal=signal, proof=second, checked_at=second["checked_at"]
+        signal=signal,
+        proof=second,
+        intent_id="intent-test",
+        checked_at=second["checked_at"],
     )
     assert second_receipt["receipt_id"] != first_receipt["receipt_id"]
     assert second_receipt["content_hash_sha256"] != first_receipt["content_hash_sha256"]
