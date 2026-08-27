@@ -14,21 +14,18 @@ from intraday_scanner.services import luna_core_universe_service as core
 from scripts import refresh_luna_core_universe as refresh_script
 
 
-def _ndx_xlsx(symbols: list[str]) -> bytes:
+def _ndx_xlsx(symbols: list[str], *, company_prefix: str = "Company") -> bytes:
     namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     shared = ["Company Name", "Security Symbol"]
     for symbol in symbols:
-        shared.extend([f"Company {symbol}", symbol])
+        shared.extend([f"{company_prefix} {symbol}", symbol])
     shared_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         f'<sst xmlns="{namespace}" count="{len(shared)}" uniqueCount="{len(shared)}">'
         + "".join(f"<si><t>{value}</t></si>" for value in shared)
         + "</sst>"
     )
-    rows = [
-        '<row r="5"><c r="A5" t="s"><v>0</v></c>'
-        '<c r="B5" t="s"><v>1</v></c></row>'
-    ]
+    rows = ['<row r="5"><c r="A5" t="s"><v>0</v></c><c r="B5" t="s"><v>1</v></c></row>']
     for number, _symbol in enumerate(symbols, start=6):
         name_index = 2 + (number - 6) * 2
         symbol_index = name_index + 1
@@ -39,9 +36,7 @@ def _ndx_xlsx(symbols: list[str]) -> bytes:
     rows.append('<row r="108"><c r="B108"/></row>')
     sheet_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        f'<worksheet xmlns="{namespace}"><sheetData>'
-        + "".join(rows)
-        + "</sheetData></worksheet>"
+        f'<worksheet xmlns="{namespace}"><sheetData>' + "".join(rows) + "</sheetData></worksheet>"
     )
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -57,9 +52,10 @@ def _ndx_xlsx(symbols: list[str]) -> bytes:
     return payload.getvalue()
 
 
-def _spy_xlsx(symbols: list[str]) -> bytes:
+def _spy_xlsx(symbols: list[str], *, effective_date: str = "2026-08-24") -> bytes:
+    effective_label = datetime.fromisoformat(effective_date).strftime("%d-%b-%Y")
     rows = [
-        '<row r="3"><c r="B3" t="inlineStr"><is><t>As of 24-Aug-2026</t></is></c></row>',
+        f'<row r="3"><c r="B3" t="inlineStr"><is><t>As of {effective_label}</t></is></c></row>',
         '<row r="5"><c r="B5" t="inlineStr"><is><t>Ticker</t></is></c></row>',
     ]
     for number, symbol in enumerate([*symbols, "-", "2602335D"], start=6):
@@ -203,6 +199,7 @@ def _install_stable_test_root(
             "raw_artifact_byte_counts": (len(payload),),
             "canonical_zip_member_names": attestation["member_names"],
             "canonical_zip_member_hashes": attestation["member_hashes"],
+            "canonical_static_member_hashes": attestation["static_member_hashes"],
             "canonical_content_digest_sha256": attestation["content_digest_sha256"],
             "canonical_member_set_hash_sha256": member_hash,
             "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
@@ -224,12 +221,29 @@ def _refresh_fixture(
     ndx_symbols: list[str],
 ) -> tuple[Path, bytes, bytes]:
     ndx_payload = _ndx_xlsx(ndx_symbols)
-    _install_test_root(monkeypatch, hashlib.sha256(ndx_payload).hexdigest())
+    _install_stable_test_root(monkeypatch, ndx_payload, ndx_symbols)
+    ndx_root = core._TRUSTED_SOURCE_ROOTS["nasdaq-ndx-point-in-time-2026-08-27"]
+    _ndx_parsed, ndx_attestation = core._parse_nasdaq_sod_weightings_xlsx_with_attestation(
+        ndx_payload
+    )
+    ndx_root.update(
+        {
+            "allow_future_same_semantic_set_dates": True,
+            "source_uri_template": core.NASDAQ_NDX_SOD_URL_TEMPLATE,
+            "source_scope_template": (
+                "Official Nasdaq-100 SOD Weightings export for {market_date}"
+            ),
+            "canonical_symbol_set_hash_sha256": ndx_attestation["symbol_set_hash_sha256"],
+        }
+    )
     spy_symbols = [f"S{number:03d}" for number in range(503)]
     spy_payload = _spy_xlsx(spy_symbols)
     spy_path = tmp_path / "spy.xlsx"
     spy_path.write_bytes(spy_payload)
     spy_digest = hashlib.sha256(spy_payload).hexdigest()
+    _parsed_spy_symbols, _spy_effective, spy_attestation = (
+        core._parse_spy_holdings_xlsx_with_attestation([spy_payload])
+    )
     spy_members = [
         {
             "ticker": symbol,
@@ -261,7 +275,14 @@ def _refresh_fixture(
         {
             "index": "S&P 500",
             "effective_date": "2026-08-24",
-            "raw_artifact_hashes": (spy_digest,),
+            "raw_artifact_hashes": (),
+            "canonical_zip_member_names": spy_attestation["member_names"],
+            "canonical_static_member_hashes": spy_attestation["static_member_hashes"],
+            "canonical_schema_digest_sha256": spy_attestation["schema_digest_sha256"],
+            "canonical_content_digest_sha256": spy_attestation["content_digest_sha256"],
+            "canonical_symbol_set_hash_sha256": spy_attestation["symbol_set_hash_sha256"],
+            "allow_future_same_semantic_set_dates": True,
+            "maximum_source_age_days": 4,
             "transformation_id": "state-street-spy-holdings-parser-v1",
             "lineage_builder_id": "state-street-spy-holdings-parser-v1",
             "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
@@ -384,9 +405,10 @@ def test_stable_root_accepts_same_content_with_volatile_zip_metadata(
     baseline = _ndx_xlsx(ndx_symbols)
     _install_stable_test_root(monkeypatch, baseline, ndx_symbols)
     rewritten = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(baseline)) as source, zipfile.ZipFile(
-        rewritten, "w", compression=zipfile.ZIP_DEFLATED
-    ) as target:
+    with (
+        zipfile.ZipFile(io.BytesIO(baseline)) as source,
+        zipfile.ZipFile(rewritten, "w", compression=zipfile.ZIP_DEFLATED) as target,
+    ):
         for info in source.infolist():
             replacement = zipfile.ZipInfo(info.filename, date_time=(2001, 2, 3, 4, 5, 6))
             replacement.compress_type = zipfile.ZIP_DEFLATED
@@ -547,9 +569,7 @@ def test_source_schema_failure_never_becomes_ready(
         manifest, observed_at="2026-08-27T13:00:00Z", market_date="2026-08-27"
     )
     assert contract["status"] == "DATA_UNAVAILABLE"
-    assert any(
-        item.startswith("source_binding_replay_failed:") for item in contract["blockers"]
-    )
+    assert any(item.startswith("source_binding_replay_failed:") for item in contract["blockers"])
 
 
 def test_proxy_authority_is_explicit_when_contract_is_built_in_test_mode() -> None:
@@ -593,37 +613,74 @@ def test_direct_source_download_failure_is_explicitly_blocked(
 
 
 def test_refresh_preserves_prior_manifest_when_raw_capture_is_not_governed(
-    tmp_path: Path, ndx_symbols: list[str]
-) -> None:
-    config = tmp_path / "config"
-    config.mkdir()
-    output = config / "luna_core_universe.json"
-    prior = {
-        "schema_version": "dawnstrike.luna.core_universe_manifest_wrapper.v1",
-        "manifests": [{"source_id": "spy", "index_name": "S&P 500"}],
-    }
-    output.write_text(json.dumps(prior), encoding="utf-8")
-    raw = tmp_path / "ndx.xlsx"
-    raw.write_bytes(_ndx_xlsx(ndx_symbols))
-    with pytest.raises(RuntimeError, match="not the governed 2026-08-27 capture"):
-        refresh_script.refresh(state_root=tmp_path, proxy_manifest=None, ndx_artifact=raw)
-    assert json.loads(output.read_text(encoding="utf-8")) == prior
-    assert not (config / "luna_core_universe_evidence" / "ndx-sod-2026-08-27.xlsx").exists()
-
-
-def test_refresh_rejects_later_market_date_without_reactivating_aug27_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ndx_symbols: list[str],
 ) -> None:
     output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
     prior = output.read_bytes()
-    with pytest.raises(RuntimeError, match="cannot certify a later session"):
+    raw = tmp_path / "ndx.xlsx"
+    changed = ["EA" if symbol == "HONA" else symbol for symbol in ndx_symbols]
+    raw.write_bytes(_ndx_xlsx(changed))
+    with pytest.raises(RuntimeError, match="not the governed currentness root"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=raw,
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+    assert output.read_bytes() == prior
+    assert not json.loads(output.read_text(encoding="utf-8")).get("generation_id")
+
+
+def test_refresh_accepts_later_market_date_only_for_same_semantic_sets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    future_ndx = tmp_path / "ndx-2026-08-28.xlsx"
+    future_ndx.write_bytes(_ndx_xlsx(ndx_symbols, company_prefix="Current Company"))
+    assert future_ndx.read_bytes() != (tmp_path / "ndx.xlsx").read_bytes()
+    future_spy = tmp_path / "spy-2026-08-27.xlsx"
+    future_spy.write_bytes(
+        _spy_xlsx(
+            [f"S{number:03d}" for number in range(503)],
+            effective_date="2026-08-27",
+        )
+    )
+    result = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=future_ndx,
+        spy_artifact=future_spy,
+        market_date="2026-08-28",
+    )
+    assert result["status"] == "READY"
+    assert result["market_date"] == "2026-08-28"
+    installed = core.build_core_universe_contract(
+        output,
+        observed_at=result["observed_at"],
+        market_date="2026-08-28",
+    )
+    assert installed["status"] == "READY"
+    assert installed["effective_date"] == "2026-08-28"
+
+
+def test_refresh_rejects_stale_spy_capture_and_preserves_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    with pytest.raises(RuntimeError, match="SPY workbook is stale"):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
             ndx_artifact=tmp_path / "ndx.xlsx",
-            market_date="2026-08-28",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-31",
         )
     assert output.read_bytes() == prior
 
@@ -638,15 +695,16 @@ def test_refresh_installs_and_revalidates_one_atomic_active_generation(
         state_root=tmp_path,
         proxy_manifest=None,
         ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
     )
     pointer = json.loads(output.read_text(encoding="utf-8"))
     assert result["status"] == "READY"
     assert pointer["schema_version"] == core.ACTIVE_POINTER_SCHEMA_VERSION
     generation_manifest = (output.parent / pointer["manifest_path"]).resolve()
     assert generation_manifest.is_file()
-    assert hashlib.sha256(generation_manifest.read_bytes()).hexdigest() == pointer[
-        "manifest_sha256"
-    ]
+    assert (
+        hashlib.sha256(generation_manifest.read_bytes()).hexdigest() == pointer["manifest_sha256"]
+    )
     generation = generation_manifest.parent
     installed_artifact = generation / "ndx-sod-2026-08-27.xlsx"
     assert installed_artifact.read_bytes() == ndx_payload
@@ -667,6 +725,7 @@ def test_refresh_reuses_same_content_addressed_generation_byte_identically(
         state_root=tmp_path,
         proxy_manifest=None,
         ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
     )
     pointer_before = output.read_bytes()
     generations = sorted((output.parent / refresh_script.GENERATION_DIRECTORY).iterdir())
@@ -674,6 +733,7 @@ def test_refresh_reuses_same_content_addressed_generation_byte_identically(
         state_root=tmp_path,
         proxy_manifest=None,
         ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
     )
     assert second["status"] == "READY"
     assert second["reused"] is True
@@ -707,6 +767,7 @@ def test_concurrent_refresh_writer_is_rejected_without_pointer_corruption(
                 state_root=tmp_path,
                 proxy_manifest=None,
                 ndx_artifact=None,
+                spy_artifact=tmp_path / "spy.xlsx",
             )
         except BaseException as exc:  # pragma: no cover - surfaced below
             result["error"] = exc
@@ -719,6 +780,7 @@ def test_concurrent_refresh_writer_is_rejected_without_pointer_corruption(
             state_root=tmp_path,
             proxy_manifest=None,
             ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
         )
     release.set()
     worker.join(timeout=10)
@@ -728,6 +790,41 @@ def test_concurrent_refresh_writer_is_rejected_without_pointer_corruption(
     pointer = json.loads(output.read_text(encoding="utf-8"))
     assert pointer["schema_version"] == core.ACTIVE_POINTER_SCHEMA_VERSION
     assert not (output.parent / refresh_script.REFRESH_LOCK_NAME).exists()
+
+
+def test_provably_dead_refresh_owner_is_archived_and_recovered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    lock_path = output.parent / refresh_script.REFRESH_LOCK_NAME
+    dead_owner = refresh_script._lock_owner_metadata()
+    dead_owner.update(
+        {
+            "owner_token": "dead-owner",
+            "pid": 999_999,
+            "process_start_time": "1.000000",
+        }
+    )
+    lock_path.write_text(
+        json.dumps(dead_owner, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(refresh_script, "_process_is_live", lambda _pid: False)
+
+    result = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
+    )
+
+    assert result["status"] == "READY"
+    assert not lock_path.exists()
+    archived = list(output.parent.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
+    assert len(archived) == 1
+    assert json.loads(archived[0].read_text(encoding="utf-8"))["owner_token"] == ("dead-owner")
 
 
 def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
@@ -754,6 +851,7 @@ def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
             state_root=tmp_path,
             proxy_manifest=None,
             ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
         )
     assert output.read_bytes() == prior
     assert json.loads(output.read_text(encoding="utf-8"))["manifests"][0]["source_id"] == (
@@ -768,16 +866,16 @@ def test_refresh_changed_member_attestation_leaves_prior_generation_intact(
 ) -> None:
     output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
     prior = output.read_bytes()
-    baseline = (tmp_path / "ndx.xlsx").read_bytes()
-    _install_stable_test_root(monkeypatch, baseline, ndx_symbols)
     changed = ["EA" if symbol == "HONA" else symbol for symbol in ndx_symbols]
     changed_path = tmp_path / "changed-ndx.xlsx"
-    changed_path.write_bytes(_ndx_xlsx(changed))
-    with pytest.raises(RuntimeError, match="not the governed 2026-08-27 capture"):
+    changed_path.write_bytes(_ndx_xlsx(changed, company_prefix="Current Company"))
+    with pytest.raises(RuntimeError, match="not the governed currentness root"):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
             ndx_artifact=changed_path,
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-28",
         )
     assert output.read_bytes() == prior
     assert not json.loads(output.read_text(encoding="utf-8")).get("generation_id")
@@ -793,6 +891,7 @@ def test_refresh_source_download_failure_leaves_active_generation_unchanged(
         state_root=tmp_path,
         proxy_manifest=None,
         ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
     )
     prior = output.read_bytes()
 
@@ -803,6 +902,4 @@ def test_refresh_source_download_failure_leaves_active_generation_unchanged(
     with pytest.raises(RuntimeError, match="source download failed"):
         refresh_script.refresh(state_root=tmp_path, proxy_manifest=None, ndx_artifact=None)
     assert output.read_bytes() == prior
-    assert json.loads(output.read_text(encoding="utf-8"))["generation_id"] == first[
-        "generation_id"
-    ]
+    assert json.loads(output.read_text(encoding="utf-8"))["generation_id"] == first["generation_id"]

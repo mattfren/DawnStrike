@@ -75,12 +75,74 @@ _NDX_CANONICAL_ZIP_MEMBER_HASHES = {
     "xl/workbook.xml": "6d246f4609966d5069771e0fd94f102ebe479f63557a7c6b7469f8bdd3bf4ce6",
     "xl/worksheets/sheet1.xml": "cf8166d6a12a68c6600c37a497521fa789e9f7e1c869b28b5cb3c3ea07dcb50a",
 }
+_NDX_DYNAMIC_MEMBER_NAMES = {
+    "docProps/core.xml",
+    "docProps/custom.xml",
+    "xl/sharedStrings.xml",
+    "xl/worksheets/sheet1.xml",
+}
+_NDX_CANONICAL_STATIC_MEMBER_HASHES = {
+    name: digest
+    for name, digest in _NDX_CANONICAL_ZIP_MEMBER_HASHES.items()
+    if name not in _NDX_DYNAMIC_MEMBER_NAMES
+}
 _NDX_CANONICAL_ZIP_CONTENT_DIGEST_SHA256 = (
     "6c8fe9543904412a8ceed93c9554ebad4b64213603e3b1cdccf09ec8ca8a269b"
 )
 _NDX_CANONICAL_MEMBER_SET_HASH_SHA256 = (
     "c5e8bb1294642e0812f8a8d20f8c015548d41c64bfc6bef0aa0187994828a0ed"
 )
+
+# State Street changes the daily holdings date and (usually) weights while
+# retaining this workbook package shape.  The proxy trust root therefore pins
+# the package structure and the canonical ticker set, rather than volatile ZIP
+# bytes or holdings weights.  The dynamic worksheet is still parsed strictly
+# by the transformer below; a changed ticker set is never silently accepted.
+_SPY_CANONICAL_ZIP_MEMBER_NAMES = (
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "docMetadata/LabelInfo.xml",
+    "docProps/app.xml",
+    "docProps/core.xml",
+    "docProps/custom.xml",
+    "xl/_rels/workbook.xml.rels",
+    "xl/printerSettings/printerSettings1.bin",
+    "xl/sharedStrings.xml",
+    "xl/styles.xml",
+    "xl/theme/theme1.xml",
+    "xl/workbook.xml",
+    "xl/worksheets/_rels/sheet1.xml.rels",
+    "xl/worksheets/sheet1.xml",
+)
+_SPY_CANONICAL_STATIC_MEMBER_NAMES = tuple(
+    name
+    for name in _SPY_CANONICAL_ZIP_MEMBER_NAMES
+    if name
+    not in {
+        "docProps/core.xml",
+        "docProps/custom.xml",
+        "xl/sharedStrings.xml",
+        "xl/worksheets/sheet1.xml",
+    }
+)
+_SPY_CANONICAL_STATIC_MEMBER_HASHES = {
+    "[Content_Types].xml": "f496107ed0a062eeffeb1de799398580569de5d5146075b6d5c888d5303ae49d",
+    "_rels/.rels": "933a35268fc19adfc9d784bf2c721c43fc36c37328d2a26b38ac0ad4d0fe66c8",
+    "docMetadata/LabelInfo.xml": "86ce9b2e439e4c175e3d0ee8f115a616fe4ac1008c8b5b044554397b56623b1b",
+    "docProps/app.xml": "758c9da301ae1bb81c9e2804d2db5e7ef1df524daa283702c7748a2de8453fcd",
+    "xl/_rels/workbook.xml.rels": (
+        "c250eb50b40d8d80e4880e576586c6c2bc330ee55bbadb90347112c347d1b621"
+    ),
+    "xl/printerSettings/printerSettings1.bin": (
+        "79c5035258f390a3257885ad0d5b878ef00e390199ca172ff747653f8ca567e6"
+    ),
+    "xl/styles.xml": "c618a5f7feb3bc054f6620dd35e07f2c92c32091563fe415cdd173c69302f3e7",
+    "xl/theme/theme1.xml": "4ea472506d97887770a296ec998c24f5c4c3eb100c72f9d4cdfb13dae2fe6c29",
+    "xl/workbook.xml": "3f02861504a029bb96d8f200bfba51c6cfe14bbd56236ab7017a697a23fdf5f4",
+    "xl/worksheets/_rels/sheet1.xml.rels": (
+        "2c4b6ba262b6f12c55a743fb76b5909de0080b6d04bfa9c7f5391952c7bd0852"
+    ),
+}
 
 # These are release trust roots for the currently mounted point-in-time
 # sources.  A manifest cannot make a changed source authoritative merely by
@@ -90,9 +152,18 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
     "state-street-spy-holdings-proxy-2026-08-24": {
         "index": "S&P 500",
         "effective_date": "2026-08-24",
-        "raw_artifact_hashes": (
-            "f1580d45c98e29360cf5cb13db70fe1f31cf66e0b0088e75e79ac29dfd6747c8",
+        # Daily downloads change their raw bytes and embedded as-of date.  The
+        # source is accepted only after the strict package/schema and canonical
+        # ticker-set checks below; raw ZIP bytes are retained in each active
+        # generation for audit but are not a reusable trust root.
+        "raw_artifact_hashes": (),
+        "canonical_zip_member_names": _SPY_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_static_member_hashes": _SPY_CANONICAL_STATIC_MEMBER_HASHES,
+        "canonical_symbol_set_hash_sha256": (
+            "5b5770ad1b7767aa92a785c3d201fa285b81a4f8ec2f9a1691e9121117d8a41e"
         ),
+        "allow_future_same_semantic_set_dates": True,
+        "maximum_source_age_days": 4,
         "transformation_id": "state-street-spy-holdings-parser-v1",
         "lineage_builder_id": "state-street-spy-holdings-parser-v1",
         "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
@@ -136,8 +207,15 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "raw_artifact_byte_counts": (8439,),
         "canonical_zip_member_names": _NDX_CANONICAL_ZIP_MEMBER_NAMES,
         "canonical_zip_member_hashes": _NDX_CANONICAL_ZIP_MEMBER_HASHES,
+        "canonical_static_member_hashes": _NDX_CANONICAL_STATIC_MEMBER_HASHES,
         "canonical_content_digest_sha256": _NDX_CANONICAL_ZIP_CONTENT_DIGEST_SHA256,
         "canonical_member_set_hash_sha256": _NDX_CANONICAL_MEMBER_SET_HASH_SHA256,
+        "allow_future_same_semantic_set_dates": True,
+        "source_uri_template": NASDAQ_NDX_SOD_URL_TEMPLATE,
+        "source_scope_template": "Official Nasdaq-100 SOD Weightings export for {market_date}",
+        "canonical_symbol_set_hash_sha256": (
+            "a0fcb7b66b5efa5e1b2ded8dbc225133c7e1274d66abdb84858b9fe8c6483d30"
+        ),
         "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
         "lineage_builder_id": "nasdaq-ndx-sod-weightings-parser-v1",
         "lineage_transformation_id": "official-sod-weightings-export-v1",
@@ -414,6 +492,7 @@ def build_core_universe_contract(
                 manifest,
                 index_name=_index_name(manifest_index),
                 effective_date=effective,
+                requested_date=requested_date,
                 artifact_hashes=raw_hashes,
                 artifact_bytes=captured_artifacts,
                 declared_members=local_members,
@@ -501,17 +580,13 @@ def build_core_universe_contract(
     # cannot be reported READY while the overall source is forged or stale.
     generic_source_binding_errors = sorted(
         {
-            error.split(":", 1)[1]
-            if error.startswith("manifest_") and ":" in error
-            else error
+            error.split(":", 1)[1] if error.startswith("manifest_") and ":" in error else error
             for error in errors
             if "source_binding_" in error
         }
     )
     for index in CORE_INDEXES:
-        index_errors = [
-            error for error in errors if f":{index}" in error or error.endswith(index)
-        ]
+        index_errors = [error for error in errors if f":{index}" in error or error.endswith(index)]
         index_errors.extend(generic_source_binding_errors)
         ready = (
             bool(per_index[index])
@@ -978,9 +1053,9 @@ def discover_core_universe_rows(
             missing = sorted(set(requested) - set(returned))
             row_quality: list[dict[str, Any]] = []
             for row in batch_rows:
-                source_verified = authenticated and str(
-                    row.get("source") or ""
-                ).lower().startswith("alpaca")
+                source_verified = authenticated and str(row.get("source") or "").lower().startswith(
+                    "alpaca"
+                )
                 freshness = _snapshot_freshness_status(
                     row,
                     observed_at=discovered_at,
@@ -1085,11 +1160,7 @@ def discover_core_universe_rows(
     )
     return {
         "status": (
-            "READY"
-            if complete
-            else "DATA_UNAVAILABLE"
-            if quality_incomplete
-            else "INCOMPLETE"
+            "READY" if complete else "DATA_UNAVAILABLE" if quality_incomplete else "INCOMPLETE"
         ),
         "rows": rows,
         "reason": (
@@ -1453,12 +1524,16 @@ def _validate_raw_artifact(manifest: dict[str, Any]) -> tuple[str, str | None]:
     entries = _declared_artifact_entries(manifest)
     declared = ""
     if entries:
-        declared = str(
-            entries[0].get("sha256")
-            or entries[0].get("raw_artifact_sha256")
-            or entries[0].get("raw_artifact_hash")
-            or ""
-        ).strip().lower()
+        declared = (
+            str(
+                entries[0].get("sha256")
+                or entries[0].get("raw_artifact_sha256")
+                or entries[0].get("raw_artifact_hash")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
     hashes, errors, _captured = _capture_raw_artifacts(manifest)
     return (hashes[0] if hashes else declared), (errors[0] if errors else None)
 
@@ -1547,11 +1622,40 @@ def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[s
     return hashes, errors
 
 
+def _nasdaq_sod_url_for_date(market_date: str) -> str:
+    """Render the authenticated Nasdaq SOD URL for one requested session."""
+
+    parsed = date.fromisoformat(market_date)
+    return NASDAQ_NDX_SOD_URL_TEMPLATE.format(
+        month=f"{parsed.month:02d}",
+        day=f"{parsed.day:02d}",
+        year=f"{parsed.year:04d}",
+    )
+
+
+def _trusted_source_uri(root: dict[str, Any], market_date: str | None) -> str:
+    template = str(root.get("source_uri_template") or "").strip()
+    if template and market_date:
+        try:
+            return _nasdaq_sod_url_for_date(market_date)
+        except ValueError:
+            return ""
+    return str(root.get("source_uri") or "").strip()
+
+
+def _trusted_source_scope(root: dict[str, Any], market_date: str | None) -> str:
+    template = str(root.get("source_scope_template") or "").strip()
+    if template and market_date:
+        return template.format(market_date=market_date)
+    return str(root.get("source_scope") or "").strip()
+
+
 def _validate_source_binding(
     manifest: dict[str, Any],
     *,
     index_name: str,
     effective_date: str | None,
+    requested_date: str | None,
     artifact_hashes: list[str],
     artifact_bytes: list[bytes],
     declared_members: list[dict[str, Any]],
@@ -1562,8 +1666,11 @@ def _validate_source_binding(
     trust root: an operator could change both and recompute both digests. The
     currently supported production sources therefore have code-pinned roots
     (source identity, authenticated URI, stable workbook content, transformer,
-    and effective date). The transformer then derives membership from the
-    already captured bytes and compares the full canonical rows.
+    and an anchored effective date). A later requested date is admissible only
+    for a root explicitly governed for same-semantic-set continuity, and only
+    after the current source's strict structure and canonical ticker set replay
+    exactly. The transformer then derives membership from the already captured
+    bytes and compares the full canonical rows.
     """
 
     source_id = str(manifest.get("source_id") or manifest.get("id") or "").strip()
@@ -1574,7 +1681,9 @@ def _validate_source_binding(
         "index": root.get("index") if root else index_name,
         "membership_authority": root.get("membership_authority") if root else None,
         "official_index_authority": root.get("official_index_authority") if root else None,
-        "source_scope": root.get("source_scope") if root else None,
+        "source_scope": (
+            _trusted_source_scope(root, requested_date or effective_date) if root else None
+        ),
         "source_id": source_id or None,
         "transformation_id": root.get("transformation_id") if root else None,
         "derived_effective_date": None,
@@ -1584,14 +1693,21 @@ def _validate_source_binding(
     errors: list[str] = []
     if root is None:
         return binding, ["source_binding_trust_root_unknown"]
+    root_effective = _date_text(root.get("effective_date"))
+    same_set_dates = bool(root.get("allow_future_same_semantic_set_dates"))
+    requested_after_root = bool(
+        requested_date and root_effective and requested_date > root_effective
+    )
+    effective_after_root = bool(
+        effective_date and root_effective and effective_date > root_effective
+    )
+    recurring_allowed = same_set_dates and requested_after_root
     if index_name != root["index"]:
         errors.append("source_binding_index_mismatch")
-    declared_index_label = str(
-        manifest.get("index_name") or manifest.get("index") or ""
-    ).strip()
+    declared_index_label = str(manifest.get("index_name") or manifest.get("index") or "").strip()
     if declared_index_label != str(root["index"]):
         errors.append("source_binding_index_label_not_trusted")
-    trusted_uri = str(root.get("source_uri") or "").strip()
+    trusted_uri = _trusted_source_uri(root, requested_date or effective_date)
     source_uri = str(
         manifest.get("source_uri") or manifest.get("uri") or manifest.get("url") or ""
     ).strip()
@@ -1604,9 +1720,37 @@ def _validate_source_binding(
         }
         if artifact_uris != {trusted_uri}:
             errors.append("source_binding_artifact_uri_not_trusted")
-    if effective_date != root["effective_date"]:
-        errors.append("source_binding_effective_date_not_trusted")
-    trusted_scope = str(root.get("source_scope") or "").strip()
+    if effective_date != root_effective:
+        if index_name == "Nasdaq-100":
+            # The official SOD workbook is the exact requested-date input.
+            if not (
+                recurring_allowed and effective_date == requested_date and effective_after_root
+            ):
+                errors.append("source_binding_effective_date_not_trusted")
+        elif index_name == "S&P 500":
+            # State Street embeds the holdings' as-of date.  A fresh daily
+            # download may be one or more trading sessions behind the request,
+            # but it must not predate the release anchor or be future-dated.
+            maximum_age = int(root.get("maximum_source_age_days") or 0)
+            source_age = (
+                (date.fromisoformat(requested_date) - date.fromisoformat(effective_date)).days
+                if requested_date and effective_date
+                else -1
+            )
+            if not (
+                recurring_allowed
+                and effective_date
+                and root_effective
+                and root_effective <= effective_date <= (requested_date or effective_date)
+                and maximum_age > 0
+                and 0 <= source_age <= maximum_age
+            ):
+                errors.append("source_binding_effective_date_not_trusted")
+        else:
+            errors.append("source_binding_effective_date_not_trusted")
+    if requested_date and effective_date and effective_date > requested_date:
+        errors.append("source_binding_effective_date_after_market_date")
+    trusted_scope = _trusted_source_scope(root, requested_date or effective_date)
     declared_scope = str(manifest.get("source_scope") or "").strip()
     if trusted_scope and declared_scope != trusted_scope:
         errors.append("source_binding_source_scope_not_trusted")
@@ -1631,24 +1775,19 @@ def _validate_source_binding(
             errors.append("source_binding_lineage_schema_mismatch")
         if str(lineage.get("builder_id") or "").strip() != root["lineage_builder_id"]:
             errors.append("source_binding_lineage_builder_mismatch")
-        if str(lineage.get("transformation_id") or "").strip() != root[
-            "lineage_transformation_id"
-        ]:
+        if str(lineage.get("transformation_id") or "").strip() != root["lineage_transformation_id"]:
             errors.append("source_binding_lineage_transformation_mismatch")
-        if str(lineage.get("reconstitution_id") or "").strip() != root[
-            "reconstitution_id"
-        ]:
+        if str(lineage.get("reconstitution_id") or "").strip() != root["reconstitution_id"]:
             errors.append("source_binding_lineage_reconstitution_mismatch")
-        if _date_text(lineage.get("effective_date")) != root["effective_date"]:
+        if _date_text(lineage.get("effective_date")) != effective_date:
             errors.append("source_binding_lineage_effective_date_mismatch")
         lineage_input_hashes = lineage.get("input_artifact_hashes")
-        if not isinstance(lineage_input_hashes, list) or [
-            str(item).lower() for item in lineage_input_hashes
-        ] != artifact_hashes:
+        if (
+            not isinstance(lineage_input_hashes, list)
+            or [str(item).lower() for item in lineage_input_hashes] != artifact_hashes
+        ):
             errors.append("source_binding_lineage_input_hashes_mismatch")
-        lineage_member_hash = str(
-            lineage.get("canonical_member_set_hash_sha256") or ""
-        ).lower()
+        lineage_member_hash = str(lineage.get("canonical_member_set_hash_sha256") or "").lower()
         if lineage_member_hash != _canonical_member_hash(declared_members):
             errors.append("source_binding_lineage_member_set_mismatch")
     trusted_sizes = root.get("raw_artifact_byte_counts")
@@ -1660,17 +1799,75 @@ def _validate_source_binding(
         errors.append("source_binding_raw_artifact_sizes_not_trusted")
     if not artifact_bytes:
         return binding, [*errors, "source_binding_artifacts_missing"]
-    if index_name == "Nasdaq-100" and root.get(
-        "transformation_id"
-    ) == "nasdaq-ndx-sod-weightings-parser-v1" and len(artifact_bytes) != 1:
+    if (
+        index_name == "Nasdaq-100"
+        and root.get("transformation_id") == "nasdaq-ndx-sod-weightings-parser-v1"
+        and len(artifact_bytes) != 1
+    ):
         return binding, [*errors, "source_binding_artifact_count_not_trusted"]
     try:
         if index_name == "S&P 500":
-            derived_members, derived_effective = _replay_spy_holdings_xlsx(artifact_bytes)
+            derived_members, derived_effective, holdings_attestation = (
+                _parse_spy_holdings_xlsx_with_attestation(artifact_bytes)
+            )
+            binding["workbook_attestation"] = holdings_attestation
+            expected_names = root.get("canonical_zip_member_names")
+            if expected_names and list(holdings_attestation["member_names"]) != list(
+                expected_names
+            ):
+                errors.append("source_binding_workbook_structure_not_trusted")
+            expected_static = root.get("canonical_static_member_hashes")
+            if expected_static and holdings_attestation["static_member_hashes"] != dict(
+                expected_static
+            ):
+                errors.append("source_binding_workbook_members_not_trusted")
+            expected_schema = str(root.get("canonical_schema_digest_sha256") or "").lower()
+            if expected_schema and holdings_attestation["schema_digest_sha256"] != expected_schema:
+                errors.append("source_binding_workbook_schema_not_trusted")
+            expected_content = str(root.get("canonical_content_digest_sha256") or "").lower()
+            if (
+                expected_content
+                and holdings_attestation["content_digest_sha256"] != expected_content
+            ):
+                errors.append("source_binding_workbook_content_not_trusted")
+            expected_symbol_set = str(root.get("canonical_symbol_set_hash_sha256") or "").lower()
+            if expected_symbol_set and (
+                holdings_attestation["symbol_set_hash_sha256"] != expected_symbol_set
+            ):
+                errors.append("source_binding_member_set_not_trusted")
+            declared_names = manifest.get("canonical_zip_member_names")
+            if declared_names is not None and list(holdings_attestation["member_names"]) != list(
+                declared_names
+            ):
+                errors.append("source_binding_declared_workbook_structure_mismatch")
+            declared_static = manifest.get("canonical_static_member_hashes")
+            if declared_static is not None and holdings_attestation["static_member_hashes"] != dict(
+                declared_static
+            ):
+                errors.append("source_binding_declared_workbook_members_mismatch")
+            declared_schema = str(manifest.get("canonical_schema_digest_sha256") or "").lower()
+            if declared_schema and holdings_attestation["schema_digest_sha256"] != declared_schema:
+                errors.append("source_binding_declared_workbook_schema_mismatch")
+            declared_content = str(manifest.get("canonical_content_digest_sha256") or "").lower()
+            if (
+                declared_content
+                and holdings_attestation["content_digest_sha256"] != declared_content
+            ):
+                errors.append("source_binding_declared_workbook_content_mismatch")
+            declared_symbol_set = str(
+                manifest.get("canonical_symbol_set_hash_sha256") or ""
+            ).lower()
+            if (
+                declared_symbol_set
+                and holdings_attestation["symbol_set_hash_sha256"] != declared_symbol_set
+            ):
+                errors.append("source_binding_declared_member_set_mismatch")
         elif index_name == "Nasdaq-100":
             if root.get("transformation_id") == "nasdaq-ndx-sod-weightings-parser-v1":
                 derived_members, workbook_attestation = (
-                    _parse_nasdaq_sod_weightings_xlsx_with_attestation(artifact_bytes[0])
+                    _parse_nasdaq_sod_weightings_xlsx_with_attestation(
+                        artifact_bytes[0], effective_date=effective_date or root_effective
+                    )
                 )
                 binding["workbook_attestation"] = workbook_attestation
                 expected_names = root.get("canonical_zip_member_names")
@@ -1684,8 +1881,20 @@ def _validate_source_binding(
                 ) != list(declared_names):
                     errors.append("source_binding_declared_workbook_structure_mismatch")
                 expected_hashes = root.get("canonical_zip_member_hashes")
-                if expected_hashes and workbook_attestation["member_hashes"] != dict(
-                    expected_hashes
+                expected_static = root.get("canonical_static_member_hashes")
+                if expected_static and workbook_attestation["static_member_hashes"] != dict(
+                    expected_static
+                ):
+                    errors.append("source_binding_workbook_static_members_not_trusted")
+                declared_static = manifest.get("canonical_static_member_hashes")
+                if declared_static is not None and workbook_attestation[
+                    "static_member_hashes"
+                ] != dict(declared_static):
+                    errors.append("source_binding_declared_workbook_static_members_mismatch")
+                if (
+                    effective_date == root_effective
+                    and expected_hashes
+                    and workbook_attestation["member_hashes"] != dict(expected_hashes)
                 ):
                     errors.append("source_binding_workbook_members_not_trusted")
                 declared_hashes = manifest.get("canonical_zip_member_hashes")
@@ -1693,11 +1902,10 @@ def _validate_source_binding(
                     declared_hashes
                 ):
                     errors.append("source_binding_declared_workbook_members_mismatch")
-                expected_content = str(
-                    root.get("canonical_content_digest_sha256") or ""
-                ).lower()
+                expected_content = str(root.get("canonical_content_digest_sha256") or "").lower()
                 if (
-                    expected_content
+                    effective_date == root_effective
+                    and expected_content
                     and workbook_attestation["content_digest_sha256"] != expected_content
                 ):
                     errors.append("source_binding_workbook_content_not_trusted")
@@ -1709,10 +1917,18 @@ def _validate_source_binding(
                     and workbook_attestation["content_digest_sha256"] != declared_content
                 ):
                     errors.append("source_binding_declared_workbook_content_mismatch")
+                expected_symbol_set = str(
+                    root.get("canonical_symbol_set_hash_sha256") or ""
+                ).lower()
+                if expected_symbol_set:
+                    if workbook_attestation.get("symbol_set_hash_sha256") != expected_symbol_set:
+                        errors.append("source_binding_member_set_not_trusted")
+                elif effective_date != root_effective and recurring_allowed:
+                    errors.append("source_binding_currentness_root_missing")
                 expected_member_set = str(
                     root.get("canonical_member_set_hash_sha256") or ""
                 ).lower()
-                if expected_member_set:
+                if expected_member_set and effective_date == root_effective:
                     derived_set = _canonical_member_hash(
                         [
                             {
@@ -1720,7 +1936,7 @@ def _validate_source_binding(
                                 "provider_symbol": symbol,
                                 "asset_class": "common_stock",
                                 "index": "Nasdaq-100",
-                                "valid_from": root["effective_date"],
+                                "valid_from": effective_date,
                                 "valid_to": None,
                             }
                             for symbol in derived_members
@@ -1736,7 +1952,7 @@ def _validate_source_binding(
                     and workbook_attestation["member_set_hash_sha256"] != declared_member_set
                 ):
                     errors.append("source_binding_declared_member_set_mismatch")
-                derived_effective = root["effective_date"]
+                derived_effective = effective_date
             else:
                 derived_members, derived_effective = _replay_nasdaq_reconstitution(artifact_bytes)
         else:
@@ -1812,14 +2028,36 @@ def _declared_artifact_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]
 def _replay_spy_holdings_xlsx(payloads: list[bytes]) -> tuple[list[str], str]:
     """Extract the exact 503 common-stock rows from the State Street XLSX."""
 
+    symbols, effective, _attestation = _parse_spy_holdings_xlsx_with_attestation(payloads)
+    return symbols, effective
+
+
+def _parse_spy_holdings_xlsx_with_attestation(
+    payloads: list[bytes],
+) -> tuple[list[str], str, dict[str, Any]]:
+    """Replay one SPY workbook and return stable package/set attestations."""
+
     if len(payloads) != 1:
         raise ValueError("SPY transformer requires one XLSX artifact")
     with zipfile.ZipFile(io.BytesIO(payloads[0])) as archive:
+        names = tuple(sorted(archive.namelist()))
+        if len(names) != len(set(names)):
+            raise ValueError("SPY workbook contains duplicate members")
         try:
-            shared = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
-            sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+            contents = {name: archive.read(name) for name in names}
         except KeyError as exc:
             raise ValueError("SPY XLSX worksheet/shared strings missing") from exc
+    for name, content in contents.items():
+        if name.endswith(".xml"):
+            try:
+                ElementTree.fromstring(content)
+            except ElementTree.ParseError as exc:
+                raise ValueError("SPY XLSX workbook XML invalid") from exc
+    try:
+        shared = ElementTree.fromstring(contents["xl/sharedStrings.xml"])
+        sheet = ElementTree.fromstring(contents["xl/worksheets/sheet1.xml"])
+    except KeyError as exc:
+        raise ValueError("SPY XLSX worksheet/shared strings missing") from exc
     namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     strings = ["".join(item.itertext()) for item in shared.findall("main:si", namespace)]
     rows: list[tuple[int, dict[str, str]]] = []
@@ -1862,9 +2100,7 @@ def _replay_spy_holdings_xlsx(payloads: list[bytes]) -> tuple[list[str], str]:
     if date_match is None:
         raise ValueError("SPY holdings date missing")
     try:
-        effective = datetime.strptime(
-            "-".join(date_match.groups()), "%d-%b-%Y"
-        ).date().isoformat()
+        effective = datetime.strptime("-".join(date_match.groups()), "%d-%b-%Y").date().isoformat()
     except ValueError as exc:
         raise ValueError("SPY holdings date invalid") from exc
     # The source sheet has a contiguous holdings block.  It intentionally
@@ -1890,13 +2126,44 @@ def _replay_spy_holdings_xlsx(payloads: list[bytes]) -> tuple[list[str], str]:
     ]
     if len(symbols) != 503 or len(set(symbols)) != len(symbols):
         raise ValueError("SPY membership count or uniqueness invalid")
-    return symbols, effective
+    static_member_hashes = {
+        name: hashlib.sha256(contents[name]).hexdigest()
+        for name in names
+        if name in _SPY_CANONICAL_STATIC_MEMBER_NAMES
+    }
+    attestation: dict[str, Any] = {
+        "member_names": list(names),
+        "static_member_hashes": static_member_hashes,
+        "schema_digest_sha256": _canonical_zip_content_digest(
+            {
+                **static_member_hashes,
+                **{
+                    name: "dynamic"
+                    for name in names
+                    if name not in _SPY_CANONICAL_STATIC_MEMBER_NAMES
+                },
+            }
+        ),
+        "symbol_set_hash_sha256": _canonical_symbol_set_hash(symbols, "S&P 500"),
+    }
+    # This is intentionally stable across the daily as-of date and holdings
+    # weights.  It binds the complete known package structure plus the exact
+    # canonical ticker set that the transformer contributes to the proxy.
+    attestation["content_digest_sha256"] = _canonical_zip_content_digest(
+        {
+            **static_member_hashes,
+            "canonical_symbol_set_sha256": attestation["symbol_set_hash_sha256"],
+        }
+    )
+    return symbols, effective, attestation
 
 
 def _xlsx_cell_text(cell: ElementTree.Element, shared_strings: list[str]) -> str:
     """Decode one XLSX cell without coercing malformed values into truth."""
 
-    value = cell.find("main:v", {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"})
+    value = cell.find(
+        "main:v", {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    )
     text = value.text if value is not None and value.text is not None else ""
     if cell.attrib.get("t") == "s" and text:
         try:
@@ -1913,10 +2180,7 @@ def _xlsx_cell_text(cell: ElementTree.Element, shared_strings: list[str]) -> str
 
 def _canonical_zip_content_digest(member_hashes: dict[str, str]) -> str:
     canonical = {
-        "members": [
-            {"name": name, "sha256": member_hashes[name]}
-            for name in sorted(member_hashes)
-        ]
+        "members": [{"name": name, "sha256": member_hashes[name]} for name in sorted(member_hashes)]
     }
     encoded = json.dumps(
         canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -1926,6 +2190,8 @@ def _canonical_zip_content_digest(member_hashes: dict[str, str]) -> str:
 
 def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
     payload: bytes,
+    *,
+    effective_date: str = "2026-08-27",
 ) -> tuple[list[str], dict[str, Any]]:
     """Parse and attest the exact authenticated Nasdaq SOD workbook shape."""
 
@@ -1951,18 +2217,18 @@ def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
             ElementTree.fromstring(content)
         except ElementTree.ParseError as exc:
             raise ValueError("Nasdaq SOD workbook XML invalid") from exc
-    member_hashes = {
-        name: hashlib.sha256(contents[name]).hexdigest() for name in names
-    }
+    member_hashes = {name: hashlib.sha256(contents[name]).hexdigest() for name in names}
     attestation: dict[str, Any] = {
         "member_names": list(names),
         "member_hashes": member_hashes,
+        "static_member_hashes": {
+            name: member_hashes[name] for name in names if name not in _NDX_DYNAMIC_MEMBER_NAMES
+        },
         "content_digest_sha256": _canonical_zip_content_digest(member_hashes),
     }
     shared_root = ElementTree.fromstring(contents["xl/sharedStrings.xml"])
     shared = [
-        "".join(item.itertext()).strip()
-        for item in shared_root.findall("main:si", namespace)
+        "".join(item.itertext()).strip() for item in shared_root.findall("main:si", namespace)
     ]
     sheet_root = ElementTree.fromstring(contents["xl/worksheets/sheet1.xml"])
 
@@ -2023,12 +2289,13 @@ def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
                 "provider_symbol": symbol,
                 "asset_class": "common_stock",
                 "index": "Nasdaq-100",
-                "valid_from": "2026-08-27",
+                "valid_from": effective_date,
                 "valid_to": None,
             }
             for symbol in symbols
         ]
     )
+    attestation["symbol_set_hash_sha256"] = _canonical_symbol_set_hash(symbols, "Nasdaq-100")
     return symbols, attestation
 
 
@@ -2094,11 +2361,7 @@ def _extract_ndx_pdf_symbols(payload: bytes) -> tuple[list[str], str]:
     # Each table cell is emitted as a literal (...) Tj operator.  Looking for
     # an uppercase ticker followed by a decimal weight avoids treating company
     # names as symbols, while retaining dual-class symbols.
-    literals = [
-        value.strip()
-        for value in re.findall(r"\(([^()]*)\)Tj", cleaned)
-        if value.strip()
-    ]
+    literals = [value.strip() for value in re.findall(r"\(([^()]*)\)Tj", cleaned) if value.strip()]
     # The text layer is a sequence of company-name, ticker, and weight cells.
     # A few names are split across cells (COCA/-/COLA, T-MOBILE, TAKE-TWO),
     # so use the ticker immediately followed by a decimal weight rather than
@@ -2111,9 +2374,7 @@ def _extract_ndx_pdf_symbols(payload: bytes) -> tuple[list[str], str]:
             symbols.append(value)
     if len(symbols) != 101 or len(set(symbols)) != 101:
         raise ValueError(f"NDX base membership count invalid: {len(symbols)}")
-    date_match = re.search(
-        r"Data as of:.*?([0-9]{2}/[0-9]{2}/[0-9]{4})", text, flags=re.DOTALL
-    )
+    date_match = re.search(r"Data as of:.*?([0-9]{2}/[0-9]{2}/[0-9]{4})", text, flags=re.DOTALL)
     if date_match is None:
         raise ValueError("NDX base effective date missing")
     try:
@@ -2200,6 +2461,17 @@ def _canonical_member_hash(records: Iterable[dict[str, Any]]) -> str:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _canonical_symbol_set_hash(symbols: Iterable[str], index: str) -> str:
+    """Hash a semantic ticker set without volatile validity/as-of fields."""
+
+    canonical = {
+        "index": _index_name(index) or str(index),
+        "symbols": sorted({canonical_symbol(symbol) for symbol in symbols}),
+    }
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
 
