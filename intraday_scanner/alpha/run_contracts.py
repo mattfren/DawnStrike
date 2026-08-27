@@ -74,6 +74,16 @@ class AlphaRunContract:
     core_snapshot_status: str = "DATA_UNAVAILABLE"
     core_snapshot_requested_count: int = 0
     core_snapshot_returned_count: int = 0
+    core_snapshot_eligible_count: int = 0
+    core_snapshot_fresh_count: int = 0
+    core_snapshot_fresh_verified_count: int = 0
+    core_snapshot_stale_count: int = 0
+    core_snapshot_missing_count: int = 0
+    core_snapshot_unknown_count: int = 0
+    core_snapshot_duplicate_count: int = 0
+    core_snapshot_coverage_status: str = "DATA_UNAVAILABLE"
+    core_snapshot_coverage_receipt_ids: tuple[str, ...] = ()
+    core_snapshot_coverage_receipt_hashes: tuple[str, ...] = ()
     core_snapshot_complete: bool = False
     core_index_verdicts: dict[str, dict[str, Any]] = field(default_factory=dict)
     core_raw_artifact_hashes: tuple[str, ...] = ()
@@ -382,6 +392,24 @@ def build_alpha_run_contract(
         core_snapshot_status=str(core.get("status") or "DATA_UNAVAILABLE"),
         core_snapshot_requested_count=max(int(core.get("requested_count") or 0), 0),
         core_snapshot_returned_count=max(int(core.get("returned_count") or 0), 0),
+        core_snapshot_eligible_count=max(int(core.get("eligible_count") or 0), 0),
+        core_snapshot_fresh_count=max(int(core.get("fresh_count") or 0), 0),
+        core_snapshot_fresh_verified_count=max(
+            int(core.get("fresh_verified_count") or 0), 0
+        ),
+        core_snapshot_stale_count=max(int(core.get("stale_count") or 0), 0),
+        core_snapshot_missing_count=max(int(core.get("missing_count") or 0), 0),
+        core_snapshot_unknown_count=max(int(core.get("unknown_count") or 0), 0),
+        core_snapshot_duplicate_count=max(int(core.get("duplicate_count") or 0), 0),
+        core_snapshot_coverage_status=str(
+            core.get("coverage_status") or core.get("status") or "DATA_UNAVAILABLE"
+        ),
+        core_snapshot_coverage_receipt_ids=tuple(
+            str(item) for item in core.get("coverage_receipt_ids") or []
+        ),
+        core_snapshot_coverage_receipt_hashes=tuple(
+            str(item) for item in core.get("coverage_receipt_hashes") or []
+        ),
         core_snapshot_complete=(
             str(core.get("status") or "") == "READY"
             and int(core.get("requested_count") or 0) > 0

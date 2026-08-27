@@ -8,12 +8,14 @@ stale.  It does not turn a broad Nasdaq listing file into Nasdaq-100 membership.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import html
 import io
 import json
 import re
 import zipfile
+from collections import Counter
 from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -22,7 +24,6 @@ from typing import Any
 from defusedxml import ElementTree
 
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SNAPSHOT_COLUMNS
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 
@@ -31,6 +32,13 @@ ACTIVE_POINTER_SCHEMA_VERSION = "dawnstrike.luna.core_universe_active_pointer.v1
 CORE_INDEXES = ("S&P 500", "Nasdaq-100")
 DEFAULT_MAX_AGE_DAYS = 31
 MIN_PRODUCTION_COUNTS = {"S&P 500": 503, "Nasdaq-100": 100}
+# A partial current snapshot may contribute research rows, but only after at
+# least one member has an independently verified, fresh Alpaca observation.
+# The threshold is deliberately small: it is a data-availability threshold,
+# not a claim that the whole index was observed.  The resulting PARTIAL
+# status and exact coverage counts remain visible to every downstream gate.
+MIN_CORE_FRESH_ROWS = 1
+CORE_COVERAGE_RECEIPT_SCHEMA_VERSION = "dawnstrike.luna.core_snapshot_coverage_receipt.v1"
 _SYMBOL_PATTERN = __import__("re").compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 STATE_STREET_SPY_HOLDINGS_URL = (
     "https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx"
@@ -963,6 +971,352 @@ def write_core_universe_contract(contract: dict[str, Any], output_path: str | Pa
     return path
 
 
+def _empty_core_discovery_result(
+    *,
+    status: str,
+    reason: str,
+    requested_count: int = 0,
+    missing_count: int = 0,
+) -> dict[str, Any]:
+    """Return the stable shape used when no provider request can be made.
+
+    This path deliberately has no coverage receipt: no provider batch was
+    attempted, so claiming a receipt would turn an unavailable contract into
+    an observed snapshot.  Counts still make the missing truth explicit to
+    lane and run-contract consumers.
+    """
+
+    requested = max(int(requested_count), 0)
+    missing = max(int(missing_count), 0)
+    return {
+        "status": str(status),
+        "coverage_status": "DATA_UNAVAILABLE",
+        "rows": [],
+        "reason": str(reason),
+        "requested_count": requested,
+        "returned_count": 0,
+        "eligible_count": 0,
+        "fresh_count": 0,
+        "fresh_verified_count": 0,
+        "stale_count": 0,
+        "missing_count": missing,
+        "unknown_count": 0,
+        "duplicate_count": 0,
+        "coverage_receipts": [],
+        "coverage_receipt_ids": [],
+        "coverage_receipt_hashes": [],
+        "attempted_count": 0,
+        "attempted_batch_count": 0,
+        "failed_batch_count": 0,
+        "limitations": ["core_snapshot_not_observed"],
+        "discovery_coverage_receipt": None,
+    }
+
+
+def _snapshot_response_hash(rows: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            rows,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _failed_core_coverage_receipt(
+    *,
+    requested: list[str],
+    requested_memberships: dict[str, list[str]],
+    batch_number: int,
+    authenticated: bool,
+    contract_hash: str,
+    observed_at: datetime,
+    max_age_seconds: int,
+    error_class: str,
+) -> dict[str, Any]:
+    """Build a content-addressed receipt for one failed provider batch.
+
+    Only the exception class crosses the provider boundary.  In particular,
+    the message is never copied into a receipt because provider errors can
+    contain URLs, request identifiers, or accidental credential material.
+    """
+
+    requested_symbols = [
+        canonical_symbol(symbol) for symbol in requested if canonical_symbol(symbol)
+    ]
+    base: dict[str, Any] = {
+        "schema_version": CORE_COVERAGE_RECEIPT_SCHEMA_VERSION,
+        "contract_hash_sha256": str(contract_hash or ""),
+        "batch_number": int(batch_number),
+        "requested_symbols": requested_symbols,
+        "requested_memberships": {
+            symbol: sorted(
+                {
+                    str(value).strip()
+                    for value in requested_memberships.get(symbol, [])
+                    if str(value).strip()
+                }
+            )
+            for symbol in requested_symbols
+        },
+        "requested_count": len(requested_symbols),
+        "returned_symbols": [],
+        "returned_count": 0,
+        "missing_symbols": requested_symbols,
+        "missing_count": len(requested_symbols),
+        "unknown_symbols": [],
+        "unknown_count": 0,
+        "duplicate_symbols": [],
+        "duplicate_count": 0,
+        "fresh_symbols": [],
+        "fresh_count": 0,
+        "fresh_verified_symbols": [],
+        "fresh_verified_count": 0,
+        "stale_symbols": [],
+        "stale_count": 0,
+        "unknown_freshness_symbols": [],
+        "unknown_freshness_count": 0,
+        "eligible_symbols": [],
+        "eligible_count": 0,
+        "unverified_symbols": requested_symbols,
+        "unverified_count": len(requested_symbols),
+        "authenticated_provider": bool(authenticated),
+        "provider": "",
+        "observed_at": observed_at.isoformat(),
+        "max_age_seconds": int(max_age_seconds),
+        "row_quality": [],
+        "response_hash_sha256": _snapshot_response_hash([]),
+        "status": "FAILED",
+        "error_class": str(error_class or "ProviderError"),
+        "limitations": ["provider_batch_error"],
+    }
+    digest = _coverage_receipt_digest(base)
+    base["coverage_receipt_hash_sha256"] = digest
+    base["coverage_receipt_id"] = "luna-core-coverage-" + digest[:24]
+    return base
+
+
+def _classify_core_snapshot_batch(
+    snapshots: Any,
+    *,
+    requested: list[str],
+    requested_memberships: dict[str, list[str]],
+    batch_number: int,
+    authenticated: bool,
+    contract_hash: str,
+    observed_at: datetime,
+    max_age_seconds: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Classify one provider response and return only safe rows.
+
+    The receipt counts raw observations, while ``eligible_symbols`` is a
+    unique set.  A duplicated ticker is therefore visible in ``returned`` and
+    ``duplicate`` counts but is never promoted to a research row.
+    """
+
+    requested_symbols = [
+        canonical_symbol(symbol) for symbol in requested if canonical_symbol(symbol)
+    ]
+    requested_set = set(requested_symbols)
+    if isinstance(snapshots, dict):
+        snapshots = [
+            {"ticker": key, **value}
+            for key, value in snapshots.items()
+            if isinstance(value, dict)
+        ]
+    batch_rows: list[dict[str, Any]] = []
+    for snapshot in snapshots or []:
+        row = snapshot.to_dict() if hasattr(snapshot, "to_dict") else dict(snapshot)
+        ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
+        batch_rows.append({**row, "ticker": ticker})
+
+    returned = [str(row.get("ticker") or "") for row in batch_rows]
+    returned_nonempty = [ticker for ticker in returned if ticker]
+    duplicates = sorted(
+        ticker
+        for ticker, count in Counter(returned_nonempty).items()
+        if count > 1
+    )
+    unknown = sorted(set(returned_nonempty) - requested_set)
+    missing = sorted(requested_set - set(returned_nonempty))
+    row_quality: list[dict[str, Any]] = []
+    row_status: dict[int, tuple[bool, str]] = {}
+    for index, row in enumerate(batch_rows):
+        ticker = str(row.get("ticker") or "")
+        source_verified = bool(
+            authenticated
+            and str(row.get("source") or "").lower().startswith("alpaca")
+        )
+        freshness = _snapshot_freshness_status(
+            row,
+            observed_at=observed_at,
+            max_age_seconds=max_age_seconds,
+        )
+        row_status[index] = (source_verified, freshness)
+        row_quality.append(
+            {
+                "ticker": ticker,
+                "provider": "alpaca" if source_verified else "",
+                "source_verified": source_verified,
+                "freshness_status": freshness,
+            }
+        )
+
+    fresh_symbols = sorted(
+        {
+            str(row.get("ticker") or "")
+            for index, row in enumerate(batch_rows)
+            if str(row.get("ticker") or "") in requested_set
+            and row_status[index][1] == "FRESH"
+        }
+    )
+    fresh_verified_symbols = sorted(
+        {
+            str(row.get("ticker") or "")
+            for index, row in enumerate(batch_rows)
+            if str(row.get("ticker") or "") in requested_set
+            and row_status[index][0]
+            and row_status[index][1] == "FRESH"
+        }
+    )
+    stale_symbols = sorted(
+        {
+            str(row.get("ticker") or "")
+            for index, row in enumerate(batch_rows)
+            if str(row.get("ticker") or "") in requested_set
+            and row_status[index][1] == "STALE"
+        }
+    )
+    unknown_freshness_symbols = sorted(
+        {
+            str(row.get("ticker") or "")
+            for index, row in enumerate(batch_rows)
+            if str(row.get("ticker") or "") in requested_set
+            and row_status[index][1] in {"UNKNOWN", "FUTURE"}
+        }
+    )
+    unverified_symbols = sorted(
+        {
+            str(row.get("ticker") or "")
+            for index, row in enumerate(batch_rows)
+            if str(row.get("ticker") or "") in requested_set
+            and not row_status[index][0]
+        }
+    )
+    eligible_symbols = sorted(
+        set(fresh_verified_symbols) - set(duplicates)
+    )
+    # A provider response containing explicit stale_data_flag=true is not
+    # eligible even if its timestamp is fresh: preserve the stronger source
+    # safety declaration rather than overwriting it.
+    eligible_symbols = [
+        symbol
+        for symbol in eligible_symbols
+        if not any(
+            str(row.get("ticker") or "") == symbol
+            and _truthy(row.get("stale_data_flag"))
+            for row in batch_rows
+        )
+    ]
+    quality_ready = bool(requested_symbols) and (
+        len(returned) == len(requested_symbols)
+        and not missing
+        and not unknown
+        and not duplicates
+        and len(fresh_verified_symbols) == len(requested_symbols)
+        and len(eligible_symbols) == len(requested_symbols)
+        and authenticated
+    )
+    limitations: list[str] = []
+    if missing:
+        limitations.append("missing_requested_symbols")
+    if unknown:
+        limitations.append("unknown_returned_symbols")
+    if duplicates:
+        limitations.append("duplicate_returned_symbols")
+    if stale_symbols:
+        limitations.append("stale_requested_snapshots")
+    if unknown_freshness_symbols:
+        limitations.append("unknown_snapshot_freshness")
+    if unverified_symbols:
+        limitations.append("unverified_provider_rows")
+    if not authenticated:
+        limitations.append("provider_not_authenticated")
+    if not eligible_symbols:
+        limitations.append("no_fresh_verified_core_rows")
+    status = "READY" if quality_ready else "PARTIAL" if eligible_symbols else "INCOMPLETE"
+    base: dict[str, Any] = {
+        "schema_version": CORE_COVERAGE_RECEIPT_SCHEMA_VERSION,
+        "contract_hash_sha256": str(contract_hash or ""),
+        "batch_number": int(batch_number),
+        "requested_symbols": requested_symbols,
+        "requested_memberships": {
+            symbol: sorted(
+                {
+                    str(value).strip()
+                    for value in requested_memberships.get(symbol, [])
+                    if str(value).strip()
+                }
+            )
+            for symbol in requested_symbols
+        },
+        "requested_count": len(requested_symbols),
+        "returned_symbols": returned,
+        "returned_count": len(returned),
+        "missing_symbols": missing,
+        "missing_count": len(missing),
+        "unknown_symbols": unknown,
+        "unknown_count": len(unknown),
+        "duplicate_symbols": duplicates,
+        "duplicate_count": len(duplicates),
+        "fresh_symbols": fresh_symbols,
+        "fresh_count": len(fresh_symbols),
+        "fresh_verified_symbols": fresh_verified_symbols,
+        "fresh_verified_count": len(fresh_verified_symbols),
+        "stale_symbols": stale_symbols,
+        "stale_count": len(stale_symbols),
+        "unknown_freshness_symbols": unknown_freshness_symbols,
+        "unknown_freshness_count": len(unknown_freshness_symbols),
+        "eligible_symbols": eligible_symbols,
+        "eligible_count": len(eligible_symbols),
+        "unverified_symbols": unverified_symbols,
+        "unverified_count": len(unverified_symbols),
+        "authenticated_provider": bool(authenticated),
+        "provider": "alpaca" if authenticated and eligible_symbols else "",
+        "observed_at": observed_at.isoformat(),
+        "max_age_seconds": int(max_age_seconds),
+        "row_quality": row_quality,
+        "response_hash_sha256": _snapshot_response_hash(batch_rows),
+        "status": status,
+        "limitations": sorted(set(limitations)),
+    }
+    digest = _coverage_receipt_digest(base)
+    base["coverage_receipt_hash_sha256"] = digest
+    base["coverage_receipt_id"] = "luna-core-coverage-" + digest[:24]
+    receipt_payload = json.dumps(base, sort_keys=True, separators=(",", ":"), default=str)
+    eligible_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(batch_rows):
+        ticker = str(row.get("ticker") or "")
+        if ticker not in eligible_symbols or row_status[index][1] != "FRESH":
+            continue
+        row["discovery_context"] = "luna_core:" + ",".join(
+            requested_memberships.get(ticker, [])
+        )
+        row["universe_lane"] = "core"
+        row["evidence_lane"] = "core"
+        row["core_universe_memberships"] = list(requested_memberships.get(ticker, []))
+        row["source_quality_status"] = "VERIFIED"
+        row["freshness_status"] = "FRESH"
+        row["core_coverage_receipt_id"] = base["coverage_receipt_id"]
+        row["core_coverage_receipt_hash_sha256"] = base["coverage_receipt_hash_sha256"]
+        row["core_coverage_receipt_status"] = status
+        row["core_coverage_receipt_payload_json"] = receipt_payload
+        eligible_rows.append(row)
+    return base, eligible_rows
+
+
 def discover_core_universe_rows(
     contract: dict[str, Any],
     *,
@@ -971,42 +1325,41 @@ def discover_core_universe_rows(
     observed_at: datetime | None = None,
     max_symbols: int = 600,
     batch_size: int = 50,
+    minimum_fresh_rows: int = MIN_CORE_FRESH_ROWS,
 ) -> dict[str, Any]:
     """Collect current read-only snapshots for READY core members.
+
+    A provider response is a *coverage observation*, not an all-or-nothing
+    batch.  Inactive symbols, omitted snapshots, and stale observations are
+    retained in the immutable per-batch receipt while independently verified
+    fresh rows from the same response remain usable.  ``READY`` is reserved
+    for complete coverage; any usable subset is explicitly ``PARTIAL`` and
+    can never imply full S&P 500/Nasdaq-100 coverage.
 
     Discovery failure is returned as a lane-local blocker; callers retain the
     existing mover rows.  No row is synthesized from membership alone.
     """
 
     if str(contract.get("status") or "") != "READY":
-        return {
-            "status": "DATA_UNAVAILABLE",
-            "rows": [],
-            "reason": str(contract.get("reason") or "core universe contract unavailable"),
-            "requested_count": 0,
-            "returned_count": 0,
-        }
+        return _empty_core_discovery_result(
+            status="DATA_UNAVAILABLE",
+            reason=str(contract.get("reason") or "core universe contract unavailable"),
+        )
     all_members = list(contract.get("members") or [])
     if len(all_members) > max(int(max_symbols), 0):
-        return {
-            "status": "INCOMPLETE",
-            "rows": [],
-            "reason": "core universe exceeds bounded discovery capacity",
-            "requested_count": len(all_members),
-            "returned_count": 0,
-            "coverage_receipts": [],
-        }
+        return _empty_core_discovery_result(
+            status="INCOMPLETE",
+            reason="core universe exceeds bounded discovery capacity",
+            requested_count=len(all_members),
+            missing_count=len(all_members),
+        )
     members = all_members
     symbols = [canonical_symbol(row.get("symbol") or row.get("ticker")) for row in members]
     symbols = [symbol for symbol in symbols if symbol]
     if not symbols:
-        return {
-            "status": "DATA_UNAVAILABLE",
-            "rows": [],
-            "reason": "core universe has no members",
-            "requested_count": 0,
-            "returned_count": 0,
-        }
+        return _empty_core_discovery_result(
+            status="DATA_UNAVAILABLE", reason="core universe has no members"
+        )
     active_provider = provider or AlpacaProvider(config)
     discovered_at = observed_at or datetime.now(timezone.utc)
     if discovered_at.tzinfo is None:
@@ -1018,159 +1371,189 @@ def discover_core_universe_rows(
         60,
     )
     memberships = {
-        canonical_symbol(row.get("symbol") or row.get("ticker")): list(
-            row.get("index_memberships") or []
+        canonical_symbol(row.get("symbol") or row.get("ticker")): sorted(
+            {
+                str(value).strip()
+                for value in (
+                    [row.get("index_memberships")]
+                    if isinstance(row.get("index_memberships"), str)
+                    else row.get("index_memberships") or []
+                )
+                if str(value).strip()
+            }
         )
         for row in members
     }
     rows: list[dict[str, Any]] = []
     receipts: list[dict[str, Any]] = []
     size = max(int(batch_size), 1)
+    minimum_rows = max(int(minimum_fresh_rows), 1)
     authenticated = False
-    try:
-        if hasattr(active_provider, "validate_credentials"):
+    authentication_error = ""
+    if hasattr(active_provider, "validate_credentials"):
+        try:
             active_provider.validate_credentials()
             authenticated = True
-        for batch_number, start in enumerate(range(0, len(symbols), size), start=1):
-            requested = symbols[start : start + size]
+        except Exception as exc:
+            # Keep the public receipt free of provider URLs, credentials, or
+            # exception text; only the stable class is useful for diagnosis.
+            authentication_error = type(exc).__name__
+    for batch_number, start in enumerate(range(0, len(symbols), size), start=1):
+        requested = symbols[start : start + size]
+        if authentication_error:
+            receipts.append(
+                _failed_core_coverage_receipt(
+                    requested=requested,
+                    requested_memberships=memberships,
+                    batch_number=batch_number,
+                    authenticated=False,
+                    contract_hash=str(contract.get("content_hash_sha256") or ""),
+                    observed_at=discovered_at,
+                    max_age_seconds=max_snapshot_age_seconds,
+                    error_class=authentication_error,
+                )
+            )
+            continue
+        try:
             snapshots = active_provider.get_premarket_snapshot(requested, config)
-            if isinstance(snapshots, dict):
-                snapshots = [
-                    {"ticker": key, **value}
-                    for key, value in snapshots.items()
-                    if isinstance(value, dict)
-                ]
-            batch_rows: list[dict[str, Any]] = []
-            for snapshot in snapshots or []:
-                row = snapshot.to_dict() if hasattr(snapshot, "to_dict") else dict(snapshot)
-                ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
-                batch_rows.append({**row, "ticker": ticker})
-            returned = [str(row.get("ticker") or "") for row in batch_rows]
-            duplicates = sorted(
-                {ticker for ticker in returned if returned.count(ticker) > 1 and ticker}
+            receipt, eligible_rows = _classify_core_snapshot_batch(
+                snapshots,
+                requested=requested,
+                requested_memberships=memberships,
+                batch_number=batch_number,
+                authenticated=authenticated,
+                contract_hash=str(contract.get("content_hash_sha256") or ""),
+                observed_at=discovered_at,
+                max_age_seconds=max_snapshot_age_seconds,
             )
-            unknown = sorted(set(returned) - set(requested))
-            missing = sorted(set(requested) - set(returned))
-            row_quality: list[dict[str, Any]] = []
-            for row in batch_rows:
-                source_verified = authenticated and str(row.get("source") or "").lower().startswith(
-                    "alpaca"
-                )
-                freshness = _snapshot_freshness_status(
-                    row,
+        except Exception as exc:
+            receipts.append(
+                _failed_core_coverage_receipt(
+                    requested=requested,
+                    requested_memberships=memberships,
+                    batch_number=batch_number,
+                    authenticated=authenticated,
+                    contract_hash=str(contract.get("content_hash_sha256") or ""),
                     observed_at=discovered_at,
                     max_age_seconds=max_snapshot_age_seconds,
+                    error_class=type(exc).__name__,
                 )
-                row_quality.append(
-                    {
-                        "ticker": str(row.get("ticker") or ""),
-                        "provider": "alpaca" if source_verified else "",
-                        "source_verified": source_verified,
-                        "freshness_status": freshness,
-                    }
-                )
-            quality_ready = bool(batch_rows) and all(
-                item["source_verified"] and item["freshness_status"] == "FRESH"
-                for item in row_quality
             )
-            receipt = {
-                "batch_number": batch_number,
-                "requested_symbols": requested,
-                "requested_count": len(requested),
-                "returned_symbols": returned,
-                "returned_count": len(returned),
-                "missing_symbols": missing,
-                "unknown_symbols": unknown,
-                "duplicate_symbols": duplicates,
-                "authenticated_provider": authenticated,
-                "provider": "alpaca" if quality_ready else "",
-                "observed_at": discovered_at.isoformat(),
-                "max_age_seconds": max_snapshot_age_seconds,
-                "row_quality": row_quality,
-                "response_hash_sha256": hashlib.sha256(
-                    json.dumps(
-                        batch_rows,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                        default=str,
-                    ).encode("utf-8")
-                ).hexdigest(),
-                "status": "READY"
-                if not missing
-                and not unknown
-                and not duplicates
-                and len(returned) == len(requested)
-                and authenticated
-                and quality_ready
-                else "INCOMPLETE",
-            }
-            receipts.append(receipt)
-            if receipt["status"] != "READY":
-                continue
-            for row in batch_rows:
-                ticker = str(row["ticker"])
-                row["discovery_context"] = "luna_core:" + ",".join(memberships[ticker])
-                row["universe_lane"] = "core"
-                row["core_universe_memberships"] = memberships[ticker]
-                # These statuses describe the authenticated snapshot receipt;
-                # halt/SEC/corporate-action statuses are attached only by their
-                # respective evidence collectors later in the cycle.
-                source_verified = authenticated and str(row.get("source") or "").lower().startswith(
-                    "alpaca"
-                )
-                freshness = _snapshot_freshness_status(
-                    row,
-                    observed_at=discovered_at,
-                    max_age_seconds=max_snapshot_age_seconds,
-                )
-                row["source_quality_status"] = "VERIFIED" if source_verified else "UNKNOWN"
-                row["freshness_status"] = freshness
-                if freshness != "FRESH":
-                    row["stale_data_flag"] = True
-                    row["coverage_warning"] = (
-                        "core_snapshot_timestamp_missing_or_outside_freshness_limit"
-                    )
-                rows.append(row)
-    except (DataProviderError, OSError, TypeError, ValueError) as exc:
-        return {
-            "status": "BLOCKED_EXTERNAL",
-            "rows": [],
-            "reason": str(exc),
-            "requested_count": len(symbols),
-            "returned_count": len(rows),
-            "coverage_receipts": receipts,
-        }
-    quality_incomplete = any(
-        item.get("status") != "READY"
-        and not item.get("missing_symbols")
-        and not item.get("unknown_symbols")
-        and not item.get("duplicate_symbols")
-        and item.get("row_quality")
-        and any(
-            not row.get("source_verified") or row.get("freshness_status") != "FRESH"
-            for row in item["row_quality"]
-        )
-        for item in receipts
+            continue
+        receipts.append(receipt)
+        rows.extend(eligible_rows)
+
+    fresh_count = sum(int(item.get("fresh_count") or 0) for item in receipts)
+    fresh_verified_count = sum(
+        int(item.get("fresh_verified_count") or 0) for item in receipts
     )
+    stale_count = sum(int(item.get("stale_count") or 0) for item in receipts)
+    missing_count = sum(int(item.get("missing_count") or 0) for item in receipts)
+    unknown_count = sum(int(item.get("unknown_count") or 0) for item in receipts)
+    unknown_freshness_count = sum(
+        int(item.get("unknown_freshness_count") or 0) for item in receipts
+    )
+    unverified_count = sum(int(item.get("unverified_count") or 0) for item in receipts)
+    duplicate_count = sum(int(item.get("duplicate_count") or 0) for item in receipts)
+    returned_count = sum(int(item.get("returned_count") or 0) for item in receipts)
     complete = (
         len(rows) == len(symbols)
         and len({str(row.get("ticker")) for row in rows}) == len(symbols)
         and all(item["status"] == "READY" for item in receipts)
     )
-    return {
-        "status": (
-            "READY" if complete else "DATA_UNAVAILABLE" if quality_incomplete else "INCOMPLETE"
+    partial = bool(rows) and len(rows) >= minimum_rows
+    limitations = sorted(
+        {
+            limitation
+            for item in receipts
+            for limitation in item.get("limitations") or []
+        }
+    )
+    failed_batches = sum(1 for item in receipts if item.get("status") == "FAILED")
+    status = "READY" if complete else "PARTIAL" if partial else (
+        "BLOCKED_EXTERNAL" if failed_batches else "DATA_UNAVAILABLE"
+    )
+    if failed_batches:
+        limitations = [
+            limitation for limitation in limitations if limitation != "provider_batch_error"
+        ]
+        limitations.append(
+            "provider_batch_error_after_partial_coverage" if rows else "provider_batch_error"
+        )
+    if not complete and "full_core_universe_coverage_not_observed" not in limitations:
+        limitations.append("full_core_universe_coverage_not_observed")
+    limitations = sorted(set(limitations))
+    aggregate_payload = {
+        "schema_version": CORE_COVERAGE_RECEIPT_SCHEMA_VERSION,
+        "contract_hash_sha256": str(contract.get("content_hash_sha256") or ""),
+        "requested_symbols": symbols,
+        "requested_count": len(symbols),
+        "returned_count": returned_count,
+        "eligible_count": len(rows),
+        "fresh_count": fresh_count,
+        "fresh_verified_count": fresh_verified_count,
+        "stale_count": stale_count,
+        "missing_count": missing_count,
+        "unknown_count": unknown_count,
+        "unknown_freshness_count": unknown_freshness_count,
+        "unverified_count": unverified_count,
+        "duplicate_count": duplicate_count,
+        "observed_at": discovered_at.isoformat(),
+        "max_age_seconds": max_snapshot_age_seconds,
+        "batch_receipt_ids": [str(item["coverage_receipt_id"]) for item in receipts],
+        "batch_receipt_hashes": [
+            str(item["coverage_receipt_hash_sha256"]) for item in receipts
+        ],
+        "attempted_count": sum(
+            int(item.get("requested_count") or 0) for item in receipts
         ),
+        "attempted_batch_count": len(receipts),
+        "failed_batch_count": failed_batches,
+        "status": status,
+        "limitations": limitations,
+    }
+    aggregate_hash = _coverage_receipt_digest(aggregate_payload)
+    return {
+        "status": status,
+        "coverage_status": "COMPLETE" if complete else "LIMITED" if partial else "DATA_UNAVAILABLE",
         "rows": rows,
         "reason": (
             ""
             if complete
-            else "core snapshot freshness/provider coverage incomplete; no READY claim"
+            else "one or more provider batches failed; no fresh verified core rows"
+            if failed_batches and not partial
+            else "core snapshot coverage unavailable; no fresh verified core rows"
+            if not partial
+            else (
+                "core snapshot coverage is partial; full S&P 500/Nasdaq-100 coverage "
+                "was not observed"
+            )
         ),
         "requested_count": len(symbols),
-        "returned_count": len(rows),
+        "returned_count": returned_count,
+        "eligible_count": len(rows),
+        "fresh_count": fresh_count,
+        "fresh_verified_count": fresh_verified_count,
+        "stale_count": stale_count,
+        "missing_count": missing_count,
+        "unknown_count": unknown_count,
+        "unknown_freshness_count": unknown_freshness_count,
+        "unverified_count": unverified_count,
+        "duplicate_count": duplicate_count,
         "coverage_receipts": receipts,
+        "coverage_receipt_ids": [str(item["coverage_receipt_id"]) for item in receipts],
+        "coverage_receipt_hashes": [
+            str(item["coverage_receipt_hash_sha256"]) for item in receipts
+        ],
+        "attempted_count": sum(int(item.get("requested_count") or 0) for item in receipts),
+        "attempted_batch_count": len(receipts),
+        "failed_batch_count": failed_batches,
+        "discovery_coverage_receipt": {
+            **aggregate_payload,
+            "coverage_receipt_hash_sha256": aggregate_hash,
+            "coverage_receipt_id": "luna-core-discovery-" + aggregate_hash[:24],
+        },
+        "limitations": limitations,
     }
 
 
@@ -1195,6 +1578,18 @@ def merge_core_universe_rows(
                 set(current.get("core_universe_memberships") or [])
                 | set(row["core_universe_memberships"])
             )
+            # Mover precedence controls legacy scoring fields, but it must not
+            # discard the core snapshot's immutable coverage binding.  A later
+            # slate/watcher's source gate needs to know which exact authenticated
+            # batch supplied the core observation.
+            for key in (
+                "core_coverage_receipt_id",
+                "core_coverage_receipt_hash_sha256",
+                "core_coverage_receipt_status",
+                "core_coverage_receipt_payload_json",
+            ):
+                if row.get(key) and not current.get(key):
+                    current[key] = row[key]
             current["universe_lane"] = "mover+core"
             current["discovery_context"] = ";".join(
                 filter(
@@ -1216,6 +1611,8 @@ def rank_core_universe_rows(
     eligible: list[dict[str, Any]] = []
     for raw in rows or []:
         row = dict(raw)
+        if not _core_coverage_binding_valid(row):
+            continue
         try:
             price = float(row.get("premarket_price") or 0)
             volume = float(row.get("premarket_volume") or 0)
@@ -1235,6 +1632,162 @@ def rank_core_universe_rows(
         ),
         reverse=True,
     )[: max(int(max_rows), 0)]
+
+
+def _core_coverage_binding_valid(row: dict[str, Any]) -> bool:
+    """Verify production core rows still point at an immutable batch receipt.
+
+    Legacy/unit-test rows without a coverage binding remain usable by this
+    pure ranking helper.  Once discovery has attached a binding, however, a
+    missing, mutated, or cross-symbol receipt fails closed before scoring.
+    """
+
+    marker_keys = {
+        "core_coverage_receipt_id",
+        "core_coverage_receipt_hash_sha256",
+        "core_coverage_receipt_payload_json",
+    }
+    if not any(key in row for key in marker_keys):
+        universe_lane = str(row.get("universe_lane") or "").strip().lower()
+        evidence_lane = str(row.get("evidence_lane") or "").strip().lower()
+        discovery_context = str(row.get("discovery_context") or "").strip().lower()
+        memberships = row.get("core_universe_memberships")
+        membership_marker = bool(
+            memberships
+            and (
+                not isinstance(memberships, str)
+                or bool(memberships.strip())
+            )
+        )
+        # Unmarked legacy rows remain usable only when they are genuinely
+        # unlabeled.  A caller cannot strip the immutable receipt from a row
+        # that still claims core provenance and then fall back to legacy rank.
+        return not (
+            universe_lane in {"core", "mover+core"}
+            or evidence_lane == "core"
+            or discovery_context.startswith("luna_core:")
+            or membership_marker
+        )
+    receipt_id = str(row.get("core_coverage_receipt_id") or "").strip()
+    receipt_hash = str(row.get("core_coverage_receipt_hash_sha256") or "").strip().lower()
+    payload_text = row.get("core_coverage_receipt_payload_json")
+    if not receipt_id or not _valid_digest(receipt_hash) or not isinstance(payload_text, str):
+        return False
+    try:
+        receipt = json.loads(payload_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    if (
+        receipt.get("schema_version") != CORE_COVERAGE_RECEIPT_SCHEMA_VERSION
+        or receipt.get("coverage_receipt_hash_sha256") != receipt_hash
+        or receipt.get("coverage_receipt_id") != receipt_id
+        or receipt_hash != _coverage_receipt_digest(receipt)
+        or receipt_id != "luna-core-coverage-" + receipt_hash[:24]
+        or str(row.get("core_coverage_receipt_status") or "") != str(
+            receipt.get("status") or ""
+        )
+    ):
+        return False
+    ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
+    requested = {
+        canonical_symbol(value) for value in receipt.get("requested_symbols") or []
+    }
+    eligible = {
+        canonical_symbol(value) for value in receipt.get("eligible_symbols") or []
+    }
+    fresh_verified = {
+        canonical_symbol(value) for value in receipt.get("fresh_verified_symbols") or []
+    }
+    if (
+        not ticker
+        or ticker not in requested
+        or ticker not in eligible
+        or ticker not in fresh_verified
+    ):
+        return False
+    declared_memberships = receipt.get("requested_memberships")
+    if isinstance(declared_memberships, dict):
+        expected_memberships = sorted(
+            str(value).strip()
+            for value in declared_memberships.get(ticker) or []
+            if str(value).strip()
+        )
+        raw_memberships = row.get("core_universe_memberships")
+        if isinstance(raw_memberships, str):
+            try:
+                parsed_memberships = json.loads(raw_memberships)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                try:
+                    parsed_memberships = ast.literal_eval(raw_memberships)
+                except (SyntaxError, ValueError, TypeError):
+                    parsed_memberships = [
+                        value.strip()
+                        for value in raw_memberships.replace(";", ",").split(",")
+                        if value.strip()
+                    ]
+            if isinstance(parsed_memberships, list) and len(parsed_memberships) == 1:
+                text = str(parsed_memberships[0]).strip()
+                if text.startswith("[") and text.endswith("]"):
+                    parsed_memberships = [
+                        value.strip().strip("'\"")
+                        for value in text[1:-1].split(",")
+                        if value.strip().strip("'\"")
+                    ]
+        else:
+            parsed_memberships = raw_memberships or []
+        if not isinstance(parsed_memberships, (list, tuple, set)):
+            return False
+        actual_memberships = sorted(
+            str(value).strip() for value in parsed_memberships if str(value).strip()
+        )
+        if expected_memberships != actual_memberships:
+            return False
+    if receipt.get("status") not in {"READY", "PARTIAL"}:
+        return False
+    if int(receipt.get("fresh_verified_count") or 0) < 1:
+        return False
+    if str(row.get("source_quality_status") or "").upper() != "VERIFIED":
+        return False
+    if str(row.get("freshness_status") or "").upper() != "FRESH":
+        return False
+    if row.get("stale_data_flag") is True:
+        return False
+    return True
+
+
+def core_discovery_data_eligible(
+    discovery: dict[str, Any] | None, *, minimum_fresh_rows: int = MIN_CORE_FRESH_ROWS
+) -> bool:
+    """Return whether a discovery result may feed the core research lane.
+
+    Only a complete ``READY`` result or an explicitly partial result with the
+    minimum number of fresh, verified rows qualifies.  This helper intentionally
+    does not collapse ``PARTIAL`` into ``COMPLETE``; callers must carry the
+    status and limitations into their lane/run/slate contracts.
+    """
+
+    payload = dict(discovery or {})
+    status = str(payload.get("status") or "").upper()
+    if status not in {"READY", "PARTIAL", "LIMITED"}:
+        return False
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or len(rows) < max(int(minimum_fresh_rows), 1):
+        return False
+    try:
+        eligible_count = int(payload.get("eligible_count") or len(rows))
+    except (TypeError, ValueError):
+        return False
+    if "fresh_verified_count" in payload:
+        try:
+            if int(payload.get("fresh_verified_count") or 0) < max(
+                int(minimum_fresh_rows), 1
+            ):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return eligible_count >= max(int(minimum_fresh_rows), 1)
 
 
 def write_snapshot_rows(rows: Iterable[dict[str, Any]], output_path: str | Path) -> Path:
@@ -1516,6 +2069,25 @@ def _snapshot_freshness_status(
     if age_seconds > max_age_seconds:
         return "STALE"
     return "FRESH"
+
+
+def _coverage_receipt_digest(receipt: dict[str, Any]) -> str:
+    """Hash receipt content without trusting caller-supplied identity fields."""
+
+    payload = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"coverage_receipt_id", "coverage_receipt_hash_sha256"}
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _validate_raw_artifact(manifest: dict[str, Any]) -> tuple[str, str | None]:
@@ -2498,12 +3070,15 @@ def _hash(value: dict[str, Any]) -> str:
 
 __all__ = [
     "CORE_INDEXES",
+    "CORE_COVERAGE_RECEIPT_SCHEMA_VERSION",
+    "MIN_CORE_FRESH_ROWS",
     "NASDAQ_NDX_SOD_2026_08_27_URL",
     "NASDAQ_NDX_SOD_URL_TEMPLATE",
     "SCHEMA_VERSION",
     "STATE_STREET_SPY_HOLDINGS_URL",
     "build_core_universe_contract",
     "canonical_symbol",
+    "core_discovery_data_eligible",
     "discover_core_universe_rows",
     "merge_core_universe_rows",
     "parse_nasdaq_sod_weightings_xlsx",

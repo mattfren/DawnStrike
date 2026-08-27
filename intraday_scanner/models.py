@@ -63,6 +63,10 @@ SNAPSHOT_COLUMNS = [
     "core_universe_memberships",
     "core_lane_score",
     "core_lane_eligible",
+    "core_coverage_receipt_id",
+    "core_coverage_receipt_hash_sha256",
+    "core_coverage_receipt_status",
+    "core_coverage_receipt_payload_json",
     "as_of_timestamp",
     "data_source_kind",
     "shadow_mode",
@@ -242,6 +246,10 @@ CANDIDATE_COLUMNS = [
     "core_universe_memberships",
     "core_lane_score",
     "core_lane_eligible",
+    "core_coverage_receipt_id",
+    "core_coverage_receipt_hash_sha256",
+    "core_coverage_receipt_status",
+    "core_coverage_receipt_payload_json",
     "halt_status",
     "sec_risk_status",
     "corporate_action_status",
@@ -386,6 +394,10 @@ class SnapshotRow:
     core_universe_memberships: str = ""
     core_lane_score: float | None = None
     core_lane_eligible: bool = False
+    core_coverage_receipt_id: str = ""
+    core_coverage_receipt_hash_sha256: str = ""
+    core_coverage_receipt_status: str = ""
+    core_coverage_receipt_payload_json: str = ""
     data_source_kind: str = ""
     shadow_mode: bool = False
     paid_data: bool = False
@@ -540,6 +552,18 @@ class SnapshotRow:
                 else parse_float(row.get("core_lane_score"), "core_lane_score")
             ),
             core_lane_eligible=parse_bool(row.get("core_lane_eligible")),
+            core_coverage_receipt_id=str(
+                row.get("core_coverage_receipt_id") or ""
+            ).strip(),
+            core_coverage_receipt_hash_sha256=str(
+                row.get("core_coverage_receipt_hash_sha256") or ""
+            ).strip(),
+            core_coverage_receipt_status=str(
+                row.get("core_coverage_receipt_status") or ""
+            ).strip(),
+            core_coverage_receipt_payload_json=str(
+                row.get("core_coverage_receipt_payload_json") or ""
+            ).strip(),
             data_source_kind=str(row.get("data_source_kind") or "").strip(),
             shadow_mode=parse_bool(row.get("shadow_mode")),
             paid_data=parse_bool(row.get("paid_data")),
@@ -686,6 +710,10 @@ class SnapshotRow:
             "core_universe_memberships": self.core_universe_memberships,
             "core_lane_score": self.core_lane_score,
             "core_lane_eligible": self.core_lane_eligible,
+            "core_coverage_receipt_id": self.core_coverage_receipt_id,
+            "core_coverage_receipt_hash_sha256": self.core_coverage_receipt_hash_sha256,
+            "core_coverage_receipt_status": self.core_coverage_receipt_status,
+            "core_coverage_receipt_payload_json": self.core_coverage_receipt_payload_json,
             "as_of_timestamp": self.as_of_timestamp,
             "data_source_kind": self.data_source_kind,
             "shadow_mode": self.shadow_mode,
@@ -902,6 +930,10 @@ class ScoredCandidate:
             "core_universe_memberships": self.snapshot.core_universe_memberships,
             "core_lane_score": self.snapshot.core_lane_score,
             "core_lane_eligible": self.snapshot.core_lane_eligible,
+            "core_coverage_receipt_id": self.snapshot.core_coverage_receipt_id,
+            "core_coverage_receipt_hash_sha256": self.snapshot.core_coverage_receipt_hash_sha256,
+            "core_coverage_receipt_status": self.snapshot.core_coverage_receipt_status,
+            "core_coverage_receipt_payload_json": self.snapshot.core_coverage_receipt_payload_json,
             "halt_status": self.snapshot.halt_status,
             "sec_risk_status": self.snapshot.sec_risk_status,
             "corporate_action_status": self.snapshot.corporate_action_status,

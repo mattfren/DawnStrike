@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from intraday_scanner.errors import DataProviderError
 from intraday_scanner.services import luna_core_universe_service as core
 from intraday_scanner.services.alpha_cycle_service import _merge_lane_candidates
 from intraday_scanner.services.luna_core_universe_service import (
@@ -246,7 +249,7 @@ def test_reconstitution_lineage_requires_order_and_structured_identity() -> None
     )
 
 
-def test_discovery_partial_batch_is_explicitly_incomplete() -> None:
+def test_discovery_without_authenticated_fresh_rows_is_data_unavailable() -> None:
     class Provider:
         def get_premarket_snapshot(self, symbols, config):
             return [{"ticker": symbols[0], "premarket_price": 10, "premarket_volume": 100}]
@@ -263,8 +266,10 @@ def test_discovery_partial_batch_is_explicitly_incomplete() -> None:
         provider=Provider(),
         batch_size=2,
     )
-    assert result["status"] == "INCOMPLETE"
+    assert result["status"] == "DATA_UNAVAILABLE"
     assert result["coverage_receipts"][0]["missing_symbols"] == ["B"]
+    assert result["coverage_receipts"][0]["fresh_verified_count"] == 0
+    assert result["eligible_count"] == 0
 
 
 def test_discovery_freshness_is_bound_to_explicit_cycle_observation_time() -> None:
@@ -335,6 +340,297 @@ def test_discovery_does_not_claim_ready_for_stale_or_unverified_batch_rows() -> 
             "freshness_status": "STALE",
         }
     ]
+
+
+def test_discovery_retains_fresh_rows_from_a_mixed_batch_with_exact_coverage_truth() -> None:
+    observed_at = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": "FRESH",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                },
+                {
+                    "ticker": "STALE",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-01T13:00:00+00:00",
+                    "premarket_price": 11,
+                    "premarket_volume": 100,
+                },
+                {
+                    "ticker": "FRESH2",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 12,
+                    "premarket_volume": 100,
+                },
+                {
+                    "ticker": "NOT_REQUESTED",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 13,
+                    "premarket_volume": 100,
+                },
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "content_hash_sha256": "c" * 64,
+            "members": [
+                {"symbol": symbol, "index_memberships": ["S&P 500"]}
+                for symbol in ("FRESH", "STALE", "MISSING", "FRESH2")
+            ],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+        batch_size=4,
+    )
+
+    receipt = result["coverage_receipts"][0]
+    assert result["status"] == "PARTIAL"
+    assert result["coverage_status"] == "LIMITED"
+    assert [row["ticker"] for row in result["rows"]] == ["FRESH", "FRESH2"]
+    assert result["requested_count"] == 4
+    assert result["returned_count"] == 4
+    assert result["eligible_count"] == 2
+    assert result["fresh_count"] == 2
+    assert result["fresh_verified_count"] == 2
+    assert result["stale_count"] == 1
+    assert result["missing_count"] == 1
+    assert result["unknown_count"] == 1
+    assert result["duplicate_count"] == 0
+    assert receipt["coverage_receipt_id"].startswith("luna-core-coverage-")
+    assert len(receipt["coverage_receipt_hash_sha256"]) == 64
+    assert receipt["provider"] == "alpaca"
+    assert result["rows"][0]["core_coverage_receipt_id"] == receipt["coverage_receipt_id"]
+    assert result["rows"][0]["core_coverage_receipt_hash_sha256"] == receipt[
+        "coverage_receipt_hash_sha256"
+    ]
+    assert result["rows"][0]["core_coverage_receipt_status"] == "PARTIAL"
+    assert core.core_discovery_data_eligible(result)
+
+
+def test_discovery_does_not_become_data_eligible_without_a_fresh_verified_row() -> None:
+    observed_at = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-01T13:00:00+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                }
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "members": [
+                {"symbol": "STALE", "index_memberships": ["S&P 500"]},
+                {"symbol": "MISSING", "index_memberships": ["S&P 500"]},
+            ],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+        batch_size=2,
+    )
+
+    assert result["status"] == "DATA_UNAVAILABLE"
+    assert result["coverage_status"] == "DATA_UNAVAILABLE"
+    assert result["rows"] == []
+    assert result["fresh_verified_count"] == 0
+    assert "stale_requested_snapshots" in result["limitations"]
+    assert "missing_requested_symbols" in result["limitations"]
+    assert not core.core_discovery_data_eligible(result)
+
+
+def test_discovery_excludes_ambiguous_duplicate_symbols_but_keeps_other_fresh_rows() -> None:
+    observed_at = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": "DUP",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                },
+                {
+                    "ticker": "DUP",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:29+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                },
+                {
+                    "ticker": "UNIQUE",
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 12,
+                    "premarket_volume": 100,
+                },
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "members": [
+                {"symbol": "DUP", "index_memberships": ["S&P 500"]},
+                {"symbol": "UNIQUE", "index_memberships": ["S&P 500"]},
+            ],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+        batch_size=2,
+    )
+
+    # The provider is called once per batch.  Both batches are intentionally
+    # supplied from the same deterministic response shape.
+    assert result["duplicate_count"] == 1
+    assert "DUP" not in [row["ticker"] for row in result["rows"]]
+    assert result["status"] in {"PARTIAL", "DATA_UNAVAILABLE"}
+
+
+@pytest.mark.parametrize("failed_symbols", [("A", "B"), ("C", "D")])
+def test_discovery_attempts_later_batches_after_provider_failure(
+    failed_symbols: tuple[str, str],
+) -> None:
+    observed_at = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
+    requested_batches: list[list[str]] = []
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            requested_batches.append(list(symbols))
+            if symbols == list(failed_symbols):
+                raise DataProviderError("provider outage secret=must-not-leak")
+            return [
+                {
+                    "ticker": symbol,
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                }
+                for symbol in symbols
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "content_hash_sha256": "d" * 64,
+            "members": [
+                {"symbol": symbol, "index_memberships": ["S&P 500"]}
+                for symbol in ("A", "B", "C", "D", "E", "F")
+            ],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+        batch_size=2,
+    )
+
+    assert requested_batches == [["A", "B"], ["C", "D"], ["E", "F"]]
+    assert result["status"] == "PARTIAL"
+    assert result["coverage_status"] == "LIMITED"
+    assert result["requested_count"] == 6
+    assert result["attempted_count"] == 6
+    assert result["attempted_batch_count"] == 3
+    assert result["failed_batch_count"] == 1
+    assert result["discovery_coverage_receipt"]["attempted_count"] == 6
+    assert result["discovery_coverage_receipt"]["attempted_batch_count"] == 3
+    assert result["discovery_coverage_receipt"]["failed_batch_count"] == 1
+    expected_rows = [
+        symbol
+        for symbol in ("A", "B", "C", "D", "E", "F")
+        if symbol not in failed_symbols
+    ]
+    assert [row["ticker"] for row in result["rows"]] == expected_rows
+    failed_batch_number = 1 if failed_symbols == ("A", "B") else 2
+    failed = result["coverage_receipts"][failed_batch_number - 1]
+    assert failed["status"] == "FAILED"
+    assert failed["requested_symbols"] == list(failed_symbols)
+    assert failed["missing_count"] == 2
+    assert failed["error_class"] == "DataProviderError"
+    assert "secret" not in json.dumps(failed).lower()
+    assert len(failed["coverage_receipt_hash_sha256"]) == 64
+
+
+def test_core_row_receipt_mutation_fails_closed_before_ranking() -> None:
+    observed_at = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
+
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "premarket_price": 10,
+                    "premarket_volume": 100,
+                }
+            ]
+
+    result = discover_core_universe_rows(
+        {
+            "status": "READY",
+            "members": [{"symbol": "BOUND", "index_memberships": ["S&P 500"]}],
+        },
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=observed_at,
+    )
+    row = dict(result["rows"][0])
+    assert core.rank_core_universe_rows([row])
+    row["core_coverage_receipt_hash_sha256"] = "f" * 64
+    assert core.rank_core_universe_rows([row]) == []
+    stripped = dict(result["rows"][0])
+    for field in (
+        "core_coverage_receipt_id",
+        "core_coverage_receipt_hash_sha256",
+        "core_coverage_receipt_status",
+        "core_coverage_receipt_payload_json",
+    ):
+        stripped.pop(field, None)
+    assert core.rank_core_universe_rows([stripped]) == []
+    row = dict(result["rows"][0])
+    row["core_coverage_receipt_status"] = "MUTATED"
+    assert core.rank_core_universe_rows([row]) == []
+    row = dict(result["rows"][0])
+    payload = json.loads(row["core_coverage_receipt_payload_json"])
+    payload["eligible_symbols"] = ["OTHER"]
+    row["core_coverage_receipt_payload_json"] = json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    )
+    assert core.rank_core_universe_rows([row]) == []
 
 
 def test_slate_has_immutable_identity_and_persistence(tmp_path: Path) -> None:

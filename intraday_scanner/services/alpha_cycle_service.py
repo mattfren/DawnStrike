@@ -78,6 +78,7 @@ from intraday_scanner.services.learning_service import (
 )
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
+    core_discovery_data_eligible,
     discover_core_universe_rows,
     rank_core_universe_rows,
     write_core_universe_contract,
@@ -237,6 +238,7 @@ def alpha_cycle(
     mover_source_failed = collection.get("status") != "success"
     mover_snapshot_count = len(list(collection.get("rows") or [])) if not mover_source_failed else 0
     core_only_recovery = False
+    core_discovery_recovery: dict[str, Any] | None = None
     source_reliability = build_source_reliability(
         source_summary,
         outcomes=load_production_alpha_learning_labels(store),
@@ -261,7 +263,7 @@ def alpha_cycle(
             observed_at=cycle_decision_at,
         )
         recovery_rows = rank_core_universe_rows(recovery.get("rows") or [])
-        if recovery.get("status") == "READY" and recovery_rows:
+        if core_discovery_data_eligible(recovery) and recovery_rows:
             recovery_path = write_snapshot_rows(
                 recovery_rows, output_dir / "web_collect" / "core_recovery_snapshot.csv"
             )
@@ -271,6 +273,7 @@ def alpha_cycle(
             )
             source_summary["status"] = "success"
             core_only_recovery = True
+            core_discovery_recovery = recovery
             source_summary["core_universe"] = {
                 **recovery,
                 "eligible_count": len(recovery_rows),
@@ -490,7 +493,9 @@ def alpha_cycle(
     if core_only_recovery:
         scanner_config = scanner_config.with_overrides(min_gap_pct=0.0, ideal_gap_low_pct=1.0)
     core_discovery = (
-        discover_core_universe_rows(
+        core_discovery_recovery
+        if core_discovery_recovery is not None
+        else discover_core_universe_rows(
             core_universe,
             config=scanner_config,
             observed_at=cycle_decision_at,
@@ -498,10 +503,20 @@ def alpha_cycle(
         if not fixture_mode
         else {
             "status": "BLOCKED_EXTERNAL",
+            "coverage_status": "DATA_UNAVAILABLE",
             "rows": [],
             "reason": "fixture mode has no current core snapshot provider",
             "requested_count": int(core_universe.get("membership_count") or 0),
             "returned_count": 0,
+            "eligible_count": 0,
+            "fresh_count": 0,
+            "stale_count": 0,
+            "missing_count": int(core_universe.get("membership_count") or 0),
+            "unknown_count": 0,
+            "duplicate_count": 0,
+            "coverage_receipts": [],
+            "coverage_receipt_ids": [],
+            "coverage_receipt_hashes": [],
         }
     )
     source_summary["core_universe"] = {
@@ -517,7 +532,7 @@ def alpha_cycle(
     }
     core_eligible_rows = (
         rank_core_universe_rows(core_discovery.get("rows") or [])
-        if core_discovery.get("status") == "READY"
+        if core_discovery_data_eligible(core_discovery)
         else []
     )
     if core_eligible_rows and not fixture_mode:
@@ -714,9 +729,11 @@ def alpha_cycle(
     mover_enrichment_status = str(enrichment["summary"].get("status") or "").lower()
     core_snapshot_status = str(core_discovery.get("status") or "DATA_UNAVAILABLE").upper()
     core_enrichment_status = str(core_enrichment_summary.get("status") or "not_run").lower()
-    mover_lane_eligible = mover_enrichment_status in {"complete", "partial"}
+    mover_lane_eligible = (
+        not mover_source_failed and mover_enrichment_status in {"complete", "partial"}
+    )
     core_lane_eligible = (
-        core_snapshot_status == "READY"
+        core_discovery_data_eligible(core_discovery)
         and core_enrichment_status in {"complete", "partial"}
     )
     coverage_limitations: list[str] = []
@@ -780,6 +797,26 @@ def alpha_cycle(
             "core": {
                 "contract_status": str(core_universe.get("status") or "DATA_UNAVAILABLE"),
                 "snapshot_status": core_snapshot_status,
+                "coverage_status": str(
+                    core_discovery.get("coverage_status") or core_snapshot_status
+                ).upper(),
+                "snapshot_complete": core_snapshot_status == "READY",
+                "snapshot_requested_count": int(core_discovery.get("requested_count") or 0),
+                "snapshot_returned_count": int(core_discovery.get("returned_count") or 0),
+                "snapshot_eligible_count": int(core_discovery.get("eligible_count") or 0),
+                "snapshot_fresh_count": int(core_discovery.get("fresh_count") or 0),
+                "snapshot_fresh_verified_count": int(
+                    core_discovery.get("fresh_verified_count") or 0
+                ),
+                "snapshot_stale_count": int(core_discovery.get("stale_count") or 0),
+                "snapshot_missing_count": int(core_discovery.get("missing_count") or 0),
+                "snapshot_unknown_count": int(core_discovery.get("unknown_count") or 0),
+                "snapshot_duplicate_count": int(core_discovery.get("duplicate_count") or 0),
+                "coverage_receipt_ids": list(core_discovery.get("coverage_receipt_ids") or []),
+                "coverage_receipt_hashes": list(
+                    core_discovery.get("coverage_receipt_hashes") or []
+                ),
+                "coverage_limitations": list(core_discovery.get("limitations") or []),
                 "enrichment_status": core_enrichment_status,
                 "data_eligible": core_lane_eligible,
                 "secondary_fallback_status": str(
