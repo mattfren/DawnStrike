@@ -89,6 +89,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
     official_publication_rows,
     persist_ranked_research_slate,
+    row_research_admissible,
     validate_ranked_research_slate,
     validated_frozen_selection_signal,
 )
@@ -1833,29 +1834,18 @@ def _merge_lane_candidates(
             merged[ticker] = dict(row)
             continue
         prior = merged[ticker]
-        # The row whose fields survive must retain its actual evidence lane.
-        # Prefer the independently collected core snapshot on overlaps; its
-        # own lane fallback/freshness contract is evaluated downstream.
-        current = dict(row) if lane == "core" else dict(prior)
-        current["universe_lane"] = "mover+core"
-        current["evidence_lane"] = lane if lane == "core" else str(
+        # Keep one independently collected row intact.  A safe row wins over
+        # an unsafe overlap; core is the deterministic tie-breaker only when
+        # both rows have the same canonical research-admissibility verdict.
+        prior_admissible = row_research_admissible(prior)
+        row_admissible = row_research_admissible(row)
+        choose_row = row_admissible or not prior_admissible
+        current = dict(row) if choose_row else dict(prior)
+        evidence_lane = lane if choose_row else str(
             prior.get("evidence_lane") or "mover"
         )
-        current["core_universe_memberships"] = (
-            current.get("core_universe_memberships")
-            or prior.get("core_universe_memberships")
-            or row.get("core_universe_memberships")
-            or ""
-        )
-        current["discovery_context"] = ";".join(
-            sorted(
-                {
-                    str(prior.get("discovery_context") or ""),
-                    str(row.get("discovery_context") or ""),
-                }
-                - {""}
-            )
-        )
+        current["universe_lane"] = "mover+core"
+        current["evidence_lane"] = evidence_lane
         merged[ticker] = current
     return sorted(
         merged.values(),

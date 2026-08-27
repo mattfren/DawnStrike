@@ -1054,6 +1054,99 @@ def test_overlap_candidate_retains_the_core_row_as_its_evidence_lane() -> None:
     assert merged[0]["source"] == "core-authenticated"
 
 
+def _safe_overlap_row(ticker: str, lane: str, *, receipt: str) -> dict:
+    return {
+        "ticker": ticker,
+        "score": 10,
+        "universe_lane": lane,
+        "evidence_lane": lane,
+        "source_count": 1,
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+        "lane_receipt": receipt,
+    }
+
+
+def test_overlap_keeps_safe_mover_whole_when_core_halt_evidence_is_unknown() -> None:
+    mover = _safe_overlap_row("OVER", "mover", receipt="mover-receipt")
+    core_unsafe = {
+        **_safe_overlap_row("OVER", "core", receipt="core-receipt"),
+        "score": 99,
+        "halt_status": "UNKNOWN",
+        "core_only_receipt": "must-not-be-spliced",
+    }
+    merged = _merge_lane_candidates([mover], [core_unsafe])
+
+    assert merged == [
+        {
+            **mover,
+            "universe_lane": "mover+core",
+            "evidence_lane": "mover",
+        }
+    ]
+    lane_statuses = {
+        "mover": {"data_eligible": True, "promotion_limited": True},
+        "core": {"data_eligible": True, "promotion_limited": False},
+    }
+    for rows in ([mover], merged):
+        slate = build_ranked_research_slate(
+            rows,
+            target=1,
+            require_safety=True,
+            generated_at="2026-08-27T13:00:00+00:00",
+            market_date="2026-08-27",
+            scan_id="scan-safe-overlap",
+            lane_statuses=lane_statuses,
+        )
+        published = apply_publication_semantics(
+            rows, slate=slate, coverage={"lanes": lane_statuses}
+        )
+        assert slate["symbols"] == ["OVER"]
+        assert published[0]["publication_tier"] == TIER1
+
+
+def test_overlap_keeps_safe_core_whole_when_mover_safety_is_unknown() -> None:
+    mover_unsafe = {
+        **_safe_overlap_row("OVER", "mover", receipt="mover-receipt"),
+        "sec_risk_status": "UNKNOWN",
+        "mover_only_receipt": "must-not-be-spliced",
+    }
+    core_safe = _safe_overlap_row("OVER", "core", receipt="core-receipt")
+
+    merged = _merge_lane_candidates([mover_unsafe], [core_safe])
+
+    assert merged == [
+        {
+            **core_safe,
+            "universe_lane": "mover+core",
+            "evidence_lane": "core",
+        }
+    ]
+
+
+@pytest.mark.parametrize("safety_status", ["CLEAR", "UNKNOWN"])
+def test_overlap_safety_tie_retains_deterministic_core_preference(
+    safety_status: str,
+) -> None:
+    mover = {
+        **_safe_overlap_row("OVER", "mover", receipt="mover-receipt"),
+        "halt_status": safety_status,
+    }
+    core_row = {
+        **_safe_overlap_row("OVER", "core", receipt="core-receipt"),
+        "halt_status": safety_status,
+    }
+
+    merged = _merge_lane_candidates([mover], [core_row])
+
+    assert merged[0]["evidence_lane"] == "core"
+    assert merged[0]["lane_receipt"] == "core-receipt"
+
+
 def test_slate_scan_identity_is_nonempty_and_content_bound() -> None:
     slate = build_ranked_research_slate(
         [{"ticker": "AAA"}],

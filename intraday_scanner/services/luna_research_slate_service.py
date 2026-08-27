@@ -596,6 +596,12 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
     return True
 
 
+def row_research_admissible(row: dict[str, Any]) -> bool:
+    """Return the canonical Tier-1 row admissibility and safety verdict."""
+
+    return _safe_for_research(row, require_safety=True)
+
+
 def _row_promotion_limited(row: dict[str, Any], coverage: dict[str, Any]) -> bool:
     blocked_statuses = {
         "research_only_applied_above_ceiling",
