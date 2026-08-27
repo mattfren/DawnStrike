@@ -168,13 +168,24 @@ def apply_publication_semantics(
             or (slate_row or {}).get("signal_id")
             or ""
         )
-        current_source_signal_id = str(
-            row.get("research_source_signal_id") or row.get("signal_id") or ""
-        )
+        current_source_signal_ids = [
+            str(value)
+            for value in (
+                row.get("research_source_signal_id"),
+                row.get("signal_id"),
+            )
+            if str(value or "")
+        ]
         exact_frozen_source = slate_row is not None and (
-            current_source_signal_id == frozen_source_signal_id
+            (
+                bool(current_source_signal_ids)
+                and all(
+                    value == frozen_source_signal_id
+                    for value in current_source_signal_ids
+                )
+            )
             or (
-                not current_source_signal_id
+                not current_source_signal_ids
                 and _matches_synthesized_frozen_source(row, slate_row)
             )
         )
