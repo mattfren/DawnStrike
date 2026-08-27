@@ -344,6 +344,21 @@ def run_trade_watcher(
         signal_events=signal_events,
     )
     monitor_stats = store.persist_monitor_publication_receipts(monitor_receipts)
+    # An overlapping watcher may have built a notification before the SQLite
+    # episode claim was attempted.  Only dispatch events whose intent survived
+    # the durable insert/claim boundary; exact retries remain eligible because
+    # their existing intent row is reused.
+    durable_intent_ids = {
+        str(row.get("intent_id") or "")
+        for row in store.load_trade_intents(limit=50_000)
+        if str(row.get("intent_id") or "").strip()
+    }
+    notification_events_by_key = {
+        key: event
+        for key, event in notification_events_by_key.items()
+        if not key.startswith("trade_intent:")
+        or key.removeprefix("trade_intent:") in durable_intent_ids
+    }
     scenario_link_stats = (
         refresh_scenario_lifecycle_links(
             store,

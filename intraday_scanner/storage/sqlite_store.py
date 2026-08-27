@@ -536,6 +536,9 @@ class SQLiteScanStore:
                         signal_id TEXT,
                         market_date TEXT NOT NULL,
                         ticker TEXT NOT NULL,
+                        episode_id TEXT NOT NULL DEFAULT '',
+                        strategy_id TEXT NOT NULL DEFAULT '',
+                        account_id TEXT NOT NULL DEFAULT '',
                         mode TEXT NOT NULL,
                         lifecycle_state TEXT NOT NULL,
                         action TEXT NOT NULL,
@@ -889,6 +892,16 @@ class SQLiteScanStore:
                         "payload_json": "TEXT NOT NULL DEFAULT '{}'",
                     },
                 )
+                _ensure_columns(
+                    connection,
+                    "trade_intents",
+                    {
+                        "episode_id": "TEXT NOT NULL DEFAULT ''",
+                        "strategy_id": "TEXT NOT NULL DEFAULT ''",
+                        "account_id": "TEXT NOT NULL DEFAULT ''",
+                    },
+                )
+                _backfill_trade_intent_identity(connection)
                 connection.executescript(
                     """
                     CREATE INDEX IF NOT EXISTS idx_price_observations_date_ticker
@@ -899,6 +912,10 @@ class SQLiteScanStore:
                     ON trade_intents(market_date, ticker, decision_time);
                     CREATE INDEX IF NOT EXISTS idx_trade_intents_signal
                     ON trade_intents(signal_id, decision_time);
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_intents_episode_entry
+                    ON trade_intents(market_date, account_id, strategy_id, episode_id)
+                    WHERE episode_id <> ''
+                      AND action IN ('ENTER_LONG', 'ENTER_SHORT');
                     CREATE INDEX IF NOT EXISTS idx_paper_positions_day_status
                     ON paper_positions(market_date, status, ticker);
                     CREATE INDEX IF NOT EXISTS idx_paper_fills_day_ticker
@@ -4832,21 +4849,33 @@ class SQLiteScanStore:
                     market_date = str(row.get("market_date") or "")[:10]
                     if not intent_id or not ticker or not market_date:
                         continue
+                    insert_statement = (
+                        "INSERT OR IGNORE"
+                        if _trade_intent_episode_id(row)
+                        else statement
+                    )
                     cursor = connection.execute(
                         f"""
-                        {statement} INTO trade_intents
-                        (intent_id, signal_id, market_date, ticker, mode, lifecycle_state,
+                        {insert_statement} INTO trade_intents
+                        (intent_id, signal_id, market_date, ticker, episode_id, strategy_id,
+                         account_id, mode, lifecycle_state,
                          action, decision_time, decision_price, trigger_price, stop_price,
                          target_price, quantity, notional, risk_amount, reason,
                          blocked_reason, source_observation_id, notification_event_key,
                          created_at, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?
+                        )
                         """,  # noqa: S608
                         (
                             intent_id,
                             str(row.get("signal_id") or ""),
                             market_date,
                             ticker,
+                            _trade_intent_episode_id(row),
+                            _trade_intent_strategy_id(row),
+                            _trade_intent_account_id(row),
                             str(row.get("mode") or ""),
                             str(row.get("lifecycle_state") or ""),
                             str(row.get("action") or ""),
@@ -4896,6 +4925,13 @@ class SQLiteScanStore:
         event_stats = {"inserted": 0, "skipped": 0}
         try:
             with self._connect() as connection:
+                # The watcher builds lifecycle rows before entering this
+                # transaction.  Treat the intent insert as the durable claim:
+                # an entry that loses the episode unique index must not be
+                # allowed to materialize a position or fill from its stale
+                # in-memory snapshot.  Exact intent-id retries remain
+                # idempotently reusable for crash repair.
+                admitted_intent_ids: set[str] = set()
                 for row in intents:
                     intent_id = str(row.get("intent_id") or "")
                     ticker = str(row.get("ticker") or "").upper()
@@ -4905,18 +4941,25 @@ class SQLiteScanStore:
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO trade_intents
-                        (intent_id, signal_id, market_date, ticker, mode, lifecycle_state,
+                        (intent_id, signal_id, market_date, ticker, episode_id, strategy_id,
+                         account_id, mode, lifecycle_state,
                          action, decision_time, decision_price, trigger_price, stop_price,
                          target_price, quantity, notional, risk_amount, reason,
                          blocked_reason, source_observation_id, notification_event_key,
                          created_at, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?
+                        )
                         """,
                         (
                             intent_id,
                             str(row.get("signal_id") or ""),
                             market_date,
                             ticker,
+                            _trade_intent_episode_id(row),
+                            _trade_intent_strategy_id(row),
+                            _trade_intent_account_id(row),
                             str(row.get("mode") or ""),
                             str(row.get("lifecycle_state") or ""),
                             str(row.get("action") or ""),
@@ -4938,14 +4981,54 @@ class SQLiteScanStore:
                     )
                     if cursor.rowcount:
                         intent_stats["inserted"] += 1
+                        admitted_intent_ids.add(intent_id)
                     else:
                         intent_stats["skipped"] += 1
+                        existing = connection.execute(
+                            "SELECT intent_id FROM trade_intents WHERE intent_id = ?",
+                            (intent_id,),
+                        ).fetchone()
+                        if existing is not None:
+                            admitted_intent_ids.add(intent_id)
+
+                admitted_entry_intent_ids = {
+                    str(row.get("intent_id") or "")
+                    for row in intents
+                    if str(row.get("intent_id") or "") in admitted_intent_ids
+                    and str(row.get("action") or "").upper()
+                    in {"ENTER_LONG", "ENTER_SHORT"}
+                }
+                admitted_non_entry_intent_ids = {
+                    str(row.get("intent_id") or "")
+                    for row in intents
+                    if str(row.get("intent_id") or "") in admitted_intent_ids
+                    and str(row.get("action") or "").upper()
+                    not in {"ENTER_LONG", "ENTER_SHORT"}
+                }
 
                 for row in paper_positions:
                     position_id = str(row.get("position_id") or "")
                     ticker = str(row.get("ticker") or "").upper()
                     market_date = str(row.get("market_date") or "")[:10]
                     if not position_id or not ticker or not market_date:
+                        continue
+                    status = str(row.get("status") or "").upper()
+                    lifecycle_intent_id = str(
+                        row.get("entry_intent_id")
+                        if status in {"OPEN", "PENDING"}
+                        else row.get("exit_intent_id") or ""
+                    )
+                    if status in {"OPEN", "PENDING"}:
+                        if lifecycle_intent_id not in admitted_entry_intent_ids:
+                            continue
+                    elif (
+                        lifecycle_intent_id
+                        and lifecycle_intent_id not in admitted_non_entry_intent_ids
+                    ):
+                        # A closed snapshot is an exit side effect.  Do not
+                        # let a losing overlapping entry replace an existing
+                        # position, while retaining legacy rows with no
+                        # linked exit intent.
                         continue
                     connection.execute(
                         """
@@ -4990,6 +5073,8 @@ class SQLiteScanStore:
                     ticker = str(row.get("ticker") or "").upper()
                     market_date = str(row.get("market_date") or "")[:10]
                     if not fill_id or not position_id or not intent_id or not ticker:
+                        continue
+                    if intent_id not in admitted_intent_ids:
                         continue
                     cursor = connection.execute(
                         """
@@ -5091,7 +5176,7 @@ class SQLiteScanStore:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(query, params).fetchall()
-                return [_json_row(row) for row in rows]
+                return [_trade_intent_row(row) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load trade intents: {exc}") from exc
 
@@ -7904,7 +7989,7 @@ class SQLiteScanStore:
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
             return connect_read_only(self.db_path)
-        return sqlite3.connect(self.db_path)
+        return sqlite3.connect(self.db_path, timeout=30.0)
 
     def connect_read_only(self) -> sqlite3.Connection:
         """Open this database without allowing the caller to mutate it."""
@@ -8118,6 +8203,73 @@ def _json_row(row: sqlite3.Row) -> dict[str, Any]:
     if isinstance(payload, dict):
         merged.update(payload)
     return merged
+
+
+def _trade_intent_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Merge intent payloads without allowing them to rewrite claim columns."""
+
+    merged = _json_row(row)
+    for key in ("episode_id", "strategy_id", "account_id"):
+        value = row[key]
+        if value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _trade_intent_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload_json")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _trade_intent_episode_id(row: Mapping[str, Any]) -> str:
+    payload = _trade_intent_payload(row)
+    return str(row.get("episode_id") or payload.get("episode_id") or "").strip()
+
+
+def _trade_intent_strategy_id(row: Mapping[str, Any]) -> str:
+    payload = _trade_intent_payload(row)
+    return str(row.get("strategy_id") or payload.get("strategy_id") or "").strip()
+
+
+def _trade_intent_account_id(row: Mapping[str, Any]) -> str:
+    payload = _trade_intent_payload(row)
+    return str(
+        row.get("account_id")
+        or payload.get("account_id")
+        or payload.get("simulated_account_id")
+        or ""
+    ).strip()
+
+
+def _backfill_trade_intent_identity(connection: sqlite3.Connection) -> None:
+    """Backfill identity columns when upgrading pre-episode databases."""
+
+    rows = connection.execute(
+        "SELECT intent_id, episode_id, strategy_id, account_id, payload_json "
+        "FROM trade_intents"
+    ).fetchall()
+    for row in rows:
+        payload = _json_value(row[4])
+        if not isinstance(payload, dict):
+            payload = {}
+        episode_id = str(row[1] or payload.get("episode_id") or "").strip()
+        strategy_id = str(row[2] or payload.get("strategy_id") or "").strip()
+        account_id = str(
+            row[3]
+            or payload.get("account_id")
+            or payload.get("simulated_account_id")
+            or ""
+        ).strip()
+        if (episode_id, strategy_id, account_id) != (
+            str(row[1] or ""),
+            str(row[2] or ""),
+            str(row[3] or ""),
+        ):
+            connection.execute(
+                "UPDATE trade_intents SET episode_id = ?, strategy_id = ?, account_id = ? "
+                "WHERE intent_id = ?",
+                (episode_id, strategy_id, account_id, row[0]),
+            )
 
 
 def _raw_json_row(row: sqlite3.Row) -> dict[str, Any]:
