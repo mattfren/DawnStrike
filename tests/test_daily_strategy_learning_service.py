@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,9 +9,12 @@ from intraday_scanner.services.daily_strategy_learning_service import (
     AttributionReportAnalyzer,
     DailyLearningContext,
     _normalize_analysis,
+    _persisted_receipt,
     run_daily_strategy_learning,
 )
 from intraday_scanner.v2.strategies import build_strategy_catalog
+
+FIXTURE_INPUT_HASH = "f" * 64
 
 
 class FixtureAnalyzer:
@@ -40,6 +44,7 @@ class FixtureAnalyzer:
                     "hypothesis": f"one controlled change for {strategy.strategy_id}",
                     "controlled_change": {"field": "ranking_weight", "delta": 0.1},
                     "sample_size": 12,
+                    "proposed_at": "2026-08-20T21:00:00+00:00",
                     "applied": True,
                 }
             ],
@@ -53,6 +58,7 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
         source_identity="fixture-source:2026-08-20",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
         analyzer=FixtureAnalyzer(),
     )
     receipt_path = Path(first["receipt_path"])
@@ -98,6 +104,7 @@ def test_daily_learning_is_catalog_complete_safe_and_idempotent(tmp_path: Path) 
         source_identity="fixture-source:2026-08-20",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
         analyzer=FixtureAnalyzer(),
     )
     assert second["run_id"] == first["run_id"]
@@ -114,6 +121,7 @@ def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanaly
         source_identity="fixture-source:2026-08-20",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
         analyzer=FixtureAnalyzer(),
     )
 
@@ -127,6 +135,7 @@ def test_daily_learning_retry_reuses_hash_valid_frozen_artifacts_without_reanaly
         source_identity="fixture-source:2026-08-20",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
         analyzer=RetryMustNotAnalyze(),
     )
 
@@ -158,7 +167,7 @@ def test_daily_learning_rejects_reuse_when_bound_input_bytes_change(tmp_path: Pa
             analyzer=FixtureAnalyzer(),
         )
     except ValueError as exc:
-        assert "invocation identity changed" in str(exc)
+        assert "invocation identity conflict: input_hash_sha256" in str(exc)
     else:
         raise AssertionError("changed bound input bytes were incorrectly reused")
 
@@ -170,6 +179,7 @@ def test_daily_learning_retry_rejects_tampered_frozen_artifact(tmp_path: Path) -
         source_identity="fixture-source:2026-08-20",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256=FIXTURE_INPUT_HASH,
         analyzer=FixtureAnalyzer(),
     )
     receipt_path = Path(first["receipt_path"])
@@ -181,10 +191,11 @@ def test_daily_learning_retry_rejects_tampered_frozen_artifact(tmp_path: Path) -
         run_daily_strategy_learning(
             market_date="2026-08-20",
             cutoff="2026-08-20T22:00:00+00:00",
-            source_identity="fixture-source:2026-08-20",
-            code_sha="fixture-code-sha",
-            out_dir=tmp_path,
-            analyzer=FixtureAnalyzer(),
+                source_identity="fixture-source:2026-08-20",
+                code_sha="fixture-code-sha",
+                out_dir=tmp_path,
+                input_hash_sha256=FIXTURE_INPUT_HASH,
+                analyzer=FixtureAnalyzer(),
         )
     except ValueError as exc:
         assert "hash mismatch" in str(exc)
@@ -209,7 +220,7 @@ def test_daily_learning_rejects_unfrozen_inputs(tmp_path: Path) -> None:
             raise AssertionError("unfrozen daily-learning input was accepted")
 
 
-def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) -> None:
+def test_attribution_adapter_quarantines_closed_rows_without_fill_truth(tmp_path: Path) -> None:
     rows = [
         {
             "record_id": "benchmark",
@@ -254,6 +265,7 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
         source_identity="fixture-attribution",
         code_sha="fixture-code-sha",
         out_dir=tmp_path,
+        input_hash_sha256="d" * 64,
         analyzer=AttributionReportAnalyzer(report),
     )
     receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
@@ -263,13 +275,14 @@ def test_attribution_adapter_keeps_only_closed_rows_as_outcomes(tmp_path: Path) 
         if item["strategy_id"] == "ts_momentum_sma_atr"
     )
 
-    assert [row["record_id"] for row in evidence["outcomes"]] == ["closed-loss"]
+    assert evidence["outcomes"] == []
+    assert [row["record_id"] for row in evidence["quarantined_closed"]] == ["closed-loss"]
     assert {row["record_id"] for row in evidence["misses"]} == {
         "closed-loss",
         "no-trade",
     }
-    assert all(row["state"] == "closed" for row in evidence["outcomes"])
-    assert result["proposal_count"] >= 2
+    assert result["proposal_count"] == 0
+    assert result["status"] == "incomplete"
 
 
 def test_attribution_adapter_quarantines_provisional_closed_rows() -> None:
@@ -344,7 +357,7 @@ def test_normalize_analysis_quarantines_unordered_terminal_and_same_day_miss_evi
     assert evidence["quarantined_evidence"][0]["record_id"] == "same-day-no-time"
 
 
-def test_daily_learning_marks_explicit_zero_alphaops_receipt_coverage_incomplete(
+def test_daily_learning_marks_explicit_zero_alphaops_receipts_checked_empty(
     tmp_path: Path,
 ) -> None:
     result = run_daily_strategy_learning(
@@ -357,11 +370,15 @@ def test_daily_learning_marks_explicit_zero_alphaops_receipt_coverage_incomplete
     )
     assert result["status"] == "incomplete"
     coverage = result["decision_receipt_learning"]["expected_strategy_coverage"]
-    assert coverage["status"] == "INCOMPLETE"
-    assert {row["strategy_id"] for row in coverage["missing"]} == {
-        "alphaops_v5",
-        "alphaops_v6_shadow",
-    }
+    assert coverage["status"] == "COMPLETE"
+    assert coverage["source_result"] == "NO_EVIDENCE"
+    assert coverage["missing"] == []
+    assert coverage["expected"] == [
+        {
+            "strategy_id": "alphaops_v5",
+            "strategy_version": "dawnstrike-alphaops-v5.0.0",
+        }
+    ]
 
 
 def _decision_condition(condition_id: str, status: str, **fields: object) -> dict[str, object]:
@@ -381,7 +398,15 @@ def _decision_receipt(
     disclosed_gaps: tuple[str, ...] = (),
     contradicted_claims: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    return {
+    body: dict[str, object] = {
+        "schema_version": "dawnstrike.strategy_decision_receipt.v1",
+        "symbol": "NOVA",
+        "market_date": "2026-08-22",
+        "decision_at": "2026-08-22T21:00:00+00:00",
+        "source_identity": "fixture-decision-source",
+        "input_hash_sha256": "a" * 64,
+        "research_only": True,
+        "broker_execution_enabled": False,
         "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "pick_tier": pick_tier,
@@ -393,6 +418,31 @@ def _decision_receipt(
         "disclosed_gaps": list(disclosed_gaps),
         "contradicted_claims": contradicted_claims or [],
     }
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    payload = {
+        **body,
+        "receipt_id": "sdr-" + digest[:24],
+        "receipt_hash_sha256": digest,
+    }
+    return _persisted_receipt(
+        payload,
+        envelope={
+            "receipt_id": payload["receipt_id"],
+            "receipt_hash_sha256": digest,
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "symbol": "NOVA",
+            "market_date": "2026-08-22",
+            "pick_tier": pick_tier,
+            "research_pick_eligible": int(research_pick_eligible),
+            "paper_entry_eligible": int(paper_entry_eligible),
+            "source_identity": "fixture-decision-source",
+            "input_hash_sha256": "a" * 64,
+            "created_at": "2026-08-22T21:00:00+00:00",
+        },
+    )
 
 
 def test_daily_learning_aggregates_decision_receipts_without_self_modification(

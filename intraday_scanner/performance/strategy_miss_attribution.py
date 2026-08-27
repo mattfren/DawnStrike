@@ -1008,18 +1008,28 @@ def _within_cutoff(row: dict[str, Any], cutoff: str | None) -> bool:
         return False
     if date_value > cutoff_date:
         return False
+    event_date_fields = (
+        "_entry_event_date",
+        "_terminal_event_date",
+    )
+    for event_date in values(event_date_fields):
+        try:
+            date.fromisoformat(event_date[:10])
+        except ValueError:
+            return False
+        if event_date[:10] > cutoff_date:
+            return False
+
     timestamp_fields = (
         "_entry_event_at",
         "fill_time",
         "opened_at",
         "signal_time",
-        "_entry_event_date",
         "_terminal_event_at",
         "close_time",
         "closed_at",
         "exit_time",
         "exit_timestamp",
-        "_terminal_event_date",
         "terminal_event_at",
         "resolved_at",
         "completed_at",

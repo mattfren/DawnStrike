@@ -215,7 +215,7 @@ def test_official_closed_return_without_explicit_aggregate_record_type_is_provis
     assert row.fill_truth_status == "missing_committed_fill_truth"
 
 
-def test_explicit_portfolio_aggregate_may_omit_trade_fill_truth() -> None:
+def test_self_labeled_portfolio_aggregate_cannot_omit_fill_truth() -> None:
     report = attribute_strategy_misses(
         [
             {
@@ -233,8 +233,9 @@ def test_explicit_portfolio_aggregate_may_omit_trade_fill_truth() -> None:
         date_cutoff="2026-08-21T16:00:00+00:00",
     )
     row = report.rows[0]
-    assert row.classification == "closed_win"
-    assert row.eligibility is Eligibility.ELIGIBLE
+    assert row.classification == "closed_provisional"
+    assert row.eligibility is Eligibility.INELIGIBLE
+    assert row.fill_truth_status == "missing_committed_fill_truth"
 
 
 def test_spoofed_fill_truth_on_aggregate_is_not_accepted() -> None:
