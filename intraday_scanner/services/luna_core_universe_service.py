@@ -31,6 +31,16 @@ CORE_INDEXES = ("S&P 500", "Nasdaq-100")
 DEFAULT_MAX_AGE_DAYS = 31
 MIN_PRODUCTION_COUNTS = {"S&P 500": 503, "Nasdaq-100": 100}
 _SYMBOL_PATTERN = __import__("re").compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
+STATE_STREET_SPY_HOLDINGS_URL = (
+    "https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx"
+)
+NASDAQ_NDX_SOD_URL_TEMPLATE = (
+    "https://indexes.nasdaq.com/Index/ExportWeightings/NDX"
+    "?tradeDate={month}%2F{day}%2F{year}&timeOfDay=SOD"
+)
+NASDAQ_NDX_SOD_2026_08_27_URL = NASDAQ_NDX_SOD_URL_TEMPLATE.format(
+    month="08", day="27", year="2026"
+)
 
 # These are release trust roots for the currently mounted point-in-time
 # sources.  A manifest cannot make a changed source authoritative merely by
@@ -49,6 +59,10 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "reconstitution_id": "spy-holdings-2026-08-24",
         "membership_authority": "tracker_holdings_proxy",
         "official_index_authority": False,
+        "source_scope": (
+            "SPY tracker holdings used as an explicitly labeled S&P 500 membership proxy"
+        ),
+        "source_uri": STATE_STREET_SPY_HOLDINGS_URL,
     },
     "nasdaq-ndx-point-in-time-2026-07-07": {
         "index": "Nasdaq-100",
@@ -65,6 +79,26 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "reconstitution_id": "ndx-through-2026-07-07",
         "membership_authority": "official_index_source",
         "official_index_authority": True,
+        "source_scope": "Nasdaq-100 membership replay through the final 2026-07-07 notice",
+    },
+    # The July replay is retained for historical research only.  This root is
+    # the current Aug-27 release root and is deliberately a different source
+    # identity, transformer, effective date, and raw byte digest.
+    "nasdaq-ndx-point-in-time-2026-08-27": {
+        "index": "Nasdaq-100",
+        "effective_date": "2026-08-27",
+        "raw_artifact_hashes": (
+            "42b2f48f1365a54cca3109efcd084b47303f6d7877534737dccd455b7eda0ffc",
+        ),
+        "raw_artifact_byte_counts": (8439,),
+        "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_builder_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_transformation_id": "official-sod-weightings-export-v1",
+        "reconstitution_id": "ndx-sod-2026-08-27",
+        "membership_authority": "official_index_source",
+        "official_index_authority": True,
+        "source_scope": "Official Nasdaq-100 SOD Weightings export for 2026-08-27",
+        "source_uri": NASDAQ_NDX_SOD_2026_08_27_URL,
     },
 }
 
@@ -144,6 +178,34 @@ def build_core_universe_contract(
             effective_values.append(effective)
             if requested_date and effective > requested_date:
                 manifest_errors.append("effective_date_after_market_date")
+            # Nasdaq-100 membership is a point-in-time input, not a slowly
+            # changing reference table.  A current release must use the
+            # exact requested market date; otherwise the July replay (or any
+            # other older set) could be observed today and incorrectly pass
+            # the broad observation-age check.
+            manifest_index_for_date = _index_name(
+                manifest.get("index_name") or manifest.get("index")
+            )
+            if not manifest_index_for_date:
+                declared_indexes = manifest.get("expected_counts")
+                if isinstance(declared_indexes, dict):
+                    normalized_indexes = {
+                        _index_name(value) for value in declared_indexes if _index_name(value)
+                    }
+                    if "Nasdaq-100" in normalized_indexes:
+                        manifest_index_for_date = "Nasdaq-100"
+                membership_indexes = manifest.get("index_memberships")
+                if isinstance(membership_indexes, dict) and "Nasdaq-100" in {
+                    _index_name(value) for value in membership_indexes
+                }:
+                    manifest_index_for_date = "Nasdaq-100"
+            if (
+                production
+                and requested_date
+                and manifest_index_for_date == "Nasdaq-100"
+                and effective != requested_date
+            ):
+                manifest_errors.append("currentness_date_mismatch:Nasdaq-100")
 
         records = manifest.get("members")
         if not isinstance(records, list):
@@ -312,10 +374,17 @@ def build_core_universe_contract(
             {
                 "source_id": source_id,
                 "source_uri": source_uri,
+                "source_scope": (
+                    str(manifest.get("source_scope") or "").strip()
+                    or source_binding.get("source_scope")
+                    or None
+                ),
                 "raw_artifact_sha256": raw_hash,
                 "raw_artifact_hashes": list(raw_hashes),
                 "canonical_member_set_hash_sha256": computed_member_hash,
                 "declared_canonical_member_set_hash_sha256": declared_member_hash or None,
+                "membership_authority": source_binding.get("membership_authority"),
+                "official_index_authority": source_binding.get("official_index_authority"),
                 "source_binding": source_binding,
                 "error_codes": sorted(set(manifest_errors)),
             }
@@ -432,6 +501,21 @@ def build_core_universe_contract(
             }
         ),
         "source_artifacts": source_artifacts,
+        "membership_authorities": {
+            index: sorted(
+                {
+                    str(item.get("membership_authority") or "")
+                    for item in source_artifacts
+                    if item.get("membership_authority")
+                    and item.get("source_binding", {}).get("index") == index
+                }
+            )
+            for index in CORE_INDEXES
+        },
+        "proxy_disclosures": [
+            "S&P 500 membership is proxied by SPY tracker holdings; this is not an official "
+            "S&P DJI constituent feed."
+        ],
         "raw_artifact_hashes": [
             digest
             for item in source_artifacts
@@ -1304,6 +1388,7 @@ def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[s
             )
             path = entry.get("path") or entry.get("file") or entry.get("local_path")
             content = entry.get("content")
+            artifact_bytes: bytes | None = None
             if not _valid_digest(digest):
                 errors.append(f"raw_artifact_sha256_missing_or_invalid:{number}")
                 continue
@@ -1313,7 +1398,8 @@ def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[s
                     errors.append(f"raw_artifact_missing:{number}")
                     continue
                 try:
-                    actual = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                    artifact_bytes = artifact_path.read_bytes()
+                    actual = hashlib.sha256(artifact_bytes).hexdigest()
                 except OSError:
                     errors.append(f"raw_artifact_unreadable:{number}")
                     continue
@@ -1321,12 +1407,26 @@ def _validate_raw_artifacts(manifest: dict[str, Any]) -> tuple[list[str], list[s
                     errors.append(f"raw_artifact_sha256_mismatch:{number}")
                     continue
             elif isinstance(content, str):
-                if hashlib.sha256(content.encode("utf-8")).hexdigest() != digest:
+                artifact_bytes = content.encode("utf-8")
+                if hashlib.sha256(artifact_bytes).hexdigest() != digest:
                     errors.append(f"raw_artifact_sha256_mismatch:{number}")
                     continue
             else:
                 errors.append(f"raw_artifact_bytes_missing:{number}")
                 continue
+            declared_size = entry.get("byte_count")
+            if declared_size is not None:
+                try:
+                    if (
+                        isinstance(declared_size, bool)
+                        or artifact_bytes is None
+                        or int(declared_size) != len(artifact_bytes)
+                    ):
+                        errors.append(f"raw_artifact_byte_count_mismatch:{number}")
+                        continue
+                except (TypeError, ValueError):
+                    errors.append(f"raw_artifact_byte_count_invalid:{number}")
+                    continue
             hashes.append(digest)
         if not entries:
             errors.append("raw_artifact_entries_missing")
@@ -1358,8 +1458,10 @@ def _validate_source_binding(
     binding: dict[str, Any] = {
         "status": "BLOCKED",
         "authority": "release_trust_root",
+        "index": root.get("index") if root else index_name,
         "membership_authority": root.get("membership_authority") if root else None,
         "official_index_authority": root.get("official_index_authority") if root else None,
+        "source_scope": root.get("source_scope") if root else None,
         "source_id": source_id or None,
         "transformation_id": root.get("transformation_id") if root else None,
         "derived_effective_date": None,
@@ -1371,6 +1473,19 @@ def _validate_source_binding(
         return binding, ["source_binding_trust_root_unknown"]
     if index_name != root["index"]:
         errors.append("source_binding_index_mismatch")
+    trusted_uri = str(root.get("source_uri") or "").strip()
+    source_uri = str(
+        manifest.get("source_uri") or manifest.get("uri") or manifest.get("url") or ""
+    ).strip()
+    if trusted_uri and source_uri != trusted_uri:
+        errors.append("source_binding_source_uri_not_trusted")
+    if trusted_uri:
+        artifact_uris = {
+            str(entry.get("uri") or entry.get("url") or "").strip()
+            for entry in _declared_artifact_entries(manifest)
+        }
+        if artifact_uris != {trusted_uri}:
+            errors.append("source_binding_artifact_uri_not_trusted")
     if effective_date != root["effective_date"]:
         errors.append("source_binding_effective_date_not_trusted")
     if list(artifact_hashes) != list(root["raw_artifact_hashes"]):
@@ -1401,11 +1516,22 @@ def _validate_source_binding(
     raw_bytes, read_errors = _read_declared_artifact_bytes(manifest)
     if read_errors:
         return binding, [*errors, *read_errors]
+    trusted_sizes = root.get("raw_artifact_byte_counts")
+    if (
+        isinstance(trusted_sizes, (list, tuple))
+        and list(map(len, raw_bytes)) != list(trusted_sizes)
+    ):
+        errors.append("source_binding_raw_artifact_sizes_not_trusted")
+        return binding, errors
     try:
         if index_name == "S&P 500":
             derived_members, derived_effective = _replay_spy_holdings_xlsx(raw_bytes)
         elif index_name == "Nasdaq-100":
-            derived_members, derived_effective = _replay_nasdaq_reconstitution(raw_bytes)
+            if root.get("transformation_id") == "nasdaq-ndx-sod-weightings-parser-v1":
+                derived_members = _parse_nasdaq_sod_weightings_xlsx(raw_bytes[0])
+                derived_effective = root["effective_date"]
+            else:
+                derived_members, derived_effective = _replay_nasdaq_reconstitution(raw_bytes)
         else:
             return binding, ["source_binding_transformer_unavailable"]
     except (OSError, ValueError, TypeError, zipfile.BadZipFile) as exc:
@@ -1556,6 +1682,118 @@ def _replay_spy_holdings_xlsx(payloads: list[bytes]) -> tuple[list[str], str]:
     if len(symbols) != 503 or len(set(symbols)) != len(symbols):
         raise ValueError("SPY membership count or uniqueness invalid")
     return symbols, effective
+
+
+def _xlsx_cell_text(cell: ElementTree.Element, shared_strings: list[str]) -> str:
+    """Decode one XLSX cell without coercing malformed values into truth."""
+
+    value = cell.find("main:v", {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"})
+    text = value.text if value is not None and value.text is not None else ""
+    if cell.attrib.get("t") == "s" and text:
+        try:
+            text = shared_strings[int(text)]
+        except (IndexError, ValueError):
+            raise ValueError("Nasdaq SOD shared-string index invalid") from None
+    elif cell.attrib.get("t") == "inlineStr":
+        inline = cell.find(
+            "main:is", {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        )
+        text = "".join(inline.itertext()) if inline is not None else ""
+    return str(text).strip()
+
+
+def _parse_nasdaq_sod_weightings_xlsx(payload: bytes) -> list[str]:
+    """Parse the official Nasdaq SOD export's strict two-column schema.
+
+    The export is intentionally treated as a raw, independently hashed
+    artifact.  We only accept a worksheet with the expected header and one
+    contiguous 102-row symbol block.  A broad Nasdaq listing file, a partial
+    workbook, or a changed layout therefore cannot become membership truth.
+    """
+
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = set(archive.namelist())
+            if "xl/sharedStrings.xml" not in names:
+                raise ValueError("Nasdaq SOD shared strings missing")
+            worksheet_names = sorted(
+                name
+                for name in names
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            )
+            if not worksheet_names:
+                raise ValueError("Nasdaq SOD worksheet missing")
+            shared_root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = [
+                "".join(item.itertext()).strip()
+                for item in shared_root.findall("main:si", namespace)
+            ]
+            sheet_root = ElementTree.fromstring(archive.read(worksheet_names[0]))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Nasdaq SOD export is not a valid XLSX") from exc
+    except KeyError as exc:
+        raise ValueError("Nasdaq SOD workbook member missing") from exc
+    except ElementTree.ParseError as exc:
+        raise ValueError("Nasdaq SOD workbook XML invalid") from exc
+
+    rows: dict[int, dict[str, str]] = {}
+    for row in sheet_root.findall(".//main:row", namespace):
+        try:
+            number = int(row.attrib.get("r", "0"))
+        except (TypeError, ValueError):
+            continue
+        if number <= 0:
+            raise ValueError("Nasdaq SOD row number invalid")
+        values: dict[str, str] = {}
+        for cell in row.findall("main:c", namespace):
+            reference = str(cell.attrib.get("r") or "")
+            column_match = re.match(r"[A-Z]+", reference)
+            if column_match is None:
+                raise ValueError("Nasdaq SOD cell reference invalid")
+            values[column_match.group()] = _xlsx_cell_text(cell, shared)
+        rows[number] = values
+
+    headers = [
+        number
+        for number, values in rows.items()
+        if values.get("A", "").casefold() == "company name"
+        and values.get("B", "").casefold() == "security symbol"
+    ]
+    if len(headers) != 1:
+        raise ValueError("Nasdaq SOD header schema invalid")
+    header = headers[0]
+    symbols: list[str] = []
+    row_number = header + 1
+    while True:
+        values = rows.get(row_number)
+        if values is None:
+            raise ValueError("Nasdaq SOD member rows are not contiguous")
+        company = values.get("A", "").strip()
+        symbol = canonical_symbol(values.get("B", ""))
+        if not company and not symbol:
+            break
+        if not company or not symbol or not _SYMBOL_PATTERN.fullmatch(symbol):
+            raise ValueError("Nasdaq SOD member row schema invalid")
+        symbols.append(symbol)
+        row_number += 1
+    # A later populated row indicates an inserted gap or footer that was
+    # mistaken for a valid terminator.
+    if any(
+        (values.get("A", "").strip() or values.get("B", "").strip())
+        for number, values in rows.items()
+        if number > row_number
+    ):
+        raise ValueError("Nasdaq SOD rows continue after member block")
+    if len(symbols) != 102 or len(set(symbols)) != len(symbols):
+        raise ValueError("Nasdaq SOD membership count or uniqueness invalid")
+    return symbols
+
+
+def parse_nasdaq_sod_weightings_xlsx(payload: bytes) -> list[str]:
+    """Parse a governed Nasdaq SOD workbook for callers building evidence."""
+
+    return _parse_nasdaq_sod_weightings_xlsx(payload)
 
 
 def _replay_nasdaq_reconstitution(payloads: list[bytes]) -> tuple[list[str], str]:
@@ -1739,11 +1977,15 @@ def _hash(value: dict[str, Any]) -> str:
 
 __all__ = [
     "CORE_INDEXES",
+    "NASDAQ_NDX_SOD_2026_08_27_URL",
+    "NASDAQ_NDX_SOD_URL_TEMPLATE",
     "SCHEMA_VERSION",
+    "STATE_STREET_SPY_HOLDINGS_URL",
     "build_core_universe_contract",
     "canonical_symbol",
     "discover_core_universe_rows",
     "merge_core_universe_rows",
+    "parse_nasdaq_sod_weightings_xlsx",
     "rank_core_universe_rows",
     "read_core_universe_manifest",
     "write_core_universe_contract",
