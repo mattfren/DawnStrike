@@ -323,6 +323,11 @@ def alpha_cycle(
         )
         source_summary["ranked_research_slate"] = luna_research_slate
         source_summary["ranked_research_slate_lineage"] = {
+            "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+            "slate_id": str(luna_research_slate.get("slate_id") or ""),
+            "slate_content_hash_sha256": str(
+                luna_research_slate.get("content_hash_sha256") or ""
+            ),
             "frozen_source_scan_id": str(luna_research_slate.get("scan_id") or ""),
             "current_scan_id": no_data_scan_id,
             "reuse_status": (
@@ -791,6 +796,11 @@ def alpha_cycle(
     source_summary["ranked_research_slate"] = luna_research_slate
     frozen_source_scan_id = str(luna_research_slate.get("scan_id") or "")
     source_summary["ranked_research_slate_lineage"] = {
+        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+        "slate_id": str(luna_research_slate.get("slate_id") or ""),
+        "slate_content_hash_sha256": str(
+            luna_research_slate.get("content_hash_sha256") or ""
+        ),
         "frozen_source_scan_id": frozen_source_scan_id,
         "current_scan_id": scan_result.run_id,
         "reuse_status": (

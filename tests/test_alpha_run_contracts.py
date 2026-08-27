@@ -131,6 +131,9 @@ def test_contract_reports_governed_cross_scan_frozen_slate_without_current_repla
             "status": "success",
             "ranked_research_slate": slate,
             "ranked_research_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-original",
                 "current_scan_id": "scan-retry",
                 "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
@@ -205,6 +208,9 @@ def test_empty_frozen_slate_cannot_publish_retry_watchlist_or_watchlist_ready():
             "ranked_research_slate": slate,
             "ranked_research_publication_rows": [],
             "ranked_research_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-original",
                 "current_scan_id": "scan-retry",
                 "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
@@ -232,7 +238,7 @@ def test_contract_rejects_caller_claimed_slate_lineage_that_disagrees_with_artif
         market_date="2026-08-05",
         scan_id="scan-original",
     )
-    with pytest.raises(ValueError, match="frozen slate lineage is inconsistent"):
+    with pytest.raises(ValueError, match="FROZEN_SLATE_SCAN_MISMATCH"):
         build_alpha_run_contract(
             scan_id="scan-retry",
             generated_at="2026-08-05T12:23:00+00:00",

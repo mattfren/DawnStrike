@@ -206,6 +206,9 @@ def build_alpha_run_contract(
     # makes an arbitrary same-day artifact look like the current cohort.
     if slate_source_scan_id != scan_id:
         required_reuse_fields = (
+            "schema_version",
+            "slate_id",
+            "slate_content_hash_sha256",
             "frozen_source_scan_id",
             "current_scan_id",
             "reuse_status",
@@ -225,8 +228,16 @@ def build_alpha_run_contract(
     declared_reuse_status = str(
         slate_lineage.get("reuse_status") or expected_reuse_status
     )
-    if (
-        declared_source_scan_id != slate_source_scan_id
+    lineage_identity_matches = (
+        str(slate_lineage.get("schema_version") or "")
+        == "dawnstrike.luna.frozen_slate_selection_lineage.v1"
+        and str(slate_lineage.get("slate_id") or "") == str(slate.get("slate_id") or "")
+        and str(slate_lineage.get("slate_content_hash_sha256") or "")
+        == str(slate.get("content_hash_sha256") or "")
+    )
+    if persisted_slate and (
+        not lineage_identity_matches
+        or declared_source_scan_id != slate_source_scan_id
         or declared_current_scan_id != scan_id
         or declared_reuse_status != expected_reuse_status
     ):

@@ -144,6 +144,16 @@ def apply_publication_semantics(
     for row in source:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
         enriched = dict(row)
+        for key in (
+            "research_rank",
+            "research_selection_id",
+            "research_source_signal_id",
+            "publication_tier",
+            "plan_qualification_status",
+            "execution_cost_status",
+            "entry_state",
+        ):
+            enriched.pop(key, None)
         # Publication is a hard research-only boundary.  Caller-provided
         # execution flags and tiers are untrusted input, including for rows
         # that will be rejected below.
