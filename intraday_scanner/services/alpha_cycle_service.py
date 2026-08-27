@@ -64,6 +64,7 @@ from intraday_scanner.providers.web_source_base import get_source, load_web_sour
 from intraday_scanner.reporting import write_scan_outputs
 from intraday_scanner.services.alpha_official_cohort_service import (
     build_official_cohort_row,
+    membership_sha256,
 )
 from intraday_scanner.services.alpha_v6_universe_service import (
     active_alpha_v6_membership_by_ticker,
@@ -331,7 +332,7 @@ def alpha_cycle(
                 selected_signals=[],
             )
         ]
-        selected_rows, selection_stats = _persist_official_selections(
+        frozen_cohort_retry = _govern_frozen_official_cohort_retry(
             store,
             scan_id=no_data_scan_id,
             selected_signals=[no_data_no_trade_row],
@@ -339,6 +340,21 @@ def alpha_cycle(
             selected_at=no_data_generated_at,
             event=events[0],
         )
+        if frozen_cohort_retry is None:
+            selected_rows, selection_stats = _persist_official_selections(
+                store,
+                scan_id=no_data_scan_id,
+                selected_signals=[no_data_no_trade_row],
+                decision=dict(review["decision"]),
+                selected_at=no_data_generated_at,
+                event=events[0],
+            )
+            selection_scan_id = no_data_scan_id
+        else:
+            events = [frozen_cohort_retry["event"]]
+            selected_rows = list(frozen_cohort_retry["selections"])
+            selection_stats = dict(frozen_cohort_retry["stats"])
+            selection_scan_id = str(frozen_cohort_retry["scan_id"])
         preexisting_notification_keys = _existing_notification_keys(
             store,
             events=events,
@@ -401,11 +417,11 @@ def alpha_cycle(
         )
         _link_notification_events(
             store,
-            scan_id=no_data_scan_id,
+            scan_id=selection_scan_id,
             events=events,
             notify=notify,
             dry_run=dry_run,
-            signal_ids=[str(no_data_no_trade_row["signal_id"])],
+            signal_ids=[str(row["signal_id"]) for row in selected_rows],
             notification_deliveries=notification_deliveries,
         )
         no_data_result: dict[str, Any] = {
@@ -904,24 +920,41 @@ def alpha_cycle(
         )
     ]
     selection_members = selected_signals or ([no_trade_row] if no_trade_row is not None else [])
-    selected_rows, selection_stats = _persist_official_selections(
+    frozen_cohort_retry = _govern_frozen_official_cohort_retry(
         store,
         scan_id=scan_result.run_id,
         selected_signals=selection_members,
         decision=publication_decision,
         selected_at=timestamp,
         event=events[0],
-        slate=luna_research_slate,
     )
+    if frozen_cohort_retry is None:
+        selected_rows, selection_stats = _persist_official_selections(
+            store,
+            scan_id=scan_result.run_id,
+            selected_signals=selection_members,
+            decision=publication_decision,
+            selected_at=timestamp,
+            event=events[0],
+            slate=luna_research_slate,
+        )
+        selection_scan_id = scan_result.run_id
+        selection_selected_at = timestamp
+    else:
+        events = [frozen_cohort_retry["event"]]
+        selected_rows = list(frozen_cohort_retry["selections"])
+        selection_stats = dict(frozen_cohort_retry["stats"])
+        selection_scan_id = str(frozen_cohort_retry["scan_id"])
+        selection_selected_at = str(frozen_cohort_retry["selected_at"])
     radar_selection_rows, radar_selection_stats = _persist_research_radar_selections(
         store,
-        scan_id=scan_result.run_id,
+        scan_id=selection_scan_id,
         # Freeze the exact five-target research slate for monitoring on both
         # edge and no-edge days.  The radar cohort is the existing read-only
         # persistence surface and remains broker-disabled.
         radar=list(luna_research_slate.get("rows") or []),
         slate=luna_research_slate,
-        selected_at=timestamp,
+        selected_at=selection_selected_at,
         event=events[0],
     )
     delivery_selection_rows = [*selected_rows, *radar_selection_rows]
@@ -988,7 +1021,7 @@ def alpha_cycle(
     )
     notification_link = _link_notification_events(
         store,
-        scan_id=scan_result.run_id,
+        scan_id=selection_scan_id,
         events=events,
         notify=notify,
         dry_run=dry_run,
@@ -2574,6 +2607,157 @@ def _official_selection_notification_event(
     )
 
 
+def _govern_frozen_official_cohort_retry(
+    store: SQLiteScanStore,
+    *,
+    scan_id: str,
+    selected_signals: list[dict[str, Any]],
+    decision: dict[str, Any],
+    selected_at: str,
+    event: NotificationEvent,
+) -> dict[str, Any] | None:
+    """Reuse one immutable date cohort after a pre-dispatch persistence crash.
+
+    The producer-attempt scan may change, but the operator-facing event and its
+    exact members may not.  The original event body is persisted inside the
+    cohort payload on new writes; legacy rows may reuse a deterministically
+    re-rendered body only when its SHA-256 is already the frozen body hash.
+    """
+
+    strategy_id, strategy_version = alphaops_strategy_contract(selected_at)
+    existing = store.load_official_strategy_cohort(
+        market_date=selected_at[:10],
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        cohort=ALPHAOPS_OFFICIAL_COHORT,
+    )
+    if existing is None:
+        return None
+    rows = store.load_signal_selections(
+        scan_id=str(existing.get("scan_id") or ""),
+        event_key=str(existing.get("event_key") or ""),
+        strategy_id=strategy_id,
+        cohort=ALPHAOPS_OFFICIAL_COHORT,
+        limit=100,
+    )
+    if (
+        not rows
+        or membership_sha256(rows) != str(existing.get("membership_sha256") or "")
+    ):
+        raise SnapshotValidationError(
+            "FROZEN_COHORT_CONFLICT: persisted official membership is incomplete "
+            "or does not match its immutable hash"
+        )
+    decision_name = (
+        "no_trade" if decision.get("no_trade") else str(decision.get("decision_tier") or "selected")
+    )
+    if any(str(row.get("decision") or "") != decision_name for row in rows):
+        raise SnapshotValidationError(
+            "FROZEN_COHORT_CONFLICT: retry decision differs from the immutable cohort"
+        )
+    current_members = sorted(
+        (
+            _selection_signal_id(signal, scan_id),
+            str(signal.get("ticker") or "").upper(),
+        )
+        for signal in selected_signals
+        if _selection_signal_id(signal, scan_id)
+    )
+    frozen_members = sorted(
+        (str(row.get("signal_id") or ""), str(row.get("ticker") or "").upper())
+        for row in rows
+    )
+    if decision_name == "no_trade":
+        current_is_no_trade = (
+            len(selected_signals) == 1
+            and str(selected_signals[0].get("ticker") or "").upper() == "NO_TRADE"
+        )
+        frozen_is_no_trade = (
+            len(frozen_members) == 1 and frozen_members[0][1] == "NO_TRADE"
+        )
+        membership_matches = current_is_no_trade and frozen_is_no_trade
+    else:
+        membership_matches = bool(current_members) and current_members == frozen_members
+    if not membership_matches:
+        raise SnapshotValidationError(
+            "FROZEN_COHORT_CONFLICT: retry members differ from the immutable cohort"
+        )
+
+    body_hash = _body_sha256(event.body)
+    if body_hash != str(existing.get("body_sha256") or ""):
+        raise SnapshotValidationError(
+            "FROZEN_COHORT_CONFLICT: retry rendered body differs from the immutable cohort"
+        )
+    cohort_payload = existing.get("payload_json")
+    notification_manifest = (
+        cohort_payload.get("notification_manifest")
+        if isinstance(cohort_payload, dict)
+        else None
+    )
+    if isinstance(notification_manifest, dict):
+        frozen_body = str(notification_manifest.get("body") or "")
+        if (
+            str(notification_manifest.get("schema_version") or "")
+            != "dawnstrike.alphaops.official_notification_manifest.v1"
+            or str(notification_manifest.get("event_key") or "")
+            != str(existing.get("event_key") or "")
+            or str(notification_manifest.get("body_sha256") or "")
+            != str(existing.get("body_sha256") or "")
+            or _body_sha256(frozen_body) != str(existing.get("body_sha256") or "")
+            or str(notification_manifest.get("title") or "") != event.title
+            or str(notification_manifest.get("channel_hint") or "") != event.channel_hint
+        ):
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: immutable notification manifest is invalid"
+            )
+    else:
+        frozen_body = event.body
+    frozen_signals = [
+        dict(row.get("payload_json", {}).get("signal") or {})
+        for row in rows
+        if isinstance(row.get("payload_json"), dict)
+    ]
+    retry_payload = {
+        **dict(event.payload or {}),
+        "run_id": str(existing.get("scan_id") or ""),
+        "producer_attempt_scan_id": scan_id,
+        "frozen_cohort_retry": {
+            "status": "GOVERNED_IMMUTABLE_RETRY",
+            "official_cohort_id": str(existing.get("official_cohort_id") or ""),
+            "source_scan_id": str(existing.get("scan_id") or ""),
+            "producer_attempt_scan_id": scan_id,
+            "membership_sha256": str(existing.get("membership_sha256") or ""),
+        },
+        "signals": frozen_signals,
+    }
+    governed_event = NotificationEvent(
+        event_key=str(existing.get("event_key") or ""),
+        title=event.title,
+        body=frozen_body,
+        channel_hint=event.channel_hint,
+        ticker=event.ticker,
+        payload=retry_payload,
+    )
+    return {
+        "event": governed_event,
+        "selections": rows,
+        "scan_id": str(existing.get("scan_id") or ""),
+        "selected_at": str(existing.get("claimed_at") or ""),
+        "stats": {
+            "inserted": 0,
+            "skipped": len(rows),
+            "official_cohort_claimed": False,
+            "official_cohort_reused": True,
+            "official_cohort_id": str(existing.get("official_cohort_id") or ""),
+            "official_membership_sha256": str(existing.get("membership_sha256") or ""),
+            "producer_attempt_scan_id": scan_id,
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "cohort": ALPHAOPS_OFFICIAL_COHORT,
+        },
+    }
+
+
 def _persist_official_selections(
     store: SQLiteScanStore,
     *,
@@ -2718,6 +2902,16 @@ def _persist_official_selections(
         claimed_at=selected_at,
         selections=rows,
     )
+    cohort_row["payload_json"]["notification_manifest"] = {
+        "schema_version": "dawnstrike.alphaops.official_notification_manifest.v1",
+        "event_key": event.event_key,
+        "title": event.title,
+        "body": event.body,
+        "channel_hint": event.channel_hint,
+        "body_sha256": body_sha256,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
     cohort_stats = store.persist_official_signal_cohort(cohort_row, rows)
     inserted = int(cohort_stats["inserted_members"])
     return rows, {
@@ -2825,7 +3019,44 @@ def _persist_research_radar_selections(
         }
         rows.append(row)
     persisted = store.persist_signal_selections(rows)
-    return rows, {
+    stored_rows = store.load_signal_selections(
+        scan_id=scan_id,
+        event_key=event.event_key,
+        strategy_id=ALPHAOPS_RADAR_COHORT,
+        cohort=ALPHAOPS_RADAR_COHORT,
+        limit=max(100, len(rows) * 2),
+    )
+    if len(stored_rows) != len(rows):
+        raise SnapshotValidationError(
+            "FROZEN_COHORT_CONFLICT: research selection persistence is incomplete"
+        )
+    stored_by_id = {str(row.get("selection_id") or ""): row for row in stored_rows}
+    for expected in rows:
+        actual = stored_by_id.get(str(expected.get("selection_id") or ""))
+        expected_stored = {
+            key: expected.get(key)
+            for key in (
+                "selection_id",
+                "scan_id",
+                "signal_id",
+                "ticker",
+                "rank",
+                "strategy_id",
+                "strategy_version",
+                "cohort",
+                "decision",
+                "selected_at",
+                "event_key",
+                "body_sha256",
+                "payload_json",
+            )
+        }
+        if actual is None or canonical_json(actual) != canonical_json(expected_stored):
+            raise SnapshotValidationError(
+                "FROZEN_COHORT_CONFLICT: research selection identity was already "
+                "persisted with different immutable truth"
+            )
+    return stored_rows, {
         **persisted,
         "cohort": ALPHAOPS_RADAR_COHORT,
         "strategy_version": ALPHAOPS_RADAR_VERSION,

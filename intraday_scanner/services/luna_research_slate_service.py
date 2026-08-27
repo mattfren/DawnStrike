@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID
+
 TIER1 = "RANKED_RESEARCH_CANDIDATE"
 TIER2 = "PAPER_PLAN_QUALIFIED"
 TIER2_WAITING = "WAITING_CURRENT_CHECKS"
@@ -745,6 +747,14 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         return False
     portfolio = proof["portfolio_receipt"]
     portfolio_time = _parse_watcher_time(portfolio.get("checked_at"))
+    portfolio_account_id = str(portfolio.get("simulated_account_id") or "").strip()
+    row_account_id = str(row.get("account_id") or "").strip()
+    decision_trace = row.get("decision_trace")
+    trace_account_id = (
+        str(decision_trace.get("account_id") or "").strip()
+        if isinstance(decision_trace, dict)
+        else ""
+    )
     if (
         str(portfolio.get("schema_version") or "")
         != "dawnstrike.alphaops.portfolio_admission.v1"
@@ -752,7 +762,9 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or portfolio.get("admitted") is not True
         or list(portfolio.get("blocking_reasons") or [])
         or str(portfolio.get("account_mode") or "").upper() != "PAPER"
-        or not str(portfolio.get("simulated_account_id") or "").strip()
+        or portfolio_account_id != ALPHAOPS_V5_ACCOUNT_ID
+        or (row_account_id and row_account_id != portfolio_account_id)
+        or (trace_account_id and trace_account_id != portfolio_account_id)
         or not str(portfolio.get("admission_id") or "").strip()
         or str(portfolio.get("admission_key") or "")
         != f"paper-admission:{signal_id}:{plan_hash[:16]}"

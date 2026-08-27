@@ -1766,7 +1766,8 @@ class SQLiteScanStore:
                     str(official[field]) != str(cohort_row[field]) for field in immutable_fields
                 ):
                     raise StorageError(
-                        "Official strategy cohort is already frozen for this market date "
+                        "FROZEN_COHORT_CONFLICT: Official strategy cohort is already "
+                        "frozen for this market date "
                         "with a different Telegram cohort"
                     )
                 inserted_members = 0
