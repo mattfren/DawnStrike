@@ -10,6 +10,8 @@ import pytest
 
 from intraday_scanner.storage.migrations import (
     CURRENT_SCHEMA_VERSION,
+    _migration_033_research_episode_outcome_bridges,
+    _migration_034_research_episode_outcome_bridge_logical_key,
     get_schema_version,
     run_migrations,
     set_schema_version,
@@ -725,3 +727,128 @@ def test_migration_rollback_leaves_disposable_database_at_21(tmp_path: Path) -> 
         connection.rollback()
         assert get_schema_version(connection) == 21
         assert "rollback_probe" not in _table_names(connection)
+
+
+def _insert_duplicate_research_bridge_rows(connection: sqlite3.Connection) -> None:
+    values = []
+    for bridge_id, bridge_hash in (("rep-a", "a" * 64), ("rep-b", "b" * 64)):
+        values.append(
+            (
+                bridge_id,
+                bridge_hash,
+                "selection:nova",
+                "slate:nova",
+                "c" * 64,
+                "episode:nova",
+                "NOVA",
+                "2026-08-28",
+                "2026-08-28T14:00:00+00:00",
+                "strategy-one",
+                "v1",
+                "receipt-one",
+                "d" * 64,
+                "MISSING",
+                0,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-28T20:00:00+00:00",
+                None,
+                None,
+                "{}",
+                "2026-08-28T20:00:00+00:00",
+            )
+        )
+    connection.executemany(
+        """INSERT INTO research_episode_outcome_bridges (
+        bridge_id, bridge_hash_sha256, selection_id, slate_id,
+        slate_content_hash_sha256, episode_id, ticker, market_date, selected_at,
+        strategy_id, strategy_version, receipt_id, receipt_hash_sha256,
+        outcome_status, learning_eligible, source_observation_id,
+        source_observation_hash_sha256, source_path_id, source_path_hash_sha256,
+        source_cutoff, outcome_artifact_id, outcome_artifact_hash_sha256,
+        payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        values,
+    )
+
+
+def test_migration_34_assigns_stable_revisions_to_populated_duplicate_keys() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        _migration_033_research_episode_outcome_bridges(connection)
+        _insert_duplicate_research_bridge_rows(connection)
+        connection.commit()
+        _migration_034_research_episode_outcome_bridge_logical_key(connection)
+        rows = connection.execute(
+            "SELECT bridge_id, logical_key FROM research_episode_outcome_bridges "
+            "ORDER BY bridge_id"
+        ).fetchall()
+        assert rows[0][1].startswith("research-bridge-logical-v1-")
+        assert rows[1][1] == rows[0][1] + "-r2"
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' "
+            "AND name='idx_research_episode_outcome_bridges_logical_key'"
+        ).fetchone() == (1,)
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "UPDATE research_episode_outcome_bridges SET ticker='EVIL' "
+                "WHERE bridge_id='rep-a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "DELETE FROM research_episode_outcome_bridges WHERE bridge_id='rep-a'"
+            )
+
+
+def test_migration_34_failure_rolls_back_column_rows_index_and_restores_triggers() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        _migration_033_research_episode_outcome_bridges(connection)
+        _insert_duplicate_research_bridge_rows(connection)
+        connection.commit()
+        before = connection.execute(
+            "SELECT bridge_id, payload_json FROM research_episode_outcome_bridges "
+            "ORDER BY bridge_id"
+        ).fetchall()
+
+        def deny_logical_index(action, arg1, _arg2, _database, _source):
+            if (
+                action == sqlite3.SQLITE_CREATE_INDEX
+                and arg1 == "idx_research_episode_outcome_bridges_logical_key"
+            ):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(deny_logical_index)
+        with pytest.raises(sqlite3.DatabaseError):
+            _migration_034_research_episode_outcome_bridge_logical_key(connection)
+        connection.set_authorizer(None)
+        assert "logical_key" not in {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(research_episode_outcome_bridges)"
+            ).fetchall()
+        }
+        assert connection.execute(
+            "SELECT bridge_id, payload_json FROM research_episode_outcome_bridges "
+            "ORDER BY bridge_id"
+        ).fetchall() == before
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            ).fetchall()
+        }
+        assert {
+            "research_episode_outcome_bridges_no_update",
+            "research_episode_outcome_bridges_no_delete",
+        } <= triggers
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' "
+            "AND name='idx_research_episode_outcome_bridges_logical_key'"
+        ).fetchone() == (0,)
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "UPDATE research_episode_outcome_bridges SET ticker='EVIL' "
+                "WHERE bridge_id='rep-a'"
+            )

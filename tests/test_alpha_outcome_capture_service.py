@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from intraday_scanner.alpha.v5_policy import (
 )
 from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.decisioning.contracts import StrategyDecisionReceipt, canonical_json
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
 from intraday_scanner.notifiers import NotificationEvent
 from intraday_scanner.services.alpha_cycle_service import _persist_research_radar_selections
@@ -74,6 +76,69 @@ def _two_source_config() -> ScannerConfig:
     )
 
 
+def _bound_rows_fetcher(rows: list[dict[str, Any]]):
+    def fetch(ticker: str, *_args, **_kwargs) -> list[dict[str, Any]]:
+        return [{**row, "ticker": ticker} for row in rows]
+
+    return fetch
+
+
+def _typed_strategy_contributor(
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    signal_id: str,
+    ticker: str,
+    market_date: str,
+    direction: str = "long",
+) -> dict[str, Any]:
+    input_payload_json = canonical_json(
+        {
+            "direction": direction,
+            "signal_id": signal_id,
+            "ticker": ticker,
+        }
+    )
+    receipt = StrategyDecisionReceipt(
+        schema_version="dawnstrike.strategy_decision_receipt.v2",
+        receipt_id="",
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        symbol=ticker,
+        market_date=market_date,
+        decision_at=f"{market_date}T12:59:00+00:00",
+        code_sha="test-sha",
+        policy_version="test-policy-v1",
+        condition_results=(),
+        first_blocking_failure=None,
+        all_blocking_failures=(),
+        disclosed_gaps=(),
+        research_pick_eligible=True,
+        paper_entry_eligible=False,
+        pick_tier="QUALIFIED_PICK",
+        base_strategy_score=1.0,
+        score_adjustment=0.0,
+        final_score=1.0,
+        entry_reference=None,
+        stop=None,
+        target=None,
+        reward_risk_ratio=None,
+        source_identity="global-test-source",
+        input_hash_sha256=hashlib.sha256(input_payload_json.encode()).hexdigest(),
+        input_payload_json=input_payload_json,
+    ).to_dict()
+    return {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "source_signal_id": signal_id,
+        "direction": direction,
+        "receipt_id": receipt["receipt_id"],
+        "receipt_hash_sha256": receipt["receipt_hash_sha256"],
+        "receipt_status": "COMPLETE",
+        "decision_receipt": receipt,
+    }
+
+
 def test_sourced_eod_capture_persists_one_canonical_path_receipt(
     tmp_path: Path,
 ) -> None:
@@ -100,7 +165,7 @@ def test_sourced_eod_capture_persists_one_canonical_path_receipt(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: payload,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     assert result["status"] == "complete", json.dumps(
@@ -723,7 +788,7 @@ def test_capture_propagates_exact_replay_receipt_and_full_bound_inputs(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: payload,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     assert len(calls) == 1
@@ -828,7 +893,7 @@ def test_authenticated_entry_is_not_reclassified_from_pre_entry_bars(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: payload,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     outcome = result["outcomes"][0]
@@ -864,7 +929,7 @@ def test_capture_consumes_replay_exit_without_post_exit_excursion_recompute(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: payload,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     outcome = result["outcomes"][0]
@@ -1099,7 +1164,7 @@ def test_current_v6_builder_decision_is_quarantined_without_current_context(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: _chart_payload(rows),
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     shadow_signal_id = str(decision["shadow_signal_id"])
@@ -1164,7 +1229,7 @@ def test_non_clean_edge_paper_selection_is_quarantined_from_current_return(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: _chart_payload(rows),
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     assert result["outcomes"] == []
@@ -1299,20 +1364,32 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
         "scan_id": "scan-radar-only",
         "episode_id": "episode:" + "c" * 32,
         "strategy_contributors": [
-            {
-                "strategy_id": "radar-primary",
-                "strategy_version": "v1",
-                "receipt_id": "radar-primary-receipt",
-                "receipt_hash_sha256": "a" * 64,
-            },
-            {
-                "strategy_id": "radar-secondary",
-                "strategy_version": "v2",
-                "receipt_id": "radar-secondary-receipt",
-                "receipt_hash_sha256": "b" * 64,
-            },
+            _typed_strategy_contributor(
+                strategy_id="radar-primary",
+                strategy_version="v1",
+                signal_id="radar-only-signal",
+                ticker="NOVA",
+                market_date=DAY,
+            ),
+            _typed_strategy_contributor(
+                strategy_id="radar-secondary",
+                strategy_version="v2",
+                signal_id="radar-only-signal",
+                ticker="NOVA",
+                market_date=DAY,
+            ),
         ],
     }
+    for contributor in radar_signal["strategy_contributors"]:
+        receipt_payload = contributor["decision_receipt"]
+        store.persist_strategy_decision_receipt(
+            StrategyDecisionReceipt(
+                **{
+                    **receipt_payload,
+                    "condition_results": tuple(receipt_payload["condition_results"]),
+                }
+            )
+        )
     slate = build_ranked_research_slate(
         [radar_signal],
         generated_at=selected_at,
@@ -1351,10 +1428,10 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
     bridges = store.load_research_episode_outcome_bridges(market_date=DAY)
     assert result["signal_count"] == 0
     assert len(bridges) == 2, json.dumps(result, sort_keys=True, indent=2, default=str)
-    assert {row["receipt_id"] for row in bridges} == {
-        "radar-primary-receipt",
-        "radar-secondary-receipt",
+    expected_receipt_ids = {
+        row["receipt_id"] for row in radar_signal["strategy_contributors"]
     }
+    assert {row["receipt_id"] for row in bridges} == expected_receipt_ids
     assert all(row["source_outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
     assert all(row["outcome_status"] == "FLAT_CLOSE" for row in bridges)
     assert all(row["learning_eligible"] is True for row in bridges)
@@ -1459,23 +1536,33 @@ def test_radar_outcome_requires_authenticated_canonical_source_binding(
             volume=1_000.0,
         ),
     ]
-    source_hash = capture_module._bars_hash(bars)
-    valid_evidence = {
-        "source": "yahoo_finance_chart",
-        "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?range=5d&interval=1m&includePrePost=false",
-        "source_artifact_identity": f"market-bars:yahoo_finance_chart:NOVA:{DAY}:1m:{source_hash}",
-        "source_bar_hash_sha256": source_hash,
-        "source_lineage": [{
-                "source": "yahoo_finance_chart",
-                "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?range=5d&interval=1m&includePrePost=false",
-            "request": "GET /bars?symbol=NOVA",
-            "attempt": 1,
-            "fetched_at": requested_at.isoformat(),
-            "cutoff": requested_at.isoformat(),
-        }],
-        "source_coverage_complete": True,
-        "source_fetched_at": requested_at.isoformat(),
-    }
+    source_url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?"
+        "range=5d&interval=1m&includePrePost=false"
+    )
+    source_request = capture_module._provider_request(
+        ticker="NOVA",
+        source="yahoo_finance_chart",
+        source_url=source_url,
+        bars=bars,
+        session=session,
+        fetched_at=requested_at.isoformat(),
+        attempt=1,
+        request_contract={
+            "provider": "yahoo_finance_chart",
+            "ticker": "NOVA",
+            "provider_symbol": "NOVA",
+            "endpoint": source_url,
+            "range": "5d",
+            "interval": "1m",
+            "include_pre_post": False,
+        },
+    )
+    valid_evidence = capture_module._selected_source_evidence(
+        source_request,
+        [source_request],
+        [(bars, source_request)],
+    )
     valid = capture_module._derive_research_selection_outcome(
         selection,
         bars,
@@ -1487,18 +1574,35 @@ def test_radar_outcome_requires_authenticated_canonical_source_binding(
     assert valid["outcome_status"] == "COMPLETE_SOURCED"
     assert valid["source_authenticated"] is True
     single_bar = bars[:1]
-    single_hash = capture_module._bars_hash(single_bar)
-    single_evidence = {
-        **valid_evidence,
-        "source_bar_hash_sha256": single_hash,
-        "source_artifact_identity": f"artifact:provider-a:nova:{single_hash}",
-    }
     single_session = capture_module.SessionWindow(
         market_date=DAY,
         opened_at=session.opened_at,
         closed_at=datetime.fromisoformat(f"{DAY}T09:31:00-04:00"),
         is_trading_day=True,
         calendar={},
+    )
+    single_request = capture_module._provider_request(
+        ticker="NOVA",
+        source="yahoo_finance_chart",
+        source_url=source_url,
+        bars=single_bar,
+        session=single_session,
+        fetched_at=requested_at.isoformat(),
+        attempt=1,
+        request_contract={
+            "provider": "yahoo_finance_chart",
+            "ticker": "NOVA",
+            "provider_symbol": "NOVA",
+            "endpoint": source_url,
+            "range": "5d",
+            "interval": "1m",
+            "include_pre_post": False,
+        },
+    )
+    single_evidence = capture_module._selected_source_evidence(
+        single_request,
+        [single_request],
+        [(single_bar, single_request)],
     )
     no_subsequent = capture_module._derive_research_selection_outcome(
         selection,
@@ -1567,6 +1671,10 @@ def test_radar_outcome_requires_authenticated_canonical_source_binding(
             ),
             bars[1],
         ]
+        if not math.isfinite(hostile_value):
+            with pytest.raises(ValueError, match="Out of range float"):
+                capture_module._bars_hash(hostile_bars)
+            continue
         hostile_hash = capture_module._bars_hash(hostile_bars)
         evidence = {
             **valid_evidence,
@@ -1678,7 +1786,7 @@ def test_bounded_secondary_provider_fallback_captures_full_attribution(
         out_dir=tmp_path / "capture",
         config=ScannerConfig(),
         fetcher=unavailable_primary,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
         provider_attempt_limit=2,
     )
 
@@ -1721,7 +1829,7 @@ def test_alpaca_first_mode_preserves_yahoo_as_secondary_reconciliation(
             outcome_capture_provider_order="alpaca,yahoo",
         ),
         fetcher=unavailable_yahoo,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
         provider_attempt_limit=2,
     )
 
@@ -1731,6 +1839,204 @@ def test_alpaca_first_mode_preserves_yahoo_as_secondary_reconciliation(
     assert result["diagnostics"][0]["status"] == (
         "ineligible_incomplete_canonical_return_truth"
     )
+
+
+def test_alpaca_outcome_request_and_rows_are_exactly_bound() -> None:
+    session = capture_module._session_window(DAY)
+    requested_at = session.closed_at
+    rows = _contiguous_bars()
+    calls: list[dict[str, Any]] = []
+
+    def exact_fetcher(
+        ticker: str,
+        _config: ScannerConfig,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        calls.append({"ticker": ticker, **kwargs})
+        return [{**row, "ticker": ticker} for row in rows]
+
+    requests: list[dict[str, Any]] = []
+    candidates: list[tuple[list[capture_module.OutcomeBar], dict[str, Any]]] = []
+    errors: list[str] = []
+    config = ScannerConfig(alpaca_data_feed="iex")
+    capture_module._collect_alpaca_candidates(
+        ticker="NOVA",
+        config=config,
+        session=session,
+        requested_at=requested_at,
+        captured_at=requested_at.astimezone(timezone.utc).isoformat(),
+        attempt_limit=1,
+        fetcher=exact_fetcher,
+        requests=requests,
+        candidates=candidates,
+        errors=errors,
+    )
+    assert calls == [
+        {
+            "ticker": "NOVA",
+            "start": "2026-08-03T13:30:00Z",
+            "end": "2026-08-03T20:00:00Z",
+            "timeframe": "1Min",
+            "feed": "iex",
+        }
+    ]
+    assert errors == []
+    assert len(candidates) == 1
+    assert requests[0]["request_contract"] == {
+        "provider": "alpaca_market_data_iex",
+        "ticker": "NOVA",
+        "symbols": ["NOVA"],
+        "endpoint": "https://data.alpaca.markets/v2/stocks/bars",
+        "start": "2026-08-03T13:30:00Z",
+        "end": "2026-08-03T20:00:00Z",
+        "timeframe": "1Min",
+        "feed": "iex",
+    }
+
+    tickerless_requests: list[dict[str, Any]] = []
+    tickerless_candidates: list[
+        tuple[list[capture_module.OutcomeBar], dict[str, Any]]
+    ] = []
+    tickerless_errors: list[str] = []
+    capture_module._collect_alpaca_candidates(
+        ticker="NOVA",
+        config=config,
+        session=session,
+        requested_at=requested_at,
+        captured_at=requested_at.astimezone(timezone.utc).isoformat(),
+        attempt_limit=1,
+        fetcher=lambda *_args, **_kwargs: rows,
+        requests=tickerless_requests,
+        candidates=tickerless_candidates,
+        errors=tickerless_errors,
+    )
+    assert tickerless_candidates == []
+    assert len(tickerless_requests) == 1
+    assert tickerless_requests[0]["status"] == "provider_error"
+    assert "explicit ticker binding" in tickerless_errors[0]
+
+
+@pytest.mark.parametrize(
+    ("canonical_ticker", "provider_symbol"),
+    (("BRK.B", "BRK-B"), ("BF.B", "BF-B")),
+)
+def test_yahoo_dotted_symbol_preserves_canonical_lineage_and_binds_provider_symbol(
+    canonical_ticker: str,
+    provider_symbol: str,
+) -> None:
+    session = capture_module._session_window(DAY)
+    rows = _contiguous_bars()
+    calls: list[str] = []
+
+    def exact_fetcher(symbol: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append(symbol)
+        return _chart_payload(rows)
+
+    requests: list[dict[str, Any]] = []
+    candidates: list[tuple[list[capture_module.OutcomeBar], dict[str, Any]]] = []
+    errors: list[str] = []
+    capture_module._collect_yahoo_candidates(
+        ticker=canonical_ticker,
+        config=ScannerConfig(),
+        session=session,
+        requested_at=session.closed_at,
+        captured_at=session.closed_at.astimezone(timezone.utc).isoformat(),
+        attempt_limit=1,
+        fetcher=exact_fetcher,
+        requests=requests,
+        candidates=candidates,
+        errors=errors,
+    )
+
+    expected_url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{provider_symbol}?"
+        "range=5d&interval=1m&includePrePost=false"
+    )
+    assert calls == [provider_symbol]
+    assert errors == []
+    assert len(candidates) == 1
+    assert requests[0]["ticker"] == canonical_ticker
+    assert requests[0]["source_url"] == expected_url
+    assert requests[0]["source_artifact_identity"].startswith(
+        f"market-bars:yahoo_finance_chart:{canonical_ticker}:{DAY}:1m:"
+    )
+    assert requests[0]["request_contract"] == {
+        "provider": "yahoo_finance_chart",
+        "ticker": canonical_ticker,
+        "provider_symbol": provider_symbol,
+        "endpoint": expected_url,
+        "range": "5d",
+        "interval": "1m",
+        "include_pre_post": False,
+    }
+
+
+def test_independent_provider_disagreement_is_explicit_and_fail_closed() -> None:
+    session = capture_module._session_window(DAY)
+    yahoo_rows = _contiguous_bars(default=(100.0, 100.0, 100.0, 100.0))
+    alpaca_rows = _contiguous_bars(default=(110.0, 110.0, 110.0, 110.0))
+    yahoo_bars = capture_module._regular_session_bars_from_rows(
+        "NOVA",
+        [{**row, "ticker": "NOVA"} for row in yahoo_rows],
+        session=session,
+        requested_at=session.closed_at,
+    )
+    alpaca_bars = capture_module._regular_session_bars_from_rows(
+        "NOVA",
+        [{**row, "ticker": "NOVA"} for row in alpaca_rows],
+        session=session,
+        requested_at=session.closed_at,
+    )
+    yahoo_url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?"
+        "range=5d&interval=1m&includePrePost=false"
+    )
+    alpaca_url = "https://data.alpaca.markets/v2/stocks/bars"
+    yahoo_request = capture_module._provider_request(
+        ticker="NOVA",
+        source="yahoo_finance_chart",
+        source_url=yahoo_url,
+        bars=yahoo_bars,
+        session=session,
+        fetched_at="2026-08-03T20:00:00Z",
+        attempt=1,
+        request_contract={
+            "provider": "yahoo_finance_chart",
+            "ticker": "NOVA",
+            "provider_symbol": "NOVA",
+            "endpoint": yahoo_url,
+            "range": "5d",
+            "interval": "1m",
+            "include_pre_post": False,
+        },
+    )
+    alpaca_request = capture_module._provider_request(
+        ticker="NOVA",
+        source="alpaca_market_data_iex",
+        source_url=alpaca_url,
+        bars=alpaca_bars,
+        session=session,
+        fetched_at="2026-08-03T20:00:00Z",
+        attempt=1,
+        request_contract={
+            "provider": "alpaca_market_data_iex",
+            "ticker": "NOVA",
+            "symbols": ["NOVA"],
+            "endpoint": alpaca_url,
+            "start": "2026-08-03T13:30:00Z",
+            "end": "2026-08-03T20:00:00Z",
+            "timeframe": "1Min",
+            "feed": "iex",
+        },
+    )
+    evidence = capture_module._selected_source_evidence(
+        yahoo_request,
+        [yahoo_request, alpaca_request],
+        [(yahoo_bars, yahoo_request), (alpaca_bars, alpaca_request)],
+    )
+    assert evidence["independent_reconciliation_status"] == "DISAGREEMENT"
+    assert evidence["independent_reconciliation"]["agreement"] is False
+    assert evidence["source_conflict"] is True
 
 
 def test_v5_complete_candidate_without_authenticated_entry_is_not_labeled(
@@ -1813,7 +2119,7 @@ def test_sourced_capture_uses_published_early_close(tmp_path: Path) -> None:
         out_dir=tmp_path / "capture",
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: payload,
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     assert result["status"] == "complete"
@@ -2172,7 +2478,7 @@ def test_legacy_complete_outcome_is_quarantined_and_revision_is_deferred(
         persist=True,
         config=_two_source_config(),
         fetcher=lambda *_args, **_kwargs: _chart_payload(rows),
-        fallback_fetcher=lambda *_args, **_kwargs: rows,
+        fallback_fetcher=_bound_rows_fetcher(rows),
     )
 
     assert result["legacy_outcome_quarantined_count"] == 1
@@ -2206,8 +2512,10 @@ def test_sourced_capture_preview_preserves_existing_database_bytes(tmp_path: Pat
                 overrides={"10:01": (12.50, 13.00, 12.40, 12.80)}
             )
         ),
-        fallback_fetcher=lambda *_args, **_kwargs: _contiguous_bars(
-            overrides={"10:01": (12.50, 13.00, 12.40, 12.80)}
+        fallback_fetcher=_bound_rows_fetcher(
+            _contiguous_bars(
+                overrides={"10:01": (12.50, 13.00, 12.40, 12.80)}
+            )
         ),
     )
 

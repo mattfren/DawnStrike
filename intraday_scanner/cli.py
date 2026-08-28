@@ -1971,12 +1971,14 @@ def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
         )
     if args.evidence_file or args.db_path:
         snapshot = _load_or_freeze_strategy_learning_evidence(args)
-        analyzer, input_hash_sha256, decision_receipts, v6_decisions, no_evidence_receipts = (
-            _restore_strategy_learning_evidence(snapshot)
-        )
-        research_episode_outcomes = snapshot.get("research_episode_outcomes")
-        if not isinstance(research_episode_outcomes, list):
-            research_episode_outcomes = None
+        (
+            analyzer,
+            input_hash_sha256,
+            decision_receipts,
+            v6_decisions,
+            no_evidence_receipts,
+            research_episode_outcomes,
+        ) = _restore_strategy_learning_evidence(snapshot)
         frozen_cutoff = str(snapshot["cutoff"])
         frozen_source_identity = str(snapshot["source_identity"])
         frozen_source_hash = str(snapshot["source_hash_sha256"])
@@ -2073,12 +2075,26 @@ def _hash_strategy_learning_inputs(
 
 
 def _canonical_input_bytes(value: Any) -> bytes:
-    if hasattr(value, "invalid_identities") or hasattr(value, "invalid_reasons"):
-        value = {
+    if (
+        hasattr(value, "invalid_identities")
+        or hasattr(value, "invalid_reasons")
+        or hasattr(value, "expected_selection_count")
+        or hasattr(value, "expected_contributor_count")
+    ):
+        identity = {
             "accepted": list(value),
             "invalid_identities": list(getattr(value, "invalid_identities", ())),
             "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
         }
+        if hasattr(value, "expected_selection_count"):
+            identity["expected_selection_count"] = int(
+                getattr(value, "expected_selection_count", 0) or 0
+            )
+        if hasattr(value, "expected_contributor_count"):
+            identity["expected_contributor_count"] = int(
+                getattr(value, "expected_contributor_count", 0) or 0
+            )
+        value = identity
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -2322,6 +2338,8 @@ class _FrozenLearningBatch(tuple):
         *,
         invalid_reasons: Mapping[str, Any],
         invalid_identities: Sequence[Any],
+        expected_selection_count: int = 0,
+        expected_contributor_count: int = 0,
     ):
         result = super().__new__(cls, values)
         result.invalid_reasons = {
@@ -2329,6 +2347,8 @@ class _FrozenLearningBatch(tuple):
         }
         result.invalid_count = sum(result.invalid_reasons.values())
         result.invalid_identities = tuple(str(value) for value in invalid_identities)
+        result.expected_selection_count = int(expected_selection_count)
+        result.expected_contributor_count = int(expected_contributor_count)
         return result
 
 
@@ -2860,11 +2880,20 @@ def _load_or_freeze_strategy_learning_evidence(
 def _external_input_identity(value: Sequence[Mapping[str, Any]] | None) -> Any:
     if value is None:
         return None
-    return {
+    identity = {
         "accepted": [dict(item) for item in value],
         "invalid_identities": list(getattr(value, "invalid_identities", ())),
         "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
     }
+    if hasattr(value, "expected_selection_count"):
+        identity["expected_selection_count"] = int(
+            getattr(value, "expected_selection_count", 0) or 0
+        )
+    if hasattr(value, "expected_contributor_count"):
+        identity["expected_contributor_count"] = int(
+            getattr(value, "expected_contributor_count", 0) or 0
+        )
+    return identity
 
 
 def _recompute_snapshot_input_hash(snapshot: Mapping[str, Any]) -> str:
@@ -2968,6 +2997,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             decision_receipts, provenance="untrusted_external"
         )
         serialized_v6 = _serialize_learning_batch(None, provenance="not_provided")
+        serialized_bridges = _serialize_learning_batch(None, provenance="not_provided")
         component_hashes["evidence_payload"] = hashlib.sha256(
             _canonical_input_bytes(payload)
         ).hexdigest()
@@ -3078,6 +3108,10 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             decision_receipts, provenance="persisted_v5"
         )
         serialized_v6 = _serialize_learning_batch(v6_decisions, provenance="persisted_v6")
+        serialized_bridges = _serialize_learning_batch(
+            research_episode_outcomes,
+            provenance="persisted_research_bridge",
+        )
         component_hashes["portfolio_performance_rows"] = hashlib.sha256(
             _canonical_input_bytes(rows)
         ).hexdigest()
@@ -3096,10 +3130,8 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             "paper_ops_rows": list(paper_ops_rows) if paper_ops_rows is not None else None,
             "decision_receipts": _external_input_identity(decision_receipts),
             "v6_decisions": _external_input_identity(v6_decisions),
-            "research_episode_outcomes": (
-                list(research_episode_outcomes)
-                if research_episode_outcomes is not None
-                else None
+            "research_episode_outcomes": _external_input_identity(
+                research_episode_outcomes
             ),
             "paper_ops_materializer_inputs": paper_input_hash
             if paper_ops_rows is not None
@@ -3144,11 +3176,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
         "analysis_payload": analysis_payload,
         "decision_receipts": serialized_receipts,
         "v6_decisions": serialized_v6,
-        "research_episode_outcomes": (
-            list(research_episode_outcomes)
-            if research_episode_outcomes is not None
-            else None
-        ),
+        "research_episode_outcomes": serialized_bridges,
         "input_hash_sha256": input_hash_sha256,
         "component_hashes": dict(sorted(component_hashes.items())),
         "source_generation": source_generation,
@@ -3171,6 +3199,8 @@ def _serialize_learning_batch(
             "items": [],
             "invalid_reasons": {},
             "invalid_identities": [],
+            "expected_selection_count": 0,
+            "expected_contributor_count": 0,
         }
     items: list[dict[str, Any]] = []
     for value in values:
@@ -3185,6 +3215,13 @@ def _serialize_learning_batch(
             if not isinstance(envelope, Mapping) or not envelope.get("stored_at"):
                 raise SnapshotValidationError("daily-learning V6 decision lacks persisted envelope")
             item["envelope"] = dict(envelope)
+        elif provenance == "persisted_research_bridge":
+            envelope = getattr(value, "_envelope", None)
+            if not isinstance(envelope, Mapping):
+                raise SnapshotValidationError(
+                    "daily-learning research bridge lacks persisted envelope"
+                )
+            item["envelope"] = dict(envelope)
         items.append(item)
     return {
         "provided": True,
@@ -3192,6 +3229,12 @@ def _serialize_learning_batch(
         "items": items,
         "invalid_reasons": dict(getattr(values, "invalid_reasons", {})),
         "invalid_identities": list(getattr(values, "invalid_identities", ())),
+        "expected_selection_count": int(
+            getattr(values, "expected_selection_count", 0) or 0
+        ),
+        "expected_contributor_count": int(
+            getattr(values, "expected_contributor_count", 0) or 0
+        ),
     }
 
 
@@ -3643,6 +3686,7 @@ def _restore_strategy_learning_evidence(
     Sequence[Mapping[str, Any]] | None,
     Sequence[Mapping[str, Any]] | None,
     Sequence[Mapping[str, Any]],
+    Sequence[Mapping[str, Any]] | None,
 ]:
     if not isinstance(snapshot, _AuthenticatedLearningSnapshot):
         raise SnapshotValidationError(
@@ -3674,6 +3718,13 @@ def _restore_strategy_learning_evidence(
         market_date=str(snapshot["market_date"]),
         cutoff=str(snapshot["cutoff"]),
     )
+    research_episode_outcomes = _restore_learning_batch(
+        snapshot.get("research_episode_outcomes"),
+        allowed_provenance="persisted_research_bridge",
+        authenticated=True,
+        market_date=str(snapshot["market_date"]),
+        cutoff=str(snapshot["cutoff"]),
+    )
     raw_no_evidence = snapshot.get("no_evidence_receipts")
     if not isinstance(raw_no_evidence, list):
         raise SnapshotValidationError("daily-learning no-evidence receipts are malformed")
@@ -3684,6 +3735,7 @@ def _restore_strategy_learning_evidence(
         decision_receipts,
         v6_decisions,
         no_evidence_receipts,
+        research_episode_outcomes,
     )
 
 
@@ -3702,20 +3754,39 @@ def _restore_learning_batch(
     items = value.get("items")
     invalid_reasons = value.get("invalid_reasons")
     invalid_identities = value.get("invalid_identities")
+    expected_selection_count = value.get("expected_selection_count", 0)
+    expected_contributor_count = value.get("expected_contributor_count", 0)
     if (
         not isinstance(provided, bool)
         or not isinstance(items, list)
         or not isinstance(invalid_reasons, Mapping)
         or not isinstance(invalid_identities, list)
+        or isinstance(expected_selection_count, bool)
+        or not isinstance(expected_selection_count, int)
+        or expected_selection_count < 0
+        or isinstance(expected_contributor_count, bool)
+        or not isinstance(expected_contributor_count, int)
+        or expected_contributor_count < 0
     ):
         raise SnapshotValidationError("daily-learning frozen batch fields are malformed")
     if not provided:
-        if provenance != "not_provided" or items or invalid_reasons or invalid_identities:
+        if (
+            provenance != "not_provided"
+            or items
+            or invalid_reasons
+            or invalid_identities
+            or expected_selection_count
+            or expected_contributor_count
+        ):
             raise SnapshotValidationError("daily-learning absent batch has evidence")
         return None
     if provenance != allowed_provenance:
         raise SnapshotValidationError("daily-learning frozen batch provenance mismatch")
-    if provenance in {"persisted_v5", "persisted_v6"} and not authenticated:
+    if provenance in {
+        "persisted_v5",
+        "persisted_v6",
+        "persisted_research_bridge",
+    } and not authenticated:
         raise SnapshotValidationError(
             "daily-learning persisted provenance requires authenticated acquisition"
         )
@@ -3776,12 +3847,45 @@ def _restore_learning_batch(
                 cutoff=cutoff,
             )
             restored.append(_persisted_v6_decision(payload, envelope=dict(envelope)))
+        elif provenance == "persisted_research_bridge":
+            envelope = item.get("envelope")
+            if not isinstance(envelope, Mapping):
+                raise SnapshotValidationError(
+                    "daily-learning frozen research bridge envelope is malformed"
+                )
+            if market_date is None or cutoff is None:
+                raise SnapshotValidationError(
+                    "daily-learning research bridge restore context is missing"
+                )
+            from intraday_scanner.services.daily_strategy_learning_service import (
+                _persisted_research_bridge,
+                _validate_persisted_research_bridge,
+            )
+
+            restored_item = _persisted_research_bridge(payload, envelope=dict(envelope))
+            cutoff_at = _parse_learning_timestamp(cutoff)
+            if cutoff_at is None:
+                raise SnapshotValidationError(
+                    "daily-learning research bridge restore cutoff is malformed"
+                )
+            valid, reason = _validate_persisted_research_bridge(
+                restored_item,
+                market_date=market_date,
+                cutoff=cutoff_at,
+            )
+            if not valid:
+                raise SnapshotValidationError(
+                    f"daily-learning research bridge restore failed: {reason}"
+                )
+            restored.append(restored_item)
         else:
             restored.append(payload)
     return _FrozenLearningBatch(
         restored,
         invalid_reasons=invalid_reasons,
         invalid_identities=invalid_identities,
+        expected_selection_count=expected_selection_count,
+        expected_contributor_count=expected_contributor_count,
     )
 
 

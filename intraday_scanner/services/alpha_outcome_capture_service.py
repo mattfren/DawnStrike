@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -52,6 +53,7 @@ from intraday_scanner.providers.yahoo_chart_provider import (
     bars_from_yahoo_chart_payload,
     fetch_yahoo_chart,
     yahoo_chart_url,
+    yahoo_provider_symbol,
 )
 from intraday_scanner.services.alpha_official_cohort_service import (
     validate_or_recover_official_cohort,
@@ -68,6 +70,7 @@ UTC = timezone.utc
 CAPTURE_MODEL_VERSION = "alphaops-sourced-outcome-v3"
 YAHOO_RANGE = "5d"
 BAR_INTERVAL = "1m"
+ALPACA_TIMEFRAME = "1Min"
 DEFAULT_MAX_CLOSE_STALENESS_SECONDS = 90
 MAX_BAR_GAP_SECONDS = 60
 CONCLUSIVE_STATUSES = {
@@ -669,13 +672,12 @@ def capture_sourced_alpha_outcomes(
                 radar_bridge_stats = build_and_persist_research_episode_outcome_bridges(
                     store,
                     radar_selections,
-                    [*outcomes, *radar_outcomes],
+                    radar_outcomes,
                     market_date=resolved_date,
                     cutoff=session.closed_at.astimezone(UTC).isoformat(),
                     source_identity="alpha_sourced_eod_outcomes",
                     created_at=captured_at,
                 )
-                radar_bridge_stats["status"] = "COMPLETE"
             except SnapshotValidationError as exc:
                 radar_bridge_stats["status"] = "INELIGIBLE"
                 radar_bridge_stats["reason"] = str(exc)
@@ -979,6 +981,7 @@ def _collect_yahoo_candidates(
     candidates: list[tuple[list[OutcomeBar], dict[str, Any]]],
     errors: list[str],
 ) -> None:
+    provider_symbol = yahoo_provider_symbol(ticker)
     yahoo_url = yahoo_chart_url(
         ticker,
         range_name=YAHOO_RANGE,
@@ -988,7 +991,7 @@ def _collect_yahoo_candidates(
     for attempt in range(1, attempt_limit + 1):
         try:
             payload = fetcher(
-                ticker,
+                provider_symbol,
                 config,
                 range_name=YAHOO_RANGE,
                 interval=BAR_INTERVAL,
@@ -1008,6 +1011,15 @@ def _collect_yahoo_candidates(
                 session=session,
                 fetched_at=captured_at,
                 attempt=attempt,
+                request_contract={
+                    "provider": YAHOO_SOURCE_NAME,
+                    "ticker": ticker,
+                    "provider_symbol": provider_symbol,
+                    "endpoint": yahoo_url,
+                    "range": YAHOO_RANGE,
+                    "interval": BAR_INTERVAL,
+                    "include_pre_post": False,
+                },
             )
             requests.append(request)
             candidates.append((bars, request))
@@ -1064,6 +1076,8 @@ def _collect_alpaca_candidates(
                 config,
                 start=_iso_utc(session.opened_at),
                 end=_iso_utc(session.closed_at),
+                timeframe=ALPACA_TIMEFRAME,
+                feed=str(config.alpaca_data_feed),
             )
             bars = _regular_session_bars_from_rows(
                 ticker,
@@ -1079,6 +1093,16 @@ def _collect_alpaca_candidates(
                 session=session,
                 fetched_at=captured_at,
                 attempt=attempt,
+                request_contract={
+                    "provider": alpaca_source,
+                    "ticker": ticker,
+                    "symbols": [ticker],
+                    "endpoint": alpaca_url,
+                    "start": _iso_utc(session.opened_at),
+                    "end": _iso_utc(session.closed_at),
+                    "timeframe": ALPACA_TIMEFRAME,
+                    "feed": str(config.alpaca_data_feed),
+                },
             )
             requests.append(request)
             candidates.append((bars, request))
@@ -1106,10 +1130,17 @@ def _fetch_alpaca_rows(
     *,
     start: str,
     end: str,
+    timeframe: str,
+    feed: str,
 ) -> list[dict[str, Any]]:
     """Use Alpaca's read-only market-data endpoint; no trading API is imported."""
 
-    return AlpacaProvider(config).get_minute_bars([ticker], start, end, config)
+    if timeframe != ALPACA_TIMEFRAME or feed != str(config.alpaca_data_feed):
+        raise DataProviderError("Alpaca outcome request contract is not exact")
+    provider = AlpacaProvider(config)
+    if str(provider.feed) != feed:
+        raise DataProviderError("Alpaca outcome feed conflicts with provider configuration")
+    return provider.get_minute_bars([ticker], start, end, config)
 
 
 def _provider_request(
@@ -1121,6 +1152,7 @@ def _provider_request(
     session: SessionWindow,
     fetched_at: str,
     attempt: int,
+    request_contract: Mapping[str, Any],
 ) -> dict[str, Any]:
     coverage = _validate_bar_coverage(
         bars,
@@ -1133,6 +1165,7 @@ def _provider_request(
         "status": "ok" if coverage.is_complete else coverage.status,
         "source": source,
         "source_url": source_url,
+        "request_contract": dict(request_contract),
         "attempt": attempt,
         "fetched_at": fetched_at,
         "bar_count": len(bars),
@@ -1143,9 +1176,7 @@ def _provider_request(
             f"market-bars:{source}:{ticker}:{session.market_date}:"
             f"{BAR_INTERVAL}:{source_bar_hash}"
         ),
-        "source_coverage_complete": coverage.is_complete,
-        "coverage_status": coverage.status,
-        "coverage_detail": coverage.detail,
+        **coverage.to_dict(),
     }
 
 
@@ -1162,6 +1193,7 @@ def _selected_source_evidence(
         "source_fetched_at": selected.get("fetched_at"),
         "source_bar_hash_sha256": selected.get("source_bar_hash_sha256"),
         "source_coverage_complete": selected.get("source_coverage_complete"),
+        "request_contract": selected.get("request_contract"),
         "source_lineage": [dict(row) for row in requests],
         "provider_chain_exhausted": selected.get("source_coverage_complete") is not True,
         "independent_reconciliation": reconciliation,
@@ -1291,20 +1323,17 @@ def _derive_research_selection_outcome(
     declared_bar_hash = str(source_evidence.get("source_bar_hash_sha256") or "").strip().lower()
     computed_bar_hash = _bars_hash(bars)
     source_bar_hash = declared_bar_hash or computed_bar_hash
+    source_bar_payload = [bar.to_dict() for bar in bars]
     source_artifact_identity = str(
         source_evidence.get("source_artifact_identity") or ""
     ).strip()
     raw_lineage = source_evidence.get("source_lineage") or []
     lineage_rows = []
     if isinstance(raw_lineage, list):
-        source_provider = str(source_evidence.get("source") or "").strip()
-        source_endpoint = str(source_evidence.get("source_url") or "").strip()
         successful = [
             item
             for item in raw_lineage
             if isinstance(item, Mapping)
-            and str(item.get("source") or "").strip() == source_provider
-            and str(item.get("source_url") or "").strip() == source_endpoint
             and (
                 str(item.get("status") or "").lower() == "ok"
                 or item.get("source_coverage_complete") is True
@@ -1347,6 +1376,7 @@ def _derive_research_selection_outcome(
         "source_first_bar_at": _iso_utc(bars[0].observed_at) if bars else None,
         "source_last_bar_at": _iso_utc(bars[-1].observed_at) if bars else None,
         "source_bar_hash_sha256": source_bar_hash,
+        "source_bar_payload": source_bar_payload,
         "source_fetched_at": source_evidence.get("source_fetched_at"),
         "source_artifact_identity": source_artifact_identity,
         "source_lineage": lineage_rows,
@@ -1360,6 +1390,11 @@ def _derive_research_selection_outcome(
         "broker_execution_enabled": False,
         "capture_model_version": CAPTURE_MODEL_VERSION,
         "capture_mode": "automatic_sourced_selection_observation",
+        "independent_reconciliation": source_evidence.get("independent_reconciliation"),
+        "independent_reconciliation_status": str(
+            source_evidence.get("independent_reconciliation_status") or ""
+        ),
+        "source_conflict": source_evidence.get("source_conflict") is True,
     }
     lineage_valid = bool(lineage_rows) and all(
         isinstance(item, Mapping)
@@ -1378,8 +1413,25 @@ def _derive_research_selection_outcome(
         "source_artifact_identity": source_artifact_identity,
         "source_bar_hash_sha256": source_bar_hash,
         "source_lineage": lineage_rows,
+        "request_contract": source_evidence.get("request_contract"),
+        "independent_reconciliation": source_evidence.get("independent_reconciliation"),
+        "independent_reconciliation_status": str(
+            source_evidence.get("independent_reconciliation_status") or ""
+        ),
         "source_cutoff": _iso_utc(requested_at),
     }
+    try:
+        source_binding["reconciliation_hash_sha256"] = hashlib.sha256(
+            json.dumps(
+                source_binding["independent_reconciliation"],
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        source_binding["reconciliation_hash_sha256"] = ""
+        lineage_valid = False
     try:
         source_binding["source_request_hash_sha256"] = hashlib.sha256(
             json.dumps(
@@ -1392,6 +1444,104 @@ def _derive_research_selection_outcome(
     except (TypeError, ValueError):
         source_binding["source_request_hash_sha256"] = ""
         lineage_valid = False
+    try:
+        from intraday_scanner.services.research_episode_outcome_service import (
+            _expected_provider_request_contract,
+        )
+
+        expected_full_count = int(
+            (session.closed_at - session.opened_at).total_seconds() // 60
+        )
+        expected_full_start = _iso_utc(session.opened_at)
+        expected_full_end = _iso_utc(session.closed_at - timedelta(minutes=1))
+        expected_maximum_gap = (
+            0 if expected_full_count == 1 else MAX_BAR_GAP_SECONDS
+        )
+        selected_request = _expected_provider_request_contract(
+            provider=str(source_binding["provider"]),
+            ticker=ticker,
+            source_url=str(source_binding["source_url"]),
+            session_open=session.opened_at,
+            session_close=session.closed_at,
+        )
+        if source_binding["request_contract"] != selected_request:
+            raise SnapshotValidationError("selected provider request contract mismatch")
+        selected_lineage_count = 0
+        for item in lineage_rows:
+            item_provider = str(item.get("source") or "").strip()
+            item_url = str(item.get("source_url") or "").strip()
+            item_hash = str(item.get("source_bar_hash_sha256") or "").lower()
+            expected_request = _expected_provider_request_contract(
+                provider=item_provider,
+                ticker=ticker,
+                source_url=item_url,
+                session_open=session.opened_at,
+                session_close=session.closed_at,
+            )
+            expected_artifact = (
+                f"market-bars:{item_provider}:{ticker}:{session.market_date}:"
+                f"{BAR_INTERVAL}:{item_hash}"
+            )
+            if (
+                str(item.get("ticker") or "").upper() != ticker
+                or not re.fullmatch(r"[0-9a-f]{64}", item_hash)
+                or item.get("request_contract") != expected_request
+                or str(item.get("source_artifact_identity") or "")
+                != expected_artifact
+                or str(item.get("status") or "").lower() != "ok"
+                or item.get("source_coverage_complete") is not True
+                or str(item.get("coverage_status") or "").lower() != "complete"
+                or item.get("coverage_expected_start_at") != expected_full_start
+                or item.get("coverage_expected_end_at") != expected_full_end
+                or item.get("coverage_expected_minute_count") != expected_full_count
+                or item.get("coverage_observed_minute_count") != expected_full_count
+                or item.get("bar_count") != expected_full_count
+                or item.get("first_bar_at") != expected_full_start
+                or item.get("last_bar_at") != expected_full_end
+                or item.get("coverage_maximum_gap_seconds") != expected_maximum_gap
+                or item.get("coverage_allowed_gap_seconds") != MAX_BAR_GAP_SECONDS
+            ):
+                raise SnapshotValidationError("provider lineage contract is incomplete")
+            if (
+                item_provider == source_binding["provider"]
+                and item_url == source_binding["source_url"]
+            ):
+                selected_lineage_count += 1
+                if (
+                    item_hash != source_bar_hash
+                    or str(item.get("source_artifact_identity") or "")
+                    != source_artifact_identity
+                ):
+                    raise SnapshotValidationError(
+                        "selected provider lineage conflicts with source binding"
+                    )
+        reconciliation = source_binding["independent_reconciliation"]
+        if not isinstance(reconciliation, Mapping):
+            raise SnapshotValidationError("provider reconciliation is absent")
+        lineage_source_names = sorted(
+            {str(item.get("source") or "") for item in lineage_rows}
+        )
+        reconciliation_status = str(reconciliation.get("status") or "")
+        if (
+            selected_lineage_count < 1
+            or reconciliation.get("independent_source_count")
+            != len(lineage_source_names)
+            or reconciliation_status == "DISAGREEMENT"
+        ):
+            raise SnapshotValidationError("provider reconciliation is not learning-safe")
+        if len(lineage_source_names) < 2:
+            if reconciliation_status != "NOT_AVAILABLE" or reconciliation.get(
+                "agreement"
+            ) is not None:
+                raise SnapshotValidationError("provider reconciliation availability mismatch")
+        elif (
+            reconciliation_status != "PASSED"
+            or reconciliation.get("agreement") is not True
+            or reconciliation.get("source_names") != lineage_source_names
+        ):
+            raise SnapshotValidationError("provider reconciliation lineage mismatch")
+    except (SnapshotValidationError, TypeError, ValueError):
+        lineage_valid = False
     source_binding_valid = bool(
         source_binding["provider"]
         and source_binding["source_url"]
@@ -1400,13 +1550,14 @@ def _derive_research_selection_outcome(
         and source_binding["source_bar_hash_sha256"] == computed_bar_hash
         and lineage_valid
         and source_binding["provider"] in lineage_sources
-        and any(
-            isinstance(item, Mapping)
-            and str(item.get("source") or "").strip() == source_binding["provider"]
-            and str(item.get("source_url") or "").strip()
-            == source_binding["source_url"]
-            for item in lineage_rows
+        and source_artifact_identity
+        == (
+            f"market-bars:{source_binding['provider']}:{ticker}:{session.market_date}:"
+            f"{BAR_INTERVAL}:{source_bar_hash}"
         )
+        and source_evidence.get("source_conflict") is not True
+        and str(source_evidence.get("independent_reconciliation_status") or "")
+        != "DISAGREEMENT"
     )
     try:
         from intraday_scanner.services.research_episode_outcome_service import (
@@ -1464,7 +1615,8 @@ def _derive_research_selection_outcome(
             "outcome_status": "INELIGIBLE",
             "learning_eligible": False,
             "outcome_reason": (
-                "source provider/artifact/request lineage or canonical bars hash is invalid"
+                "source provider/artifact/request/reconciliation lineage or "
+                "canonical bars hash is invalid"
             ),
         })
         return base
@@ -1622,7 +1774,15 @@ def _research_bar_complete(bar: OutcomeBar) -> bool:
         values = tuple(float(value) for value in (bar.open, bar.high, bar.low, bar.close))
     except (TypeError, ValueError):
         return False
-    return all(math.isfinite(value) and value > 0 for value in values)
+    if not all(math.isfinite(value) and value > 0 for value in values):
+        return False
+    if bar.volume is None:
+        return True
+    try:
+        volume = float(bar.volume)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(volume) and volume >= 0
 
 
 def _source_choice_key(bars: list[OutcomeBar]) -> tuple[int, int, int]:
@@ -2589,9 +2749,11 @@ def _regular_session_bars_from_rows(
 ) -> list[OutcomeBar]:
     by_time: dict[datetime, OutcomeBar] = {}
     for row in rows:
-        row_ticker = str(row.get("ticker") or ticker).upper()
+        row_ticker = str(row.get("ticker") or "").strip().upper()
+        if not row_ticker:
+            raise ValueError("provider bar row lacks an explicit ticker binding")
         if row_ticker != ticker.upper():
-            continue
+            raise ValueError("provider bar row ticker conflicts with requested ticker")
         observed_at = _timestamp(row.get("timestamp"))
         close = _float(row.get("close"))
         if observed_at is None or close is None:
@@ -3125,9 +3287,42 @@ def _write_artifacts(
     capture_attempts: list[dict[str, Any]] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_bar_artifact = {
+        "schema_version": "dawnstrike.alpha_outcome_source_bars.v1",
+        "market_date": str(summary.get("market_date") or "")[:10],
+        "bars_by_ticker": source_bars,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    source_bar_artifact_bytes = json.dumps(
+        source_bar_artifact,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    source_bar_artifact_hash = hashlib.sha256(source_bar_artifact_bytes).hexdigest()
+    source_bar_artifact_path = output_dir / (
+        f"alpha_outcome_source_bars-{source_bar_artifact_hash}.json"
+    )
+    if source_bar_artifact_path.exists():
+        if source_bar_artifact_path.read_bytes() != source_bar_artifact_bytes:
+            raise SnapshotValidationError(
+                "content-addressed source-bar artifact conflicts with existing bytes"
+            )
+    else:
+        source_bar_artifact_path.write_bytes(source_bar_artifact_bytes)
+    summary["source_bar_artifact"] = {
+        "artifact_path": str(source_bar_artifact_path),
+        "artifact_hash_sha256": source_bar_artifact_hash,
+        "content_addressed": True,
+        "mutable_alias_authoritative": False,
+    }
     _write_json(output_dir / "alpha_outcome_capture.json", summary)
     _write_json(output_dir / "alpha_sourced_outcomes.json", outcomes)
     _write_json(output_dir / "alpha_outcome_capture_diagnostics.json", diagnostics)
+    # Backward-compatible operator diagnostic only.  Certification uses the
+    # content-addressed artifact above and the exact per-bridge bar payload.
     _write_json(output_dir / "alpha_outcome_source_bars.json", source_bars)
     _write_json(
         output_dir / "alpha_outcome_capture_attempts.json",
@@ -3357,6 +3552,7 @@ def _bars_hash(bars: list[OutcomeBar]) -> str:
         [bar.to_dict() for bar in bars],
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.scenario.contracts import (
@@ -8660,7 +8661,7 @@ class SQLiteScanStore:
 
     def persist_research_episode_outcome_bridges(
         self, rows: Iterable[Mapping[str, Any]]
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """Persist immutable selection-only strategy outcome joins.
 
         A retry may restate the exact bridge.  Any identity or payload drift is
@@ -8672,6 +8673,8 @@ class SQLiteScanStore:
         materialized = [dict(row) for row in rows]
         inserted = 0
         reused = 0
+        persisted_rows: list[dict[str, Any]] = []
+        revision_mappings: list[dict[str, str]] = []
         try:
             with self._connect() as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
@@ -8683,6 +8686,10 @@ class SQLiteScanStore:
                     logical_key = str(row.get("logical_key") or "").strip()
                     if not bridge_id or not bridge_hash or not logical_key:
                         raise StorageError("research outcome bridge identity is required")
+                    if logical_key.endswith("-r2"):
+                        raise StorageError(
+                            "research outcome bridge revisions may only be minted by the store"
+                        )
                     bridge_body = {
                         key: value
                         for key, value in row.items()
@@ -8694,27 +8701,52 @@ class SQLiteScanStore:
                             sort_keys=True,
                             separators=(",", ":"),
                             ensure_ascii=True,
+                            allow_nan=False,
                         ).encode("utf-8")
                     ).hexdigest()
                     if bridge_hash != expected_bridge_hash:
                         raise StorageError("research outcome bridge hash mismatch")
                     if bridge_id != "rep-" + bridge_hash[:24]:
                         raise StorageError("research outcome bridge ID is not derived from hash")
-                    if (
-                        row.get("learning_eligible") is True
-                        or str(row.get("outcome_status") or "").upper()
-                        == "COMPLETE_SOURCED"
-                    ):
-                        try:
-                            from intraday_scanner.services.research_episode_outcome_service import (
-                                validate_research_episode_outcome_bridge,
-                            )
+                    try:
+                        from intraday_scanner.services.research_episode_outcome_service import (
+                            validate_research_episode_outcome_bridge,
+                        )
 
-                            validate_research_episode_outcome_bridge(row)
-                        except (SnapshotValidationError, TypeError, ValueError) as exc:
+                        validate_research_episode_outcome_bridge(row)
+                    except (SnapshotValidationError, TypeError, ValueError) as exc:
+                        raise StorageError(
+                            "research outcome producer proof is invalid: " + str(exc)
+                        ) from exc
+                    if row.get("learning_eligible") is True:
+                        receipt_id = str(row.get("receipt_id") or "")
+                        authoritative_receipt = connection.execute(
+                            """SELECT receipt_hash_sha256, strategy_id,
+                            strategy_version, symbol, market_date, canonical_json
+                            FROM strategy_decision_receipts WHERE receipt_id = ?""",
+                            (receipt_id,),
+                        ).fetchone()
+                        embedded_receipt = row.get("strategy_decision_receipt")
+                        if (
+                            authoritative_receipt is None
+                            or not isinstance(embedded_receipt, Mapping)
+                            or str(authoritative_receipt[0]).lower()
+                            != str(row.get("receipt_hash_sha256") or "").lower()
+                            or str(authoritative_receipt[1])
+                            != str(row.get("strategy_id") or "")
+                            or str(authoritative_receipt[2])
+                            != str(row.get("strategy_version") or "")
+                            or str(authoritative_receipt[3]).upper()
+                            != str(row.get("ticker") or "").upper()
+                            or str(authoritative_receipt[4])[:10]
+                            != str(row.get("market_date") or "")[:10]
+                            or str(authoritative_receipt[5])
+                            != canonical_json(dict(embedded_receipt))
+                        ):
                             raise StorageError(
-                                "research outcome producer proof is invalid: " + str(exc)
-                            ) from exc
+                                "research outcome bridge requires its exact persisted "
+                                "strategy decision receipt"
+                            )
                     payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
 
                     def comparable_payload(value: str) -> str:
@@ -8738,6 +8770,7 @@ class SQLiteScanStore:
                                 "research outcome bridge identity/payload mismatch: " + bridge_id
                             )
                         reused += 1
+                        persisted_rows.append(json.loads(str(existing[1])))
                         continue
                     logical_existing = connection.execute(
                         "SELECT bridge_id, bridge_hash_sha256, payload_json "
@@ -8763,6 +8796,9 @@ class SQLiteScanStore:
                             existing_status in {"MISSING", "INELIGIBLE"}
                             and incoming_status == "COMPLETE_SOURCED"
                         ):
+                            candidate_bridge_id = bridge_id
+                            persisted_from_bridge_id = str(logical_existing[0])
+                            persisted_from_logical_key = logical_key
                             row["logical_key"] = logical_key + "-r2"
                             logical_key = str(row["logical_key"])
                             bridge_body = {
@@ -8776,16 +8812,34 @@ class SQLiteScanStore:
                                     sort_keys=True,
                                     separators=(",", ":"),
                                     ensure_ascii=True,
+                                    allow_nan=False,
                                 ).encode("utf-8")
                             ).hexdigest()
                             bridge_id = "rep-" + bridge_hash[:24]
                             row["bridge_hash_sha256"] = bridge_hash
                             row["bridge_id"] = bridge_id
+                            revision_mappings.append(
+                                {
+                                    "from_bridge_id": persisted_from_bridge_id,
+                                    "from_logical_key": persisted_from_logical_key,
+                                    "candidate_bridge_id": candidate_bridge_id,
+                                    "to_bridge_id": bridge_id,
+                                    "to_logical_key": logical_key,
+                                }
+                            )
                             payload_json = json.dumps(
                                 row, sort_keys=True, separators=(",", ":")
                             )
                             try:
-                                validate_research_episode_outcome_bridge(row)
+                                from intraday_scanner.services import (
+                                    research_episode_outcome_service,
+                                )
+
+                                persisted_validator = (
+                                    research_episode_outcome_service
+                                    ._validate_persisted_research_episode_outcome_bridge
+                                )
+                                persisted_validator(row)
                             except (SnapshotValidationError, TypeError, ValueError) as exc:
                                 raise StorageError(
                                     "research outcome producer proof is invalid: "
@@ -8808,6 +8862,7 @@ class SQLiteScanStore:
                                 )
                         if logical_existing is not None:
                             reused += 1
+                            persisted_rows.append(json.loads(str(logical_existing[2])))
                             continue
                     owner = connection.execute(
                         "SELECT bridge_id FROM research_episode_outcome_bridges "
@@ -8863,7 +8918,14 @@ class SQLiteScanStore:
                         ),
                     )
                     inserted += 1
-            return {"inserted": inserted, "reused": reused, "row_count": len(materialized)}
+                    persisted_rows.append(json.loads(payload_json))
+            return {
+                "inserted": inserted,
+                "reused": reused,
+                "row_count": len(materialized),
+                "persisted_rows": persisted_rows,
+                "revision_mappings": revision_mappings,
+            }
         except StorageError:
             raise
         except sqlite3.Error as exc:
@@ -9007,7 +9069,12 @@ def _selection_semantics(row: Mapping[str, Any]) -> tuple[Any, ...]:
         str(row.get("selected_at") or ""),
         str(row.get("event_key") or ""),
         str(row.get("body_sha256") or ""),
-        _json_value(row.get("payload_json")),
+        json.dumps(
+            _json_value(row.get("payload_json")),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
     )
 
 

@@ -2481,62 +2481,71 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
 ) -> None:
     """Bind one immutable bridge to its logical selection/contributor key."""
 
-    connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_update")
-    connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_delete")
-    _add_column_if_missing(
-        connection,
-        "research_episode_outcome_bridges",
-        "logical_key TEXT NOT NULL DEFAULT ''",
-    )
-    existing_rows = connection.execute(
-        """
-        SELECT bridge_id, market_date, selection_id, strategy_id,
-               strategy_version, receipt_id
-        FROM research_episode_outcome_bridges
-        WHERE logical_key = ''
-        """
-    ).fetchall()
-    logical_counts: dict[str, int] = {}
-    for row in sorted(existing_rows, key=lambda value: str(value[0])):
-        identity = {
-            "market_date": str(row[1] or "")[:10],
-            "selection_id": str(row[2] or ""),
-            "strategy_id": str(row[3] or ""),
-            "strategy_version": str(row[4] or ""),
-            "receipt_id": str(row[5] or ""),
-        }
-        digest = hashlib.sha256(
-            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        logical_base = "research-bridge-logical-v1-" + digest
-        revision = logical_counts.get(logical_base, 0) + 1
-        logical_counts[logical_base] = revision
-        logical_key = (
-            logical_base if revision == 1 else f"{logical_base}-r{revision}"
+    savepoint = "migration_034_research_bridge"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_update")
+        connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_delete")
+        _add_column_if_missing(
+            connection,
+            "research_episode_outcome_bridges",
+            "logical_key TEXT NOT NULL DEFAULT ''",
+        )
+        existing_rows = connection.execute(
+            """
+            SELECT bridge_id, market_date, selection_id, strategy_id,
+                   strategy_version, receipt_id
+            FROM research_episode_outcome_bridges
+            WHERE logical_key = ''
+            """
+        ).fetchall()
+        logical_counts: dict[str, int] = {}
+        for row in sorted(existing_rows, key=lambda value: str(value[0])):
+            identity = {
+                "market_date": str(row[1] or "")[:10],
+                "selection_id": str(row[2] or ""),
+                "strategy_id": str(row[3] or ""),
+                "strategy_version": str(row[4] or ""),
+                "receipt_id": str(row[5] or ""),
+            }
+            digest = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            logical_base = "research-bridge-logical-v1-" + digest
+            revision = logical_counts.get(logical_base, 0) + 1
+            logical_counts[logical_base] = revision
+            logical_key = (
+                logical_base if revision == 1 else f"{logical_base}-r{revision}"
+            )
+            connection.execute(
+                "UPDATE research_episode_outcome_bridges SET logical_key = ? WHERE bridge_id = ?",
+                (logical_key, str(row[0])),
+            )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_research_episode_outcome_bridges_logical_key
+            ON research_episode_outcome_bridges(logical_key)
+            """
         )
         connection.execute(
-            "UPDATE research_episode_outcome_bridges SET logical_key = ? WHERE bridge_id = ?",
-            (logical_key, str(row[0])),
+            """CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_update
+            BEFORE UPDATE ON research_episode_outcome_bridges BEGIN
+                SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+            END"""
         )
-    connection.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS
-            idx_research_episode_outcome_bridges_logical_key
-        ON research_episode_outcome_bridges(logical_key)
-        """
-    )
-    connection.executescript(
-        """
-        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_update
-        BEFORE UPDATE ON research_episode_outcome_bridges BEGIN
-            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
-        END;
-        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_delete
-        BEFORE DELETE ON research_episode_outcome_bridges BEGIN
-            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
-        END;
-        """
-    )
+        connection.execute(
+            """CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_delete
+            BEFORE DELETE ON research_episode_outcome_bridges BEGIN
+                SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+            END"""
+        )
+    except Exception:
+        connection.execute(f"ROLLBACK TO {savepoint}")
+        connection.execute(f"RELEASE {savepoint}")
+        raise
+    else:
+        connection.execute(f"RELEASE {savepoint}")
 
 
 def _add_column_if_missing(

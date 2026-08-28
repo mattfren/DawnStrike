@@ -22,6 +22,12 @@ YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_SOURCE_NAME = "yahoo_finance_chart"
 
 
+def yahoo_provider_symbol(symbol: str) -> str:
+    """Map a canonical US equity symbol to Yahoo's explicit path spelling."""
+
+    return str(symbol or "").strip().upper().replace(".", "-")
+
+
 def yahoo_chart_url(
     symbol: str,
     *,
@@ -36,7 +42,8 @@ def yahoo_chart_url(
             "includePrePost": "true" if include_pre_post else "false",
         }
     )
-    return f"{YAHOO_CHART_BASE_URL}/{urllib.parse.quote(symbol.upper())}?{query}"
+    provider_symbol = yahoo_provider_symbol(symbol)
+    return f"{YAHOO_CHART_BASE_URL}/{urllib.parse.quote(provider_symbol)}?{query}"
 
 
 def fetch_yahoo_chart(

@@ -2955,11 +2955,29 @@ def _merge_strategy_adapter_signals(
             _seen_contributors.add(key)
             receipt = row.get("strategy_decision_receipt") or row.get("decision_receipt")
             receipt_id = str(row.get("receipt_id") or "").strip()
+            receipt_input: dict[str, Any] = {}
             if isinstance(receipt, dict):
                 receipt_id = str(receipt.get("receipt_id") or receipt_id).strip()
+                try:
+                    decoded_input = json.loads(str(receipt.get("input_payload_json") or ""))
+                    if isinstance(decoded_input, dict):
+                        receipt_input = decoded_input
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    receipt_input = {}
                 if receipt_id and receipt_id not in _seen_receipts:
                     _receipts.append(dict(receipt))
                     _seen_receipts.add(receipt_id)
+            receipt_plan = receipt_input.get("alphaops_market_structure_plan")
+            if not isinstance(receipt_plan, dict):
+                receipt_plan = {}
+            direction = str(
+                row.get("direction")
+                or row.get("trade_direction")
+                or receipt_input.get("direction")
+                or receipt_input.get("trade_direction")
+                or receipt_plan.get("direction")
+                or ""
+            ).strip().lower()
             _contributors.append(
                 {
                     "strategy_id": strategy_id,
@@ -2967,6 +2985,7 @@ def _merge_strategy_adapter_signals(
                     "strategy_semantics_fingerprint": strategy_fp,
                     "source_signal_id": source_id,
                     "signal_id": str(row.get("signal_id") or ""),
+                    "direction": direction,
                     "strategy_adapter": str(row.get("strategy_adapter") or ""),
                     "receipt_id": receipt_id,
                     "receipt_hash_sha256": str(row.get("receipt_hash_sha256") or ""),

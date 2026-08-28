@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.alpha.v6.contracts import ALPHAOPS_V6_STRATEGY_VERSION
+from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.performance.contracts import Cohort, normalize_cohort, safe_float
 
 
@@ -889,6 +891,7 @@ def load_strategy_learning_database_snapshot_readonly(
             "strategy_decision_receipts",
             "alpha_v6_decisions",
             "research_episode_outcome_bridges",
+            "signal_selections",
         ):
             if table not in tables:
                 table_generations[table] = {
@@ -929,17 +932,204 @@ def load_strategy_learning_database_snapshot_readonly(
             _connection=connection,
         )
         if table_generations["research_episode_outcome_bridges"]["exists"]:
-            bridge_rows = [
-                json.loads(str(row[0]))
-                for row in connection.execute(
-                    """SELECT payload_json FROM research_episode_outcome_bridges
-                    WHERE market_date = ? AND source_cutoff <= ?
-                    ORDER BY selected_at ASC, bridge_id ASC""",
-                    (market_date[:10], date_cutoff),
+            raw_bridge_rows = connection.execute(
+                """SELECT bridge_id, bridge_hash_sha256, logical_key, selection_id,
+                slate_id, slate_content_hash_sha256, episode_id, ticker, market_date,
+                selected_at, strategy_id, strategy_version, receipt_id,
+                receipt_hash_sha256, outcome_status, learning_eligible,
+                source_observation_id, source_observation_hash_sha256,
+                source_path_id, source_path_hash_sha256, source_cutoff,
+                outcome_artifact_id, outcome_artifact_hash_sha256,
+                payload_json, created_at
+                FROM research_episode_outcome_bridges
+                WHERE market_date = ?
+                ORDER BY selected_at ASC, bridge_id ASC""",
+                (market_date[:10],),
+            ).fetchall()
+            from intraday_scanner.services.daily_strategy_learning_service import (
+                _persisted_research_bridge,
+            )
+            from intraday_scanner.services.research_episode_outcome_service import (
+                _validate_persisted_research_episode_outcome_bridge,
+            )
+
+            validated_bridge_values: list[Mapping[str, Any]] = []
+            bridge_invalid_reasons: dict[str, int] = {}
+            bridge_invalid_identities: list[str] = []
+            expected_selection_count = 0
+            expected_contributor_count = 0
+            if "signal_selections" in tables:
+                expected_selection_rows = connection.execute(
+                    """SELECT payload_json FROM signal_selections
+                    WHERE cohort = ? AND substr(selected_at, 1, 10) = ?
+                    ORDER BY selection_id""",
+                    ("research_radar", market_date[:10]),
                 ).fetchall()
-            ]
+                expected_selection_count = len(expected_selection_rows)
+                for expected_row in expected_selection_rows:
+                    try:
+                        expected_payload = json.loads(str(expected_row[0]))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        expected_contributor_count += 1
+                        continue
+                    expected_signal = (
+                        expected_payload.get("signal")
+                        if isinstance(expected_payload, Mapping)
+                        else None
+                    )
+                    contributors = (
+                        expected_signal.get("strategy_contributors")
+                        if isinstance(expected_signal, Mapping)
+                        else None
+                    )
+                    expected_contributor_count += (
+                        len(contributors)
+                        if isinstance(contributors, list) and contributors
+                        else 1
+                    )
+            cutoff_at = cutoff
+            for raw_bridge in raw_bridge_rows:
+                envelope = dict(raw_bridge)
+                payload_text = str(envelope.pop("payload_json"))
+                identity = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+                try:
+                    payload = json.loads(payload_text)
+                    if not isinstance(payload, dict):
+                        raise ValueError("payload is not an object")
+                    _validate_persisted_research_episode_outcome_bridge(payload)
+                    if payload.get("learning_eligible") is True:
+                        authoritative_receipt = connection.execute(
+                            """SELECT receipt_hash_sha256, strategy_id,
+                            strategy_version, symbol, market_date, canonical_json
+                            FROM strategy_decision_receipts WHERE receipt_id = ?""",
+                            (str(payload.get("receipt_id") or ""),),
+                        ).fetchone()
+                        embedded_receipt = payload.get("strategy_decision_receipt")
+                        if (
+                            authoritative_receipt is None
+                            or not isinstance(embedded_receipt, Mapping)
+                            or str(authoritative_receipt[0]).lower()
+                            != str(payload.get("receipt_hash_sha256") or "").lower()
+                            or str(authoritative_receipt[1])
+                            != str(payload.get("strategy_id") or "")
+                            or str(authoritative_receipt[2])
+                            != str(payload.get("strategy_version") or "")
+                            or str(authoritative_receipt[3]).upper()
+                            != str(payload.get("ticker") or "").upper()
+                            or str(authoritative_receipt[4])[:10]
+                            != str(payload.get("market_date") or "")[:10]
+                            or str(authoritative_receipt[5])
+                            != canonical_json(dict(embedded_receipt))
+                        ):
+                            raise ValueError(
+                                "exact persisted strategy decision receipt is absent"
+                            )
+                    source_cutoff = _parse_timestamp(payload.get("source_cutoff"))
+                    created_at = _parse_timestamp(payload.get("created_at"))
+                    if source_cutoff is None or source_cutoff > cutoff_at:
+                        raise ValueError("source cutoff exceeds learning cutoff")
+                    if created_at is None or created_at > cutoff_at:
+                        raise ValueError("created_at exceeds learning cutoff")
+                    for field, stored in envelope.items():
+                        payload_value = payload.get(field)
+                        if field == "learning_eligible":
+                            if (
+                                isinstance(stored, bool)
+                                or stored not in (0, 1)
+                                or not isinstance(payload_value, bool)
+                                or bool(stored) is not payload_value
+                            ):
+                                raise ValueError("learning_eligible column mismatch")
+                        elif field in {
+                            "source_observation_id",
+                            "source_observation_hash_sha256",
+                            "source_path_id",
+                            "source_path_hash_sha256",
+                            "source_cutoff",
+                            "outcome_artifact_id",
+                            "outcome_artifact_hash_sha256",
+                        }:
+                            if ("" if stored is None else str(stored)) != (
+                                "" if payload_value is None else str(payload_value)
+                            ):
+                                raise ValueError(f"{field} column mismatch")
+                        elif str(stored) != str(payload_value):
+                            raise ValueError(f"{field} column mismatch")
+                    validated_bridge_values.append(
+                        _persisted_research_bridge(payload, envelope=envelope)
+                    )
+                except (TypeError, ValueError, KeyError, SnapshotValidationError) as exc:
+                    reason = f"bridge_integrity_failure:{type(exc).__name__}:{exc}"
+                    bridge_invalid_reasons[reason] = bridge_invalid_reasons.get(reason, 0) + 1
+                    bridge_invalid_identities.append(identity)
+
+            bridge_values: list[Mapping[str, Any]] = []
+            revisions_by_logical_key: dict[str, list[Mapping[str, Any]]] = {}
+            for value in validated_bridge_values:
+                logical_key = str(value.get("logical_key") or "")
+                logical_base = (
+                    logical_key[:-3] if logical_key.endswith("-r2") else logical_key
+                )
+                revisions_by_logical_key.setdefault(logical_base, []).append(value)
+            for logical_base, revisions in sorted(revisions_by_logical_key.items()):
+                by_key = {
+                    str(value.get("logical_key") or ""): value for value in revisions
+                }
+                base = by_key.get(logical_base)
+                r2 = by_key.get(logical_base + "-r2")
+                topology_valid = len(by_key) == len(revisions) and (
+                    (len(revisions) == 1 and base is not None)
+                    or (
+                        len(revisions) == 2
+                        and base is not None
+                        and r2 is not None
+                        and base.get("learning_eligible") is not True
+                        and str(base.get("outcome_status") or "").upper()
+                        in {"MISSING", "INELIGIBLE"}
+                        and r2.get("learning_eligible") is True
+                        and str(r2.get("source_outcome_status") or "").upper()
+                        == "COMPLETE_SOURCED"
+                    )
+                )
+                if topology_valid:
+                    bridge_values.append(r2 if r2 is not None else base)
+                    continue
+                reason = "bridge_revision_topology_invalid"
+                bridge_invalid_reasons[reason] = (
+                    bridge_invalid_reasons.get(reason, 0) + 1
+                )
+                bridge_invalid_identities.append(
+                    hashlib.sha256(logical_base.encode("utf-8")).hexdigest()
+                )
+
+            class _BridgeBatch(tuple):
+                def __new__(
+                    cls,
+                    values,
+                    *,
+                    invalid_reasons,
+                    invalid_identities,
+                    expected_selection_count,
+                    expected_contributor_count,
+                ):
+                    result = super().__new__(cls, values)
+                    result.invalid_reasons = dict(sorted(invalid_reasons.items()))
+                    result.invalid_count = sum(result.invalid_reasons.values())
+                    result.invalid_identities = tuple(invalid_identities)
+                    result.expected_selection_count = int(expected_selection_count)
+                    result.expected_contributor_count = int(expected_contributor_count)
+                    result.persisted_history_count = len(validated_bridge_values)
+                    return result
+
+            bridge_rows = _BridgeBatch(
+                bridge_values,
+                invalid_reasons=bridge_invalid_reasons,
+                invalid_identities=bridge_invalid_identities,
+                expected_selection_count=expected_selection_count,
+                expected_contributor_count=expected_contributor_count,
+            )
         else:
-            bridge_rows = []
+            bridge_rows = None
         generation = {
             "database_path": str(path),
             "transaction": (

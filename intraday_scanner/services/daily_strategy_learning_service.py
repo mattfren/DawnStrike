@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.v2.strategies import (
     StrategySpec,
     build_alphaops_intraday_strategy,
@@ -72,6 +73,7 @@ _EVIDENCE_TIMESTAMP_FIELDS = (
 # marker field.  The readonly DB adapter creates this envelope below.
 _TRUSTED_RECEIPT_TOKEN = object()
 _TRUSTED_V6_TOKEN = object()
+_TRUSTED_RESEARCH_BRIDGE_TOKEN = object()
 _TRUSTED_NO_EVIDENCE_TOKEN = object()
 _LEARNING_MANIFEST_KEY_ENV = "DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY"
 _LEARNING_MANIFEST_KEY_FILE_ENV = "DAWNSTRIKE_DAILY_LEARNING_HMAC_KEY_FILE"
@@ -138,6 +140,32 @@ def _persisted_v6_decision(
     payload: Mapping[str, Any], *, envelope: Mapping[str, Any] | None = None
 ) -> _PersistedV6Decision:
     return _PersistedV6Decision(payload, envelope=envelope, token=_TRUSTED_V6_TOKEN)
+
+
+class _PersistedResearchEpisodeOutcomeBridge(dict[str, Any]):
+    """Validated append-only research bridge plus exact SQLite row envelope."""
+
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        envelope: Mapping[str, Any],
+        token: object,
+    ) -> None:
+        if token is not _TRUSTED_RESEARCH_BRIDGE_TOKEN:
+            raise TypeError("persisted research bridge provenance is private")
+        super().__init__(payload)
+        self._envelope = dict(envelope)
+
+
+def _persisted_research_bridge(
+    payload: Mapping[str, Any], *, envelope: Mapping[str, Any]
+) -> _PersistedResearchEpisodeOutcomeBridge:
+    return _PersistedResearchEpisodeOutcomeBridge(
+        payload,
+        envelope=envelope,
+        token=_TRUSTED_RESEARCH_BRIDGE_TOKEN,
+    )
 
 
 class _AuthenticatedNoEvidenceReceipts(tuple):
@@ -1550,6 +1578,11 @@ def run_daily_strategy_learning(
         market_date=context.market_date,
         cutoff=_cutoff_datetime(context),
     )
+    valid_research_bridges, bridge_ingress = _validated_research_bridges(
+        research_episode_outcomes,
+        market_date=context.market_date,
+        cutoff=_cutoff_datetime(context),
+    )
     valid_v6 = tuple(row for row in (v6_decisions or ()) if isinstance(row, _PersistedV6Decision))
     v6_invalid_count = len(tuple(v6_decisions or ())) - len(valid_v6)
     v6_invalid_reasons = dict(getattr(v6_decisions, "invalid_reasons", {}))
@@ -1678,12 +1711,21 @@ def run_daily_strategy_learning(
     # Keep raw receipt observations visible for diagnostics, but only the
     # authenticated persisted subset can contribute to certification.
     receipt_learning_receipts = _apply_research_episode_outcomes(
-        valid_receipts, research_episode_outcomes
+        valid_receipts, valid_research_bridges
     )
     receipt_learning = _aggregate_decision_receipts(receipt_learning_receipts)
-    receipt_learning["research_episode_outcome_bridges"] = _bridge_learning_summary(
-        research_episode_outcomes, valid_receipts
+    bridge_learning = _bridge_learning_summary(
+        valid_research_bridges,
+        valid_receipts,
+        ingress=bridge_ingress,
+        expected_selection_count=int(
+            getattr(research_episode_outcomes, "expected_selection_count", 0) or 0
+        ),
+        expected_contributor_count=int(
+            getattr(research_episode_outcomes, "expected_contributor_count", 0) or 0
+        ),
     )
+    receipt_learning["research_episode_outcome_bridges"] = bridge_learning
     receipt_learning["valid_receipt_count"] = len(valid_receipts)
     receipt_learning["invalid_receipt_count"] = int(receipt_ingress["invalid_count"])
     receipt_learning["invalid_receipt_reasons"] = receipt_ingress["invalid_reasons"]
@@ -1758,6 +1800,7 @@ def run_daily_strategy_learning(
     )
     receipt_learning["strategy_coverage"] = strategy_coverage
     receipt_coverage["strategy_coverage"] = strategy_coverage
+    receipt_coverage["research_episode_outcome_bridges"] = bridge_learning
     receipt_coverage["v6_identity"] = {
         "strategy_id": EXPECTED_V6_DECISION_IDENTITY[0],
         "strategy_version": EXPECTED_V6_DECISION_IDENTITY[1],
@@ -1767,6 +1810,13 @@ def run_daily_strategy_learning(
         if receipt_coverage.get("status") != "COMPLETE"
         or v6_source_status in {"NOT_PROVIDED", "NO_EVIDENCE", "INTEGRITY_FAILURE"}
         or strategy_coverage_incomplete
+        or (
+            bridge_learning["status"] != "COMPLETE"
+            and (
+                bridge_learning["expected_contributor_count"] > 0
+                or bridge_learning["invalid_count"] > 0
+            )
+        )
         else "COMPLETE"
     )
     receipt_coverage["coverage_hash_sha256"] = _sha256(
@@ -1778,6 +1828,13 @@ def run_daily_strategy_learning(
         and v6_source_status
         not in {"NOT_PROVIDED", "NO_EVIDENCE", "INTEGRITY_FAILURE"}
         and not strategy_coverage_incomplete
+        and (
+            bridge_learning["status"] == "COMPLETE"
+            or (
+                bridge_learning["expected_contributor_count"] == 0
+                and bridge_learning["invalid_count"] == 0
+            )
+        )
         else "incomplete"
     )
 
@@ -1867,6 +1924,124 @@ def run_daily_strategy_learning(
     }
 
 
+def _validate_persisted_research_bridge(
+    value: Mapping[str, Any],
+    *,
+    market_date: str,
+    cutoff: datetime,
+) -> tuple[bool, str]:
+    if not isinstance(value, _PersistedResearchEpisodeOutcomeBridge):
+        return False, "bridge_not_from_persisted_readonly_source"
+    try:
+        from intraday_scanner.services.research_episode_outcome_service import (
+            _validate_persisted_research_episode_outcome_bridge,
+        )
+
+        _validate_persisted_research_episode_outcome_bridge(value)
+    except (SnapshotValidationError, TypeError, ValueError, KeyError) as exc:
+        return False, f"bridge_schema_invalid:{type(exc).__name__}"
+    if str(value.get("market_date") or "")[:10] != market_date:
+        return False, "bridge_market_date_mismatch"
+    source_cutoff = _parse_aware_timestamp(value.get("source_cutoff"))
+    created_at = _parse_aware_timestamp(value.get("created_at"))
+    if source_cutoff is None or source_cutoff > cutoff:
+        return False, "bridge_source_cutoff_invalid"
+    if created_at is None or created_at > cutoff:
+        return False, "bridge_created_at_invalid"
+    envelope = value._envelope
+    string_fields = (
+        "bridge_id",
+        "bridge_hash_sha256",
+        "logical_key",
+        "selection_id",
+        "slate_id",
+        "slate_content_hash_sha256",
+        "episode_id",
+        "ticker",
+        "market_date",
+        "selected_at",
+        "strategy_id",
+        "strategy_version",
+        "receipt_id",
+        "receipt_hash_sha256",
+        "outcome_status",
+        "source_observation_id",
+        "source_observation_hash_sha256",
+        "source_path_id",
+        "source_path_hash_sha256",
+        "source_cutoff",
+        "outcome_artifact_id",
+        "outcome_artifact_hash_sha256",
+        "created_at",
+    )
+    for field in string_fields:
+        stored = envelope.get(field)
+        payload = value.get(field)
+        if field in {
+            "source_observation_id",
+            "source_observation_hash_sha256",
+            "source_path_id",
+            "source_path_hash_sha256",
+            "source_cutoff",
+            "outcome_artifact_id",
+            "outcome_artifact_hash_sha256",
+        }:
+            stored = "" if stored is None else str(stored)
+            payload = "" if payload is None else str(payload)
+        if not isinstance(stored, str) or not isinstance(payload, str) or stored != payload:
+            return False, f"bridge_envelope_{field}_mismatch"
+    stored_eligible = envelope.get("learning_eligible")
+    if (
+        isinstance(stored_eligible, bool)
+        or stored_eligible not in (0, 1)
+        or not isinstance(value.get("learning_eligible"), bool)
+        or bool(stored_eligible) is not value.get("learning_eligible")
+    ):
+        return False, "bridge_envelope_learning_eligible_mismatch"
+    return True, ""
+
+
+def _validated_research_bridges(
+    bridges: Sequence[Mapping[str, Any]] | None,
+    *,
+    market_date: str,
+    cutoff: datetime,
+) -> tuple[tuple[Mapping[str, Any], ...], dict[str, Any]]:
+    if bridges is None:
+        return (), {
+            "source_status": "NOT_PROVIDED",
+            "invalid_count": 0,
+            "invalid_reasons": {},
+        }
+    accepted: list[Mapping[str, Any]] = []
+    reasons: dict[str, int] = {}
+    for bridge in bridges:
+        valid, reason = _validate_persisted_research_bridge(
+            bridge,
+            market_date=market_date,
+            cutoff=cutoff,
+        )
+        if valid:
+            accepted.append(bridge)
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    for reason, count in dict(getattr(bridges, "invalid_reasons", {})).items():
+        reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
+    invalid_count = sum(reasons.values())
+    status = (
+        "INTEGRITY_FAILURE"
+        if invalid_count
+        else "NO_EVIDENCE"
+        if not accepted
+        else "PROVIDED"
+    )
+    return tuple(accepted), {
+        "source_status": status,
+        "invalid_count": invalid_count,
+        "invalid_reasons": dict(sorted(reasons.items())),
+    }
+
+
 def _apply_research_episode_outcomes(
     receipts: Sequence[Mapping[str, Any]],
     bridges: Sequence[Mapping[str, Any]] | None,
@@ -1881,7 +2056,7 @@ def _apply_research_episode_outcomes(
         if isinstance(receipt, Mapping)
     }
     for bridge in bridges or ():
-        if not isinstance(bridge, Mapping):
+        if not isinstance(bridge, _PersistedResearchEpisodeOutcomeBridge):
             continue
         receipt_id = str(bridge.get("receipt_id") or "").strip()
         if not receipt_id or receipt_id not in valid_ids:
@@ -1963,8 +2138,16 @@ def _bridge_matches_receipt(
 def _bridge_learning_summary(
     bridges: Sequence[Mapping[str, Any]] | None,
     receipts: Sequence[Mapping[str, Any]],
+    *,
+    ingress: Mapping[str, Any] | None = None,
+    expected_selection_count: int = 0,
+    expected_contributor_count: int = 0,
 ) -> dict[str, Any]:
-    all_bridges = [item for item in bridges or () if isinstance(item, Mapping)]
+    all_bridges = [
+        item
+        for item in bridges or ()
+        if isinstance(item, _PersistedResearchEpisodeOutcomeBridge)
+    ]
     usable = [
         item
         for item in all_bridges
@@ -2031,10 +2214,8 @@ def _bridge_learning_summary(
                 row[sum_key] += value
                 row[count_key] += 1
         try:
-            reference = float(metrics.get("reference_price"))
-            close = float(metrics.get("close_price"))
-            close_change = (close - reference) / reference * 100.0
-        except (TypeError, ValueError, ZeroDivisionError):
+            close_change = float(metrics.get("direction_adjusted_close_change_pct"))
+        except (TypeError, ValueError):
             continue
         if math.isfinite(close_change):
             row["close_change_pct_sum"] += close_change
@@ -2048,9 +2229,72 @@ def _bridge_learning_summary(
             row[mean_key] = (
                 row[sum_key] / row[count_key] if row[count_key] else None
             )
+    unmatched_count = sum(
+        1
+        for item in all_bridges
+        if not any(
+            _bridge_matches_receipt(receipt, item)
+            for receipt in receipts
+            if isinstance(receipt, Mapping)
+        )
+    )
+    ambiguous_count = sum(len(items) for items in candidates.values() if len(items) > 1)
+    ambiguous_count += sum(
+        str(item.get("outcome_match_status") or "").upper() == "AMBIGUOUS"
+        for item in all_bridges
+    )
+    missing_count = sum(
+        str(item.get("outcome_status") or "").upper() == "MISSING"
+        for item in all_bridges
+    )
+    ineligible_count = (
+        sum(item.get("learning_eligible") is not True for item in all_bridges)
+        - missing_count
+    )
+    eligible_count = sum(item.get("learning_eligible") is True for item in all_bridges)
+    actual_selection_count = len(
+        {str(item.get("selection_id") or "") for item in all_bridges if item.get("selection_id")}
+    )
+    shortfall_count = max(0, expected_contributor_count - len(all_bridges))
+    unexpected_count = max(0, len(all_bridges) - expected_contributor_count)
+    selection_shortfall_count = max(
+        0, expected_selection_count - actual_selection_count
+    )
+    unexpected_selection_count = max(
+        0, actual_selection_count - expected_selection_count
+    )
+    invalid_count = int((ingress or {}).get("invalid_count") or 0)
+    status = (
+        "COMPLETE"
+        if expected_selection_count == actual_selection_count
+        and expected_contributor_count == len(all_bridges)
+        and eligible_count == expected_contributor_count
+        and not invalid_count
+        and not unmatched_count
+        and not ambiguous_count
+        else "INCOMPLETE"
+    )
     return {
         "schema_version": "dawnstrike.research_episode_outcome_learning.v1",
         "bridge_count": len(usable),
+        "persisted_bridge_count": len(all_bridges),
+        "expected_selection_count": expected_selection_count,
+        "observed_selection_count": actual_selection_count,
+        "expected_contributor_count": expected_contributor_count,
+        "observed_contributor_count": len(all_bridges),
+        "eligible_count": eligible_count,
+        "missing_count": missing_count,
+        "ineligible_count": ineligible_count,
+        "unmatched_count": unmatched_count,
+        "ambiguous_count": ambiguous_count,
+        "shortfall_count": shortfall_count,
+        "unexpected_count": unexpected_count,
+        "selection_shortfall_count": selection_shortfall_count,
+        "unexpected_selection_count": unexpected_selection_count,
+        "invalid_count": invalid_count,
+        "invalid_reasons": dict((ingress or {}).get("invalid_reasons") or {}),
+        "source_status": str((ingress or {}).get("source_status") or "NOT_PROVIDED"),
+        "status": status,
         "deduplicated_receipt_count": len(deduped),
         "outcome_state_counts": {
             state: sum(
