@@ -479,12 +479,7 @@ def _current_condition_results(
         or current_source_identity
         or ""
     ).strip()
-    current_price = _number(
-        row.get("current_price")
-        or row.get("premarket_price")
-        or row.get("price")
-        or row.get("close")
-    )
+    current_price = _current_price_from_row(row)
     current_volume = _number(
         row.get("current_volume")
         or row.get("volume")
@@ -1216,12 +1211,7 @@ def _validated_current_observed_at(
 def _current_setup_open(
     row: Mapping[str, Any], *, direction: str, stop: float | None, target: float | None
 ) -> bool:
-    current_price = _number(
-        row.get("current_price")
-        or row.get("premarket_price")
-        or row.get("price")
-        or row.get("close")
-    )
+    current_price = _current_price_from_row(row)
     if current_price is None or stop is None or target is None:
         return False
     if direction == "long":
@@ -1338,6 +1328,20 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _current_price_from_row(row: Mapping[str, Any]) -> float | None:
+    """Return the highest-authority explicitly supplied current price.
+
+    Presence, rather than truthiness, determines precedence: an explicitly
+    supplied invalid value must remain invalid and fail closed instead of
+    being replaced by a lower-authority field.
+    """
+
+    for key in ("current_price", "premarket_price", "price", "close"):
+        if key in row:
+            return _number(row[key])
+    return None
 
 
 def _valid_date(value: Any) -> date | None:

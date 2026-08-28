@@ -868,6 +868,36 @@ def test_prior_adapter_rejects_long_setup_at_or_beyond_stop_or_target(current_pr
     )
 
 
+@pytest.mark.parametrize(
+    ("current_patch", "expected_count"),
+    (
+        ({"current_price": 0.0, "close": 100.0}, 0),
+        ({"current_price": -1.0, "close": 100.0}, 0),
+        ({"current_price": math.nan, "close": 100.0}, 0),
+        ({"close": 100.0}, 1),
+        ({"current_price": 100.0, "close": 84.0}, 1),
+    ),
+)
+def test_prior_adapter_current_price_precedence_fails_closed(
+    current_patch: dict[str, object], expected_count: int
+) -> None:
+    current = _current_row()
+    current.pop("current_price")
+    current.update(current_patch)
+    rows = adapt_verified_prior_session_rows(
+        [_prior_row(strategy_id="gap_up_continuation")],
+        current_rows=[current],
+        prior_session_date="2026-08-27",
+        current_market_date="2026-08-28",
+        current_snapshot_id="snapshot",
+        current_source_identity="source",
+        decision_at="2026-08-28T12:59:00+00:00",
+        current_universe_membership={"AAA"},
+    )
+
+    assert len(rows) == expected_count
+
+
 def test_prior_adapter_rejects_short_setup_at_or_beyond_stop_or_target() -> None:
     source = _prior_row(strategy_id="gap_up_continuation")
     source.update({"direction": Direction.SHORT, "stop": 115.0, "target": 77.5})
