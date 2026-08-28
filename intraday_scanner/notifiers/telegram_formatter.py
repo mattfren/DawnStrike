@@ -1045,6 +1045,25 @@ def _clip_preserving_suffix(prefix: str, suffix: str, max_chars: int) -> str:
     body = prefix + separator + suffix
     if len(body) <= limit:
         return body
+    lineage_lines = [
+        line
+        for line in prefix.splitlines()
+        if line.startswith(
+            (
+                "   Receipt ",
+                "   Contributors ",
+                "  Receipt ",
+                "  Contributors ",
+                "Adapter prior-session lineage:",
+                "  Adapter prior-session lineage:",
+                "   Adapter prior-session lineage:",
+            )
+        )
+    ]
+    lineage = "\n".join(lineage_lines).strip()
+    lineage_body = lineage + ("\n\n" if lineage and suffix else "") + suffix
+    if lineage and len(lineage_body) <= limit:
+        return lineage_body
     if len(suffix) >= limit:
         # Tiny non-production limits cannot hold every invariant. Preserve the
         # terminal research-only statement rather than returning optional

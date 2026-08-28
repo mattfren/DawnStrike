@@ -20,8 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.services.luna_core_universe_service import (
+    _TRUSTED_SOURCE_ROOTS,
     CORE_INDEXES,
+    DEFAULT_MAX_AGE_DAYS,
     _canonical_member_hash,
+    _canonical_symbol_set_hash,
+    _trusted_source_uri,
     canonical_symbol,
 )
 from intraday_scanner.services.luna_core_universe_service import (
@@ -44,6 +48,7 @@ def build_universe_handoff(
     market_date: str | date,
     *,
     output_path: str | Path | None = None,
+    allow_test_override: bool = False,
 ) -> dict[str, Any]:
     """Build and persist the exact deduplicated Morning PIT union.
 
@@ -65,7 +70,9 @@ def build_universe_handoff(
     )
 
     _validate_cycle_identity(cycle, cycle_contract, requested_date)
-    core_ready_indexes = _validate_core_contract(core, requested_date)
+    core_ready_indexes = _validate_core_contract(
+        core, requested_date, allow_test_override=allow_test_override
+    )
     _validate_source_summary(source_summary, requested_date, root=root)
 
     source_snapshot = _resolve_source_path(
@@ -303,7 +310,11 @@ def load_universe_handoff(
         # unhashed semantic body.  This closes the self-consistent-forgery
         # case where an attacker replaces those fields and recomputes every
         # handoff digest and identity alias.
-        expected = build_universe_handoff(handoff_path.parent, actual_date)
+        expected = build_universe_handoff(
+            handoff_path.parent,
+            actual_date,
+            allow_test_override=not require_production,
+        )
         expected_artifacts = expected.get("source_artifacts")
         if artifacts != expected_artifacts:
             raise UniverseHandoffError("universe handoff source artifact manifest is invalid")
@@ -353,12 +364,15 @@ def _validate_cycle_identity(
         raise UniverseHandoffError("Morning source status is not governed")
 
 
-def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
+def _validate_core_contract(
+    core: dict[str, Any], market_date: str, *, allow_test_override: bool = False
+) -> set[str]:
     if str(core.get("schema_version") or "") != "dawnstrike.luna.core_universe.v1":
         raise UniverseHandoffError("core universe contract schema is invalid")
     if str(core.get("requested_market_date") or "") != market_date:
         raise UniverseHandoffError("core universe contract market date conflicts")
-    if _iso_date(core.get("observed_at")) is None:
+    observed_date = _iso_date(core.get("observed_at"))
+    if observed_date is None:
         raise UniverseHandoffError("core universe contract observation is invalid")
     if str(core.get("status") or "").upper() not in {"READY", "DATA_UNAVAILABLE"}:
         raise UniverseHandoffError("core universe contract status is invalid")
@@ -373,6 +387,15 @@ def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
         "UNKNOWN",
     }:
         raise UniverseHandoffError("core universe contract freshness is invalid")
+    if str(core.get("status") or "").upper() == "READY" and str(
+        core.get("freshness_verdict") or ""
+    ).upper() == "FRESH":
+        observed_day = date.fromisoformat(observed_date)
+        requested_day = date.fromisoformat(market_date)
+        if observed_day > requested_day or (
+            requested_day - observed_day
+        ).days > DEFAULT_MAX_AGE_DAYS:
+            raise UniverseHandoffError("core universe observation is not fresh for market date")
     claimed = str(core.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed):
         raise UniverseHandoffError("core universe contract hash is missing")
@@ -411,6 +434,16 @@ def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
         if isinstance(row, dict)
         for index in (row.get("index_memberships") or [])
     ]
+    if str(core.get("status") or "").upper() == "READY":
+        for row in members:
+            if not isinstance(row, dict):
+                continue
+            valid_from = _date_text(row.get("valid_from"))
+            valid_to = _date_text(row.get("valid_to"))
+            if valid_from is None or valid_from > market_date or (
+                valid_to is not None and market_date > valid_to
+            ):
+                raise UniverseHandoffError("core universe member is not valid for market date")
     if _canonical_member_hash(canonical_records) != declared_member_hash:
         raise UniverseHandoffError("core universe canonical member hash mismatch")
     source_ids = core.get("source_ids")
@@ -462,7 +495,127 @@ def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
             raise UniverseHandoffError("core universe source lineage binding is invalid")
         if not str(binding.get("source_scope") or "").strip():
             raise UniverseHandoffError("core universe source scope is missing")
+        trusted = _TRUSTED_SOURCE_ROOTS.get(str(artifact.get("source_id") or "").strip())
+        if trusted is None:
+            if not allow_test_override or (
+                str(binding.get("authority") or "").strip().lower() != "fixture"
+            ):
+                raise UniverseHandoffError("core universe source root is not trusted")
+        else:
+            if str(binding.get("index") or "").strip() != str(trusted.get("index") or ""):
+                raise UniverseHandoffError("core universe source root index is not trusted")
+            if str(binding.get("transformation_id") or "").strip() != str(
+                trusted.get("transformation_id") or ""
+            ).strip():
+                raise UniverseHandoffError("core universe source transformation is not trusted")
+            trusted_membership_authority = str(
+                trusted.get("membership_authority") or ""
+            ).strip()
+            if trusted_membership_authority and str(
+                binding.get("membership_authority") or ""
+            ).strip() != trusted_membership_authority:
+                raise UniverseHandoffError("core universe membership authority is not trusted")
+            if trusted.get("official_index_authority") is not None and binding.get(
+                "official_index_authority"
+            ) is not trusted.get("official_index_authority"):
+                raise UniverseHandoffError("core universe official authority is not trusted")
+            derived_effective = _date_text(binding.get("derived_effective_date"))
+            if derived_effective is None or derived_effective > market_date:
+                raise UniverseHandoffError("core universe source effective date is invalid")
+            trusted_effective = _date_text(trusted.get("effective_date"))
+            recurring_effective = bool(
+                trusted.get("allow_future_same_semantic_set_dates")
+                and market_date > trusted_effective
+                and trusted_effective <= derived_effective <= market_date
+            ) if trusted_effective else False
+            if (
+                trusted_effective
+                and derived_effective != trusted_effective
+                and not recurring_effective
+            ):
+                raise UniverseHandoffError("core universe source effective date is not trusted")
+            if trusted_effective and market_date > trusted_effective:
+                age_basis = derived_effective if recurring_effective else trusted_effective
+                semantic_age = (
+                    date.fromisoformat(market_date) - date.fromisoformat(age_basis)
+                ).days
+                maximum_age = int(
+                    trusted.get("maximum_source_age_days") or DEFAULT_MAX_AGE_DAYS
+                )
+                if (
+                    not trusted.get("allow_future_same_semantic_set_dates")
+                    or semantic_age < 0
+                    or semantic_age > maximum_age
+                ):
+                    raise UniverseHandoffError("core universe source semantic age is not trusted")
+            trusted_scope_template = str(trusted.get("source_scope_template") or "").strip()
+            trusted_scope = (
+                trusted_scope_template.format(market_date=market_date)
+                if trusted_scope_template
+                else str(trusted.get("source_scope") or "").strip()
+            )
+            if trusted_scope and str(binding.get("source_scope") or "").strip() != trusted_scope:
+                raise UniverseHandoffError("core universe source scope is not trusted")
+            trusted_uri = _trusted_source_uri(trusted, market_date)
+            if trusted_uri and str(artifact.get("source_uri") or "").strip() != trusted_uri:
+                raise UniverseHandoffError("core universe source URI is not trusted")
+            trusted_hashes = [
+                str(value).lower() for value in trusted.get("raw_artifact_hashes") or []
+            ]
+            if trusted_hashes and [str(value).lower() for value in raw_hashes] != trusted_hashes:
+                raise UniverseHandoffError("core universe source raw hash is not trusted")
+            trusted_member_hash = str(
+                trusted.get("canonical_member_set_hash_sha256") or ""
+            ).lower()
+            if trusted_member_hash and not recurring_effective and str(
+                artifact.get("canonical_member_set_hash_sha256") or ""
+            ).lower() != trusted_member_hash:
+                raise UniverseHandoffError("core universe canonical member root is not trusted")
+            trusted_symbol_hash = str(
+                trusted.get("canonical_symbol_set_hash_sha256") or ""
+            ).lower()
+            if trusted_symbol_hash:
+                trusted_symbols = [
+                    row.get("symbol")
+                    for row in members
+                    if isinstance(row, dict)
+                    and index in (row.get("index_memberships") or [])
+                ]
+                if _canonical_symbol_set_hash(trusted_symbols, index) != trusted_symbol_hash:
+                    raise UniverseHandoffError("core universe canonical symbol root is not trusted")
+            trusted_rows = [
+                row
+                for row in members
+                if isinstance(row, dict) and index in (row.get("index_memberships") or [])
+            ]
+            if any(
+                canonical_symbol(row.get("provider_symbol") or row.get("symbol"))
+                != canonical_symbol(row.get("symbol"))
+                or str(row.get("asset_class") or row.get("security_type") or "common_stock")
+                .strip()
+                .lower()
+                != "common_stock"
+                for row in trusted_rows
+            ):
+                raise UniverseHandoffError("core universe provider mapping is not trusted")
+            for field in (
+                "lineage_builder_id",
+                "lineage_transformation_id",
+                "lineage_schema_version",
+                "reconstitution_id",
+            ):
+                expected_lineage = str(trusted.get(field) or "").strip()
+                if expected_lineage and str(
+                    artifact.get(field) or binding.get(field) or ""
+                ).strip() != expected_lineage:
+                    raise UniverseHandoffError(
+                        f"core universe {field} is not trusted"
+                    )
     if str(core.get("status") or "").upper() == "READY":
+        if len(source_ids) != len({str(value).strip() for value in source_ids}):
+            raise UniverseHandoffError("core universe source identities are duplicated")
+        if len(source_uris) != len({str(value).strip() for value in source_uris}):
+            raise UniverseHandoffError("core universe source URIs are duplicated")
         artifact_ids = {str(item.get("source_id") or "").strip() for item in artifacts}
         artifact_uris = {str(item.get("source_uri") or "").strip() for item in artifacts}
         if artifact_ids != {str(value).strip() for value in source_ids}:
@@ -486,7 +639,7 @@ def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
             raise UniverseHandoffError("core universe index counts are invalid")
         if status == "READY" and (expected_count is None or expected_count <= 0):
             raise UniverseHandoffError(f"core universe {index} expected count is invalid")
-        if status == "READY" and not artifacts_by_index[index]:
+        if status == "READY" and len(artifacts_by_index[index]) != 1:
             raise UniverseHandoffError(f"core universe source root is missing for {index}")
         if status == "READY":
             required = {
@@ -631,6 +784,14 @@ def _core_members(
         output.append(
             {
                 "symbol": symbol,
+                "provider_symbol": canonical_symbol(
+                    raw.get("provider_symbol") or raw.get("mapped_symbol") or symbol
+                ),
+                "asset_class": str(
+                    raw.get("asset_class") or raw.get("security_type") or "common_stock"
+                ).strip().lower(),
+                "valid_from": raw.get("valid_from"),
+                "valid_to": raw.get("valid_to"),
                 "lanes": ["core"],
                 "lane": "core",
                 "index_memberships": memberships,
@@ -641,6 +802,15 @@ def _core_members(
                     "canonical_member_set_hash_sha256": str(
                         core.get("canonical_member_set_hash_sha256") or ""
                     ),
+                    "provider_symbol": canonical_symbol(
+                        raw.get("provider_symbol") or raw.get("mapped_symbol") or symbol
+                    ),
+                    "provider_mapping": {
+                        "canonical_symbol": symbol,
+                        "provider_symbol": canonical_symbol(
+                            raw.get("provider_symbol") or raw.get("mapped_symbol") or symbol
+                        ),
+                    },
                 },
             }
         )
@@ -712,6 +882,9 @@ def _read_mover_snapshot(path: Path, market_date: str) -> list[dict[str, Any]]:
     except (OSError, csv.Error) as exc:
         raise UniverseHandoffError("governed mover snapshot is unreadable") from exc
     for row in rows:
+        ticker = canonical_symbol(row.get("ticker") or row.get("symbol"))
+        if not _SYMBOL_PATTERN.fullmatch(ticker):
+            raise UniverseHandoffError("governed mover snapshot ticker is invalid")
         declared = str(row.get("market_date") or row.get("as_of_date") or "").strip()
         timestamp = _first_text(row.get("as_of_timestamp"), row.get("extracted_at"))
         if declared and declared != market_date:

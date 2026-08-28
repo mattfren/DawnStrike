@@ -16,6 +16,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
+from intraday_scanner.decisioning.contracts import StrategyDecisionReceipt
 from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import (
     ALPHAOPS_OFFICIAL_COHORT,
@@ -172,6 +173,46 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
     store = SQLiteScanStore(tmp_path / "frozen-official-retry.sqlite")
     source_scan_id = "scan-frozen-source"
     retry_scan_id = "scan-frozen-retry"
+    source_signal_id = f"{source_scan_id}:1:SOBR"
+
+    def fixture_receipt(strategy_id: str, source_id: str) -> dict[str, object]:
+        input_payload = {"source_signal_id": source_id}
+        input_payload_json = json.dumps(
+            input_payload, sort_keys=True, separators=(",", ":")
+        )
+        receipt = StrategyDecisionReceipt(
+            schema_version="dawnstrike.strategy_decision_receipt.v2",
+            receipt_id="",
+            strategy_id=strategy_id,
+            strategy_version="fixture-v1",
+            symbol="SOBR",
+            market_date="2026-07-15",
+            decision_at=SELECTED_AT,
+            code_sha="a" * 40,
+            policy_version="fixture-policy-v1",
+            condition_results=(),
+            first_blocking_failure=None,
+            all_blocking_failures=(),
+            disclosed_gaps=(),
+            research_pick_eligible=True,
+            paper_entry_eligible=False,
+            pick_tier="WATCH_ONLY",
+            base_strategy_score=75.0,
+            score_adjustment=0.0,
+            final_score=75.0,
+            entry_reference=10.0,
+            stop=9.0,
+            target=12.0,
+            reward_risk_ratio=2.0,
+            source_identity="fixture-source",
+            input_hash_sha256=hashlib.sha256(input_payload_json.encode()).hexdigest(),
+            input_payload_json=input_payload_json,
+        )
+        return receipt.to_dict()
+
+    alpha_receipt = fixture_receipt("alphaops_v5", source_signal_id)
+    gap_source_id = "gap-prior"
+    gap_receipt = fixture_receipt("gap_up_continuation", gap_source_id)
     source_signal = {
         **_signal("SOBR", rank=1, can_alert=True),
         "scan_id": source_scan_id,
@@ -181,13 +222,19 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
         "strategy_contributors": [
             {
                 "strategy_id": "alphaops_v5",
-                "receipt_id": "receipt-alpha",
-                "receipt_hash_sha256": "a" * 64,
+                "strategy_version": "fixture-v1",
+                "source_signal_id": source_signal_id,
+                "receipt_id": alpha_receipt["receipt_id"],
+                "receipt_hash_sha256": alpha_receipt["receipt_hash_sha256"],
+                "receipt_status": "COMPLETE",
             },
             {
                 "strategy_id": "gap_up_continuation",
-                "receipt_id": "receipt-gap",
-                "receipt_hash_sha256": "b" * 64,
+                "strategy_version": "fixture-v1",
+                "source_signal_id": "gap-prior",
+                "receipt_id": gap_receipt["receipt_id"],
+                "receipt_hash_sha256": gap_receipt["receipt_hash_sha256"],
+                "receipt_status": "COMPLETE",
                 "strategy_adapter": "morning_strategy_adapter_v3",
                 "prior_session_lineage": {
                     "source_signal_id": "gap-prior",
@@ -195,9 +242,11 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
                 },
             },
         ],
+        "strategy_contributor_count": 2,
+        "strategy_contributor_ids": ["alphaops_v5", "gap_up_continuation"],
         "strategy_decision_receipts": [
-            {"receipt_id": "receipt-alpha"},
-            {"receipt_id": "receipt-gap"},
+            alpha_receipt,
+            gap_receipt,
         ],
         "canonical_primary_strategy_id": "alphaops_v5",
     }
@@ -270,15 +319,17 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
     watched = _watch_signals(store, market_date="2026-07-15")
 
     assert context["signal_id"] == source_signal["signal_key"]
-    assert context["authoritative_signal"] == frozen_signal
+    assert context["authoritative_signal"]["strategy_contributors"] == frozen_signal[
+        "strategy_contributors"
+    ]
     assert [
         item["receipt_id"] for item in context["authoritative_signal"]["strategy_contributors"]
-    ] == ["receipt-alpha", "receipt-gap"]
+    ] == [alpha_receipt["receipt_id"], gap_receipt["receipt_id"]]
     assert watched[0]["signal_id"] == source_signal["signal_key"]
     assert watched[0]["selection_id"] == persisted["selection_id"]
     assert [
         item["receipt_id"] for item in watched[0]["strategy_contributors"]
-    ] == ["receipt-alpha", "receipt-gap"]
+    ] == [alpha_receipt["receipt_id"], gap_receipt["receipt_id"]]
     assert persisted["payload_json"]["source_scan_id"] == source_scan_id
     assert (
         persisted["payload_json"]["scan_lineage_status"]

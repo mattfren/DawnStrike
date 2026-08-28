@@ -13,12 +13,27 @@ from intraday_scanner.v2.paper_ops.lifecycle_backtest import _signal_cards
 from intraday_scanner.v2.paper_ops.models import PaperRun, PaperRunMode
 from intraday_scanner.v2.paper_ops.universe_handoff import (
     UniverseHandoffError,
-    build_universe_handoff,
     load_universe_handoff,
+)
+from intraday_scanner.v2.paper_ops.universe_handoff import (
+    build_universe_handoff as _build_universe_handoff,
 )
 from intraday_scanner.v2.strategies import Direction, StrategySignal
 
 MARKET_DATE = "2026-08-28"
+
+
+def build_universe_handoff(
+    root: Path, market_date: str, *, output_path: Path | None = None
+) -> dict[str, object]:
+    """Use the explicit fixture trust injection for synthetic Morning inputs."""
+
+    return _build_universe_handoff(
+        root,
+        market_date,
+        output_path=output_path,
+        allow_test_override=True,
+    )
 
 
 def _core_contract() -> dict[str, object]:
@@ -40,6 +55,7 @@ def _core_contract() -> dict[str, object]:
                 "symbol": "AAA",
                 "index_memberships": ["Nasdaq-100", "S&P 500"],
                 "sources": ["fixture-core"],
+                "valid_from": MARKET_DATE,
             }
         ],
     }
@@ -50,7 +66,7 @@ def _core_contract() -> dict[str, object]:
                 "provider_symbol": "AAA",
                 "asset_class": "common_stock",
                 "index": "S&P 500",
-                "valid_from": None,
+                "valid_from": MARKET_DATE,
                 "valid_to": None,
             }
         ]
@@ -60,7 +76,7 @@ def _core_contract() -> dict[str, object]:
                 "provider_symbol": "AAA",
                 "asset_class": "common_stock",
                 "index": "Nasdaq-100",
-                "valid_from": None,
+                "valid_from": MARKET_DATE,
                 "valid_to": None,
             }
         ]
@@ -79,7 +95,7 @@ def _core_contract() -> dict[str, object]:
                         "provider_symbol": "AAA",
                         "asset_class": "common_stock",
                         "index": "S&P 500",
-                        "valid_from": None,
+                        "valid_from": MARKET_DATE,
                         "valid_to": None,
                     }
                 ]
@@ -97,7 +113,7 @@ def _core_contract() -> dict[str, object]:
                             "provider_symbol": "AAA",
                             "asset_class": "common_stock",
                             "index": "S&P 500",
-                            "valid_from": None,
+                            "valid_from": MARKET_DATE,
                             "valid_to": None,
                         }
                     ]
@@ -116,7 +132,7 @@ def _core_contract() -> dict[str, object]:
                         "provider_symbol": "AAA",
                         "asset_class": "common_stock",
                         "index": "Nasdaq-100",
-                        "valid_from": None,
+                        "valid_from": MARKET_DATE,
                         "valid_to": None,
                     }
                 ]
@@ -134,7 +150,7 @@ def _core_contract() -> dict[str, object]:
                             "provider_symbol": "AAA",
                             "asset_class": "common_stock",
                             "index": "Nasdaq-100",
-                            "valid_from": None,
+                            "valid_from": MARKET_DATE,
                             "valid_to": None,
                         }
                     ]
@@ -298,7 +314,7 @@ def test_one_lane_self_hashed_core_cannot_claim_complete(tmp_path: Path) -> None
                 "provider_symbol": "AAA",
                 "asset_class": "common_stock",
                 "index": "S&P 500",
-                "valid_from": None,
+                "valid_from": MARKET_DATE,
                 "valid_to": None,
             }
         ]
@@ -326,6 +342,17 @@ def test_undated_mover_rows_cannot_become_complete(tmp_path: Path) -> None:
     snapshot_path.write_text("ticker,source\nAAA,mover\n", encoding="utf-8")
 
     with pytest.raises(UniverseHandoffError, match="row date is missing"):
+        build_universe_handoff(root, MARKET_DATE)
+
+
+def test_invalid_mover_ticker_cannot_be_dropped_from_complete_count(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    snapshot_path = root / "web_collect" / "premarket_snapshot.csv"
+    snapshot_path.write_text(
+        f"ticker,market_date,source\n!!!,{MARKET_DATE},mover\n", encoding="utf-8"
+    )
+
+    with pytest.raises(UniverseHandoffError, match="ticker is invalid"):
         build_universe_handoff(root, MARKET_DATE)
 
 
@@ -413,11 +440,17 @@ def test_self_consistent_forged_union_membership_and_coverage_are_rejected_by_lo
     forged["universe_id"] = "paperops-pit-universe-" + digest[:24]
     handoff_path.write_text(json.dumps(forged, sort_keys=True), encoding="utf-8")
 
-    with pytest.raises(UniverseHandoffError, match="semantic binding"):
+    with pytest.raises(
+        UniverseHandoffError,
+        match="(?:semantic binding|source root is not trusted)",
+    ):
         load_universe_handoff(handoff_path, market_date=MARKET_DATE, require_production=True)
 
     paths = paper_ops_engine.PaperOpsPaths.create(tmp_path / "paper_ops")
-    with pytest.raises(UniverseHandoffError, match="semantic binding"):
+    with pytest.raises(
+        UniverseHandoffError,
+        match="(?:semantic binding|source root is not trusted)",
+    ):
         paper_ops_engine._run_config_with_universe_handoff(
             paths,
             run_date=date.fromisoformat(MARKET_DATE),
@@ -576,7 +609,7 @@ def test_bound_manifest_rejects_mutated_handoff_source_before_observation(tmp_pa
     handoff = build_universe_handoff(morning, MARKET_DATE, output_path=handoff_path)
     coverage = handoff["coverage"]
     manifest = {
-        "mode": "forward",
+        "mode": "replay",
         "run_date": MARKET_DATE,
         "universe_id": handoff["universe_id"],
         "universe_symbols": handoff["universe_symbols"],

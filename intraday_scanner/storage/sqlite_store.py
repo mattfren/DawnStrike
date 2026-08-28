@@ -6,11 +6,17 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.decisioning.contracts import (
+    ConditionResult,
+    StrategyDecisionReceipt,
+    canonical_json,
+)
 from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.scenario.contracts import (
@@ -8999,7 +9005,7 @@ def _assert_applied_backfeed_allowed(
 
 def _historical_signal_row(row: sqlite3.Row) -> dict[str, Any]:
     payload = _json_value(row["raw_payload_json"])
-    return {
+    hydrated = {
         "signal_id": str(row["signal_id"]),
         "scan_id": str(row["scan_id"] or ""),
         "alpha_signal_id": str(row["alpha_signal_id"] or ""),
@@ -9033,6 +9039,230 @@ def _historical_signal_row(row: sqlite3.Row) -> dict[str, Any]:
         "no_trade_reason": str(row["no_trade_reason"] or ""),
         "raw_payload_json": payload,
     }
+    if isinstance(payload, dict):
+        signal_payload = payload.get("signal")
+        source = signal_payload if isinstance(signal_payload, dict) else payload
+        _hydrate_contributor_projection(hydrated, source)
+    return hydrated
+
+
+def _hydrate_contributor_projection(
+    target: dict[str, Any], source: Mapping[str, Any]
+) -> None:
+    """Expose and validate merged contributor receipts after SQLite roundtrip."""
+
+    contributors = source.get("strategy_contributors")
+    if contributors is None:
+        return
+    if not isinstance(contributors, list):
+        raise StorageError("historical signal contributor projection is malformed")
+    normalized: list[dict[str, Any]] = []
+    contributor_ids: list[str] = []
+    seen_keys: set[tuple[str, str]] = set()
+    seen_receipt_ids: set[str] = set()
+    for item in contributors:
+        if not isinstance(item, dict):
+            raise StorageError("historical signal contributor row is malformed")
+        strategy_id = str(item.get("strategy_id") or "").strip()
+        strategy_version = str(item.get("strategy_version") or "").strip()
+        source_signal_id = str(
+            item.get("source_signal_id") or item.get("signal_id") or ""
+        ).strip()
+        if not strategy_id or not strategy_version or not source_signal_id:
+            raise StorageError("historical signal contributor identity is incomplete")
+        key = (strategy_id, source_signal_id)
+        if key in seen_keys:
+            raise StorageError("historical signal contributor identity is duplicated")
+        seen_keys.add(key)
+        receipt_id = str(item.get("receipt_id") or "").strip()
+        receipt_hash = str(item.get("receipt_hash_sha256") or "").strip().lower()
+        if bool(receipt_id) != bool(receipt_hash):
+            raise StorageError("historical signal contributor receipt identity is incomplete")
+        if receipt_hash and not _is_sha256(receipt_hash):
+            raise StorageError("historical signal contributor receipt hash is invalid")
+        if receipt_id and receipt_id in seen_receipt_ids:
+            raise StorageError("historical signal contributor receipt is duplicated")
+        if receipt_id:
+            seen_receipt_ids.add(receipt_id)
+        adapter = str(item.get("strategy_adapter") or "").strip()
+        lineage = item.get("prior_session_lineage")
+        if adapter:
+            if not isinstance(lineage, dict) or str(
+                lineage.get("source_signal_id") or ""
+            ).strip() != source_signal_id:
+                raise StorageError("historical signal contributor adapter lineage is invalid")
+        elif source_signal_id != str(target.get("signal_id") or "").strip() and str(
+            item.get("signal_id") or ""
+        ).strip() != str(target.get("signal_id") or "").strip():
+            raise StorageError("historical signal contributor source signal is not bound")
+        normalized_item = {
+            key: deepcopy(item[key])
+            for key in (
+                "strategy_id",
+                "strategy_version",
+                "strategy_semantics_fingerprint",
+                "source_signal_id",
+                "signal_id",
+                "strategy_adapter",
+                "receipt_id",
+                "receipt_hash_sha256",
+                "receipt_status",
+                "prior_session_lineage",
+                "decision_receipt",
+            )
+            if key in item
+        }
+        normalized_item["strategy_id"] = strategy_id
+        normalized_item["source_signal_id"] = source_signal_id
+        if receipt_hash:
+            normalized_item["receipt_hash_sha256"] = receipt_hash
+        normalized.append(normalized_item)
+        contributor_ids.append(strategy_id)
+    if "strategy_contributor_count" in source:
+        try:
+            declared_count = int(source.get("strategy_contributor_count"))
+        except (TypeError, ValueError) as exc:
+            raise StorageError("historical signal contributor count is invalid") from exc
+        if declared_count != len(normalized):
+            raise StorageError("historical signal contributor count conflicts")
+    declared_ids = source.get("strategy_contributor_ids")
+    if declared_ids is not None and (
+        not isinstance(declared_ids, list)
+        or sorted(str(value).strip() for value in declared_ids)
+        != sorted(contributor_ids)
+    ):
+        raise StorageError("historical signal contributor IDs conflict")
+    receipts = source.get("strategy_decision_receipts")
+    if receipts is not None:
+        if not isinstance(receipts, list) or any(not isinstance(item, dict) for item in receipts):
+            raise StorageError("historical signal contributor receipts are malformed")
+        receipt_by_id: dict[str, dict[str, Any]] = {}
+        for receipt in receipts:
+            receipt_id = str(receipt.get("receipt_id") or "").strip()
+            receipt_hash = str(receipt.get("receipt_hash_sha256") or "").strip().lower()
+            if not receipt_id or not _is_sha256(receipt_hash):
+                raise StorageError("historical signal contributor receipt identity is invalid")
+            if receipt_id in receipt_by_id:
+                raise StorageError("historical signal contributor receipt is duplicated")
+            receipt_by_id[receipt_id] = receipt
+        referenced_receipt_ids: set[str] = set()
+        for item in normalized:
+            receipt_id = str(item.get("receipt_id") or "").strip()
+            if not receipt_id:
+                continue
+            referenced_receipt_ids.add(receipt_id)
+            receipt = receipt_by_id.get(receipt_id)
+            if receipt is None:
+                raise StorageError("historical signal contributor receipt is not bound")
+            contributor_hash = str(item.get("receipt_hash_sha256") or "").strip().lower()
+            receipt_hash = str(receipt.get("receipt_hash_sha256") or "").strip().lower()
+            if contributor_hash != receipt_hash:
+                raise StorageError("historical signal contributor receipt hash conflicts")
+            try:
+                receipt_payload = {
+                    field.name: receipt[field.name]
+                    for field in fields(StrategyDecisionReceipt)
+                    if field.name in receipt
+                }
+                condition_results = receipt_payload.get("condition_results") or []
+                receipt_payload["condition_results"] = tuple(
+                    item
+                    if isinstance(item, ConditionResult)
+                    else ConditionResult(**item)
+                    for item in condition_results
+                )
+                typed_receipt = StrategyDecisionReceipt(**receipt_payload)
+            except (TypeError, ValueError, KeyError) as exc:
+                raise StorageError(
+                    "historical signal contributor receipt typed schema is invalid"
+                ) from exc
+            if canonical_json(typed_receipt.to_dict()) != canonical_json(receipt):
+                raise StorageError("historical signal contributor receipt payload is not exact")
+            expected_hash = typed_receipt.receipt_hash_sha256
+            if receipt_hash != expected_hash or receipt_id != typed_receipt.receipt_id:
+                raise StorageError(
+                    "historical signal contributor receipt canonical hash is invalid"
+                )
+            receipt_strategy = str(receipt.get("strategy_id") or "").strip()
+            receipt_version = str(receipt.get("strategy_version") or "").strip()
+            if receipt_strategy != str(item.get("strategy_id") or "").strip():
+                raise StorageError("historical signal contributor receipt strategy conflicts")
+            if receipt_version != str(item.get("strategy_version") or "").strip():
+                raise StorageError("historical signal contributor receipt version conflicts")
+            contributor_source = str(item.get("source_signal_id") or "").strip()
+            if typed_receipt.schema_version == "dawnstrike.strategy_decision_receipt.v2":
+                try:
+                    input_payload = json.loads(typed_receipt.input_payload_json)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise StorageError(
+                        "historical signal contributor receipt input is invalid"
+                    ) from exc
+                input_source = next(
+                    (
+                        str(input_payload.get(key) or "").strip()
+                        for key in (
+                            "source_signal_id",
+                            "prior_session_signal_id",
+                            "signal_id",
+                            "signal_key",
+                        )
+                        if str(input_payload.get(key) or "").strip()
+                    ),
+                    "",
+                ) if isinstance(input_payload, dict) else ""
+                if input_source != contributor_source:
+                    raise StorageError(
+                        "historical signal contributor receipt source conflicts"
+                    )
+            else:
+                raise StorageError(
+                    "historical signal contributor receipt lacks replayable source input"
+                )
+            if typed_receipt.symbol != str(target.get("ticker") or "").strip().upper():
+                raise StorageError("historical signal contributor receipt symbol conflicts")
+            if typed_receipt.market_date != str(target.get("market_date") or "").strip():
+                raise StorageError("historical signal contributor receipt date conflicts")
+            receipt_source_signal = str(
+                receipt.get("source_signal_id") or receipt.get("signal_id") or ""
+            ).strip()
+            if receipt_source_signal and receipt_source_signal != str(
+                item.get("source_signal_id") or ""
+            ).strip():
+                raise StorageError("historical signal contributor receipt source conflicts")
+            contributor_status = str(item.get("receipt_status") or "").strip()
+            receipt_status = str(
+                receipt.get("status") or receipt.get("receipt_status") or ""
+            ).strip()
+            if contributor_status and receipt_status and contributor_status != receipt_status:
+                raise StorageError("historical signal contributor receipt status conflicts")
+            if not contributor_status and not receipt_status:
+                raise StorageError("historical signal contributor receipt status is missing")
+            if contributor_status.upper() in {"MISSING", "UNKNOWN"} and not receipt_status:
+                raise StorageError("historical signal contributor receipt status is unverified")
+            if contributor_status.upper() != "COMPLETE":
+                raise StorageError("historical signal contributor receipt status is unverified")
+            if not contributor_status and receipt_status:
+                normalized_item = next(
+                    row for row in normalized if row["strategy_id"] == item["strategy_id"]
+                    and row["source_signal_id"] == item["source_signal_id"]
+                )
+                normalized_item["receipt_status"] = receipt_status
+        if referenced_receipt_ids != set(receipt_by_id):
+            raise StorageError("historical signal contributor receipts contain unbound rows")
+    elif seen_receipt_ids:
+        raise StorageError("historical signal contributor receipts are missing")
+    target["strategy_contributors"] = normalized
+    target["strategy_contributor_count"] = len(normalized)
+    target["strategy_contributor_ids"] = sorted(contributor_ids)
+    if receipts is not None:
+        target["strategy_decision_receipts"] = deepcopy(receipts)
+    for field in ("canonical_primary_strategy_id", "strategy_contribution_status"):
+        if field in source:
+            target[field] = deepcopy(source[field])
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 def _selection_identity_row(row: sqlite3.Row) -> dict[str, Any]:
