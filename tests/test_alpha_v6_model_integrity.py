@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
+from intraday_scanner.alpha.v6 import dataset_builder as dataset_builder_module
+from intraday_scanner.alpha.v6 import models as models_module
 from intraday_scanner.alpha.v6 import training as training_module
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
 from intraday_scanner.alpha.v6.training import (
@@ -11,6 +15,28 @@ from intraday_scanner.alpha.v6.training import (
 )
 from intraday_scanner.alpha.v6.validation import evaluate_return_predictions
 from tests._alpha_path_truth import canonical_v6_decision, canonical_v6_label
+
+
+def _synthetic_research_fill_truth(value: object) -> bool:
+    """Authenticate only the explicit unit-test research fixture marker."""
+
+    return isinstance(value, dict) and value.get("synthetic_research_fixture") is True
+
+
+@pytest.fixture
+def synthetic_research_fill_truth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep synthetic model-integrity data isolated from production FillTruth."""
+
+    monkeypatch.setattr(
+        dataset_builder_module,
+        "has_authenticated_committed_fill_truth",
+        _synthetic_research_fill_truth,
+    )
+    monkeypatch.setattr(
+        models_module,
+        "has_authenticated_committed_fill_truth",
+        _synthetic_research_fill_truth,
+    )
 
 
 def _dataset(
@@ -54,7 +80,11 @@ def _dataset(
             }
             decisions.append(decision)
             labels.extend(
-                (
+                {
+                    **label,
+                    "synthetic_research_fixture": True,
+                }
+                for label in (
                     canonical_v6_label(decision, value=realized),
                     canonical_v6_label(
                         decision,
@@ -71,7 +101,9 @@ def _dataset(
     return build_return_dataset(decisions=decisions, labels=labels)
 
 
-def test_training_fits_real_models_and_excludes_prohibited_features() -> None:
+def test_training_fits_real_models_and_excludes_prohibited_features(
+    synthetic_research_fill_truth,
+) -> None:
     receipt = train_shadow_challengers(_dataset(), code_sha="c" * 40)
 
     assert receipt["status"] == "TRAINED_RESEARCH_BASELINES"
@@ -84,7 +116,9 @@ def test_training_fits_real_models_and_excludes_prohibited_features() -> None:
     assert receipt["artifact"]["models"]["conditional_return_model"]["fitted"] is True
 
 
-def test_walk_forward_predictions_never_see_same_or_future_date() -> None:
+def test_walk_forward_predictions_never_see_same_or_future_date(
+    synthetic_research_fill_truth,
+) -> None:
     predictions = walk_forward_challenger_predictions(
         _dataset(), model_run_id="v6m-test"
     )
@@ -99,6 +133,7 @@ def test_walk_forward_predictions_never_see_same_or_future_date() -> None:
 
 def test_walk_forward_evaluates_permitted_gradient_on_its_own_exact_fold(
     monkeypatch,
+    synthetic_research_fill_truth,
 ) -> None:
     dataset = _dataset(day_count=61, rows_per_day=9)
     rows = dataset["rows"]
@@ -139,7 +174,9 @@ def test_walk_forward_evaluates_permitted_gradient_on_its_own_exact_fold(
     )
 
 
-def test_frozen_artifact_scores_only_later_matching_schema_decisions() -> None:
+def test_frozen_artifact_scores_only_later_matching_schema_decisions(
+    synthetic_research_fill_truth,
+) -> None:
     receipt = train_shadow_challengers(_dataset(), code_sha="c" * 40)
     decision = {
         "market_date": "2026-02-02",
