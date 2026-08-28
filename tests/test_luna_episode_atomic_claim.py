@@ -153,7 +153,25 @@ def _lifecycle_rows(*, suffix: str, episode_id: str) -> tuple[list[dict], list[d
 def _persist(db_path: Path, suffix: str) -> dict:
     intents, positions, fills = _lifecycle_rows(suffix=suffix, episode_id="episode:atomic")
     intent_id = intents[0]["intent_id"]
-    return SQLiteScanStore(db_path).persist_trade_watcher_lifecycle(
+    store = SQLiteScanStore(db_path)
+    # The production watcher receives only selections whose source signal is
+    # already durable.  Seed that governed parent here so this fixture tests
+    # atomic episode admission rather than relying on an orphan event.
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": intents[0]["signal_id"],
+                "generated_at": "2026-08-27T14:30:00+00:00",
+                "market_date": intents[0]["market_date"],
+                "ticker": intents[0]["ticker"],
+                "signal_label": "WATCH",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {"fixture": "governed_episode_parent"},
+            }
+        ]
+    )
+    return store.persist_trade_watcher_lifecycle(
         intents=intents,
         paper_positions=positions,
         paper_fills=fills,
