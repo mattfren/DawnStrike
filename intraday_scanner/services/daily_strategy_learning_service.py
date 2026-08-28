@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import tempfile
@@ -1873,7 +1874,7 @@ def _apply_research_episode_outcomes(
     """Overlay exact sidecar outcomes on receipt copies for this run only."""
 
     by_receipt: dict[str, Mapping[str, Any]] = {}
-    by_receipt_order: dict[str, tuple[str, str]] = {}
+    ambiguous_receipts: set[str] = set()
     valid_ids = {
         str(receipt.get("receipt_id") or "")
         for receipt in receipts
@@ -1885,31 +1886,25 @@ def _apply_research_episode_outcomes(
         receipt_id = str(bridge.get("receipt_id") or "").strip()
         if not receipt_id or receipt_id not in valid_ids:
             continue
+        if bridge.get("learning_eligible") is not True:
+            continue
         # A bridge is allowed to affect a receipt only when the immutable hash
         # is exact.  Ticker/date are additionally checked so a same-ID fixture
         # cannot leak a neighboring selection's result.
-        receipt_hash = str(bridge.get("receipt_hash_sha256") or "").strip().lower()
         for receipt in receipts:
-            if (
-                isinstance(receipt, Mapping)
-                and str(receipt.get("receipt_id") or "") == receipt_id
-                and str(receipt.get("receipt_hash_sha256") or "").lower() == receipt_hash
-                and str(receipt.get("market_date") or "")[:10]
-                == str(bridge.get("market_date") or "")[:10]
-                and str(receipt.get("symbol") or "").upper()
-                == str(bridge.get("ticker") or "").upper()
-            ):
-                order = (
-                    str(bridge.get("logical_key") or ""),
-                    str(bridge.get("bridge_id") or ""),
-                )
-                if receipt_id not in by_receipt or order < by_receipt_order[receipt_id]:
+            if isinstance(receipt, Mapping) and _bridge_matches_receipt(receipt, bridge):
+                if receipt_id in by_receipt:
+                    ambiguous_receipts.add(receipt_id)
+                    by_receipt.pop(receipt_id, None)
+                elif receipt_id not in ambiguous_receipts:
                     by_receipt[receipt_id] = bridge
-                    by_receipt_order[receipt_id] = order
                 break
     result: list[Mapping[str, Any]] = []
     for receipt in receipts:
         receipt_id = str(receipt.get("receipt_id") or "")
+        if receipt_id in ambiguous_receipts:
+            result.append(receipt)
+            continue
         bridge = by_receipt.get(receipt_id)
         if bridge is not None and bridge.get("learning_eligible") is not True:
             bridge = None
@@ -1920,7 +1915,14 @@ def _apply_research_episode_outcomes(
             {
                 **dict(receipt),
                 "outcome_state": str(
-                    bridge.get("outcome_state") or bridge.get("outcome_status") or "MISSING"
+                    bridge.get("selection_outcome")
+                    or (
+                        (bridge.get("selection_outcome_metrics") or {}).get("path_status")
+                        if isinstance(bridge.get("selection_outcome_metrics"), Mapping)
+                        else None
+                    )
+                    or bridge.get("outcome_state")
+                    or "MISSING"
                 ),
                 "selection_outcome_bridge_id": bridge.get("bridge_id"),
             }
@@ -1928,26 +1930,124 @@ def _apply_research_episode_outcomes(
     return tuple(result)
 
 
+def _bridge_matches_receipt(
+    receipt: Mapping[str, Any], bridge: Mapping[str, Any]
+) -> bool:
+    """Apply the same immutable contributor join predicate to every consumer."""
+
+    return (
+        str(receipt.get("receipt_id") or "") == str(bridge.get("receipt_id") or "")
+        and str(receipt.get("receipt_hash_sha256") or "").lower()
+        == str(bridge.get("receipt_hash_sha256") or "").lower()
+        and str(receipt.get("strategy_id") or "")
+        == str(bridge.get("strategy_id") or "")
+        and str(receipt.get("strategy_version") or "")
+        == str(bridge.get("strategy_version") or "")
+        and (
+            not bridge.get("selection_id")
+            or not receipt.get("selection_id")
+            or str(receipt.get("selection_id")) == str(bridge.get("selection_id"))
+        )
+        and (
+            not bridge.get("episode_id")
+            or not receipt.get("episode_id")
+            or str(receipt.get("episode_id")) == str(bridge.get("episode_id"))
+        )
+        and str(receipt.get("market_date") or "")[:10]
+        == str(bridge.get("market_date") or "")[:10]
+        and str(receipt.get("symbol") or "").upper()
+        == str(bridge.get("ticker") or "").upper()
+    )
+
+
 def _bridge_learning_summary(
     bridges: Sequence[Mapping[str, Any]] | None,
     receipts: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    receipt_ids = {str(item.get("receipt_id") or "") for item in receipts}
     all_bridges = [item for item in bridges or () if isinstance(item, Mapping)]
-    usable = [item for item in all_bridges if str(item.get("receipt_id") or "") in receipt_ids]
-    deduped: dict[str, Mapping[str, Any]] = {}
-    deduped_order: dict[str, tuple[str, str]] = {}
+    usable = [
+        item
+        for item in all_bridges
+        if any(
+            _bridge_matches_receipt(receipt, item)
+            for receipt in receipts
+            if isinstance(receipt, Mapping)
+        )
+    ]
+    candidates: dict[str, list[Mapping[str, Any]]] = {}
     for item in usable:
         receipt_id = str(item.get("receipt_id") or "")
-        order = (
-            str(item.get("logical_key") or ""),
-            str(item.get("bridge_id") or ""),
+        if receipt_id and item.get("learning_eligible") is True:
+            candidates.setdefault(receipt_id, []).append(item)
+    deduped = {
+        receipt_id: items[0]
+        for receipt_id, items in candidates.items()
+        if len(items) == 1
+    }
+    strategy_metrics: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in deduped.values():
+        key = (
+            str(item.get("strategy_id") or "UNKNOWN"),
+            str(item.get("strategy_version") or "UNKNOWN"),
         )
-        if receipt_id and (
-            receipt_id not in deduped or order < deduped_order[receipt_id]
+        row = strategy_metrics.setdefault(
+            key,
+            {
+                "strategy_id": key[0],
+                "strategy_version": key[1],
+                "eligible_episode_count": 0,
+                "path_status_counts": {},
+                "mfe_pct_sum": 0.0,
+                "mfe_pct_count": 0,
+                "mae_pct_sum": 0.0,
+                "mae_pct_count": 0,
+                "close_change_pct_sum": 0.0,
+                "close_change_pct_count": 0,
+            },
+        )
+        row["eligible_episode_count"] += 1
+        status = str(
+            item.get("selection_outcome")
+            or (
+                (item.get("selection_outcome_metrics") or {}).get("path_status")
+                if isinstance(item.get("selection_outcome_metrics"), Mapping)
+                else None
+            )
+            or "MISSING"
+        ).upper()
+        row["path_status_counts"][status] = row["path_status_counts"].get(status, 0) + 1
+        metrics = item.get("selection_outcome_metrics")
+        if not isinstance(metrics, Mapping):
+            continue
+        for metric_key, sum_key, count_key in (
+            ("mfe_pct", "mfe_pct_sum", "mfe_pct_count"),
+            ("mae_pct", "mae_pct_sum", "mae_pct_count"),
         ):
-            deduped[receipt_id] = item
-            deduped_order[receipt_id] = order
+            try:
+                value = float(metrics.get(metric_key))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                row[sum_key] += value
+                row[count_key] += 1
+        try:
+            reference = float(metrics.get("reference_price"))
+            close = float(metrics.get("close_price"))
+            close_change = (close - reference) / reference * 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(close_change):
+            row["close_change_pct_sum"] += close_change
+            row["close_change_pct_count"] += 1
+    for row in strategy_metrics.values():
+        for sum_key, count_key, mean_key in (
+            ("mfe_pct_sum", "mfe_pct_count", "mfe_pct_mean"),
+            ("mae_pct_sum", "mae_pct_count", "mae_pct_mean"),
+            ("close_change_pct_sum", "close_change_pct_count", "close_change_pct_mean"),
+        ):
+            row[mean_key] = (
+                row[sum_key] / row[count_key] if row[count_key] else None
+            )
     return {
         "schema_version": "dawnstrike.research_episode_outcome_learning.v1",
         "bridge_count": len(usable),
@@ -1956,15 +2056,39 @@ def _bridge_learning_summary(
             state: sum(
                 1
                 for item in deduped.values()
-                if str(item.get("outcome_status") or "MISSING") == state
+                if str(
+                    item.get("selection_outcome")
+                    or (
+                        (item.get("selection_outcome_metrics") or {}).get("path_status")
+                        if isinstance(item.get("selection_outcome_metrics"), Mapping)
+                        else None
+                    )
+                    or item.get("outcome_state")
+                    or item.get("outcome_status")
+                    or "MISSING"
+                ).upper() == state
             )
             for state in sorted(
                 {
-                    str(item.get("outcome_status") or "MISSING")
+                    str(
+                        item.get("selection_outcome")
+                        or (
+                            (item.get("selection_outcome_metrics") or {}).get("path_status")
+                            if isinstance(item.get("selection_outcome_metrics"), Mapping)
+                            else None
+                        )
+                        or item.get("outcome_state")
+                        or item.get("outcome_status")
+                        or "MISSING"
+                    ).upper()
                     for item in deduped.values()
                 }
             )
         },
+        "strategies": [
+            strategy_metrics[key]
+            for key in sorted(strategy_metrics)
+        ],
         "missing_receipt_join_count": sum(
             1 for item in all_bridges if not str(item.get("receipt_id") or "")
         ),

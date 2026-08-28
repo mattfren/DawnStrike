@@ -36,6 +36,27 @@ def _selection() -> dict[str, object]:
                 "slate_id": "luna-slate-" + "b" * 24,
                 "content_hash_sha256": "c" * 64,
                 "selection_ids": ["research-selection:nova"],
+                "rows": [{
+                    "research_selection_id": "research-selection:nova",
+                    "signal_id": "signal:nova",
+                    "ticker": "NOVA",
+                    "market_date": "2026-08-28",
+                    "episode_id": "episode:" + "a" * 32,
+                    "strategy_contributors": [
+                        {
+                            "strategy_id": "primary",
+                            "strategy_version": "v1",
+                            "receipt_id": "sdr-primary",
+                            "receipt_hash_sha256": "d" * 64,
+                        },
+                        {
+                            "strategy_id": "secondary",
+                            "strategy_version": "v2",
+                            "receipt_id": "sdr-secondary",
+                            "receipt_hash_sha256": "e" * 64,
+                        },
+                    ],
+                }],
             },
             "signal": {
                 "signal_id": "signal:nova",
@@ -86,6 +107,96 @@ def _outcome() -> dict[str, object]:
     }
 
 
+def _complete_selection_outcome() -> dict[str, object]:
+    provider = "yahoo_finance_chart"
+    source_url = "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?range=5d&interval=1m&includePrePost=false"
+    bar_hash = "2" * 64
+    lineage = [{"source": provider, "source_url": source_url, "request": "GET /chart"}]
+    binding = {
+        "provider": provider,
+        "source_url": source_url,
+        "source_artifact_identity": f"market-bars:{provider}:NOVA:2026-08-28:1m:{bar_hash}",
+        "source_bar_hash_sha256": bar_hash,
+        "source_lineage": lineage,
+        "source_cutoff": "2026-08-28T20:00:00+00:00",
+        "source_request_hash_sha256": bridge._digest_list(lineage),
+    }
+    metrics = {
+        "reference_at": "2026-08-28T14:01:00Z",
+        "reference_price": 100.0,
+        "close_at": "2026-08-28T14:02:00Z",
+        "close_price": 101.0,
+        "high_after_reference": 101.0,
+        "low_after_reference": 100.0,
+        "mfe_pct": 1.0,
+        "mae_pct": 0.0,
+        "path_status": "POSITIVE_CLOSE",
+        "bar_count": 1,
+    }
+    observation_payload = {
+        "ticker": "NOVA",
+        "market_date": "2026-08-28",
+        "observed_at": metrics["reference_at"],
+        "open": 100.0,
+        "high": 100.0,
+        "low": 100.0,
+        "close": 100.0,
+        "volume": 1.0,
+    }
+    path_id = f"selection-path:selection:nova:{bar_hash[:24]}"
+    path_payload = {
+        "path_id": path_id,
+        "metrics": metrics,
+        "source_bar_hash_sha256": bar_hash,
+    }
+    metric_body = {
+        "selection_id": "selection:nova",
+        "signal_id": "signal:nova",
+        "ticker": "NOVA",
+        "market_date": "2026-08-28",
+        "source_bar_hash_sha256": bar_hash,
+        "source_binding": binding,
+        "metrics": metrics,
+    }
+    metric_hash = bridge._digest(metric_body)
+    return {
+        "selection_id": "selection:nova",
+        "signal_id": "signal:nova",
+        "market_date": "2026-08-28",
+        "selected_at": "2026-08-28T14:00:00+00:00",
+        "outcome_status": "COMPLETE_SOURCED",
+        "source_authenticated": True,
+        "automatic_sourced_data": True,
+        "source_provider": provider,
+        "source": provider,
+        "source_url": source_url,
+        "source_artifact_identity": binding["source_artifact_identity"],
+        "source_bar_hash_sha256": bar_hash,
+        "source_bar_interval": "1m",
+        "source_binding": binding,
+        "source_lineage": lineage,
+        "source_cutoff": binding["source_cutoff"],
+        "source_coverage_complete": True,
+        "coverage_maximum_gap_seconds": 0,
+        "coverage_allowed_gap_seconds": 60,
+        "capture_model_version": "alphaops-sourced-outcome-v3",
+        "capture_mode": "automatic_sourced_selection_observation",
+        "no_lookahead": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "source_observation_id": "selection-observation:selection:nova:2026-08-28T14:01:00Z",
+        "source_observation_hash_sha256": bridge._digest(observation_payload),
+        "source_observation_payload": observation_payload,
+        "source_path_id": path_id,
+        "source_path_hash_sha256": bridge._digest(path_payload),
+        "source_path_payload": path_payload,
+        "outcome_artifact_id": f"selection-outcome:selection:nova:{metric_hash[:24]}",
+        "outcome_artifact_hash_sha256": metric_hash,
+        "selection_outcome_metrics": metrics,
+        "learning_eligible": True,
+    }
+
+
 def test_bridge_binds_every_contributor_and_scrubs_trade_fields(monkeypatch) -> None:
     monkeypatch.setattr(bridge, "validate_ranked_research_slate", lambda slate, **_: slate)
     rows = bridge.build_research_episode_outcome_bridges(
@@ -95,7 +206,8 @@ def test_bridge_binds_every_contributor_and_scrubs_trade_fields(monkeypatch) -> 
         cutoff="2026-08-28T21:00:00+00:00",
     )
     assert [row["receipt_id"] for row in rows] == ["sdr-primary", "sdr-secondary"]
-    assert all(row["outcome_status"] == "WIN" for row in rows)
+    assert all(row["outcome_status"] == "INELIGIBLE" for row in rows)
+    assert all("trade outcome" in row["outcome_reason"] for row in rows)
     assert all("entry_price" not in row and "gross_return_pct" not in row for row in rows)
     assert all(row["research_only"] is True for row in rows)
     assert all(row["broker_execution_enabled"] is False for row in rows)
@@ -220,23 +332,20 @@ def test_production_persist_shape_binds_nested_contributors_once(
         cutoff="2026-08-28T21:00:00+00:00",
     )
     assert [row["receipt_id"] for row in rows] == ["sdr-primary", "sdr-secondary"]
-    assert all(row["learning_eligible"] is True for row in rows)
+    assert all(row["learning_eligible"] is False for row in rows)
 
 
 def test_stripped_nested_contributors_are_ineligible_and_do_not_inherit(monkeypatch) -> None:
     monkeypatch.setattr(bridge, "validate_ranked_research_slate", lambda slate, **_: slate)
     selection = _selection()
     del selection["payload_json"]["signal"]["strategy_contributors"]
-    rows = bridge.build_research_episode_outcome_bridges(
-        [selection],
-        [_outcome()],
-        market_date="2026-08-28",
-        cutoff="2026-08-28T21:00:00+00:00",
-    )
-    assert len(rows) == 1
-    assert rows[0]["receipt_id"] == ""
-    assert rows[0]["outcome_status"] == "INELIGIBLE"
-    assert rows[0]["learning_eligible"] is False
+    with pytest.raises(SnapshotValidationError, match="contributor receipts"):
+        bridge.build_research_episode_outcome_bridges(
+            [selection],
+            [_outcome()],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
 
 
 def test_mutated_nested_receipt_hash_cannot_join_learning(monkeypatch) -> None:
@@ -245,14 +354,13 @@ def test_mutated_nested_receipt_hash_cannot_join_learning(monkeypatch) -> None:
     selection["payload_json"]["signal"]["strategy_contributors"][0][
         "receipt_hash_sha256"
     ] = "9" * 64
-    rows = bridge.build_research_episode_outcome_bridges(
-        [selection],
-        [_outcome()],
-        market_date="2026-08-28",
-        cutoff="2026-08-28T21:00:00+00:00",
-    )
-    assert rows[0]["receipt_id"] == "sdr-primary"
-    assert rows[0]["receipt_hash_sha256"] == "9" * 64
+    with pytest.raises(SnapshotValidationError, match="contributor receipts"):
+        bridge.build_research_episode_outcome_bridges(
+            [selection],
+            [_outcome()],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
     receipts = (
         {
             "receipt_id": "sdr-primary",
@@ -264,8 +372,7 @@ def test_mutated_nested_receipt_hash_cannot_join_learning(monkeypatch) -> None:
             "outcome_state": "MISSING",
         },
     )
-    overlaid = _apply_research_episode_outcomes(receipts, rows)
-    assert overlaid[0]["outcome_state"] == "MISSING"
+    assert _apply_research_episode_outcomes(receipts, []) == receipts
 
 
 def test_missing_outcome_does_not_inherit_neighbor_or_become_zero(monkeypatch) -> None:
@@ -415,6 +522,32 @@ def test_frozen_timestamp_and_lineage_overrides_fail_closed(monkeypatch) -> None
         )
 
 
+def test_missing_capture_can_recover_as_immutable_r2_revision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(bridge, "validate_ranked_research_slate", lambda slate, **_: slate)
+    store = SQLiteScanStore(tmp_path / "recovery.sqlite")
+    missing = bridge.build_research_episode_outcome_bridges(
+        [_selection()],
+        [],
+        market_date="2026-08-28",
+        cutoff="2026-08-28T20:00:00+00:00",
+    )
+    assert bridge.persist_research_episode_outcome_bridges(store, missing)["inserted"] == 2
+    complete = bridge.build_research_episode_outcome_bridges(
+        [_selection()],
+        [_complete_selection_outcome()],
+        market_date="2026-08-28",
+        cutoff="2026-08-28T20:00:00+00:00",
+    )
+    assert bridge.persist_research_episode_outcome_bridges(store, complete)["inserted"] == 2
+    assert bridge.persist_research_episode_outcome_bridges(store, complete)["reused"] == 2
+    loaded = store.load_research_episode_outcome_bridges(market_date="2026-08-28")
+    assert len(loaded) == 4
+    assert sum(row["outcome_status"] == "MISSING" for row in loaded) == 2
+    assert sum(row["outcome_status"] == "POSITIVE_CLOSE" for row in loaded) == 2
+
+
 def test_learning_overlay_matches_receipt_identity_once_without_inheriting() -> None:
     receipts = (
         {
@@ -449,33 +582,39 @@ def test_learning_overlay_matches_receipt_identity_once_without_inheriting() -> 
             "bridge_id": "rep-one",
             "receipt_id": "sdr-primary",
             "receipt_hash_sha256": "d" * 64,
+            "strategy_id": "primary",
+            "strategy_version": "v1",
             "ticker": "NOVA",
             "market_date": "2026-08-28",
-            "outcome_status": "WIN",
+                "selection_outcome": "POSITIVE_CLOSE",
             "learning_eligible": True,
         },
         {
             "bridge_id": "rep-two",
             "receipt_id": "sdr-primary",
             "receipt_hash_sha256": "d" * 64,
+            "strategy_id": "primary",
+            "strategy_version": "v1",
             "ticker": "NOVA",
             "market_date": "2026-08-28",
-            "outcome_status": "LOSS",
+                "selection_outcome": "NEGATIVE_CLOSE",
             "learning_eligible": True,
         },
         {
             "bridge_id": "rep-three",
             "receipt_id": "sdr-secondary",
             "receipt_hash_sha256": "e" * 64,
+            "strategy_id": "secondary",
+            "strategy_version": "v2",
             "ticker": "NOVA",
             "market_date": "2026-08-28",
-            "outcome_status": "WIN",
+                "selection_outcome": "POSITIVE_CLOSE",
             "learning_eligible": True,
         },
     ]
     overlaid = _apply_research_episode_outcomes(receipts, joined)
     summary = _aggregate_decision_receipts(overlaid)
-    assert summary["outcome_state_counts"]["WIN"] == 2
-    assert summary["outcome_state_counts"]["MISSING_OUTCOME"] == 1
+    assert summary["outcome_state_counts"]["POSITIVE_CLOSE"] == 1
+    assert summary["outcome_state_counts"]["MISSING_OUTCOME"] == 2
     reversed_overlay = _apply_research_episode_outcomes(receipts, list(reversed(joined)))
     assert reversed_overlay == overlaid

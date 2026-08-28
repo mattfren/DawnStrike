@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from intraday_scanner.errors import StorageError
+from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.scenario.contracts import (
     SCENARIO_FEATURE_SCHEMA_VERSION,
@@ -8676,7 +8676,8 @@ class SQLiteScanStore:
             with self._connect() as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("BEGIN IMMEDIATE")
-                for row in materialized:
+                for source_row in materialized:
+                    row = dict(source_row)
                     bridge_id = str(row.get("bridge_id") or "").strip()
                     bridge_hash = str(row.get("bridge_hash_sha256") or "").strip().lower()
                     logical_key = str(row.get("logical_key") or "").strip()
@@ -8699,6 +8700,21 @@ class SQLiteScanStore:
                         raise StorageError("research outcome bridge hash mismatch")
                     if bridge_id != "rep-" + bridge_hash[:24]:
                         raise StorageError("research outcome bridge ID is not derived from hash")
+                    if (
+                        row.get("learning_eligible") is True
+                        or str(row.get("outcome_status") or "").upper()
+                        == "COMPLETE_SOURCED"
+                    ):
+                        try:
+                            from intraday_scanner.services.research_episode_outcome_service import (
+                                validate_research_episode_outcome_bridge,
+                            )
+
+                            validate_research_episode_outcome_bridge(row)
+                        except (SnapshotValidationError, TypeError, ValueError) as exc:
+                            raise StorageError(
+                                "research outcome producer proof is invalid: " + str(exc)
+                            ) from exc
                     payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
 
                     def comparable_payload(value: str) -> str:
@@ -8729,17 +8745,70 @@ class SQLiteScanStore:
                         (logical_key,),
                     ).fetchone()
                     if logical_existing is not None:
+                        existing_payload = json.loads(str(logical_existing[2]))
+                        existing_status = str(
+                            existing_payload.get("outcome_status") or ""
+                        ).upper()
+                        incoming_status = str(
+                            row.get("source_outcome_status")
+                            or row.get("outcome_status")
+                            or ""
+                        ).upper()
+                        # A transient missing capture is retained as an
+                        # immutable diagnostic, while the first recovered
+                        # authenticated capture becomes an explicit revision.
+                        # This avoids silently consuming good evidence while
+                        # preserving append-only history.
                         if (
-                            str(logical_existing[1]) != bridge_hash
-                            or comparable_payload(str(logical_existing[2]))
-                            != comparable_payload(payload_json)
+                            existing_status in {"MISSING", "INELIGIBLE"}
+                            and incoming_status == "COMPLETE_SOURCED"
                         ):
-                            raise StorageError(
-                                "research outcome logical identity/payload mismatch: "
-                                + logical_key
+                            row["logical_key"] = logical_key + "-r2"
+                            logical_key = str(row["logical_key"])
+                            bridge_body = {
+                                key: value
+                                for key, value in row.items()
+                                if key not in {"bridge_id", "bridge_hash_sha256", "created_at"}
+                            }
+                            bridge_hash = hashlib.sha256(
+                                json.dumps(
+                                    bridge_body,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                    ensure_ascii=True,
+                                ).encode("utf-8")
+                            ).hexdigest()
+                            bridge_id = "rep-" + bridge_hash[:24]
+                            row["bridge_hash_sha256"] = bridge_hash
+                            row["bridge_id"] = bridge_id
+                            payload_json = json.dumps(
+                                row, sort_keys=True, separators=(",", ":")
                             )
-                        reused += 1
-                        continue
+                            try:
+                                validate_research_episode_outcome_bridge(row)
+                            except (SnapshotValidationError, TypeError, ValueError) as exc:
+                                raise StorageError(
+                                    "research outcome producer proof is invalid: "
+                                    + str(exc)
+                                ) from exc
+                            logical_existing = connection.execute(
+                                "SELECT bridge_id, bridge_hash_sha256, payload_json "
+                                "FROM research_episode_outcome_bridges WHERE logical_key = ?",
+                                (logical_key,),
+                            ).fetchone()
+                        if logical_existing is not None:
+                            same_hash = str(logical_existing[1]) == bridge_hash
+                            same_payload = comparable_payload(
+                                str(logical_existing[2])
+                            ) == comparable_payload(payload_json)
+                            if not (same_hash and same_payload):
+                                raise StorageError(
+                                    "research outcome logical identity/payload mismatch: "
+                                    + logical_key
+                                )
+                        if logical_existing is not None:
+                            reused += 1
+                            continue
                     owner = connection.execute(
                         "SELECT bridge_id FROM research_episode_outcome_bridges "
                         "WHERE bridge_hash_sha256 = ?",

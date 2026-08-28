@@ -1355,7 +1355,8 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
         "radar-primary-receipt",
         "radar-secondary-receipt",
     }
-    assert all(row["outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
+    assert all(row["source_outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
+    assert all(row["outcome_status"] == "FLAT_CLOSE" for row in bridges)
     assert all(row["learning_eligible"] is True for row in bridges)
     assert all(row["selection_outcome_metrics"]["reference_price"] == 100.0 for row in bridges)
     assert all(row["selection_outcome_metrics"]["high_after_reference"] == 100.0 for row in bridges)
@@ -1415,6 +1416,13 @@ def test_radar_outcome_requires_authenticated_canonical_source_binding(
                 "slate_id": "luna-slate-" + "a" * 24,
                 "content_hash_sha256": "b" * 64,
                 "selection_ids": ["research-selection:source-binding"],
+                "rows": [{
+                    "research_selection_id": "research-selection:source-binding",
+                    "signal_id": "signal:source-binding",
+                    "ticker": "NOVA",
+                    "market_date": DAY,
+                    "episode_id": "episode:" + "c" * 32,
+                }],
             },
             "signal": {
                 "signal_id": "signal:source-binding",
@@ -1453,13 +1461,13 @@ def test_radar_outcome_requires_authenticated_canonical_source_binding(
     ]
     source_hash = capture_module._bars_hash(bars)
     valid_evidence = {
-        "source": "provider-a",
-        "source_url": "https://provider-a.test/bars",
-        "source_artifact_identity": f"artifact:provider-a:nova:{source_hash}",
+        "source": "yahoo_finance_chart",
+        "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?range=5d&interval=1m&includePrePost=false",
+        "source_artifact_identity": f"market-bars:yahoo_finance_chart:NOVA:{DAY}:1m:{source_hash}",
         "source_bar_hash_sha256": source_hash,
         "source_lineage": [{
-            "source": "provider-a",
-            "source_url": "https://provider-a.test/bars",
+                "source": "yahoo_finance_chart",
+                "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/NOVA?range=5d&interval=1m&includePrePost=false",
             "request": "GET /bars?symbol=NOVA",
             "attempt": 1,
             "fetched_at": requested_at.isoformat(),

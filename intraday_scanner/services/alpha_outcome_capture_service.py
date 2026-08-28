@@ -629,7 +629,9 @@ def capture_sourced_alpha_outcomes(
             bars_by_ticker.get(str(selection.get("ticker") or "").upper(), []),
             source_evidence_by_ticker.get(str(selection.get("ticker") or "").upper(), {}),
             session=session,
-            requested_at=at,
+            # EOD bridge identity is anchored to the immutable market-session
+            # close, never to the wall-clock acquisition retry time.
+            requested_at=session.closed_at.astimezone(UTC),
             captured_at=captured_at,
         )
         for selection in radar_selections
@@ -669,7 +671,7 @@ def capture_sourced_alpha_outcomes(
                     radar_selections,
                     [*outcomes, *radar_outcomes],
                     market_date=resolved_date,
-                    cutoff=at.isoformat(),
+                    cutoff=session.closed_at.astimezone(UTC).isoformat(),
                     source_identity="alpha_sourced_eod_outcomes",
                     created_at=captured_at,
                 )
@@ -688,6 +690,8 @@ def capture_sourced_alpha_outcomes(
         if str(row.get("status") or "") == "terminal_missing"
     )
     status = "partial" if unresolved_count else "complete"
+    if radar_selections and radar_bridge_stats.get("status") != "COMPLETE":
+        status = "partial"
     summary = _summary(
         status=status,
         market_date=resolved_date,
@@ -1290,6 +1294,43 @@ def _derive_research_selection_outcome(
     source_artifact_identity = str(
         source_evidence.get("source_artifact_identity") or ""
     ).strip()
+    raw_lineage = source_evidence.get("source_lineage") or []
+    lineage_rows = []
+    if isinstance(raw_lineage, list):
+        source_provider = str(source_evidence.get("source") or "").strip()
+        source_endpoint = str(source_evidence.get("source_url") or "").strip()
+        successful = [
+            item
+            for item in raw_lineage
+            if isinstance(item, Mapping)
+            and str(item.get("source") or "").strip() == source_provider
+            and str(item.get("source_url") or "").strip() == source_endpoint
+            and (
+                str(item.get("status") or "").lower() == "ok"
+                or item.get("source_coverage_complete") is True
+            )
+        ]
+        lineage_input = successful or raw_lineage
+        seen_lineage: set[str] = set()
+        for item in lineage_input:
+            if isinstance(item, Mapping):
+                canonical_item = dict(item)
+                for key in (
+                    "fetched_at",
+                    "attempt",
+                    "attempt_limit",
+                    "error",
+                ):
+                    canonical_item.pop(key, None)
+                identity = json.dumps(
+                    canonical_item, sort_keys=True, separators=(",", ":")
+                )
+                if identity not in seen_lineage:
+                    lineage_rows.append(canonical_item)
+                    seen_lineage.add(identity)
+        lineage_rows.sort(
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
+        )
     base: dict[str, Any] = {
         "selection_id": selection_id,
         "signal_id": signal_id,
@@ -1308,7 +1349,7 @@ def _derive_research_selection_outcome(
         "source_bar_hash_sha256": source_bar_hash,
         "source_fetched_at": source_evidence.get("source_fetched_at"),
         "source_artifact_identity": source_artifact_identity,
-        "source_lineage": source_evidence.get("source_lineage") or [],
+        "source_lineage": lineage_rows,
         "source_coverage_complete": source_evidence.get("source_coverage_complete"),
         "automatic_sourced_data": True,
         # Authentication is granted only after the structured source binding
@@ -1320,13 +1361,10 @@ def _derive_research_selection_outcome(
         "capture_model_version": CAPTURE_MODEL_VERSION,
         "capture_mode": "automatic_sourced_selection_observation",
     }
-    lineage_rows = source_evidence.get("source_lineage") or []
     lineage_valid = bool(lineage_rows) and all(
         isinstance(item, Mapping)
         and str(item.get("source") or "").strip()
         and str(item.get("source_url") or "").strip()
-        and item.get("attempt") is not None
-        and str(item.get("fetched_at") or "").strip()
         for item in lineage_rows
     )
     lineage_sources = {
@@ -1524,9 +1562,14 @@ def _derive_research_selection_outcome(
     metric_hash = hashlib.sha256(
         json.dumps(metric_body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
+    observation_payload = {
+        "ticker": ticker,
+        "market_date": session.market_date,
+        **reference.to_dict(),
+    }
     reference_hash = hashlib.sha256(
         json.dumps(
-            reference.to_dict(),
+            observation_payload,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -1541,16 +1584,23 @@ def _derive_research_selection_outcome(
             allow_nan=False,
         ).encode()
     ).hexdigest()
+    path_payload = {
+        "path_id": path_id,
+        "metrics": metrics,
+        "source_bar_hash_sha256": source_bar_hash,
+    }
     base.update({
         "source_authenticated": bool(
             source_binding_valid
         ),
         "source_observation_id": (
-            f"selection-observation:{selection_id}:{reference.observed_at.isoformat()}"
+            f"selection-observation:{selection_id}:{_iso_utc(reference.observed_at)}"
         ),
         "source_observation_hash_sha256": reference_hash,
+        "source_observation_payload": observation_payload,
         "source_path_id": path_id,
         "source_path_hash_sha256": path_hash,
+        "source_path_payload": path_payload,
         "source_cutoff": _iso_utc(requested_at),
         "source_binding": source_binding,
         "outcome_artifact_id": f"selection-outcome:{selection_id}:{metric_hash[:24]}",

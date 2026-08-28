@@ -2481,6 +2481,8 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
 ) -> None:
     """Bind one immutable bridge to its logical selection/contributor key."""
 
+    connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_update")
+    connection.execute("DROP TRIGGER IF EXISTS research_episode_outcome_bridges_no_delete")
     _add_column_if_missing(
         connection,
         "research_episode_outcome_bridges",
@@ -2494,7 +2496,8 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
         WHERE logical_key = ''
         """
     ).fetchall()
-    for row in existing_rows:
+    logical_counts: dict[str, int] = {}
+    for row in sorted(existing_rows, key=lambda value: str(value[0])):
         identity = {
             "market_date": str(row[1] or "")[:10],
             "selection_id": str(row[2] or ""),
@@ -2505,7 +2508,12 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        logical_key = "research-bridge-logical-v1-" + digest
+        logical_base = "research-bridge-logical-v1-" + digest
+        revision = logical_counts.get(logical_base, 0) + 1
+        logical_counts[logical_base] = revision
+        logical_key = (
+            logical_base if revision == 1 else f"{logical_base}-r{revision}"
+        )
         connection.execute(
             "UPDATE research_episode_outcome_bridges SET logical_key = ? WHERE bridge_id = ?",
             (logical_key, str(row[0])),
@@ -2515,6 +2523,18 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
         CREATE UNIQUE INDEX IF NOT EXISTS
             idx_research_episode_outcome_bridges_logical_key
         ON research_episode_outcome_bridges(logical_key)
+        """
+    )
+    connection.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_update
+        BEFORE UPDATE ON research_episode_outcome_bridges BEGIN
+            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_delete
+        BEFORE DELETE ON research_episode_outcome_bridges BEGIN
+            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+        END;
         """
     )
 

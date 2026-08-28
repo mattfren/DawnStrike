@@ -12,7 +12,9 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.services.luna_research_slate_service import (
     validate_ranked_research_slate,
@@ -113,8 +115,6 @@ def build_and_persist_research_episode_outcome_bridges(
         "research_only": True,
         "broker_execution_enabled": False,
     }
-
-
 def load_research_episode_outcome_bridges(
     store: SQLiteScanStore,
     *,
@@ -200,6 +200,49 @@ def _selection_identity(
         frozen_signal.get("selected_at"),
     ]
     frozen_selection_id = str(frozen_signal.get("research_selection_id") or "").strip()
+    frozen_rows = [
+        row
+        for row in slate.get("rows") or ()
+        if isinstance(row, Mapping)
+        and str(row.get("research_selection_id") or "").strip()
+        == frozen_selection_id
+    ]
+    if len(frozen_rows) != 1:
+        raise SnapshotValidationError("research radar selection lacks one exact frozen row")
+    frozen_row = frozen_rows[0]
+    for field in ("signal_id", "ticker", "market_date", "episode_id"):
+        asserted = frozen_signal.get(field)
+        frozen = frozen_row.get(field)
+        if asserted not in (None, "") and frozen not in (None, ""):
+            left = (
+                str(asserted).upper()
+                if field == "ticker"
+                else str(asserted)[:10]
+                if field == "market_date"
+                else str(asserted)
+            )
+            right = (
+                str(frozen).upper()
+                if field == "ticker"
+                else str(frozen)[:10]
+                if field == "market_date"
+                else str(frozen)
+            )
+            if left != right:
+                raise SnapshotValidationError(
+                    f"research radar frozen row {field} conflicts with signal"
+                )
+        elif asserted not in (None, "") and frozen in (None, ""):
+            raise SnapshotValidationError(f"research radar frozen row lacks {field}")
+    row_selected_at = frozen_row.get("selected_at")
+    if row_selected_at not in (None, ""):
+        selected_at_candidates.append(row_selected_at)
+    if _contributor_projection(
+        frozen_signal.get("strategy_contributors")
+    ) != _contributor_projection(frozen_row.get("strategy_contributors")):
+        raise SnapshotValidationError(
+            "research radar frozen row contributor receipts conflict with signal"
+        )
     for row in slate.get("rows") or ():
         if (
             isinstance(row, Mapping)
@@ -370,6 +413,73 @@ def _contributors(selection: Mapping[str, Any]) -> list[dict[str, Any]]:
             or receipt.get("receipt_status")
             or ""
         ).strip().upper()
+        effective_receipt_status = receipt_status
+        if receipt:
+            contributor_source_signal = str(
+                item.get("source_signal_id")
+                or item.get("prior_session_signal_id")
+                or item.get("signal_id")
+                or signal.get("signal_id")
+                or ""
+            ).strip()
+            receipt_payload = dict(receipt)
+            supplied_hash = str(
+                receipt_payload.get("receipt_hash_sha256") or ""
+            ).lower()
+            supplied_id = str(receipt_payload.get("receipt_id") or "")
+            hash_body = {
+                key: value
+                for key, value in receipt_payload.items()
+                if key not in {"receipt_hash_sha256", "receipt_id"}
+            }
+            expected_hash = hashlib.sha256(
+                canonical_json(hash_body).encode("utf-8")
+            ).hexdigest()
+            if (
+                supplied_hash != expected_hash
+                or supplied_id != "sdr-" + expected_hash[:24]
+                or str(receipt_payload.get("strategy_id") or "") != strategy_id
+                or str(receipt_payload.get("strategy_version") or "") != strategy_version
+                or str(receipt_payload.get("symbol") or "").upper()
+                != str(selection.get("ticker") or "").upper()
+                or str(receipt_payload.get("market_date") or "")[:10]
+                != str(selection.get("market_date") or "")[:10]
+                or (
+                    not contributor_source_signal
+                    or not str(receipt_payload.get("input_payload_json") or "").strip()
+                )
+                or receipt_status != "COMPLETE"
+            ):
+                item["_receipt_status"] = "INVALID"
+            else:
+                try:
+                    input_payload_text = str(receipt_payload["input_payload_json"])
+                    input_payload = json.loads(input_payload_text)
+                    input_signal = next(
+                        (
+                            str(input_payload.get(key) or "").strip()
+                            for key in (
+                                "source_signal_id",
+                                "prior_session_signal_id",
+                                "signal_id",
+                                "signal_key",
+                            )
+                            if str(input_payload.get(key) or "").strip()
+                        ),
+                        "",
+                    )
+                    if (
+                        canonical_json(input_payload) != input_payload_text
+                        or input_signal != contributor_source_signal
+                    ):
+                        item["_receipt_status"] = "INVALID"
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    item["_receipt_status"] = "INVALID"
+        elif receipt_status == "COMPLETE" and (receipt_id or receipt_hash):
+            item["_receipt_status"] = "INVALID"
+        effective_receipt_status = str(
+            item.get("_receipt_status") or receipt_status
+        ).strip().upper()
         if not strategy_id:
             continue
         key = (strategy_id, strategy_version, receipt_id, receipt_hash)
@@ -380,13 +490,48 @@ def _contributors(selection: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "strategy_version": strategy_version,
                 "receipt_id": receipt_id,
                 "receipt_hash_sha256": receipt_hash,
-                "_receipt_status": receipt_status,
+                "source_signal_id": str(
+                    item.get("source_signal_id")
+                    or item.get("prior_session_signal_id")
+                    or item.get("signal_id")
+                    or signal.get("signal_id")
+                    or ""
+                ).strip(),
+                "_receipt_status": effective_receipt_status,
                 "_missing_authenticated_contributor": bool(
                     item.get("_missing_authenticated_contributor")
                 ),
             },
         )
     return list(unique.values())
+
+
+def _contributor_projection(value: Any) -> tuple[tuple[str, str, str, str, str, str], ...]:
+    decoded = _decode_json(value)
+    if not isinstance(decoded, Sequence) or isinstance(decoded, (str, bytes)):
+        return ()
+    return tuple(
+        sorted(
+            (
+                str(item.get("strategy_id") or item.get("decision_strategy_id") or "").strip(),
+                str(item.get("strategy_version") or "").strip(),
+                str(item.get("receipt_id") or "").strip(),
+                str(
+                    item.get("receipt_hash_sha256")
+                    or item.get("receipt_hash")
+                    or ""
+                ).strip().lower(),
+                str(item.get("source_signal_id") or item.get("signal_id") or "").strip(),
+                str(
+                    item.get("receipt_status")
+                    or item.get("strategy_receipt_construction_status")
+                    or ""
+                ).strip().upper(),
+            )
+            for item in decoded
+            if isinstance(item, Mapping)
+        )
+    )
 
 
 def _decode_json(value: Any) -> Any:
@@ -407,17 +552,21 @@ def _exact_outcome(
     selection: Mapping[str, Any],
     by_identity: Mapping[tuple[str, str], list[Mapping[str, Any]]],
 ) -> Mapping[str, Any] | None:
+    matches: list[Mapping[str, Any]] = []
+    seen_ids: set[int] = set()
     for key in ("selection_id", "signal_id"):
         identity = str(selection.get(key) or "").strip()
         if not identity:
             payload = _decode_mapping(selection.get("payload_json"))
             identity = str(payload.get(key) or "").strip()
-        matches = by_identity.get((key, identity), [])
-        if len(matches) > 1:
-            raise SnapshotValidationError("research radar outcome identity is ambiguous")
-        if matches:
-            return matches[0]
-    return None
+        identity_matches = by_identity.get((key, identity), [])
+        for match in identity_matches:
+            if id(match) not in seen_ids:
+                matches.append(match)
+                seen_ids.add(id(match))
+    if len(matches) > 1:
+        raise SnapshotValidationError("research radar outcome identity is ambiguous")
+    return matches[0] if matches else None
 
 
 def _bridge_row(
@@ -475,6 +624,17 @@ def _bridge_row(
         if isinstance(outcome, Mapping) and outcome.get("source_binding") not in (None, "")
         else base.get("source_binding")
     )
+    source_bar_hash = _first(
+        outcome, "source_bar_hash_sha256"
+    ) or str(base.get("source_bar_hash_sha256") or "")
+    observation_payload = (
+        outcome.get("source_observation_payload")
+        if isinstance(outcome, Mapping)
+        else None
+    ) or base.get("source_observation_payload")
+    path_payload = (
+        outcome.get("source_path_payload") if isinstance(outcome, Mapping) else None
+    ) or base.get("source_path_payload")
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         **dict(base),
@@ -482,25 +642,71 @@ def _bridge_row(
         "strategy_version": str(contributor.get("strategy_version") or ""),
         "receipt_id": str(contributor.get("receipt_id") or ""),
         "receipt_hash_sha256": str(contributor.get("receipt_hash_sha256") or ""),
+        "source_signal_id": str(contributor.get("source_signal_id") or ""),
+        "receipt_status": str(contributor.get("_receipt_status") or ""),
         "outcome_status": outcome_status,
         "outcome_reason": reason,
         "learning_eligible": eligible,
         "source_observation_id": source_observation_id,
         "source_observation_hash_sha256": source_observation_hash,
+        "source_observation_payload": observation_payload,
         "source_path_id": source_path_id,
         "source_path_hash_sha256": source_path_hash,
+        "source_path_payload": path_payload,
         "source_cutoff": source_cutoff,
+        "source_bar_hash_sha256": source_bar_hash,
         "source_provider": source_provider,
         "source_url": source_url,
         "source_artifact_identity": source_artifact_identity,
         "source_lineage": source_lineage,
         "source_binding": source_binding,
+        "source_authenticated": bool(
+            outcome.get("source_authenticated")
+            if isinstance(outcome, Mapping) and "source_authenticated" in outcome
+            else base.get("source_authenticated")
+        ),
         "outcome_artifact_id": artifact_id,
         "outcome_artifact_hash_sha256": artifact_hash,
+        "source_outcome_status": str(
+            (outcome or {}).get("outcome_status")
+            or (outcome or {}).get("outcome_state")
+            or ""
+        ).strip().upper() if isinstance(outcome, Mapping) else "",
         "source_identity": source_identity,
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    # Carry the producer's complete proof envelope into the immutable join;
+    # the SQLite validator must be able to recheck it without consulting the
+    # transient capture result.
+    if isinstance(outcome, Mapping):
+        for field in (
+            "source_bar_interval",
+            "source_bar_count",
+            "source_first_bar_at",
+            "source_last_bar_at",
+            "source_coverage_complete",
+            "coverage_status",
+            "coverage_detail",
+            "coverage_expected_start_at",
+            "coverage_expected_end_at",
+            "coverage_expected_minute_count",
+            "coverage_observed_minute_count",
+            "coverage_maximum_gap_seconds",
+            "coverage_allowed_gap_seconds",
+            "capture_model_version",
+            "capture_mode",
+            "automatic_sourced_data",
+            "source_authenticated",
+            "no_lookahead",
+        ):
+            if field in outcome:
+                payload[field] = outcome[field]
+    # Acquisition timestamps are observational metadata and must not create a
+    # new logical bridge on a same-session retry.
+    payload["requested_at"] = source_cutoff
+    payload["captured_at"] = source_cutoff
+    payload["source_fetched_at"] = None
     payload["logical_key"] = _logical_key(
         market_date=str(base.get("market_date") or "")[:10],
         selection_id=str(base.get("selection_id") or ""),
@@ -511,6 +717,7 @@ def _bridge_row(
     metrics = outcome.get("selection_outcome_metrics") if isinstance(outcome, Mapping) else None
     if isinstance(metrics, Mapping):
         payload["selection_outcome_metrics"] = dict(metrics)
+        payload["selection_outcome"] = str(metrics.get("path_status") or "").strip().upper()
     payload["created_at"] = str(created_at or source_cutoff)
     body = {
         key: value
@@ -520,6 +727,8 @@ def _bridge_row(
     digest = _digest(body)
     payload["bridge_hash_sha256"] = digest
     payload["bridge_id"] = "rep-" + digest[:24]
+    if eligible:
+        validate_research_episode_outcome_bridge(payload)
     return payload
 
 
@@ -592,8 +801,11 @@ def _outcome_state(
     # Only the producer's validated source binding may authorize learning.
     if outcome.get("source_authenticated") is not True:
         return INELIGIBLE, False, "outcome source is not authenticated"
+    metrics = outcome.get("selection_outcome_metrics")
+    path_status = metrics.get("path_status") if isinstance(metrics, Mapping) else None
     status = str(
         outcome.get("selection_outcome")
+        or path_status
         or outcome.get("outcome_state")
         or outcome.get("outcome_status")
         or ""
@@ -609,6 +821,10 @@ def _outcome_state(
         "INELIGIBLE",
     }:
         return INELIGIBLE, False, "sourced outcome is stale or incomplete"
+    if status in {"WIN", "LOSS", "PROFIT", "RETURN"}:
+        return INELIGIBLE, False, "trade outcome labels are not valid for radar observations"
+    if status not in {"POSITIVE_CLOSE", "NEGATIVE_CLOSE", "FLAT_CLOSE"}:
+        return INELIGIBLE, False, "selection path outcome is absent or invalid"
     if (
         outcome.get("source_coverage_complete") is not True
         or outcome.get("coverage_complete") is False
@@ -645,6 +861,227 @@ def _outcome_state(
     if last_bar is not None and last_bar > cutoff:
         return INELIGIBLE, False, "source bars include data after cutoff"
     return status, bool(outcome.get("learning_eligible", True)), ""
+
+
+def validate_research_episode_outcome_bridge(row: Mapping[str, Any]) -> None:
+    """Validate the carried automatic-capture proof before learning/persisting."""
+
+    status = str(row.get("outcome_status") or "").strip().upper()
+    if row.get("learning_eligible") is not True and status != "COMPLETE_SOURCED":
+        return
+    if row.get("learning_eligible") is True and str(
+        row.get("source_outcome_status") or ""
+    ).upper() != "COMPLETE_SOURCED":
+        raise SnapshotValidationError("research outcome producer status is not complete sourced")
+    binding = row.get("source_binding")
+    if not isinstance(binding, Mapping):
+        raise SnapshotValidationError("research outcome source binding is absent")
+    provider = str(binding.get("provider") or "").strip()
+    source_url = str(binding.get("source_url") or "").strip()
+    artifact = str(binding.get("source_artifact_identity") or "").strip()
+    bar_hash = str(binding.get("source_bar_hash_sha256") or "").strip().lower()
+    lineage = binding.get("source_lineage")
+    if not provider or not source_url or not artifact or not _sha256(bar_hash):
+        raise SnapshotValidationError("research outcome source binding is incomplete")
+    if bar_hash not in artifact.lower():
+        raise SnapshotValidationError("research outcome source binding is not authenticated")
+    canonical_lineage = _canonical_source_lineage(lineage)
+    if not canonical_lineage or provider not in {
+        str(item.get("source") or "").strip() for item in canonical_lineage
+    }:
+        raise SnapshotValidationError("research outcome source lineage is invalid")
+    matching = [
+        item for item in canonical_lineage
+        if str(item.get("source") or "").strip() == provider
+        and str(item.get("source_url") or "").strip() == source_url
+    ]
+    if not matching:
+        raise SnapshotValidationError("research outcome provider/request binding is invalid")
+    ticker = str(row.get("ticker") or "").upper()
+    for item in canonical_lineage:
+        if str(item.get("ticker") or ticker).upper() != ticker:
+            raise SnapshotValidationError("research outcome lineage ticker binding mismatch")
+        if item.get("source_bar_hash_sha256") not in (None, "", bar_hash):
+            raise SnapshotValidationError("research outcome lineage bar binding mismatch")
+    expected_request_hash = _digest_list(canonical_lineage)
+    if str(binding.get("source_request_hash_sha256") or "").lower() != expected_request_hash:
+        raise SnapshotValidationError("research outcome request hash mismatch")
+    if row.get("source_bar_hash_sha256") != bar_hash:
+        raise SnapshotValidationError("research outcome bar hash binding mismatch")
+    if str(row.get("source_provider") or "").strip() != provider:
+        raise SnapshotValidationError("research outcome provider binding mismatch")
+    if str(row.get("source_url") or "").strip() != source_url:
+        raise SnapshotValidationError("research outcome URL binding mismatch")
+    if str(row.get("source_artifact_identity") or "").strip() != artifact:
+        raise SnapshotValidationError("research outcome artifact binding mismatch")
+    row_cutoff = str(row.get("source_cutoff") or "").strip()
+    binding_cutoff = str(binding.get("source_cutoff") or "").strip()
+    if not row_cutoff or row_cutoff != binding_cutoff:
+        raise SnapshotValidationError("research outcome cutoff binding mismatch")
+    cutoff_dt = _parse_optional(row_cutoff)
+    if cutoff_dt is None:
+        raise SnapshotValidationError("research outcome cutoff is invalid")
+    if row.get("source_coverage_complete") is not True:
+        raise SnapshotValidationError("research outcome coverage proof is absent")
+    if row.get("source_authenticated") is not True:
+        raise SnapshotValidationError("research outcome source authentication is absent")
+    if row.get("automatic_sourced_data") is not True:
+        raise SnapshotValidationError("research outcome automatic producer proof is absent")
+    if row.get("research_only") is not True or row.get("broker_execution_enabled") is not False:
+        raise SnapshotValidationError("research outcome execution scope is invalid")
+    if row.get("no_lookahead") is not True:
+        raise SnapshotValidationError("research outcome no-lookahead proof is absent")
+    if str(row.get("capture_mode") or "") != "automatic_sourced_selection_observation":
+        raise SnapshotValidationError("research outcome capture producer is invalid")
+    if not str(row.get("capture_model_version") or "").strip():
+        raise SnapshotValidationError("research outcome capture model proof is absent")
+    parsed_url = urlparse(source_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise SnapshotValidationError("research outcome source URL is not governed")
+    if provider.lower() in {"yahoo", "yahoo_finance", "yahoo finance", "yahoo_finance_chart"}:
+        if (
+            parsed_url.hostname != "query1.finance.yahoo.com"
+            or parsed_url.path != f"/v8/finance/chart/{ticker}"
+            or parse_qs(parsed_url.query, keep_blank_values=True)
+            != {"range": ["5d"], "interval": ["1m"], "includePrePost": ["false"]}
+        ):
+            raise SnapshotValidationError("research outcome Yahoo source URL is not governed")
+    elif provider.lower().startswith("alpaca_market_data_"):
+        if (
+            parsed_url.hostname != "data.alpaca.markets"
+            or parsed_url.path != "/v2/stocks/bars"
+            or parsed_url.query
+        ):
+            raise SnapshotValidationError("research outcome Alpaca source URL is not governed")
+    else:
+        raise SnapshotValidationError("research outcome provider is not allowlisted")
+    if str(row.get("capture_model_version") or "") != "alphaops-sourced-outcome-v3":
+        raise SnapshotValidationError("research outcome capture model is not governed")
+    expected_artifact = (
+        f"market-bars:{provider}:{ticker}:{str(row.get('market_date') or '')[:10]}:"
+        f"1m:{bar_hash}"
+    )
+    if artifact != expected_artifact:
+        raise SnapshotValidationError("research outcome artifact identity is not producer-bound")
+    if str(row.get("source_bar_interval") or "") != "1m":
+        raise SnapshotValidationError("research outcome bar interval is not governed")
+    try:
+        maximum_gap = float(row.get("coverage_maximum_gap_seconds"))
+        allowed_gap = float(row.get("coverage_allowed_gap_seconds"))
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError("research outcome gap proof is invalid") from exc
+    if maximum_gap < 0 or allowed_gap < 0 or maximum_gap > allowed_gap:
+        raise SnapshotValidationError("research outcome gap proof is invalid")
+    metrics = row.get("selection_outcome_metrics")
+    if not isinstance(metrics, Mapping):
+        raise SnapshotValidationError("research outcome metrics are absent")
+    path_status = str(metrics.get("path_status") or "").strip().upper()
+    if path_status not in {"POSITIVE_CLOSE", "NEGATIVE_CLOSE", "FLAT_CLOSE"}:
+        raise SnapshotValidationError("research outcome path status is invalid")
+    observation_payload = _decode_mapping(row.get("source_observation_payload"))
+    if not observation_payload:
+        raise SnapshotValidationError("research outcome observation payload is absent")
+    expected_observation_hash = _digest(observation_payload)
+    if str(row.get("source_observation_hash_sha256") or "").lower() != expected_observation_hash:
+        raise SnapshotValidationError("research outcome observation hash mismatch")
+    if str(observation_payload.get("ticker") or "").upper() != str(
+        row.get("ticker") or ""
+    ).upper():
+        raise SnapshotValidationError("research outcome observation ticker binding mismatch")
+    if str(observation_payload.get("market_date") or "")[:10] != str(
+        row.get("market_date") or ""
+    )[:10]:
+        raise SnapshotValidationError("research outcome observation date binding mismatch")
+    if str(observation_payload.get("observed_at") or "") != str(metrics.get("reference_at") or ""):
+        raise SnapshotValidationError("research outcome reference timestamp binding mismatch")
+    observation_at = _parse_optional(observation_payload.get("observed_at"))
+    if observation_at is None or observation_at > cutoff_dt:
+        raise SnapshotValidationError("research outcome reference exceeds cutoff")
+    close_at = _parse_optional(metrics.get("close_at"))
+    if close_at is not None and close_at > cutoff_dt:
+        raise SnapshotValidationError("research outcome path exceeds cutoff")
+    try:
+        if float(observation_payload.get("close")) != float(metrics.get("reference_price")):
+            raise SnapshotValidationError("research outcome reference price binding mismatch")
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError("research outcome reference price is invalid") from exc
+    path_payload = _decode_mapping(row.get("source_path_payload"))
+    if not path_payload:
+        raise SnapshotValidationError("research outcome path payload is absent")
+    expected_path_hash = _digest(path_payload)
+    if str(row.get("source_path_hash_sha256") or "").lower() != expected_path_hash:
+        raise SnapshotValidationError("research outcome path hash mismatch")
+    if str(path_payload.get("path_id") or "") != str(row.get("source_path_id") or ""):
+        raise SnapshotValidationError("research outcome path identity mismatch")
+    if path_payload.get("metrics") != dict(metrics):
+        raise SnapshotValidationError("research outcome path metrics binding mismatch")
+    if str(path_payload.get("source_bar_hash_sha256") or "").lower() != bar_hash:
+        raise SnapshotValidationError("research outcome path bar binding mismatch")
+    expected_observation_id = (
+        f"selection-observation:{row.get('selection_id')}:{observation_payload.get('observed_at')}"
+    )
+    if str(row.get("source_observation_id") or "") != expected_observation_id:
+        raise SnapshotValidationError("research outcome observation identity mismatch")
+    expected_path_id = f"selection-path:{row.get('selection_id')}:{bar_hash[:24]}"
+    if str(row.get("source_path_id") or "") != expected_path_id:
+        raise SnapshotValidationError("research outcome path identity is not producer-bound")
+    metric_body = {
+        "selection_id": str(row.get("selection_id") or ""),
+        "signal_id": str(row.get("signal_id") or ""),
+        "ticker": str(row.get("ticker") or "").upper(),
+        "market_date": str(row.get("market_date") or "")[:10],
+        "source_bar_hash_sha256": bar_hash,
+        "source_binding": dict(binding),
+        "metrics": dict(metrics),
+    }
+    expected_metric_hash = _digest(metric_body)
+    if str(row.get("outcome_artifact_hash_sha256") or "").lower() != expected_metric_hash:
+        raise SnapshotValidationError("research outcome artifact hash mismatch")
+    if str(row.get("outcome_artifact_id") or "") != (
+        f"selection-outcome:{row.get('selection_id')}:{expected_metric_hash[:24]}"
+    ):
+        raise SnapshotValidationError("research outcome metric artifact identity mismatch")
+    if not _sha256(str(row.get("source_observation_hash_sha256") or "")):
+        raise SnapshotValidationError("research outcome observation hash is absent")
+    if not _sha256(str(row.get("source_path_hash_sha256") or "")):
+        raise SnapshotValidationError("research outcome path hash is absent")
+
+
+def _canonical_source_lineage(value: Any) -> list[dict[str, Any]]:
+    decoded = _decode_json(value)
+    if not isinstance(decoded, Sequence) or isinstance(decoded, (str, bytes)):
+        return []
+    candidates = [
+        item
+        for item in decoded
+        if isinstance(item, Mapping)
+        and (
+            str(item.get("status") or "").lower() == "ok"
+            or item.get("source_coverage_complete") is True
+        )
+    ]
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates or decoded:
+        if not isinstance(item, Mapping):
+            return []
+        row = dict(item)
+        for key in ("fetched_at", "attempt", "attempt_limit", "error"):
+            row.pop(key, None)
+        identity = json.dumps(row, sort_keys=True, separators=(",", ":"))
+        if identity not in seen:
+            rows.append(row)
+            seen.add(identity)
+    return sorted(
+        rows,
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _digest_list(value: Sequence[Mapping[str, Any]]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
 
 
 def _first(value: Mapping[str, Any] | None, *keys: str) -> str:
