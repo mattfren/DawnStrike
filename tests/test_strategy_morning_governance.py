@@ -827,6 +827,28 @@ def test_prior_adapter_rejects_newer_as_of_masking_unbound_stale_enrichment() ->
     )
 
 
+@pytest.mark.parametrize(
+    "avoid_reasons",
+    ("formula_avoid: gap below minimum", ["formula_avoid: gap below minimum"]),
+)
+def test_prior_adapter_rejects_serialized_avoid_reasons(avoid_reasons: object) -> None:
+    current = _current_row()
+    current["avoid_reasons"] = avoid_reasons
+    assert (
+        adapt_verified_prior_session_rows(
+            [_prior_row(strategy_id="gap_up_continuation")],
+            current_rows=[current],
+            prior_session_date="2026-08-27",
+            current_market_date="2026-08-28",
+            current_snapshot_id="snapshot",
+            current_source_identity="source",
+            decision_at="2026-08-28T12:59:00+00:00",
+            current_universe_membership={"AAA"},
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("current_price", (85.0, 122.5))
 def test_prior_adapter_rejects_long_setup_at_or_beyond_stop_or_target(current_price: float) -> None:
     current = _current_row()

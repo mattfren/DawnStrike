@@ -252,6 +252,8 @@ def adapt_verified_prior_session_rows(
                 or admission_row.get("source_quality_status")
                 or ""
             )
+        if _has_serialized_avoid_reason(admission_row):
+            continue
         if _current_fallback_blocked(admission_row):
             continue
         if not row_research_admissible(admission_row):
@@ -1256,6 +1258,17 @@ def _current_fallback_blocked(row: Mapping[str, Any]) -> bool:
         or str(row.get("enrichment_fallback_status") or "").lower() in blocked_statuses
         or str(row.get("secondary_fallback_status") or "").lower() in blocked_statuses
     )
+
+
+def _has_serialized_avoid_reason(row: Mapping[str, Any]) -> bool:
+    """Reject formula-avoid annotations that generic safety may not inspect."""
+
+    value = row.get("avoid_reasons")
+    if isinstance(value, (list, tuple, set)):
+        return any(str(item).strip() for item in value)
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
 
 
 def _source_signal_id(

@@ -961,7 +961,7 @@ def alpha_cycle(
     strategy_adapter_result = adapt_prior_session_paper_ops(
         output_root=paper_ops_root,
         market_date=timestamp[:10],
-        current_candidates=all_candidates,
+        current_candidates=scoring_cohort,
         current_snapshot_id=scan_result.run_id,
         current_source_identity=(
             str(source_summary.get("source_identity") or "").strip()
