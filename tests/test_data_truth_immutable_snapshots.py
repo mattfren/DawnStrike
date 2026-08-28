@@ -11,11 +11,92 @@ import pytest
 import intraday_scanner.v2.data_truth.core as datatruth_core
 from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data_truth import (
+    DataTruthAcquisitionIncomplete,
     build_data_truth_snapshot,
     load_datatruth_dataset,
     load_datatruth_snapshot,
     verify_datatruth_snapshot,
 )
+
+
+def test_production_cache_rejects_mutable_csv_even_with_matching_contract(
+    tmp_path: Path,
+) -> None:
+    source_csv = tmp_path / "mutable_source.csv"
+    source_csv.write_text(
+        "symbol,timestamp,open,high,low,close,volume\n"
+        "TST,2026-01-02T00:00:00+00:00,10,11,9,10.5,100\n",
+        encoding="utf-8",
+    )
+    source_csv.with_name(f"{source_csv.name}.contract.json").write_bytes(
+        datatruth_core._json_bytes(datatruth_core._production_request_contract())
+    )
+
+    with pytest.raises(
+        DataTruthAcquisitionIncomplete,
+        match="full-digest content-addressed artifact",
+    ):
+        datatruth_core._source_refs_from_cache(
+            source_csv,
+            tmp_path / "raw",
+            required_symbols=("TST",),
+            required_bar_date=date(2026, 1, 2),
+            minimum_history_bars=1,
+            require_production=True,
+        )
+
+
+def test_production_snapshot_retains_request_contract_after_cache_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_csv, raw_dir = _production_source_fixture(tmp_path)
+    output_root = tmp_path / "data_truth"
+    monkeypatch.setattr(datatruth_core, "_governed_minimum_history_bars", lambda: 1)
+
+    result = build_data_truth_snapshot(
+        as_of_date=date(2026, 1, 5),
+        output_root=output_root,
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+        allow_fetch=False,
+        symbols=("TST",),
+        require_production=True,
+    )
+
+    assert result.manifest.production_required is True
+    assert result.manifest.request_contract == datatruth_core._production_request_contract()
+    assert result.manifest.request_contract_artifact_path
+    retained_contract = output_root / result.manifest.request_contract_artifact_path
+    assert retained_contract.is_file()
+    assert _sha256(retained_contract) == result.manifest.request_contract_artifact_hash
+
+    for cache_artifact in raw_dir.iterdir():
+        if cache_artifact.name.endswith(".contract.json"):
+            if cache_artifact.name.endswith(".csv.contract.json"):
+                cache_artifact.unlink()
+            else:
+                cache_artifact.write_text("{}", encoding="utf-8")
+    verify_datatruth_snapshot(result.manifest.snapshot_id, output_root)
+
+    retained_contract.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="request contract bytes are not canonical"):
+        verify_datatruth_snapshot(result.manifest.snapshot_id, output_root)
+
+    retained_contract.write_bytes(datatruth_core._json_bytes(result.manifest.request_contract))
+    manifest_path = output_root / result.manifest.snapshot_relative_path / "manifest.json"
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fake_contract = datatruth_core._json_bytes({})
+    fake_hash = hashlib.sha256(fake_contract).hexdigest()
+    manifest_payload["request_contract"] = {}
+    manifest_payload["request_contract_hash"] = fake_hash
+    manifest_payload["request_contract_artifact_hash"] = fake_hash
+    manifest_payload["manifest_payload_hash"] = datatruth_core._manifest_payload_hash(
+        manifest_payload
+    )
+    manifest_path.write_bytes(datatruth_core._json_bytes(manifest_payload))
+    with pytest.raises(ValueError, match="request contract is incomplete or noncanonical"):
+        verify_datatruth_snapshot(result.manifest.snapshot_id, output_root)
 
 
 def test_build_retains_content_bound_snapshot_and_reuses_identical_bytes(
@@ -325,6 +406,66 @@ def _source_fixture(tmp_path: Path) -> tuple[Path, Path]:
         },
     )
     write_ohlcv_csv(dataset, source_csv)
+    return source_csv, raw_dir
+
+
+def _production_source_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a minimal, fully content-addressed Yahoo-shaped production cache."""
+
+    from intraday_scanner.v2.data.yahoo_chart import _bars_from_payload
+
+    raw_dir = tmp_path / "production_cache"
+    raw_dir.mkdir()
+    bars = (
+        _bar(date(2026, 1, 1), 10.0, 11.0, 9.5, 10.5),
+        _bar(date(2026, 1, 2), 10.5, 11.5, 10.0, 11.0),
+    )
+    dataset = MarketDataset(
+        dataset_id="production-fixture",
+        source_kind="public_yahoo_chart",
+        timeframe="1d",
+        bars_by_symbol={"TST": bars},
+    )
+    source_staging = tmp_path / "source_staging.csv"
+    write_ohlcv_csv(dataset, source_staging)
+    source_content = source_staging.read_bytes()
+    source_csv = raw_dir / (
+        "public_yahoo_ohlcv_" + hashlib.sha256(source_content).hexdigest() + ".csv"
+    )
+    source_csv.write_bytes(source_content)
+
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"symbol": "TST"},
+                    "timestamp": [int(bar.timestamp.timestamp()) for bar in bars],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [bar.open for bar in bars],
+                                "high": [bar.high for bar in bars],
+                                "low": [bar.low for bar in bars],
+                                "close": [bar.close for bar in bars],
+                                "volume": [bar.volume for bar in bars],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    raw_content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    raw_path = raw_dir / (
+        "tst_chart_" + hashlib.sha256(raw_content).hexdigest() + ".json"
+    )
+    raw_path.write_bytes(raw_content)
+    contract_bytes = datatruth_core._json_bytes(datatruth_core._production_request_contract())
+    source_csv.with_name(f"{source_csv.name}.contract.json").write_bytes(contract_bytes)
+    raw_path.with_name(f"{raw_path.name}.contract.json").write_bytes(contract_bytes)
+    parsed, warnings = _bars_from_payload("TST", payload)
+    assert not warnings
+    assert tuple(parsed) == bars
     return source_csv, raw_dir
 
 

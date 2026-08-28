@@ -50,6 +50,11 @@ class DataTruthManifest:
     code_version: str | None = None
     required_bar_date: str | None = None
     schema_version: str = "v2.data_truth_manifest.v1"
+    production_required: bool = False
+    request_contract: dict[str, object] | None = None
+    request_contract_hash: str | None = None
+    request_contract_artifact_path: str | None = None
+    request_contract_artifact_hash: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)

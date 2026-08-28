@@ -34,6 +34,19 @@ SNAPSHOT_ARTIFACT_SCHEMA_VERSION = "v2.data_truth_snapshot_artifacts.v1"
 SNAPSHOT_IDENTITY_SCHEMA_VERSION = "v2.data_truth_snapshot_identity.v1"
 DATA_TRUTH_MANIFEST_SCHEMA_VERSION = "v2.data_truth_manifest.v2"
 DATA_TRUTH_NORMALIZED_TIMEFRAME = "1d"
+PUBLIC_YAHOO_REQUEST_CONTRACT_SCHEMA = "v2.public_yahoo_chart_request.v1"
+
+
+def _production_request_contract() -> dict[str, object]:
+    """Return the immutable Yahoo request envelope required for production."""
+
+    return {
+        "events": "history",
+        "includePrePost": False,
+        "interval": "1d",
+        "range": "2y",
+        "schema_version": PUBLIC_YAHOO_REQUEST_CONTRACT_SCHEMA,
+    }
 
 
 class DataTruthAcquisitionIncomplete(RuntimeError):
@@ -144,6 +157,7 @@ def build_data_truth_snapshot(
         raw_dir=raw_dir,
         source_refs=source_refs,
         require_content_addressed_raw=symbols is not None,
+        require_content_addressed_csv=require_production,
     )
     raw_dataset = _load_captured_source_dataset(source_artifacts[0])
     normalized, rejected_count, skipped_incomplete, normalization_warnings = _normalize_daily(
@@ -197,6 +211,11 @@ def build_data_truth_snapshot(
         as_of_date.isoformat() if requested_end != "n/a" else requested_end
     )
     normalized_hash = _sha256_bytes(normalized_bytes)
+    request_contract = _production_request_contract() if require_production else None
+    request_contract_bytes = _json_bytes(request_contract) if request_contract is not None else None
+    request_contract_hash = (
+        _sha256_bytes(request_contract_bytes) if request_contract_bytes is not None else None
+    )
     snapshot_content_hash = _snapshot_content_hash(
         provider_id="public_yahoo_chart",
         timeframe=normalized.timeframe,
@@ -207,6 +226,7 @@ def build_data_truth_snapshot(
         accepted_end=accepted_end,
         normalized_hash=normalized_hash,
         source_artifacts=source_artifacts,
+        request_contract_hash=request_contract_hash,
     )
     snapshot_id = _snapshot_id(
         provider_id="public_yahoo_chart",
@@ -215,6 +235,11 @@ def build_data_truth_snapshot(
         content_hash=snapshot_content_hash,
     )
     snapshot_relative_path = f"snapshots/{snapshot_id}"
+    request_contract_artifact_path = (
+        f"{snapshot_relative_path}/source/request_contract.json"
+        if request_contract_hash is not None
+        else None
+    )
     normalized_artifact_path = f"{snapshot_relative_path}/normalized/ohlcv.csv"
     raw_artifact_paths = tuple(
         f"{snapshot_relative_path}/{artifact.logical_path}" for artifact in source_artifacts
@@ -265,6 +290,11 @@ def build_data_truth_snapshot(
         artifact_schema_version=SNAPSHOT_ARTIFACT_SCHEMA_VERSION,
         code_version="0.1.0",
         required_bar_date=required_bar_date.isoformat() if required_bar_date else None,
+        production_required=require_production,
+        request_contract=request_contract,
+        request_contract_hash=request_contract_hash,
+        request_contract_artifact_path=request_contract_artifact_path,
+        request_contract_artifact_hash=request_contract_hash,
         schema_version=DATA_TRUTH_MANIFEST_SCHEMA_VERSION,
     )
     manifest = replace(
@@ -276,6 +306,7 @@ def build_data_truth_snapshot(
         manifest=manifest,
         normalized_bytes=normalized_bytes,
         source_artifacts=source_artifacts,
+        request_contract_bytes=request_contract_bytes,
     )
     _write_latest_aliases(
         paths=paths,
@@ -408,6 +439,49 @@ def verify_datatruth_snapshot(
     expected_snapshot_relative = f"snapshots/{snapshot_id}"
     if manifest.snapshot_relative_path != expected_snapshot_relative:
         raise ValueError("DataTruth immutable snapshot path does not match its identity")
+    request_contract_bytes: bytes | None = None
+    request_contract_logical_path: str | None = None
+    has_request_contract_fields = any(
+        value is not None
+        for value in (
+            manifest.request_contract,
+            manifest.request_contract_hash,
+            manifest.request_contract_artifact_path,
+            manifest.request_contract_artifact_hash,
+        )
+    )
+    if manifest.production_required or has_request_contract_fields:
+        if not manifest.production_required:
+            raise ValueError("DataTruth request contract is only valid for production snapshots")
+        if (
+            manifest.request_contract != _production_request_contract()
+            or not manifest.request_contract_hash
+            or not manifest.request_contract_artifact_path
+            or manifest.request_contract_artifact_hash != manifest.request_contract_hash
+        ):
+            raise ValueError("DataTruth production request contract is incomplete or noncanonical")
+        request_contract_bytes = _json_bytes(manifest.request_contract)
+        if _sha256_bytes(request_contract_bytes) != manifest.request_contract_hash:
+            raise ValueError("DataTruth production request contract hash mismatch")
+        try:
+            request_contract_logical_path = Path(
+                manifest.request_contract_artifact_path
+            ).relative_to(Path(expected_snapshot_relative)).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "DataTruth production request contract is outside its snapshot"
+            ) from exc
+        if request_contract_logical_path != "source/request_contract.json":
+            raise ValueError("DataTruth production request contract path is noncanonical")
+        request_contract_path = _artifact_path(output_root, manifest.request_contract_artifact_path)
+        if not request_contract_path.is_file():
+            raise FileNotFoundError(
+                f"DataTruth production request contract is missing: {request_contract_path}"
+            )
+        if request_contract_path.read_bytes() != request_contract_bytes:
+            raise ValueError("DataTruth production request contract bytes are not canonical")
+        if _sha256(request_contract_path) != manifest.request_contract_artifact_hash:
+            raise ValueError("DataTruth production request contract artifact hash mismatch")
     expected_manifest_hash = _manifest_payload_hash(payload)
     if manifest.manifest_payload_hash != expected_manifest_hash:
         raise ValueError("DataTruth immutable manifest payload hash mismatch")
@@ -471,6 +545,7 @@ def verify_datatruth_snapshot(
         accepted_end=manifest.accepted_end,
         normalized_hash=manifest.normalized_artifact_hash,
         source_artifact_hashes=tuple(logical_raw_hashes),
+        request_contract_hash=manifest.request_contract_artifact_hash,
     )
     if manifest.snapshot_content_hash != recomputed_content_hash:
         raise ValueError("DataTruth immutable snapshot content hash mismatch")
@@ -491,6 +566,8 @@ def verify_datatruth_snapshot(
             for path in manifest.raw_artifact_paths
         ),
     }
+    if request_contract_logical_path is not None:
+        expected_files.add(request_contract_logical_path)
     actual_files = {
         path.relative_to(snapshot_root).as_posix()
         for path in snapshot_root.rglob("*")
@@ -507,9 +584,14 @@ def _capture_source_artifacts(
     raw_dir: Path,
     source_refs: tuple[str, ...] = (),
     require_content_addressed_raw: bool = False,
+    require_content_addressed_csv: bool = False,
 ) -> tuple[_CapturedArtifact, ...]:
     if not source_csv.is_file():
         raise FileNotFoundError(f"DataTruth source CSV is missing: {source_csv}")
+    if require_content_addressed_csv and not _is_full_digest_csv_name(source_csv):
+        raise DataTruthAcquisitionIncomplete(
+            "production cache CSV must be a full-digest content-addressed artifact"
+        )
     selected_raw_paths: set[Path] | None = None
     if require_content_addressed_raw:
         selected_raw_paths = set()
@@ -536,6 +618,25 @@ def _capture_source_artifacts(
     captured: list[_CapturedArtifact] = []
     for logical_path, source_path in candidates:
         content = source_path.read_bytes()
+        if logical_path == "source/source.csv" and require_content_addressed_csv:
+            digest = source_path.stem.rsplit("_", 1)[-1]
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise DataTruthAcquisitionIncomplete(
+                    "content-addressed CSV changed during DataTruth capture"
+                )
+        elif logical_path.startswith("raw/") and require_content_addressed_raw:
+            artifact_name = source_path.name
+            marker = artifact_name.find("_chart_")
+            prefix = artifact_name[: marker + len("_chart_")] if marker >= 0 else ""
+            if not prefix or not _is_full_digest_raw_name(source_path, prefix):
+                raise DataTruthAcquisitionIncomplete(
+                    f"raw Yahoo artifact is not a canonical digest object: {source_path}"
+                )
+            digest = source_path.stem[len(prefix) :]
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise DataTruthAcquisitionIncomplete(
+                    f"raw Yahoo artifact changed during DataTruth capture: {source_path}"
+                )
         captured.append(
             _CapturedArtifact(
                 logical_path=logical_path,
@@ -579,6 +680,7 @@ def _snapshot_content_hash(
     accepted_end: str,
     normalized_hash: str,
     source_artifacts: tuple[_CapturedArtifact, ...],
+    request_contract_hash: str | None = None,
 ) -> str:
     return _snapshot_content_hash_from_hashes(
         provider_id=provider_id,
@@ -592,6 +694,7 @@ def _snapshot_content_hash(
         source_artifact_hashes=tuple(
             (artifact.logical_path, artifact.sha256) for artifact in source_artifacts
         ),
+        request_contract_hash=request_contract_hash,
     )
 
 
@@ -606,6 +709,7 @@ def _snapshot_content_hash_from_hashes(
     accepted_end: str,
     normalized_hash: str,
     source_artifact_hashes: tuple[tuple[str, str], ...],
+    request_contract_hash: str | None = None,
 ) -> str:
     payload = {
         "accepted_end": accepted_end,
@@ -625,6 +729,11 @@ def _snapshot_content_hash_from_hashes(
         "symbols": list(symbols),
         "timeframe": timeframe,
     }
+    if request_contract_hash is not None:
+        payload["request_contract"] = {
+            "path": "source/request_contract.json",
+            "sha256": request_contract_hash,
+        }
     return _sha256_bytes(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
@@ -713,6 +822,7 @@ def _retain_immutable_snapshot(
     manifest: DataTruthManifest,
     normalized_bytes: bytes,
     source_artifacts: tuple[_CapturedArtifact, ...],
+    request_contract_bytes: bytes | None = None,
 ) -> None:
     if not manifest.normalized_artifact_path:
         raise ValueError("DataTruth immutable normalized path is missing")
@@ -732,6 +842,28 @@ def _retain_immutable_snapshot(
             "DataTruth immutable normalized artifact is outside its snapshot"
         ) from exc
     expected_files: dict[str, bytes] = {normalized_logical_path: normalized_bytes}
+    if manifest.request_contract_artifact_path is not None:
+        if request_contract_bytes is None:
+            raise ValueError("DataTruth production request contract bytes are missing")
+        try:
+            request_contract_logical_path = Path(
+                manifest.request_contract_artifact_path
+            ).relative_to(snapshot_relative).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "DataTruth production request contract is outside its snapshot"
+            ) from exc
+        if request_contract_logical_path != "source/request_contract.json":
+            raise ValueError("DataTruth production request contract path is noncanonical")
+        if (
+            manifest.request_contract_hash is None
+            or manifest.request_contract_artifact_hash != manifest.request_contract_hash
+            or _sha256_bytes(request_contract_bytes) != manifest.request_contract_hash
+        ):
+            raise ValueError("DataTruth production request contract hash is invalid")
+        expected_files[request_contract_logical_path] = request_contract_bytes
+    elif request_contract_bytes is not None:
+        raise ValueError("DataTruth request contract bytes are not declared")
     for artifact, relative_path in zip(
         source_artifacts,
         manifest.raw_artifact_paths,
@@ -977,6 +1109,17 @@ def _manifest_from_payload(payload: dict[str, object]) -> DataTruthManifest:
         ),
         code_version=_optional_manifest_string(payload, "code_version"),
         required_bar_date=_optional_manifest_string(payload, "required_bar_date"),
+        production_required=_manifest_bool(payload, "production_required"),
+        request_contract=_optional_manifest_object(payload, "request_contract"),
+        request_contract_hash=_optional_manifest_string(payload, "request_contract_hash"),
+        request_contract_artifact_path=_optional_manifest_string(
+            payload,
+            "request_contract_artifact_path",
+        ),
+        request_contract_artifact_hash=_optional_manifest_string(
+            payload,
+            "request_contract_artifact_hash",
+        ),
         schema_version=str(payload.get("schema_version") or "v2.data_truth_manifest.v1"),
     )
 
@@ -998,6 +1141,25 @@ def _payload_list(
 def _optional_manifest_string(payload: dict[str, object], field_name: str) -> str | None:
     value = payload.get(field_name)
     return str(value) if value not in {None, ""} else None
+
+
+def _optional_manifest_object(
+    payload: dict[str, object],
+    field_name: str,
+) -> dict[str, object] | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"DataTruth manifest {field_name} must be an object")
+    return dict(value)
+
+
+def _manifest_bool(payload: dict[str, object], field_name: str) -> bool:
+    value = payload.get(field_name, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"DataTruth manifest {field_name} must be a boolean")
+    return value
 
 
 def _manifest_int(payload: dict[str, object], field_name: str) -> int:
@@ -1443,18 +1605,16 @@ def _source_refs_from_cache(
     minimum_history_bars: int = 0,
     require_production: bool = False,
 ) -> tuple[str, ...]:
-    expected_request = {
-        "events": "history",
-        "includePrePost": False,
-        "interval": "1d",
-        "range": "2y",
-        "schema_version": "v2.public_yahoo_chart_request.v1",
-    }
+    expected_request = _production_request_contract()
     _validate_cache_request_contract(
         source_csv,
         expected_request,
         required=require_production,
     )
+    if require_production and not _is_full_digest_csv_name(source_csv):
+        raise DataTruthAcquisitionIncomplete(
+            "production cache CSV must be a full-digest content-addressed artifact"
+        )
     if _is_full_digest_csv_name(source_csv):
         digest = source_csv.stem.rsplit("_", 1)[-1]
         content = _bounded_source_bytes(source_csv)
