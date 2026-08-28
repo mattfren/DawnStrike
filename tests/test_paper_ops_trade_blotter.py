@@ -214,6 +214,7 @@ def _lifecycle(
 
 
 def _seed_manifests(root: Path) -> None:
+    execution_policy_version = str(_registry_row(root)["execution_policy_version"])
     for filename, run_id, snapshot_id, run_date in (
         ("entry", _run_id("entry"), "snapshot-entry", "2026-01-05"),
         ("fill", _run_id("fill"), "snapshot-fill", "2026-01-06"),
@@ -227,7 +228,7 @@ def _seed_manifests(root: Path) -> None:
             "data_snapshot_id": snapshot_id,
             "output_artifacts": [],
             "warnings": [],
-            "execution_policy_version": "paperops_daily_next_open_risk_v2",
+            "execution_policy_version": execution_policy_version,
             "execution_policy_fingerprint": "test-policy",
             "universe_id": "test-universe",
             "universe_symbols": ["AAA"],
@@ -254,7 +255,7 @@ def _seed_manifests(root: Path) -> None:
             "strategy_id": "test-strategy",
             "strategy_version": "v1",
             "strategy_status": "active",
-            "execution_policy_version": "paperops_daily_next_open_risk_v2",
+            "execution_policy_version": execution_policy_version,
             "strategy_semantics_fingerprint": "test-semantics",
             "data_snapshot_id": {
                 _run_id("entry"): "snapshot-entry",
