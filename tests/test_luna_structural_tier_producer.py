@@ -807,6 +807,9 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
             "source_confidence": 92,
             "source_count": 3,
             "source_quality_status": "verified",
+            "freshness_status": "FRESH",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
             "stale_data_flag": False,
             "float_shares": 8_000_000,
             "float_status": "verified",
@@ -827,12 +830,31 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
             "liquidity_tier": "high_liquidity",
         }
     )
+    # The legacy fixture's source bar is intentionally older than the quote
+    # proof clock. Rebind only the immutable slate input to a short, valid
+    # observation window so this operational fixture can satisfy production
+    # slate validation without changing the watcher quote scenario.
+    slate_input = dict(payload)
+    observation_payload = json.loads(slate_input["enrichment_observation_payload_json"])
+    premarket_raw = json.loads(slate_input["premarket_raw_payload_json"])
+    premarket_raw["requested_at"] = "2026-08-26T13:02:00+00:00"
+    premarket_raw_json = json.dumps(premarket_raw, sort_keys=True, separators=(",", ":"))
+    observation_payload["premarket_raw_payload_json"] = premarket_raw_json
+    observation_payload["premarket_source_hash_sha256"] = hashlib.sha256(
+        premarket_raw_json.encode()
+    ).hexdigest()
+    observation_json = json.dumps(observation_payload, sort_keys=True, separators=(",", ":"))
+    slate_input["enrichment_observation_payload_json"] = observation_json
+    slate_input["enrichment_observation_sha256"] = hashlib.sha256(
+        observation_json.encode()
+    ).hexdigest()
     slate = build_ranked_research_slate(
-        [{"ticker": "NOVA", "signal_id": "sig-nova", "score": 2.0}],
+        [slate_input],
         target=1,
         market_date="2026-08-26",
-        generated_at="2026-08-26T13:30:00+00:00",
+        generated_at="2026-08-26T13:02:00+00:00",
         scan_id="scan-watcher",
+        require_safety=True,
     )
     payload.update(
         {
@@ -907,6 +929,40 @@ def test_watcher_proof_requires_valid_frozen_lineage_and_strict_identity() -> No
     bad_slate["content_hash_sha256"] = "d" * 64
     bad_signal = {**signal, "frozen_ranked_research_slate": bad_slate}
     assert _build_watcher_current_proof(bad_signal, observation, trace) is None
+
+
+@pytest.mark.parametrize("slate_kind", ["v2_unsafe", "v1"])
+def test_frozen_lineage_validation_rejects_nonproduction_slates(
+    slate_kind: str,
+) -> None:
+    signal, _ = _watcher_signal()
+    slate = build_ranked_research_slate(
+        [signal],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-watcher",
+        require_safety=False,
+    )
+    if slate_kind == "v1":
+        slate = dict(slate)
+        slate["schema_version"] = "dawnstrike.luna.ranked_research_slate.v1"
+        slate.pop("require_safety", None)
+        slate["content_hash_sha256"] = luna_slate_module._slate_content_hash(slate)
+        slate["slate_id"] = "luna-slate-" + slate["content_hash_sha256"][:24]
+    hostile = {
+        **signal,
+        "frozen_ranked_research_slate": slate,
+        "frozen_slate_lineage": {
+            **signal["frozen_slate_lineage"],
+            "slate_id": slate["slate_id"],
+            "slate_content_hash_sha256": slate["content_hash_sha256"],
+        },
+    }
+
+    result = luna_slate_module._frozen_lineage_for_validation(hostile, "NOVA")
+
+    assert result["_invalid"] == "frozen ranked slate failed validation"
 
 
 def test_watcher_rejects_wrong_account_quote_ticker_plan_and_entry_window() -> None:

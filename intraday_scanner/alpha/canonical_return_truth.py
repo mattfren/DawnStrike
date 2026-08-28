@@ -424,6 +424,7 @@ def canonical_paper_selection_context(
             dict(selection),
             market_date=market_date,
             allowed_cohorts=("official_telegram",),
+            production=True,
         )
         if frozen_signal is None or not _json_equal(frozen_signal, signal_payload):
             raise ValueError(

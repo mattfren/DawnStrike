@@ -742,6 +742,7 @@ def _validate_selection_historical_scan_binding(
         selection,
         market_date=market_date,
         allowed_cohorts=("research_radar", "official_telegram"),
+        production=True,
     )
     payload = selection.get("payload_json")
     slate = payload.get("frozen_ranked_research_slate") if isinstance(payload, dict) else None

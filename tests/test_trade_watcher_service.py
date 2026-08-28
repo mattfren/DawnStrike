@@ -1,4 +1,7 @@
 import csv
+import hashlib
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_STRATEGY_ID,
     canonical_hash,
 )
+from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
 )
@@ -121,14 +125,25 @@ def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() 
     slate = build_ranked_research_slate(
         [
             {
-                "ticker": "NOVA",
                 "signal_id": "sig-frozen",
+                "ticker": "NOVA",
                 "scan_id": "scan-old",
+                "market_date": "2026-08-26",
+                "source_count": 1,
+                "source_quality_status": "VERIFIED",
+                "freshness_status": "FRESH",
+                "halt_status": "CLEAR",
+                "sec_risk_status": "CLEAR",
+                "corporate_action_status": "CLEAR",
+                "input_status": "VERIFIED",
+                "evidence_status": "VERIFIED",
+                **_authenticated_observation("NOVA", "2026-08-26T13:00:00+00:00"),
             }
         ],
         generated_at="2026-08-26T13:00:00+00:00",
         market_date="2026-08-26",
         scan_id="scan-old",
+        require_safety=True,
     )
     frozen_signal = slate["rows"][0]
     selection = {
@@ -157,6 +172,67 @@ def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() 
         {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
         market_date="2026-08-26",
     )
+
+
+@pytest.mark.parametrize("schema_version", ["v2_unsafe", "v1"])
+def test_selection_historical_cross_scan_rejects_nonproduction_frozen_slates(
+    schema_version: str,
+) -> None:
+    source = {
+        "signal_id": "sig-frozen",
+        "ticker": "NOVA",
+        "scan_id": "scan-old",
+        "market_date": "2026-08-26",
+        "source_count": 1,
+        "source_quality_status": "VERIFIED",
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+        **_authenticated_observation("NOVA", "2026-08-26T13:00:00+00:00"),
+    }
+    slate = build_ranked_research_slate(
+        [source],
+        generated_at="2026-08-26T13:00:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-old",
+        require_safety=False,
+    )
+    if schema_version == "v1":
+        slate = dict(slate)
+        slate["schema_version"] = "dawnstrike.luna.ranked_research_slate.v1"
+        slate.pop("require_safety", None)
+        slate["content_hash_sha256"] = _slate_hash(slate)
+        slate["slate_id"] = "luna-slate-" + slate["content_hash_sha256"][:24]
+    frozen_signal = slate["rows"][0]
+    selection = {
+        "signal_id": "sig-frozen",
+        "scan_id": "scan-new",
+        "source_scan_id": "scan-old",
+        "scan_lineage_status": "GOVERNED_DAILY_FREEZE_REUSE",
+        "ticker": "NOVA",
+        "cohort": "research_radar",
+        "payload_json": {
+            "signal": frozen_signal,
+            "frozen_slate_lineage": {
+                "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+                "slate_id": slate["slate_id"],
+                "slate_content_hash_sha256": slate["content_hash_sha256"],
+                "frozen_source_scan_id": "scan-old",
+                "current_scan_id": "scan-new",
+                "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
+            },
+            "frozen_ranked_research_slate": slate,
+        },
+    }
+    with pytest.raises(SnapshotValidationError, match="frozen-slate lineage"):
+        _validate_selection_historical_scan_binding(
+            selection,
+            {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
+            market_date="2026-08-26",
+        )
 
 
 def test_trade_watcher_rejects_cross_scan_official_selection_join(tmp_path: Path) -> None:
@@ -1650,3 +1726,47 @@ def _write_minute_bars(path: Path, rows: list[dict[str, str]]) -> Path:
         writer.writeheader()
         writer.writerows(rows)
     return path
+
+
+def _authenticated_observation(ticker: str, generated_at: str) -> dict[str, object]:
+    generated = datetime.fromisoformat(generated_at)
+    observation = premarket.observation_from_alpaca_bars(
+        ticker,
+        [
+            {
+                "ticker": ticker,
+                "timestamp": (generated - timedelta(minutes=2)).isoformat(),
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=generated,
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
+    return {
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
+    }
+
+
+def _slate_hash(slate: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in slate.items()
+                if key not in {"content_hash_sha256", "slate_id"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()

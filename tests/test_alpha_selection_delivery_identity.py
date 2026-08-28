@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION
 from intraday_scanner.alpha.canonical_return_truth import (
@@ -11,6 +16,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
+from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import (
     ALPHAOPS_OFFICIAL_COHORT,
     ALPHAOPS_STRATEGY_ID,
@@ -173,11 +179,13 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
         "market_date": "2026-07-15",
         "timestamp": SELECTED_AT,
     }
+    source_signal.update(_authenticated_observation("SOBR", SELECTED_AT))
     slate = build_ranked_research_slate(
         [source_signal],
         generated_at=SELECTED_AT,
         market_date="2026-07-15",
         scan_id=source_scan_id,
+        require_safety=True,
     )
     frozen_signal = slate["rows"][0]
     historical = {
@@ -248,6 +256,81 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
         persisted["payload_json"]["scan_lineage_status"]
         == "GOVERNED_DAILY_FREEZE_REUSE"
     )
+
+
+@pytest.mark.parametrize("schema_version", ["v2_unsafe", "v1"])
+def test_canonical_paper_context_rejects_nonproduction_cross_scan_slates(
+    tmp_path: Path, schema_version: str
+) -> None:
+    source_scan_id = "scan-frozen-source"
+    retry_scan_id = "scan-frozen-retry"
+    source_signal = {
+        **_signal("SOBR", rank=1, can_alert=True),
+        "scan_id": source_scan_id,
+        "signal_key": f"{source_scan_id}:1:SOBR",
+        "market_date": "2026-07-15",
+        "timestamp": SELECTED_AT,
+    }
+    source_signal.update(_authenticated_observation("SOBR", SELECTED_AT))
+    slate = build_ranked_research_slate(
+        [source_signal],
+        generated_at=SELECTED_AT,
+        market_date="2026-07-15",
+        scan_id=source_scan_id,
+        require_safety=False,
+    )
+    if schema_version == "v1":
+        slate = dict(slate)
+        slate["schema_version"] = "dawnstrike.luna.ranked_research_slate.v1"
+        slate.pop("require_safety", None)
+        slate["content_hash_sha256"] = _slate_hash(slate)
+        slate["slate_id"] = "luna-slate-" + slate["content_hash_sha256"][:24]
+    store = SQLiteScanStore(tmp_path / f"hostile-{schema_version}.sqlite")
+    historical = {
+        **_historical_signal(source_signal),
+        "signal_id": source_signal["signal_key"],
+        "scan_id": source_scan_id,
+        "raw_payload_json": slate["rows"][0],
+    }
+    store.persist_historical_signals([historical])
+    event = _official_selection_notification_event(
+        retry_scan_id,
+        "alpha_morning_watch",
+        "Dawnstrike Alpha Watch",
+        "OFFICIAL PAPER CANDIDATES\n1) SOBR - frozen retry",
+        selected_signals=[slate["rows"][0]],
+    )
+    selections, _ = _persist_official_selections(
+        store,
+        scan_id=retry_scan_id,
+        selected_signals=[slate["rows"][0]],
+        decision={"no_trade": False, "decision_tier": "clean_edge"},
+        selected_at=SELECTED_AT,
+        event=event,
+        slate=slate,
+    )
+    selection = store.load_signal_selections(scan_id=retry_scan_id)[0]
+    notification_key = f"{event.event_key}:telegram"
+    assert store.record_notification(
+        event_key=notification_key,
+        channel="telegram",
+        run_id=retry_scan_id,
+        payload={
+            "title": event.title,
+            "body": event.body,
+            "channel_hint": event.channel_hint,
+            "payload": event.payload,
+        },
+    )
+    deliveries = _persist_notification_delivery_memberships(
+        store,
+        selections=selections,
+        events=[event],
+        notify="telegram",
+        preexisting_notification_keys=set(),
+    )
+    with pytest.raises(ValueError, match="frozen-slate lineage"):
+        canonical_paper_selection_context(selection, delivery=deliveries[0])
 
 
 def test_selection_identity_migration_is_additive_and_idempotent(tmp_path: Path) -> None:
@@ -369,3 +452,55 @@ def _historical_signal(signal: dict[str, object]) -> dict[str, object]:
         "was_alerted": False,
         "raw_payload_json": signal,
     }
+
+
+def _authenticated_observation(ticker: str, generated_at: str) -> dict[str, object]:
+    generated = datetime.fromisoformat(generated_at)
+    observation = premarket.observation_from_alpaca_bars(
+        ticker,
+        [
+            {
+                "ticker": ticker,
+                "timestamp": (generated - timedelta(minutes=2)).isoformat(),
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=generated,
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
+    return {
+        "source_count": 1,
+        "source_quality_status": "VERIFIED",
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
+    }
+
+
+def _slate_hash(slate: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in slate.items()
+                if key not in {"content_hash_sha256", "slate_id"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()

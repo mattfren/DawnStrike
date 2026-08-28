@@ -1681,7 +1681,9 @@ def _frozen_lineage_for_validation(
         return {}
     try:
         validate_ranked_research_slate(
-            slate, market_date=str(row.get("market_date") or "")[:10]
+            slate,
+            market_date=str(row.get("market_date") or "")[:10],
+            production=True,
         )
     except (TypeError, ValueError):
         return {"_invalid": "frozen ranked slate failed validation"}
