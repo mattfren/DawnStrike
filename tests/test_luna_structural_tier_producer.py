@@ -397,11 +397,39 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     # being mistaken for the historical second-rounded scan timestamp.
     premarket_raw = json.loads(candidate["premarket_raw_payload_json"])
     premarket_raw["requested_at"] = cycle_timestamp
+    premarket_raw["bars"][0]["timestamp"] = "2026-08-26T13:28:00+00:00"
     premarket_raw_json = json.dumps(premarket_raw, sort_keys=True, separators=(",", ":"))
     candidate["premarket_raw_payload_json"] = premarket_raw_json
     candidate["premarket_source_hash_sha256"] = hashlib.sha256(
         premarket_raw_json.encode()
     ).hexdigest()
+    observation_payload = json.loads(candidate["enrichment_observation_payload_json"])
+    observation_payload.update(
+        {
+            "observed_at": "2026-08-26T13:28:00+00:00",
+            "bar_completed_at": "2026-08-26T13:29:00+00:00",
+            "age_seconds": 60,
+            "premarket_raw_payload_json": premarket_raw_json,
+            "premarket_source_hash_sha256": candidate[
+                "premarket_source_hash_sha256"
+            ],
+        }
+    )
+    observation_json = json.dumps(
+        observation_payload, sort_keys=True, separators=(",", ":")
+    )
+    candidate.update(
+        {
+            "enrichment_observed_at": observation_payload["observed_at"],
+            "enrichment_bar_completed_at": observation_payload[
+                "bar_completed_at"
+            ],
+            "enrichment_observation_payload_json": observation_json,
+            "enrichment_observation_sha256": hashlib.sha256(
+                observation_json.encode()
+            ).hexdigest(),
+        }
+    )
     enrichment_requested_at: list[str] = []
 
     class Candidate:
