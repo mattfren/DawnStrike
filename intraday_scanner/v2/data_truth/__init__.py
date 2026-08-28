@@ -1,6 +1,7 @@
 """DataTruth v1 immutable market-data evidence layer."""
 
 from intraday_scanner.v2.data_truth.core import (
+    DataTruthAcquisitionIncomplete,
     DataTruthBuildResult,
     DataTruthPaths,
     build_data_truth_snapshot,
@@ -40,6 +41,7 @@ from intraday_scanner.v2.data_truth.reconcile import (
 
 __all__ = [
     "DataTruthBuildResult",
+    "DataTruthAcquisitionIncomplete",
     "DataTruthManifest",
     "DataTruthPaths",
     "DataTruthReconciliationReport",

@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from intraday_scanner.v2.data import (
@@ -30,6 +30,10 @@ SNAPSHOT_ARTIFACT_SCHEMA_VERSION = "v2.data_truth_snapshot_artifacts.v1"
 SNAPSHOT_IDENTITY_SCHEMA_VERSION = "v2.data_truth_snapshot_identity.v1"
 DATA_TRUTH_MANIFEST_SCHEMA_VERSION = "v2.data_truth_manifest.v2"
 DATA_TRUTH_NORMALIZED_TIMEFRAME = "1d"
+
+
+class DataTruthAcquisitionIncomplete(RuntimeError):
+    """Exact-universe acquisition did not produce a complete source set."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,9 @@ def build_data_truth_snapshot(
     raw_dir: Path | None = None,
     allow_fetch: bool = True,
     symbols: tuple[str, ...] | None = None,
+    fetch_max_workers: int = 12,
+    fetch_max_requests_per_second: float | None = 8.0,
+    fetch_time_budget_seconds: float | None = 90 * 60,
 ) -> DataTruthBuildResult:
     now = created_at or datetime.now(timezone.utc)
     paths = DataTruthPaths.create(output_root)
@@ -106,8 +113,16 @@ def build_data_truth_snapshot(
         raw_dir=raw_dir,
         allow_fetch=allow_fetch,
         symbols=symbols,
+        required_bar_date=as_of_date - timedelta(days=1) if symbols is not None else None,
+        fetch_max_workers=fetch_max_workers,
+        fetch_max_requests_per_second=fetch_max_requests_per_second,
+        fetch_time_budget_seconds=fetch_time_budget_seconds,
     )
-    source_artifacts = _capture_source_artifacts(source_csv=source_csv, raw_dir=raw_dir)
+    source_artifacts = _capture_source_artifacts(
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+        source_refs=source_refs,
+    )
     raw_dataset = _load_captured_source_dataset(source_artifacts[0])
     normalized, rejected_count, skipped_incomplete, normalization_warnings = _normalize_daily(
         raw_dataset,
@@ -424,15 +439,27 @@ def _capture_source_artifacts(
     *,
     source_csv: Path,
     raw_dir: Path,
+    source_refs: tuple[str, ...] = (),
 ) -> tuple[_CapturedArtifact, ...]:
     if not source_csv.is_file():
         raise FileNotFoundError(f"DataTruth source CSV is missing: {source_csv}")
+    selected_raw_paths: set[Path] | None = None
+    if source_refs:
+        selected_raw_paths = set()
+        for reference in source_refs:
+            if "_chart" not in reference or not reference.endswith(".json"):
+                continue
+            try:
+                selected_raw_paths.add(Path(reference).resolve())
+            except OSError:
+                continue
     candidates = [
         ("source/source.csv", source_csv),
         *(
             (f"raw/{path.name}", path)
             for path in sorted(raw_dir.glob("*.json"))
             if path.is_file()
+            and (selected_raw_paths is None or path.resolve() in selected_raw_paths)
         ),
     ]
     logical_paths = [logical_path for logical_path, _path in candidates]
@@ -1032,6 +1059,10 @@ def _resolve_public_yahoo_source(
     raw_dir: Path | None,
     allow_fetch: bool,
     symbols: tuple[str, ...] | None,
+    required_bar_date: date | None = None,
+    fetch_max_workers: int = 12,
+    fetch_max_requests_per_second: float | None = 8.0,
+    fetch_time_budget_seconds: float | None = 90 * 60,
 ) -> tuple[Path, Path, tuple[str, ...], tuple[str, ...]]:
     if source_csv is not None and raw_dir is not None:
         return source_csv, raw_dir, _source_refs_from_cache(source_csv, raw_dir), ()
@@ -1047,12 +1078,37 @@ def _resolve_public_yahoo_source(
         )
 
         try:
-            fetched = (
-                fetch_yahoo_chart_daily_dataset(cache_dir=local_cache, symbols=symbols)
-                if symbols is not None
-                else fetch_yahoo_chart_daily_dataset(cache_dir=local_cache)
-            )
+            fetch_kwargs: dict[str, object] = {"cache_dir": local_cache}
+            if symbols is not None:
+                fetch_kwargs.update(
+                    {
+                        "symbols": symbols,
+                        "required_bar_date": required_bar_date,
+                        "max_workers": fetch_max_workers,
+                        "max_requests_per_second": fetch_max_requests_per_second,
+                        "time_budget_seconds": fetch_time_budget_seconds,
+                    }
+                )
+            fetched = fetch_yahoo_chart_daily_dataset(**fetch_kwargs)
             fetch_warnings = tuple(fetched.warnings)
+            if symbols is not None:
+                requested_symbols = tuple(
+                    sorted(
+                        dict.fromkeys(
+                            symbol.strip().upper() for symbol in symbols if symbol.strip()
+                        )
+                    )
+                )
+                if fetched.dataset.symbols != requested_symbols:
+                    missing = tuple(
+                        symbol
+                        for symbol in requested_symbols
+                        if symbol not in fetched.dataset.symbols
+                    )
+                    raise DataTruthAcquisitionIncomplete(
+                        "DataTruth Yahoo acquisition PARTIAL; exact requested symbol set was not "
+                        f"completed; missing={list(missing)}"
+                    )
             if fetched.dataset.source_path:
                 fetched_csv = Path(fetched.dataset.source_path)
                 if fetched.dataset.total_bars and fetched_csv.exists():
@@ -1065,6 +1121,12 @@ def _resolve_public_yahoo_source(
             refresh_failure = "refresh returned no usable daily bars"
         except (OSError, TimeoutError, TypeError, ValueError) as exc:
             refresh_failure = f"{type(exc).__name__}: {exc}"
+
+    if symbols is not None and refresh_failure is not None:
+        raise DataTruthAcquisitionIncomplete(
+            "DataTruth Yahoo acquisition terminal failure for exact requested symbol set: "
+            f"{refresh_failure}"
+        )
 
     for cached_csv, cache_dir in ((local_csv, local_cache), (alpha_csv, alpha_cache)):
         if not cached_csv.exists():

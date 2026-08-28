@@ -13,6 +13,7 @@ import pytest
 
 from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data_truth import (
+    DataTruthAcquisitionIncomplete,
     build_data_truth_snapshot,
     import_local_csv_provider,
     reconcile_provider_datasets,
@@ -581,6 +582,48 @@ def test_datatruth_fetch_failure_falls_back_with_explicit_warning(
         "refresh failed (TimeoutError: offline); using cached OHLCV" in warning
         for warning in result.manifest.warnings
     )
+
+
+def test_datatruth_explicit_universe_rejects_partial_fetch_instead_of_stale_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    alpha_cache = Path("data/v2_alpha_lab/fixtures/public_yahoo")
+    alpha_cache.mkdir(parents=True)
+    write_ohlcv_csv(
+        MarketDataset(
+            dataset_id="stale-alpha-fixture",
+            source_kind="public_yahoo_chart",
+            timeframe="1d",
+            bars_by_symbol={"SPY": (_bar("SPY", date(2026, 1, 2), 9, 10, 8, 9.5),)},
+        ),
+        alpha_cache / "public_yahoo_ohlcv.csv",
+    )
+
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    def partial_fetch(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            dataset=MarketDataset(
+                dataset_id="partial",
+                source_kind="public_yahoo_chart",
+                timeframe="1d",
+                bars_by_symbol={"SPY": (_bar("SPY", date(2026, 1, 2), 9, 10, 8, 9.5),)},
+            ),
+            warnings=("incomplete requested symbol set",),
+        )
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", partial_fetch)
+    monkeypatch.setattr(data_truth_core, "_comparison_datasets", lambda **_kwargs: {})
+    with pytest.raises(DataTruthAcquisitionIncomplete, match="PARTIAL"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 3),
+            output_root=Path("data/v2_data_truth"),
+            created_at=NOW,
+            allow_fetch=True,
+            symbols=("SPY", "WMT"),
+        )
 
 
 def test_datatruth_provider_reconciliation_detects_mismatch() -> None:
