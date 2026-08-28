@@ -626,6 +626,35 @@ def capture_sourced_alpha_outcomes(
         })
     else:
         persisted = {"inserted": 0, "skipped": 0}
+    radar_bridge_stats: dict[str, Any] = {
+        "inserted": 0,
+        "reused": 0,
+        "row_count": 0,
+        "status": "NOT_ATTEMPTED",
+    }
+    if persist:
+        from intraday_scanner.services.research_episode_outcome_service import (
+            build_and_persist_research_episode_outcome_bridges,
+        )
+
+        radar_selections = store.load_signal_selections(
+            cohort="research_radar", limit=50_000
+        )
+        if radar_selections:
+            try:
+                radar_bridge_stats = build_and_persist_research_episode_outcome_bridges(
+                    store,
+                    radar_selections,
+                    outcomes,
+                    market_date=resolved_date,
+                    cutoff=at.isoformat(),
+                    source_identity="alpha_sourced_eod_outcomes",
+                    created_at=captured_at,
+                )
+                radar_bridge_stats["status"] = "COMPLETE"
+            except SnapshotValidationError as exc:
+                radar_bridge_stats["status"] = "INELIGIBLE"
+                radar_bridge_stats["reason"] = str(exc)
     attempt_persisted = (
         store.persist_outcome_capture_attempts(capture_attempts)
         if persist and capture_attempts
@@ -652,6 +681,7 @@ def capture_sourced_alpha_outcomes(
         capture_attempts=capture_attempts,
         capture_attempt_persistence=attempt_persisted,
     )
+    summary["research_episode_outcome_bridges"] = radar_bridge_stats
     revision_summary["canonical_source_available_revision_deferred_count"] = len(
         deferred_revision_candidates
     )

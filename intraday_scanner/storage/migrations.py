@@ -16,6 +16,7 @@ _STRATEGY_RECEIPT_TABLES = (
     "strategy_condition_results",
     "strategy_evidence_claims",
     "strategy_evidence_resolution_runs",
+    "research_episode_outcome_bridges",
 )
 _STRATEGY_RECEIPT_TRIGGERS = (
     "strategy_decision_receipts_no_update",
@@ -26,6 +27,8 @@ _STRATEGY_RECEIPT_TRIGGERS = (
     "strategy_evidence_claims_no_delete",
     "strategy_evidence_resolution_runs_no_update",
     "strategy_evidence_resolution_runs_no_delete",
+    "research_episode_outcome_bridges_no_update",
+    "research_episode_outcome_bridges_no_delete",
 )
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -57,7 +60,7 @@ def run_migrations(connection: sqlite3.Connection) -> int:
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
             continue
-        if target_version in {31, 32}:
+        if target_version in {31, 32, 33}:
             missing_tables = {
                 name
                 for name in _STRATEGY_RECEIPT_TABLES
@@ -2409,6 +2412,53 @@ def _migration_032_v6_decision_availability(connection: sqlite3.Connection) -> N
         )
 
 
+def _migration_033_research_episode_outcome_bridges(connection: sqlite3.Connection) -> None:
+    """Add immutable selection-only research episode outcome joins."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS research_episode_outcome_bridges (
+            bridge_id TEXT PRIMARY KEY,
+            bridge_hash_sha256 TEXT NOT NULL UNIQUE,
+            selection_id TEXT NOT NULL,
+            slate_id TEXT NOT NULL,
+            slate_content_hash_sha256 TEXT NOT NULL,
+            episode_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            selected_at TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            receipt_hash_sha256 TEXT NOT NULL,
+            outcome_status TEXT NOT NULL,
+            learning_eligible INTEGER NOT NULL,
+            source_observation_id TEXT,
+            source_observation_hash_sha256 TEXT,
+            source_path_id TEXT,
+            source_path_hash_sha256 TEXT,
+            source_cutoff TEXT,
+            outcome_artifact_id TEXT,
+            outcome_artifact_hash_sha256 TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_episode_outcome_bridges_selection
+        ON research_episode_outcome_bridges(market_date, selection_id, ticker);
+        CREATE INDEX IF NOT EXISTS idx_research_episode_outcome_bridges_receipt
+        ON research_episode_outcome_bridges(market_date, receipt_id);
+        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_update
+        BEFORE UPDATE ON research_episode_outcome_bridges BEGIN
+            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS research_episode_outcome_bridges_no_delete
+        BEFORE DELETE ON research_episode_outcome_bridges BEGIN
+            SELECT RAISE(ABORT, 'research_episode_outcome_bridges is append-only');
+        END;
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -2451,4 +2501,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (30, _migration_030_opportunity_validation),
     (31, _migration_031_strategy_decision_receipts),
     (32, _migration_032_v6_decision_availability),
+    (33, _migration_033_research_episode_outcome_bridges),
 )

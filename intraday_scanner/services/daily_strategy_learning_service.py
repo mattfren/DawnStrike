@@ -1505,6 +1505,7 @@ def run_daily_strategy_learning(
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
     v6_decisions: Sequence[Mapping[str, Any]] | None = None,
     no_evidence_receipts: Sequence[Mapping[str, Any]] | None = None,
+    research_episode_outcomes: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Inventory the catalog and write one immutable research-only daily run."""
 
@@ -1515,6 +1516,7 @@ def run_daily_strategy_learning(
             for name, value in (
                 ("decision_receipts", decision_receipts),
                 ("v6_decisions", v6_decisions),
+                ("research_episode_outcomes", research_episode_outcomes),
             )
             if value is not None
         }
@@ -1674,7 +1676,13 @@ def run_daily_strategy_learning(
 
     # Keep raw receipt observations visible for diagnostics, but only the
     # authenticated persisted subset can contribute to certification.
-    receipt_learning = _aggregate_decision_receipts(valid_receipts)
+    receipt_learning_receipts = _apply_research_episode_outcomes(
+        valid_receipts, research_episode_outcomes
+    )
+    receipt_learning = _aggregate_decision_receipts(receipt_learning_receipts)
+    receipt_learning["research_episode_outcome_bridges"] = _bridge_learning_summary(
+        research_episode_outcomes, valid_receipts
+    )
     receipt_learning["valid_receipt_count"] = len(valid_receipts)
     receipt_learning["invalid_receipt_count"] = int(receipt_ingress["invalid_count"])
     receipt_learning["invalid_receipt_reasons"] = receipt_ingress["invalid_reasons"]
@@ -1855,6 +1863,98 @@ def run_daily_strategy_learning(
         "broker_execution_enabled": False,
         "decision_receipt_learning": receipt_learning,
         "input_hash_sha256": context.input_hash_sha256,
+    }
+
+
+def _apply_research_episode_outcomes(
+    receipts: Sequence[Mapping[str, Any]],
+    bridges: Sequence[Mapping[str, Any]] | None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Overlay exact sidecar outcomes on receipt copies for this run only."""
+
+    by_receipt: dict[str, Mapping[str, Any]] = {}
+    valid_ids = {
+        str(receipt.get("receipt_id") or "")
+        for receipt in receipts
+        if isinstance(receipt, Mapping)
+    }
+    for bridge in bridges or ():
+        if not isinstance(bridge, Mapping):
+            continue
+        receipt_id = str(bridge.get("receipt_id") or "").strip()
+        if not receipt_id or receipt_id not in valid_ids or receipt_id in by_receipt:
+            continue
+        # A bridge is allowed to affect a receipt only when the immutable hash
+        # is exact.  Ticker/date are additionally checked so a same-ID fixture
+        # cannot leak a neighboring selection's result.
+        receipt_hash = str(bridge.get("receipt_hash_sha256") or "").strip().lower()
+        for receipt in receipts:
+            if (
+                isinstance(receipt, Mapping)
+                and str(receipt.get("receipt_id") or "") == receipt_id
+                and str(receipt.get("receipt_hash_sha256") or "").lower() == receipt_hash
+                and str(receipt.get("market_date") or "")[:10]
+                == str(bridge.get("market_date") or "")[:10]
+                and str(receipt.get("symbol") or "").upper()
+                == str(bridge.get("ticker") or "").upper()
+            ):
+                by_receipt[receipt_id] = bridge
+                break
+    result: list[Mapping[str, Any]] = []
+    for receipt in receipts:
+        receipt_id = str(receipt.get("receipt_id") or "")
+        bridge = by_receipt.get(receipt_id)
+        if bridge is not None and bridge.get("learning_eligible") is not True:
+            bridge = None
+        if bridge is None:
+            result.append(receipt)
+            continue
+        result.append(
+            {
+                **dict(receipt),
+                "outcome_state": str(
+                    bridge.get("outcome_state") or bridge.get("outcome_status") or "MISSING"
+                ),
+                "selection_outcome_bridge_id": bridge.get("bridge_id"),
+            }
+        )
+    return tuple(result)
+
+
+def _bridge_learning_summary(
+    bridges: Sequence[Mapping[str, Any]] | None,
+    receipts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    receipt_ids = {str(item.get("receipt_id") or "") for item in receipts}
+    all_bridges = [item for item in bridges or () if isinstance(item, Mapping)]
+    usable = [item for item in all_bridges if str(item.get("receipt_id") or "") in receipt_ids]
+    deduped: dict[str, Mapping[str, Any]] = {}
+    for item in usable:
+        receipt_id = str(item.get("receipt_id") or "")
+        if receipt_id and receipt_id not in deduped:
+            deduped[receipt_id] = item
+    return {
+        "schema_version": "dawnstrike.research_episode_outcome_learning.v1",
+        "bridge_count": len(usable),
+        "deduplicated_receipt_count": len(deduped),
+        "outcome_state_counts": {
+            state: sum(
+                1
+                for item in deduped.values()
+                if str(item.get("outcome_status") or "MISSING") == state
+            )
+            for state in sorted(
+                {
+                    str(item.get("outcome_status") or "MISSING")
+                    for item in deduped.values()
+                }
+            )
+        },
+        "missing_receipt_join_count": sum(
+            1 for item in all_bridges if not str(item.get("receipt_id") or "")
+        ),
+        "research_only": True,
+        "broker_execution_enabled": False,
     }
 
 

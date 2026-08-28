@@ -1954,6 +1954,7 @@ def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
     decision_receipts: Sequence[Mapping[str, Any]] | None
     v6_decisions: Sequence[Mapping[str, Any]] | None
     no_evidence_receipts: Sequence[Mapping[str, Any]] | None
+    research_episode_outcomes: Sequence[Mapping[str, Any]] | None
     if args.paper_ops_root and not args.db_path:
         raise SnapshotValidationError("--paper-ops-root requires --db-path")
     # Phase 1 is deliberately before the first database, PaperOps, or
@@ -1973,6 +1974,9 @@ def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
         analyzer, input_hash_sha256, decision_receipts, v6_decisions, no_evidence_receipts = (
             _restore_strategy_learning_evidence(snapshot)
         )
+        research_episode_outcomes = snapshot.get("research_episode_outcomes")
+        if not isinstance(research_episode_outcomes, list):
+            research_episode_outcomes = None
         frozen_cutoff = str(snapshot["cutoff"])
         frozen_source_identity = str(snapshot["source_identity"])
         frozen_source_hash = str(snapshot["source_hash_sha256"])
@@ -1982,6 +1986,7 @@ def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
         decision_receipts = None
         v6_decisions = None
         no_evidence_receipts = None
+        research_episode_outcomes = None
         frozen_cutoff = str(args.cutoff)
         frozen_source_identity = str(args.source_identity)
         frozen_source_hash = args.source_hash_sha256
@@ -1999,6 +2004,7 @@ def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
         decision_receipts=decision_receipts,
         v6_decisions=v6_decisions,
         no_evidence_receipts=no_evidence_receipts,
+        research_episode_outcomes=research_episode_outcomes,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "complete" else 1
@@ -2012,6 +2018,7 @@ def _hash_strategy_learning_inputs(
     evidence_payload: Mapping[str, Any] | None = None,
     decision_receipts: Sequence[Mapping[str, Any]] | None = None,
     v6_decisions: Sequence[Mapping[str, Any]] | None = None,
+    research_episode_outcomes: Sequence[Mapping[str, Any]] | None = None,
 ) -> str | None:
     """Bind reuse to the exact evidence objects consumed by the analyzer.
 
@@ -2046,6 +2053,13 @@ def _hash_strategy_learning_inputs(
         parts.append(("strategy_decision_receipts", _canonical_input_bytes(decision_receipts)))
     if v6_decisions is not None:
         parts.append(("alpha_v6_decisions", _canonical_input_bytes(v6_decisions)))
+    if research_episode_outcomes is not None:
+        parts.append(
+            (
+                "research_episode_outcomes",
+                _canonical_input_bytes(research_episode_outcomes),
+            )
+        )
     if not parts:
         return None
     digest = hashlib.sha256()
@@ -2881,6 +2895,13 @@ def _recompute_snapshot_input_hash(snapshot: Mapping[str, Any]) -> str:
         )
     if components.get("v6_decisions") is not None:
         parts.append(("alpha_v6_decisions", _canonical_input_bytes(components["v6_decisions"])))
+    if components.get("research_episode_outcomes") is not None:
+        parts.append(
+            (
+                "research_episode_outcomes",
+                _canonical_input_bytes(components["research_episode_outcomes"]),
+            )
+        )
     if not parts:
         raise SnapshotValidationError("daily-learning frozen input components are empty")
     digest = hashlib.sha256()
@@ -2896,6 +2917,7 @@ def _recompute_snapshot_input_hash(snapshot: Mapping[str, Any]) -> str:
 def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, Any]:
     decision_receipts: Sequence[Mapping[str, Any]] | None = None
     v6_decisions: Sequence[Mapping[str, Any]] | None = None
+    research_episode_outcomes: Sequence[Mapping[str, Any]] | None = None
     component_hashes: dict[str, str] = {}
     source_generation: dict[str, Any] = {"mode": "none"}
     input_components: dict[str, Any] = {}
@@ -2957,6 +2979,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             "evidence_payload": payload,
             "decision_receipts": list(decision_receipts) if decision_receipts is not None else None,
             "v6_decisions": None,
+            "research_episode_outcomes": None,
         }
         component_hashes["strategy_decision_receipts"] = hashlib.sha256(
             _canonical_input_bytes(input_components["decision_receipts"])
@@ -2971,6 +2994,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
         rows = database_snapshot["portfolio_rows"]
         decision_receipts = database_snapshot["decision_receipts"]
         v6_decisions = database_snapshot["v6_decisions"]
+        research_episode_outcomes = database_snapshot["research_episode_outcomes"]
         source_generation = {"mode": "database", **database_snapshot["generation"]}
         paper_ops_rows = None
         paper_generation: dict[str, Any] | None = None
@@ -3041,6 +3065,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             paper_ops_root=Path(args.paper_ops_root) if args.paper_ops_root else None,
             decision_receipts=decision_receipts,
             v6_decisions=v6_decisions,
+            research_episode_outcomes=research_episode_outcomes,
         )
         report = attribute_strategy_misses(
             rows,
@@ -3071,6 +3096,11 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             "paper_ops_rows": list(paper_ops_rows) if paper_ops_rows is not None else None,
             "decision_receipts": _external_input_identity(decision_receipts),
             "v6_decisions": _external_input_identity(v6_decisions),
+            "research_episode_outcomes": (
+                list(research_episode_outcomes)
+                if research_episode_outcomes is not None
+                else None
+            ),
             "paper_ops_materializer_inputs": paper_input_hash
             if paper_ops_rows is not None
             else None,
@@ -3083,6 +3113,9 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
             component_hashes["alpha_v6_decisions"] = hashlib.sha256(
                 _canonical_input_bytes(input_components["v6_decisions"])
             ).hexdigest()
+        component_hashes["research_episode_outcomes"] = hashlib.sha256(
+            _canonical_input_bytes(input_components["research_episode_outcomes"])
+        ).hexdigest()
         no_evidence_candidates = _no_evidence_candidates(
             args,
             rows=rows,
@@ -3111,6 +3144,11 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
         "analysis_payload": analysis_payload,
         "decision_receipts": serialized_receipts,
         "v6_decisions": serialized_v6,
+        "research_episode_outcomes": (
+            list(research_episode_outcomes)
+            if research_episode_outcomes is not None
+            else None
+        ),
         "input_hash_sha256": input_hash_sha256,
         "component_hashes": dict(sorted(component_hashes.items())),
         "source_generation": source_generation,
@@ -3577,6 +3615,7 @@ def _read_strategy_learning_evidence_snapshot(
         "paper_ops_rows": "paper_ops_lifecycle_rows",
         "decision_receipts": "strategy_decision_receipts",
         "v6_decisions": "alpha_v6_decisions",
+        "research_episode_outcomes": "research_episode_outcomes",
     }
     for component_key, component_label in component_labels.items():
         if input_components.get(component_key) is not None:

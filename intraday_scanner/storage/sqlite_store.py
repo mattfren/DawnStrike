@@ -8658,6 +8658,151 @@ class SQLiteScanStore:
             rows = connection.execute(query, (*params, limit)).fetchall()
         return [json.loads(str(row[0])) for row in rows]
 
+    def persist_research_episode_outcome_bridges(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> dict[str, int]:
+        """Persist immutable selection-only strategy outcome joins.
+
+        A retry may restate the exact bridge.  Any identity or payload drift is
+        rejected before a second row can be created; strategy decision receipts
+        themselves are never updated by this sidecar.
+        """
+
+        self.initialize()
+        materialized = [dict(row) for row in rows]
+        inserted = 0
+        reused = 0
+        try:
+            with self._connect() as connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("BEGIN IMMEDIATE")
+                for row in materialized:
+                    bridge_id = str(row.get("bridge_id") or "").strip()
+                    bridge_hash = str(row.get("bridge_hash_sha256") or "").strip().lower()
+                    if not bridge_id or not bridge_hash:
+                        raise StorageError("research outcome bridge identity is required")
+                    bridge_body = {
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"bridge_id", "bridge_hash_sha256"}
+                    }
+                    expected_bridge_hash = hashlib.sha256(
+                        json.dumps(
+                            bridge_body,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if bridge_hash != expected_bridge_hash:
+                        raise StorageError("research outcome bridge hash mismatch")
+                    if bridge_id != "rep-" + bridge_hash[:24]:
+                        raise StorageError("research outcome bridge ID is not derived from hash")
+                    payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                    existing = connection.execute(
+                        "SELECT bridge_hash_sha256, payload_json "
+                        "FROM research_episode_outcome_bridges WHERE bridge_id = ?",
+                        (bridge_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[0]) != bridge_hash or str(existing[1]) != payload_json:
+                            raise StorageError(
+                                "research outcome bridge identity/payload mismatch: " + bridge_id
+                            )
+                        reused += 1
+                        continue
+                    owner = connection.execute(
+                        "SELECT bridge_id FROM research_episode_outcome_bridges "
+                        "WHERE bridge_hash_sha256 = ?",
+                        (bridge_hash,),
+                    ).fetchone()
+                    if owner is not None and str(owner[0]) != bridge_id:
+                        raise StorageError(
+                            "research outcome bridge hash is bound to another identity"
+                        )
+                    connection.execute(
+                        """
+                        INSERT INTO research_episode_outcome_bridges
+                        (bridge_id, bridge_hash_sha256, selection_id, slate_id,
+                         slate_content_hash_sha256, episode_id, ticker, market_date,
+                         selected_at, strategy_id, strategy_version, receipt_id,
+                         receipt_hash_sha256, outcome_status, learning_eligible,
+                         source_observation_id, source_observation_hash_sha256,
+                         source_path_id, source_path_hash_sha256, source_cutoff,
+                         outcome_artifact_id, outcome_artifact_hash_sha256,
+                         payload_json, created_at)
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            bridge_id,
+                            bridge_hash,
+                            str(row.get("selection_id") or ""),
+                            str(row.get("slate_id") or ""),
+                            str(row.get("slate_content_hash_sha256") or ""),
+                            str(row.get("episode_id") or ""),
+                            str(row.get("ticker") or "").upper(),
+                            str(row.get("market_date") or "")[:10],
+                            str(row.get("selected_at") or ""),
+                            str(row.get("strategy_id") or ""),
+                            str(row.get("strategy_version") or ""),
+                            str(row.get("receipt_id") or ""),
+                            str(row.get("receipt_hash_sha256") or ""),
+                            str(row.get("outcome_status") or "MISSING"),
+                            int(bool(row.get("learning_eligible"))),
+                            str(row.get("source_observation_id") or "") or None,
+                            str(row.get("source_observation_hash_sha256") or "") or None,
+                            str(row.get("source_path_id") or "") or None,
+                            str(row.get("source_path_hash_sha256") or "") or None,
+                            str(row.get("source_cutoff") or "") or None,
+                            str(row.get("outcome_artifact_id") or "") or None,
+                            str(row.get("outcome_artifact_hash_sha256") or "") or None,
+                            payload_json,
+                            str(row.get("created_at") or ""),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "reused": reused, "row_count": len(materialized)}
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist research outcome bridges: {exc}") from exc
+
+    def load_research_episode_outcome_bridges(
+        self,
+        *,
+        market_date: str | None = None,
+        selection_id: str | None = None,
+        receipt_id: str | None = None,
+        limit: int = 50_000,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("market_date", market_date),
+            ("selection_id", selection_id),
+            ("receipt_id", receipt_id),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(str(value)[:10] if column == "market_date" else str(value))
+        query = "SELECT payload_json FROM research_episode_outcome_bridges"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY market_date ASC, selected_at ASC, bridge_id ASC LIMIT ?"
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                return [
+                    json.loads(str(row[0]))
+                    for row in connection.execute(query, params).fetchall()
+                ]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load research outcome bridges: {exc}") from exc
+
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
             return connect_read_only(self.db_path)

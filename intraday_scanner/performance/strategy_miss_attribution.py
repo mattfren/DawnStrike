@@ -888,6 +888,7 @@ def load_strategy_learning_database_snapshot_readonly(
             "portfolio_performance_rows",
             "strategy_decision_receipts",
             "alpha_v6_decisions",
+            "research_episode_outcome_bridges",
         ):
             if table not in tables:
                 table_generations[table] = {
@@ -927,6 +928,18 @@ def load_strategy_learning_database_snapshot_readonly(
             date_cutoff=date_cutoff,
             _connection=connection,
         )
+        if table_generations["research_episode_outcome_bridges"]["exists"]:
+            bridge_rows = [
+                json.loads(str(row[0]))
+                for row in connection.execute(
+                    """SELECT payload_json FROM research_episode_outcome_bridges
+                    WHERE market_date = ? AND source_cutoff <= ?
+                    ORDER BY selected_at ASC, bridge_id ASC""",
+                    (market_date[:10], date_cutoff),
+                ).fetchall()
+            ]
+        else:
+            bridge_rows = []
         generation = {
             "database_path": str(path),
             "transaction": (
@@ -941,6 +954,7 @@ def load_strategy_learning_database_snapshot_readonly(
             "portfolio_rows": rows,
             "decision_receipts": receipts,
             "v6_decisions": v6_decisions,
+            "research_episode_outcomes": bridge_rows,
             "generation": generation,
         }
     finally:
