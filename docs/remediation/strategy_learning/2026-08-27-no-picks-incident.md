@@ -67,6 +67,14 @@ Finalize task retained result `267014`. That release-governance failure is separ
 successful Aug. 27 Morning task and does not explain the zero-name slate. It must still be cleared
 by a legitimate scheduled Finalize result before production proof can close.
 
+The scheduled Aug. 27 Finalize later ran at `17:30:02-05:00` and cleared this separate blocker
+without manual intervention. The old-SHA run completed at `17:33:03-05:00` with 14/14 stage rows,
+zero failed or missing stages, a `READY` finalizer receipt, Task Scheduler result `0`, and
+`research_only=true` / `broker_execution_enabled=false`. Calendar truth was honestly `NO_TRADE`.
+That proves terminal integrity for registered SHA
+`5190ab6beb1b81556bfc70640c43a4cff48bd1f8`; it does not prove the remediation candidate or
+retroactively create Aug. 27 picks.
+
 ## Remediation and acceptance boundary
 
 The strategy-remediation candidate must pass one actual observation timestamp from the scheduled
@@ -77,3 +85,10 @@ cycle timestamp. Acceptance requires hostile regressions, the cross-lane suite, 
 verification, an independent P0/P1 audit, a clean exact SHA on `main`, and evidence from the next
 legitimate scheduled Morning-to-Finalize chain. An out-of-window Morning replay is not valid
 evidence.
+
+The current integration candidate implements explicit as-of propagation, exact core
+lineage/freshness and row binding, lane-aware fallback ceilings, frozen-slate retry and cross-scan
+governance, collision-safe selection identities, and fail-closed no-broker publication. It also
+adds atomic watcher admission, exact lifecycle identity/proof binding, committed-FillTruth learning
+quarantine, and official performance/Calendar FillTruth gating. These implementation facts do not
+replace the next legitimate scheduled-chain acceptance proof.

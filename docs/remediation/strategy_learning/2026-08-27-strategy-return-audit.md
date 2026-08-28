@@ -25,6 +25,14 @@ This is a research-only audit. Broker execution remains disabled.
   47 outcome objects, but none carries a committed FillTruth hash. It is historical/provisional
   evidence, not forward promotion authority under the hardened learning boundary.
 
+The hardened candidate separates four evidence classes that must not be collapsed. Modeled EOD
+replay is diagnostic. Operational lifecycle closure may restore paper state. Official realized
+performance additionally requires exact, recomputed joins across a closed durable position,
+entry and exit fills, admitted intents, identity, timestamps, source hash, cohort/account, and the
+research-only/no-broker boundary. Learning is stricter still: without a governed CommitBridge and
+committed FillTruth identity, the return remains quarantined even when operational lifecycle rows
+exist. EOD repair or reconciliation output cannot authenticate itself as realized return truth.
+
 `Mean return` below is the arithmetic mean of `trade_return_pct` for closed rows. `PF` is gross
 positive net P&L divided by absolute gross negative net P&L. `Ex-best` removes the single best
 closed trade to expose concentration.
@@ -58,9 +66,19 @@ closed trade to expose concentration.
 5. Learning must consume one frozen, authenticated, point-in-time cohort. Closed rows without
    committed FillTruth remain quarantined; checked-zero claims require an authenticated query over
    an existing, warning-free source.
+6. Operational lifecycle closure and modeled EOD replay are different evidence classes. EOD repair
+   may restore state, but it cannot self-authenticate a realized return; only independently bound
+   lifecycle evidence can support official performance, and only committed FillTruth can support
+   learning or promotion.
 
 ## Release implication
 
 The remediation can improve daily discovery and learning integrity without changing a champion.
-Release acceptance requires the complete test/audit gate, a clean exact SHA on `main`, and proof
-from the next legitimate scheduled session. An out-of-window Morning replay is not valid evidence.
+The integration candidate now includes atomic watcher admission, authenticated fill/position
+lifecycle identity, committed-FillTruth quarantine, official performance and Calendar FillTruth
+gating, and hostile no-broker/evidence-mismatch regressions. These are candidate-code facts, not
+production proof. The old-SHA Aug. 27 chain completed all 14 stages at 17:33 CT with a valid
+finalizer receipt and a `NO_TRADE` Calendar outcome; that terminal result does not certify the new
+candidate. Release acceptance still requires the complete test/audit gate, a clean exact SHA on
+`main`, and proof from the next legitimate scheduled session. An out-of-window Morning replay is
+not valid evidence.
