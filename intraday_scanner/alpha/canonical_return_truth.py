@@ -2259,6 +2259,9 @@ def _validate_intent_column_projection(
         "watcher_current_proof",
         "watcher_validation_row",
         "monitor_proof_lineage",
+        "research_only",
+        "broker_execution",
+        "broker_execution_enabled",
     }
     if set(columns) != column_keys or set(payload) != payload_keys:
         raise ValueError("trade intent raw record has an unexpected schema")
@@ -2483,6 +2486,9 @@ def _validate_current_v5_entry_intent(
         "execution_policy_version": ALPHAOPS_V5_POLICY_VERSION,
         "cost_model_version": ALPHAOPS_V5_COST_MODEL_VERSION,
         "official_paper_eligible": True,
+        "research_only": True,
+        "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "source_observation_id": source_columns.get("observation_id"),
         "source_bar_hash_sha256": source_payload.get(
             "source_bar_hash_sha256"
