@@ -175,13 +175,27 @@ def write_ohlcv_csv(
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=("symbol", "timestamp", "open", "high", "low", "close", "volume"),
+            fieldnames=(
+                "symbol",
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "vwap",
+            ),
         )
         writer.writeheader()
         for symbol in dataset.symbols:
             for bar in dataset.bars_by_symbol[symbol]:
                 if deadline is not None and clock.monotonic() >= deadline:
                     raise TimeoutError("OHLCV CSV generation exceeded acquisition deadline")
+                values = (bar.open, bar.high, bar.low, bar.close)
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError("OHLC must be finite")
+                if bar.vwap is not None and not math.isfinite(bar.vwap):
+                    raise ValueError("VWAP must be finite when present")
                 writer.writerow(
                     {
                         "symbol": bar.symbol,
@@ -191,6 +205,7 @@ def write_ohlcv_csv(
                         "low": _format_float(bar.low),
                         "close": _format_float(bar.close),
                         "volume": str(bar.volume),
+                        "vwap": "" if bar.vwap is None else _format_float(bar.vwap),
                     }
                 )
 
@@ -434,4 +449,8 @@ def _optional_float(value: str | None) -> float | None:
 
 
 def _format_float(value: float) -> str:
-    return f"{value:.4f}".rstrip("0").rstrip(".")
+    if not math.isfinite(value):
+        raise ValueError("market float must be finite")
+    # repr(float) is deterministic and round-trips the exact IEEE-754 value;
+    # fixed four-decimal formatting silently changed source prices.
+    return repr(float(value))

@@ -7,6 +7,7 @@ import inspect
 import json
 import math
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -48,6 +49,7 @@ _RATE_RESERVATION_SAFETY_SECONDS = 0.1
 _CACHE_WRITE_LOCK = threading.RLock()
 _PROCESS_RATE_LOCK = threading.Lock()
 _PROCESS_NEXT_REQUEST_AT = 0.0
+_REQUEST_CONTRACT_SCHEMA = "v2.public_yahoo_chart_request.v1"
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,7 @@ def fetch_yahoo_chart_daily_dataset(
         }
     )
     deadline = time.monotonic() + time_budget_seconds if time_budget_seconds else None
+    request_contract = _request_contract(range_period=range_period, interval=interval)
     request_gate = _RequestRateGate(
         max_requests_per_second,
         cache_root=cache_root,
@@ -127,14 +130,40 @@ def fetch_yahoo_chart_daily_dataset(
     # The executor is deliberately bounded.  Futures are consumed in the
     # original symbol order below, so network completion order cannot change
     # warning order, CSV order, or any downstream hash.
-    executor = ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(requested_symbols))))
-    futures: dict[str, Future[_SymbolFetchResult]] = {
-        symbol: executor.submit(
-            _fetch_symbol,
-            symbol=symbol,
-            provider_symbol=provider_symbols[symbol],
-            url=urls[symbol],
-            cache_dir=cache_root,
+    worker_count = min(max_workers, max(1, len(requested_symbols)))
+    executor: ThreadPoolExecutor | None = None
+    if deadline is None:
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        futures: dict[str, Future[_SymbolFetchResult]] = {
+            symbol: executor.submit(
+                _fetch_symbol,
+                symbol=symbol,
+                provider_symbol=provider_symbols[symbol],
+                url=urls[symbol],
+                cache_dir=cache_root,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+                required_bar_date=required_bar_date,
+                minimum_history_bars=minimum_history_bars,
+                deadline=deadline,
+                request_gate=request_gate,
+                cache_root=cache_root,
+                request_contract=request_contract,
+            )
+            for symbol in requested_symbols
+        }
+    else:
+        # A ThreadPoolExecutor owns non-daemon threads and waits for a
+        # non-cooperative test/transport adapter during shutdown.  The
+        # deadline path uses bounded daemon workers and cancels queued work;
+        # workers never write artifacts, so a late transport return cannot
+        # mutate the cache after the caller has received its terminal result.
+        futures = _start_daemon_fetches(
+            requested_symbols=requested_symbols,
+            provider_symbols=provider_symbols,
+            urls=urls,
+            cache_root=cache_root,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_backoff_seconds=retry_backoff_seconds,
@@ -142,10 +171,9 @@ def fetch_yahoo_chart_daily_dataset(
             minimum_history_bars=minimum_history_bars,
             deadline=deadline,
             request_gate=request_gate,
-            cache_root=cache_root,
+            request_contract=request_contract,
+            max_workers=worker_count,
         )
-        for symbol in requested_symbols
-    }
     results: dict[str, _SymbolFetchResult] = {}
     try:
         for symbol in requested_symbols:
@@ -172,10 +200,10 @@ def fetch_yahoo_chart_daily_dataset(
         for future in futures.values():
             if not future.done():
                 future.cancel()
-        # In-flight urllib calls are bounded by timeout_seconds.  Always join
-        # workers so a declared admission budget never leaks background threads
-        # past the caller's terminal result.
-        executor.shutdown(wait=True, cancel_futures=True)
+        if executor is not None:
+            # No deadline means there is no terminal wall-clock promise, so
+            # retain the ordinary executor's strong join semantics.
+            executor.shutdown(wait=True, cancel_futures=True)
 
     payloads: dict[str, dict[str, Any]] = {}
     for symbol in requested_symbols:
@@ -245,6 +273,7 @@ def fetch_yahoo_chart_daily_dataset(
             {symbol: payloads[symbol] for symbol in requested_symbols if symbol in payloads},
             required_bar_date=required_bar_date,
             deadline=deadline,
+            request_contract=request_contract,
         )
         dataset = _dataset_with_warnings(dataset, warnings)
         return YahooChartFetchResult(
@@ -261,6 +290,7 @@ def fetch_yahoo_chart_daily_dataset(
             normalized,
             payloads[normalized],
             deadline=deadline,
+            request_contract=request_contract,
         )
         raw_paths.append(raw_path)
         source_refs.extend(
@@ -272,7 +302,12 @@ def fetch_yahoo_chart_daily_dataset(
             )
         )
 
-    csv_path = _write_csv_immutable(dataset, cache_root=cache_root, deadline=deadline)
+    csv_path = _write_csv_immutable(
+        dataset,
+        cache_root=cache_root,
+        deadline=deadline,
+        request_contract=request_contract,
+    )
     dataset = MarketDataset(
         dataset_id=dataset.dataset_id,
         source_kind=dataset.source_kind,
@@ -287,6 +322,79 @@ def fetch_yahoo_chart_daily_dataset(
         raw_payload_paths=tuple(raw_paths),
         warnings=dataset.warnings,
     )
+
+
+def _start_daemon_fetches(
+    *,
+    requested_symbols: tuple[str, ...],
+    provider_symbols: dict[str, str],
+    urls: dict[str, str],
+    cache_root: Path,
+    timeout_seconds: float,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+    required_bar_date: date | None,
+    minimum_history_bars: int,
+    deadline: float,
+    request_gate: _RequestRateGate,
+    request_contract: dict[str, object],
+    max_workers: int,
+) -> dict[str, Future[_SymbolFetchResult]]:
+    jobs: queue.Queue[str] = queue.Queue()
+    futures: dict[str, Future[_SymbolFetchResult]] = {}
+    for symbol in requested_symbols:
+        jobs.put(symbol)
+        futures[symbol] = Future()
+
+    def worker() -> None:
+        while True:
+            try:
+                symbol = jobs.get_nowait()
+            except queue.Empty:
+                return
+            future = futures[symbol]
+            if future.cancelled():
+                jobs.task_done()
+                continue
+            if time.monotonic() >= deadline:
+                future.set_result(
+                    _SymbolFetchResult(
+                        symbol=symbol,
+                        payload=None,
+                        attempts=0,
+                        error="acquisition wall-clock budget exhausted",
+                    )
+                )
+                jobs.task_done()
+                continue
+            try:
+                result = _fetch_symbol(
+                    symbol=symbol,
+                    provider_symbol=provider_symbols[symbol],
+                    url=urls[symbol],
+                    cache_dir=cache_root,
+                    timeout_seconds=timeout_seconds,
+                    max_attempts=max_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    required_bar_date=required_bar_date,
+                    minimum_history_bars=minimum_history_bars,
+                    deadline=deadline,
+                    request_gate=request_gate,
+                    cache_root=cache_root,
+                    request_contract=request_contract,
+                )
+            except BaseException as exc:  # defensive isolation of one symbol
+                if not future.cancelled():
+                    future.set_exception(exc)
+            else:
+                if not future.cancelled():
+                    future.set_result(result)
+            finally:
+                jobs.task_done()
+
+    for _index in range(max_workers):
+        threading.Thread(target=worker, daemon=True, name="yahoo-chart-fetch").start()
+    return futures
 
 
 class _RequestRateGate:
@@ -339,9 +447,19 @@ def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
     lock_path = cache_root / ".yahoo_rate_gate.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as handle:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"0")
-            handle.flush()
+        while handle.seek(0, os.SEEK_END) == 0:
+            try:
+                handle.write(b"0")
+                handle.flush()
+            except PermissionError:
+                # Another process may be initializing and locking the same
+                # one-byte file. Wait for its durable seed rather than
+                # failing the request admission path spuriously.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Yahoo rate-gate initialization exceeded deadline") from None
+                time.sleep(0.01)
+            else:
+                break
         handle.seek(0)
         if os.name == "nt":
             import msvcrt
@@ -412,6 +530,7 @@ def _fetch_symbol(
     deadline: float | None,
     request_gate: _RequestRateGate,
     cache_root: Path,
+    request_contract: dict[str, object],
 ) -> _SymbolFetchResult:
     cached = _read_cached_payload(
         cache_root,
@@ -421,6 +540,7 @@ def _fetch_symbol(
         minimum_history_bars=minimum_history_bars,
         deadline=deadline,
         cache_root=cache_root,
+        expected_request_contract=request_contract,
     )
     if cached is not None:
         payload, cache_path = cached
@@ -562,6 +682,7 @@ def _read_cached_payload(
     minimum_history_bars: int,
     deadline: float | None,
     cache_root: Path,
+    expected_request_contract: dict[str, object] | None = None,
 ) -> tuple[dict[str, Any], Path] | None:
     # Only full-digest content-addressed objects are admissible. Legacy mutable
     # aliases are intentionally ignored, even when their bytes look valid.
@@ -576,10 +697,17 @@ def _read_cached_payload(
             continue
         try:
             expected_digest = _cache_digest_from_name(path, symbol)
+            _validate_cache_contract(
+                path,
+                expected_request_contract,
+                required=False,
+            )
             content = _bounded_file_read(path, deadline=deadline)
             actual_digest = hashlib.sha256(content).hexdigest()
             if actual_digest != expected_digest:
-                _quarantine_corrupt_cache(path, cache_root)
+                # Reads are intentionally side-effect free: deadline workers
+                # may still be unwinding a transport after the caller returns.
+                # The immutable writer quarantines this object before repair.
                 continue
             payload = json.loads(content.decode("utf-8"))
             if not isinstance(payload, dict):
@@ -683,6 +811,7 @@ def _write_immutable_payload(
     payload: dict[str, Any],
     *,
     deadline: float | None = None,
+    request_contract: dict[str, object] | None = None,
 ) -> Path:
     _ensure_before_deadline(deadline)
     cache_root = cache_dir.resolve()
@@ -719,6 +848,8 @@ def _write_immutable_payload(
             expected_digest=digest,
             deadline=deadline,
         )
+        if request_contract is not None:
+            _write_cache_contract(content_path, request_contract, cache_root=cache_root)
     return content_path
 
 
@@ -728,6 +859,7 @@ def _write_partial_payloads(
     *,
     required_bar_date: date | None,
     deadline: float | None = None,
+    request_contract: dict[str, object] | None = None,
 ) -> None:
     if required_bar_date is None:
         return
@@ -741,6 +873,7 @@ def _write_partial_payloads(
             symbol,
             payloads[symbol],
             deadline=deadline,
+            request_contract=request_contract,
         )
 
 
@@ -830,6 +963,7 @@ def _write_csv_immutable(
     *,
     cache_root: Path,
     deadline: float | None = None,
+    request_contract: dict[str, object] | None = None,
 ) -> Path:
     """Write a content-addressed CSV and retain a non-authoritative alias."""
 
@@ -873,6 +1007,8 @@ def _write_csv_immutable(
         deadline=deadline,
         max_bytes=_MAX_CSV_BYTES,
     )
+    if request_contract is not None:
+        _write_cache_contract(immutable_path, request_contract, cache_root=cache_root)
     alias_path = cache_root / "public_yahoo_ohlcv.csv"
     _assert_cache_path(cache_root, alias_path)
     if not alias_path.exists():
@@ -888,6 +1024,58 @@ def _write_csv_immutable(
             pass
     _ensure_before_deadline(deadline)
     return immutable_path
+
+
+def _request_contract(*, range_period: str, interval: str) -> dict[str, object]:
+    return {
+        "events": "history",
+        "includePrePost": False,
+        "interval": interval,
+        "range": range_period,
+        "schema_version": _REQUEST_CONTRACT_SCHEMA,
+    }
+
+
+def _cache_contract_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.contract.json")
+
+
+def _write_cache_contract(
+    path: Path,
+    contract: dict[str, object],
+    *,
+    cache_root: Path,
+) -> None:
+    _assert_cache_path(cache_root, path)
+    contract_path = _cache_contract_path(path)
+    _assert_cache_path(cache_root, contract_path)
+    content = _canonical_payload_bytes(contract)
+    _write_exclusive(
+        contract_path,
+        content,
+        cache_root=cache_root,
+        expected_digest=hashlib.sha256(content).hexdigest(),
+        max_bytes=64 * 1024,
+    )
+
+
+def _validate_cache_contract(
+    path: Path,
+    expected: dict[str, object] | None,
+    *,
+    required: bool,
+) -> None:
+    if expected is None:
+        return
+    contract_path = _cache_contract_path(path)
+    if not contract_path.exists():
+        if required:
+            raise ValueError("Yahoo cache request contract is missing")
+        return
+    content = _bounded_file_read(contract_path, deadline=None, max_bytes=64 * 1024)
+    actual = json.loads(content.decode("utf-8"))
+    if actual != expected:
+        raise ValueError("Yahoo cache request contract does not match the request")
 
 
 def _quarantine_corrupt_cache(

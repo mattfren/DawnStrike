@@ -108,6 +108,7 @@ def build_data_truth_snapshot(
     fetch_max_workers: int = 12,
     fetch_max_requests_per_second: float | None = 8.0,
     fetch_time_budget_seconds: float | None = 90 * 60,
+    require_production: bool = False,
 ) -> DataTruthBuildResult:
     if symbols is not None:
         from intraday_scanner.public_data.yahoo_chart_fetcher import (
@@ -115,6 +116,10 @@ def build_data_truth_snapshot(
         )
 
         symbols = canonicalize_yahoo_symbols(symbols)
+    if require_production and not symbols:
+        raise ValueError(
+            "production DataTruth requires a nonempty explicit requested universe"
+        )
     required_bar_date = (
         _last_completed_market_session(as_of_date) if symbols is not None else None
     )
@@ -132,11 +137,13 @@ def build_data_truth_snapshot(
         fetch_max_requests_per_second=fetch_max_requests_per_second,
         fetch_time_budget_seconds=fetch_time_budget_seconds,
         minimum_history_bars=minimum_history,
+        require_production=require_production,
     )
     source_artifacts = _capture_source_artifacts(
         source_csv=source_csv,
         raw_dir=raw_dir,
         source_refs=source_refs,
+        require_content_addressed_raw=symbols is not None,
     )
     raw_dataset = _load_captured_source_dataset(source_artifacts[0])
     normalized, rejected_count, skipped_incomplete, normalization_warnings = _normalize_daily(
@@ -413,8 +420,15 @@ def verify_datatruth_snapshot(
         )
     if _sha256(normalized_path) != manifest.normalized_artifact_hash:
         raise ValueError("DataTruth immutable normalized artifact hash mismatch")
-    if set(manifest.raw_artifact_paths) != set(manifest.raw_artifact_hashes):
+    if (
+        len(manifest.raw_artifact_paths) != len(set(manifest.raw_artifact_paths))
+        or set(manifest.raw_artifact_paths) != set(manifest.raw_artifact_hashes)
+    ):
         raise ValueError("DataTruth immutable raw artifact path/hash inventory mismatch")
+    normalized_logical_path = Path(manifest.normalized_artifact_path).relative_to(
+        Path(expected_snapshot_relative)
+    ).as_posix()
+    source_count = 0
     logical_raw_hashes: list[tuple[str, str]] = []
     snapshot_relative = Path(expected_snapshot_relative)
     for relative_path in manifest.raw_artifact_paths:
@@ -434,7 +448,19 @@ def verify_datatruth_snapshot(
             raise ValueError(
                 "DataTruth immutable source artifact is outside its snapshot directory"
             ) from exc
+        if logical_path == normalized_logical_path or logical_path == "manifest.json":
+            raise ValueError("DataTruth raw artifact aliases a reserved snapshot artifact")
+        if logical_path == "source/source.csv":
+            source_count += 1
+        elif (
+            Path(logical_path).parent.as_posix() != "raw"
+            or Path(logical_path).suffix.lower() != ".json"
+            or len(Path(logical_path).parts) != 2
+        ):
+            raise ValueError("DataTruth raw artifact path has an invalid canonical kind")
         logical_raw_hashes.append((logical_path, expected_hash))
+    if source_count != 1:
+        raise ValueError("DataTruth raw artifact inventory must contain exactly one source CSV")
     recomputed_content_hash = _snapshot_content_hash_from_hashes(
         provider_id=manifest.provider_id,
         timeframe=manifest.timeframe,
@@ -480,11 +506,12 @@ def _capture_source_artifacts(
     source_csv: Path,
     raw_dir: Path,
     source_refs: tuple[str, ...] = (),
+    require_content_addressed_raw: bool = False,
 ) -> tuple[_CapturedArtifact, ...]:
     if not source_csv.is_file():
         raise FileNotFoundError(f"DataTruth source CSV is missing: {source_csv}")
     selected_raw_paths: set[Path] | None = None
-    if source_refs:
+    if require_content_addressed_raw:
         selected_raw_paths = set()
         for reference in source_refs:
             if "_chart" not in reference or not reference.endswith(".json"):
@@ -499,6 +526,7 @@ def _capture_source_artifacts(
             (f"raw/{path.name}", path)
             for path in sorted(raw_dir.glob("*.json"))
             if path.is_file()
+            and not path.name.endswith(".contract.json")
             and (selected_raw_paths is None or path.resolve() in selected_raw_paths)
         ),
     ]
@@ -1105,6 +1133,7 @@ def _resolve_public_yahoo_source(
     fetch_max_requests_per_second: float | None = 8.0,
     fetch_time_budget_seconds: float | None = 90 * 60,
     minimum_history_bars: int = 0,
+    require_production: bool = False,
 ) -> tuple[Path, Path, tuple[str, ...], tuple[str, ...]]:
     if source_csv is not None and raw_dir is not None:
         return (
@@ -1116,6 +1145,7 @@ def _resolve_public_yahoo_source(
                 required_symbols=symbols,
                 required_bar_date=required_bar_date,
                 minimum_history_bars=minimum_history_bars,
+                require_production=require_production,
             ),
             (),
         )
@@ -1166,10 +1196,48 @@ def _resolve_public_yahoo_source(
             if fetched.dataset.source_path:
                 fetched_csv = Path(fetched.dataset.source_path)
                 if fetched.dataset.total_bars and fetched_csv.exists():
+                    if symbols is not None:
+                        insufficient = tuple(
+                            symbol
+                            for symbol in symbols
+                            if len(
+                                {
+                                    bar.timestamp
+                                    for bar in fetched.dataset.bars_by_symbol.get(symbol, ())
+                                }
+                            )
+                            < minimum_history_bars
+                        )
+                        missing_exact = tuple(
+                            symbol
+                            for symbol in symbols
+                            if required_bar_date is not None
+                            and required_bar_date
+                            not in {
+                                bar.timestamp.date()
+                                for bar in fetched.dataset.bars_by_symbol.get(symbol, ())
+                            }
+                        )
+                        if insufficient or missing_exact:
+                            raise DataTruthAcquisitionIncomplete(
+                                "DataTruth acquisition PARTIAL; explicit universe failed "
+                                "governed completed-bar/history requirements; "
+                                f"missing_exact={list(missing_exact)}; "
+                                f"insufficient_history={list(insufficient)}; "
+                                f"minimum_history_bars={minimum_history_bars}"
+                            )
+                    verified_refs = _source_refs_from_cache(
+                        fetched_csv,
+                        local_cache,
+                        required_symbols=symbols,
+                        required_bar_date=required_bar_date,
+                        minimum_history_bars=minimum_history_bars,
+                        require_production=require_production,
+                    )
                     return (
                         fetched_csv,
                         local_cache,
-                        fetched.dataset.source_refs,
+                        tuple(dict.fromkeys((*fetched.dataset.source_refs, *verified_refs))),
                         fetch_warnings,
                     )
             refresh_failure = "refresh returned no usable daily bars"
@@ -1212,6 +1280,7 @@ def _resolve_public_yahoo_source(
                 required_symbols=symbols,
                 required_bar_date=required_bar_date,
                 minimum_history_bars=minimum_history_bars,
+                require_production=require_production,
             )
         except (OSError, TypeError, ValueError, DataTruthAcquisitionIncomplete):
             continue
@@ -1372,7 +1441,20 @@ def _source_refs_from_cache(
     required_symbols: tuple[str, ...] | None = None,
     required_bar_date: date | None = None,
     minimum_history_bars: int = 0,
+    require_production: bool = False,
 ) -> tuple[str, ...]:
+    expected_request = {
+        "events": "history",
+        "includePrePost": False,
+        "interval": "1d",
+        "range": "2y",
+        "schema_version": "v2.public_yahoo_chart_request.v1",
+    }
+    _validate_cache_request_contract(
+        source_csv,
+        expected_request,
+        required=require_production,
+    )
     if _is_full_digest_csv_name(source_csv):
         digest = source_csv.stem.rsplit("_", 1)[-1]
         content = _bounded_source_bytes(source_csv)
@@ -1418,6 +1500,11 @@ def _source_refs_from_cache(
                 digest = hashlib.sha256(content).hexdigest()
                 if digest != path.stem[len(prefix) :]:
                     continue
+                _validate_cache_request_contract(
+                    path,
+                    expected_request,
+                    required=require_production,
+                )
                 payload = json.loads(content.decode("utf-8"))
                 provider_symbol = symbol.replace(".", "-")
                 chart = payload.get("chart")
@@ -1454,6 +1541,31 @@ def _source_refs_from_cache(
             )
         )
     return tuple(refs)
+
+
+def _validate_cache_request_contract(
+    path: Path,
+    expected: dict[str, object],
+    *,
+    required: bool,
+) -> None:
+    contract_path = path.with_name(f"{path.name}.contract.json")
+    if not contract_path.exists():
+        if required:
+            raise DataTruthAcquisitionIncomplete(
+                f"cache artifact lacks the governed request contract: {path}"
+            )
+        return
+    try:
+        payload = json.loads(_bounded_source_bytes(contract_path).decode("utf-8"))
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DataTruthAcquisitionIncomplete(
+            f"cache artifact request contract is malformed: {contract_path}"
+        ) from exc
+    if payload != expected:
+        raise DataTruthAcquisitionIncomplete(
+            f"cache artifact request contract does not match governed 2y/1d request: {path}"
+        )
 
 
 def _is_full_digest_raw_name(path: Path, prefix: str) -> bool:

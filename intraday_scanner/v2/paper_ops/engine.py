@@ -1622,6 +1622,7 @@ def _load_dataset_for_mode(
         allow_fetch=allow_fetch,
         symbols=normalized_universe,
         output_root=data_truth_root,
+        require_production=mode in {PaperRunMode.FORWARD, PaperRunMode.REPLAY},
     )
     observed_symbols = set(result.dataset.symbols)
     configured_symbols = set(normalized_universe)

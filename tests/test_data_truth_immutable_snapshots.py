@@ -68,6 +68,16 @@ def test_build_retains_content_bound_snapshot_and_reuses_identical_bytes(
     assert Path(loaded.source_path or "").resolve() == normalized_path.resolve()
 
 
+def test_production_datatruth_requires_nonempty_explicit_universe(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="nonempty explicit requested universe"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 5),
+            output_root=tmp_path / "data_truth",
+            allow_fetch=False,
+            require_production=True,
+        )
+
+
 def test_raw_artifact_change_creates_new_snapshot_without_overwriting_prior(
     tmp_path: Path,
 ) -> None:

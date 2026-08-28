@@ -27,15 +27,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--path")
     parser.add_argument("--provider-id", default="local_csv")
     parser.add_argument("--symbol")
+    parser.add_argument("--symbols", nargs="+")
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="require an explicit exact-universe production DataTruth acquisition",
+    )
     args = parser.parse_args(argv)
 
     output_root = Path(args.output_root)
     run_date = date.fromisoformat(args.date)
     if args.command == "build":
+        if args.production and not args.symbols:
+            parser.error("--production build requires --symbols")
         result = build_data_truth_snapshot(
             as_of_date=run_date,
             output_root=output_root,
             allow_fetch=not args.no_fetch,
+            symbols=tuple(args.symbols) if args.symbols else None,
+            require_production=args.production,
         )
         print(f"DataTruth snapshot: {result.manifest.snapshot_id}")
         print(f"Accepted bars: {result.manifest.accepted_bar_count}")

@@ -633,6 +633,90 @@ def test_market_csv_preserves_large_integer_volume_and_rejects_nonfinite(
     assert "QQQ" not in dataset.bars_by_symbol
 
 
+def test_market_csv_roundtrip_is_lossless_for_prices_and_vwap(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    source = MarketDataset(
+        dataset_id="lossless",
+        source_kind="test",
+        timeframe="1d",
+        bars_by_symbol={
+            "SPY": (
+                MarketBar(
+                    symbol="SPY",
+                    timestamp=datetime(2026, 6, 1, 21, tzinfo=timezone.utc),
+                    open=100.123456,
+                    high=102.234567,
+                    low=99.987654,
+                    close=101.111119,
+                    volume=9_007_199_254_740_993,
+                    vwap=100.555555,
+                ),
+            )
+        },
+    )
+    csv_path = tmp_path / "lossless.csv"
+    from intraday_scanner.v2.data.market import write_ohlcv_csv
+
+    write_ohlcv_csv(source, csv_path)
+    loaded = load_ohlcv_csv(
+        csv_path, dataset_id="lossless", source_kind="test", timeframe="1d"
+    )
+    assert loaded.bars_by_symbol["SPY"] == source.bars_by_symbol["SPY"]
+
+
+def test_yahoo_fetch_deadline_returns_without_waiting_for_noncooperative_transport(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        yahoo_chart_fetcher,
+        "_fetch_json",
+        lambda *_args, **_kwargs: (time.sleep(0.4) or _payload("SPY")),
+    )
+    started = time.monotonic()
+    result = yahoo_chart_fetcher.fetch_yahoo_chart_daily_dataset(
+        symbols=("SPY",),
+        cache_dir=tmp_path,
+        max_attempts=1,
+        time_budget_seconds=0.03,
+    )
+    assert time.monotonic() - started < 0.2
+    assert result.dataset.symbols == ()
+    time.sleep(0.45)
+    assert not tuple(tmp_path.glob("*.csv"))
+    assert not tuple(tmp_path.glob("*.json"))
+
+
+def test_yahoo_cache_rejects_wrong_request_contract(tmp_path: Path) -> None:
+    payload = _payload("SPY")
+    wrong_contract = yahoo_chart_fetcher._request_contract(
+        range_period="1mo", interval="1d"
+    )
+    path = yahoo_chart_fetcher._write_immutable_payload(
+        tmp_path,
+        "SPY",
+        payload,
+        request_contract=wrong_contract,
+    )
+    assert (
+        yahoo_chart_fetcher._read_cached_payload(
+            tmp_path,
+            "SPY",
+            provider_symbol="SPY",
+            required_bar_date=date.fromtimestamp(1_783_360_800),
+            minimum_history_bars=1,
+            deadline=None,
+            cache_root=tmp_path,
+            expected_request_contract=yahoo_chart_fetcher._request_contract(
+                range_period="2y", interval="1d"
+            ),
+        )
+        is None
+    )
+    assert path.is_file()
+
+
 def test_oversized_raw_and_csv_poison_objects_are_recoverable(tmp_path: Path) -> None:
     payload = _payload("SPY")
     content = yahoo_chart_fetcher._canonical_payload_bytes(payload)
