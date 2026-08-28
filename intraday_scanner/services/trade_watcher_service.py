@@ -36,9 +36,11 @@ from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.notifiers.service import build_notifiers, dispatch_events
 from intraday_scanner.scenario.contracts import (
+    SCENARIO_FEATURE_SCHEMA_VERSION,
     SCENARIO_FORWARD_COHORT,
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
+    canonical_hash,
 )
 from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.scenario.point_in_time import subsequent_entry_evidence_violations
@@ -548,15 +550,8 @@ def _watch_signals(
             f"observed {observed}."
         )
     _validate_exact_session_selections(all_selections, market_date=market_date)
-    scenario_selections = []
-    if include_scenarios:
-        scenario_selections = [
-            row
-            for row in store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT, limit=50_000)
-            if str(row.get("selected_at") or "")[:10] == market_date
-        ]
-        _validate_scenario_selections(scenario_selections, market_date=market_date)
     scenario_open_positions = []
+    scenario_selections = []
     if include_scenarios:
         scenario_open_positions = [
             row
@@ -566,6 +561,28 @@ def _watch_signals(
             and str(row.get("strategy_version") or "") == SCENARIO_POLICY_VERSION
             and str(row.get("cohort") or "") == SCENARIO_FORWARD_COHORT
         ]
+        scenario_selections = [
+            row
+            for row in store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT, limit=50_000)
+            if str(row.get("selected_at") or "")[:10] == market_date
+        ]
+        open_signal_ids = {
+            str(row.get("signal_id") or "") for row in scenario_open_positions
+        }
+        new_scenario_selections = [
+            row
+            for row in scenario_selections
+            if str(row.get("signal_id") or "") not in open_signal_ids
+        ]
+        _validate_scenario_selections(new_scenario_selections, market_date=market_date)
+        _validate_scenario_selection_bindings(
+            new_scenario_selections,
+            store.load_scenario_selection_bindings(
+                selection_ids=[str(row["selection_id"]) for row in new_scenario_selections]
+            ),
+            market_date=market_date,
+        )
+        scenario_selections = new_scenario_selections
     if not all_selections and not scenario_selections and not scenario_open_positions:
         raise SnapshotValidationError(
             "Exact AlphaOps session selection evidence is absent; paper watcher "
@@ -645,15 +662,20 @@ def _watch_signals(
         }
         for selection in selected_rows
     ]
-    identity_marked = [row for row in candidate_rows if _identity_fields_present(row)]
+    alpha_candidate_rows = [
+        row
+        for row in candidate_rows
+        if str(row.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+    ]
+    identity_marked = [row for row in alpha_candidate_rows if _identity_fields_present(row)]
     if identity_marked:
-        if len(identity_marked) != len(candidate_rows):
+        if len(identity_marked) != len(alpha_candidate_rows):
             raise SnapshotValidationError(
                 "Selected paper signals mix episode identity fields with legacy rows; "
                 "intent creation is blocked."
             )
         try:
-            deduped = deduplicate_episode_candidates(candidate_rows)
+            deduped = deduplicate_episode_candidates(alpha_candidate_rows)
         except (EpisodeIdentityError, ValueError) as exc:
             raise SnapshotValidationError(f"Episode identity validation failed: {exc}") from exc
         if deduped["blocked"]:
@@ -661,7 +683,15 @@ def _watch_signals(
                 "Conflicting or incomplete episode candidates are blocked before "
                 "PaperOps intent creation."
             )
-        selected_rows = list(deduped["selected"])
+        selected_identity_ids = {
+            str(row.get("selection_id") or "") for row in deduped["selected"]
+        }
+        selected_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("cohort") or "") == SCENARIO_FORWARD_COHORT
+            or str(row.get("selection_id") or "") in selected_identity_ids
+        ]
         for row in selected_rows:
             row["episode_dedup_counts"] = dict(deduped["counts"])
             row["episode_dedup_counts"]["status"] = "FROZEN_IDENTITY_ACTIVE"
@@ -817,6 +847,11 @@ _EPISODE_IDENTITY_MARKERS = (
 def _identity_fields_present(row: dict[str, Any]) -> bool:
     """Detect partial modern identity before deciding legacy compatibility."""
 
+    # Scenario selections carry their authoritative direction and levels in the
+    # plan envelope, but that is not an AlphaOps episode identity contract.
+    if str(row.get("cohort") or "") == SCENARIO_FORWARD_COHORT:
+        return False
+
     payload = row.get("payload_json")
     if isinstance(payload, str):
         try:
@@ -902,6 +937,179 @@ def _validate_scenario_selections(rows: list[dict[str, Any]], *, market_date: st
             raise SnapshotValidationError(
                 "Scenario selection violates the bounded paper-lifecycle contract."
             )
+
+
+def _scenario_plan_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "decision_id": str(value.get("decision_id") or value.get("scenario_decision_id") or ""),
+        "market_date": str(value.get("market_date") or "")[:10],
+        "ticker": str(value.get("ticker") or "").upper(),
+        "direction": str(value.get("direction") or "").lower(),
+        "action": str(value.get("action") or "").upper(),
+        "entry_trigger": _number(value.get("entry_trigger")),
+        "invalidation_level": _number(value.get("invalidation_level")),
+        "target_1": _number(value.get("target_1")),
+        "cohort": str(value.get("cohort") or ""),
+        "policy_version": str(value.get("policy_version") or ""),
+        "feature_schema_version": str(value.get("feature_schema_version") or ""),
+        "research_only": (
+            None
+            if value.get("research_only") in (None, "")
+            else value.get("research_only") is True
+        ),
+        "broker_execution_enabled": (
+            None
+            if value.get("broker_execution_enabled") in (None, "")
+            else value.get("broker_execution_enabled") is True
+        ),
+    }
+
+
+def _scenario_decision_plan(decision: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_id": str(decision.get("decision_id") or ""),
+        "market_date": str(decision.get("market_date") or "")[:10],
+        "ticker": str(decision.get("ticker") or "").upper(),
+        "direction": str(decision.get("direction") or "").lower(),
+        "action": str(decision.get("action") or "").upper(),
+        "entry_trigger": _number(decision.get("entry_trigger")),
+        "invalidation_level": _number(decision.get("invalidation_level")),
+        "target_1": _number(decision.get("target_1")),
+        "cohort": str(decision.get("cohort") or ""),
+        "policy_version": str(decision.get("policy_version") or ""),
+        "feature_schema_version": str(decision.get("feature_schema_version") or ""),
+        "research_only": decision.get("research_only") is True,
+        "broker_execution_enabled": decision.get("broker_execution_enabled") is True,
+    }
+
+
+def _scenario_decision_hash(decision: dict[str, Any]) -> str:
+    payload = decision.get("_canonical_payload")
+    return canonical_hash(payload if isinstance(payload, dict) else decision)
+
+
+def _validate_scenario_selection_bindings(
+    selections: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+    *,
+    market_date: str,
+) -> None:
+    """Require one exact Scenario link/decision/mirror before watcher side effects."""
+
+    by_selection_id = {
+        str(binding.get("selection", {}).get("selection_id") or ""): binding
+        for binding in bindings
+    }
+    if len(by_selection_id) != len(bindings) or len(by_selection_id) != len(selections):
+        raise SnapshotValidationError(
+            "Scenario selection binding is missing or duplicated; watcher is blocked."
+        )
+    seen_signal_ids: set[str] = set()
+    for selection in selections:
+        selection_id = str(selection.get("selection_id") or "")
+        binding = by_selection_id.get(selection_id)
+        if binding is None:
+            raise SnapshotValidationError(
+                "Scenario selection binding is missing; watcher is blocked."
+            )
+        signal_id = str(selection.get("signal_id") or "")
+        if signal_id in seen_signal_ids:
+            raise SnapshotValidationError(
+                "Scenario signal has duplicate selections; watcher is blocked."
+            )
+        seen_signal_ids.add(signal_id)
+        links = list(binding.get("links") or [])
+        if len(links) != 1:
+            raise SnapshotValidationError(
+                "Scenario signal link is missing or ambiguous; watcher is blocked."
+            )
+        link = links[0]
+        decision = link.get("decision")
+        if not isinstance(decision, dict):
+            raise SnapshotValidationError(
+                "Scenario signal link has no authoritative decision; watcher is blocked."
+            )
+        plan = _scenario_decision_plan(decision)
+        entry = plan["entry_trigger"]
+        stop = plan["invalidation_level"]
+        target = plan["target_1"]
+        if (
+            not plan["decision_id"]
+            or signal_id != f"scenario:{plan['decision_id']}"
+            or str(link.get("decision_id") or "") != plan["decision_id"]
+            or str(link.get("signal_id") or "") != signal_id
+            or str(link.get("scan_id") or "") != f"scenario:{plan['market_date']}"
+            or str(link.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+            or str(link.get("strategy_id") or "") != SCENARIO_STRATEGY_ID
+            or str(link.get("strategy_version") or "") != SCENARIO_POLICY_VERSION
+            or plan["market_date"] != market_date
+            or plan["action"] != "ENTER_LONG"
+            or plan["direction"] != "bullish"
+            or plan["cohort"] != SCENARIO_FORWARD_COHORT
+            or plan["policy_version"] != SCENARIO_POLICY_VERSION
+            or plan["feature_schema_version"] != SCENARIO_FEATURE_SCHEMA_VERSION
+            or plan["research_only"] is not True
+            or plan["broker_execution_enabled"] is not False
+            or entry is None
+            or stop is None
+            or target is None
+            or not (entry > stop > 0 and target > entry)
+        ):
+            raise SnapshotValidationError(
+                "Scenario selection/link/decision identity or contract mismatch; "
+                "watcher is blocked."
+            )
+        if (
+            str(selection.get("selection_id") or "") != f"scenario-selection:{plan['decision_id']}"
+            or str(selection.get("scan_id") or "") != f"scenario:{market_date}"
+            or str(selection.get("ticker") or "").upper() != plan["ticker"]
+            or str(selection.get("strategy_id") or "") != SCENARIO_STRATEGY_ID
+            or str(selection.get("strategy_version") or "") != SCENARIO_POLICY_VERSION
+            or str(selection.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+            or str(selection.get("decision") or "").lower() != "paper_entry"
+            or str(selection.get("selected_at") or "") != str(decision.get("decision_at") or "")
+            or str(selection.get("event_key") or "")
+            != f"scenario-paper:{plan['decision_id']}"
+            or decision.get("_canonical_payload_matches") is not True
+            or str(selection.get("body_sha256") or "") != _scenario_decision_hash(decision)
+            or _scenario_plan_projection(selection.get("payload_json")) != plan
+        ):
+            raise SnapshotValidationError(
+                "Scenario selection plan drift or identity mismatch; watcher is blocked."
+            )
+        historical = binding.get("historical")
+        if not isinstance(historical, dict):
+            raise SnapshotValidationError(
+                "Scenario historical mirror is missing; watcher is blocked."
+            )
+        embedded = _scenario_plan_projection(
+            (historical.get("raw_payload_json") or {}).get("scenario_decision")
+            if isinstance(historical.get("raw_payload_json"), dict)
+            else None
+        )
+        if (
+            str(historical.get("signal_id") or "") != signal_id
+            or str(historical.get("market_date") or "")[:10] != plan["market_date"]
+            or str(historical.get("ticker") or "").upper() != plan["ticker"]
+            or _number(historical.get("entry_watch_level")) != plan["entry_trigger"]
+            or _number(historical.get("invalidation_level")) != plan["invalidation_level"]
+            or _number(historical.get("target_1")) != plan["target_1"]
+            or str(historical.get("model_version") or "") != plan["policy_version"]
+            or embedded != plan
+        ):
+            raise SnapshotValidationError(
+                "Scenario historical mirror is stale or does not match the authoritative plan."
+            )
+        # Carry the joined decision into the candidate envelope.  Historical
+        # rows are compatibility mirrors only; watcher levels/direction must be
+        # sourced from the authoritative decision that passed this validator.
+        selection["direction"] = plan["direction"]
+        selection["entry_watch_level"] = entry
+        selection["invalidation_level"] = stop
+        selection["target_1"] = target
+        selection["_scenario_authoritative_decision"] = decision
 
 
 def _signals_for_open_positions(
@@ -1945,6 +2153,23 @@ def _signal_event(intent: dict[str, Any], event_type: str) -> dict[str, Any]:
     event_id = (
         "se_" + hashlib.sha256(f"{intent['intent_id']}:{event_type}".encode()).hexdigest()[:24]
     )
+    payload = {
+        "intent_id": intent["intent_id"],
+        "action": intent["action"],
+        "mode": intent["mode"],
+        "reason": intent.get("reason") or "",
+        "selection_id": intent.get("selection_id"),
+        "strategy_id": intent.get("strategy_id"),
+        "strategy_version": intent.get("strategy_version"),
+        "cohort": intent.get("cohort"),
+        "source_reconciliation_trade_id": intent.get("source_reconciliation_trade_id"),
+        "source_bar_hash_sha256": intent.get("source_bar_hash_sha256"),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    signal_id = str(intent.get("signal_id") or "")
+    if signal_id.startswith("scenario:"):
+        payload["decision_id"] = signal_id.removeprefix("scenario:")
     return {
         "event_id": event_id,
         "signal_id": intent["signal_id"],
@@ -1953,20 +2178,7 @@ def _signal_event(intent: dict[str, Any], event_type: str) -> dict[str, Any]:
         "event_price": intent.get("decision_price"),
         "source": "trade_watcher",
         "notes": intent.get("reason") or "",
-        "payload_json": {
-            "intent_id": intent["intent_id"],
-            "action": intent["action"],
-            "mode": intent["mode"],
-            "reason": intent.get("reason") or "",
-            "selection_id": intent.get("selection_id"),
-            "strategy_id": intent.get("strategy_id"),
-            "strategy_version": intent.get("strategy_version"),
-            "cohort": intent.get("cohort"),
-            "source_reconciliation_trade_id": intent.get("source_reconciliation_trade_id"),
-            "source_bar_hash_sha256": intent.get("source_bar_hash_sha256"),
-            "research_only": True,
-            "broker_execution_enabled": False,
-        },
+        "payload_json": payload,
     }
 
 

@@ -1054,23 +1054,38 @@ def _materialize_decision(store: SQLiteScanStore, decision: dict[str, Any]) -> d
         "selected_at": now,
         "event_key": f"scenario-paper:{decision_id}",
         "body_sha256": canonical_hash(decision),
-        "payload_json": {"scenario_decision_id": decision_id, "research_only": True},
+        "payload_json": {
+            "decision_id": decision_id,
+            "scenario_decision_id": decision_id,
+            "market_date": decision["market_date"],
+            "ticker": decision["ticker"],
+            "direction": decision["direction"],
+            "action": decision["action"],
+            "entry_trigger": decision["entry_trigger"],
+            "invalidation_level": decision["invalidation_level"],
+            "target_1": decision["target_1"],
+            "cohort": decision["cohort"],
+            "policy_version": decision["policy_version"],
+            "feature_schema_version": decision["feature_schema_version"],
+            "research_only": decision["research_only"],
+            "broker_execution_enabled": decision["broker_execution_enabled"],
+        },
     }
-    store.persist_historical_signals([signal], replace=False)
-    store.persist_signal_selections([selection])
-    store.upsert_scenario_signal_links(
-        [
-            {
-                "decision_id": decision_id,
-                "signal_id": signal_id,
-                "scan_id": signal["scan_id"],
-                "cohort": SCENARIO_FORWARD_COHORT,
-                "strategy_id": SCENARIO_STRATEGY_ID,
-                "strategy_version": SCENARIO_POLICY_VERSION,
-                "created_at": now,
-                "updated_at": now,
-            }
-        ]
+    link = {
+        "decision_id": decision_id,
+        "signal_id": signal_id,
+        "scan_id": signal["scan_id"],
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "strategy_id": SCENARIO_STRATEGY_ID,
+        "strategy_version": SCENARIO_POLICY_VERSION,
+        "created_at": now,
+        "updated_at": now,
+    }
+    store.persist_scenario_forward_materialization(
+        decision=decision,
+        signal=signal,
+        selection=selection,
+        link=link,
     )
     return {"decision_id": decision_id, "signal_id": signal_id, "ticker": signal["ticker"]}
 

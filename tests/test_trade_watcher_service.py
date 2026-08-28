@@ -11,15 +11,18 @@ from intraday_scanner.alpha.v5_policy import (
 from intraday_scanner.cli import main
 from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.scenario.contracts import (
+    SCENARIO_FEATURE_SCHEMA_VERSION,
     SCENARIO_FORWARD_COHORT,
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
+    canonical_hash,
 )
 from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
 )
 from intraday_scanner.services.trade_watcher_service import (
     _existing_symbol_lifecycles,
+    _validate_scenario_selection_bindings,
     _validate_selection_historical_scan_binding,
     run_trade_watcher,
 )
@@ -466,10 +469,224 @@ def test_trade_watcher_fails_closed_without_exact_session_selection(
         )
 
 
+def _scenario_binding_fixture() -> tuple[dict[str, object], dict[str, object]]:
+    decision = {
+        "decision_id": "decision-binding",
+        "article_id": "article-binding",
+        "ticker": "NOVA",
+        "market_date": "2026-08-03",
+        "decision_at": "2026-08-03T14:00:00Z",
+        "event_type": "contract_customer",
+        "direction": "bullish",
+        "directional_evidence_score": 6.0,
+        "action": "ENTER_LONG",
+        "calibration_status": "UNCALIBRATED",
+        "entry_trigger": 10.25,
+        "invalidation_level": 9.5,
+        "target_1": 11.5,
+        "time_stop": "market_close",
+        "source_tier": "T1",
+        "source_lineage_hash_sha256": "source-binding",
+        "feature_hash_sha256": "features-binding",
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "policy_version": SCENARIO_POLICY_VERSION,
+        "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    plan = {
+        "decision_id": decision["decision_id"],
+        "scenario_decision_id": decision["decision_id"],
+        "market_date": decision["market_date"],
+        "ticker": decision["ticker"],
+        "direction": decision["direction"],
+        "action": decision["action"],
+        "entry_trigger": decision["entry_trigger"],
+        "invalidation_level": decision["invalidation_level"],
+        "target_1": decision["target_1"],
+        "cohort": decision["cohort"],
+        "policy_version": decision["policy_version"],
+        "feature_schema_version": decision["feature_schema_version"],
+        "research_only": decision["research_only"],
+        "broker_execution_enabled": decision["broker_execution_enabled"],
+    }
+    decision["_canonical_payload"] = decision.copy()
+    decision["_canonical_payload_matches"] = True
+    selection = {
+        "selection_id": "scenario-selection:decision-binding",
+        "scan_id": "scenario:2026-08-03",
+        "signal_id": "scenario:decision-binding",
+        "ticker": "NOVA",
+        "strategy_id": SCENARIO_STRATEGY_ID,
+        "strategy_version": SCENARIO_POLICY_VERSION,
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "decision": "paper_entry",
+        "selected_at": decision["decision_at"],
+        "event_key": "scenario-paper:decision-binding",
+        "body_sha256": canonical_hash(decision["_canonical_payload"]),
+        "payload_json": plan,
+    }
+    historical = {
+        "signal_id": "scenario:decision-binding",
+        "scan_id": "scenario:2026-08-03",
+        "market_date": "2026-08-03",
+        "ticker": "NOVA",
+        "entry_watch_level": 10.25,
+        "invalidation_level": 9.5,
+        "target_1": 11.5,
+        "model_version": SCENARIO_POLICY_VERSION,
+        "raw_payload_json": {"scenario_decision": decision["_canonical_payload"]},
+    }
+    link = {
+        "decision_id": "decision-binding",
+        "signal_id": "scenario:decision-binding",
+        "scan_id": "scenario:2026-08-03",
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "strategy_id": SCENARIO_STRATEGY_ID,
+        "strategy_version": SCENARIO_POLICY_VERSION,
+    }
+    return selection, {
+        "selection": selection,
+        "links": [link | {"decision": decision}],
+        "historical": historical,
+    }
+
+
+def test_scenario_binding_accepts_authoritative_plan() -> None:
+    selection, binding = _scenario_binding_fixture()
+    _validate_scenario_selection_bindings([selection], [binding], market_date="2026-08-03")
+    assert selection["entry_watch_level"] == 10.25
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_embedded_id",
+        "wrong_embedded_id",
+        "plan_drift",
+        "missing_link",
+        "duplicate_link",
+        "body_hash",
+        "bad_geometry",
+    ),
+)
+def test_scenario_binding_rejects_hostile_plan_before_watcher_side_effects(mutation: str) -> None:
+    selection, binding = _scenario_binding_fixture()
+    if mutation == "missing_embedded_id":
+        binding["historical"]["raw_payload_json"]["scenario_decision"].pop("decision_id")
+    elif mutation == "wrong_embedded_id":
+        binding["historical"]["raw_payload_json"]["scenario_decision"]["decision_id"] = "other"
+    elif mutation == "plan_drift":
+        binding["selection"]["payload_json"]["entry_trigger"] = 10.5
+    elif mutation == "missing_link":
+        binding["links"] = []
+    elif mutation == "duplicate_link":
+        binding["links"] = binding["links"] * 2
+    elif mutation == "body_hash":
+        binding["selection"]["body_sha256"] = "tampered"
+    else:
+        binding["links"][0]["decision"]["target_1"] = 9.0
+
+    with pytest.raises(SnapshotValidationError):
+        _validate_scenario_selection_bindings([selection], [binding], market_date="2026-08-03")
+
+
+def test_alpha_and_scenario_candidates_preserve_alpha_admission_order(monkeypatch) -> None:
+    scenario_selection, scenario_binding = _scenario_binding_fixture()
+    alpha_selection = {
+        "selection_id": "alpha-selection",
+        "scan_id": "alpha-scan",
+        "signal_id": "alpha-signal",
+        "ticker": "ALFA",
+        "strategy_id": ALPHAOPS_V5_STRATEGY_ID,
+        "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
+        "cohort": "official_telegram",
+        "decision": "paper_entry",
+        "selected_at": "2026-08-03T13:00:00Z",
+        "event_key": "alpha-selection-event",
+        "body_sha256": "alpha-body",
+        "episode_id": "alpha-episode",
+    }
+    historical = [
+        {
+            "signal_id": "alpha-signal",
+            "scan_id": "alpha-scan",
+            "market_date": "2026-08-03",
+            "ticker": "ALFA",
+            "entry_watch_level": 10.0,
+            "invalidation_level": 9.0,
+            "target_1": 12.0,
+            "raw_payload_json": {},
+        },
+        scenario_binding["historical"],
+    ]
+    observed_alpha_rows: list[dict[str, object]] = []
+
+    class Store:
+        def load_signal_selections(self, *, cohort: str, limit: int) -> list[dict[str, object]]:
+            return [alpha_selection] if cohort == "official_telegram" else [scenario_selection]
+
+        def load_scenario_selection_bindings(self, *, selection_ids: list[str]):
+            return [scenario_binding]
+
+        def load_paper_positions(self, *, limit: int):
+            return []
+
+        def load_historical_signals(self, *, market_date: str, limit: int):
+            return historical
+
+    def fake_dedupe(rows):
+        observed_alpha_rows.extend(rows)
+        return {
+            "blocked": False,
+            "selected": rows,
+            "counts": {"status": "FROZEN_IDENTITY_ACTIVE"},
+        }
+
+    monkeypatch.setattr(
+        watcher_module,
+        "recover_legacy_alpha_delivery_membership",
+        lambda *a, **k: {},
+    )
+    monkeypatch.setattr(watcher_module, "deduplicate_episode_candidates", fake_dedupe)
+    result = watcher_module._watch_signals(
+        Store(), market_date="2026-08-03", include_scenarios=True
+    )
+
+    assert [row["signal_id"] for row in result] == ["alpha-signal", "scenario:decision-binding"]
+    assert [row["signal_id"] for row in observed_alpha_rows] == ["alpha-signal"]
+
+
 def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Path) -> None:
     db_path = tmp_path / "scenario.sqlite"
     store = SQLiteScanStore(db_path)
     market_date = "2026-08-03"
+    decision = {
+        "decision_id": "decision-1",
+        "article_id": "article-1",
+        "ticker": "NOVA",
+        "market_date": market_date,
+        "decision_at": "2026-08-03T14:00:00Z",
+        "event_type": "contract_customer",
+        "direction": "bullish",
+        "directional_evidence_score": 6.0,
+        "action": "ENTER_LONG",
+        "reason_codes": [],
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "policy_version": SCENARIO_POLICY_VERSION,
+        "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
+        "source_tier": "T1",
+        "source_lineage_hash_sha256": "source",
+        "feature_hash_sha256": "features",
+        "features": {},
+        "entry_trigger": 10.25,
+        "invalidation_level": 9.5,
+        "target_1": 11.5,
+        "time_stop": "market_close",
+        "calibration_status": "UNCALIBRATED",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
     store.persist_historical_signals(
         [
             {
@@ -480,10 +697,12 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
                 "ticker": "NOVA",
                 "rank": 1,
                 "signal_label": "scenario_enter_long",
+                "model_version": SCENARIO_POLICY_VERSION,
                 "entry_watch_level": 10.25,
                 "invalidation_level": 9.5,
                 "target_1": 11.5,
                 "raw_payload_json": {
+                    "scenario_decision": decision,
                     "research_only": True,
                     "cost_model_version": "scenario-paper-fill-slippage-v1",
                 },
@@ -504,32 +723,27 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
                 "decision": "paper_entry",
                 "selected_at": "2026-08-03T14:00:00Z",
                 "event_key": "scenario-paper:decision-1",
-                "body_sha256": "scenario-body-hash",
+                "body_sha256": canonical_hash(decision),
+                "payload_json": {
+                    "decision_id": "decision-1",
+                    "scenario_decision_id": "decision-1",
+                    "market_date": market_date,
+                    "ticker": "NOVA",
+                    "direction": "bullish",
+                    "action": "ENTER_LONG",
+                    "entry_trigger": 10.25,
+                    "invalidation_level": 9.5,
+                    "target_1": 11.5,
+                    "cohort": SCENARIO_FORWARD_COHORT,
+                    "policy_version": SCENARIO_POLICY_VERSION,
+                    "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                },
             }
         ]
     )
-    store.persist_scenario_decisions(
-        [
-            {
-                "decision_id": "decision-1",
-                "article_id": "article-1",
-                "ticker": "NOVA",
-                "market_date": market_date,
-                "decision_at": "2026-08-03T14:00:00Z",
-                "event_type": "contract_customer",
-                "direction": "bullish",
-                "directional_evidence_score": 6.0,
-                "action": "ENTER_LONG",
-                "cohort": SCENARIO_FORWARD_COHORT,
-                "policy_version": SCENARIO_POLICY_VERSION,
-                "source_tier": "T1",
-                "source_lineage_hash_sha256": "source",
-                "feature_hash_sha256": "features",
-                "research_only": True,
-                "broker_execution_enabled": False,
-            }
-        ]
-    )
+    store.persist_scenario_decisions([decision])
     store.upsert_scenario_signal_links(
         [
             {

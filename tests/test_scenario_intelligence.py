@@ -9,12 +9,19 @@ from intraday_scanner.ai.scenario_claim_extractor import extract_claims
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import StorageError
 from intraday_scanner.providers.news_provider import _scenario_article_from_alpaca
-from intraday_scanner.scenario.contracts import ScenarioExtraction, ScenarioNewsArticle
+from intraday_scanner.scenario.contracts import (
+    SCENARIO_FEATURE_SCHEMA_VERSION,
+    SCENARIO_FORWARD_COHORT,
+    SCENARIO_POLICY_VERSION,
+    ScenarioExtraction,
+    ScenarioNewsArticle,
+)
 from intraday_scanner.scenario.engine import PriceContext, evaluate_scenario
 from intraday_scanner.services.scenario_intelligence_service import (
     SCENARIO_COST_MODEL_VERSION,
     _deterministic_bootstrap_ci,
     _forward_lifecycle_row,
+    _materialize_decision,
     _simulate_replay_trade,
     close_open_scenario_positions,
     finalize_scenario_performance,
@@ -557,8 +564,12 @@ def test_finalize_excludes_closed_position_without_complete_return_truth(tmp_pat
                 "direction": "bullish",
                 "directional_evidence_score": 6.0,
                 "action": "ENTER_LONG",
+                "entry_trigger": 10.25,
+                "invalidation_level": 9.5,
+                "target_1": 11.5,
                 "cohort": "scenario_forward",
                 "policy_version": "dawnstrike-news-scenario-v1",
+                "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
                 "source_tier": "T1",
                 "source_lineage_hash_sha256": "source",
                 "feature_hash_sha256": "features",
@@ -653,29 +664,33 @@ def _persist_scenario_signal_parent(
     research_only: bool = True,
     broker_execution_enabled: bool = False,
 ) -> None:
-    store.persist_scenario_decisions(
-        [
-            {
-                "decision_id": decision_id,
-                "article_id": "article-parent",
-                "ticker": ticker,
-                "market_date": market_date,
-                "decision_at": f"{market_date}T14:00:00Z",
-                "event_type": "contract_customer",
-                "direction": "bullish",
-                "directional_evidence_score": 6.0,
-                "action": "ENTER_LONG",
-                "cohort": "scenario_forward",
-                "policy_version": "dawnstrike-news-scenario-v1",
-                "source_tier": "T1",
-                "source_lineage_hash_sha256": "source",
-                "feature_hash_sha256": "features",
-                "features": {},
-                "research_only": research_only,
-                "broker_execution_enabled": broker_execution_enabled,
-            }
-        ]
-    )
+    decision = {
+        "decision_id": decision_id,
+        "article_id": "article-parent",
+        "ticker": ticker,
+        "market_date": market_date,
+        "decision_at": f"{market_date}T14:00:00Z",
+        "event_type": "contract_customer",
+        "direction": "bullish",
+        "directional_evidence_score": 6.0,
+        "action": "ENTER_LONG",
+        "reason_codes": [],
+        "entry_trigger": 10.25,
+        "invalidation_level": 9.5,
+        "target_1": 11.5,
+        "time_stop": "market_close",
+        "calibration_status": "UNCALIBRATED",
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "policy_version": SCENARIO_POLICY_VERSION,
+        "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
+        "source_tier": "T1",
+        "source_lineage_hash_sha256": "source",
+        "feature_hash_sha256": "features",
+        "features": {},
+        "research_only": research_only,
+        "broker_execution_enabled": broker_execution_enabled,
+    }
+    store.persist_scenario_decisions([decision])
     store.upsert_scenario_signal_links(
         [
             {
@@ -698,13 +713,104 @@ def _persist_scenario_signal_parent(
                     "market_date": market_date,
                     "ticker": ticker,
                     "signal_label": "scenario_enter_long",
+                    "entry_watch_level": decision["entry_trigger"],
+                    "model_version": SCENARIO_POLICY_VERSION,
+                    "invalidation_level": decision["invalidation_level"],
+                    "target_1": decision["target_1"],
                     "risk_flags_json": ["research_only"],
                     "avoid_reasons_json": [],
                     "raw_payload_json": {
-                        "scenario_decision": {"decision_id": decision_id}
+                        "scenario_decision": decision,
                     },
                 }
             ]
+        )
+
+
+def _materialization_decision() -> dict[str, object]:
+    return {
+        "decision_id": "decision-materialized",
+        "article_id": "article-materialized",
+        "ticker": "NOVA",
+        "market_date": "2026-08-03",
+        "decision_at": "2026-08-03T14:00:00Z",
+        "event_type": "contract_customer",
+        "direction": "bullish",
+        "directional_evidence_score": 6.0,
+        "action": "ENTER_LONG",
+        "reason_codes": [],
+        "entry_trigger": 10.25,
+        "invalidation_level": 9.5,
+        "target_1": 11.5,
+        "time_stop": "market_close",
+        "calibration_status": "UNCALIBRATED",
+        "source_tier": "T1",
+        "source_lineage_hash_sha256": "source-materialized",
+        "feature_hash_sha256": "features-materialized",
+        "features": {},
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "policy_version": SCENARIO_POLICY_VERSION,
+        "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def test_scenario_materialization_is_exactly_retryable(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-materialization.sqlite")
+    decision = _materialization_decision()
+    store.persist_scenario_decisions([decision])
+
+    assert _materialize_decision(store, decision)["signal_id"] == (
+        "scenario:decision-materialized"
+    )
+    assert _materialize_decision(store, decision)["signal_id"] == (
+        "scenario:decision-materialized"
+    )
+    assert len(store.load_historical_signals()) == 1
+    assert len(store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT)) == 1
+    assert len(store.load_scenario_signal_links()) == 1
+
+
+def test_scenario_materialization_rolls_back_on_selection_conflict(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-materialization-rollback.sqlite")
+    decision = _materialization_decision()
+    store.persist_scenario_decisions([decision])
+    selection = {
+        "selection_id": "scenario-selection:decision-materialized",
+        "scan_id": "scenario:2026-08-03",
+        "signal_id": "scenario:decision-materialized",
+        "ticker": "NOVA",
+        "rank": 1,
+        "strategy_id": "news_scenario_v1",
+        "strategy_version": SCENARIO_POLICY_VERSION,
+        "cohort": SCENARIO_FORWARD_COHORT,
+        "decision": "paper_entry",
+        "selected_at": "2026-08-03T14:00:00Z",
+        "event_key": "scenario-paper:decision-materialized",
+        "body_sha256": "tampered-body",
+        "payload_json": {},
+    }
+    store.persist_signal_selections([selection])
+
+    with pytest.raises(StorageError, match="Scenario selection conflicts"):
+        _materialize_decision(store, decision)
+    assert store.load_historical_signals() == []
+    assert store.load_scenario_signal_links() == []
+    assert len(store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT)) == 1
+
+
+def test_scenario_outcome_rejects_stale_historical_mirror(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-stale-mirror.sqlite")
+    _persist_scenario_signal_parent(store, persist_historical_mirror=True)
+    mirror = store.load_historical_signals()[0]
+    mirror["entry_watch_level"] = 999.0
+    mirror["raw_payload_json"]["scenario_decision"]["entry_trigger"] = 999.0
+    store.persist_historical_signals([mirror])
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes(
+            [_scenario_signal_outcome(signal_id="scenario:decision-parent")]
         )
 
 
@@ -734,6 +840,7 @@ def test_signal_children_accept_governed_scenario_parent(tmp_path: Path) -> None
         "signal_id": "scenario:decision-parent",
         "event_type": "OUTCOME_CAPTURED",
         "event_timestamp": "2026-08-03T20:00:00Z",
+        "payload_json": {"decision_id": "decision-parent"},
     }
 
     assert store.persist_signal_outcomes([outcome]) == {"inserted": 1, "skipped": 0}
@@ -746,6 +853,7 @@ def test_signal_children_accept_governed_scenario_parent(tmp_path: Path) -> None
         {"market_date": "2026-08-04"},
         {"ticker": "OTHER"},
         {"payload_json": {"decision_id": "different-decision"}},
+        {"payload_json": {}},
     ),
 )
 def test_scenario_outcome_parent_binding_rejects_mismatch(
@@ -875,8 +983,12 @@ def test_finalize_uses_sourced_spy_bars_for_after_cost_excess(tmp_path: Path) ->
                 "direction": "bullish",
                 "directional_evidence_score": 6.0,
                 "action": "ENTER_LONG",
+                "entry_trigger": 10.25,
+                "invalidation_level": 9.5,
+                "target_1": 11.5,
                 "cohort": "scenario_forward",
                 "policy_version": "dawnstrike-news-scenario-v1",
+                "feature_schema_version": SCENARIO_FEATURE_SCHEMA_VERSION,
                 "source_tier": "T1",
                 "source_lineage_hash_sha256": "source",
                 "feature_hash_sha256": "features",

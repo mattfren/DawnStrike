@@ -13,9 +13,11 @@ from typing import Any
 from intraday_scanner.errors import StorageError
 from intraday_scanner.models import ScanResult
 from intraday_scanner.scenario.contracts import (
+    SCENARIO_FEATURE_SCHEMA_VERSION,
     SCENARIO_FORWARD_COHORT,
     SCENARIO_POLICY_VERSION,
     SCENARIO_STRATEGY_ID,
+    canonical_hash,
 )
 from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
 from intraday_scanner.storage.read_only import connect_read_only
@@ -2118,6 +2120,153 @@ class SQLiteScanStore:
                 return [_selection_identity_row(row) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load signal selections: {exc}") from exc
+
+    def load_scenario_selection_bindings(
+        self,
+        *,
+        selection_ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        """Load Scenario selections with every exact link and joined decision parent."""
+
+        selected_ids = sorted({str(value) for value in selection_ids if str(value).strip()})
+        if not selected_ids:
+            return []
+        self.initialize()
+        placeholders = ",".join("?" for _ in selected_ids)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                selections = connection.execute(
+                    "SELECT * FROM signal_selections "
+                    f"WHERE selection_id IN ({placeholders})",  # nosec B608
+                    selected_ids,
+                ).fetchall()
+                signal_ids = sorted({str(row["signal_id"] or "") for row in selections})
+                if not signal_ids:
+                    return [
+                        {"selection": _selection_identity_row(row), "links": [], "historical": None}
+                        for row in selections
+                    ]
+                signal_placeholders = ",".join("?" for _ in signal_ids)
+                historical = {
+                    str(row["signal_id"]): _historical_signal_row(row)
+                    for row in connection.execute(
+                        "SELECT * FROM historical_signals "
+                        f"WHERE signal_id IN ({signal_placeholders})",  # nosec B608
+                        signal_ids,
+                    ).fetchall()
+                }
+                joined = connection.execute(
+                    """
+                    SELECT
+                        l.decision_id AS link_decision_id,
+                        l.signal_id AS link_signal_id,
+                        l.scan_id AS link_scan_id,
+                        l.cohort AS link_cohort,
+                        l.strategy_id AS link_strategy_id,
+                        l.strategy_version AS link_strategy_version,
+                        d.decision_id AS decision_id,
+                        d.article_id AS decision_article_id,
+                        d.ticker AS decision_ticker,
+                        d.market_date AS decision_market_date,
+                        d.decision_at AS decision_at,
+                        d.event_type AS decision_event_type,
+                        d.direction AS decision_direction,
+                        d.directional_evidence_score AS decision_directional_evidence_score,
+                        d.action AS decision_action,
+                        d.calibration_status AS decision_calibration_status,
+                        d.entry_trigger AS decision_entry_trigger,
+                        d.invalidation_level AS decision_invalidation_level,
+                        d.target_1 AS decision_target_1,
+                        d.time_stop AS decision_time_stop,
+                        d.source_tier AS decision_source_tier,
+                        d.source_lineage_hash_sha256 AS decision_source_lineage_hash_sha256,
+                        d.feature_hash_sha256 AS decision_feature_hash_sha256,
+                        d.cohort AS decision_cohort,
+                        d.policy_version AS decision_policy_version,
+                        d.feature_schema_version AS decision_feature_schema_version,
+                        d.research_only AS decision_research_only,
+                        d.broker_execution_enabled AS decision_broker_execution_enabled,
+                        d.payload_json AS decision_payload_json
+                    FROM scenario_signal_links AS l
+                    LEFT JOIN scenario_decisions AS d ON d.decision_id = l.decision_id
+                    WHERE l.signal_id IN ("""
+                    f"{signal_placeholders})",  # nosec B608
+                    signal_ids,
+                ).fetchall()
+                links_by_signal: dict[str, list[dict[str, Any]]] = {}
+                for row in joined:
+                    signal_id = str(row["link_signal_id"] or "")
+                    decision = None
+                    if row["decision_id"] is not None:
+                        decision = {
+                            "decision_id": str(row["decision_id"] or ""),
+                            "article_id": str(row["decision_article_id"] or ""),
+                            "ticker": str(row["decision_ticker"] or "").upper(),
+                            "market_date": str(row["decision_market_date"] or "")[:10],
+                            "decision_at": str(row["decision_at"] or ""),
+                            "event_type": str(row["decision_event_type"] or ""),
+                            "direction": str(row["decision_direction"] or "").lower(),
+                            "directional_evidence_score": _float_or_none(
+                                row["decision_directional_evidence_score"]
+                            ),
+                            "action": str(row["decision_action"] or "").upper(),
+                            "calibration_status": str(
+                                row["decision_calibration_status"] or ""
+                            ),
+                            "entry_trigger": _float_or_none(row["decision_entry_trigger"]),
+                            "invalidation_level": _float_or_none(
+                                row["decision_invalidation_level"]
+                            ),
+                            "target_1": _float_or_none(row["decision_target_1"]),
+                            "time_stop": str(row["decision_time_stop"] or "market_close"),
+                            "source_tier": str(row["decision_source_tier"] or ""),
+                            "source_lineage_hash_sha256": str(
+                                row["decision_source_lineage_hash_sha256"] or ""
+                            ),
+                            "feature_hash_sha256": str(
+                                row["decision_feature_hash_sha256"] or ""
+                            ),
+                            "cohort": str(row["decision_cohort"] or ""),
+                            "policy_version": str(row["decision_policy_version"] or ""),
+                            "feature_schema_version": str(
+                                row["decision_feature_schema_version"] or ""
+                            ),
+                            "research_only": _scenario_bool(row["decision_research_only"]),
+                            "broker_execution_enabled": _scenario_bool(
+                                row["decision_broker_execution_enabled"]
+                            ),
+                        }
+                        canonical_payload = _json_value(row["decision_payload_json"])
+                        decision["_canonical_payload"] = (
+                            canonical_payload if isinstance(canonical_payload, dict) else None
+                        )
+                        decision["_canonical_payload_matches"] = (
+                            isinstance(canonical_payload, dict)
+                            and _scenario_decision_projection(canonical_payload)
+                            == _scenario_decision_projection(decision)
+                        )
+                    links_by_signal.setdefault(signal_id, []).append(
+                        {
+                            "decision_id": str(row["link_decision_id"] or ""),
+                            "signal_id": signal_id,
+                            "scan_id": str(row["link_scan_id"] or ""),
+                            "cohort": str(row["link_cohort"] or ""),
+                            "strategy_id": str(row["link_strategy_id"] or ""),
+                            "strategy_version": str(row["link_strategy_version"] or ""),
+                            "decision": decision,
+                        }
+                    )
+                return [
+                    {
+                        "selection": _selection_identity_row(row),
+                        "links": links_by_signal.get(str(row["signal_id"] or ""), []),
+                        "historical": historical.get(str(row["signal_id"] or "")),
+                    }
+                    for row in selections
+                ]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load Scenario selection bindings: {exc}") from exc
 
     def persist_notification_deliveries(
         self,
@@ -7609,6 +7758,253 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist scenario decisions: {exc}") from exc
 
+    def persist_scenario_forward_materialization(
+        self,
+        *,
+        decision: Mapping[str, Any],
+        signal: Mapping[str, Any],
+        selection: Mapping[str, Any],
+        link: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically materialize one authoritative forward Scenario decision.
+
+        The decision must already exist in ``scenario_decisions``.  The signal,
+        selection, and lifecycle link are one immutable materialization envelope:
+        retries may restate the exact envelope, but any drift or duplicate signal
+        parent aborts the transaction before partial rows can survive.
+        """
+
+        self.initialize()
+        decision_id = str(decision.get("decision_id") or "")
+        signal_id = str(signal.get("signal_id") or "")
+        if not decision_id or signal_id != f"scenario:{decision_id}":
+            raise StorageError("Scenario materialization identity is incomplete or mismatched")
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.row_factory = sqlite3.Row
+                authoritative_row = connection.execute(
+                    "SELECT * FROM scenario_decisions WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+                if authoritative_row is None:
+                    raise StorageError(
+                        "Scenario materialization requires an existing authoritative decision: "
+                        + decision_id
+                    )
+                authoritative = {
+                    key: authoritative_row[key] for key in authoritative_row.keys()
+                }
+                authoritative_projection = _scenario_decision_projection(authoritative)
+                decision_projection = _scenario_decision_projection(decision)
+                if authoritative_projection != decision_projection:
+                    raise StorageError(
+                        "Scenario materialization decision conflicts with authoritative truth: "
+                        + decision_id
+                    )
+                authoritative_payload = _json_value(authoritative_row["payload_json"])
+                if (
+                    not isinstance(authoritative_payload, dict)
+                    or _scenario_decision_projection(authoritative_payload)
+                    != authoritative_projection
+                ):
+                    raise StorageError(
+                        "Scenario materialization payload conflicts with authoritative truth: "
+                        + decision_id
+                    )
+                _validate_scenario_decision_contract(authoritative_projection)
+                _validate_scenario_materialization_rows(
+                    decision_projection,
+                    signal=signal,
+                    selection=selection,
+                    link=link,
+                    canonical_payload=authoritative_payload,
+                )
+
+                existing_historical = connection.execute(
+                    "SELECT * FROM historical_signals WHERE signal_id = ?",
+                    (signal_id,),
+                ).fetchone()
+                if existing_historical is not None:
+                    if not _scenario_historical_mirror_matches(
+                        existing_historical, decision_projection
+                    ):
+                        raise StorageError(
+                            "Scenario historical mirror conflicts with authoritative truth: "
+                            + signal_id
+                        )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO historical_signals
+                        (signal_id, scan_id, alpha_signal_id, generated_at, market_date,
+                         ticker, company, rank, source, source_url, source_confidence,
+                         data_source_kind, model_version, config_hash, primary_setup,
+                         setup_grade, signal_label, entry_watch_level, entry_trigger_type,
+                         entry_condition, confirmation_condition, exit_line,
+                         invalidation_level, target_1, target_2, risk_flags_json,
+                         avoid_reasons_json, catalyst_summary, telegram_event_key,
+                         was_alerted, no_trade_reason, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            signal_id,
+                            str(signal.get("scan_id") or ""),
+                            str(signal.get("alpha_signal_id") or ""),
+                            str(signal.get("generated_at") or ""),
+                            str(signal.get("market_date") or "")[:10],
+                            str(signal.get("ticker") or "").upper(),
+                            str(signal.get("company") or ""),
+                            _int_or_none(signal.get("rank")),
+                            str(signal.get("source") or ""),
+                            str(signal.get("source_url") or ""),
+                            _float_or_none(signal.get("source_confidence")),
+                            str(signal.get("data_source_kind") or ""),
+                            str(signal.get("model_version") or ""),
+                            str(signal.get("config_hash") or ""),
+                            str(signal.get("primary_setup") or ""),
+                            str(signal.get("setup_grade") or ""),
+                            str(signal.get("signal_label") or ""),
+                            _float_or_none(signal.get("entry_watch_level")),
+                            str(signal.get("entry_trigger_type") or ""),
+                            str(signal.get("entry_condition") or ""),
+                            str(signal.get("confirmation_condition") or ""),
+                            _float_or_none(signal.get("exit_line")),
+                            _float_or_none(signal.get("invalidation_level")),
+                            _float_or_none(signal.get("target_1")),
+                            _float_or_none(signal.get("target_2")),
+                            json.dumps(signal.get("risk_flags_json") or [], sort_keys=True),
+                            json.dumps(signal.get("avoid_reasons_json") or [], sort_keys=True),
+                            str(signal.get("catalyst_summary") or ""),
+                            str(signal.get("telegram_event_key") or ""),
+                            1 if signal.get("was_alerted") else 0,
+                            str(signal.get("no_trade_reason") or ""),
+                            json.dumps(signal.get("raw_payload_json") or {}, sort_keys=True),
+                        ),
+                    )
+
+                selection_id = str(selection.get("selection_id") or "")
+                existing_selection = connection.execute(
+                    "SELECT * FROM signal_selections WHERE selection_id = ?",
+                    (selection_id,),
+                ).fetchone()
+                if existing_selection is not None:
+                    if _selection_semantics(_selection_identity_row(existing_selection)) != (
+                        _selection_semantics(selection)
+                    ):
+                        raise StorageError(
+                            "Scenario selection conflicts with authoritative truth: "
+                            + selection_id
+                        )
+                else:
+                    duplicate_selection = connection.execute(
+                        """
+                        SELECT selection_id FROM signal_selections
+                        WHERE strategy_id = ? AND strategy_version = ?
+                          AND cohort = ? AND signal_id = ?
+                        """,
+                        (
+                            str(selection.get("strategy_id") or ""),
+                            str(selection.get("strategy_version") or ""),
+                            str(selection.get("cohort") or ""),
+                            signal_id,
+                        ),
+                    ).fetchall()
+                    if duplicate_selection:
+                        raise StorageError(
+                            "Scenario selection signal identity is already materialized: "
+                            + signal_id
+                        )
+                    connection.execute(
+                        """
+                        INSERT INTO signal_selections
+                        (selection_id, scan_id, signal_id, ticker, rank, strategy_id,
+                         strategy_version, cohort, decision, selected_at, event_key,
+                         body_sha256, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            selection_id,
+                            str(selection.get("scan_id") or ""),
+                            signal_id,
+                            str(selection.get("ticker") or "").upper(),
+                            _int_or_none(selection.get("rank")),
+                            str(selection.get("strategy_id") or ""),
+                            str(selection.get("strategy_version") or ""),
+                            str(selection.get("cohort") or ""),
+                            str(selection.get("decision") or ""),
+                            str(selection.get("selected_at") or ""),
+                            str(selection.get("event_key") or ""),
+                            str(selection.get("body_sha256") or ""),
+                            json.dumps(selection.get("payload_json") or {}, sort_keys=True),
+                        ),
+                    )
+
+                existing_link = connection.execute(
+                    "SELECT * FROM scenario_signal_links WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+                signal_links = connection.execute(
+                    "SELECT decision_id FROM scenario_signal_links WHERE signal_id = ?",
+                    (signal_id,),
+                ).fetchall()
+                if len(signal_links) > 1 or any(
+                    str(row[0]) != decision_id for row in signal_links
+                ):
+                    raise StorageError(
+                        "Scenario signal link identity is ambiguous: " + signal_id
+                    )
+                if existing_link is not None:
+                    if _scenario_link_projection(existing_link) != _scenario_link_projection(
+                        link
+                    ):
+                        raise StorageError(
+                            "Scenario signal link conflicts with authoritative truth: "
+                            + decision_id
+                        )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO scenario_signal_links
+                        (decision_id, signal_id, scan_id, paper_intent_id, entry_intent_id,
+                         exit_intent_id, position_id, entry_fill_id, exit_fill_id,
+                         paper_trade_id, outcome_id, cohort, strategy_id, strategy_version,
+                         created_at, updated_at, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            decision_id,
+                            signal_id,
+                            str(link.get("scan_id") or ""),
+                            str(link.get("paper_intent_id") or ""),
+                            str(link.get("entry_intent_id") or ""),
+                            str(link.get("exit_intent_id") or ""),
+                            str(link.get("position_id") or ""),
+                            str(link.get("entry_fill_id") or ""),
+                            str(link.get("exit_fill_id") or ""),
+                            str(link.get("paper_trade_id") or ""),
+                            str(link.get("outcome_id") or ""),
+                            str(link.get("cohort") or ""),
+                            str(link.get("strategy_id") or ""),
+                            str(link.get("strategy_version") or ""),
+                            str(link.get("created_at") or ""),
+                            str(link.get("updated_at") or ""),
+                            json.dumps(link.get("payload_json") or link, sort_keys=True),
+                        ),
+                    )
+                return {
+                    "decision_id": decision_id,
+                    "signal_id": signal_id,
+                    "selection_id": selection_id,
+                }
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Could not atomically materialize Scenario decision {decision_id}: {exc}"
+            ) from exc
+
     def load_scenario_decisions(
         self,
         *,
@@ -8410,6 +8806,236 @@ def _official_strategy_cohort_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+_SCENARIO_DECISION_PROJECTION_FIELDS = (
+    "decision_id",
+    "article_id",
+    "ticker",
+    "market_date",
+    "decision_at",
+    "event_type",
+    "direction",
+    "directional_evidence_score",
+    "action",
+    "calibration_status",
+    "entry_trigger",
+    "invalidation_level",
+    "target_1",
+    "time_stop",
+    "source_tier",
+    "source_lineage_hash_sha256",
+    "feature_hash_sha256",
+    "cohort",
+    "policy_version",
+    "feature_schema_version",
+    "research_only",
+    "broker_execution_enabled",
+)
+
+
+def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[key] if key in row.keys() else default
+    return row.get(key, default)
+
+
+def _scenario_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _scenario_optional_bool(row: Mapping[str, Any], key: str) -> bool | None:
+    value = _mapping_value(row, key, None)
+    if value is None or value == "":
+        return None
+    return _scenario_bool(value)
+
+
+def _scenario_decision_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(row, sqlite3.Row):
+        row = {key: row[key] for key in row.keys()}
+    return {
+        "decision_id": str(_mapping_value(row, "decision_id") or ""),
+        "article_id": str(_mapping_value(row, "article_id") or ""),
+        "ticker": str(_mapping_value(row, "ticker") or "").upper(),
+        "market_date": str(_mapping_value(row, "market_date") or "")[:10],
+        "decision_at": str(_mapping_value(row, "decision_at") or ""),
+        "event_type": str(_mapping_value(row, "event_type") or ""),
+        "direction": str(_mapping_value(row, "direction") or "").lower(),
+        "directional_evidence_score": _float_or_none(
+            _mapping_value(row, "directional_evidence_score")
+        ),
+        "action": str(_mapping_value(row, "action") or "").upper(),
+        "calibration_status": str(
+            _mapping_value(row, "calibration_status", "UNCALIBRATED") or "UNCALIBRATED"
+        ),
+        "entry_trigger": _float_or_none(_mapping_value(row, "entry_trigger")),
+        "invalidation_level": _float_or_none(_mapping_value(row, "invalidation_level")),
+        "target_1": _float_or_none(_mapping_value(row, "target_1")),
+        "time_stop": str(_mapping_value(row, "time_stop") or ""),
+        "source_tier": str(_mapping_value(row, "source_tier") or ""),
+        "source_lineage_hash_sha256": str(
+            _mapping_value(row, "source_lineage_hash_sha256") or ""
+        ),
+        "feature_hash_sha256": str(_mapping_value(row, "feature_hash_sha256") or ""),
+        "cohort": str(_mapping_value(row, "cohort") or ""),
+        "policy_version": str(_mapping_value(row, "policy_version") or ""),
+        "feature_schema_version": str(_mapping_value(row, "feature_schema_version") or ""),
+        "research_only": _scenario_optional_bool(row, "research_only"),
+        "broker_execution_enabled": _scenario_optional_bool(row, "broker_execution_enabled"),
+    }
+
+
+def _validate_scenario_decision_contract(decision: Mapping[str, Any]) -> None:
+    entry = decision["entry_trigger"]
+    stop = decision["invalidation_level"]
+    target = decision["target_1"]
+    if (
+        not decision["decision_id"]
+        or not decision["market_date"]
+        or not decision["ticker"]
+        or decision["direction"] != "bullish"
+        or decision["action"] != "ENTER_LONG"
+        or entry is None
+        or stop is None
+        or target is None
+        or not (entry > stop > 0 and target > entry)
+        or decision["cohort"] != SCENARIO_FORWARD_COHORT
+        or decision["policy_version"] != SCENARIO_POLICY_VERSION
+        or decision["feature_schema_version"] != SCENARIO_FEATURE_SCHEMA_VERSION
+        or decision["research_only"] is not True
+        or decision["broker_execution_enabled"] is not False
+    ):
+        raise StorageError("Scenario decision violates the forward paper contract")
+
+
+def _scenario_embedded_decision(payload: Any) -> Mapping[str, Any] | None:
+    parsed = _json_value(payload)
+    if not isinstance(parsed, dict):
+        return None
+    embedded = parsed.get("scenario_decision")
+    return embedded if isinstance(embedded, dict) else None
+
+
+def _scenario_historical_mirror_matches(
+    row: sqlite3.Row | Mapping[str, Any], decision: Mapping[str, Any]
+) -> bool:
+    actual = {key: row[key] for key in row.keys()} if isinstance(row, sqlite3.Row) else row
+    embedded = _scenario_embedded_decision(_mapping_value(actual, "raw_payload_json"))
+    if embedded is None or _scenario_decision_projection(embedded) != dict(decision):
+        return False
+    return (
+        str(_mapping_value(actual, "signal_id") or "") == f"scenario:{decision['decision_id']}"
+        and str(_mapping_value(actual, "market_date") or "")[:10] == decision["market_date"]
+        and str(_mapping_value(actual, "ticker") or "").upper() == decision["ticker"]
+        and _float_or_none(_mapping_value(actual, "entry_watch_level"))
+        == decision["entry_trigger"]
+        and _float_or_none(_mapping_value(actual, "invalidation_level"))
+        == decision["invalidation_level"]
+        and _float_or_none(_mapping_value(actual, "target_1")) == decision["target_1"]
+        and str(_mapping_value(actual, "model_version") or "") == decision["policy_version"]
+    )
+
+
+def _scenario_plan_projection(payload: Any) -> dict[str, Any] | None:
+    parsed = _json_value(payload)
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "decision_id": str(
+            parsed.get("decision_id") or parsed.get("scenario_decision_id") or ""
+        ),
+        "market_date": str(parsed.get("market_date") or "")[:10],
+        "ticker": str(parsed.get("ticker") or "").upper(),
+        "direction": str(parsed.get("direction") or "").lower(),
+        "action": str(parsed.get("action") or "").upper(),
+        "entry_trigger": _float_or_none(parsed.get("entry_trigger")),
+        "invalidation_level": _float_or_none(parsed.get("invalidation_level")),
+        "target_1": _float_or_none(parsed.get("target_1")),
+        "cohort": str(parsed.get("cohort") or ""),
+        "policy_version": str(parsed.get("policy_version") or ""),
+        "feature_schema_version": str(parsed.get("feature_schema_version") or ""),
+        "research_only": _scenario_optional_bool(parsed, "research_only"),
+        "broker_execution_enabled": _scenario_optional_bool(
+            parsed, "broker_execution_enabled"
+        ),
+    }
+
+
+def _scenario_selection_plan(decision: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_id": decision["decision_id"],
+        "market_date": decision["market_date"],
+        "ticker": decision["ticker"],
+        "direction": decision["direction"],
+        "action": decision["action"],
+        "entry_trigger": decision["entry_trigger"],
+        "invalidation_level": decision["invalidation_level"],
+        "target_1": decision["target_1"],
+        "cohort": decision["cohort"],
+        "policy_version": decision["policy_version"],
+        "feature_schema_version": decision["feature_schema_version"],
+        "research_only": decision["research_only"],
+        "broker_execution_enabled": decision["broker_execution_enabled"],
+    }
+
+
+def _scenario_link_projection(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(_mapping_value(row, key) or "")
+        for key in (
+            "decision_id",
+            "signal_id",
+            "scan_id",
+            "cohort",
+            "strategy_id",
+            "strategy_version",
+        )
+    )
+
+
+def _validate_scenario_materialization_rows(
+    decision: Mapping[str, Any],
+    *,
+    signal: Mapping[str, Any],
+    selection: Mapping[str, Any],
+    link: Mapping[str, Any],
+    canonical_payload: Mapping[str, Any] | None = None,
+) -> None:
+    signal_id = f"scenario:{decision['decision_id']}"
+    if not _scenario_historical_mirror_matches(signal, decision):
+        raise StorageError("Scenario historical mirror does not match authoritative decision")
+    expected_plan = _scenario_selection_plan(decision)
+    selection_payload = _scenario_plan_projection(selection.get("payload_json"))
+    if (
+        str(selection.get("selection_id") or "") != f"scenario-selection:{decision['decision_id']}"
+        or str(selection.get("scan_id") or "") != f"scenario:{decision['market_date']}"
+        or str(selection.get("signal_id") or "") != signal_id
+        or str(selection.get("ticker") or "").upper() != decision["ticker"]
+        or str(selection.get("strategy_id") or "") != SCENARIO_STRATEGY_ID
+        or str(selection.get("strategy_version") or "") != SCENARIO_POLICY_VERSION
+        or str(selection.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+        or str(selection.get("decision") or "").lower() != "paper_entry"
+        or str(selection.get("selected_at") or "") != decision["decision_at"]
+        or str(selection.get("event_key") or "") != f"scenario-paper:{decision['decision_id']}"
+        or str(selection.get("body_sha256") or "")
+        != canonical_hash(canonical_payload if canonical_payload is not None else decision)
+        or selection_payload != expected_plan
+    ):
+        raise StorageError("Scenario selection does not match authoritative decision plan")
+    if _scenario_link_projection(link) != (
+        decision["decision_id"],
+        signal_id,
+        f"scenario:{decision['market_date']}",
+        SCENARIO_FORWARD_COHORT,
+        SCENARIO_STRATEGY_ID,
+        SCENARIO_POLICY_VERSION,
+    ):
+        raise StorageError("Scenario signal link does not match authoritative decision")
+
+
 def _embedded_scenario_decision_id(payload: Any) -> str:
     parsed = _json_value(payload)
     if not isinstance(parsed, dict):
@@ -8455,9 +9081,15 @@ def _validate_signal_parent_rows(
             str(row[1] or ""),
             str(row[2] or ""),
             _embedded_scenario_decision_id(row[3]),
+            _json_value(row[3]),
+            _float_or_none(row[4]),
+            _float_or_none(row[5]),
+            _float_or_none(row[6]),
+            str(row[7] or ""),
         )
         for row in connection.execute(
-            "SELECT signal_id, market_date, ticker, raw_payload_json "
+            "SELECT signal_id, market_date, ticker, raw_payload_json, "
+            "entry_watch_level, invalidation_level, target_1, model_version "
             f"FROM historical_signals WHERE signal_id IN ({placeholders})",  # nosec B608
             signal_ids,
         ).fetchall()
@@ -8473,7 +9105,9 @@ def _validate_signal_parent_rows(
     scenario_parents: dict[str, set[tuple[str, ...]]] = {}
     for row in connection.execute(
         "SELECT l.signal_id, d.decision_id, d.market_date, d.ticker, "
-        "d.cohort, d.policy_version, d.research_only, d.broker_execution_enabled, "
+        "d.cohort, d.policy_version, d.feature_schema_version, d.research_only, "
+        "d.broker_execution_enabled, d.direction, d.action, d.entry_trigger, "
+        "d.invalidation_level, d.target_1, "
         "l.cohort, l.strategy_id, l.strategy_version "
         "FROM scenario_signal_links AS l "
         "JOIN scenario_decisions AS d ON d.decision_id = l.decision_id "
@@ -8507,8 +9141,14 @@ def _validate_signal_parent_rows(
                 expected_ticker,
                 decision_cohort,
                 decision_policy_version,
+                decision_feature_schema_version,
                 decision_research_only,
                 decision_broker_execution_enabled,
+                decision_direction,
+                decision_action,
+                decision_entry_trigger,
+                decision_invalidation_level,
+                decision_target_1,
                 link_cohort,
                 link_strategy_id,
                 link_strategy_version,
@@ -8520,24 +9160,61 @@ def _validate_signal_parent_rows(
                 and signal_id == f"scenario:{expected_decision_id}"
                 and decision_cohort == SCENARIO_FORWARD_COHORT
                 and decision_policy_version == SCENARIO_POLICY_VERSION
+                and decision_feature_schema_version == SCENARIO_FEATURE_SCHEMA_VERSION
                 and decision_research_only == "1"
                 and decision_broker_execution_enabled == "0"
+                and decision_direction == "bullish"
+                and decision_action == "ENTER_LONG"
+                and _float_or_none(decision_entry_trigger) is not None
+                and _float_or_none(decision_invalidation_level) is not None
+                and _float_or_none(decision_target_1) is not None
+                and (
+                    _float_or_none(decision_entry_trigger)
+                    > _float_or_none(decision_invalidation_level)
+                    > 0
+                    and _float_or_none(decision_target_1)
+                    > _float_or_none(decision_entry_trigger)
+                )
                 and link_cohort == decision_cohort
                 and link_strategy_id == SCENARIO_STRATEGY_ID
                 and link_strategy_version == decision_policy_version
             )
             historical_matches = True
             if historical_parent is not None:
-                historical_date, historical_ticker, historical_decision_id = historical_parent
+                historical_date, historical_ticker, historical_decision_id = historical_parent[:3]
+                historical_raw_payload = historical_parent[3]
+                historical_entry = historical_parent[4]
+                historical_stop = historical_parent[5]
+                historical_target = historical_parent[6]
+                historical_model_version = historical_parent[7]
+                embedded = _scenario_embedded_decision(historical_raw_payload)
+                embedded_plan = _scenario_plan_projection(embedded)
+                expected_plan = {
+                    "decision_id": expected_decision_id,
+                    "market_date": expected_date[:10],
+                    "ticker": expected_ticker.upper(),
+                    "direction": decision_direction,
+                    "action": decision_action,
+                    "entry_trigger": _float_or_none(decision_entry_trigger),
+                    "invalidation_level": _float_or_none(decision_invalidation_level),
+                    "target_1": _float_or_none(decision_target_1),
+                    "cohort": decision_cohort,
+                    "policy_version": decision_policy_version,
+                    "feature_schema_version": decision_feature_schema_version,
+                    "research_only": decision_research_only == "1",
+                    "broker_execution_enabled": decision_broker_execution_enabled == "1",
+                }
                 historical_matches = (
                     bool(historical_date)
                     and historical_date[:10] == expected_date[:10]
                     and bool(historical_ticker)
                     and historical_ticker.upper() == expected_ticker.upper()
-                    and (
-                        not historical_decision_id
-                        or historical_decision_id == expected_decision_id
-                    )
+                    and historical_decision_id == expected_decision_id
+                    and embedded_plan == expected_plan
+                    and historical_entry == expected_plan["entry_trigger"]
+                    and historical_stop == expected_plan["invalidation_level"]
+                    and historical_target == expected_plan["target_1"]
+                    and historical_model_version == expected_plan["policy_version"]
                 )
             if not contract_matches or not historical_matches:
                 mismatched += 1
@@ -8548,7 +9225,7 @@ def _validate_signal_parent_rows(
                     if isinstance(row.get("payload_json"), dict)
                     else ""
                 )
-                if claimed_decision_id and claimed_decision_id != expected_decision_id:
+                if claimed_decision_id != expected_decision_id:
                     mismatched += 1
                 continue
             market_date = str(row.get("market_date") or row.get("date") or "")[:10]
@@ -8582,7 +9259,7 @@ def _validate_signal_parent_rows(
             continue
         if not require_market_identity:
             continue
-        expected_date, expected_ticker, _ = parents[0]
+        expected_date, expected_ticker, _ = parents[0][:3]
         market_date = str(row.get("market_date") or row.get("date") or "")[:10]
         ticker = str(row.get("ticker") or "").upper()
         date_matches = bool(market_date) and market_date == expected_date[:10]
