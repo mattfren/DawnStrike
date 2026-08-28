@@ -784,11 +784,25 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
     contributor_rows = [
         item for item in row.get("strategy_contributors") or [] if isinstance(item, dict)
     ]
+    has_adapter_lineage = any(
+        str(item.get("strategy_adapter") or "").strip()
+        and (
+            str(item.get("source_signal_id") or "").strip()
+            or (
+                isinstance(item.get("prior_session_lineage"), dict)
+                and str(
+                    item["prior_session_lineage"].get("source_signal_id") or ""
+                ).strip()
+            )
+        )
+        for item in contributor_rows
+    )
     if (
         not tier
         and not receipt_id
         and not row.get("strategy_receipt_gap")
         and len(contributor_rows) <= 1
+        and not has_adapter_lineage
     ):
         return []
     strategy_id = _text(row.get("strategy_id"), "not reported")
@@ -820,7 +834,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
                 f"Why: {_truncate(why, 100)}",
             ]
         )
-    if len(contributor_rows) > 1:
+    if len(contributor_rows) > 1 or has_adapter_lineage:
         contributor_ids = sorted(
             {
                 str(item.get("strategy_id") or "").strip()
@@ -830,7 +844,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
         )
         lines.append(
             "Contributors (one ranked row): "
-            + (_truncate(", ".join(contributor_ids), 120) or "not reported")
+            + (", ".join(contributor_ids) or "not reported")
         )
         adapter_lineage = []
         for item in contributor_rows:
@@ -853,7 +867,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
         if adapter_lineage:
             lines.append(
                 "Adapter prior-session lineage: "
-                + _truncate(", ".join(sorted(set(adapter_lineage))), 120)
+                + ", ".join(sorted(set(adapter_lineage)))
             )
 
     core = row.get("core_conditions_passed") or []

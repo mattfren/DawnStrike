@@ -726,6 +726,23 @@ def _watch_signals(
             "frozen_plan_hash": selection.get("frozen_plan_hash"),
             "plan_freeze_status": selection.get("plan_freeze_status"),
             "episode_dedup_counts": selection.get("episode_dedup_counts") or {},
+            # Keep the complete authenticated contributor receipt projection on
+            # the watcher row.  The native Alpha row remains primary, while
+            # adapter contributors stay available to episode/outcome learning.
+            "strategy_contributors": (
+                _episode_identity_payload(
+                    historical_by_id[str(selection.get("signal_id") or "")],
+                    selection,
+                ).get("strategy_contributors")
+                or []
+            ),
+            "strategy_decision_receipts": (
+                _episode_identity_payload(
+                    historical_by_id[str(selection.get("signal_id") or "")],
+                    selection,
+                ).get("strategy_decision_receipts")
+                or []
+            ),
         }
         for selection in selected_rows
     ]

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.services.luna_core_universe_service import (
+    CORE_INDEXES,
     _canonical_member_hash,
     canonical_symbol,
 )
@@ -64,8 +65,8 @@ def build_universe_handoff(
     )
 
     _validate_cycle_identity(cycle, cycle_contract, requested_date)
-    _validate_core_contract(core, requested_date)
-    _validate_source_summary(source_summary, requested_date)
+    core_ready_indexes = _validate_core_contract(core, requested_date)
+    _validate_source_summary(source_summary, requested_date, root=root)
 
     source_snapshot = _resolve_source_path(
         root,
@@ -78,8 +79,11 @@ def build_universe_handoff(
     if mover_lane_status == "SOURCE_FAILED":
         mover_available = False
 
-    core_ready = str(core.get("status") or "").strip().upper() == "READY"
-    core_members = _core_members(core) if core_ready else []
+    core_ready = (
+        str(core.get("status") or "").strip().upper() == "READY"
+        and core_ready_indexes == set(CORE_INDEXES)
+    )
+    core_members = _core_members(core, allowed_indexes=core_ready_indexes)
     mover_members = (
         _mover_members(mover_rows, source_summary, requested_date) if mover_available else []
     )
@@ -91,19 +95,32 @@ def build_universe_handoff(
     shortfalls: list[str] = []
     if not core_ready:
         shortfalls.append("core_membership_unavailable")
+    shortfalls.extend(
+        f"core_index_unavailable:{index}"
+        for index in CORE_INDEXES
+        if index not in core_ready_indexes
+    )
     if not mover_available:
         shortfalls.append("governed_mover_source_unavailable")
     if source_status in {"success", "partial"} and not mover_rows:
         shortfalls.append("governed_mover_snapshot_empty")
     declared_mover_count = int(source_summary.get("candidate_count") or 0)
-    if source_status in {"success", "partial"} and declared_mover_count != len(mover_members):
+    if source_status in {"success", "partial"} and declared_mover_count != len(mover_rows):
         shortfalls.append("governed_mover_snapshot_count_mismatch")
     if int(source_summary.get("source_failures") or 0) > 0:
         shortfalls.append("provider_failures_present")
-    coverage_status = "COMPLETE" if not shortfalls else "PARTIAL"
-
     strategy_ids = _expected_strategy_ids()
-    adapter = source_summary.get("morning_strategy_adapter")
+    # The standalone web source summary is persisted before the Alpha cycle
+    # attaches its authenticated prior-session adapter.  The cycle artifact is
+    # the authoritative immutable container for that declaration; accepting a
+    # declaration supplied only by the standalone summary would permit an
+    # unbound fleet claim.
+    cycle_source_summary = cycle.get("source_summary")
+    adapter = (
+        cycle_source_summary.get("morning_strategy_adapter")
+        if isinstance(cycle_source_summary, dict)
+        else None
+    )
     declared_strategy_ids = (
         sorted(
             {
@@ -115,6 +132,7 @@ def build_universe_handoff(
         if isinstance(adapter, dict)
         else []
     )
+    coverage_status = "COMPLETE" if not shortfalls else "PARTIAL"
     generated_at = _first_text(
         cycle_contract.get("generated_at"),
         cycle.get("generated_at"),
@@ -130,6 +148,7 @@ def build_universe_handoff(
         _artifact(root / "web_collect" / "source_summary.json", root, "mover_source_summary"),
         _artifact(source_snapshot, root, "mover_snapshot"),
     ]
+    _validate_source_artifact_manifest(root, source_artifacts)
     body: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "market_date": requested_date,
@@ -175,6 +194,7 @@ def build_universe_handoff(
         },
         "strategy_fleet": {
             "expected_strategy_ids": list(strategy_ids),
+            "declared_paperops_strategy_ids": list(strategy_ids),
             "declared_morning_strategy_ids": declared_strategy_ids,
             "missing_declared_strategy_ids": sorted(set(strategy_ids) - set(declared_strategy_ids)),
             "expected_count": len(strategy_ids),
@@ -257,6 +277,7 @@ def load_universe_handoff(
     if (
         not isinstance(fleet, dict)
         or fleet.get("expected_strategy_ids") != expected_strategy_ids
+        or fleet.get("declared_paperops_strategy_ids") != expected_strategy_ids
         or fleet.get("expected_count") != len(expected_strategy_ids)
     ):
         raise UniverseHandoffError("universe handoff strategy fleet is invalid")
@@ -264,6 +285,7 @@ def load_universe_handoff(
         artifacts = payload.get("source_artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             raise UniverseHandoffError("universe handoff source artifacts are missing")
+        _validate_source_artifact_manifest(handoff_path.parent, artifacts)
         for artifact in artifacts:
             if not isinstance(artifact, dict):
                 raise UniverseHandoffError("universe handoff source artifact is malformed")
@@ -331,13 +353,26 @@ def _validate_cycle_identity(
         raise UniverseHandoffError("Morning source status is not governed")
 
 
-def _validate_core_contract(core: dict[str, Any], market_date: str) -> None:
+def _validate_core_contract(core: dict[str, Any], market_date: str) -> set[str]:
     if str(core.get("schema_version") or "") != "dawnstrike.luna.core_universe.v1":
         raise UniverseHandoffError("core universe contract schema is invalid")
     if str(core.get("requested_market_date") or "") != market_date:
         raise UniverseHandoffError("core universe contract market date conflicts")
-    if _iso_date(core.get("observed_at")) != market_date:
-        raise UniverseHandoffError("core universe contract is stale or cross-date")
+    if _iso_date(core.get("observed_at")) is None:
+        raise UniverseHandoffError("core universe contract observation is invalid")
+    if str(core.get("status") or "").upper() not in {"READY", "DATA_UNAVAILABLE"}:
+        raise UniverseHandoffError("core universe contract status is invalid")
+    if str(core.get("completeness_verdict") or "").upper() not in {
+        "COMPLETE",
+        "INCOMPLETE",
+    }:
+        raise UniverseHandoffError("core universe contract completeness is invalid")
+    if str(core.get("freshness_verdict") or "").upper() not in {
+        "FRESH",
+        "STALE",
+        "UNKNOWN",
+    }:
+        raise UniverseHandoffError("core universe contract freshness is invalid")
     claimed = str(core.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed):
         raise UniverseHandoffError("core universe contract hash is missing")
@@ -378,17 +413,173 @@ def _validate_core_contract(core: dict[str, Any], market_date: str) -> None:
     ]
     if _canonical_member_hash(canonical_records) != declared_member_hash:
         raise UniverseHandoffError("core universe canonical member hash mismatch")
+    source_ids = core.get("source_ids")
+    source_uris = core.get("source_uris")
+    if not isinstance(source_ids, list) or (
+        str(core.get("status") or "").upper() == "READY"
+        and not any(str(value).strip() for value in source_ids)
+    ):
+        raise UniverseHandoffError("core universe source identities are missing")
+    if not isinstance(source_uris, list) or (
+        str(core.get("status") or "").upper() == "READY"
+        and not any(str(value).strip() for value in source_uris)
+    ):
+        raise UniverseHandoffError("core universe source URIs are missing")
+    artifacts = core.get("source_artifacts")
+    if not isinstance(artifacts, list):
+        raise UniverseHandoffError("core universe source roots are missing")
+    index_verdicts = core.get("index_verdicts")
+    if not isinstance(index_verdicts, dict) or set(index_verdicts) != set(CORE_INDEXES):
+        raise UniverseHandoffError("core universe index verdicts are incomplete")
+    ready_indexes: set[str] = set()
+    artifacts_by_index: dict[str, list[dict[str, Any]]] = {index: [] for index in CORE_INDEXES}
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise UniverseHandoffError("core universe source root is malformed")
+        binding = artifact.get("source_binding")
+        if not isinstance(binding, dict):
+            raise UniverseHandoffError("core universe source lineage is missing")
+        index = str(binding.get("index") or "").strip()
+        if index not in artifacts_by_index:
+            raise UniverseHandoffError("core universe source root index is invalid")
+        artifacts_by_index[index].append(artifact)
+        if not str(artifact.get("source_id") or "").strip() or not str(
+            artifact.get("source_uri") or ""
+        ).strip():
+            raise UniverseHandoffError("core universe source identity binding is invalid")
+        raw_hashes = artifact.get("raw_artifact_hashes") or []
+        if not isinstance(raw_hashes, list) or not raw_hashes or any(
+            not _SHA_PATTERN.fullmatch(str(value).lower()) for value in raw_hashes
+        ):
+            raise UniverseHandoffError("core universe source artifact hashes are invalid")
+        if not _SHA_PATTERN.fullmatch(
+            str(artifact.get("canonical_member_set_hash_sha256") or "").lower()
+        ):
+            raise UniverseHandoffError("core universe source member hash is invalid")
+        if not str(binding.get("authority") or "").strip() or not str(
+            binding.get("transformation_id") or ""
+        ).strip():
+            raise UniverseHandoffError("core universe source lineage binding is invalid")
+        if not str(binding.get("source_scope") or "").strip():
+            raise UniverseHandoffError("core universe source scope is missing")
+    if str(core.get("status") or "").upper() == "READY":
+        artifact_ids = {str(item.get("source_id") or "").strip() for item in artifacts}
+        artifact_uris = {str(item.get("source_uri") or "").strip() for item in artifacts}
+        if artifact_ids != {str(value).strip() for value in source_ids}:
+            raise UniverseHandoffError("core universe source identities are not bound")
+        if artifact_uris != {str(value).strip() for value in source_uris}:
+            raise UniverseHandoffError("core universe source URIs are not bound")
+    for index in CORE_INDEXES:
+        verdict = index_verdicts[index]
+        if not isinstance(verdict, dict):
+            raise UniverseHandoffError("core universe index verdict is malformed")
+        status = str(verdict.get("status") or "").upper()
+        if status not in {"READY", "DATA_UNAVAILABLE"}:
+            raise UniverseHandoffError("core universe index verdict status is invalid")
+        raw_expected_count = verdict.get("expected_count")
+        try:
+            expected_count = int(raw_expected_count) if raw_expected_count is not None else None
+            observed_count = int(verdict.get("observed_unique_count"))
+        except (TypeError, ValueError) as exc:
+            raise UniverseHandoffError("core universe index counts are invalid") from exc
+        if (expected_count is not None and expected_count < 0) or observed_count < 0:
+            raise UniverseHandoffError("core universe index counts are invalid")
+        if status == "READY" and (expected_count is None or expected_count <= 0):
+            raise UniverseHandoffError(f"core universe {index} expected count is invalid")
+        if status == "READY" and not artifacts_by_index[index]:
+            raise UniverseHandoffError(f"core universe source root is missing for {index}")
+        if status == "READY":
+            required = {
+                "count_verdict": "PASS",
+                "effective_date_verdict": "PASS",
+                "freshness_verdict": "FRESH",
+                "completeness_verdict": "COMPLETE",
+            }
+            if any(
+                str(verdict.get(field) or "").upper() != value
+                for field, value in required.items()
+            ):
+                raise UniverseHandoffError(f"core universe {index} verdict is not governed")
+            if expected_count != observed_count:
+                raise UniverseHandoffError(f"core universe {index} count binding is invalid")
+            if any(
+                str(artifact["source_binding"].get("status") or "").upper()
+                != "VERIFIED"
+                or not _SHA_PATTERN.fullmatch(
+                    str(
+                        artifact["source_binding"].get(
+                            "derived_member_set_hash_sha256"
+                        )
+                        or ""
+                    ).lower()
+                )
+                or int(artifact["source_binding"].get("derived_membership_count") or 0)
+                != observed_count
+                for artifact in artifacts_by_index[index]
+            ):
+                raise UniverseHandoffError(f"core universe {index} source binding is invalid")
+            index_records = [
+                {
+                    "symbol": canonical_symbol(row.get("symbol") or row.get("ticker")),
+                    "provider_symbol": canonical_symbol(
+                        row.get("provider_symbol") or row.get("mapped_symbol") or row.get("symbol")
+                    ),
+                    "asset_class": str(
+                        row.get("asset_class") or row.get("security_type") or "common_stock"
+                    ).strip().lower(),
+                    "index": index,
+                    "valid_from": row.get("valid_from"),
+                    "valid_to": row.get("valid_to"),
+                }
+                for row in members
+                if isinstance(row, dict) and index in (row.get("index_memberships") or [])
+            ]
+            if len(index_records) != observed_count:
+                raise UniverseHandoffError(f"core universe {index} member count binding is invalid")
+            expected_index_hash = _canonical_member_hash(index_records)
+            if any(
+                str(artifact.get("canonical_member_set_hash_sha256") or "").lower()
+                != expected_index_hash
+                or str(
+                    artifact["source_binding"].get("derived_member_set_hash_sha256")
+                    or ""
+                ).lower()
+                != expected_index_hash
+                for artifact in artifacts_by_index[index]
+            ):
+                raise UniverseHandoffError(f"core universe {index} member hash binding is invalid")
+            ready_indexes.add(index)
+    if str(core.get("status") or "").upper() == "READY" and ready_indexes != set(CORE_INDEXES):
+        raise UniverseHandoffError("READY core universe does not prove both index lanes")
+    if str(core.get("status") or "").upper() == "READY" and (
+        str(core.get("completeness_verdict") or "").upper() != "COMPLETE"
+        or str(core.get("freshness_verdict") or "").upper() != "FRESH"
+    ):
+        raise UniverseHandoffError("READY core universe top-level verdict is not governed")
+    return ready_indexes
 
 
-def _validate_source_summary(source: dict[str, Any], market_date: str) -> None:
+def _validate_source_summary(
+    source: dict[str, Any], market_date: str, *, root: Path | None = None
+) -> None:
     status = str(source.get("status") or "").strip().lower()
     if status not in _ALLOWED_SOURCE_STATUSES:
         raise UniverseHandoffError("Morning source summary status is invalid")
+    source_identity = _first_text(source.get("source_identity"), source.get("run_id"))
+    if not source_identity:
+        raise UniverseHandoffError("Morning source summary identity is missing")
     requested = str(source.get("requested_observed_at") or "").strip()
     if not requested or _iso_date(requested) != market_date:
         raise UniverseHandoffError("Morning source summary is cross-date")
-    if not str(source.get("snapshot_path") or "").strip():
+    snapshot_value = str(source.get("snapshot_path") or "").strip()
+    if not snapshot_value:
         raise UniverseHandoffError("Morning source summary snapshot path is missing")
+    paths = source.get("paths")
+    if isinstance(paths, dict) and paths.get("premarket_snapshot") and root is not None:
+        if _resolve_source_path(root, snapshot_value) != _resolve_source_path(
+            root, str(paths["premarket_snapshot"])
+        ):
+            raise UniverseHandoffError("Morning source summary snapshot binding is invalid")
 
 
 def _validate_core_binding(payload: dict[str, Any], market_date: str) -> None:
@@ -410,13 +601,19 @@ def _expected_strategy_ids() -> tuple[str, ...]:
                 str(strategy.strategy_id)
                 for strategy in build_strategy_catalog()
                 if str(strategy.strategy_id)
-                not in {"benchmark_buy_hold_equal_weight", "baseline_buy_hold"}
+                not in {
+                    "benchmark_buy_hold_equal_weight",
+                    "baseline_buy_hold",
+                    "cash_no_trade_baseline",
+                }
             }
         )
     )
 
 
-def _core_members(core: dict[str, Any]) -> list[dict[str, Any]]:
+def _core_members(
+    core: dict[str, Any], *, allowed_indexes: set[str] | None = None
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for raw in core.get("members") or []:
         if not isinstance(raw, dict):
@@ -427,6 +624,10 @@ def _core_members(core: dict[str, Any]) -> list[dict[str, Any]]:
         memberships = sorted(
             {str(item).strip() for item in raw.get("index_memberships") or [] if str(item).strip()}
         )
+        if allowed_indexes is not None:
+            memberships = [item for item in memberships if item in allowed_indexes]
+            if not memberships:
+                continue
         output.append(
             {
                 "symbol": symbol,
@@ -512,8 +713,13 @@ def _read_mover_snapshot(path: Path, market_date: str) -> list[dict[str, Any]]:
         raise UniverseHandoffError("governed mover snapshot is unreadable") from exc
     for row in rows:
         declared = str(row.get("market_date") or row.get("as_of_date") or "").strip()
+        timestamp = _first_text(row.get("as_of_timestamp"), row.get("extracted_at"))
         if declared and declared != market_date:
             raise UniverseHandoffError("governed mover snapshot is cross-date")
+        if not declared and (not timestamp or _iso_date(timestamp) != market_date):
+            raise UniverseHandoffError("governed mover snapshot row date is missing")
+        if not str(row.get("source") or row.get("source_identity") or "").strip():
+            raise UniverseHandoffError("governed mover snapshot row source is missing")
     return rows
 
 
@@ -536,6 +742,42 @@ def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
         "path": path.resolve().relative_to(root).as_posix(),
         "sha256": _sha256_file(path),
     }
+
+
+def _validate_source_artifact_manifest(root: Path, artifacts: list[dict[str, Any]]) -> None:
+    """Require the immutable handoff to name exactly its five source inputs."""
+
+    expected_kinds = {
+        "alpha_cycle",
+        "alpha_run_contract",
+        "core_universe_contract",
+        "mover_source_summary",
+        "mover_snapshot",
+    }
+    if len(artifacts) != len(expected_kinds):
+        raise UniverseHandoffError("universe handoff source artifact manifest is invalid")
+    kinds = [str(item.get("kind") or "") for item in artifacts]
+    if set(kinds) != expected_kinds or len(set(kinds)) != len(kinds):
+        raise UniverseHandoffError("universe handoff source artifact kinds are invalid")
+    paths: list[Path] = []
+    for item in artifacts:
+        path = _resolve_source_path(root, str(item.get("path") or ""))
+        paths.append(path)
+        if not path.is_file():
+            raise UniverseHandoffError("universe handoff source artifact is missing")
+        kind = str(item.get("kind") or "")
+        expected_path = {
+            "alpha_cycle": root / "alpha_cycle.json",
+            "alpha_run_contract": root / "alpha_run_contract.json",
+            "core_universe_contract": root / "core_universe_contract.json",
+            "mover_source_summary": root / "web_collect" / "source_summary.json",
+        }.get(kind)
+        if expected_path is not None and path != expected_path.resolve():
+            raise UniverseHandoffError("universe handoff source artifact path is invalid")
+        if kind == "mover_snapshot" and path.suffix.lower() != ".csv":
+            raise UniverseHandoffError("universe handoff mover snapshot format is invalid")
+    if len({path.resolve() for path in paths}) != len(paths):
+        raise UniverseHandoffError("universe handoff source artifact paths are duplicated")
 
 
 def _resolve_source_path(root: Path, value: str) -> Path:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import math
@@ -843,6 +844,16 @@ def _attribution_row(
         "score_bucket": _score_bucket(signal),
         "risk_flags": ";".join(str(item) for item in signal.get("risk_flags_json") or []),
     }
+    for field in (
+        "strategy_contributors",
+        "strategy_contributor_count",
+        "strategy_contributor_ids",
+        "strategy_decision_receipts",
+        "canonical_primary_strategy_id",
+        "strategy_contribution_status",
+    ):
+        if field in signal:
+            row[field] = copy.deepcopy(signal[field])
     row["payload_json"] = dict(row)
     return row
 

@@ -178,6 +178,28 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
         "signal_key": f"{source_scan_id}:1:SOBR",
         "market_date": "2026-07-15",
         "timestamp": SELECTED_AT,
+        "strategy_contributors": [
+            {
+                "strategy_id": "alphaops_v5",
+                "receipt_id": "receipt-alpha",
+                "receipt_hash_sha256": "a" * 64,
+            },
+            {
+                "strategy_id": "gap_up_continuation",
+                "receipt_id": "receipt-gap",
+                "receipt_hash_sha256": "b" * 64,
+                "strategy_adapter": "morning_strategy_adapter_v3",
+                "prior_session_lineage": {
+                    "source_signal_id": "gap-prior",
+                    "prior_session_date": "2026-07-14",
+                },
+            },
+        ],
+        "strategy_decision_receipts": [
+            {"receipt_id": "receipt-alpha"},
+            {"receipt_id": "receipt-gap"},
+        ],
+        "canonical_primary_strategy_id": "alphaops_v5",
     }
     source_signal.update(_authenticated_observation("SOBR", SELECTED_AT))
     slate = build_ranked_research_slate(
@@ -249,8 +271,14 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
 
     assert context["signal_id"] == source_signal["signal_key"]
     assert context["authoritative_signal"] == frozen_signal
+    assert [
+        item["receipt_id"] for item in context["authoritative_signal"]["strategy_contributors"]
+    ] == ["receipt-alpha", "receipt-gap"]
     assert watched[0]["signal_id"] == source_signal["signal_key"]
     assert watched[0]["selection_id"] == persisted["selection_id"]
+    assert [
+        item["receipt_id"] for item in watched[0]["strategy_contributors"]
+    ] == ["receipt-alpha", "receipt-gap"]
     assert persisted["payload_json"]["source_scan_id"] == source_scan_id
     assert (
         persisted["payload_json"]["scan_lineage_status"]

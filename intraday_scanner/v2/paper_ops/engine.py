@@ -250,6 +250,35 @@ def _run_config_with_universe_handoff(
     )
     if not config.universe_id:
         raise ValueError("PaperOps universe handoff universe identity is missing")
+    if scheduled_production:
+        expected_strategy_ids = set(
+            str(item) for item in (handoff.get("strategy_fleet") or {}).get(
+                "declared_paperops_strategy_ids", ()
+            )
+        )
+        actual_strategy_ids = {
+            strategy.strategy_id
+            for strategy in _strategies_eligible_for_run(
+                paths,
+                config=config,
+                run_date=run_date,
+                mode=mode,
+            )
+        }
+        catalog_strategy_ids = {
+            str(strategy.strategy_id)
+            for strategy in build_strategy_catalog()
+            if strategy.status
+            not in {"quarantined", "rejected", "parked", "baseline", "benchmark"}
+        }
+        if (
+            actual_strategy_ids != expected_strategy_ids
+            or actual_strategy_ids != catalog_strategy_ids
+        ):
+            raise ValueError(
+                "scheduled PaperOps executable strategy fleet does not match "
+                "the exact nine-strategy handoff"
+            )
     return config, handoff
 
 

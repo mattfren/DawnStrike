@@ -8,6 +8,7 @@ bars can become learning-eligible outcomes.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -2580,7 +2581,7 @@ def _outcome_base(
             include_pre_post=False,
         )
     )
-    return {
+    base = {
         "signal_id": str(signal.get("signal_id") or ""),
         "scan_id": str(signal.get("scan_id") or ""),
         "alpha_signal_id": str(signal.get("alpha_signal_id") or ""),
@@ -2625,6 +2626,21 @@ def _outcome_base(
         "broker_execution_enabled": False,
         "halted": None,
     }
+    # Carry the immutable merged-row contributor receipts into every outcome
+    # and learning payload.  This preserves the native Alpha primary identity
+    # while keeping authenticated adapter contributors attributable after the
+    # official-selection -> watcher -> outcome transition.
+    for field in (
+        "strategy_contributors",
+        "strategy_contributor_count",
+        "strategy_contributor_ids",
+        "strategy_decision_receipts",
+        "canonical_primary_strategy_id",
+        "strategy_contribution_status",
+    ):
+        if field in signal:
+            base[field] = copy.deepcopy(signal[field])
+    return base
 
 
 def _conclusive_without_entry(

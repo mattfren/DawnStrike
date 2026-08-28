@@ -27,6 +27,8 @@ def _core_contract() -> dict[str, object]:
         "requested_market_date": MARKET_DATE,
         "observed_at": f"{MARKET_DATE}T12:00:00+00:00",
         "status": "READY",
+        "completeness_verdict": "COMPLETE",
+        "freshness_verdict": "FRESH",
         "contract_id": "luna-core-fixture",
         "content_hash_sha256": "",
         "content_hash": "",
@@ -36,7 +38,7 @@ def _core_contract() -> dict[str, object]:
         "members": [
             {
                 "symbol": "AAA",
-                "index_memberships": ["S&P 500"],
+                "index_memberships": ["Nasdaq-100", "S&P 500"],
                 "sources": ["fixture-core"],
             }
         ],
@@ -52,7 +54,115 @@ def _core_contract() -> dict[str, object]:
                 "valid_to": None,
             }
         ]
+        + [
+            {
+                "symbol": "AAA",
+                "provider_symbol": "AAA",
+                "asset_class": "common_stock",
+                "index": "Nasdaq-100",
+                "valid_from": None,
+                "valid_to": None,
+            }
+        ]
     )
+    payload["source_ids"] = ["fixture-spy", "fixture-ndx"]
+    payload["source_uris"] = ["https://example.test/spy", "https://example.test/ndx"]
+    payload["source_artifacts"] = [
+        {
+            "source_id": "fixture-spy",
+            "source_uri": "https://example.test/spy",
+            "raw_artifact_hashes": ["a" * 64],
+            "canonical_member_set_hash_sha256": _canonical_member_hash(
+                [
+                    {
+                        "symbol": "AAA",
+                        "provider_symbol": "AAA",
+                        "asset_class": "common_stock",
+                        "index": "S&P 500",
+                        "valid_from": None,
+                        "valid_to": None,
+                    }
+                ]
+            ),
+            "source_binding": {
+                "status": "VERIFIED",
+                "authority": "fixture",
+                "index": "S&P 500",
+                "transformation_id": "fixture-v1",
+                "source_scope": "fixture S&P 500",
+                "derived_member_set_hash_sha256": _canonical_member_hash(
+                    [
+                        {
+                            "symbol": "AAA",
+                            "provider_symbol": "AAA",
+                            "asset_class": "common_stock",
+                            "index": "S&P 500",
+                            "valid_from": None,
+                            "valid_to": None,
+                        }
+                    ]
+                ),
+                "derived_membership_count": 1,
+            },
+        },
+        {
+            "source_id": "fixture-ndx",
+            "source_uri": "https://example.test/ndx",
+            "raw_artifact_hashes": ["b" * 64],
+            "canonical_member_set_hash_sha256": _canonical_member_hash(
+                [
+                    {
+                        "symbol": "AAA",
+                        "provider_symbol": "AAA",
+                        "asset_class": "common_stock",
+                        "index": "Nasdaq-100",
+                        "valid_from": None,
+                        "valid_to": None,
+                    }
+                ]
+            ),
+            "source_binding": {
+                "status": "VERIFIED",
+                "authority": "fixture",
+                "index": "Nasdaq-100",
+                "transformation_id": "fixture-v1",
+                "source_scope": "fixture Nasdaq-100",
+                "derived_member_set_hash_sha256": _canonical_member_hash(
+                    [
+                        {
+                            "symbol": "AAA",
+                            "provider_symbol": "AAA",
+                            "asset_class": "common_stock",
+                            "index": "Nasdaq-100",
+                            "valid_from": None,
+                            "valid_to": None,
+                        }
+                    ]
+                ),
+                "derived_membership_count": 1,
+            },
+        },
+    ]
+    payload["index_verdicts"] = {
+        "S&P 500": {
+            "status": "READY",
+            "expected_count": 1,
+            "observed_unique_count": 1,
+            "count_verdict": "PASS",
+            "freshness_verdict": "FRESH",
+            "effective_date_verdict": "PASS",
+            "completeness_verdict": "COMPLETE",
+        },
+        "Nasdaq-100": {
+            "status": "READY",
+            "expected_count": 1,
+            "observed_unique_count": 1,
+            "count_verdict": "PASS",
+            "freshness_verdict": "FRESH",
+            "effective_date_verdict": "PASS",
+            "completeness_verdict": "COMPLETE",
+        },
+    }
     unhashed = dict(payload)
     for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
         unhashed.pop(key, None)
@@ -149,6 +259,17 @@ def test_handoff_keeps_mover_subset_when_core_membership_is_unavailable(tmp_path
     core["membership_count"] = 0
     core.pop("canonical_member_set_hash_sha256", None)
     core["canonical_member_set_hash_sha256"] = _canonical_member_hash([])
+    for verdict in core["index_verdicts"].values():
+        verdict.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "observed_unique_count": 0,
+                "count_verdict": "FAIL",
+                "effective_date_verdict": "UNKNOWN",
+                "freshness_verdict": "UNKNOWN",
+                "completeness_verdict": "INCOMPLETE",
+            }
+        )
     unhashed = dict(core)
     for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
         unhashed.pop(key, None)
@@ -163,6 +284,60 @@ def test_handoff_keeps_mover_subset_when_core_membership_is_unavailable(tmp_path
 
     assert payload["universe_symbols"] == ["AAA", "BBB"]
     assert "core_membership_unavailable" in payload["coverage"]["shortfall_reasons"]
+
+
+def test_one_lane_self_hashed_core_cannot_claim_complete(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    core_path = root / "core_universe_contract.json"
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    core["members"][0]["index_memberships"] = ["S&P 500"]
+    core["canonical_member_set_hash_sha256"] = _canonical_member_hash(
+        [
+            {
+                "symbol": "AAA",
+                "provider_symbol": "AAA",
+                "asset_class": "common_stock",
+                "index": "S&P 500",
+                "valid_from": None,
+                "valid_to": None,
+            }
+        ]
+    )
+    core["index_verdicts"].pop("Nasdaq-100")
+    unhashed = {
+        key: value
+        for key, value in core.items()
+        if key not in {"content_hash_sha256", "content_hash", "contract_id", "universe_id"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    core["content_hash_sha256"] = digest
+    core["content_hash"] = digest
+    core_path.write_text(json.dumps(core, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError, match="index verdicts are incomplete"):
+        build_universe_handoff(root, MARKET_DATE)
+
+
+def test_undated_mover_rows_cannot_become_complete(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    snapshot_path = root / "web_collect" / "premarket_snapshot.csv"
+    snapshot_path.write_text("ticker,source\nAAA,mover\n", encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError, match="row date is missing"):
+        build_universe_handoff(root, MARKET_DATE)
+
+
+def test_source_summary_snapshot_cannot_duplicate_canonical_artifact(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    summary_path = root / "web_collect" / "source_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["snapshot_path"] = str(root / "alpha_cycle.json")
+    summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError):
+        build_universe_handoff(root, MARKET_DATE)
 
 
 @pytest.mark.parametrize("mutation", ["bytes", "date"])
@@ -250,6 +425,32 @@ def test_self_consistent_forged_union_membership_and_coverage_are_rejected_by_lo
             universe_handoff_path=handoff_path,
             scheduled_production=True,
         )
+
+
+def test_forged_strategy_fleet_is_rejected_by_loader(tmp_path: Path) -> None:
+    morning = _morning_root(tmp_path)
+    handoff_path = morning / "paperops_universe_handoff.json"
+    build_universe_handoff(morning, MARKET_DATE, output_path=handoff_path)
+    forged = json.loads(handoff_path.read_text(encoding="utf-8"))
+    forged["strategy_fleet"]["declared_paperops_strategy_ids"] = forged["strategy_fleet"][
+        "expected_strategy_ids"
+    ][:-1]
+    unhashed = {
+        key: value
+        for key, value in forged.items()
+        if key not in {"content_hash_sha256", "content_hash", "handoff_id", "universe_id"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    forged["content_hash_sha256"] = digest
+    forged["content_hash"] = digest
+    forged["handoff_id"] = "paperops-universe-" + digest[:24]
+    forged["universe_id"] = "paperops-pit-universe-" + digest[:24]
+    handoff_path.write_text(json.dumps(forged, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError, match="strategy fleet"):
+        load_universe_handoff(handoff_path, market_date=MARKET_DATE, require_production=True)
 
 
 def test_handoff_stale_morning_cycle_is_fail_closed(tmp_path: Path) -> None:
