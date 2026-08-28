@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -32,7 +34,10 @@ _CANONICAL_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
 _MAX_SYMBOL_LENGTH = 16
 _MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_MAX_PERSISTED_RATE_AHEAD_SECONDS = 30 * 60
 _CACHE_WRITE_LOCK = threading.RLock()
+_PROCESS_RATE_LOCK = threading.Lock()
+_PROCESS_NEXT_REQUEST_AT = 0.0
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,7 @@ def fetch_yahoo_chart_daily_dataset(
     max_requests_per_second: float | None = None,
     time_budget_seconds: float | None = None,
     required_bar_date: date | None = None,
+    minimum_history_bars: int = 0,
 ) -> YahooChartFetchResult:
     """Fetch public daily OHLCV bars and cache raw payloads for audit.
 
@@ -81,6 +87,8 @@ def fetch_yahoo_chart_daily_dataset(
         raise ValueError("max_requests_per_second must be positive when supplied")
     if time_budget_seconds is not None and time_budget_seconds <= 0:
         raise ValueError("time_budget_seconds must be positive when supplied")
+    if minimum_history_bars < 0:
+        raise ValueError("minimum_history_bars cannot be negative")
     requested_symbols = canonicalize_yahoo_symbols(symbols)
     provider_symbols = _provider_symbol_map(requested_symbols)
     cache_root = cache_dir.resolve()
@@ -101,7 +109,10 @@ def fetch_yahoo_chart_daily_dataset(
         }
     )
     deadline = time.monotonic() + time_budget_seconds if time_budget_seconds else None
-    request_gate = _RequestRateGate(max_requests_per_second)
+    request_gate = _RequestRateGate(
+        max_requests_per_second,
+        cache_root=cache_root,
+    )
 
     # The executor is deliberately bounded.  Futures are consumed in the
     # original symbol order below, so network completion order cannot change
@@ -118,6 +129,7 @@ def fetch_yahoo_chart_daily_dataset(
             max_attempts=max_attempts,
             retry_backoff_seconds=retry_backoff_seconds,
             required_bar_date=required_bar_date,
+            minimum_history_bars=minimum_history_bars,
             deadline=deadline,
             request_gate=request_gate,
             cache_root=cache_root,
@@ -202,6 +214,14 @@ def fetch_yahoo_chart_daily_dataset(
         ),
         warnings=tuple(warnings),
     )
+    if deadline is not None and time.monotonic() >= deadline:
+        warnings.append("public_yahoo_chart: acquisition deadline exhausted before artifact writes")
+        dataset = _dataset_with_warnings(dataset, warnings)
+        return YahooChartFetchResult(
+            dataset=dataset,
+            raw_payload_paths=(),
+            warnings=dataset.warnings,
+        )
     missing_symbols = tuple(
         symbol for symbol in requested_symbols if symbol not in dataset.bars_by_symbol
     )
@@ -214,6 +234,7 @@ def fetch_yahoo_chart_daily_dataset(
             cache_dir,
             {symbol: payloads[symbol] for symbol in requested_symbols if symbol in payloads},
             required_bar_date=required_bar_date,
+            deadline=deadline,
         )
         dataset = _dataset_with_warnings(dataset, warnings)
         return YahooChartFetchResult(
@@ -229,6 +250,7 @@ def fetch_yahoo_chart_daily_dataset(
             cache_dir,
             normalized,
             payloads[normalized],
+            deadline=deadline,
         )
         raw_paths.append(raw_path)
         source_refs.extend(
@@ -240,7 +262,7 @@ def fetch_yahoo_chart_daily_dataset(
             )
         )
 
-    csv_path = _write_csv_immutable(dataset, cache_root=cache_root)
+    csv_path = _write_csv_immutable(dataset, cache_root=cache_root, deadline=deadline)
     dataset = MarketDataset(
         dataset_id=dataset.dataset_id,
         source_kind=dataset.source_kind,
@@ -258,22 +280,36 @@ def fetch_yahoo_chart_daily_dataset(
 
 
 class _RequestRateGate:
-    """Small process-local pacing gate shared by all bounded workers."""
+    """Process-wide pacing gate shared by all concurrent fetch invocations."""
 
-    def __init__(self, max_requests_per_second: float | None) -> None:
+    def __init__(
+        self,
+        max_requests_per_second: float | None,
+        *,
+        cache_root: Path | None = None,
+    ) -> None:
         self._interval = (
             0.0 if max_requests_per_second is None else 1.0 / max_requests_per_second
         )
-        self._next_at = 0.0
-        self._lock = threading.Lock()
+        self._cache_root = cache_root
 
     def wait(self, deadline: float | None) -> bool:
         if self._interval <= 0:
             return deadline is None or time.monotonic() < deadline
-        with self._lock:
+        global _PROCESS_NEXT_REQUEST_AT
+        with _PROCESS_RATE_LOCK:
             now = time.monotonic()
-            scheduled = max(now, self._next_at)
-            self._next_at = scheduled + self._interval
+            scheduled = max(now, _PROCESS_NEXT_REQUEST_AT)
+            if self._cache_root is not None:
+                with _cross_process_rate_lock(self._cache_root, deadline=deadline) as state:
+                    now_wall = time.time()
+                    scheduled_wall = max(now_wall, float(state[0]))
+                    state[0] = scheduled_wall + self._interval
+                    scheduled = max(
+                        scheduled,
+                        now + max(0.0, scheduled_wall - now_wall),
+                    )
+            _PROCESS_NEXT_REQUEST_AT = max(_PROCESS_NEXT_REQUEST_AT, scheduled + self._interval)
         if deadline is not None and scheduled >= deadline:
             return False
         delay = scheduled - time.monotonic()
@@ -282,6 +318,70 @@ class _RequestRateGate:
                 return False
             time.sleep(delay)
         return deadline is None or time.monotonic() < deadline
+
+
+@contextmanager
+def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
+    lock_path = cache_root / ".yahoo_rate_gate.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Yahoo rate-gate lock exceeded acquisition deadline"
+                        ) from None
+                    time.sleep(0.01)
+        else:  # pragma: no cover - exercised on POSIX CI only
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Yahoo rate-gate lock exceeded acquisition deadline"
+                        ) from None
+                    time.sleep(0.01)
+        try:
+            handle.seek(0)
+            raw = handle.read(128).decode("ascii", errors="ignore").strip()
+            try:
+                persisted = float(raw)
+            except ValueError:
+                persisted = 0.0
+            now_wall = time.time()
+            if not math.isfinite(persisted) or not (
+                now_wall - 3600
+                <= persisted
+                <= now_wall + _MAX_PERSISTED_RATE_AHEAD_SECONDS
+            ):
+                persisted = now_wall
+            state = [persisted]
+            yield state
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{state[0]:.9f}".encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover - exercised on POSIX CI only
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _fetch_symbol(
@@ -294,6 +394,7 @@ def _fetch_symbol(
     max_attempts: int,
     retry_backoff_seconds: float,
     required_bar_date: date | None,
+    minimum_history_bars: int,
     deadline: float | None,
     request_gate: _RequestRateGate,
     cache_root: Path,
@@ -303,6 +404,8 @@ def _fetch_symbol(
         symbol,
         provider_symbol=provider_symbol,
         required_bar_date=required_bar_date,
+        minimum_history_bars=minimum_history_bars,
+        deadline=deadline,
         cache_root=cache_root,
     )
     if cached is not None:
@@ -377,11 +480,14 @@ def _fetch_symbol(
             del parse_warnings
             if not bars:
                 raise ValueError("response contained no valid daily bars")
-            if required_bar_date is not None and not any(
-                bar.timestamp.date() == required_bar_date for bar in bars
+            if not _bars_meet_admission_contract(
+                bars,
+                required_bar_date=required_bar_date,
+                minimum_history_bars=minimum_history_bars,
             ):
                 raise ValueError(
-                    f"response lacks required completed bar {required_bar_date.isoformat()}"
+                    f"response lacks governed completed-bar/history requirements for "
+                    f"{required_bar_date.isoformat() if required_bar_date else 'request'}"
                 )
             return _SymbolFetchResult(
                 symbol=symbol,
@@ -422,19 +528,15 @@ def _cache_candidates(
     *,
     required_bar_date: date | None,
 ) -> tuple[Path, ...]:
-    candidates = [
-        cache_dir / f"{symbol.lower()}_chart.json",
-        *sorted(cache_dir.glob(f"{symbol.lower()}_chart_*.json")),
-    ]
+    candidates = sorted(cache_dir.glob(f"{symbol.lower()}_chart_*.json"))
     if required_bar_date is not None:
         partial_dir = cache_dir / ".partial" / required_bar_date.isoformat()
-        candidates.extend(
-            [
-                partial_dir / f"{symbol.lower()}_chart.json",
-                *sorted(partial_dir.glob(f"{symbol.lower()}_chart_*.json")),
-            ]
-        )
-    return tuple(path for path in candidates if path.is_file())
+        candidates.extend(sorted(partial_dir.glob(f"{symbol.lower()}_chart_*.json")))
+    return tuple(
+        path
+        for path in candidates
+        if path.is_file() and _content_addressed_cache_name(path, symbol)
+    )
 
 
 def _read_cached_payload(
@@ -443,13 +545,13 @@ def _read_cached_payload(
     *,
     provider_symbol: str,
     required_bar_date: date | None,
+    minimum_history_bars: int,
+    deadline: float | None,
     cache_root: Path,
 ) -> tuple[dict[str, Any], Path] | None:
-    # Root cache files predate this bounded-resume implementation.  They are
-    # usable only when the caller supplies an exact required date; otherwise a
-    # root cache could silently turn a fresh request into stale truth. Partial
-    # files are namespaced by that exact date and are never reused undated.
-    candidates: list[tuple[Path, dict[str, Any], list[Any]]] = []
+    # Only full-digest content-addressed objects are admissible. Legacy mutable
+    # aliases are intentionally ignored, even when their bytes look valid.
+    candidates: list[tuple[Path, dict[str, Any], list[Any], str]] = []
     for path in _cache_candidates(
         cache_dir,
         symbol,
@@ -459,49 +561,139 @@ def _read_cached_payload(
         if required_bar_date is None:
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            expected_digest = _cache_digest_from_name(path, symbol)
+            content = _bounded_file_read(path, deadline=deadline)
+            actual_digest = hashlib.sha256(content).hexdigest()
+            if actual_digest != expected_digest:
+                _quarantine_corrupt_cache(path, cache_root)
+                continue
+            payload = json.loads(content.decode("utf-8"))
             if not isinstance(payload, dict):
                 continue
             _validate_payload_symbol(provider_symbol, payload)
             bars, _warnings = _bars_from_payload(symbol, payload)
-            if not bars:
-                continue
-            if required_bar_date is not None and not any(
-                bar.timestamp.date() == required_bar_date for bar in bars
+            if not _bars_meet_admission_contract(
+                bars,
+                required_bar_date=required_bar_date,
+                minimum_history_bars=minimum_history_bars,
             ):
                 continue
-            candidates.append((path, payload, bars))
+            candidates.append((path, payload, bars, expected_digest))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             continue
     if not candidates:
         return None
     # Choose the newest exact-date bar, with a stable filename tie-breaker.
     # Filesystem mtime is intentionally excluded from the identity.
-    path, payload, _bars = max(
+    path, payload, _bars, _digest = max(
         candidates,
-        key=lambda item: (max(bar.timestamp for bar in item[2]), item[0].name),
+        key=lambda item: (
+            len({bar.timestamp for bar in item[2]}),
+            (
+                max(bar.timestamp for bar in item[2])
+                - min(bar.timestamp for bar in item[2])
+            ).total_seconds(),
+            item[3],
+        ),
     )
     return payload, path
+
+
+def _content_addressed_cache_name(path: Path, symbol: str) -> bool:
+    prefix = f"{symbol.lower()}_chart_"
+    return (
+        path.name.startswith(prefix)
+        and path.name.endswith(".json")
+        and len(path.name) == len(prefix) + 64 + len(".json")
+        and all(character in "0123456789abcdef" for character in path.stem[len(prefix) :])
+    )
+
+
+def _cache_digest_from_name(path: Path, symbol: str) -> str:
+    if not _content_addressed_cache_name(path, symbol):
+        raise ValueError("Yahoo cache object is not a full-digest content-addressed file")
+    return path.stem[len(f"{symbol.lower()}_chart_") :]
+
+
+def _bounded_file_read(path: Path, *, deadline: float | None) -> bytes:
+    if path.stat().st_size > _MAX_PAYLOAD_BYTES:
+        raise ValueError("Yahoo cache object exceeds maximum payload size")
+    chunks: list[bytes] = []
+    total = 0
+    with path.open("rb") as handle:
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Yahoo cache read exceeded acquisition deadline")
+            chunk = handle.read(min(_READ_CHUNK_BYTES, _MAX_PAYLOAD_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_PAYLOAD_BYTES:
+                raise ValueError("Yahoo cache object exceeds maximum payload size")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _ensure_before_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("acquisition deadline exhausted before artifact mutation")
+
+
+def _bars_meet_admission_contract(
+    bars: list[Any],
+    *,
+    required_bar_date: date | None,
+    minimum_history_bars: int,
+) -> bool:
+    unique_timestamps = {bar.timestamp for bar in bars}
+    if len(unique_timestamps) < minimum_history_bars or not bars:
+        return False
+    if required_bar_date is None:
+        return True
+    dates = [bar.timestamp.date() for bar in bars]
+    return max(dates) == required_bar_date and required_bar_date in dates
 
 
 def _canonical_payload_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _write_immutable_payload(cache_dir: Path, symbol: str, payload: dict[str, Any]) -> Path:
+def _write_immutable_payload(
+    cache_dir: Path,
+    symbol: str,
+    payload: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> Path:
+    _ensure_before_deadline(deadline)
     cache_root = cache_dir.resolve()
     _validate_symbol(symbol)
     content = _canonical_payload_bytes(payload)
-    digest = hashlib.sha256(content).hexdigest()[:16]
+    digest = hashlib.sha256(content).hexdigest()
     content_path = cache_dir / f"{symbol.lower()}_chart_{digest}.json"
     # The digest path is the sole authoritative source identity.  The old
     # ``<symbol>_chart.json`` alias is intentionally never returned: another
     # process may replace it between acquisition and DataTruth hashing.
     _assert_cache_path(cache_root, content_path)
     with _CACHE_WRITE_LOCK:
-        if content_path.exists() and content_path.read_bytes() != content:
-            _quarantine_corrupt_cache(content_path, cache_root)
-        _write_exclusive(content_path, content, cache_root=cache_root)
+        if content_path.exists():
+            existing = _bounded_file_read(content_path, deadline=None)
+            existing_digest = hashlib.sha256(existing).hexdigest()
+            if existing != content:
+                if existing_digest == digest:
+                    raise ValueError(
+                        "Yahoo cache digest collision: authoritative object bytes differ"
+                    )
+                _quarantine_corrupt_cache(
+                    content_path, cache_root, expected_digest=digest
+                )
+        _write_exclusive(
+            content_path,
+            content,
+            cache_root=cache_root,
+            expected_digest=digest,
+            deadline=deadline,
+        )
     return content_path
 
 
@@ -510,6 +702,7 @@ def _write_partial_payloads(
     payloads: dict[str, dict[str, Any]],
     *,
     required_bar_date: date | None,
+    deadline: float | None = None,
 ) -> None:
     if required_bar_date is None:
         return
@@ -518,16 +711,32 @@ def _write_partial_payloads(
     _assert_cache_path(cache_root, partial_dir)
     partial_dir.mkdir(parents=True, exist_ok=True)
     for symbol in sorted(payloads):
-        _write_immutable_payload(partial_dir, symbol, payloads[symbol])
+        _write_immutable_payload(
+            partial_dir,
+            symbol,
+            payloads[symbol],
+            deadline=deadline,
+        )
 
 
-def _write_exclusive(path: Path, content: bytes, *, cache_root: Path) -> None:
+def _write_exclusive(
+    path: Path,
+    content: bytes,
+    *,
+    cache_root: Path,
+    expected_digest: str | None = None,
+    deadline: float | None = None,
+) -> None:
+    _ensure_before_deadline(deadline)
     _assert_cache_path(cache_root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _CACHE_WRITE_LOCK:
         if path.exists():
-            if path.read_bytes() == content:
+            existing = _bounded_file_read(path, deadline=None)
+            if existing == content:
                 return
+            if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
+                raise ValueError("Yahoo cache digest collision: authoritative bytes differ")
             raise ValueError(f"immutable Yahoo cache conflict: {path}")
         descriptor, temporary_name = tempfile.mkstemp(
             dir=path.parent,
@@ -540,20 +749,43 @@ def _write_exclusive(path: Path, content: bytes, *, cache_root: Path) -> None:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
+            _ensure_before_deadline(deadline)
             # The lock makes create/replace atomic for concurrent workers in
-            # this process; a pre-existing target is never overwritten.
+            # this process. Hard-link creation is exclusive across processes;
+            # a pre-existing target is never overwritten.
             if path.exists():
-                if path.read_bytes() == content:
+                existing = _bounded_file_read(path, deadline=None)
+                if existing == content:
                     return
-                raise ValueError(f"immutable Yahoo cache conflict: {path}")
-            os.replace(temporary_path, path)
+                if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
+                    raise ValueError(
+                        "Yahoo cache digest collision: authoritative bytes differ"
+                    ) from None
+                raise ValueError(f"immutable Yahoo cache conflict: {path}") from None
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError:
+                existing = _bounded_file_read(path, deadline=None)
+                if existing == content:
+                    return
+                if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
+                    raise ValueError(
+                        "Yahoo cache digest collision: authoritative bytes differ"
+                    ) from None
+                raise ValueError(f"immutable Yahoo cache conflict: {path}") from None
         finally:
             temporary_path.unlink(missing_ok=True)
 
 
-def _write_csv_immutable(dataset: MarketDataset, *, cache_root: Path) -> Path:
+def _write_csv_immutable(
+    dataset: MarketDataset,
+    *,
+    cache_root: Path,
+    deadline: float | None = None,
+) -> Path:
     """Write a content-addressed CSV and retain a non-authoritative alias."""
 
+    _ensure_before_deadline(deadline)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=cache_root,
         prefix=".public_yahoo_ohlcv.",
@@ -567,44 +799,81 @@ def _write_csv_immutable(dataset: MarketDataset, *, cache_root: Path) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         content = temporary_path.read_bytes()
+        _ensure_before_deadline(deadline)
     finally:
         temporary_path.unlink(missing_ok=True)
     digest = hashlib.sha256(content).hexdigest()
     immutable_path = cache_root / f"public_yahoo_ohlcv_{digest}.csv"
     _assert_cache_path(cache_root, immutable_path)
     if immutable_path.exists() and immutable_path.read_bytes() != content:
-        _quarantine_corrupt_cache(immutable_path, cache_root)
-    _write_exclusive(immutable_path, content, cache_root=cache_root)
+        _quarantine_corrupt_cache(
+            immutable_path, cache_root, expected_digest=digest
+        )
+    _write_exclusive(
+        immutable_path,
+        content,
+        cache_root=cache_root,
+        expected_digest=digest,
+        deadline=deadline,
+    )
     alias_path = cache_root / "public_yahoo_ohlcv.csv"
     _assert_cache_path(cache_root, alias_path)
     if not alias_path.exists():
         try:
-            _write_exclusive(alias_path, content, cache_root=cache_root)
+            _write_exclusive(alias_path, content, cache_root=cache_root, deadline=deadline)
         except ValueError:
             pass
+    _ensure_before_deadline(deadline)
     return immutable_path
 
 
-def _quarantine_corrupt_cache(path: Path, cache_root: Path) -> None:
+def _quarantine_corrupt_cache(
+    path: Path,
+    cache_root: Path,
+    *,
+    expected_digest: str | None = None,
+) -> None:
     _assert_cache_path(cache_root, path)
     quarantine_root = cache_root / ".quarantine"
     quarantine_root.mkdir(parents=True, exist_ok=True)
     with _CACHE_WRITE_LOCK:
         if not path.exists():
             return
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        try:
+            content = _bounded_file_read(path, deadline=None)
+            digest = hashlib.sha256(content).hexdigest()
+            if expected_digest is not None and digest == expected_digest:
+                return
+            original_stat = path.stat()
+        except FileNotFoundError:
+            return
         quarantine_path = quarantine_root / f"{path.name}.{digest}.corrupt"
         _assert_cache_path(cache_root, quarantine_path)
-        if path.exists():
+        try:
             if not quarantine_path.exists():
-                try:
-                    os.replace(path, quarantine_path)
-                except FileNotFoundError:
-                    # A separate process may have quarantined this exact
-                    # corrupt object between the existence check and replace.
-                    return
-            elif path.read_bytes() == quarantine_path.read_bytes():
+                os.link(path, quarantine_path)
+            current_stat = path.stat()
+            if (
+                current_stat.st_dev == original_stat.st_dev
+                and current_stat.st_ino == original_stat.st_ino
+            ):
                 path.unlink()
+            elif quarantine_path.exists() and quarantine_path.stat().st_ino == original_stat.st_ino:
+                quarantine_path.unlink()
+        except FileExistsError:
+            # Another process already quarantined the same corrupt bytes. If
+            # this path still contains those verified bytes, remove only that
+            # inode so the correct digest target can be recreated.
+            try:
+                current_stat = path.stat()
+                if _bounded_file_read(path, deadline=None) == _bounded_file_read(
+                    quarantine_path, deadline=None
+                ) and current_stat.st_ino == original_stat.st_ino:
+                    path.unlink()
+            except FileNotFoundError:
+                return
+        except FileNotFoundError:
+            return
 
 
 def _assert_cache_path(cache_root: Path, path: Path) -> None:

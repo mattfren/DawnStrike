@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -13,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from intraday_scanner.market_calendar import market_session
 from intraday_scanner.v2.data import (
     MarketBar,
     MarketDataset,
@@ -111,6 +113,10 @@ def build_data_truth_snapshot(
         )
 
         symbols = canonicalize_yahoo_symbols(symbols)
+    required_bar_date = (
+        _last_completed_market_session(as_of_date) if symbols is not None else None
+    )
+    minimum_history = _governed_minimum_history_bars() if symbols is not None else 0
     now = created_at or datetime.now(timezone.utc)
     paths = DataTruthPaths.create(output_root)
     source_csv, raw_dir, source_refs, source_warnings = _resolve_public_yahoo_source(
@@ -119,10 +125,11 @@ def build_data_truth_snapshot(
         raw_dir=raw_dir,
         allow_fetch=allow_fetch,
         symbols=symbols,
-        required_bar_date=as_of_date - timedelta(days=1) if symbols is not None else None,
+        required_bar_date=required_bar_date,
         fetch_max_workers=fetch_max_workers,
         fetch_max_requests_per_second=fetch_max_requests_per_second,
         fetch_time_budget_seconds=fetch_time_budget_seconds,
+        minimum_history_bars=minimum_history,
     )
     source_artifacts = _capture_source_artifacts(
         source_csv=source_csv,
@@ -136,7 +143,6 @@ def build_data_truth_snapshot(
         source_refs=source_refs,
     )
     if symbols is not None:
-        required_bar_date = as_of_date - timedelta(days=1)
         requested_symbols = tuple(
             sorted(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
         )
@@ -148,7 +154,6 @@ def build_data_truth_snapshot(
                 for bar in normalized.bars_by_symbol.get(symbol, ())
             )
         )
-        minimum_history = _governed_minimum_history_bars()
         insufficient_history = tuple(
             symbol
             for symbol in requested_symbols
@@ -250,6 +255,7 @@ def build_data_truth_snapshot(
         snapshot_content_hash=snapshot_content_hash,
         artifact_schema_version=SNAPSHOT_ARTIFACT_SCHEMA_VERSION,
         code_version="0.1.0",
+        required_bar_date=required_bar_date.isoformat() if required_bar_date else None,
         schema_version=DATA_TRUTH_MANIFEST_SCHEMA_VERSION,
     )
     manifest = replace(
@@ -940,6 +946,7 @@ def _manifest_from_payload(payload: dict[str, object]) -> DataTruthManifest:
             "artifact_schema_version",
         ),
         code_version=_optional_manifest_string(payload, "code_version"),
+        required_bar_date=_optional_manifest_string(payload, "required_bar_date"),
         schema_version=str(payload.get("schema_version") or "v2.data_truth_manifest.v1"),
     )
 
@@ -1095,9 +1102,15 @@ def _resolve_public_yahoo_source(
     fetch_max_workers: int = 12,
     fetch_max_requests_per_second: float | None = 8.0,
     fetch_time_budget_seconds: float | None = 90 * 60,
+    minimum_history_bars: int = 0,
 ) -> tuple[Path, Path, tuple[str, ...], tuple[str, ...]]:
     if source_csv is not None and raw_dir is not None:
-        return source_csv, raw_dir, _source_refs_from_cache(source_csv, raw_dir), ()
+        return (
+            source_csv,
+            raw_dir,
+            _source_refs_from_cache(source_csv, raw_dir, required_symbols=symbols),
+            (),
+        )
     local_cache = paths.cache / "public_yahoo"
     local_csv = local_cache / "public_yahoo_ohlcv.csv"
     alpha_cache = Path("data/v2_alpha_lab/fixtures/public_yahoo")
@@ -1119,6 +1132,7 @@ def _resolve_public_yahoo_source(
                         "max_workers": fetch_max_workers,
                         "max_requests_per_second": fetch_max_requests_per_second,
                         "time_budget_seconds": fetch_time_budget_seconds,
+                        "minimum_history_bars": minimum_history_bars,
                     }
                 )
             fetched = fetch_yahoo_chart_daily_dataset(**fetch_kwargs)
@@ -1271,21 +1285,115 @@ def _normalize_daily(
     return normalized, rejected_count, skipped_incomplete, tuple(dict.fromkeys(warnings))
 
 
-def _source_refs_from_cache(source_csv: Path, raw_dir: Path) -> tuple[str, ...]:
+def _source_refs_from_cache(
+    source_csv: Path,
+    raw_dir: Path,
+    *,
+    required_symbols: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
     refs = [source_csv.as_posix()]
-    for path in sorted(raw_dir.glob("*_chart*.json")):
-        symbol = path.name.split("_", 1)[0].upper()
+    selected = load_ohlcv_csv(
+        source_csv,
+        dataset_id="cache_source_selection",
+        source_kind="public_yahoo_chart",
+        timeframe="1d",
+    )
+    if required_symbols is not None and set(selected.symbols) != set(required_symbols):
+        raise DataTruthAcquisitionIncomplete(
+            "CSV source symbol set does not exactly match scheduled requested universe"
+        )
+    from intraday_scanner.v2.data.yahoo_chart import _bars_from_payload
+
+    for symbol in selected.symbols:
+        prefix = f"{symbol.lower()}_chart_"
+        matches: list[Path] = []
+        for path in sorted(raw_dir.glob(f"{prefix}*.json")):
+            if not _is_full_digest_raw_name(path, prefix) or not path.is_file():
+                continue
+            try:
+                content = _bounded_source_bytes(path)
+                digest = hashlib.sha256(content).hexdigest()
+                if digest != path.stem[len(prefix) :]:
+                    continue
+                payload = json.loads(content.decode("utf-8"))
+                provider_symbol = symbol.replace(".", "-")
+                chart = payload.get("chart")
+                result = chart.get("result", []) if isinstance(chart, dict) else []
+                first_result = result[0] if isinstance(result, list) and result else {}
+                meta = first_result.get("meta", {}) if isinstance(first_result, dict) else {}
+                if meta.get("symbol") != provider_symbol:
+                    continue
+                bars, _warnings = _bars_from_payload(symbol, payload)
+                if _bar_fingerprint(bars) == _bar_fingerprint(selected.bars_by_symbol[symbol]):
+                    matches.append(path)
+            except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        if not matches:
+            if required_symbols is not None:
+                raise DataTruthAcquisitionIncomplete(
+                    f"no verified raw Yahoo artifact matches CSV symbol {symbol}"
+                )
+            continue
+        if required_symbols is not None and len(matches) != 1:
+            raise DataTruthAcquisitionIncomplete(
+                f"expected exactly one verified raw Yahoo artifact for {symbol}; "
+                f"found={len(matches)}"
+            )
+        path = matches[0]
         provider_symbol = symbol.replace(".", "-")
-        refs.append(
-            f"canonical_symbol:{symbol}"
+        refs.extend(
+            (
+                f"canonical_symbol:{symbol}",
+                f"yahoo_symbol:{provider_symbol}",
+                "https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{provider_symbol}?range=2y&interval=1d&includePrePost=false&events=history",
+                path.as_posix(),
+            )
         )
-        refs.append(f"yahoo_symbol:{provider_symbol}")
-        refs.append(
-            "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{provider_symbol}?range=2y&interval=1d&includePrePost=false&events=history"
-        )
-        refs.append(path.as_posix())
     return tuple(refs)
+
+
+def _is_full_digest_raw_name(path: Path, prefix: str) -> bool:
+    digest = path.stem[len(prefix) :]
+    return (
+        path.name.startswith(prefix)
+        and path.name.endswith(".json")
+        and len(digest) == 64
+        and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+    )
+
+
+def _bounded_source_bytes(path: Path) -> bytes:
+    max_bytes = 16 * 1024 * 1024
+    if path.stat().st_size > max_bytes:
+        raise ValueError("source artifact exceeds maximum payload size")
+    chunks: list[bytes] = []
+    total = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(min(65536, max_bytes + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("source artifact exceeds maximum payload size")
+            chunks.append(chunk)
+
+
+def _bar_fingerprint(
+    bars: tuple[MarketBar, ...] | list[MarketBar],
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (
+            bar.timestamp.isoformat(),
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+        )
+        for bar in bars
+    )
 
 
 def _artifact_hashes(paths: tuple[Path, ...]) -> dict[str, str]:
@@ -1327,6 +1435,15 @@ def _governed_minimum_history_bars() -> int:
         raise ValueError("active strategy catalog has no governed history requirement")
     # An indicator that starts at index N needs N+1 observations.
     return max(warmup_values) + 1
+
+
+def _last_completed_market_session(value: date) -> date:
+    """Resolve the prior exchange session, including weekends and holidays."""
+
+    candidate = value - timedelta(days=1)
+    while not market_session(candidate).is_trading_day:
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1428,9 +1545,10 @@ def count_csv_rows(path: Path) -> int:
 
 
 def _calendar_warnings(as_of_date: date) -> list[str]:
-    if as_of_date.weekday() >= 5:
+    if not market_session(as_of_date).is_trading_day:
+        latest = _last_completed_market_session(as_of_date)
         return [
-            f"run date {as_of_date.isoformat()} is a weekend; latest completed trading date "
-            "is resolved by accepted provider bars, not an exchange holiday calendar"
+            f"run date {as_of_date.isoformat()} is not a trading session; latest completed "
+            f"trading date is {latest.isoformat()} per governed market calendar"
         ]
     return []

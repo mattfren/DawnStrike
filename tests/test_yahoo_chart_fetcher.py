@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,14 @@ def _symbol_from_url(url: str) -> str:
 
 def _write_payload_in_child(cache_dir: str, payload: dict[str, object]) -> None:
     yahoo_chart_fetcher._write_immutable_payload(Path(cache_dir), "SPY", payload)
+
+
+def _rate_gate_in_child(cache_dir: str) -> None:
+    gate = yahoo_chart_fetcher._RequestRateGate(1, cache_root=Path(cache_dir))
+    gate.wait(None)
+    (Path(cache_dir) / f"started_{os.getpid()}.txt").write_text(
+        str(time.time()), encoding="ascii"
+    )
 
 
 def test_yahoo_chart_fetch_retries_transient_symbol_failure(
@@ -415,7 +424,7 @@ def test_yahoo_chart_cache_writer_is_concurrency_safe_and_quarantines_corruption
 ) -> None:
     payload = _payload("SPY")
     content = yahoo_chart_fetcher._canonical_payload_bytes(payload)
-    digest = hashlib.sha256(content).hexdigest()[:16]
+    digest = hashlib.sha256(content).hexdigest()
     target = tmp_path / f"spy_chart_{digest}.json"
     target.write_bytes(b"truncated")
 
@@ -436,7 +445,7 @@ def test_yahoo_chart_raw_sources_are_immutable_across_process_builders(
     second_payload = _payload("SPY")
     second_payload["chart"]["result"][0]["indicators"]["quote"][0]["close"] = [202.0]
     expected = {
-        hashlib.sha256(yahoo_chart_fetcher._canonical_payload_bytes(payload)).hexdigest()[:16]:
+        hashlib.sha256(yahoo_chart_fetcher._canonical_payload_bytes(payload)).hexdigest():
         yahoo_chart_fetcher._canonical_payload_bytes(payload)
         for payload in (first_payload, second_payload)
     }
@@ -481,6 +490,119 @@ def test_yahoo_transport_discards_slow_drip_after_deadline(monkeypatch) -> None:
             timeout_seconds=1,
             deadline=time.monotonic() + 0.001,
         )
+
+
+def test_yahoo_rate_gate_is_process_wide_across_invocations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    starts: list[float] = []
+    lock = threading.Lock()
+
+    def fake_fetch(url: str, *, timeout_seconds: float, **kwargs: object) -> dict[str, object]:
+        del timeout_seconds, kwargs
+        with lock:
+            starts.append(time.monotonic())
+        return _payload(_symbol_from_url(url))
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "_fetch_json", fake_fetch)
+
+    def build(symbol: str) -> None:
+        yahoo_chart_fetcher.fetch_yahoo_chart_daily_dataset(
+            symbols=(symbol,),
+            cache_dir=tmp_path / symbol,
+            max_attempts=1,
+            max_requests_per_second=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tuple(executor.map(build, ("AAA", "BBB")))
+    assert len(starts) == 2
+    assert abs(starts[1] - starts[0]) >= 0.9
+
+
+def test_yahoo_cache_prefers_complete_unique_history_over_one_bar(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    rich = _payload("SPY")
+    result = rich["chart"]["result"][0]
+    base_timestamp = result["timestamp"][0]
+    result["timestamp"] = [base_timestamp - 86400, base_timestamp]
+    quote = result["indicators"]["quote"][0]
+    for key in ("open", "high", "low", "close", "volume"):
+        quote[key] = [quote[key][0] - 1, quote[key][0]]
+    one_bar = _payload("SPY")
+    yahoo_chart_fetcher._write_immutable_payload(tmp_path, "SPY", one_bar)
+    yahoo_chart_fetcher._write_immutable_payload(tmp_path, "SPY", rich)
+    monkeypatch.setattr(
+        yahoo_chart_fetcher,
+        "_fetch_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network used")),
+    )
+    fetched = yahoo_chart_fetcher.fetch_yahoo_chart_daily_dataset(
+        symbols=("SPY",),
+        cache_dir=tmp_path,
+        required_bar_date=date.fromtimestamp(base_timestamp),
+        minimum_history_bars=2,
+        max_attempts=1,
+    )
+    assert fetched.dataset.symbols == ("SPY",)
+    assert len(fetched.dataset.bars_by_symbol["SPY"]) == 2
+
+
+def test_yahoo_cache_stale_rate_state_recovers_after_restart(tmp_path: Path) -> None:
+    lock_path = tmp_path / ".yahoo_rate_gate.lock"
+    lock_path.write_text("1337060.0", encoding="ascii")
+    yahoo_chart_fetcher._PROCESS_NEXT_REQUEST_AT = 0.0
+    started = time.monotonic()
+    assert yahoo_chart_fetcher._RequestRateGate(1, cache_root=tmp_path).wait(None)
+    assert time.monotonic() - started < 0.5
+    lock_path.write_text(str(time.time() + 3600), encoding="ascii")
+    yahoo_chart_fetcher._PROCESS_NEXT_REQUEST_AT = 0.0
+    started = time.monotonic()
+    assert yahoo_chart_fetcher._RequestRateGate(1, cache_root=tmp_path).wait(None)
+    assert time.monotonic() - started < 0.5
+
+
+def test_yahoo_rate_gate_cross_process_invocations_are_paced(tmp_path: Path) -> None:
+    context = get_context("spawn")
+    processes = tuple(
+        context.Process(target=_rate_gate_in_child, args=(str(tmp_path),))
+        for _ in range(2)
+    )
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+        assert process.exitcode == 0
+    starts = sorted(
+        float(path.read_text(encoding="ascii"))
+        for path in tmp_path.glob("started_*.txt")
+    )
+    assert len(starts) == 2
+    assert starts[1] - starts[0] >= 0.9
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("open", True), ("volume", None), ("timestamp", True)),
+)
+def test_yahoo_parser_rejects_bool_and_missing_volume(field: str, value: object) -> None:
+    payload = _payload("SPY")
+    if field == "timestamp":
+        payload["chart"]["result"][0][field] = [value]
+    else:
+        payload["chart"]["result"][0]["indicators"]["quote"][0][field] = [value]
+    from intraday_scanner.v2.data.yahoo_chart import dataset_from_yahoo_chart_payloads
+
+    parsed = dataset_from_yahoo_chart_payloads(
+        {"SPY": payload}, dataset_id="hostile", source_kind="test"
+    )
+    assert parsed.symbols == ()
 
 
 def test_yahoo_chart_concurrent_builders_return_byte_exact_content_addressed_csv(

@@ -53,6 +53,15 @@ from intraday_scanner.v2.paper_ops.readiness import forward_readiness
 from intraday_scanner.v2.paper_ops.strategy_evidence import score_strategy_evidence
 from intraday_scanner.v2.strategies import Direction, build_strategy_catalog
 
+
+def test_datatruth_resolves_last_completed_market_session_across_weekends_holidays() -> None:
+    assert data_truth_core._last_completed_market_session(date(2026, 8, 31)) == date(
+        2026, 8, 28
+    )
+    assert data_truth_core._last_completed_market_session(date(2026, 9, 8)) == date(
+        2026, 9, 4
+    )
+
 NOW = datetime(2026, 1, 5, 12, 0, tzinfo=timezone.utc)
 
 

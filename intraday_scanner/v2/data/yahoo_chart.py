@@ -74,7 +74,7 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
             high_value = _number_at(quote, "high", index)
             low_value = _number_at(quote, "low", index)
             close_value = _number_at(quote, "close", index)
-            volume_value = _number_at(quote, "volume", index, allow_none=True)
+            volume_value = _number_at(quote, "volume", index)
         except (TypeError, ValueError, IndexError) as exc:
             warnings.append(f"{symbol}: skipped bar {index} ({exc})")
             continue
@@ -96,7 +96,10 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
         ):
             warnings.append(f"{symbol}: skipped bar {index} with non-finite OHLC")
             continue
-        volume = float(volume_value or 0)
+        if not isinstance(volume_value, int) or isinstance(volume_value, bool):
+            warnings.append(f"{symbol}: skipped bar {index} with non-integer volume")
+            continue
+        volume = float(volume_value)
         if not math.isfinite(volume) or volume < 0:
             warnings.append(f"{symbol}: skipped bar {index} with invalid volume")
             continue
@@ -143,17 +146,13 @@ def _number_at(
     quote: dict[str, Any],
     key: str,
     index: int,
-    *,
-    allow_none: bool = False,
 ) -> float | int | None:
     values = quote.get(key)
     if not isinstance(values, list):
         raise TypeError(f"missing {key} series")
     value = values[index]
-    if value is None and allow_none:
-        return None
     if value is None:
         raise ValueError(f"missing {key}")
-    if not isinstance(value, int | float):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"invalid {key} value")
     return value

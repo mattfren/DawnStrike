@@ -48,6 +48,7 @@ class DataTruthManifest:
     manifest_payload_hash: str | None = None
     artifact_schema_version: str | None = None
     code_version: str | None = None
+    required_bar_date: str | None = None
     schema_version: str = "v2.data_truth_manifest.v1"
 
     def to_dict(self) -> dict[str, object]:
