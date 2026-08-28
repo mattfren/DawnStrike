@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.public_data import yahoo_chart_fetcher
+from intraday_scanner.v2.data.market import MarketBar, MarketDataset, load_ohlcv_csv
+from intraday_scanner.v2.data.yahoo_chart import dataset_from_yahoo_chart_payloads
 
 
 def _payload(symbol: str) -> dict[str, object]:
@@ -597,12 +599,113 @@ def test_yahoo_parser_rejects_bool_and_missing_volume(field: str, value: object)
         payload["chart"]["result"][0][field] = [value]
     else:
         payload["chart"]["result"][0]["indicators"]["quote"][0][field] = [value]
-    from intraday_scanner.v2.data.yahoo_chart import dataset_from_yahoo_chart_payloads
-
     parsed = dataset_from_yahoo_chart_payloads(
         {"SPY": payload}, dataset_id="hostile", source_kind="test"
     )
     assert parsed.symbols == ()
+
+
+def test_yahoo_parser_preserves_large_integer_volume_exactly() -> None:
+    payload = _payload("SPY")
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["volume"] = [
+        9_007_199_254_740_993
+    ]
+    parsed = dataset_from_yahoo_chart_payloads(
+        {"SPY": payload}, dataset_id="large-volume", source_kind="test"
+    )
+    assert parsed.bars_by_symbol["SPY"][0].volume == 9_007_199_254_740_993
+
+
+def test_market_csv_preserves_large_integer_volume_and_rejects_nonfinite(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "hostile.csv"
+    csv_path.write_text(
+        "symbol,timestamp,open,high,low,close,volume\n"
+        "SPY,2026-06-01T21:00:00+00:00,100,102,99,101,9007199254740993\n"
+        "QQQ,2026-06-01T21:00:00+00:00,NaN,102,99,101,1\n",
+        encoding="utf-8",
+    )
+    dataset = load_ohlcv_csv(
+        csv_path, dataset_id="hostile", source_kind="test", timeframe="1d"
+    )
+    assert dataset.bars_by_symbol["SPY"][0].volume == 9_007_199_254_740_993
+    assert "QQQ" not in dataset.bars_by_symbol
+
+
+def test_oversized_raw_and_csv_poison_objects_are_recoverable(tmp_path: Path) -> None:
+    payload = _payload("SPY")
+    content = yahoo_chart_fetcher._canonical_payload_bytes(payload)
+    digest = hashlib.sha256(content).hexdigest()
+    raw_path = tmp_path / f"spy_chart_{digest}.json"
+    raw_path.write_bytes(b"x" * (yahoo_chart_fetcher._MAX_PAYLOAD_BYTES + 1))
+    assert yahoo_chart_fetcher._write_immutable_payload(tmp_path, "SPY", payload) == raw_path
+    assert raw_path.read_bytes() == content
+
+    from datetime import datetime, timezone
+
+    dataset = MarketDataset(
+        dataset_id="csv-poison",
+        source_kind="test",
+        timeframe="1d",
+        bars_by_symbol={
+            "SPY": (
+                MarketBar(
+                    symbol="SPY",
+                    timestamp=datetime(2026, 6, 1, 21, tzinfo=timezone.utc),
+                    open=100.0,
+                    high=102.0,
+                    low=99.0,
+                    close=101.0,
+                    volume=1,
+                ),
+            )
+        },
+    )
+    first = yahoo_chart_fetcher._write_csv_immutable(dataset, cache_root=tmp_path)
+    csv_content = first.read_bytes()
+    first.write_bytes(b"x" * (yahoo_chart_fetcher._MAX_CSV_BYTES + 1))
+    repaired = yahoo_chart_fetcher._write_csv_immutable(dataset, cache_root=tmp_path)
+    assert repaired == first
+    assert repaired.read_bytes() == csv_content
+
+
+def test_full_universe_csv_over_16mib_is_bounded_and_idempotent(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    bars_by_symbol = {}
+    for symbol_index in range(519):
+        symbol = f"S{symbol_index:03d}"
+        bars_by_symbol[symbol] = tuple(
+            MarketBar(
+                symbol=symbol,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc)
+                + timedelta(days=bar_index),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=9_007_199_254_740_993,
+            )
+            for bar_index in range(510)
+        )
+    dataset = MarketDataset(
+        dataset_id="full-universe",
+        source_kind="test",
+        timeframe="1d",
+        bars_by_symbol=bars_by_symbol,
+    )
+    first = yahoo_chart_fetcher._write_csv_immutable(dataset, cache_root=tmp_path)
+    first_bytes = first.read_bytes()
+    assert len(first_bytes) > yahoo_chart_fetcher._MAX_PAYLOAD_BYTES
+    second = yahoo_chart_fetcher._write_csv_immutable(dataset, cache_root=tmp_path)
+    assert second == first
+    assert second.read_bytes() == first_bytes
+    loaded = load_ohlcv_csv(
+        first, dataset_id="full-universe", source_kind="test", timeframe="1d"
+    )
+    assert len(loaded.symbols) == 519
+    assert loaded.bars_by_symbol["S000"][0].volume == 9_007_199_254_740_993
 
 
 def test_yahoo_chart_concurrent_builders_return_byte_exact_content_addressed_csv(

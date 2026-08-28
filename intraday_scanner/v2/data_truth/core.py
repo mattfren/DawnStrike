@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ from intraday_scanner.v2.data import (
     validate_dataset,
     write_ohlcv_csv,
 )
+from intraday_scanner.v2.data.market import MAX_MARKET_CSV_BYTES, MAX_MARKET_VOLUME
 from intraday_scanner.v2.data_truth.models import (
     DataTruthManifest,
     DataTruthReconciliationReport,
@@ -1108,7 +1110,13 @@ def _resolve_public_yahoo_source(
         return (
             source_csv,
             raw_dir,
-            _source_refs_from_cache(source_csv, raw_dir, required_symbols=symbols),
+            _source_refs_from_cache(
+                source_csv,
+                raw_dir,
+                required_symbols=symbols,
+                required_bar_date=required_bar_date,
+                minimum_history_bars=minimum_history_bars,
+            ),
             (),
         )
     local_cache = paths.cache / "public_yahoo"
@@ -1168,13 +1176,27 @@ def _resolve_public_yahoo_source(
         except (OSError, TimeoutError, TypeError, ValueError) as exc:
             refresh_failure = f"{type(exc).__name__}: {exc}"
 
-    if symbols is not None and refresh_failure is not None:
-        raise DataTruthAcquisitionIncomplete(
-            "DataTruth Yahoo acquisition terminal failure for exact requested symbol set: "
-            f"{refresh_failure}"
-        )
-
-    for cached_csv, cache_dir in ((local_csv, local_cache), (alpha_csv, alpha_cache)):
+    cache_pairs = ((local_csv, local_cache), (alpha_csv, alpha_cache))
+    if symbols is not None:
+        # The mutable compatibility alias is never authoritative for an
+        # explicit scheduled universe. Search immutable CSV objects and select
+        # the most complete exact-date candidate deterministically.
+        candidate_pairs = [
+            (path, cache_dir)
+            for _legacy, cache_dir in cache_pairs
+            for path in sorted(cache_dir.glob("public_yahoo_ohlcv_*.csv"))
+            if _is_full_digest_csv_name(path)
+        ]
+    else:
+        candidate_pairs = [
+            (cached_csv, cache_dir)
+            for cached_csv, cache_dir in cache_pairs
+            if cached_csv.exists()
+        ]
+    valid_candidates: list[
+        tuple[tuple[int, float, str], Path, Path, tuple[str, ...], tuple[str, ...]]
+    ] = []
+    for cached_csv, cache_dir in candidate_pairs:
         if not cached_csv.exists():
             continue
         fallback_warning: tuple[str, ...] = ()
@@ -1183,11 +1205,57 @@ def _resolve_public_yahoo_source(
                 "public_yahoo_chart: refresh failed "
                 f"({refresh_failure}); using cached OHLCV from {cached_csv.as_posix()}",
             )
+        try:
+            refs = _source_refs_from_cache(
+                cached_csv,
+                cache_dir,
+                required_symbols=symbols,
+                required_bar_date=required_bar_date,
+                minimum_history_bars=minimum_history_bars,
+            )
+        except (OSError, TypeError, ValueError, DataTruthAcquisitionIncomplete):
+            continue
+        if symbols is None:
+            return (
+                cached_csv,
+                cache_dir,
+                refs,
+                tuple(dict.fromkeys(fetch_warnings + fallback_warning)),
+            )
+        selected = load_ohlcv_csv(
+            cached_csv,
+            dataset_id="cache_candidate_selection",
+            source_kind="public_yahoo_chart",
+            timeframe="1d",
+        )
+        bars = [bar for symbol in selected.symbols for bar in selected.bars_by_symbol[symbol]]
+        span = (
+            max(bar.timestamp for bar in bars) - min(bar.timestamp for bar in bars)
+        ).total_seconds()
+        digest = cached_csv.stem.rsplit("_", 1)[-1]
+        valid_candidates.append(
+            (
+                (len({bar.timestamp for bar in bars}), span, digest),
+                cached_csv,
+                cache_dir,
+                refs,
+                fallback_warning,
+            )
+        )
+    if valid_candidates:
+        _score, cached_csv, cache_dir, refs, candidate_warning = max(
+            valid_candidates, key=lambda item: item[0]
+        )
         return (
             cached_csv,
             cache_dir,
-            _source_refs_from_cache(cached_csv, cache_dir),
-            tuple(dict.fromkeys(fetch_warnings + fallback_warning)),
+            refs,
+            tuple(dict.fromkeys(fetch_warnings + candidate_warning)),
+        )
+    if symbols is not None and refresh_failure is not None:
+        raise DataTruthAcquisitionIncomplete(
+            "DataTruth Yahoo acquisition terminal failure for exact requested symbol set: "
+            f"{refresh_failure}"
         )
     raise FileNotFoundError("no cached public Yahoo OHLCV data was available")
 
@@ -1256,6 +1324,18 @@ def _normalize_daily(
                 warnings.append(f"{symbol}: duplicate timestamp {bar.timestamp.isoformat()}")
                 continue
             seen.add(bar.timestamp)
+            if not all(math.isfinite(value) for value in (bar.open, bar.high, bar.low, bar.close)):
+                rejected_count += 1
+                warnings.append(f"{symbol}: rejected non-finite OHLC at {bar.timestamp}")
+                continue
+            if (
+                type(bar.volume) is not int
+                or bar.volume < 0
+                or bar.volume > MAX_MARKET_VOLUME
+            ):
+                rejected_count += 1
+                warnings.append(f"{symbol}: rejected invalid volume at {bar.timestamp}")
+                continue
             if min(bar.open, bar.high, bar.low, bar.close) <= 0:
                 rejected_count += 1
                 warnings.append(f"{symbol}: rejected non-positive OHLC at {bar.timestamp}")
@@ -1290,7 +1370,16 @@ def _source_refs_from_cache(
     raw_dir: Path,
     *,
     required_symbols: tuple[str, ...] | None = None,
+    required_bar_date: date | None = None,
+    minimum_history_bars: int = 0,
 ) -> tuple[str, ...]:
+    if _is_full_digest_csv_name(source_csv):
+        digest = source_csv.stem.rsplit("_", 1)[-1]
+        content = _bounded_source_bytes(source_csv)
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise DataTruthAcquisitionIncomplete(
+                "content-addressed CSV digest does not match its bytes"
+            )
     refs = [source_csv.as_posix()]
     selected = load_ohlcv_csv(
         source_csv,
@@ -1302,6 +1391,20 @@ def _source_refs_from_cache(
         raise DataTruthAcquisitionIncomplete(
             "CSV source symbol set does not exactly match scheduled requested universe"
         )
+    if required_symbols is not None:
+        for symbol in required_symbols:
+            bars = selected.bars_by_symbol.get(symbol, ())
+            unique_timestamps = {bar.timestamp for bar in bars}
+            if len(unique_timestamps) < minimum_history_bars:
+                raise DataTruthAcquisitionIncomplete(
+                    f"CSV source symbol {symbol} lacks governed minimum history"
+                )
+            if required_bar_date is not None:
+                dates = [bar.timestamp.date() for bar in bars]
+                if not dates or max(dates) != required_bar_date or required_bar_date not in dates:
+                    raise DataTruthAcquisitionIncomplete(
+                        f"CSV source symbol {symbol} lacks exact completed bar {required_bar_date}"
+                    )
     from intraday_scanner.v2.data.yahoo_chart import _bars_from_payload
 
     for symbol in selected.symbols:
@@ -1363,8 +1466,13 @@ def _is_full_digest_raw_name(path: Path, prefix: str) -> bool:
     )
 
 
+def _is_full_digest_csv_name(path: Path) -> bool:
+    match = re.fullmatch(r"public_yahoo_ohlcv_([0-9a-f]{64})\.csv", path.name)
+    return match is not None
+
+
 def _bounded_source_bytes(path: Path) -> bytes:
-    max_bytes = 16 * 1024 * 1024
+    max_bytes = MAX_MARKET_CSV_BYTES if path.suffix.lower() == ".csv" else 16 * 1024 * 1024
     if path.stat().st_size > max_bytes:
         raise ValueError("source artifact exceeds maximum payload size")
     chunks: list[bytes] = []

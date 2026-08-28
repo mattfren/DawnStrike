@@ -33,6 +33,20 @@ STRATEGY_ID = "fixture_shadow_parent"
 CHALLENGER_ID = "fixture_shadow_parent_candidate_v2"
 
 
+def _future_session_date(days: int) -> date:
+    value = date.today() + timedelta(days=days)
+    while value.weekday() >= 5:
+        value += timedelta(days=1)
+    return value
+
+
+def _next_session(value: date) -> date:
+    value += timedelta(days=1)
+    while value.weekday() >= 5:
+        value += timedelta(days=1)
+    return value
+
+
 def _always_long(
     spec: StrategySpec,
     _dataset: MarketDataset,
@@ -188,7 +202,7 @@ def test_legacy_candidate_accepts_only_scoped_drift_and_preserves_frozen_lineage
     root = tmp_path / "paper"
     parent = _parent_strategy()
     monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
-    run_date = date.today() + timedelta(days=1)
+    run_date = _future_session_date(1)
     _seed_root(root, parent)
     shadow_runner.initialize_shadow_registry(output_root=root)
     registration = _seed_registered_challenger(
@@ -584,8 +598,8 @@ def test_shadow_candidate_runs_independent_two_day_paper_lifecycle(
     root = tmp_path / "paper"
     parent = _parent_strategy()
     monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
-    day_one = date.today() + timedelta(days=1)
-    day_two = day_one + timedelta(days=1)
+    day_one = _future_session_date(1)
+    day_two = _next_session(day_one)
     datasets = {
         day_one: _dataset(day_one),
         day_two: _dataset(day_one, day_two),
@@ -823,7 +837,7 @@ def test_registration_event_recovers_exact_orphan_and_rejects_changed_semantics(
     write_json(root / "state" / "strategy_challenger_registry.json", registry)
     with pytest.raises(ValueError, match="registry integrity failed"):
         shadow_runner.run_shadow_day(
-            run_date=date.today() + timedelta(days=1),
+            run_date=_future_session_date(1),
             output_root=root,
         )
 
@@ -916,7 +930,7 @@ def test_shadow_day_runs_eligible_challengers_while_preserving_ineligible_as_na(
     root = tmp_path / "paper"
     parent = _parent_strategy()
     monkeypatch.setattr(shadow_runner, "build_strategy_catalog", lambda: (parent,))
-    run_date = date.today() + timedelta(days=2)
+    run_date = _future_session_date(2)
     _seed_root(root, parent)
     shadow_runner.initialize_shadow_registry(output_root=root)
     eligible = _seed_registered_challenger(
@@ -1364,31 +1378,90 @@ def _build_retained_data_truth_snapshot(
     fixture_root.mkdir(parents=True)
     raw_dir = fixture_root / "raw"
     raw_dir.mkdir()
-    (raw_dir / "tst_chart.json").write_text(
-        f'{{"revision":"{revision}"}}',
-        encoding="utf-8",
-    )
     source_csv = fixture_root / "ohlcv.csv"
-    write_ohlcv_csv(
-        dataset
-        or MarketDataset(
-            dataset_id=f"fixture-{revision}",
-            source_kind="sourced_fixture",
-            timeframe="1d",
-            bars_by_symbol={
-                "TST": (
-                    _bar(
-                        run_date,
-                        open_price=100.0,
-                        high=max(101.0, close + 1.0),
-                        low=99.0,
-                        close=close,
-                    ),
+    source_dataset = dataset or MarketDataset(
+        dataset_id=f"fixture-{revision}",
+        source_kind="sourced_fixture",
+        timeframe="1d",
+        bars_by_symbol={
+            "TST": (
+                _bar(
+                    run_date,
+                    open_price=100.0,
+                    high=max(101.0, close + 1.0),
+                    low=99.0,
+                    close=close,
+                ),
+            )
+        },
+    )
+    # The governed DataTruth explicit-universe contract requires the active
+    # fleet warm-up history and the last completed exchange session. Keep this
+    # retained fixture realistic while preserving the requested terminal close.
+    completed_date = run_date
+    while completed_date.weekday() >= 5:
+        completed_date -= timedelta(days=1)
+    original_bars = list(source_dataset.bars_by_symbol.get("TST", ()))
+    terminal = next(
+        (bar for bar in original_bars if bar.timestamp.date() == completed_date),
+        original_bars[-1],
+    )
+    history: list[MarketBar] = []
+    cursor = completed_date - timedelta(days=1)
+    while len(history) < 100:
+        if cursor.weekday() < 5:
+            history.append(
+                replace(
+                    terminal,
+                    timestamp=datetime.combine(cursor, time(21, 0), tzinfo=timezone.utc),
                 )
-            },
-        ),
+            )
+        cursor -= timedelta(days=1)
+    source_dataset = replace(
+        source_dataset,
+        bars_by_symbol={
+            "TST": tuple(
+                sorted(
+                    [
+                        *history,
+                        replace(
+                            terminal,
+                            timestamp=datetime.combine(
+                                completed_date, time(21, 0), tzinfo=timezone.utc
+                            ),
+                        ),
+                    ],
+                    key=lambda bar: bar.timestamp,
+                )
+            )
+        },
+    )
+    write_ohlcv_csv(
+        source_dataset,
         source_csv,
     )
+    bars = source_dataset.bars_by_symbol["TST"]
+    payload = {
+        "chart": {
+            "result": [{
+                "meta": {"symbol": "TST"},
+                "timestamp": [int(bar.timestamp.timestamp()) for bar in bars],
+                "indicators": {
+                    "quote": [{
+                        "open": [bar.open for bar in bars],
+                        "high": [bar.high for bar in bars],
+                        "low": [bar.low for bar in bars],
+                        "close": [bar.close for bar in bars],
+                        "volume": [bar.volume for bar in bars],
+                    }]
+                },
+            }],
+            "error": None,
+        }
+    }
+    raw_bytes = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    raw_digest = hashlib.sha256(raw_bytes).hexdigest()
+    (raw_dir / f"tst_chart_{raw_digest}.json").write_bytes(raw_bytes)
     result = build_data_truth_snapshot(
         as_of_date=run_date + timedelta(days=1),
         output_root=data_truth_root,
@@ -1402,7 +1475,7 @@ def _build_retained_data_truth_snapshot(
         allow_fetch=False,
         symbols=("TST",),
     )
-    assert result.manifest.accepted_end == run_date.isoformat()
+    assert result.manifest.accepted_end == completed_date.isoformat()
     return result.manifest
 
 

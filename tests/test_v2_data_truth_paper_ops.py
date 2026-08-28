@@ -685,6 +685,76 @@ def test_datatruth_explicit_universe_rejects_one_bar_strategy_history(
         )
 
 
+def test_datatruth_explicit_retry_uses_exact_immutable_cache_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(data_truth_core, "_governed_minimum_history_bars", lambda: 1)
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    cache_dir = tmp_path / "datatruth" / "cache" / "public_yahoo"
+    cache_dir.mkdir(parents=True)
+    bar = _bar("TST", date(2026, 1, 2), 9.0, 9.5, 8.5, 9.1)
+    dataset = MarketDataset(
+        dataset_id="immutable-cache",
+        source_kind="public_yahoo_chart",
+        timeframe="1d",
+        bars_by_symbol={"TST": (bar,)},
+    )
+    temporary_csv = cache_dir / ".csv.tmp"
+    write_ohlcv_csv(dataset, temporary_csv)
+    csv_bytes = temporary_csv.read_bytes()
+    csv_digest = hashlib.sha256(csv_bytes).hexdigest()
+    immutable_csv = cache_dir / f"public_yahoo_ohlcv_{csv_digest}.csv"
+    temporary_csv.replace(immutable_csv)
+    payload = {
+        "chart": {
+            "error": None,
+            "result": [{
+                "meta": {"symbol": "TST"},
+                "timestamp": [int(bar.timestamp.timestamp())],
+                "indicators": {"quote": [{
+                    "open": [bar.open], "high": [bar.high],
+                    "low": [bar.low], "close": [bar.close],
+                    "volume": [bar.volume],
+                }]},
+            }],
+        }
+    }
+    raw_bytes = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    raw_digest = hashlib.sha256(raw_bytes).hexdigest()
+    (cache_dir / f"tst_chart_{raw_digest}.json").write_bytes(raw_bytes)
+
+    def failed_fetch(**_kwargs: object) -> None:
+        raise TimeoutError("transient provider outage")
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", failed_fetch)
+    paths = data_truth_core.DataTruthPaths.create(tmp_path / "datatruth")
+    selected, _raw, refs, warnings = data_truth_core._resolve_public_yahoo_source(
+        paths,
+        source_csv=None,
+        raw_dir=None,
+        allow_fetch=True,
+        symbols=("TST",),
+        required_bar_date=date(2026, 1, 2),
+        minimum_history_bars=1,
+    )
+    assert selected == immutable_csv
+    assert any(immutable_csv.as_posix() in warning for warning in warnings)
+    assert any(raw_digest in ref for ref in refs)
+    with pytest.raises(DataTruthAcquisitionIncomplete):
+        data_truth_core._resolve_public_yahoo_source(
+            paths,
+            source_csv=None,
+            raw_dir=None,
+            allow_fetch=True,
+            symbols=("TST",),
+            required_bar_date=date(2026, 1, 5),
+            minimum_history_bars=1,
+        )
+
+
 def test_datatruth_provider_reconciliation_detects_mismatch() -> None:
     canonical = MarketDataset(
         dataset_id="canonical",

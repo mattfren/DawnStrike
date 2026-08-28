@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import csv
+import math
+import re
+import time as clock
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -22,6 +25,10 @@ from intraday_scanner.v2.contracts import (
     Symbol,
     Timeframe,
 )
+
+MAX_MARKET_VOLUME = (1 << 63) - 1
+MAX_MARKET_CSV_BYTES = 128 * 1024 * 1024
+_INTEGER_TEXT_RE = re.compile(r"^[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -96,6 +103,8 @@ def discover_ohlcv_csvs(root: Path) -> tuple[Path, ...]:
 def load_ohlcv_csv(
     path: Path, *, dataset_id: str, source_kind: str, timeframe: str
 ) -> MarketDataset:
+    if path.stat().st_size > MAX_MARKET_CSV_BYTES:
+        raise ValueError("OHLCV CSV exceeds governed payload size")
     rows_by_symbol: dict[str, list[MarketBar]] = {}
     warnings: list[str] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -110,14 +119,31 @@ def load_ohlcv_csv(
                 continue
             try:
                 timestamp = _parse_timestamp(timestamp_raw)
+                open_price = float(row["open"])
+                high_price = float(row["high"])
+                low_price = float(row["low"])
+                close_price = float(row["close"])
+                volume_raw = (row.get("volume") or "").strip()
+                if not _INTEGER_TEXT_RE.fullmatch(volume_raw):
+                    raise ValueError("volume must be a nonnegative integer")
+                volume = int(volume_raw)
+                if volume > MAX_MARKET_VOLUME:
+                    raise ValueError("volume exceeds governed integer bound")
+                if not all(
+                    math.isfinite(value)
+                    for value in (open_price, high_price, low_price, close_price)
+                ):
+                    raise ValueError("OHLC must be finite")
+                if min(open_price, high_price, low_price, close_price) <= 0:
+                    raise ValueError("OHLC must be positive")
                 bar = MarketBar(
                     symbol=symbol,
                     timestamp=timestamp,
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=int(float(row["volume"])),
+                    open=open_price,
+                    high=high_price,
+                    low=low_price,
+                    close=close_price,
+                    volume=volume,
                     vwap=_optional_float(row.get("vwap")),
                 )
             except (KeyError, TypeError, ValueError) as exc:
@@ -139,7 +165,12 @@ def load_ohlcv_csv(
     )
 
 
-def write_ohlcv_csv(dataset: MarketDataset, path: Path) -> None:
+def write_ohlcv_csv(
+    dataset: MarketDataset,
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -149,6 +180,8 @@ def write_ohlcv_csv(dataset: MarketDataset, path: Path) -> None:
         writer.writeheader()
         for symbol in dataset.symbols:
             for bar in dataset.bars_by_symbol[symbol]:
+                if deadline is not None and clock.monotonic() >= deadline:
+                    raise TimeoutError("OHLCV CSV generation exceeded acquisition deadline")
                 writer.writerow(
                     {
                         "symbol": bar.symbol,
@@ -188,6 +221,8 @@ def validate_dataset(
             if previous_timestamp and bar.timestamp < previous_timestamp:
                 issues.append(f"{symbol}: bars are not sorted")
             previous_timestamp = bar.timestamp
+            if not all(math.isfinite(value) for value in (bar.open, bar.high, bar.low, bar.close)):
+                issues.append(f"{symbol}: non-finite OHLC value at {bar.timestamp.isoformat()}")
             if min(bar.open, bar.high, bar.low, bar.close) <= 0:
                 issues.append(f"{symbol}: non-positive OHLC value at {bar.timestamp.isoformat()}")
             if bar.high < max(bar.open, bar.close, bar.low):
@@ -198,8 +233,8 @@ def validate_dataset(
                 issues.append(
                     f"{symbol}: low is above open/close/high at {bar.timestamp.isoformat()}"
                 )
-            if bar.volume < 0:
-                issues.append(f"{symbol}: negative volume at {bar.timestamp.isoformat()}")
+            if type(bar.volume) is not int or bar.volume < 0 or bar.volume > MAX_MARKET_VOLUME:
+                issues.append(f"{symbol}: invalid volume at {bar.timestamp.isoformat()}")
 
         latest = bars[-1].timestamp if bars else None
         if latest:
@@ -392,7 +427,10 @@ def _parse_timestamp(value: str) -> datetime:
 def _optional_float(value: str | None) -> float | None:
     if value is None or not value.strip():
         return None
-    return float(value)
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("optional value must be finite")
+    return parsed
 
 
 def _format_float(value: float) -> str:

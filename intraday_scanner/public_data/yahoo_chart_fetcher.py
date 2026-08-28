@@ -11,6 +11,7 @@ import re
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,7 +22,11 @@ from urllib.parse import urlencode
 from urllib.request import Request
 
 from intraday_scanner.network_safety import open_allowlisted_url
-from intraday_scanner.v2.data.market import MarketDataset, write_ohlcv_csv
+from intraday_scanner.v2.data.market import (
+    MAX_MARKET_CSV_BYTES,
+    MarketDataset,
+    write_ohlcv_csv,
+)
 from intraday_scanner.v2.data.yahoo_chart import (
     DEFAULT_YAHOO_CHART_SYMBOLS,
     YahooChartFetchResult,
@@ -33,8 +38,13 @@ YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbo
 _CANONICAL_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
 _MAX_SYMBOL_LENGTH = 16
 _MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+_MAX_CSV_BYTES = MAX_MARKET_CSV_BYTES
 _READ_CHUNK_BYTES = 64 * 1024
-_MAX_PERSISTED_RATE_AHEAD_SECONDS = 30 * 60
+# Persisted reservations are expected to cover only the bounded in-flight
+# worker horizon. Anything farther ahead is treated as poisoned state so a
+# stale lock file cannot consume the entire EOD admission window.
+_MAX_PERSISTED_RATE_AHEAD_SECONDS = 5 * 60
+_RATE_RESERVATION_SAFETY_SECONDS = 0.1
 _CACHE_WRITE_LOCK = threading.RLock()
 _PROCESS_RATE_LOCK = threading.Lock()
 _PROCESS_NEXT_REQUEST_AT = 0.0
@@ -304,7 +314,11 @@ class _RequestRateGate:
                 with _cross_process_rate_lock(self._cache_root, deadline=deadline) as state:
                     now_wall = time.time()
                     scheduled_wall = max(now_wall, float(state[0]))
-                    state[0] = scheduled_wall + self._interval
+                    state[0] = (
+                        scheduled_wall
+                        + self._interval
+                        + _RATE_RESERVATION_SAFETY_SECONDS
+                    )
                     scheduled = max(
                         scheduled,
                         now + max(0.0, scheduled_wall - now_wall),
@@ -615,8 +629,13 @@ def _cache_digest_from_name(path: Path, symbol: str) -> str:
     return path.stem[len(f"{symbol.lower()}_chart_") :]
 
 
-def _bounded_file_read(path: Path, *, deadline: float | None) -> bytes:
-    if path.stat().st_size > _MAX_PAYLOAD_BYTES:
+def _bounded_file_read(
+    path: Path,
+    *,
+    deadline: float | None,
+    max_bytes: int = _MAX_PAYLOAD_BYTES,
+) -> bytes:
+    if path.stat().st_size > max_bytes:
         raise ValueError("Yahoo cache object exceeds maximum payload size")
     chunks: list[bytes] = []
     total = 0
@@ -624,11 +643,11 @@ def _bounded_file_read(path: Path, *, deadline: float | None) -> bytes:
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Yahoo cache read exceeded acquisition deadline")
-            chunk = handle.read(min(_READ_CHUNK_BYTES, _MAX_PAYLOAD_BYTES + 1 - total))
+            chunk = handle.read(min(_READ_CHUNK_BYTES, max_bytes + 1 - total))
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_PAYLOAD_BYTES:
+            if total > max_bytes:
                 raise ValueError("Yahoo cache object exceeds maximum payload size")
             chunks.append(chunk)
     return b"".join(chunks)
@@ -677,7 +696,13 @@ def _write_immutable_payload(
     _assert_cache_path(cache_root, content_path)
     with _CACHE_WRITE_LOCK:
         if content_path.exists():
-            existing = _bounded_file_read(content_path, deadline=None)
+            try:
+                existing = _bounded_file_read(content_path, deadline=None)
+            except ValueError:
+                _quarantine_corrupt_cache(content_path, cache_root, expected_digest=digest)
+                existing = None
+            if existing is None:
+                existing = b""
             existing_digest = hashlib.sha256(existing).hexdigest()
             if existing != content:
                 if existing_digest == digest:
@@ -726,18 +751,24 @@ def _write_exclusive(
     cache_root: Path,
     expected_digest: str | None = None,
     deadline: float | None = None,
+    max_bytes: int = _MAX_PAYLOAD_BYTES,
 ) -> None:
     _ensure_before_deadline(deadline)
     _assert_cache_path(cache_root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _CACHE_WRITE_LOCK:
         if path.exists():
-            existing = _bounded_file_read(path, deadline=None)
-            if existing == content:
-                return
-            if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
-                raise ValueError("Yahoo cache digest collision: authoritative bytes differ")
-            raise ValueError(f"immutable Yahoo cache conflict: {path}")
+            try:
+                existing = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
+            except ValueError:
+                _quarantine_corrupt_cache(path, cache_root, expected_digest=expected_digest)
+                existing = None
+            if existing is not None:
+                if existing == content:
+                    return
+                if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
+                    raise ValueError("Yahoo cache digest collision: authoritative bytes differ")
+                raise ValueError(f"immutable Yahoo cache conflict: {path}")
         descriptor, temporary_name = tempfile.mkstemp(
             dir=path.parent,
             prefix=f".{path.name}.",
@@ -754,18 +785,35 @@ def _write_exclusive(
             # this process. Hard-link creation is exclusive across processes;
             # a pre-existing target is never overwritten.
             if path.exists():
-                existing = _bounded_file_read(path, deadline=None)
-                if existing == content:
-                    return
-                if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
-                    raise ValueError(
-                        "Yahoo cache digest collision: authoritative bytes differ"
-                    ) from None
-                raise ValueError(f"immutable Yahoo cache conflict: {path}") from None
+                try:
+                    existing = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
+                except ValueError:
+                    _quarantine_corrupt_cache(path, cache_root, expected_digest=expected_digest)
+                    existing = None
+                if existing is not None:
+                    if existing == content:
+                        return
+                    if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
+                        raise ValueError(
+                            "Yahoo cache digest collision: authoritative bytes differ"
+                        ) from None
+                    raise ValueError(f"immutable Yahoo cache conflict: {path}") from None
             try:
                 os.link(temporary_path, path)
             except FileExistsError:
-                existing = _bounded_file_read(path, deadline=None)
+                try:
+                    existing = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
+                except ValueError:
+                    _quarantine_corrupt_cache(path, cache_root, expected_digest=expected_digest)
+                    existing = None
+                if existing is None:
+                    # The corrupt object was removed by the bounded quarantine;
+                    # retry the exclusive link with the still-fsynced temp file.
+                    try:
+                        os.link(temporary_path, path)
+                        return
+                    except FileExistsError:
+                        existing = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
                 if existing == content:
                     return
                 if expected_digest and hashlib.sha256(existing).hexdigest() == expected_digest:
@@ -794,33 +842,48 @@ def _write_csv_immutable(
     os.close(descriptor)
     temporary_path = Path(temporary_name)
     try:
-        write_ohlcv_csv(dataset, temporary_path)
+        write_ohlcv_csv(dataset, temporary_path, deadline=deadline)
         with temporary_path.open("r+b") as handle:
             handle.flush()
             os.fsync(handle.fileno())
-        content = temporary_path.read_bytes()
+        content = _bounded_file_read(
+            temporary_path, deadline=deadline, max_bytes=_MAX_CSV_BYTES
+        )
         _ensure_before_deadline(deadline)
     finally:
         temporary_path.unlink(missing_ok=True)
     digest = hashlib.sha256(content).hexdigest()
     immutable_path = cache_root / f"public_yahoo_ohlcv_{digest}.csv"
     _assert_cache_path(cache_root, immutable_path)
-    if immutable_path.exists() and immutable_path.read_bytes() != content:
-        _quarantine_corrupt_cache(
-            immutable_path, cache_root, expected_digest=digest
-        )
+    if immutable_path.exists():
+        try:
+            existing = _bounded_file_read(
+                immutable_path, deadline=None, max_bytes=_MAX_CSV_BYTES
+            )
+        except ValueError:
+            _quarantine_corrupt_cache(immutable_path, cache_root, expected_digest=digest)
+            existing = None
+        if existing is not None and existing != content:
+            _quarantine_corrupt_cache(immutable_path, cache_root, expected_digest=digest)
     _write_exclusive(
         immutable_path,
         content,
         cache_root=cache_root,
         expected_digest=digest,
         deadline=deadline,
+        max_bytes=_MAX_CSV_BYTES,
     )
     alias_path = cache_root / "public_yahoo_ohlcv.csv"
     _assert_cache_path(cache_root, alias_path)
     if not alias_path.exists():
         try:
-            _write_exclusive(alias_path, content, cache_root=cache_root, deadline=deadline)
+            _write_exclusive(
+                alias_path,
+                content,
+                cache_root=cache_root,
+                deadline=deadline,
+                max_bytes=_MAX_CSV_BYTES,
+            )
         except ValueError:
             pass
     _ensure_before_deadline(deadline)
@@ -840,18 +903,40 @@ def _quarantine_corrupt_cache(
         if not path.exists():
             return
         try:
-            content = _bounded_file_read(path, deadline=None)
-            digest = hashlib.sha256(content).hexdigest()
-            if expected_digest is not None and digest == expected_digest:
-                return
             original_stat = path.stat()
+            size = original_stat.st_size
+            max_bytes = _MAX_CSV_BYTES if path.suffix.lower() == ".csv" else _MAX_PAYLOAD_BYTES
+            if size <= max_bytes:
+                content = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
+                digest = hashlib.sha256(content).hexdigest()
+                identity = ("full", digest, size)
+                if expected_digest is not None and digest == expected_digest:
+                    return
+            else:
+                digest = _corrupt_prefix_digest(path, size)
+                identity = ("prefix", digest, size)
         except FileNotFoundError:
             return
         quarantine_path = quarantine_root / f"{path.name}.{digest}.corrupt"
         _assert_cache_path(cache_root, quarantine_path)
         try:
+            if quarantine_path.exists() and _corrupt_identity(quarantine_path) != identity:
+                # A bounded prefix fingerprint can collide for two oversized
+                # objects. Keep both byte identities quarantined without ever
+                # overwriting the first inode.
+                quarantine_path = quarantine_root / (
+                    f"{path.name}.{digest}.{original_stat.st_ino:x}.{uuid.uuid4().hex}.corrupt"
+                )
+                _assert_cache_path(cache_root, quarantine_path)
             if not quarantine_path.exists():
                 os.link(path, quarantine_path)
+            else:
+                quarantine_stat = quarantine_path.stat()
+                if (
+                    quarantine_stat.st_size != size
+                    or _corrupt_identity(quarantine_path) != identity
+                ):
+                    raise ValueError("Yahoo quarantine digest collision")
             current_stat = path.stat()
             if (
                 current_stat.st_dev == original_stat.st_dev
@@ -866,14 +951,34 @@ def _quarantine_corrupt_cache(
             # inode so the correct digest target can be recreated.
             try:
                 current_stat = path.stat()
-                if _bounded_file_read(path, deadline=None) == _bounded_file_read(
-                    quarantine_path, deadline=None
-                ) and current_stat.st_ino == original_stat.st_ino:
+                if (
+                    _corrupt_identity(path) == identity
+                    and current_stat.st_ino == original_stat.st_ino
+                ):
                     path.unlink()
             except FileNotFoundError:
                 return
         except FileNotFoundError:
             return
+
+
+def _corrupt_prefix_digest(path: Path, size: int) -> str:
+    """Fingerprint an oversized object without reading beyond a bounded prefix."""
+
+    digest = hashlib.sha256()
+    digest.update(str(size).encode("ascii"))
+    with path.open("rb") as handle:
+        digest.update(handle.read(_READ_CHUNK_BYTES))
+    return digest.hexdigest()
+
+
+def _corrupt_identity(path: Path) -> tuple[str, str, int]:
+    size = path.stat().st_size
+    max_bytes = _MAX_CSV_BYTES if path.suffix.lower() == ".csv" else _MAX_PAYLOAD_BYTES
+    if size > max_bytes:
+        return ("prefix", _corrupt_prefix_digest(path, size), size)
+    content = _bounded_file_read(path, deadline=None, max_bytes=max_bytes)
+    return ("full", hashlib.sha256(content).hexdigest(), size)
 
 
 def _assert_cache_path(cache_root: Path, path: Path) -> None:

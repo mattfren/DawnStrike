@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from intraday_scanner.v2.data.market import MarketBar, MarketDataset
+from intraday_scanner.v2.data.market import MAX_MARKET_VOLUME, MarketBar, MarketDataset
 
 DEFAULT_YAHOO_CHART_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN")
 
@@ -99,8 +99,7 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
         if not isinstance(volume_value, int) or isinstance(volume_value, bool):
             warnings.append(f"{symbol}: skipped bar {index} with non-integer volume")
             continue
-        volume = float(volume_value)
-        if not math.isfinite(volume) or volume < 0:
+        if volume_value < 0 or volume_value > MAX_MARKET_VOLUME:
             warnings.append(f"{symbol}: skipped bar {index} with invalid volume")
             continue
         try:
@@ -136,7 +135,7 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
                 high=high_price,
                 low=low_price,
                 close=close_price,
-                volume=int(volume),
+                volume=volume_value,
             )
         )
     return bars, warnings
