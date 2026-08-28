@@ -483,6 +483,7 @@ def build_core_universe_contract(
         computed_member_hash = _canonical_member_hash(local_members)
         source_binding: dict[str, Any] = {
             "status": "NOT_CHECKED",
+            "index": _index_name(manifest_index),
             "transformation_id": None,
             "derived_effective_date": None,
             "derived_member_set_hash_sha256": None,
@@ -601,15 +602,31 @@ def build_core_universe_contract(
             if "source_binding_" in error
         }
     )
+    artifact_error_codes_by_index = {
+        index: sorted(
+            {
+                str(code).strip()
+                for artifact in source_artifacts
+                if str(artifact.get("source_binding", {}).get("index") or "").strip() == index
+                for code in artifact.get("error_codes") or []
+                if str(code).strip()
+            }
+        )
+        for index in CORE_INDEXES
+    }
     for index in CORE_INDEXES:
         index_errors = [error for error in errors if f":{index}" in error or error.endswith(index)]
         index_errors.extend(generic_source_binding_errors)
+        index_errors.extend(
+            f"source_artifact_error:{code}" for code in artifact_error_codes_by_index[index]
+        )
         ready = (
             bool(per_index[index])
             and expected[index] is not None
             and len(per_index[index]) == expected[index]
             and freshness == "FRESH"
             and not generic_source_binding_errors
+            and not artifact_error_codes_by_index[index]
             and not any(index in error for error in errors)
         )
         index_verdicts[index] = {

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner import cli as cli_module
 from intraday_scanner.cli import main
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -20,6 +21,20 @@ def test_cli_init_db_creates_sqlite(tmp_path):
     db_path = tmp_path / "scanner.sqlite"
     assert main(["init-db", "--db-path", str(db_path)]) == 0
     assert db_path.exists()
+
+
+def test_cli_alpha_cycle_plumbs_explicit_release_sha(monkeypatch, capsys) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_alpha_cycle(**kwargs):
+        captured.update(kwargs)
+        return {"status": "fixture"}
+
+    monkeypatch.setattr(cli_module, "alpha_cycle", fake_alpha_cycle)
+
+    assert main(["alpha-cycle", "--code-sha", "a" * 40]) == 0
+    assert captured["code_sha"] == "a" * 40
+    assert json.loads(capsys.readouterr().out)["status"] == "fixture"
 
 
 def test_cli_strategy_learning_daily_writes_research_only_receipts(tmp_path, capsys):
@@ -122,9 +137,7 @@ def test_cli_strategy_learning_daily_attributes_database_read_only(tmp_path, cap
     assert receipt["automatic_policy_change"] is False
 
 
-def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
-    tmp_path, capsys
-):
+def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(tmp_path, capsys):
     database_path = tmp_path / "timestamp-performance.sqlite"
     payload_before = {
         "trade_lifecycles": [
@@ -153,7 +166,7 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
             "CREATE TABLE portfolio_performance_rows ("
             "record_id TEXT, market_date TEXT, cohort TEXT, strategy_id TEXT, "
             "strategy_version TEXT, record_status TEXT, return_pct REAL, "
-                "benchmark_return_pct REAL, open_position_count INTEGER, "
+            "benchmark_return_pct REAL, open_position_count INTEGER, "
             "reconciled_at TEXT, payload_json TEXT)"
         )
         connection.executemany(
@@ -223,9 +236,7 @@ def test_cli_strategy_learning_honors_exact_timestamp_cutoff_for_same_day_close(
     assert all(row["record_id"] != "after-cutoff" for row in evidence["outcomes"])
 
 
-def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows(
-    tmp_path, capsys
-):
+def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows(tmp_path, capsys):
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(
         json.dumps(
@@ -290,9 +301,7 @@ def test_cli_strategy_learning_evidence_file_quarantines_unordered_terminal_rows
     assert evidence["counts"]["terminal_timestamp_quarantined"] == 0
 
 
-def test_cli_evidence_file_fabricated_return_cannot_become_learning_or_proposal(
-    tmp_path, capsys
-):
+def test_cli_evidence_file_fabricated_return_cannot_become_learning_or_proposal(tmp_path, capsys):
     evidence_path = tmp_path / "hostile-evidence.json"
     evidence_path.write_text(
         json.dumps(
@@ -315,7 +324,7 @@ def test_cli_evidence_file_fabricated_return_cannot_become_learning_or_proposal(
                                 "nested": {"profitFactor": 999.0, "note": "diagnostic"},
                             },
                         }
-                    ]
+                    ],
                 }
             }
         ),
@@ -462,9 +471,7 @@ def test_cli_live_scan_missing_keys_records_provider_health(monkeypatch, tmp_pat
     monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
     db_path = tmp_path / "scanner.sqlite"
 
-    status = main(
-        ["live-scan", "--symbols", "NOVA", "--db-path", str(db_path), "--persist"]
-    )
+    status = main(["live-scan", "--symbols", "NOVA", "--db-path", str(db_path), "--persist"])
 
     captured = capsys.readouterr()
     health = SQLiteScanStore(db_path).load_provider_health()

@@ -18,6 +18,7 @@ Import-DawnstrikeEnvironment -StateRoot $state
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""
@@ -78,6 +79,7 @@ function Write-MonitorStage {
         "--status", $Status,
         "--runtime-root", $runtime,
         "--state-root", $state,
+        "--release-sha", $releaseSha,
         "--exit-code", "$ExitCode",
         "--started-at", $startedAt
     )
@@ -98,6 +100,7 @@ function Write-ScenarioStage {
         "--status", $Status,
         "--runtime-root", $runtime,
         "--state-root", $state,
+        "--release-sha", $releaseSha,
         "--exit-code", "$ExitCode",
         "--started-at", $startedAt,
         "--not-required"
@@ -121,7 +124,7 @@ if (-not $dailyLock.acquired) {
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
-    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "intraday_monitor", "--status", "RUNNING") `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "intraday_monitor", "--status", "RUNNING", "--release-sha", $releaseSha) `
     -LogRoot $logRoot `
     -LogName "alpha_monitor_heartbeat-$MarketDate"
 if ($heartbeat.exit_code -ne 0) {
@@ -150,7 +153,8 @@ try {
         try {
             $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
                 -ArtifactPath $alphaCyclePath `
-                -MarketDate $MarketDate
+                -MarketDate $MarketDate `
+                -ReleaseSha $releaseSha
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
             $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
         }
@@ -178,7 +182,7 @@ try {
         }
         $watch = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList (@("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "alpaca", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5") + $scenarioWatchArgs) `
+            -ArgumentList (@("-m", "intraday_scanner.cli", "trade-watch", "--db-path", $dbPath, "--market-date", $MarketDate, "--mode", "paper_execute", "--source", "alpaca", "--notify", $Notify, "--simulated-equity", "100000", "--max-open-positions", "3", "--max-daily-entries", "10", "--min-reward-risk", "1.5", "--expected-code-sha", $releaseSha) + $scenarioWatchArgs) `
             -LogRoot $logRoot `
             -LogName "trade_watch-$MarketDate"
         if ($watch.exit_code -ne 0) {

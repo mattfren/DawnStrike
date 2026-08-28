@@ -8,6 +8,7 @@ from intraday_scanner.decisioning.condition_registry import registry_for_strateg
 from intraday_scanner.services.alpha_cycle_service import (
     _apply_receipt_risk_gates,
     _apply_strategy_decision_receipts,
+    _merge_strategy_adapter_signals,
     _signal_payload,
 )
 from intraday_scanner.services.daily_strategy_learning_service import (
@@ -121,6 +122,86 @@ def test_receipt_integration_covers_supported_rows_after_legacy_rows(tmp_path, m
     assert first["receipt_id"].startswith("sdr-")
     assert second["receipt_id"].startswith("sdr-")
     assert len(store.load_strategy_decision_receipts()) == 3
+
+
+def test_explicit_release_sha_overrides_ambient_spoof_for_receipt_identity(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "b" * 40)
+    row = _supported_signal()
+    config = load_config(
+        strategy_evidence_enabled=True,
+        strategy_evidence_shadow_only=True,
+        alert_score_threshold=0,
+    )
+
+    _apply_strategy_decision_receipts(
+        [row],
+        store=SQLiteScanStore(tmp_path / "explicit-release.sqlite"),
+        config=config,
+        decision_at="2026-08-22T14:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+        code_sha="a" * 40,
+    )
+
+    assert row["strategy_decision_receipt"]["code_sha"] == "a" * 40
+    assert row["strategy_receipt_construction_status"] == "COMPLETE"
+
+
+def test_explicit_release_sha_rejects_malformed_or_ambient_only_spoof(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "a" * 40)
+    row = _supported_signal()
+    config = load_config(strategy_evidence_enabled=True)
+
+    with pytest.raises(ValueError, match="full Git commit SHA"):
+        _apply_strategy_decision_receipts(
+            [row],
+            store=SQLiteScanStore(tmp_path / "invalid-release.sqlite"),
+            config=config,
+            decision_at="2026-08-22T14:30:00+00:00",
+            source_summary={"source_identity": "fixture-source"},
+            code_sha="ambient-must-not-win",
+        )
+
+
+def test_receipt_construction_normalizes_authoritative_score_for_merge(
+    tmp_path,
+) -> None:
+    row = _supported_signal()
+    row.update(
+        {
+            "signal_id": "supported-source-signal",
+            "source_signal_id": "supported-source-signal",
+            "direction": "long",
+            "entry_reference": 10,
+            "stop": 9,
+            "target": 12,
+        }
+    )
+    config = load_config(
+        strategy_evidence_enabled=True,
+        strategy_evidence_shadow_only=True,
+        alert_score_threshold=0,
+    )
+
+    _apply_strategy_decision_receipts(
+        [row],
+        store=SQLiteScanStore(tmp_path / "receipt-merge.sqlite"),
+        config=config,
+        decision_at="2026-08-22T14:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+        code_sha="a" * 40,
+    )
+    merged = _merge_strategy_adapter_signals([row])
+
+    receipt_score = row["strategy_decision_receipt"]["final_score"]
+    assert row["alpha_score"] == receipt_score
+    assert row["score"] == receipt_score
+    assert merged[0]["strongest_eligible_contributor_score"] == receipt_score
+    assert merged[0]["strategy_contribution_status"] == "COMPLETE"
+    assert merged[0]["strategy_contributors"][0]["direction"] == "long"
 
 
 def test_receipt_resolution_orders_supported_candidates_and_respects_budget(
@@ -277,15 +358,11 @@ def test_receipt_migration_repairs_partial_sidecar_and_protects_children(tmp_pat
         assert run_migrations(connection) == 30
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         triggers = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
         }
         assert {
             "strategy_decision_receipts",

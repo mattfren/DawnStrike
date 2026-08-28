@@ -76,18 +76,25 @@ def _build_frozen_contract(*, publication_rows, receipt_verifier=None, frozen_in
     signal, slate, _, lineage = frozen_inputs or _frozen_contract_inputs()
     market_date = str(slate["market_date"])
     ticker = str(signal["ticker"])
+    source_summary = {
+        "status": "success",
+        "ranked_research_slate": slate,
+        "ranked_research_publication_rows": publication_rows,
+        "ranked_research_slate_lineage": dict(lineage),
+    }
+    producer_code_sha = str(slate.get("producer_code_sha") or "")
+    if producer_code_sha:
+        source_summary["code_sha"] = producer_code_sha
+        source_summary["ranked_research_slate_lineage"].setdefault(
+            "frozen_source_code_sha", producer_code_sha
+        )
     return build_alpha_run_contract(
         scan_id="scan-frozen",
         generated_at=f"{market_date}T12:01:00+00:00",
         ranked_count=1,
         signals=[signal],
         review={"decision": {"reason": "No clean edge."}, "watchlist": []},
-        source_summary={
-            "status": "success",
-            "ranked_research_slate": slate,
-            "ranked_research_publication_rows": publication_rows,
-            "ranked_research_slate_lineage": lineage,
-        },
+        source_summary=source_summary,
         enrichment_summary={
             "status": "complete",
             "selected_count": 1,
@@ -103,6 +110,60 @@ def test_contract_accepts_exact_rederived_frozen_publication_rows():
     _, _, publication_rows, _ = _frozen_contract_inputs()
     contract = _build_frozen_contract(publication_rows=publication_rows)
     assert contract.ranked_research_count == 1
+
+
+def test_run_contract_carries_exact_explicit_release_sha() -> None:
+    contract = build_alpha_run_contract(
+        scan_id="scan-release",
+        generated_at="2026-08-28T12:00:00+00:00",
+        ranked_count=0,
+        signals=[],
+        review={"decision": {"reason": "No clean edge."}, "watchlist": []},
+        source_summary={"status": "success", "code_sha": "a" * 40},
+        enrichment_summary={"status": "complete"},
+        notification_stats={},
+    )
+
+    assert contract.code_sha == "a" * 40
+    assert contract.to_dict()["code_sha"] == "a" * 40
+
+
+def test_production_run_contract_rejects_sha_less_empty_frozen_slate() -> None:
+    slate = build_ranked_research_slate(
+        [],
+        target=1,
+        generated_at="2026-08-28T12:00:00+00:00",
+        market_date="2026-08-28",
+        scan_id="scan-empty-release",
+        require_safety=True,
+    )
+    lineage = {
+        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+        "slate_id": slate["slate_id"],
+        "slate_content_hash_sha256": slate["content_hash_sha256"],
+        "frozen_source_scan_id": "scan-empty-release",
+        "current_scan_id": "scan-empty-release",
+        "reuse_status": "CURRENT_SCAN",
+    }
+
+    with pytest.raises(ValueError, match="producer code SHA"):
+        build_alpha_run_contract(
+            scan_id="scan-empty-release",
+            generated_at="2026-08-28T12:01:00+00:00",
+            ranked_count=0,
+            signals=[],
+            review={"decision": {"no_trade": True, "reason": "none"}, "watchlist": []},
+            source_summary={
+                "status": "success",
+                "code_sha": "a" * 40,
+                "require_watcher_proof": True,
+                "ranked_research_slate": slate,
+                "ranked_research_publication_rows": [],
+                "ranked_research_slate_lineage": lineage,
+            },
+            enrichment_summary={"status": "complete"},
+            notification_stats={},
+        )
 
 
 def test_contract_labels_legacy_pre_watcher_alert_count_separately_from_tier_three():
@@ -197,7 +258,6 @@ def test_contract_preserves_tier_two_only_with_authenticated_receipt_resolver(
     assert contract.paper_plan_qualified_count == 1
     with pytest.raises(ValueError, match="exact authenticated frozen-slate"):
         _build_frozen_contract(publication_rows=publication_rows, frozen_inputs=frozen_inputs)
-
 
 
 @pytest.mark.parametrize(

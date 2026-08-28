@@ -95,9 +95,7 @@ def _authenticated_freshness(ticker: str = "NOVA") -> dict[str, object]:
         max_age_seconds=600,
         feed="iex",
     )
-    observation_hash, observation_payload = premarket._canonical_observation_payload(
-        observation
-    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(observation)
     return {
         "market_date": "2026-08-26",
         "enrichment_observation_sha256": observation_hash,
@@ -198,6 +196,15 @@ def test_v2_receipt_binds_plan_and_market_structure_observations(tmp_path, monke
     plan_replaced["alphaops_market_structure_plan"]["plan_hash_sha256"] = "0" * 64
     plan_replaced["plan_hash_sha256"] = "0" * 64
     assert not validate_strategy_receipt_envelope(plan_replaced)
+
+    for hostile_score in (float("nan"), float("inf"), float("-inf"), 999.0):
+        score_replaced = deepcopy(payload)
+        score_replaced["alpha_score"] = hostile_score
+        assert not validate_strategy_receipt_envelope(score_replaced)
+
+    direction_replaced = deepcopy(payload)
+    direction_replaced["direction"] = "short" if payload["direction"] == "long" else "long"
+    assert not validate_strategy_receipt_envelope(direction_replaced)
 
 
 def test_publication_receipt_binding_requires_exact_persisted_receipt(

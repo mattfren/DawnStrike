@@ -51,6 +51,7 @@ class AlphaRunContract:
     notification_status: str
     research_only: bool = True
     broker_execution: str = "disabled"
+    code_sha: str = ""
     # Additive Luna publication counts.  Legacy fields above remain stable for
     # consumers that have not migrated to the three-tier contract.
     source_collected: int = 0
@@ -122,6 +123,7 @@ def build_alpha_run_contract(
     notification_dry_run: bool = False,
     notification_status_override: str = "",
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> AlphaRunContract:
     decision = dict(review.get("decision") or {})
     diagnostics = dict(review.get("selection_diagnostics") or {})
@@ -132,11 +134,15 @@ def build_alpha_run_contract(
     coverage = evaluate_premarket_coverage(enrichment)
     data_eligible = coverage.status in {"complete", "partial"}
     persisted_slate = dict(source_summary.get("ranked_research_slate") or {})
+    require_watcher_proof = bool(source_summary.get("require_watcher_proof"))
+    current_code_sha = str(source_summary.get("code_sha") or "").strip()
     if persisted_slate:
         slate = validate_ranked_research_slate(
             persisted_slate,
             market_date=generated_at[:10],
-            production=bool(source_summary.get("require_watcher_proof")),
+            production=require_watcher_proof,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=current_code_sha if require_watcher_proof else None,
         )
     else:
         slate = build_ranked_research_slate(
@@ -146,7 +152,14 @@ def build_alpha_run_contract(
             generated_at=generated_at,
             market_date=generated_at[:10],
             scan_id=scan_id,
-            require_safety=bool(source_summary.get("require_watcher_proof")),
+            require_safety=require_watcher_proof,
+            producer_code_sha=current_code_sha,
+        )
+    slate_code_sha = str(slate.get("producer_code_sha") or "").strip()
+    if persisted_slate and require_watcher_proof and slate_code_sha != current_code_sha:
+        raise ValueError(
+            "FROZEN_SLATE_CODE_SHA_MISMATCH: run-contract release identity "
+            "differs from the immutable slate producer."
         )
     frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
     derived_publication_rows = apply_publication_semantics(
@@ -155,6 +168,7 @@ def build_alpha_run_contract(
         coverage={"lanes": slate.get("lane_statuses") or {}},
         require_watcher_proof=bool(source_summary.get("require_watcher_proof")),
         receipt_verifier=receipt_verifier,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     if isinstance(frozen_publication_rows, list):
         published_signals = [dict(row) for row in frozen_publication_rows]
@@ -164,6 +178,7 @@ def build_alpha_run_contract(
                 slate=slate,
                 market_date=generated_at[:10],
                 production=True,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
         expected_selection_ids = list(slate.get("selection_ids") or [])
         actual_selection_ids = [
@@ -183,15 +198,14 @@ def build_alpha_run_contract(
         # so it may reconstruct Tier 1 only. Operational Tier 2/3 survives
         # only when rederived with the cycle's persisted-receipt resolver.
         published_signals = derived_publication_rows
-    authoritative_slate = bool(persisted_slate) or isinstance(
-        frozen_publication_rows, list
-    )
+    authoritative_slate = bool(persisted_slate) or isinstance(frozen_publication_rows, list)
     exact_official_rows = (
         official_publication_rows(
             published_signals,
             slate=slate,
             production=True,
             limit=3,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         if authoritative_slate and source_summary.get("require_watcher_proof")
         else []
@@ -247,17 +261,18 @@ def build_alpha_run_contract(
     # from the artifact's scan id or default the missing fields: doing so
     # makes an arbitrary same-day artifact look like the current cohort.
     if slate_source_scan_id != scan_id:
-        required_reuse_fields = (
+        required_reuse_fields = [
             "schema_version",
             "slate_id",
             "slate_content_hash_sha256",
             "frozen_source_scan_id",
             "current_scan_id",
             "reuse_status",
-        )
+        ]
+        if slate_code_sha:
+            required_reuse_fields.append("frozen_source_code_sha")
         if not isinstance(slate_lineage, dict) or any(
-            not str(slate_lineage.get(field) or "").strip()
-            for field in required_reuse_fields
+            not str(slate_lineage.get(field) or "").strip() for field in required_reuse_fields
         ):
             raise ValueError(
                 "FROZEN_SLATE_SCAN_MISMATCH: persisted slate scan_id differs "
@@ -267,15 +282,17 @@ def build_alpha_run_contract(
         slate_lineage.get("frozen_source_scan_id") or slate_source_scan_id
     )
     declared_current_scan_id = str(slate_lineage.get("current_scan_id") or scan_id)
-    declared_reuse_status = str(
-        slate_lineage.get("reuse_status") or expected_reuse_status
-    )
+    declared_reuse_status = str(slate_lineage.get("reuse_status") or expected_reuse_status)
     lineage_identity_matches = (
         str(slate_lineage.get("schema_version") or "")
         == "dawnstrike.luna.frozen_slate_selection_lineage.v1"
         and str(slate_lineage.get("slate_id") or "") == str(slate.get("slate_id") or "")
         and str(slate_lineage.get("slate_content_hash_sha256") or "")
         == str(slate.get("content_hash_sha256") or "")
+        and (
+            not slate_code_sha
+            or str(slate_lineage.get("frozen_source_code_sha") or "") == slate_code_sha
+        )
     )
     if persisted_slate and (
         not lineage_identity_matches
@@ -320,8 +337,7 @@ def build_alpha_run_contract(
         combined_data_eligible = (
             any(value.get("data_eligible") is True for value in lane_statuses.values())
             if lane_statuses
-            else slate_coverage_status
-            not in {"", "DATA_UNAVAILABLE", "INELIGIBLE", "BLOCKED"}
+            else slate_coverage_status not in {"", "DATA_UNAVAILABLE", "INELIGIBLE", "BLOCKED"}
         )
         contract_coverage_status = slate_coverage_status.lower()
     else:
@@ -387,6 +403,7 @@ def build_alpha_run_contract(
             dry_run=notification_dry_run,
             override=notification_status_override,
         ),
+        code_sha=str(source_summary.get("code_sha") or ""),
         source_collected=source_collected,
         enrichment_selected=coverage.selected_count,
         primary_verified=primary_verified,
@@ -425,9 +442,7 @@ def build_alpha_run_contract(
         core_snapshot_returned_count=max(int(core.get("returned_count") or 0), 0),
         core_snapshot_eligible_count=max(int(core.get("eligible_count") or 0), 0),
         core_snapshot_fresh_count=max(int(core.get("fresh_count") or 0), 0),
-        core_snapshot_fresh_verified_count=max(
-            int(core.get("fresh_verified_count") or 0), 0
-        ),
+        core_snapshot_fresh_verified_count=max(int(core.get("fresh_verified_count") or 0), 0),
         core_snapshot_stale_count=max(int(core.get("stale_count") or 0), 0),
         core_snapshot_missing_count=max(int(core.get("missing_count") or 0), 0),
         core_snapshot_unknown_count=max(int(core.get("unknown_count") or 0), 0),
@@ -444,33 +459,23 @@ def build_alpha_run_contract(
         core_snapshot_complete=(
             str(core.get("status") or "") == "READY"
             and int(core.get("requested_count") or 0) > 0
-            and int(core.get("requested_count") or 0)
-            == int(core.get("returned_count") or 0)
+            and int(core.get("requested_count") or 0) == int(core.get("returned_count") or 0)
         ),
         core_index_verdicts=dict(core.get("index_verdicts") or {}),
-        core_raw_artifact_hashes=tuple(
-            str(item) for item in core.get("raw_artifact_hashes") or []
-        ),
+        core_raw_artifact_hashes=tuple(str(item) for item in core.get("raw_artifact_hashes") or []),
         core_member_set_hash_sha256=str(core.get("canonical_member_set_hash_sha256") or ""),
         lane_counts=lane_counts,
         lane_statuses=lane_statuses,
         slate_id=str(slate.get("slate_id") or ""),
-        slate_content_hash_sha256=str(
-            slate.get("content_hash_sha256") or ""
-        ),
+        slate_content_hash_sha256=str(slate.get("content_hash_sha256") or ""),
         slate_market_date=str(slate.get("market_date") or generated_at[:10]),
         slate_source_scan_id=slate_source_scan_id,
         slate_reuse_status=slate_reuse_status,
-        slate_published_count=max(
-            int(slate.get("published_count") or 0), 0
-        ),
-        slate_selection_ids=tuple(
-            str(item) for item in slate.get("selection_ids") or []
-        ),
+        slate_published_count=max(int(slate.get("published_count") or 0), 0),
+        slate_selection_ids=tuple(str(item) for item in slate.get("selection_ids") or []),
         strategy_contributions=strategy_contributions,
         strategy_adapter_provenance=dict(
-            dict(source_summary.get("morning_strategy_adapter") or {}).get("provenance")
-            or {}
+            dict(source_summary.get("morning_strategy_adapter") or {}).get("provenance") or {}
         ),
     )
 
@@ -576,9 +581,7 @@ def _strategy_contribution_summary(
                 )
     adapter_summary = source_summary.get("morning_strategy_adapter")
     enabled = (
-        adapter_summary.get("enabled_strategy_ids")
-        if isinstance(adapter_summary, dict)
-        else ()
+        adapter_summary.get("enabled_strategy_ids") if isinstance(adapter_summary, dict) else ()
     )
     enabled_identities = (
         adapter_summary.get("enabled_strategy_identities")
@@ -588,9 +591,7 @@ def _strategy_contribution_summary(
     if not isinstance(enabled_identities, dict) and isinstance(adapter_summary, dict):
         provenance = adapter_summary.get("provenance")
         enabled_identities = (
-            provenance.get("enabled_strategy_identities")
-            if isinstance(provenance, dict)
-            else {}
+            provenance.get("enabled_strategy_identities") if isinstance(provenance, dict) else {}
         )
     for strategy_id in enabled or ():
         identity = (
@@ -626,9 +627,7 @@ def _strategy_contribution_summary(
     return {
         strategy_id: {
             "strategy_id": strategy_id,
-            "strategy_versions": sorted(
-                item["slate_versions"] or item["current_versions"]
-            ),
+            "strategy_versions": sorted(item["slate_versions"] or item["current_versions"]),
             "strategy_semantics_fingerprints": sorted(
                 item["slate_semantics"] or item["current_semantics"]
             ),

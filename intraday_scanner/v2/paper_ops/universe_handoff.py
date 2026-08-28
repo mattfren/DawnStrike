@@ -70,26 +70,48 @@ def build_universe_handoff(
     )
 
     _validate_cycle_identity(cycle, cycle_contract, requested_date)
+    _validate_release_claims(
+        cycle,
+        cycle_contract,
+        require_production=not allow_test_override,
+    )
+    _validate_core_claims(
+        cycle,
+        cycle_contract,
+        core,
+        require_production=not allow_test_override,
+    )
     core_ready_indexes = _validate_core_contract(
         core, requested_date, allow_test_override=allow_test_override
     )
     _validate_source_summary(source_summary, requested_date, root=root)
 
+    cycle_source_summary = cycle.get("source_summary")
+    core_only_recovery = _is_core_only_recovery(cycle_source_summary, source_summary)
+    snapshot_summary = cycle_source_summary if core_only_recovery else source_summary
     source_snapshot = _resolve_source_path(
         root,
-        str(source_summary.get("snapshot_path") or ""),
+        str(snapshot_summary.get("snapshot_path") or ""),
     )
     mover_rows = _read_mover_snapshot(source_snapshot, requested_date)
+    _validate_source_summary_binding(
+        cycle,
+        source_summary,
+        root=root,
+        requested_date=requested_date,
+        source_snapshot=source_snapshot,
+        mover_rows=mover_rows,
+        require_production=not allow_test_override,
+    )
     source_status = str(source_summary.get("status") or "").strip().lower()
     mover_lane_status = str(source_summary.get("mover_lane_status") or "").strip().upper()
     mover_available = source_status in {"success", "partial"} and bool(mover_rows)
     if mover_lane_status == "SOURCE_FAILED":
         mover_available = False
 
-    core_ready = (
-        str(core.get("status") or "").strip().upper() == "READY"
-        and core_ready_indexes == set(CORE_INDEXES)
-    )
+    core_ready = str(
+        core.get("status") or ""
+    ).strip().upper() == "READY" and core_ready_indexes == set(CORE_INDEXES)
     core_members = _core_members(core, allowed_indexes=core_ready_indexes)
     mover_members = (
         _mover_members(mover_rows, source_summary, requested_date) if mover_available else []
@@ -111,6 +133,13 @@ def build_universe_handoff(
         shortfalls.append("governed_mover_source_unavailable")
     if source_status in {"success", "partial"} and not mover_rows:
         shortfalls.append("governed_mover_snapshot_empty")
+    if source_status == "partial":
+        shortfalls.append("governed_mover_source_partial")
+    if mover_lane_status == "PARTIAL":
+        shortfalls.append("governed_mover_lane_partial")
+    mover_symbols = [canonical_symbol(row.get("ticker") or row.get("symbol")) for row in mover_rows]
+    if len(mover_symbols) != len(set(mover_symbols)):
+        shortfalls.append("governed_mover_snapshot_duplicate_symbols")
     declared_mover_count = int(source_summary.get("candidate_count") or 0)
     if source_status in {"success", "partial"} and declared_mover_count != len(mover_rows):
         shortfalls.append("governed_mover_snapshot_count_mismatch")
@@ -139,6 +168,9 @@ def build_universe_handoff(
         if isinstance(adapter, dict)
         else []
     )
+    missing_strategy_ids = sorted(set(strategy_ids) - set(declared_strategy_ids))
+    if missing_strategy_ids:
+        shortfalls.append("morning_strategy_fleet_incomplete")
     coverage_status = "COMPLETE" if not shortfalls else "PARTIAL"
     generated_at = _first_text(
         cycle_contract.get("generated_at"),
@@ -162,6 +194,7 @@ def build_universe_handoff(
         "generated_at": generated_at,
         "run_id": str(cycle.get("scan_id") or cycle_contract.get("producer_run_id") or ""),
         "morning_scan_id": str(cycle.get("scan_id") or ""),
+        "code_sha": str(cycle_contract.get("code_sha") or ""),
         "universe_symbols": symbols,
         "symbols": symbols,
         "members": members,
@@ -203,7 +236,7 @@ def build_universe_handoff(
             "expected_strategy_ids": list(strategy_ids),
             "declared_paperops_strategy_ids": list(strategy_ids),
             "declared_morning_strategy_ids": declared_strategy_ids,
-            "missing_declared_strategy_ids": sorted(set(strategy_ids) - set(declared_strategy_ids)),
+            "missing_declared_strategy_ids": missing_strategy_ids,
             "expected_count": len(strategy_ids),
         },
         "safety": {
@@ -230,6 +263,7 @@ def load_universe_handoff(
     market_date: str | date | None = None,
     require_production: bool = False,
     verify_sources: bool = True,
+    expected_code_sha: str | None = None,
 ) -> dict[str, Any]:
     """Load and verify a content-addressed universe handoff."""
 
@@ -243,6 +277,11 @@ def load_universe_handoff(
         raise UniverseHandoffError("universe handoff market date conflicts")
     if require_production and not verify_sources:
         raise UniverseHandoffError("production universe handoff requires source verification")
+    if expected_code_sha is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", expected_code_sha):
+            raise UniverseHandoffError("expected runtime release SHA is invalid")
+        if str(payload.get("code_sha") or "") != expected_code_sha:
+            raise UniverseHandoffError("universe handoff release SHA conflicts with runtime")
     claimed = str(payload.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed) or claimed != _handoff_hash(payload):
         raise UniverseHandoffError("universe handoff content hash is invalid")
@@ -310,11 +349,18 @@ def load_universe_handoff(
         # unhashed semantic body.  This closes the self-consistent-forgery
         # case where an attacker replaces those fields and recomputes every
         # handoff digest and identity alias.
-        expected = build_universe_handoff(
-            handoff_path.parent,
-            actual_date,
-            allow_test_override=not require_production,
-        )
+        try:
+            expected = build_universe_handoff(
+                handoff_path.parent,
+                actual_date,
+                allow_test_override=not require_production,
+            )
+        except UniverseHandoffError as exc:
+            # A malformed sibling input invalidates the handoff's semantic
+            # binding just as surely as a changed derived body does.  Keep the
+            # loader's failure class stable without exposing an implementation
+            # detail from the rebuild path.
+            raise UniverseHandoffError("universe handoff semantic binding is invalid") from exc
         expected_artifacts = expected.get("source_artifacts")
         if artifacts != expected_artifacts:
             raise UniverseHandoffError("universe handoff source artifact manifest is invalid")
@@ -334,9 +380,17 @@ def load_universe_handoff(
 
 
 def validate_universe_handoff(
-    path: str | Path, market_date: str | date | None = None
+    path: str | Path,
+    market_date: str | date | None = None,
+    *,
+    expected_code_sha: str | None = None,
 ) -> dict[str, Any]:
-    return load_universe_handoff(path, market_date=market_date, require_production=True)
+    return load_universe_handoff(
+        path,
+        market_date=market_date,
+        require_production=True,
+        expected_code_sha=expected_code_sha,
+    )
 
 
 def _validate_cycle_identity(
@@ -364,6 +418,185 @@ def _validate_cycle_identity(
         raise UniverseHandoffError("Morning source status is not governed")
 
 
+def _core_claim_projection(core: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact core fields copied into Alpha artifacts."""
+
+    return {
+        "contract_status": str(core.get("status") or "DATA_UNAVAILABLE"),
+        "contract_membership_count": int(core.get("membership_count") or 0),
+        "contract_hash_sha256": str(core.get("content_hash_sha256") or ""),
+        "requested_market_date": str(core.get("requested_market_date") or ""),
+        "index_verdicts": core.get("index_verdicts") or {},
+        "raw_artifact_hashes": core.get("raw_artifact_hashes") or [],
+        "canonical_member_set_hash_sha256": str(core.get("canonical_member_set_hash_sha256") or ""),
+    }
+
+
+def _validate_release_claims(
+    cycle: dict[str, Any],
+    cycle_contract: dict[str, Any],
+    *,
+    require_production: bool,
+) -> None:
+    cycle_source = cycle.get("source_summary")
+    values = {
+        "alpha cycle": str(cycle.get("code_sha") or "").strip().lower(),
+        "alpha run contract": str(cycle_contract.get("code_sha") or "").strip().lower(),
+        "alpha source summary": (
+            str(cycle_source.get("code_sha") or "").strip().lower()
+            if isinstance(cycle_source, dict)
+            else ""
+        ),
+    }
+    present = {value for value in values.values() if value}
+    if require_production and any(
+        not re.fullmatch(r"[0-9a-f]{40}", value) for value in values.values()
+    ):
+        raise UniverseHandoffError("Morning release SHA claims are missing or invalid")
+    if any(value and not re.fullmatch(r"[0-9a-f]{40}", value) for value in values.values()):
+        raise UniverseHandoffError("Morning release SHA claim is invalid")
+    if len(present) > 1:
+        raise UniverseHandoffError("Morning release SHA claims are inconsistent")
+    if present and any(not value for value in values.values()):
+        raise UniverseHandoffError("Morning release SHA claims are incomplete")
+
+
+def _validate_core_claims(
+    cycle: dict[str, Any],
+    cycle_contract: dict[str, Any],
+    core: dict[str, Any],
+    *,
+    require_production: bool,
+) -> None:
+    """Bind cycle and flattened run-contract core claims to the sibling file."""
+
+    expected = _core_claim_projection(core)
+    cycle_core = cycle.get("core_universe")
+    if cycle_core is None:
+        if require_production:
+            raise UniverseHandoffError("alpha cycle core universe claim is missing")
+    elif cycle_core != core:
+        raise UniverseHandoffError("alpha cycle core universe claim is not bound")
+
+    cycle_source = cycle.get("source_summary")
+    if isinstance(cycle_source, dict) and cycle_source.get("core_universe") is not None:
+        claim = cycle_source.get("core_universe")
+        if not isinstance(claim, dict) or any(
+            claim.get(field) != value for field, value in expected.items()
+        ):
+            raise UniverseHandoffError("alpha cycle source core claim is not bound")
+    elif require_production:
+        raise UniverseHandoffError("alpha cycle source core claim is missing")
+
+    flattened = {
+        "core_universe_status": expected["contract_status"],
+        "core_universe_count": expected["contract_membership_count"],
+        "core_universe_hash_sha256": expected["contract_hash_sha256"],
+        "core_universe_market_date": expected["requested_market_date"],
+        "core_index_verdicts": expected["index_verdicts"],
+        "core_raw_artifact_hashes": expected["raw_artifact_hashes"],
+        "core_member_set_hash_sha256": expected["canonical_member_set_hash_sha256"],
+    }
+    present = [field for field in flattened if field in cycle_contract]
+    if require_production and len(present) != len(flattened):
+        raise UniverseHandoffError("alpha run contract core claims are incomplete")
+    if any(
+        cycle_contract.get(field) != value
+        for field, value in flattened.items()
+        if field in cycle_contract
+    ):
+        raise UniverseHandoffError("alpha run contract core claims are not bound")
+
+
+def _validate_source_summary_binding(
+    cycle: dict[str, Any],
+    standalone: dict[str, Any],
+    *,
+    root: Path,
+    requested_date: str,
+    source_snapshot: Path,
+    mover_rows: list[dict[str, Any]],
+    require_production: bool,
+) -> None:
+    """Bind the cycle's mover summary to the standalone summary and CSV.
+
+    The normal cycle copies the web-collection summary and then adds Alpha
+    fields.  The sole governed exception is a READY-core recovery after a
+    mover outage, where the cycle deliberately points at
+    ``core_recovery_snapshot.csv`` while the standalone source remains failed.
+    """
+
+    cycle_summary = cycle.get("source_summary")
+    if cycle_summary is None:
+        if require_production:
+            raise UniverseHandoffError("alpha cycle source summary is missing")
+        return
+    if not isinstance(cycle_summary, dict):
+        raise UniverseHandoffError("alpha cycle source summary is malformed")
+
+    standalone_identity = _first_text(standalone.get("source_identity"), standalone.get("run_id"))
+    cycle_identity = _first_text(cycle_summary.get("source_identity"), cycle_summary.get("run_id"))
+    if not standalone_identity or cycle_identity != standalone_identity:
+        raise UniverseHandoffError("alpha cycle source summary identity is not bound")
+    for identity_field in ("source_identity", "run_id"):
+        standalone_value = str(standalone.get(identity_field) or "").strip()
+        cycle_value = str(cycle_summary.get(identity_field) or "").strip()
+        if standalone_value and cycle_value != standalone_value:
+            raise UniverseHandoffError(f"alpha cycle source summary {identity_field} is not bound")
+
+    recovery = _is_core_only_recovery(cycle_summary, standalone)
+    if (
+        require_production
+        and recovery
+        and str(cycle.get("core_universe", {}).get("status") or "").upper() != "READY"
+    ):
+        raise UniverseHandoffError("core-only mover recovery requires READY core contract")
+
+    # Every standalone field is copied into the cycle in the normal path.  In
+    # recovery the cycle records the failed mover path and points to the
+    # separately generated core-recovery snapshot.
+    mutable_recovery_fields = {"status", "snapshot_path"}
+    if recovery:
+        failed_snapshot = _resolve_source_path(
+            root, str(cycle_summary.get("failed_mover_snapshot_path") or "")
+        )
+        standalone_snapshot = _resolve_source_path(root, str(standalone.get("snapshot_path") or ""))
+        if failed_snapshot != standalone_snapshot:
+            raise UniverseHandoffError("core-only recovery failed mover snapshot is not bound")
+        if source_snapshot == standalone_snapshot:
+            raise UniverseHandoffError("core-only recovery snapshot is not distinct")
+    elif cycle_summary.get("failed_mover_snapshot_path") is not None:
+        raise UniverseHandoffError("alpha cycle source summary recovery path is unexpected")
+    for key, value in standalone.items():
+        if recovery and key in mutable_recovery_fields:
+            continue
+        if cycle_summary.get(key) != value:
+            raise UniverseHandoffError(f"alpha cycle source summary field is not bound: {key}")
+
+    standalone_snapshot = _resolve_source_path(root, str(standalone.get("snapshot_path") or ""))
+    if not recovery and source_snapshot != standalone_snapshot:
+        raise UniverseHandoffError("alpha cycle source summary snapshot is not bound")
+
+    # A declared-count/CSV mismatch is governed incomplete truth rather than
+    # permission to replace either artifact.  Both exact files are already
+    # content-bound above; the builder emits the named PARTIAL shortfall.
+
+
+def _is_core_only_recovery(cycle_summary: Any, standalone: dict[str, Any]) -> bool:
+    """Identify the one governed source-summary rewrite used by core recovery."""
+
+    return (
+        isinstance(cycle_summary, dict)
+        and str(cycle_summary.get("mover_lane_status") or "").strip().upper() == "SOURCE_FAILED"
+        and str(cycle_summary.get("status") or "").strip().lower() == "success"
+        and str(standalone.get("status") or "").strip().lower() in {"failed", "no_data", "empty"}
+        and str(cycle_summary.get("snapshot_path") or "")
+        .strip()
+        .endswith("core_recovery_snapshot.csv")
+        and str(cycle_summary.get("failed_mover_snapshot_path") or "").strip()
+    )
+
+
 def _validate_core_contract(
     core: dict[str, Any], market_date: str, *, allow_test_override: bool = False
 ) -> set[str]:
@@ -387,14 +620,16 @@ def _validate_core_contract(
         "UNKNOWN",
     }:
         raise UniverseHandoffError("core universe contract freshness is invalid")
-    if str(core.get("status") or "").upper() == "READY" and str(
-        core.get("freshness_verdict") or ""
-    ).upper() == "FRESH":
+    if (
+        str(core.get("status") or "").upper() == "READY"
+        and str(core.get("freshness_verdict") or "").upper() == "FRESH"
+    ):
         observed_day = date.fromisoformat(observed_date)
         requested_day = date.fromisoformat(market_date)
-        if observed_day > requested_day or (
-            requested_day - observed_day
-        ).days > DEFAULT_MAX_AGE_DAYS:
+        if (
+            observed_day > requested_day
+            or (requested_day - observed_day).days > DEFAULT_MAX_AGE_DAYS
+        ):
             raise UniverseHandoffError("core universe observation is not fresh for market date")
     claimed = str(core.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed):
@@ -440,8 +675,10 @@ def _validate_core_contract(
                 continue
             valid_from = _date_text(row.get("valid_from"))
             valid_to = _date_text(row.get("valid_to"))
-            if valid_from is None or valid_from > market_date or (
-                valid_to is not None and market_date > valid_to
+            if (
+                valid_from is None
+                or valid_from > market_date
+                or (valid_to is not None and market_date > valid_to)
             ):
                 raise UniverseHandoffError("core universe member is not valid for market date")
     if _canonical_member_hash(canonical_records) != declared_member_hash:
@@ -476,22 +713,26 @@ def _validate_core_contract(
         if index not in artifacts_by_index:
             raise UniverseHandoffError("core universe source root index is invalid")
         artifacts_by_index[index].append(artifact)
-        if not str(artifact.get("source_id") or "").strip() or not str(
-            artifact.get("source_uri") or ""
-        ).strip():
+        if (
+            not str(artifact.get("source_id") or "").strip()
+            or not str(artifact.get("source_uri") or "").strip()
+        ):
             raise UniverseHandoffError("core universe source identity binding is invalid")
         raw_hashes = artifact.get("raw_artifact_hashes") or []
-        if not isinstance(raw_hashes, list) or not raw_hashes or any(
-            not _SHA_PATTERN.fullmatch(str(value).lower()) for value in raw_hashes
+        if (
+            not isinstance(raw_hashes, list)
+            or not raw_hashes
+            or any(not _SHA_PATTERN.fullmatch(str(value).lower()) for value in raw_hashes)
         ):
             raise UniverseHandoffError("core universe source artifact hashes are invalid")
         if not _SHA_PATTERN.fullmatch(
             str(artifact.get("canonical_member_set_hash_sha256") or "").lower()
         ):
             raise UniverseHandoffError("core universe source member hash is invalid")
-        if not str(binding.get("authority") or "").strip() or not str(
-            binding.get("transformation_id") or ""
-        ).strip():
+        if (
+            not str(binding.get("authority") or "").strip()
+            or not str(binding.get("transformation_id") or "").strip()
+        ):
             raise UniverseHandoffError("core universe source lineage binding is invalid")
         if not str(binding.get("source_scope") or "").strip():
             raise UniverseHandoffError("core universe source scope is missing")
@@ -504,16 +745,17 @@ def _validate_core_contract(
         else:
             if str(binding.get("index") or "").strip() != str(trusted.get("index") or ""):
                 raise UniverseHandoffError("core universe source root index is not trusted")
-            if str(binding.get("transformation_id") or "").strip() != str(
-                trusted.get("transformation_id") or ""
-            ).strip():
+            if (
+                str(binding.get("transformation_id") or "").strip()
+                != str(trusted.get("transformation_id") or "").strip()
+            ):
                 raise UniverseHandoffError("core universe source transformation is not trusted")
-            trusted_membership_authority = str(
-                trusted.get("membership_authority") or ""
-            ).strip()
-            if trusted_membership_authority and str(
-                binding.get("membership_authority") or ""
-            ).strip() != trusted_membership_authority:
+            trusted_membership_authority = str(trusted.get("membership_authority") or "").strip()
+            if (
+                trusted_membership_authority
+                and str(binding.get("membership_authority") or "").strip()
+                != trusted_membership_authority
+            ):
                 raise UniverseHandoffError("core universe membership authority is not trusted")
             if trusted.get("official_index_authority") is not None and binding.get(
                 "official_index_authority"
@@ -523,11 +765,15 @@ def _validate_core_contract(
             if derived_effective is None or derived_effective > market_date:
                 raise UniverseHandoffError("core universe source effective date is invalid")
             trusted_effective = _date_text(trusted.get("effective_date"))
-            recurring_effective = bool(
-                trusted.get("allow_future_same_semantic_set_dates")
-                and market_date > trusted_effective
-                and trusted_effective <= derived_effective <= market_date
-            ) if trusted_effective else False
+            recurring_effective = (
+                bool(
+                    trusted.get("allow_future_same_semantic_set_dates")
+                    and market_date > trusted_effective
+                    and trusted_effective <= derived_effective <= market_date
+                )
+                if trusted_effective
+                else False
+            )
             if (
                 trusted_effective
                 and derived_effective != trusted_effective
@@ -539,9 +785,7 @@ def _validate_core_contract(
                 semantic_age = (
                     date.fromisoformat(market_date) - date.fromisoformat(age_basis)
                 ).days
-                maximum_age = int(
-                    trusted.get("maximum_source_age_days") or DEFAULT_MAX_AGE_DAYS
-                )
+                maximum_age = int(trusted.get("maximum_source_age_days") or DEFAULT_MAX_AGE_DAYS)
                 if (
                     not trusted.get("allow_future_same_semantic_set_dates")
                     or semantic_age < 0
@@ -564,22 +808,20 @@ def _validate_core_contract(
             ]
             if trusted_hashes and [str(value).lower() for value in raw_hashes] != trusted_hashes:
                 raise UniverseHandoffError("core universe source raw hash is not trusted")
-            trusted_member_hash = str(
-                trusted.get("canonical_member_set_hash_sha256") or ""
-            ).lower()
-            if trusted_member_hash and not recurring_effective and str(
-                artifact.get("canonical_member_set_hash_sha256") or ""
-            ).lower() != trusted_member_hash:
+            trusted_member_hash = str(trusted.get("canonical_member_set_hash_sha256") or "").lower()
+            if (
+                trusted_member_hash
+                and not recurring_effective
+                and str(artifact.get("canonical_member_set_hash_sha256") or "").lower()
+                != trusted_member_hash
+            ):
                 raise UniverseHandoffError("core universe canonical member root is not trusted")
-            trusted_symbol_hash = str(
-                trusted.get("canonical_symbol_set_hash_sha256") or ""
-            ).lower()
+            trusted_symbol_hash = str(trusted.get("canonical_symbol_set_hash_sha256") or "").lower()
             if trusted_symbol_hash:
                 trusted_symbols = [
                     row.get("symbol")
                     for row in members
-                    if isinstance(row, dict)
-                    and index in (row.get("index_memberships") or [])
+                    if isinstance(row, dict) and index in (row.get("index_memberships") or [])
                 ]
                 if _canonical_symbol_set_hash(trusted_symbols, index) != trusted_symbol_hash:
                     raise UniverseHandoffError("core universe canonical symbol root is not trusted")
@@ -605,12 +847,12 @@ def _validate_core_contract(
                 "reconstitution_id",
             ):
                 expected_lineage = str(trusted.get(field) or "").strip()
-                if expected_lineage and str(
-                    artifact.get(field) or binding.get(field) or ""
-                ).strip() != expected_lineage:
-                    raise UniverseHandoffError(
-                        f"core universe {field} is not trusted"
-                    )
+                if (
+                    expected_lineage
+                    and str(artifact.get(field) or binding.get(field) or "").strip()
+                    != expected_lineage
+                ):
+                    raise UniverseHandoffError(f"core universe {field} is not trusted")
     if str(core.get("status") or "").upper() == "READY":
         if len(source_ids) != len({str(value).strip() for value in source_ids}):
             raise UniverseHandoffError("core universe source identities are duplicated")
@@ -642,6 +884,13 @@ def _validate_core_contract(
         if status == "READY" and len(artifacts_by_index[index]) != 1:
             raise UniverseHandoffError(f"core universe source root is missing for {index}")
         if status == "READY":
+            if any(
+                isinstance(artifact.get("error_codes"), list) and artifact.get("error_codes")
+                for artifact in artifacts_by_index[index]
+            ):
+                raise UniverseHandoffError(
+                    f"core universe {index} READY source artifact has errors"
+                )
             required = {
                 "count_verdict": "PASS",
                 "effective_date_verdict": "PASS",
@@ -649,21 +898,16 @@ def _validate_core_contract(
                 "completeness_verdict": "COMPLETE",
             }
             if any(
-                str(verdict.get(field) or "").upper() != value
-                for field, value in required.items()
+                str(verdict.get(field) or "").upper() != value for field, value in required.items()
             ):
                 raise UniverseHandoffError(f"core universe {index} verdict is not governed")
             if expected_count != observed_count:
                 raise UniverseHandoffError(f"core universe {index} count binding is invalid")
             if any(
-                str(artifact["source_binding"].get("status") or "").upper()
-                != "VERIFIED"
+                str(artifact["source_binding"].get("status") or "").upper() != "VERIFIED"
                 or not _SHA_PATTERN.fullmatch(
                     str(
-                        artifact["source_binding"].get(
-                            "derived_member_set_hash_sha256"
-                        )
-                        or ""
+                        artifact["source_binding"].get("derived_member_set_hash_sha256") or ""
                     ).lower()
                 )
                 or int(artifact["source_binding"].get("derived_membership_count") or 0)
@@ -679,7 +923,9 @@ def _validate_core_contract(
                     ),
                     "asset_class": str(
                         row.get("asset_class") or row.get("security_type") or "common_stock"
-                    ).strip().lower(),
+                    )
+                    .strip()
+                    .lower(),
                     "index": index,
                     "valid_from": row.get("valid_from"),
                     "valid_to": row.get("valid_to"),
@@ -694,8 +940,7 @@ def _validate_core_contract(
                 str(artifact.get("canonical_member_set_hash_sha256") or "").lower()
                 != expected_index_hash
                 or str(
-                    artifact["source_binding"].get("derived_member_set_hash_sha256")
-                    or ""
+                    artifact["source_binding"].get("derived_member_set_hash_sha256") or ""
                 ).lower()
                 != expected_index_hash
                 for artifact in artifacts_by_index[index]
@@ -709,6 +954,12 @@ def _validate_core_contract(
         or str(core.get("freshness_verdict") or "").upper() != "FRESH"
     ):
         raise UniverseHandoffError("READY core universe top-level verdict is not governed")
+    if str(core.get("status") or "").upper() == "DATA_UNAVAILABLE" and ready_indexes == set(
+        CORE_INDEXES
+    ):
+        raise UniverseHandoffError(
+            "DATA_UNAVAILABLE core universe cannot claim both READY index lanes"
+        )
     return ready_indexes
 
 
@@ -789,7 +1040,9 @@ def _core_members(
                 ),
                 "asset_class": str(
                     raw.get("asset_class") or raw.get("security_type") or "common_stock"
-                ).strip().lower(),
+                )
+                .strip()
+                .lower(),
                 "valid_from": raw.get("valid_from"),
                 "valid_to": raw.get("valid_to"),
                 "lanes": ["core"],
@@ -1042,10 +1295,15 @@ def _cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--out")
     parser.add_argument("--handoff")
     parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--expected-code-sha")
     args = parser.parse_args(argv)
     try:
         if args.validate:
-            payload = validate_universe_handoff(args.handoff or args.out or "", args.market_date)
+            payload = validate_universe_handoff(
+                args.handoff or args.out or "",
+                args.market_date,
+                expected_code_sha=args.expected_code_sha,
+            )
         else:
             payload = build_universe_handoff(
                 args.morning_root or "", args.market_date, output_path=args.out

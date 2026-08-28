@@ -34,6 +34,9 @@ from intraday_scanner.alpha.v5_policy import (
 from intraday_scanner.config import ScannerConfig, load_config
 from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.models import utc_now_iso
+from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 LEGACY_ALPHAOPS_STRATEGY_ID = "alphaops_v4"
@@ -93,13 +96,9 @@ def _is_official_telegram_delivery(
 ) -> bool:
     return bool(
         str(row.get("channel") or "").strip().lower() == "telegram"
-        and (
-            strategy_id is None
-            or str(row.get("strategy_id") or "") == strategy_id
-        )
+        and (strategy_id is None or str(row.get("strategy_id") or "") == strategy_id)
         and str(row.get("cohort") or "") == DELIVERED_COHORT
-        and str(row.get("delivery_status") or "").strip().lower()
-        in _DELIVERED_STATUSES
+        and str(row.get("delivery_status") or "").strip().lower() in _DELIVERED_STATUSES
     )
 
 
@@ -120,9 +119,7 @@ def reconcile_alpha_paper_trades(
     if fee_bps < 0:
         raise ValueError("fee_bps must be non-negative")
     day = (market_date or date.today().isoformat())[:10]
-    strategy_id, strategy_version = alphaops_strategy_contract(
-        f"{day}T12:00:00-04:00"
-    )
+    strategy_id, strategy_version = alphaops_strategy_contract(f"{day}T12:00:00-04:00")
     execution_policy_version = (
         ALPHAOPS_V5_POLICY_VERSION
         if strategy_id == ALPHAOPS_V5_STRATEGY_ID
@@ -131,6 +128,11 @@ def reconcile_alpha_paper_trades(
     scanner_config = config or load_config(database_path=Path(db_path))
     store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=day,
+        strategy_id=None,
+    )
     recovery = recover_legacy_alpha_delivery_membership(
         store,
         market_date=day,
@@ -200,9 +202,7 @@ def reconcile_alpha_paper_trades(
         limit=50_000,
     ):
         payload = row.get("payload_json")
-        signal_id = str(
-            payload.get("signal_id") if isinstance(payload, dict) else ""
-        )
+        signal_id = str(payload.get("signal_id") if isinstance(payload, dict) else "")
         if signal_id:
             raw_entry_by_signal.setdefault(signal_id, []).append(row)
     raw_observations = store.load_price_observation_records(
@@ -212,9 +212,7 @@ def reconcile_alpha_paper_trades(
     observation_by_id: dict[str, dict[str, Any]] = {}
     for row in raw_observations:
         columns = row.get("columns")
-        observation_id = str(
-            columns.get("observation_id") if isinstance(columns, dict) else ""
-        )
+        observation_id = str(columns.get("observation_id") if isinstance(columns, dict) else "")
         if observation_id:
             observation_by_id[observation_id] = row
     historical = {
@@ -240,6 +238,7 @@ def reconcile_alpha_paper_trades(
                 selection_context = canonical_paper_selection_context(
                     selection,
                     delivery=delivery,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
                 raw_entries = raw_entry_by_signal.get(signal_id, [])
                 if len(raw_entries) == 1:
@@ -247,8 +246,7 @@ def reconcile_alpha_paper_trades(
                     source_id = str(
                         intent_payload.get("source_observation_id")
                         if isinstance(intent_payload, dict)
-                        else raw_entries[0].get("source_observation_id")
-                        or ""
+                        else raw_entries[0].get("source_observation_id") or ""
                     )
                     source_record = observation_by_id.get(source_id)
                     if source_record is not None:
@@ -257,9 +255,10 @@ def reconcile_alpha_paper_trades(
                             intent_record=raw_entries[0],
                             source_observation_record=source_record,
                         )
-                elif outcome is not None and str(
-                    outcome.get("outcome_status") or ""
-                ) == "not_triggered":
+                elif (
+                    outcome is not None
+                    and str(outcome.get("outcome_status") or "") == "not_triggered"
+                ):
                     decision_context = selection_context
             except ValueError:
                 decision_context = None
@@ -313,11 +312,7 @@ def reconcile_alpha_paper_trades(
     invalid = [
         row for row in evaluations if str(row.get("reconciliation_status") or "") == "invalid"
     ]
-    status = (
-        "complete"
-        if session_selections and not unresolved and not invalid
-        else "failed"
-    )
+    status = "complete" if session_selections and not unresolved and not invalid else "failed"
     output_dir = Path(out_dir) / day
     paths = _write_artifacts(
         output_dir,
@@ -381,9 +376,7 @@ def recover_legacy_alpha_delivery_membership(
         strategy_id=LEGACY_ALPHAOPS_STRATEGY_ID,
         limit=50_000,
     )
-    existing = [
-        row for row in existing if str(row.get("selected_at") or "")[:10] == market_date
-    ]
+    existing = [row for row in existing if str(row.get("selected_at") or "")[:10] == market_date]
     if existing:
         return {"status": "not_needed", "recovered": 0}
     notifications = [
@@ -425,52 +418,56 @@ def recover_legacy_alpha_delivery_membership(
             signal_id = str(signal.get("signal_id") or "")
             selection_id = _stable_id("selection", scan_id, signal_id, DELIVERED_COHORT)
             selected_at = str(signal.get("generated_at") or notification.get("sent_at") or "")
-            selection_rows.append({
-                "selection_id": selection_id,
-                "signal_id": signal_id,
-                "scan_id": scan_id,
-                "market_date": market_date,
-                "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
-                "strategy_version": str(
-                    signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
-                ),
-                "cohort": DELIVERED_COHORT,
-                "rank": signal.get("rank") or rank,
-                "decision": "selected",
-                "selected_at": selected_at,
-                "event_key": event_key,
-                "body_sha256": body_sha256,
-                "payload_json": {
-                    "legacy_recovered": True,
-                    "ticker": ticker,
+            selection_rows.append(
+                {
+                    "selection_id": selection_id,
+                    "signal_id": signal_id,
+                    "scan_id": scan_id,
+                    "market_date": market_date,
+                    "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
+                    "strategy_version": str(
+                        signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
+                    ),
+                    "cohort": DELIVERED_COHORT,
+                    "rank": signal.get("rank") or rank,
+                    "decision": "selected",
+                    "selected_at": selected_at,
+                    "event_key": event_key,
                     "body_sha256": body_sha256,
-                    "reason": "Recovered from exact persisted Telegram body.",
-                },
-            })
-            delivery_rows.append({
-                "membership_id": _stable_id("delivery", event_key, signal_id),
-                "event_key": event_key,
-                "selection_id": selection_id,
-                "signal_id": signal_id,
-                "scan_id": scan_id,
-                "market_date": market_date,
-                "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
-                "strategy_version": str(
-                    signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
-                ),
-                "cohort": DELIVERED_COHORT,
-                "channel": "telegram",
-                "decision": "selected",
-                "selected_at": selected_at,
-                "delivery_status": "delivered_legacy",
-                "attempted_at": str(notification.get("sent_at") or ""),
-                "delivered_at": str(notification.get("sent_at") or ""),
-                "body_sha256": body_sha256,
-                "payload_json": {
-                    "legacy_recovered": True,
-                    "exact_body_membership": True,
-                },
-            })
+                    "payload_json": {
+                        "legacy_recovered": True,
+                        "ticker": ticker,
+                        "body_sha256": body_sha256,
+                        "reason": "Recovered from exact persisted Telegram body.",
+                    },
+                }
+            )
+            delivery_rows.append(
+                {
+                    "membership_id": _stable_id("delivery", event_key, signal_id),
+                    "event_key": event_key,
+                    "selection_id": selection_id,
+                    "signal_id": signal_id,
+                    "scan_id": scan_id,
+                    "market_date": market_date,
+                    "strategy_id": LEGACY_ALPHAOPS_STRATEGY_ID,
+                    "strategy_version": str(
+                        signal.get("model_version") or ALPHAOPS_STRATEGY_VERSION
+                    ),
+                    "cohort": DELIVERED_COHORT,
+                    "channel": "telegram",
+                    "decision": "selected",
+                    "selected_at": selected_at,
+                    "delivery_status": "delivered_legacy",
+                    "attempted_at": str(notification.get("sent_at") or ""),
+                    "delivered_at": str(notification.get("sent_at") or ""),
+                    "body_sha256": body_sha256,
+                    "payload_json": {
+                        "legacy_recovered": True,
+                        "exact_body_membership": True,
+                    },
+                }
+            )
     if persist and selection_rows:
         store.persist_signal_selections(selection_rows)
         store.persist_notification_deliveries(delivery_rows)
@@ -520,16 +517,12 @@ def _reconcile_selection(
         "market_date": market_date,
         "ticker": ticker,
         "strategy_id": strategy_id,
-        "strategy_version": str(
-            selection.get("strategy_version") or ALPHAOPS_STRATEGY_VERSION
-        ),
+        "strategy_version": str(selection.get("strategy_version") or ALPHAOPS_STRATEGY_VERSION),
         "cohort": str(selection.get("cohort") or DELIVERED_COHORT),
         "direction": "long",
         "decision_time": signal.get("generated_at") or selection.get("selected_at"),
         "delivery_id": delivery.get("membership_id") if delivery else None,
-        "delivery_status": (
-            delivery.get("delivery_status") if delivery else "not_delivered"
-        ),
+        "delivery_status": (delivery.get("delivery_status") if delivery else "not_delivered"),
         "delivery_channel": delivery.get("channel") if delivery else None,
         "delivered": delivered,
         "execution_policy_version": execution_policy_version,
@@ -541,9 +534,7 @@ def _reconcile_selection(
         return (
             {
                 **base,
-                "observation_status": (
-                    "complete" if outcome is not None else "missing"
-                ),
+                "observation_status": ("complete" if outcome is not None else "missing"),
                 "terminal_state": "research_only_policy_blocked",
                 "reconciliation_status": "resolved",
                 "activated": None,
@@ -588,12 +579,8 @@ def _reconcile_selection(
         "source_coverage_complete": source_complete,
         "path_replay_id": outcome.get("path_replay_id"),
         "path_truth_status": outcome.get("path_truth_status"),
-        "retrospective_research_eligible": outcome.get(
-            "retrospective_research_eligible", True
-        ),
-        "prospective_promotion_eligible": outcome.get(
-            "prospective_promotion_eligible", False
-        ),
+        "retrospective_research_eligible": outcome.get("retrospective_research_eligible", True),
+        "prospective_promotion_eligible": outcome.get("prospective_promotion_eligible", False),
     }
     path_status = str(outcome.get("path_truth_status") or "")
     if path_status in {
@@ -751,10 +738,14 @@ def _reconcile_selection(
         "max_adverse_excursion_pct": trade["max_adverse_excursion_pct"],
         "reason": "Paper trade reconstructed from complete sourced one-minute bars.",
     }
-    return evaluation, trade, [
-        _activation_label(evaluation, value=True),
-        _return_label(evaluation, trade),
-    ]
+    return (
+        evaluation,
+        trade,
+        [
+            _activation_label(evaluation, value=True),
+            _return_label(evaluation, trade),
+        ],
+    )
 
 
 def _paper_trade_from_outcome(
@@ -857,9 +848,7 @@ def _paper_trade_from_outcome(
         "net_pnl": round(notional * canonical_after_cost / 100.0, 4),
         "net_return_pct": canonical_after_cost,
         "risk_amount": round(risk_amount, 4) if risk_amount and risk_amount > 0 else None,
-        "r_multiple": round(net_pnl / risk_amount, 4)
-        if risk_amount and risk_amount > 0
-        else None,
+        "r_multiple": round(net_pnl / risk_amount, 4) if risk_amount and risk_amount > 0 else None,
         "max_favorable_excursion_pct": _number(outcome.get("mfe_pct")),
         "max_adverse_excursion_pct": _number(outcome.get("mae_pct")),
         "source": outcome.get("outcome_source") or outcome.get("source"),
@@ -867,17 +856,11 @@ def _paper_trade_from_outcome(
         "source_bar_hash_sha256": outcome.get("source_bar_hash_sha256"),
         "source_bar_count": outcome.get("source_bar_count"),
         "execution_policy_version": execution_policy_version,
-        "account_id": (
-            v5_entry.get("account_id") if v5_entry else None
-        ),
-        "decision_fingerprint": (
-            v5_entry.get("decision_fingerprint") if v5_entry else None
-        ),
+        "account_id": (v5_entry.get("account_id") if v5_entry else None),
+        "decision_fingerprint": (v5_entry.get("decision_fingerprint") if v5_entry else None),
         "slippage_bps": applied_slippage_bps,
         "fee_bps": applied_fee_bps,
-        "commission_per_share_per_side": (
-            commission
-        ),
+        "commission_per_share_per_side": (commission),
         "reconstruction_mode": "sourced_eod_one_minute_replay",
         "same_bar_policy": "stop_first_conservative",
         "created_at": base["reconciled_at"],
@@ -966,9 +949,7 @@ def _daily_scorecards(
         returns = [float(row["net_return_pct"]) for row in cohort_trades]
         pnls = [float(row["net_pnl"]) for row in cohort_trades]
         r_values = [
-            float(row["r_multiple"])
-            for row in cohort_trades
-            if row.get("r_multiple") is not None
+            float(row["r_multiple"]) for row in cohort_trades if row.get("r_multiple") is not None
         ]
         wins = [value for value in pnls if value > 0]
         losses = [value for value in pnls if value < 0]
@@ -1003,8 +984,7 @@ def _daily_scorecards(
             "execution_policy_version": execution_policy_version,
             "selected_count": selected_count,
             "delivered_count": (
-                sum(1 for row in cohort_evaluations if row.get("delivered"))
-                + no_trade_count
+                sum(1 for row in cohort_evaluations if row.get("delivered")) + no_trade_count
             ),
             "no_trade_count": no_trade_count,
             "session_status": session_status,
@@ -1072,9 +1052,7 @@ def _delivery_by_signal(
 ) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
     official_rows = [
-        row
-        for row in rows
-        if _is_official_telegram_delivery(row, strategy_id=strategy_id)
+        row for row in rows if _is_official_telegram_delivery(row, strategy_id=strategy_id)
     ]
     for row in sorted(
         official_rows,

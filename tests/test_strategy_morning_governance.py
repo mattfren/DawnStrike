@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -7,6 +9,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from intraday_scanner.alpha.run_contracts import _strategy_contribution_summary
+from intraday_scanner.decisioning.contracts import (
+    StrategyDecisionReceipt,
+    parse_strategy_decision_receipt,
+)
 from intraday_scanner.market_calendar import (
     NEXT_SESSION_ACTIVATION_POLICY,
     registration_coverage_inception_date,
@@ -16,7 +22,10 @@ from intraday_scanner.services.alpha_cycle_service import (
     _merge_strategy_adapter_signals,
     _strategy_adapter_contributor_count,
 )
-from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
+from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
+    build_ranked_research_slate,
+)
 from intraday_scanner.services.morning_strategy_adapter import (
     DATATRUTH_MANIFEST_ATTESTATION_LABEL,
     GOVERNED_SOURCE_LABEL,
@@ -25,6 +34,7 @@ from intraday_scanner.services.morning_strategy_adapter import (
     adapt_prior_session_paper_ops,
     adapt_verified_prior_session_rows,
 )
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from intraday_scanner.v2.data import MarketBar, MarketDataset
 from intraday_scanner.v2.data_truth.core import (
     DATA_TRUTH_MANIFEST_SCHEMA_VERSION,
@@ -67,6 +77,82 @@ from intraday_scanner.v2.strategies import (
     StrategySpec,
     build_strategy_catalog,
 )
+
+
+def _receipt_backed_merge_row(
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    source_signal_id: str,
+    final_score: float,
+    research_eligible: bool,
+    direction: str = "long",
+    bind_source: bool = True,
+    market_date: str = "2026-08-28",
+) -> dict[str, object]:
+    input_payload = {"direction": direction}
+    if bind_source:
+        input_payload["source_signal_id"] = source_signal_id
+    input_payload_json = json.dumps(
+        input_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    receipt = StrategyDecisionReceipt(
+        schema_version="dawnstrike.strategy_decision_receipt.v2",
+        receipt_id="",
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        symbol="AAA",
+        market_date=market_date,
+        decision_at="2026-08-28T13:00:00+00:00",
+        code_sha="a" * 40,
+        policy_version="fixture-policy-v1",
+        condition_results=(),
+        first_blocking_failure=None if research_eligible else "fixture_block",
+        all_blocking_failures=() if research_eligible else ("fixture_block",),
+        disclosed_gaps=(),
+        research_pick_eligible=research_eligible,
+        paper_entry_eligible=False,
+        pick_tier="QUALIFIED_PICK" if research_eligible else "BLOCKED_DATA",
+        base_strategy_score=final_score,
+        score_adjustment=0.0,
+        final_score=final_score,
+        entry_reference=None,
+        stop=None,
+        target=None,
+        reward_risk_ratio=None,
+        source_identity="fixture-source",
+        input_hash_sha256=hashlib.sha256(input_payload_json.encode()).hexdigest(),
+        input_payload_json=input_payload_json,
+    )
+    return {
+        "ticker": "AAA",
+        "market_date": market_date,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "signal_id": source_signal_id,
+        "source_signal_id": source_signal_id,
+        "alpha_score": final_score,
+        "score": final_score,
+        "final_score": final_score,
+        "base_strategy_score": final_score,
+        "score_adjustment": 0.0,
+        "direction": direction,
+        "research_pick_eligible": research_eligible,
+        "paper_entry_eligible": False,
+        "strategy_decision_receipt": receipt.to_dict(),
+        "receipt_id": receipt.receipt_id,
+        "receipt_hash_sha256": receipt.receipt_hash_sha256,
+        "strategy_receipt_construction_status": "COMPLETE",
+        "strategy_receipt_persistence_status": "PERSISTED",
+        "strategy_receipt_tier": ("QUALIFIED_PICK" if research_eligible else "BLOCKED_DATA"),
+        "strategy_receipt_research_pick_eligible": research_eligible,
+        "strategy_receipt_paper_entry_eligible": False,
+        "pick_tier": "QUALIFIED_PICK" if research_eligible else "BLOCKED_DATA",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
 
 
 def _signal(*, direction: str, stop: float, target: float) -> StrategySignal:
@@ -303,12 +389,8 @@ def _account(order) -> StrategyPaperAccount:
 def test_v3_order_admission_rejects_weak_reward_risk_and_stop_distance() -> None:
     config = PaperOpsConfig()
     run = _paper_run()
-    weak_rr = _order_from_pick(
-        _paper_pick(stop=90.0, target=102.0, reward_risk=0.2), run, config
-    )
-    wide_stop = _order_from_pick(
-        _paper_pick(stop=80.0, target=140.0, reward_risk=2.0), run, config
-    )
+    weak_rr = _order_from_pick(_paper_pick(stop=90.0, target=102.0, reward_risk=0.2), run, config)
+    wide_stop = _order_from_pick(_paper_pick(stop=80.0, target=140.0, reward_risk=2.0), run, config)
 
     assert (
         _order_entry_block_reason(
@@ -382,17 +464,20 @@ def test_fill_admission_rechecks_actual_fill_stop_distance_after_gap() -> None:
     fill = _fill_order(order, bar, run, config)
     position = _position_from_fill(order, fill)
 
-    assert _fill_entry_block_reason(
-        order,
-        fill=fill,
-        position=position,
-        fill_bar=bar,
-        position_rows=[],
-        pending_rows=[],
-        account=_account(order),
-        config=config,
-        daily_closed_net=0.0,
-    ) == "fill_stop_distance_exceeds_threshold"
+    assert (
+        _fill_entry_block_reason(
+            order,
+            fill=fill,
+            position=position,
+            fill_bar=bar,
+            position_rows=[],
+            pending_rows=[],
+            account=_account(order),
+            config=config,
+            daily_closed_net=0.0,
+        )
+        == "fill_stop_distance_exceeds_threshold"
+    )
 
 
 def test_legacy_scan_keeps_accepted_pick_but_order_and_fill_are_management_only() -> None:
@@ -435,14 +520,17 @@ def test_legacy_scan_keeps_accepted_pick_but_order_and_fill_are_management_only(
 
     assert picks[0].decision is PaperPickDecision.ACCEPTED
     order = _order_from_pick(picks[0], _paper_run(), config)
-    assert _order_entry_block_reason(
-        order,
-        position_rows=[],
-        pending_rows=[],
-        account=_account(order),
-        config=config,
-        daily_closed_net=0.0,
-    ) == "legacy_policy_management_only"
+    assert (
+        _order_entry_block_reason(
+            order,
+            position_rows=[],
+            pending_rows=[],
+            account=_account(order),
+            config=config,
+            daily_closed_net=0.0,
+        )
+        == "legacy_policy_management_only"
+    )
 
 
 def test_legacy_lifecycle_replay_keeps_v2_1_20r_trade_while_forward_is_blocked() -> None:
@@ -506,8 +594,8 @@ def test_legacy_lifecycle_replay_keeps_v2_1_20r_trade_while_forward_is_blocked()
                 for index, values in enumerate(
                     (
                         (100.0, 101.0, 99.0, 100.0),
-                            (100.0, 125.0, 99.0, 124.0),
-                            (124.0, 125.0, 123.0, 124.0),
+                        (100.0, 125.0, 99.0, 124.0),
+                        (124.0, 125.0, 123.0, 124.0),
                     )
                 )
             )
@@ -541,15 +629,18 @@ def test_legacy_lifecycle_replay_keeps_v2_1_20r_trade_while_forward_is_blocked()
         _paper_run(),
         config,
     )
-    assert _order_entry_block_reason(
-        order,
-        position_rows=[],
-        pending_rows=[],
-        account=_account(order),
-        config=config,
-        daily_closed_net=0.0,
-        management_only=True,
-    ) == "legacy_policy_management_only"
+    assert (
+        _order_entry_block_reason(
+            order,
+            position_rows=[],
+            pending_rows=[],
+            account=_account(order),
+            config=config,
+            daily_closed_net=0.0,
+            management_only=True,
+        )
+        == "legacy_policy_management_only"
+    )
 
 
 def test_v2_config_fingerprint_is_stable_and_v3_serializes_stop_cap() -> None:
@@ -559,9 +650,7 @@ def test_v2_config_fingerprint_is_stable_and_v3_serializes_stop_cap() -> None:
         "schema_version": "v2.paper_ops_config.v4",
     }
     legacy = _config_from_payload(legacy_payload)
-    legacy_changed_cap = _config_from_payload(
-        {**legacy_payload, "max_stop_distance_pct": 0.15}
-    )
+    legacy_changed_cap = _config_from_payload({**legacy_payload, "max_stop_distance_pct": 0.15})
     v3 = _config_from_payload({"execution_policy_version": PAPER_EXECUTION_POLICY_VERSION})
 
     assert legacy.min_reward_risk == 1.0
@@ -625,9 +714,7 @@ def test_datatruth_acl_sealed_attestation_revalidates_alias_identity(tmp_path) -
 
 def test_datatruth_acl_sealed_attestation_rejects_mutated_or_missing_alias(tmp_path) -> None:
     paths, alias_path, payload, run_manifest = _attested_datatruth_fixture(tmp_path)
-    payload["raw_artifact_hashes"][
-        next(iter(payload["raw_artifact_hashes"]))
-    ] = "c" * 64
+    payload["raw_artifact_hashes"][next(iter(payload["raw_artifact_hashes"]))] = "c" * 64
     write_json(alias_path, payload)
     with pytest.raises(ValueError, match="manifest payload hash mismatch"):
         _attest_bound_datatruth_manifest(paths, run_manifest)
@@ -990,77 +1077,90 @@ def test_production_adapter_fails_closed_without_verified_prior_artifacts(tmp_pa
 
 
 def test_strategy_merge_dedupes_ticker_and_prefers_eligible_adapter_over_ineligible_alpha() -> None:
-    alpha = {
-        "ticker": "AAA",
-        "strategy_id": "alphaops_v5",
-        "strategy_version": "v5",
-        "signal_id": "alpha-signal",
-        "alpha_score": 99.0,
-        "research_pick_eligible": False,
-        "broker_execution_enabled": False,
-    }
+    alpha = _receipt_backed_merge_row(
+        strategy_id="native_alpha",
+        strategy_version="v5",
+        source_signal_id="alpha-signal",
+        final_score=99.0,
+        research_eligible=False,
+    )
     adapter = {
-        **_prior_row(strategy_id="gap_up_continuation"),
+        **_receipt_backed_merge_row(
+            strategy_id="gap_up_continuation",
+            strategy_version="v1.0",
+            source_signal_id="adapter-signal",
+            final_score=75.0,
+            research_eligible=True,
+        ),
         "strategy_adapter": LEGACY_SOURCE_LABEL,
-        "signal_id": "adapter-signal",
-        "research_pick_eligible": True,
-        "strategy_decision_receipt": {"receipt_id": "receipt-adapter"},
-        "receipt_id": "receipt-adapter",
-        "broker_execution_enabled": False,
+        "prior_session_paper_ops": {
+            "source_signal_id": "adapter-signal",
+            "prior_session_date": "2026-08-27",
+        },
     }
     merged = _merge_strategy_adapter_signals([alpha, adapter])
 
     assert len(merged) == 1
     assert merged[0]["strategy_id"] == "gap_up_continuation"
     assert merged[0]["strategy_contributor_count"] == 2
-    assert merged[0]["strategy_contributor_ids"] == ["alphaops_v5", "gap_up_continuation"]
-    assert merged[0]["strategy_decision_receipts"] == [{"receipt_id": "receipt-adapter"}]
+    assert merged[0]["strategy_contributor_ids"] == ["gap_up_continuation", "native_alpha"]
+    assert len(merged[0]["strategy_decision_receipts"]) == 2
+    assert merged[0]["strategy_contribution_status"] == "COMPLETE"
     assert merged[0]["broker_execution_enabled"] is False
 
 
 def test_strategy_merge_prefers_eligible_alpha_over_eligible_adapter() -> None:
-    alpha = {
-        "ticker": "AAA",
-        "strategy_id": "alphaops_v5",
-        "strategy_version": "v5",
-        "signal_id": "alpha-signal",
-        "alpha_score": 1.0,
-        "research_pick_eligible": True,
-    }
+    alpha = _receipt_backed_merge_row(
+        strategy_id="native_alpha",
+        strategy_version="v5",
+        source_signal_id="alpha-signal",
+        final_score=1.0,
+        research_eligible=True,
+    )
     adapter = {
-        "ticker": "AAA",
-        "strategy_id": "gap_up_continuation",
-        "strategy_version": "v1.0",
-        "signal_id": "adapter-signal",
+        **_receipt_backed_merge_row(
+            strategy_id="gap_up_continuation",
+            strategy_version="v1.0",
+            source_signal_id="adapter-signal",
+            final_score=99.0,
+            research_eligible=True,
+        ),
         "strategy_adapter": LEGACY_SOURCE_LABEL,
-        "research_pick_eligible": True,
+        "prior_session_paper_ops": {
+            "source_signal_id": "adapter-signal",
+            "prior_session_date": "2026-08-27",
+        },
     }
 
-    assert _merge_strategy_adapter_signals([alpha, adapter])[0]["strategy_id"] == "alphaops_v5"
+    assert _merge_strategy_adapter_signals([alpha, adapter])[0]["strategy_id"] == "native_alpha"
 
 
 def test_strategy_merge_ranks_strongest_eligible_overlap_and_discloses_lineage() -> None:
     alpha = {
-        "ticker": "AAA",
-        "strategy_id": "alphaops_v5",
-        "strategy_version": "v5",
-        "signal_id": "alpha76",
-        "alpha_score": 76.0,
-        "research_pick_eligible": True,
+        **_receipt_backed_merge_row(
+            strategy_id="native_alpha",
+            strategy_version="v5",
+            source_signal_id="alpha76",
+            final_score=76.0,
+            research_eligible=True,
+        ),
         "decision_tier": "clean_edge",
         "alert_gate_status": "PASS",
         "manual_confirmation_required": False,
         "can_alert": True,
     }
     adapter = {
-        "ticker": "AAA",
-        "strategy_id": "adapter99",
-        "strategy_version": "v1",
+        **_receipt_backed_merge_row(
+            strategy_id="adapter99",
+            strategy_version="v1",
+            source_signal_id="adapter99-prior-signal",
+            final_score=99.0,
+            research_eligible=True,
+            direction="short",
+        ),
         "signal_id": "adapter99-current",
         "source_signal_id": "adapter99-prior-signal",
-        "alpha_score": 99.0,
         "strategy_adapter": GOVERNED_SOURCE_LABEL,
-        "research_pick_eligible": True,
         "decision_tier": "clean_edge",
         "alert_gate_status": "PASS",
         "manual_confirmation_required": False,
@@ -1075,10 +1175,14 @@ def test_strategy_merge_ranks_strongest_eligible_overlap_and_discloses_lineage()
     row = merged[0]
     message = format_alpha_watch(signals=merged, edge_label="test")
 
-    assert row["strategy_id"] == "alphaops_v5"
-    assert row["canonical_primary_strategy_id"] == "alphaops_v5"
+    assert row["strategy_id"] == "native_alpha"
+    assert row["canonical_primary_strategy_id"] == "native_alpha"
     assert row["strongest_eligible_contributor_score"] == 99.0
-    assert row["strategy_contributor_ids"] == ["adapter99", "alphaops_v5"]
+    assert row["strategy_contributor_ids"] == ["adapter99", "native_alpha"]
+    assert {item["direction"] for item in row["strategy_contributors"]} == {
+        "long",
+        "short",
+    }
     slate = build_ranked_research_slate(
         [
             row,
@@ -1092,20 +1196,246 @@ def test_strategy_merge_ranks_strongest_eligible_overlap_and_discloses_lineage()
         target=2,
     )
     assert [item["ticker"] for item in slate["rows"]] == ["AAA", "BBB"]
-    assert "Contributors (one ranked row): adapter99, alphaops_v5" in message
+    assert "Contributors (one ranked row): adapter99, native_alpha" in message
     assert "Adapter prior-session lineage: adapter99<-adapter99-prior-signal@2026-08-27" in message
+
+
+@pytest.mark.parametrize("hostile_score", [float("nan"), float("inf"), float("-inf")])
+def test_strategy_merge_rejects_nonfinite_or_receipt_mismatched_score_aliases(
+    hostile_score: float,
+) -> None:
+    row = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="hostile-score",
+        final_score=77.0,
+        research_eligible=True,
+    )
+    row["alpha_score"] = hostile_score
+
+    merged = _merge_strategy_adapter_signals([row])
+
+    assert merged[0]["strategy_contributors"] == []
+    assert merged[0]["strongest_eligible_contributor_score"] is None
+    assert merged[0]["strategy_contribution_status"] == "DISCLOSED_GAPS"
+    assert merged[0]["strategy_contribution_gaps"][0]["reason"] == (
+        "canonical_v2_strategy_receipt_unavailable_or_unbound"
+    )
+    assert build_ranked_research_slate(merged, target=1)["rows"] == []
+
+
+def test_strategy_merge_uses_receipt_final_score_not_self_asserted_alias() -> None:
+    row = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="forged-score",
+        final_score=10.0,
+        research_eligible=True,
+    )
+    row["alpha_score"] = 99.0
+
+    merged = _merge_strategy_adapter_signals([row])
+
+    assert merged[0]["strongest_eligible_contributor_score"] is None
+    assert merged[0]["strategy_contribution_status"] == "DISCLOSED_GAPS"
+    assert build_ranked_research_slate(merged, target=1)["rows"] == []
+
+
+def test_strategy_merge_rejects_mixed_current_receipt_market_dates() -> None:
+    current = _receipt_backed_merge_row(
+        strategy_id="native_alpha",
+        strategy_version="v5",
+        source_signal_id="current-date",
+        final_score=76.0,
+        research_eligible=True,
+    )
+    stale = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="prior-date",
+        final_score=99.0,
+        research_eligible=True,
+        market_date="2026-08-27",
+    )
+
+    merged = _merge_strategy_adapter_signals([current, stale])
+
+    assert merged[0]["strategy_contributors"] == []
+    assert merged[0]["strongest_eligible_contributor_score"] is None
+    assert {item["reason"] for item in merged[0]["strategy_contribution_gaps"]} == {
+        "mixed_strategy_receipt_market_dates"
+    }
+    assert build_ranked_research_slate(merged, target=1)["rows"] == []
+
+
+def test_strategy_merge_rejects_receipt_without_canonical_source_signal_identity() -> None:
+    row = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="unbound-source",
+        final_score=77.0,
+        research_eligible=True,
+        bind_source=False,
+    )
+
+    merged = _merge_strategy_adapter_signals([row])
+
+    assert merged[0]["strategy_contributors"] == []
+    assert merged[0]["strategy_contribution_status"] == "DISCLOSED_GAPS"
+
+
+def test_strategy_merge_rejects_receipt_without_canonical_direction() -> None:
+    row = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="missing-direction",
+        final_score=77.0,
+        research_eligible=True,
+        direction="",
+    )
+
+    merged = _merge_strategy_adapter_signals([row])
+
+    assert merged[0]["strategy_contributors"] == []
+    assert merged[0]["strongest_eligible_contributor_score"] is None
+    assert build_ranked_research_slate(merged, target=1)["rows"] == []
+
+
+def test_strategy_merge_binds_receipt_to_current_cycle_release_sha() -> None:
+    row = _receipt_backed_merge_row(
+        strategy_id="gap_up_continuation",
+        strategy_version="v1.0",
+        source_signal_id="cross-release",
+        final_score=77.0,
+        research_eligible=True,
+    )
+
+    merged = _merge_strategy_adapter_signals(
+        [row],
+        expected_code_sha="b" * 40,
+    )
+
+    assert merged[0]["strategy_contributors"] == []
+    assert merged[0]["strongest_eligible_contributor_score"] is None
+
+
+def test_strategy_merge_rejects_unpersisted_nested_contributor_receipt(
+    tmp_path,
+) -> None:
+    native = _receipt_backed_merge_row(
+        strategy_id="native_alpha",
+        strategy_version="v5",
+        source_signal_id="persisted-native",
+        final_score=10.0,
+        research_eligible=True,
+    )
+    forged = _receipt_backed_merge_row(
+        strategy_id="forged_adapter",
+        strategy_version="v1",
+        source_signal_id="unpersisted-nested",
+        final_score=99.0,
+        research_eligible=True,
+    )
+    native["strategy_contributors"] = [
+        {
+            "strategy_id": forged["strategy_id"],
+            "strategy_version": forged["strategy_version"],
+            "source_signal_id": forged["source_signal_id"],
+            "signal_id": forged["signal_id"],
+            "receipt_id": forged["receipt_id"],
+            "receipt_hash_sha256": forged["receipt_hash_sha256"],
+            "receipt_status": "COMPLETE",
+            "research_pick_eligible": True,
+            "paper_entry_eligible": False,
+            "final_score": 99.0,
+            "direction": "long",
+            "decision_receipt": forged["strategy_decision_receipt"],
+        }
+    ]
+    store = SQLiteScanStore(tmp_path / "receipt-auth.sqlite")
+    store.persist_strategy_decision_receipt(
+        parse_strategy_decision_receipt(
+            native["strategy_decision_receipt"],
+            require_v2=True,
+        )
+    )
+    verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-28",
+        strategy_id=None,
+    )
+
+    merged = _merge_strategy_adapter_signals(
+        [native],
+        expected_code_sha="a" * 40,
+        receipt_verifier=verifier,
+    )
+
+    assert merged[0]["strongest_eligible_contributor_score"] == 10.0
+    assert merged[0]["strategy_contributor_ids"] == ["native_alpha"]
+    assert merged[0]["strategy_contribution_status"] == "DISCLOSED_GAPS"
+    assert merged[0]["strategy_contribution_gaps"] == [
+        {
+            "strategy_id": "forged_adapter",
+            "strategy_version": "v1",
+            "source_signal_id": "unpersisted-nested",
+            "reason": "canonical_v2_strategy_receipt_unavailable_or_unbound",
+        }
+    ]
+
+
+def test_generic_receipt_resolver_capacity_exceeds_full_core_nine_strategy_fleet(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load(
+        _store,
+        *,
+        market_date=None,
+        strategy_id=None,
+        limit=100,
+    ):
+        captured.update(
+            market_date=market_date,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+        return []
+
+    monkeypatch.setattr(SQLiteScanStore, "load_strategy_decision_receipts", fake_load)
+
+    AuthenticatedStrategyReceiptResolver.from_store(
+        SQLiteScanStore(tmp_path / "capacity.sqlite"),
+        market_date="2026-08-28",
+        strategy_id=None,
+    )
+
+    assert captured == {
+        "market_date": "2026-08-28",
+        "strategy_id": None,
+        "limit": 100_000,
+    }
+    assert int(captured["limit"]) > 598 * 9
 
 
 def test_strategy_adapter_contributor_count_includes_governed_v3_source() -> None:
     merged = _merge_strategy_adapter_signals(
         [
             {
-                "ticker": "AAA",
-                "strategy_id": "gap_up_continuation",
-                "strategy_version": "v1.0",
-                "signal_id": "adapter-signal",
+                **_receipt_backed_merge_row(
+                    strategy_id="gap_up_continuation",
+                    strategy_version="v1.0",
+                    source_signal_id="adapter-signal",
+                    final_score=75.0,
+                    research_eligible=True,
+                ),
                 "strategy_adapter": GOVERNED_SOURCE_LABEL,
-                "research_pick_eligible": True,
+                "prior_session_paper_ops": {
+                    "source_signal_id": "adapter-signal",
+                    "prior_session_date": "2026-08-27",
+                },
             }
         ]
     )
@@ -1141,9 +1471,7 @@ def test_run_contract_contributions_keep_frozen_slate_truth_on_retry() -> None:
     assert summary["prior_strategy"]["selected_symbols"] == ["FROZEN"]
     assert summary["prior_strategy"]["receipt_ids"] == ["frozen-receipt"]
     assert summary["prior_strategy"]["strategy_versions"] == ["v1"]
-    assert summary["prior_strategy"]["strategy_semantics_fingerprints"] == [
-        "prior-fingerprint"
-    ]
+    assert summary["prior_strategy"]["strategy_semantics_fingerprints"] == ["prior-fingerprint"]
     assert summary["prior_strategy"]["candidate_count"] == 0
     assert summary["retry_strategy"]["candidate_count"] == 1
     assert summary["retry_strategy"]["slate_count"] == 0

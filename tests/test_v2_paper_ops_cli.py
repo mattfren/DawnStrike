@@ -204,9 +204,7 @@ def _seed_manifest_only_replay_conflict(root):
         ],
     )
     write_json(root / "manifests" / "replay_fixture.json", manifest)
-    extra = _complete_run_manifest(
-        "replay", run_date, "fixture-manifest-only-snapshot", policy
-    )
+    extra = _complete_run_manifest("replay", run_date, "fixture-manifest-only-snapshot", policy)
     write_json(root / "manifests" / "replay_manifest_only.json", extra)
 
 
@@ -228,9 +226,7 @@ def _seed_pending_journal(root, journal_kind):
     config = paper_ops_engine._config(paths)
     catalog = tuple(paper_ops_engine.build_strategy_catalog())
     strategy_config = paper_ops_engine._strategy_configs(config, catalog)[-1]
-    strategy = next(
-        item for item in catalog if item.strategy_id == strategy_config.strategy_id
-    )
+    strategy = next(item for item in catalog if item.strategy_id == strategy_config.strategy_id)
     strategy_id = strategy.strategy_id
     strategy_version = strategy.version
     semantics = paper_ops_engine._strategy_semantics_fingerprint(strategy)
@@ -344,9 +340,7 @@ def _seed_pending_journal(root, journal_kind):
         data_manifest=result.manifest,
         data_truth_root=data_truth_root,
     )
-    paper_ops_engine.write_json(
-        paths.exports / "picks_forward_2026-01-02.json", [pick]
-    )
+    paper_ops_engine.write_json(paths.exports / "picks_forward_2026-01-02.json", [pick])
     scan_event = paper_ops_engine.PaperLedgerEvent(
         event_id=paper_ops_engine.stable_id(
             "paper_ops_event",
@@ -409,9 +403,7 @@ def _seed_calendar_variant(root, calendar_kind):
             "execution_policy_version": "fixture-policy-v1",
             "strategy_semantics_fingerprint": "unknown",
             "data_snapshot_id": "fixture-snapshot",
-            "daily_return_pct": (
-                "not-a-number" if calendar_kind == "malformed_numeric" else 0.0
-            ),
+            "daily_return_pct": ("not-a-number" if calendar_kind == "malformed_numeric" else 0.0),
             "warnings": "",
             "run_id": "fixture-run",
         }
@@ -690,6 +682,39 @@ def test_paper_ops_cli_returns_nonzero_when_run_day_reconciliation_fails(
     )
 
     assert status == 2
+
+
+def test_paper_ops_cli_plumbs_expected_release_sha_to_scheduled_run_day(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_day(**kwargs):
+        captured.update(kwargs)
+        return {"status": "passed", "reconcile": {"status": "passed"}}
+
+    monkeypatch.setattr(paper_ops_cli, "run_day", fake_run_day)
+
+    assert (
+        paper_ops_cli.main(
+            [
+                "run-day",
+                "--date",
+                "2026-08-28",
+                "--output-root",
+                str(tmp_path / "paper_ops"),
+                "--universe-handoff",
+                str(tmp_path / "handoff.json"),
+                "--expected-code-sha",
+                "a" * 40,
+                "--scheduled-production",
+            ]
+        )
+        == 0
+    )
+    assert captured["expected_code_sha"] == "a" * 40
+    assert captured["scheduled_production"] is True
 
 
 def test_paper_ops_cli_exposes_shadow_registration_run_and_evaluation(

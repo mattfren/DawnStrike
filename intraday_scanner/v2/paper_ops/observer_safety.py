@@ -116,13 +116,36 @@ OBSERVER_COMMAND_SPECS: dict[str, ObserverCommandSpec] = {
 }
 
 _CALENDAR_FIELDS = (
-    "date", "mode", "strategy_id", "strategy_version", "strategy_status",
-    "execution_policy_version", "strategy_semantics_fingerprint", "data_snapshot_id",
-    "starting_equity", "ending_equity", "realized_pnl", "unrealized_pnl", "total_pnl",
-    "daily_return_pct", "cumulative_return_pct", "drawdown_pct", "trades_opened",
-    "trades_closed", "pending_orders", "open_positions", "wins", "losses", "flats",
-    "average_r", "expectancy_r", "exposure_pct", "fees_paid", "slippage_estimate",
-    "warnings", "run_id",
+    "date",
+    "mode",
+    "strategy_id",
+    "strategy_version",
+    "strategy_status",
+    "execution_policy_version",
+    "strategy_semantics_fingerprint",
+    "data_snapshot_id",
+    "starting_equity",
+    "ending_equity",
+    "realized_pnl",
+    "unrealized_pnl",
+    "total_pnl",
+    "daily_return_pct",
+    "cumulative_return_pct",
+    "drawdown_pct",
+    "trades_opened",
+    "trades_closed",
+    "pending_orders",
+    "open_positions",
+    "wins",
+    "losses",
+    "flats",
+    "average_r",
+    "expectancy_r",
+    "exposure_pct",
+    "fees_paid",
+    "slippage_estimate",
+    "warnings",
+    "run_id",
 )
 _CALENDAR_NUMERIC_FIELDS = (
     "starting_equity",
@@ -164,6 +187,7 @@ def require_observer_command(
     command: str,
     *,
     mode: str | None = None,
+    expected_code_sha: str | None = None,
 ) -> None:
     """Apply the one canonical preflight specification for an observer command."""
 
@@ -190,7 +214,12 @@ def require_observer_command(
                 "INVALID_INPUT",
                 f"{command} requires an explicit attestable PaperOps mode",
             )
-        _require_run_manifest_candidate(Path(output_root), command, manifest_mode)
+        _require_run_manifest_candidate(
+            Path(output_root),
+            command,
+            manifest_mode,
+            expected_code_sha=expected_code_sha,
+        )
 
 
 def _require_calendar_evidence(path: Path) -> None:
@@ -224,8 +253,7 @@ def _require_calendar_evidence(path: Path) -> None:
         "run_id",
     )
     has_malformed_row = any(
-        None in row
-        or not all(str(row.get(field) or "").strip() for field in identity_fields)
+        None in row or not all(str(row.get(field) or "").strip() for field in identity_fields)
         for row in rows
     )
     if has_malformed_row:
@@ -281,7 +309,13 @@ def _require_calendar_evidence(path: Path) -> None:
         seen_rows[row_identity] = row
 
 
-def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) -> None:
+def _require_run_manifest_candidate(
+    root: Path,
+    command: str,
+    mode: str | None,
+    *,
+    expected_code_sha: str | None = None,
+) -> None:
     """Require a complete canonical manifest bound to the selected observer mode."""
 
     calendars = _calendar_run_identities(root / "calendar" / "strategy_daily_returns.csv")
@@ -361,7 +395,12 @@ def _require_run_manifest_candidate(root: Path, command: str, mode: str | None) 
         valid = [
             item
             for item in candidates
-            if _is_complete_manifest(item, {run_id: identity}, mode)
+            if _is_complete_manifest(
+                item,
+                {run_id: identity},
+                mode,
+                expected_code_sha=expected_code_sha,
+            )
         ]
         # A second v3 claim for the same selected run is evidence conflict, even
         # if the first claim happens to be valid.
@@ -376,6 +415,8 @@ def _is_complete_manifest(
     payload: object,
     applicable_runs: dict[str, _ApplicableRunIdentity],
     mode: str | None,
+    *,
+    expected_code_sha: str | None = None,
 ) -> bool:
     """Validate the persisted v3 identity binding without accepting partial fixtures."""
 
@@ -409,8 +450,7 @@ def _is_complete_manifest(
         "manifest_payload_hash",
     )
     if not all(
-        isinstance(payload.get(field), str) and payload[field].strip()
-        for field in identity_fields
+        isinstance(payload.get(field), str) and payload[field].strip() for field in identity_fields
     ):
         return False
     relative_root = Path(str(payload["data_truth_root_relative"]))
@@ -448,6 +488,7 @@ def _is_complete_manifest(
     handoff_fields = (
         "universe_handoff_id",
         "universe_handoff_content_hash_sha256",
+        "release_code_sha",
         "universe_coverage_status",
         "universe_shortfall_reasons",
     )
@@ -459,6 +500,7 @@ def _is_complete_manifest(
                 handoff_path,
                 market_date=str(payload["run_date"]),
                 require_production=payload["mode"] == "forward",
+                expected_code_sha=expected_code_sha or str(payload.get("release_code_sha") or ""),
             )
         except (OSError, ValueError, TypeError):
             return False
@@ -472,11 +514,13 @@ def _is_complete_manifest(
             or payload.get("universe_id") != handoff.get("universe_id")
             or payload.get("universe_symbols") != handoff.get("universe_symbols")
             or payload.get("universe_coverage_status") != coverage.get("status")
-            or payload.get("universe_shortfall_reasons")
-            != coverage.get("shortfall_reasons", [])
+            or payload.get("universe_shortfall_reasons") != coverage.get("shortfall_reasons", [])
+            or payload.get("release_code_sha") != handoff.get("code_sha")
         ):
             return False
-    elif any(payload.get(field) not in (None, "", []) for field in handoff_fields):
+    elif expected_code_sha is not None or any(
+        payload.get(field) not in (None, "", []) for field in handoff_fields
+    ):
         return False
     hash_payload = dict(payload)
     observed_hash = hash_payload.pop("manifest_payload_hash")

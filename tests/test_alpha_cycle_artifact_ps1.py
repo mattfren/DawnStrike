@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -16,7 +18,74 @@ pytestmark = pytest.mark.skipif(
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "alpha_cycle_artifact.ps1"
+PROCESS_RUNNER = ROOT / "scripts" / "dawnstrike_process_runner.ps1"
 MARKET_DATE = "2026-08-04"
+RELEASE_SHA = "a" * 40
+
+
+def _initialize_git_runtime(runtime: Path) -> str:
+    runtime.mkdir()
+    subprocess.run(["git", "init", str(runtime)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(runtime), "config", "user.email", "test@example.test"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(runtime), "config", "user.name", "Dawnstrike Test"],
+        check=True,
+        capture_output=True,
+    )
+    (runtime / "app.py").write_text("print('clean')\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(runtime), "add", "app.py"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(runtime), "commit", "-m", "fixture"],
+        check=True,
+        capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(runtime), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _resolve_release_sha(runtime: Path, log_root: Path) -> subprocess.CompletedProcess[str]:
+    command = (
+        f". '{PROCESS_RUNNER}'; "
+        "try { "
+        f"$sha = Resolve-DawnstrikeReleaseSha -RuntimeRoot '{runtime}' "
+        f"-LogRoot '{log_root}'; "
+        '[Console]::Out.WriteLine("RESOLVED=$sha"); exit 0 '
+        "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+    )
+    environment = os.environ.copy()
+    # Codex runs pytest under PowerShell 7. Its inherited PSModulePath omits
+    # Windows PowerShell's built-in modules, while the scheduled task starts
+    # powershell.exe with the normal PS 5.1 module path.
+    windows_modules = (
+        Path(environment.get("WINDIR", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "Modules"
+    )
+    environment["PSModulePath"] = os.pathsep.join(
+        [str(windows_modules), environment.get("PSModulePath", "")]
+    )
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def _valid_payload(
@@ -26,12 +95,15 @@ def _valid_payload(
     return {
         "status": "no_trade" if signal_count == 0 else "complete",
         "scan_id": "scan-current-attempt",
+        "code_sha": RELEASE_SHA,
+        "source_summary": {"code_sha": RELEASE_SHA},
         "signal_count": signal_count,
         "run_contract": {
             "schema_version": "alphaops.run_contract.v1",
             "producer": "alphaops",
             "producer_run_id": "scan-current-attempt",
             "market_date": MARKET_DATE,
+            "code_sha": RELEASE_SHA,
             "source_status": "success",
             "selection_outcome": "data_ineligible",
             "signal_count": signal_count,
@@ -47,6 +119,7 @@ def _validate(
     *,
     started_at: datetime | None = None,
     allow_core_shortfall: bool = False,
+    release_sha: str = "",
 ) -> subprocess.CompletedProcess[str]:
     artifact = tmp_path / "alpha_cycle.json"
     receipt = tmp_path / "receipt.json"
@@ -66,12 +139,14 @@ def _validate(
         encoding="utf-8",
     )
     core_switch = "-AllowCoreShortfall " if allow_core_shortfall else ""
+    release_switch = f"-ReleaseSha '{release_sha}' " if release_sha else ""
     command = (
         f". '{HELPER}'; "
         f"$receipt = Get-Content -LiteralPath '{receipt}' -Raw | ConvertFrom-Json; "
         "try { "
         f"$result = Test-DawnstrikeAlphaCycleArtifact -ArtifactPath '{artifact}' "
-        f"-ProcessReceipt $receipt -MarketDate '{MARKET_DATE}' {core_switch}; "
+        f"-ProcessReceipt $receipt -MarketDate '{MARKET_DATE}' "
+        f"{release_switch}{core_switch}; "
         "$result | ConvertTo-Json -Compress; exit 0 "
         "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
     )
@@ -84,10 +159,46 @@ def _validate(
     )
 
 
-@pytest.mark.parametrize("signal_count", [None, -1, 0.5])
-def test_artifact_rejects_noncanonical_signal_counts(
-    tmp_path: Path, signal_count: Any
+def test_release_sha_resolver_accepts_only_exact_clean_git_runtime(tmp_path: Path) -> None:
+    if shutil.which("git.exe") is None:
+        pytest.skip("Git for Windows is required for release-SHA execution proof.")
+    runtime = tmp_path / "clean-runtime"
+    expected_sha = _initialize_git_runtime(runtime)
+
+    result = _resolve_release_sha(runtime, tmp_path / "clean-logs")
+
+    assert result.returncode == 0, result.stderr
+    assert f"RESOLVED={expected_sha}" in result.stdout
+
+
+@pytest.mark.parametrize("mutation", ["tracked", "staged", "untracked"])
+def test_release_sha_resolver_rejects_uncommitted_runtime_bytes(
+    tmp_path: Path,
+    mutation: str,
 ) -> None:
+    if shutil.which("git.exe") is None:
+        pytest.skip("Git for Windows is required for release-SHA execution proof.")
+    runtime = tmp_path / f"{mutation}-runtime"
+    _initialize_git_runtime(runtime)
+    if mutation == "untracked":
+        (runtime / "runtime_override.py").write_text("print('untracked')\n", encoding="utf-8")
+    else:
+        (runtime / "app.py").write_text("print('modified')\n", encoding="utf-8")
+        if mutation == "staged":
+            subprocess.run(
+                ["git", "-C", str(runtime), "add", "app.py"],
+                check=True,
+                capture_output=True,
+            )
+
+    result = _resolve_release_sha(runtime, tmp_path / f"{mutation}-logs")
+
+    assert result.returncode == 1
+    assert "deployed worktree is dirty" in result.stderr
+
+
+@pytest.mark.parametrize("signal_count", [None, -1, 0.5])
+def test_artifact_rejects_noncanonical_signal_counts(tmp_path: Path, signal_count: Any) -> None:
     result = _validate(tmp_path, _valid_payload(signal_count))
 
     assert result.returncode == 1
@@ -105,9 +216,7 @@ def test_artifact_rejects_missing_signal_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("payload", [None, "{not-json"])
-def test_artifact_rejects_missing_or_malformed_json(
-    tmp_path: Path, payload: str | None
-) -> None:
+def test_artifact_rejects_missing_or_malformed_json(tmp_path: Path, payload: str | None) -> None:
     result = _validate(tmp_path, payload)
 
     assert result.returncode == 1
@@ -150,6 +259,29 @@ def test_artifact_accepts_lane_local_core_data_unavailable_shortfall(
     result = _validate(tmp_path, payload, allow_core_shortfall=True)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_artifact_binds_exact_scheduled_release_sha_across_cycle_and_contract(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_payload()
+
+    accepted = _validate(tmp_path, payload, release_sha=RELEASE_SHA)
+    assert accepted.returncode == 0, accepted.stderr
+
+    for path in (
+        ("code_sha",),
+        ("source_summary", "code_sha"),
+        ("run_contract", "code_sha"),
+    ):
+        hostile = _valid_payload()
+        target = hostile
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = "b" * 40
+        rejected = _validate(tmp_path, hostile, release_sha=RELEASE_SHA)
+        assert rejected.returncode == 1
+        assert "release identity" in rejected.stderr
 
 
 def test_artifact_rejects_inconsistent_research_candidate_universe(tmp_path: Path) -> None:

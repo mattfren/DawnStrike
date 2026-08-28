@@ -9,6 +9,7 @@ from intraday_scanner.decisioning.contracts import (
     EvidenceResolutionRun,
     PickTier,
     StrategyDecisionReceipt,
+    parse_strategy_decision_receipt,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "EvidenceResolutionRun",
     "PickTier",
     "StrategyDecisionReceipt",
+    "parse_strategy_decision_receipt",
 ]

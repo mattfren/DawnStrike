@@ -222,6 +222,7 @@ def _run_config_with_universe_handoff(
     mode: PaperRunMode,
     universe_handoff_path: str | Path | None,
     scheduled_production: bool,
+    expected_code_sha: str | None = None,
 ) -> tuple[PaperOpsConfig, dict[str, object] | None]:
     """Bind a run to Morning's exact PIT universe without mutating state config."""
 
@@ -229,6 +230,10 @@ def _run_config_with_universe_handoff(
         raise ValueError("scheduled production PaperOps requires forward mode")
     if scheduled_production and not universe_handoff_path:
         raise ValueError("scheduled production PaperOps requires the Morning universe handoff")
+    if scheduled_production and (
+        expected_code_sha is None or re.fullmatch(r"[0-9a-f]{40}", expected_code_sha) is None
+    ):
+        raise ValueError("scheduled production PaperOps requires an exact runtime release SHA")
     base_config = _config(paths)
     if not universe_handoff_path:
         return base_config, None
@@ -236,6 +241,7 @@ def _run_config_with_universe_handoff(
         universe_handoff_path,
         market_date=run_date.isoformat(),
         require_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     raw_symbols = handoff.get("universe_symbols")
     if not isinstance(raw_symbols, list) or not raw_symbols:
@@ -252,7 +258,8 @@ def _run_config_with_universe_handoff(
         raise ValueError("PaperOps universe handoff universe identity is missing")
     if scheduled_production:
         expected_strategy_ids = set(
-            str(item) for item in (handoff.get("strategy_fleet") or {}).get(
+            str(item)
+            for item in (handoff.get("strategy_fleet") or {}).get(
                 "declared_paperops_strategy_ids", ()
             )
         )
@@ -268,8 +275,7 @@ def _run_config_with_universe_handoff(
         catalog_strategy_ids = {
             str(strategy.strategy_id)
             for strategy in build_strategy_catalog()
-            if strategy.status
-            not in {"quarantined", "rejected", "parked", "baseline", "benchmark"}
+            if strategy.status not in {"quarantined", "rejected", "parked", "baseline", "benchmark"}
         }
         if (
             actual_strategy_ids != expected_strategy_ids
@@ -290,6 +296,7 @@ def preflight(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     init(output_root=output_root)
     paths = PaperOpsPaths.create(output_root)
@@ -300,6 +307,7 @@ def preflight(
         mode=mode,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
@@ -335,9 +343,7 @@ def preflight(
             (handoff or {}).get("coverage", {}).get("status") or "complete"
         ).lower(),
         "universe_handoff_id": (handoff or {}).get("handoff_id"),
-        "universe_handoff_content_hash_sha256": (handoff or {}).get(
-            "content_hash_sha256"
-        ),
+        "universe_handoff_content_hash_sha256": (handoff or {}).get("content_hash_sha256"),
         "universe_shortfall_reasons": list(
             (handoff or {}).get("coverage", {}).get("shortfall_reasons") or []
         ),
@@ -355,6 +361,7 @@ def scan(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
@@ -364,6 +371,7 @@ def scan(
         mode=mode,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
@@ -431,9 +439,7 @@ def scan(
             f"expected {expected_decisions}, observed {observed_decisions}"
         )
     picks_path = paths.exports / f"picks_{mode.value}_{run_date.isoformat()}.json"
-    decisions_path = (
-        paths.exports / f"strategy_decisions_{mode.value}_{run_date.isoformat()}.json"
-    )
+    decisions_path = paths.exports / f"strategy_decisions_{mode.value}_{run_date.isoformat()}.json"
     pick_rows = [pick.to_dict() for pick in picks]
     decision_rows = [
         *(
@@ -447,32 +453,29 @@ def scan(
         ),
         *no_setup_decisions,
     ]
-    scan_events = (
-        [
-            _event(
-                run,
-                PaperJobPhase.SCAN,
-                pick.strategy_id,
-                pick.symbol,
-                "paper_pick_decision",
-                pick.pick_id,
-                pick.to_dict(),
-            )
-            for pick in picks
-        ]
-        + [
-            _event(
-                run,
-                PaperJobPhase.SCAN,
-                str(row["strategy_id"]),
-                str(row["symbol"]),
-                "paper_no_setup_decision",
-                str(row["decision_id"]),
-                row,
-            )
-            for row in no_setup_decisions
-        ]
-    )
+    scan_events = [
+        _event(
+            run,
+            PaperJobPhase.SCAN,
+            pick.strategy_id,
+            pick.symbol,
+            "paper_pick_decision",
+            pick.pick_id,
+            pick.to_dict(),
+        )
+        for pick in picks
+    ] + [
+        _event(
+            run,
+            PaperJobPhase.SCAN,
+            str(row["strategy_id"]),
+            str(row["symbol"]),
+            "paper_no_setup_decision",
+            str(row["decision_id"]),
+            row,
+        )
+        for row in no_setup_decisions
+    ]
     scan_event_rows = _serialize_transaction_events(scan_events)
     _validate_run_and_origin_evidence(paths, scan_event_rows, {})
     _validate_scan_artifact_evidence(scan_event_rows, pick_rows, decision_rows)
@@ -517,6 +520,7 @@ def enter(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
@@ -526,6 +530,7 @@ def enter(
         mode=mode,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
@@ -556,6 +561,7 @@ def enter(
             allow_fetch=allow_fetch,
             universe_handoff_path=universe_handoff_path,
             scheduled_production=scheduled_production,
+            expected_code_sha=expected_code_sha,
         )
         picks = _load_picks(paths, mode, run_date)
     _validate_picks_for_run(picks, run, config, paths)
@@ -640,9 +646,7 @@ def enter(
     )
     if existing_order_decisions is not None and not isinstance(existing_order_decisions, list):
         raise ValueError("PaperOps immutable order-decision artifact is malformed")
-    persisted_order_decisions = _enter_order_decisions_from_events(
-        _exact_run_events(paths, run)
-    )
+    persisted_order_decisions = _enter_order_decisions_from_events(_exact_run_events(paths, run))
     canonical_order_decisions = (
         proposed_order_decisions if proposed_order_decisions else persisted_order_decisions
     )
@@ -686,9 +690,7 @@ def enter(
     if existing_order_decisions is None:
         write_json(order_decisions_path, canonical_order_decisions)
     run_events = _exact_run_events(paths, run)
-    orders_created = sum(
-        row.get("event_type") == "paper_order_created" for row in run_events
-    )
+    orders_created = sum(row.get("event_type") == "paper_order_created" for row in run_events)
     orders_blocked = sum(
         row.get("event_type") == "paper_order_blocked"
         and ":enter:paper_order_blocked:" in str(row.get("event_id") or "")
@@ -722,6 +724,7 @@ def check(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
@@ -731,6 +734,7 @@ def check(
         mode=mode,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
@@ -973,6 +977,7 @@ def close(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
@@ -982,6 +987,7 @@ def close(
         mode=mode,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
@@ -1107,6 +1113,7 @@ def run_day(
     allow_fetch: bool = True,
     universe_handoff_path: str | Path | None = None,
     scheduled_production: bool = False,
+    expected_code_sha: str | None = None,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     with exclusive_file_lock(paths.state / ".paper_ops_operation.lock"):
@@ -1117,6 +1124,7 @@ def run_day(
             allow_fetch=allow_fetch,
             universe_handoff_path=universe_handoff_path,
             scheduled_production=scheduled_production,
+            expected_code_sha=expected_code_sha,
         )
 
 
@@ -1128,6 +1136,7 @@ def _run_day_unlocked(
     allow_fetch: bool,
     universe_handoff_path: str | Path | None,
     scheduled_production: bool,
+    expected_code_sha: str | None,
 ) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
     from intraday_scanner.v2.paper_ops.trade_blotter import verify_trade_blotter
@@ -1139,6 +1148,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     scan_result = scan(
         run_date=run_date,
@@ -1147,6 +1157,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     enter_result = enter(
         run_date=run_date,
@@ -1155,6 +1166,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     check_result = check(
         run_date=run_date,
@@ -1163,6 +1175,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     close_result = close(
         run_date=run_date,
@@ -1171,6 +1184,7 @@ def _run_day_unlocked(
         allow_fetch=allow_fetch,
         universe_handoff_path=universe_handoff_path,
         scheduled_production=scheduled_production,
+        expected_code_sha=expected_code_sha,
     )
     calendar_result = calendar(output_root=output_root)
     reconciliation = _reconcile_paths(PaperOpsPaths.create(output_root))
@@ -2282,9 +2296,7 @@ def _fill_entry_block_reason(
     management_only: bool | None = None,
 ) -> str | None:
     if management_only is None:
-        management_only = (
-            config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
-        )
+        management_only = config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
     if management_only:
         # Preserve historical v2 economics for audit/replay, but quarantine
         # that series from every new order and fill admission.  Existing open
@@ -2324,11 +2336,9 @@ def _fill_entry_block_reason(
         net_reward = gross_reward - fill.fee - target_fee
         if net_reward <= 0 or net_reward / actual_risk < _admission_min_reward_risk(config):
             return "fill_reward_risk_below_threshold"
-    if (
-        _stop_distance_pct(order.entry, order.stop) > _admission_max_stop_distance_pct(config)
-        or _stop_distance_pct(fill.fill_price, order.stop)
-        > _admission_max_stop_distance_pct(config)
-    ):
+    if _stop_distance_pct(order.entry, order.stop) > _admission_max_stop_distance_pct(
+        config
+    ) or _stop_distance_pct(fill.fill_price, order.stop) > _admission_max_stop_distance_pct(config):
         return "fill_stop_distance_exceeds_threshold"
     return _order_entry_block_reason(
         order,
@@ -2374,9 +2384,7 @@ def _order_entry_block_reason(
     management_only: bool | None = None,
 ) -> str | None:
     if management_only is None:
-        management_only = (
-            config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
-        )
+        management_only = config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
     if management_only:
         return "legacy_policy_management_only"
     key = _strategy_version_key(order)
@@ -2400,10 +2408,7 @@ def _order_entry_block_reason(
             abs_tol=1e-9,
         ):
             return "reward_risk_mismatch"
-    if (
-        order.reward_risk is not None
-        and order.reward_risk < _admission_min_reward_risk(config)
-    ):
+    if order.reward_risk is not None and order.reward_risk < _admission_min_reward_risk(config):
         return "reward_risk_below_threshold"
     if _stop_distance_pct(order.entry, order.stop) > _admission_max_stop_distance_pct(config):
         return "stop_distance_exceeds_threshold"
@@ -3731,9 +3736,7 @@ def _ensure_run_manifest(
     # Morning handoff changes only the per-run universe binding; it must not
     # rewrite the frozen policy manifest or turn the dynamic universe into a
     # mutable process-wide config.
-    policy_config = (
-        _config(paths) if (paths.state / "paper_ops_config.json").is_file() else config
-    )
+    policy_config = _config(paths) if (paths.state / "paper_ops_config.json").is_file() else config
     _ensure_execution_policy_manifest(paths, policy_config)
     has_complete_data_binding = all(
         (
@@ -3769,12 +3772,13 @@ def _ensure_run_manifest(
             str(universe_handoff.get("handoff_id") or "") if universe_handoff else None
         ),
         universe_handoff_content_hash_sha256=(
-            str(universe_handoff.get("content_hash_sha256") or "")
-            if universe_handoff
-            else None
+            str(universe_handoff.get("content_hash_sha256") or "") if universe_handoff else None
         ),
         universe_handoff_path=(
             str(Path(universe_handoff_path).resolve()) if universe_handoff_path else None
+        ),
+        release_code_sha=(
+            str(universe_handoff.get("code_sha") or "") if universe_handoff else None
         ),
         universe_coverage_status=(
             str(dict(universe_handoff.get("coverage") or {}).get("status") or "")
@@ -3783,9 +3787,7 @@ def _ensure_run_manifest(
         ),
         universe_shortfall_reasons=tuple(
             str(item)
-            for item in dict(universe_handoff.get("coverage") or {}).get(
-                "shortfall_reasons", []
-            )
+            for item in dict(universe_handoff.get("coverage") or {}).get("shortfall_reasons", [])
             if str(item).strip()
         )
         if universe_handoff
@@ -3831,9 +3833,7 @@ def _append_events(paths: PaperOpsPaths, events: list[PaperLedgerEvent]) -> None
     )
 
 
-def _preflight_event_append(
-    paths: PaperOpsPaths, proposed_rows: list[dict[str, object]]
-) -> None:
+def _preflight_event_append(paths: PaperOpsPaths, proposed_rows: list[dict[str, object]]) -> None:
     existing_rows = read_jsonl(paths.ledger / "paper_ledger.jsonl")
     existing_by_id: dict[str, dict[str, object]] = {}
     existing_by_logical: dict[str, dict[str, object]] = {}
@@ -3882,8 +3882,7 @@ def _validate_scan_artifact_evidence(
                 {
                     **pick,
                     "decision_status": pick["decision"],
-                    "trade_return_eligible": pick["decision"]
-                    == PaperPickDecision.ACCEPTED.value,
+                    "trade_return_eligible": pick["decision"] == PaperPickDecision.ACCEPTED.value,
                     "trade_return_pct": None,
                 }
             )
@@ -5428,8 +5427,7 @@ def _validate_transaction_coherence(
             config,
             positions_target=positions_target,
             require_complete_outcomes=(
-                positions_target in state_updates
-                and core_account_target in state_updates
+                positions_target in state_updates and core_account_target in state_updates
             ),
         )
         expected_pending = _apply_order_event_transition(current_pending, order_events, config)
@@ -5897,12 +5895,8 @@ def _validate_order_economics(row: dict[str, object], config: PaperOpsConfig) ->
     expected_quantity = max(int(expected_budget / expected_risk) if expected_risk > 0 else 0, 0)
     if (
         row.get("expected_fill_rule") != "daily signal fills no earlier than next valid bar open"
-        or not math.isclose(
-            float(row["risk_per_unit"]), expected_risk, rel_tol=1e-12, abs_tol=1e-9
-        )
-        or not math.isclose(
-            float(row["risk_budget"]), expected_budget, rel_tol=1e-12, abs_tol=1e-9
-        )
+        or not math.isclose(float(row["risk_per_unit"]), expected_risk, rel_tol=1e-12, abs_tol=1e-9)
+        or not math.isclose(float(row["risk_budget"]), expected_budget, rel_tol=1e-12, abs_tol=1e-9)
         or int(row["quantity"]) != expected_quantity
     ):
         raise ValueError("PaperOps order economics conflict with active execution policy")
@@ -5977,9 +5971,7 @@ def _validate_run_and_origin_evidence(
                 or payload.get("mode") != event["mode"]
                 or payload.get("run_date") != event["trade_date"]
                 or payload.get("data_snapshot_id")
-                != run_id.removeprefix(
-                    f"paper_ops:{event['mode']}:{event['trade_date']}:"
-                )
+                != run_id.removeprefix(f"paper_ops:{event['mode']}:{event['trade_date']}:")
                 or claimed_hash != expected_hash
             ):
                 raise ValueError("PaperOps transaction run manifest identity conflicts")
@@ -6025,15 +6017,12 @@ def _validate_run_and_origin_evidence(
         for payload in [event.get("payload")]
         if event.get("event_type") == "paper_pick_decision" and isinstance(payload, dict)
     }
-    enter_origins: list[
-        tuple[int, dict[str, object], dict[str, object], dict[str, object]]
-    ] = []
+    enter_origins: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
     for event in event_rows:
         event_payload = event["payload"]
         assert isinstance(event_payload, dict)
         is_enter_block = (
-            event["event_type"] == "paper_order_blocked"
-            and "source_bar" not in event_payload
+            event["event_type"] == "paper_order_blocked" and "source_bar" not in event_payload
         )
         if event["event_type"] != "paper_order_created" and not is_enter_block:
             continue
@@ -6060,18 +6049,13 @@ def _validate_run_and_origin_evidence(
         order_index = next(
             (
                 offset
-                for offset, candidate in enumerate(
-                    event_rows if is_shadow else []
-                )
+                for offset, candidate in enumerate(event_rows if is_shadow else [])
                 if candidate is origin
             ),
             len(event_rows),
         )
         if not is_shadow:
-            picks_path = (
-                paths.exports
-                / f"picks_{event['mode']}_{event['trade_date']}.json"
-            )
+            picks_path = paths.exports / f"picks_{event['mode']}_{event['trade_date']}.json"
             picks_payload = read_json(picks_path, None) if picks_path.is_file() else None
             if not isinstance(picks_payload, list):
                 raise ValueError(f"PaperOps {label} pick artifact is missing")
@@ -6092,9 +6076,7 @@ def _validate_run_and_origin_evidence(
     _validate_enter_order_semantics(paths, enter_origins, existing_events)
 
 
-def _validate_order_pick_lineage(
-    order: dict[str, object], pick: dict[str, object]
-) -> None:
+def _validate_order_pick_lineage(order: dict[str, object], pick: dict[str, object]) -> None:
     if pick.get("decision") != PaperPickDecision.ACCEPTED.value:
         raise ValueError("PaperOps created order did not originate from an accepted pick")
     field_pairs = {
@@ -6186,11 +6168,9 @@ def _load_bound_run_dataset(
     config = _config(paths)
     if data_manifest.accepted_end != manifest.get("run_date"):
         raise ValueError("PaperOps transaction DataTruth accepted end conflicts with run date")
-    if (
-        manifest.get("execution_policy_version") != config.execution_policy_version
-        or manifest.get("execution_policy_fingerprint")
-        != _execution_policy_fingerprint(config)
-    ):
+    if manifest.get("execution_policy_version") != config.execution_policy_version or manifest.get(
+        "execution_policy_fingerprint"
+    ) != _execution_policy_fingerprint(config):
         raise ValueError("PaperOps transaction execution policy binding conflicts")
     raw_universe = manifest.get("universe_symbols")
     manifest_symbols = (
@@ -6218,6 +6198,7 @@ def _validate_manifest_universe_handoff(
     identity_fields = (
         manifest.get("universe_handoff_id"),
         manifest.get("universe_handoff_content_hash_sha256"),
+        manifest.get("release_code_sha"),
         manifest.get("universe_coverage_status"),
     )
     if not handoff_path:
@@ -6230,6 +6211,7 @@ def _validate_manifest_universe_handoff(
         handoff_path,
         market_date=str(manifest.get("run_date") or ""),
         require_production=str(manifest.get("mode") or "") == PaperRunMode.FORWARD.value,
+        expected_code_sha=str(manifest.get("release_code_sha") or ""),
     )
     if (
         manifest.get("universe_handoff_id") != handoff.get("handoff_id")
@@ -6241,6 +6223,7 @@ def _validate_manifest_universe_handoff(
         != dict(handoff.get("coverage") or {}).get("status")
         or tuple(manifest.get("universe_shortfall_reasons") or ())
         != tuple(dict(handoff.get("coverage") or {}).get("shortfall_reasons") or ())
+        or manifest.get("release_code_sha") != handoff.get("code_sha")
     ):
         raise ValueError("PaperOps run manifest universe handoff binding conflicts")
     return handoff
@@ -6330,8 +6313,7 @@ def _validate_enter_order_semantics(
     prior_created: list[dict[str, object]] = []
     config = _config(paths)
     strategies = {
-        (strategy.strategy_id, strategy.version): strategy
-        for strategy in build_strategy_catalog()
+        (strategy.strategy_id, strategy.version): strategy for strategy in build_strategy_catalog()
     }
     dataset_by_run: dict[str, MarketDataset | None] = {}
     for _, event, pick_row, manifest in sorted(origins, key=lambda item: item[0]):
@@ -6352,9 +6334,7 @@ def _validate_enter_order_semantics(
         )
         run_id = str(event["run_id"])
         if run_id not in dataset_by_run:
-            dataset_by_run[run_id] = _load_bound_run_dataset(
-                paths, manifest, required=True
-            )
+            dataset_by_run[run_id] = _load_bound_run_dataset(paths, manifest, required=True)
         dataset = dataset_by_run[run_id]
         assert dataset is not None
         pick = _pick_from_row(_model_projection(pick_row, _PICK_FIELDS))
@@ -6521,9 +6501,7 @@ def _validate_check_order_semantics(
     )
     current_positions = _current_state_rows(paths, positions_target, "position_id")
     ledger_events = read_jsonl(paths.ledger / "paper_ledger.jsonl")
-    daily_net = _daily_closed_net_by_strategy(
-        ledger_events, run_date.isoformat(), mode
-    )
+    daily_net = _daily_closed_net_by_strategy(ledger_events, run_date.isoformat(), mode)
     new_positions: list[dict[str, object]] = []
     for order_row in effective_orders:
         order = _order_from_row(order_row)
@@ -6531,14 +6509,10 @@ def _validate_check_order_semantics(
         fill_event = fills.get(order.order_id)
         pending_event = pending_checks.get(order.order_id)
         outcomes = [
-            event
-            for event in (block_event, fill_event, pending_event)
-            if event is not None
+            event for event in (block_event, fill_event, pending_event) if event is not None
         ]
         if not outcomes:
-            raise ValueError(
-                "PaperOps check transaction omits an outcome for an effective order"
-            )
+            raise ValueError("PaperOps check transaction omits an outcome for an effective order")
         if len(outcomes) != 1:
             raise ValueError("PaperOps order has conflicting check outcomes")
         event = outcomes[0]
@@ -6671,9 +6645,7 @@ def _validate_contextual_event_ids(
             entity = f"{payload['position_id']}:{marker}:{trade_date}"
         else:
             phase = (
-                "check"
-                if challenger_id is not None or pending_target in state_updates
-                else "close"
+                "check" if challenger_id is not None or pending_target in state_updates else "close"
             )
             entity = str(payload["close_id"])
         expected = stable_id(
@@ -6796,9 +6768,7 @@ def _validate_bound_position_source_bar(
         or payload.get("source_bar_sha256") != exact_source["source_bar_sha256"]
         or payload.get("data_snapshot_id") != exact_source["data_snapshot_id"]
     ):
-        raise ValueError(
-            "PaperOps position source bar is not the latest immutable run-date bar"
-        )
+        raise ValueError("PaperOps position source bar is not the latest immutable run-date bar")
 
 
 def _validate_position_lifecycle_event(
@@ -6903,8 +6873,7 @@ def _validate_shadow_evidence_coherence(
                 {
                     **pick,
                     "decision_status": pick["decision"],
-                    "trade_return_eligible": pick["decision"]
-                    == PaperPickDecision.ACCEPTED.value,
+                    "trade_return_eligible": pick["decision"] == PaperPickDecision.ACCEPTED.value,
                     "trade_return_pct": None,
                     "challenger_id": payload["challenger_id"],
                     "logic_artifact_sha256": payload["logic_artifact_sha256"],
@@ -7102,9 +7071,7 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
     }:
         raise ValueError("PaperOps execution_policy_version is unsupported")
     execution_policy_version = (
-        PAPER_EXECUTION_POLICY_VERSION
-        if not requested_policy
-        else requested_policy
+        PAPER_EXECUTION_POLICY_VERSION if not requested_policy else requested_policy
     )
     is_legacy_policy = execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
     raw_min_reward_risk = float(payload.get("min_reward_risk", 1.0 if is_legacy_policy else 1.5))
@@ -7132,9 +7099,7 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
         # regardless of the active historical series.
         min_reward_risk=raw_min_reward_risk,
         max_stop_distance_pct=(
-            raw_max_stop_distance_pct
-            if is_legacy_policy
-            else min(raw_max_stop_distance_pct, 0.15)
+            raw_max_stop_distance_pct if is_legacy_policy else min(raw_max_stop_distance_pct, 0.15)
         ),
         fee_bps=float(payload.get("fee_bps", 1.0)),
         slippage_bps=float(payload.get("slippage_bps", 5.0)),
@@ -7143,11 +7108,7 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
         universe_symbols=universe_symbols,
         schema_version=str(
             payload.get("schema_version")
-            or (
-                "v2.paper_ops_config.v4"
-                if is_legacy_policy
-                else "v2.paper_ops_config.v5"
-            )
+            or ("v2.paper_ops_config.v4" if is_legacy_policy else "v2.paper_ops_config.v5")
         ),
     )
     _validate_config(config)

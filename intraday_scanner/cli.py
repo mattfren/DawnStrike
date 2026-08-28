@@ -470,6 +470,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="data/v2_paper_ops_live",
         help="Read-only governed prior-session PaperOps root for strategy research lineage",
     )
+    alpha_morning_parser.add_argument(
+        "--code-sha",
+        default=None,
+        help="Exact full Git SHA used to build strategy receipts",
+    )
 
     alpha_cycle_parser = subparsers.add_parser(
         "alpha-cycle", help="Run one AlphaOps collect-score-notify cycle"
@@ -494,6 +499,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--paper-ops-root",
         default="data/v2_paper_ops_live",
         help="Read-only governed prior-session PaperOps root for strategy research lineage",
+    )
+    alpha_cycle_parser.add_argument(
+        "--code-sha",
+        default=None,
+        help="Exact full Git SHA used to build strategy receipts",
     )
 
     alpha_monitor_parser = subparsers.add_parser(
@@ -709,6 +719,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     daily_heartbeat_parser.add_argument("--market-date", required=True)
     daily_heartbeat_parser.add_argument("--stage", required=True)
     daily_heartbeat_parser.add_argument("--status", default="RUNNING")
+    daily_heartbeat_parser.add_argument("--release-sha", default="")
 
     daily_status_parser = subparsers.add_parser(
         "daily-orchestrator-status",
@@ -1097,6 +1108,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch.add_argument("--market-date", default=None)
     trade_watch.add_argument("--at", default=None)
     trade_watch.add_argument("--max-age-seconds", type=int, default=360)
+    trade_watch.add_argument("--expected-code-sha", default=None)
     trade_watch.add_argument("--notify", default="console")
     trade_watch.add_argument("--dry-run", action="store_true")
     trade_watch.add_argument("--notional-per-trade", type=float, default=1000.0)
@@ -1133,6 +1145,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch_loop.add_argument("--market-date", default=None)
     trade_watch_loop.add_argument("--at", default=None)
     trade_watch_loop.add_argument("--max-age-seconds", type=int, default=360)
+    trade_watch_loop.add_argument("--expected-code-sha", default=None)
     trade_watch_loop.add_argument("--notify", default="console")
     trade_watch_loop.add_argument("--dry-run", action="store_true")
     trade_watch_loop.add_argument("--notional-per-trade", type=float, default=1000.0)
@@ -1813,6 +1826,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
         paper_ops_root=getattr(args, "paper_ops_root", None),
+        code_sha=getattr(args, "code_sha", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1829,6 +1843,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
         paper_ops_root=getattr(args, "paper_ops_root", None),
+        code_sha=getattr(args, "code_sha", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1922,9 +1937,7 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
                 f"reserved snapshot: {path}"
             ) from exc
         except ValueError as exc:
-            raise SnapshotValidationError(
-                f"strategy-learning validation failed: {exc}"
-            ) from exc
+            raise SnapshotValidationError(f"strategy-learning validation failed: {exc}") from exc
         except OSError as exc:
             raise SnapshotValidationError(
                 f"strategy-learning source cannot be read: {exc}"
@@ -1939,13 +1952,9 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
     try:
         return _run_strategy_learning_daily_unlocked(args)
     except ValueError as exc:
-        raise SnapshotValidationError(
-            f"strategy-learning validation failed: {exc}"
-        ) from exc
+        raise SnapshotValidationError(f"strategy-learning validation failed: {exc}") from exc
     except OSError as exc:
-        raise SnapshotValidationError(
-            f"strategy-learning source cannot be read: {exc}"
-        ) from exc
+        raise SnapshotValidationError(f"strategy-learning source cannot be read: {exc}") from exc
 
 
 def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
@@ -2187,10 +2196,7 @@ def _verify_learning_manifest(payload: Any, *, key: bytes) -> dict[str, Any]:
         key: value
         for key, value in payload.items()
         if key != "signature_hmac_sha256"
-        and not (
-            payload.get("reservation_phase") == 1
-            and key == "reservation_sha256"
-        )
+        and not (payload.get("reservation_phase") == 1 and key == "reservation_sha256")
         and not (payload.get("boundary_phase") == 1 and key == "boundary_sha256")
     }
     domain = (
@@ -2275,9 +2281,7 @@ def _learning_invocation_lock(args: argparse.Namespace):
         raise SnapshotValidationError(f"daily-learning output root is a symlink: {root}")
     lock_path = root / ".daily_learning_invocation.lock"
     if lock_path.is_symlink():
-        raise SnapshotValidationError(
-            f"daily-learning invocation lock is a symlink: {lock_path}"
-        )
+        raise SnapshotValidationError(f"daily-learning invocation lock is a symlink: {lock_path}")
     from intraday_scanner.v2.paper_ops.storage import exclusive_file_lock
 
     return exclusive_file_lock(lock_path)
@@ -2417,8 +2421,7 @@ def _database_source_boundary(
             }
             continue
         schema_rows = [
-            dict(row)
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            dict(row) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         ]
         try:
             rows = connection.execute(f"SELECT rowid, * FROM {table} ORDER BY rowid").fetchall()
@@ -2431,9 +2434,7 @@ def _database_source_boundary(
             "exists": True,
             "row_count": len(row_payload),
             "max_rowid": max_rowid,
-            "schema_sha256": hashlib.sha256(
-                _canonical_input_bytes(schema_rows)
-            ).hexdigest(),
+            "schema_sha256": hashlib.sha256(_canonical_input_bytes(schema_rows)).hexdigest(),
             "rows_sha256": hashlib.sha256(_canonical_input_bytes(row_payload)).hexdigest(),
         }
     return {"database_path": str(database_path.resolve()), "tables": result}
@@ -2463,9 +2464,7 @@ def _source_boundary_for_invocation(args: argparse.Namespace) -> dict[str, Any]:
         else:
             owns_connection = False
         try:
-            boundary["database"] = _database_source_boundary(
-                connection, Path(args.db_path)
-            )
+            boundary["database"] = _database_source_boundary(connection, Path(args.db_path))
         finally:
             if owns_connection:
                 connection.rollback()
@@ -2488,9 +2487,7 @@ def _verify_source_boundary_current(args: argparse.Namespace, boundary: Mapping[
             raise SnapshotValidationError("daily-learning source-boundary database lock is missing")
         actual_db = _database_source_boundary(connection, Path(args.db_path))
         if actual_db != expected_db:
-            raise SnapshotValidationError(
-                "daily-learning phase-1 database source boundary changed"
-            )
+            raise SnapshotValidationError("daily-learning phase-1 database source boundary changed")
     expected_paper = boundary.get("paper_ops")
     if expected_paper is not None:
         actual_paper = _paper_ops_source_boundary(Path(args.paper_ops_root))
@@ -2499,9 +2496,7 @@ def _verify_source_boundary_current(args: argparse.Namespace, boundary: Mapping[
         )
         actual_files = actual_paper.get("files") if isinstance(actual_paper, Mapping) else None
         if expected_files != actual_files:
-            raise SnapshotValidationError(
-                "daily-learning phase-1 PaperOps source boundary changed"
-            )
+            raise SnapshotValidationError("daily-learning phase-1 PaperOps source boundary changed")
     expected_evidence = boundary.get("evidence_file")
     if expected_evidence is not None:
         _payload, actual_evidence = _read_stable_json(Path(args.evidence_file))
@@ -2554,9 +2549,7 @@ def _bind_learning_invocation_input_hash_unlocked(
     stored_hash = str(stored.get("reservation_sha256") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", stored_hash):
         raise SnapshotValidationError("daily-learning invocation reservation hash is missing")
-    stored_body = _verify_learning_manifest(
-        stored, key=_learning_manifest_key(path.parent)
-    )
+    stored_body = _verify_learning_manifest(stored, key=_learning_manifest_key(path.parent))
     if stored_hash != hashlib.sha256(_canonical_input_bytes(stored_body)).hexdigest():
         raise SnapshotValidationError("daily-learning invocation reservation hash mismatch")
     current_input_hash = str(stored_body.get("input_hash_sha256") or "")
@@ -2577,16 +2570,11 @@ def _bind_learning_invocation_input_hash_unlocked(
         "input_hash_sha256": input_hash_sha256,
     }
     updated = {
-        **_signed_learning_manifest(
-            updated_body, key=_learning_manifest_key(path.parent)
-        ),
-        "reservation_sha256": hashlib.sha256(
-            _canonical_input_bytes(updated_body)
-        ).hexdigest(),
+        **_signed_learning_manifest(updated_body, key=_learning_manifest_key(path.parent)),
+        "reservation_sha256": hashlib.sha256(_canonical_input_bytes(updated_body)).hexdigest(),
     }
     encoded = (
-        json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
+        json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     _atomic_replace_bytes(path, encoded)
     return {**updated_body, "reservation_sha256": updated["reservation_sha256"]}
@@ -2718,12 +2706,8 @@ def _reserve_learning_invocation_unlocked(
             "broker_execution_enabled": False,
         }
         boundary_payload = {
-            **_signed_learning_manifest(
-                boundary_body, key=_learning_manifest_key(path.parent)
-            ),
-            "boundary_sha256": hashlib.sha256(
-                _canonical_input_bytes(boundary_body)
-            ).hexdigest(),
+            **_signed_learning_manifest(boundary_body, key=_learning_manifest_key(path.parent)),
+            "boundary_sha256": hashlib.sha256(_canonical_input_bytes(boundary_body)).hexdigest(),
         }
         _atomic_install_bytes(
             boundary_path,
@@ -2744,24 +2728,17 @@ def _reserve_learning_invocation_unlocked(
             "daily-learning phase-1 source boundary is unreadable"
         ) from exc
     boundary_hash = (
-        boundary_payload.get("boundary_sha256")
-        if isinstance(boundary_payload, Mapping)
-        else None
+        boundary_payload.get("boundary_sha256") if isinstance(boundary_payload, Mapping) else None
     )
     boundary_body = _verify_learning_manifest(
         boundary_payload, key=_learning_manifest_key(path.parent)
     )
     if (
-        boundary_body.get("schema_version")
-        != "dawnstrike.strategy_learning_source_boundary.v1"
+        boundary_body.get("schema_version") != "dawnstrike.strategy_learning_source_boundary.v1"
         or boundary_body.get("boundary_phase") != 1
         or boundary_body.get("reservation_sha256")
-        != str(
-            reservation.get("phase1_reservation_sha256")
-            or reservation["reservation_sha256"]
-        )
-        or boundary_hash
-        != hashlib.sha256(_canonical_input_bytes(boundary_body)).hexdigest()
+        != str(reservation.get("phase1_reservation_sha256") or reservation["reservation_sha256"])
+        or boundary_hash != hashlib.sha256(_canonical_input_bytes(boundary_body)).hexdigest()
     ):
         raise SnapshotValidationError("daily-learning phase-1 source boundary binding mismatch")
     if not snapshot_complete:
@@ -3269,9 +3246,7 @@ def _no_evidence_candidates(
         )
 
     portfolio_empty = (
-        paper_ops_rows is None
-        and empty_table("portfolio_performance_rows")
-        and not rows
+        paper_ops_rows is None and empty_table("portfolio_performance_rows") and not rows
     )
     paper_warnings = getattr(paper_ops_rows, "blotter_warnings", None)
     paper_input_generation = getattr(paper_ops_rows, "read_only_input_generation", None)
@@ -3537,9 +3512,10 @@ def _read_strategy_learning_evidence_snapshot(
     ):
         raise SnapshotValidationError("daily-learning acquisition manifest hash mismatch")
     no_evidence_receipts = manifest.get("no_evidence_receipts")
-    if not isinstance(no_evidence_receipts, list) or body.get(
-        "no_evidence_receipts"
-    ) != no_evidence_receipts:
+    if (
+        not isinstance(no_evidence_receipts, list)
+        or body.get("no_evidence_receipts") != no_evidence_receipts
+    ):
         raise SnapshotValidationError("daily-learning no-evidence receipt binding mismatch")
     source_generation = manifest.get("source_generation")
     if not isinstance(source_generation, Mapping):
@@ -3552,9 +3528,7 @@ def _read_strategy_learning_evidence_snapshot(
     for receipt in no_evidence_receipts:
         if not isinstance(receipt, Mapping):
             raise SnapshotValidationError("daily-learning no-evidence receipt is malformed")
-        receipt_body = {
-            key: value for key, value in receipt.items() if key != "receipt_sha256"
-        }
+        receipt_body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
         receipt_hash = str(receipt.get("receipt_sha256") or "")
         if (
             not re.fullmatch(r"[0-9a-f]{64}", receipt_hash)
@@ -4134,7 +4108,15 @@ def _read_alpha_v6_universe_candidate(path: str) -> dict[str, Any]:
 
 
 def _run_daily_heartbeat(args: argparse.Namespace) -> int:
-    release_sha = resolve_release_sha(args.runtime_root)
+    explicit_release_sha = str(getattr(args, "release_sha", "") or "").strip()
+    if explicit_release_sha:
+        if not re.fullmatch(r"[0-9a-f]{40}", explicit_release_sha):
+            raise SnapshotValidationError(
+                "Daily heartbeat release SHA must be one full lowercase Git SHA."
+            )
+        release_sha = explicit_release_sha
+    else:
+        release_sha = resolve_release_sha(args.runtime_root)
     result = write_heartbeat(
         state_root=args.state_root,
         market_date=args.market_date,
@@ -4833,6 +4815,7 @@ def _trade_watch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "min_reward_risk": args.min_reward_risk,
         "notify_blocked": args.notify_blocked,
         "include_scenarios": args.include_scenarios,
+        "expected_code_sha": getattr(args, "expected_code_sha", None),
     }
 
 

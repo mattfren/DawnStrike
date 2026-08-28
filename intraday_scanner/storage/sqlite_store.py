@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from intraday_scanner.decisioning.contracts import (
-    ConditionResult,
-    StrategyDecisionReceipt,
-    canonical_json,
+    parse_strategy_decision_receipt,
 )
 from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.models import ScanResult
@@ -1392,9 +1390,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load monitor events: {exc}") from exc
 
-    def persist_monitor_publication_receipts(
-        self, rows: list[dict[str, Any]]
-    ) -> dict[str, int]:
+    def persist_monitor_publication_receipts(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Persist immutable watcher publication receipts without touching the slate."""
 
         self.initialize()
@@ -1420,9 +1416,7 @@ class SQLiteScanStore:
                             str(existing[0]) != content_hash
                             or str(existing[1]) != canonical_payload
                         ):
-                            raise StorageError(
-                                "monitor publication receipt identity collision"
-                            )
+                            raise StorageError("monitor publication receipt identity collision")
                         reused += 1
                         continue
                     cursor = connection.execute(
@@ -1464,15 +1458,11 @@ class SQLiteScanStore:
                             or str(persisted[0]) != content_hash
                             or str(persisted[1]) != canonical_payload
                         ):
-                            raise StorageError(
-                                "monitor publication receipt identity collision"
-                            )
+                            raise StorageError("monitor publication receipt identity collision")
                         reused += 1
             return {"inserted": inserted, "reused": reused, "count": inserted + reused}
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not persist monitor publication receipts: {exc}"
-            ) from exc
+            raise StorageError(f"Could not persist monitor publication receipts: {exc}") from exc
 
     def load_monitor_publication_receipts(
         self, *, market_date: str | None = None, limit: int = 100
@@ -1499,9 +1489,7 @@ class SQLiteScanStore:
                     ).fetchall()
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
-            raise StorageError(
-                f"Could not load monitor publication receipts: {exc}"
-            ) from exc
+            raise StorageError(f"Could not load monitor publication receipts: {exc}") from exc
 
     def load_latest_monitor_checks(self, limit: int = 100) -> list[dict[str, Any]]:
         self.initialize()
@@ -1873,8 +1861,7 @@ class SQLiteScanStore:
                         ):
                             raise StorageError(
                                 "Exact signal selection signal identity conflicts "
-                                "with prior truth: "
-                                + str(row["signal_id"])
+                                "with prior truth: " + str(row["signal_id"])
                             )
                 for row in rows:
                     if any(not str(row.get(field) or "").strip() for field in required):
@@ -1914,11 +1901,9 @@ class SQLiteScanStore:
                             "SELECT * FROM signal_selections WHERE selection_id = ? LIMIT 1",
                             (str(row["selection_id"]),),
                         ).fetchone()
-                        if (
-                            actual_row is None
-                            or _selection_semantics(_selection_identity_row(actual_row))
-                            != _selection_semantics(row)
-                        ):
+                        if actual_row is None or _selection_semantics(
+                            _selection_identity_row(actual_row)
+                        ) != _selection_semantics(row):
                             raise StorageError(
                                 "Exact signal selection persistence is incomplete: "
                                 + str(row["selection_id"])
@@ -2144,8 +2129,7 @@ class SQLiteScanStore:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
                 selections = connection.execute(
-                    "SELECT * FROM signal_selections "
-                    f"WHERE selection_id IN ({placeholders})",  # nosec B608
+                    f"SELECT * FROM signal_selections WHERE selection_id IN ({placeholders})",  # nosec B608
                     selected_ids,
                 ).fetchall()
                 signal_ids = sorted({str(row["signal_id"] or "") for row in selections})
@@ -2218,9 +2202,7 @@ class SQLiteScanStore:
                                 row["decision_directional_evidence_score"]
                             ),
                             "action": str(row["decision_action"] or "").upper(),
-                            "calibration_status": str(
-                                row["decision_calibration_status"] or ""
-                            ),
+                            "calibration_status": str(row["decision_calibration_status"] or ""),
                             "entry_trigger": _float_or_none(row["decision_entry_trigger"]),
                             "invalidation_level": _float_or_none(
                                 row["decision_invalidation_level"]
@@ -2231,9 +2213,7 @@ class SQLiteScanStore:
                             "source_lineage_hash_sha256": str(
                                 row["decision_source_lineage_hash_sha256"] or ""
                             ),
-                            "feature_hash_sha256": str(
-                                row["decision_feature_hash_sha256"] or ""
-                            ),
+                            "feature_hash_sha256": str(row["decision_feature_hash_sha256"] or ""),
                             "cohort": str(row["decision_cohort"] or ""),
                             "policy_version": str(row["decision_policy_version"] or ""),
                             "feature_schema_version": str(
@@ -2248,11 +2228,11 @@ class SQLiteScanStore:
                         decision["_canonical_payload"] = (
                             canonical_payload if isinstance(canonical_payload, dict) else None
                         )
-                        decision["_canonical_payload_matches"] = (
-                            isinstance(canonical_payload, dict)
-                            and _scenario_decision_projection(canonical_payload)
-                            == _scenario_decision_projection(decision)
-                        )
+                        decision["_canonical_payload_matches"] = isinstance(
+                            canonical_payload, dict
+                        ) and _scenario_decision_projection(
+                            canonical_payload
+                        ) == _scenario_decision_projection(decision)
                     links_by_signal.setdefault(signal_id, []).append(
                         {
                             "decision_id": str(row["link_decision_id"] or ""),
@@ -4656,9 +4636,7 @@ class SQLiteScanStore:
         event_stats = {"inserted": 0, "skipped": 0}
         try:
             with self._connect() as connection:
-                _validate_signal_parent_rows(
-                    connection, outcome_rows, require_market_identity=True
-                )
+                _validate_signal_parent_rows(connection, outcome_rows, require_market_identity=True)
                 _validate_signal_parent_rows(connection, event_rows, require_market_identity=False)
                 if immutable:
                     outcome_count = len(outcome_rows)
@@ -5036,9 +5014,7 @@ class SQLiteScanStore:
                             skipped += 1
                             continue
                     insert_statement = (
-                        "INSERT OR IGNORE"
-                        if _trade_intent_episode_id(row)
-                        else statement
+                        "INSERT OR IGNORE" if _trade_intent_episode_id(row) else statement
                     )
                     cursor = connection.execute(
                         f"""
@@ -5112,6 +5088,7 @@ class SQLiteScanStore:
         portfolio_market_date: str = "",
         max_open_positions: int | None = None,
         max_daily_entries: int | None = None,
+        contributor_receipt_verifier: Any | None = None,
     ) -> dict[str, Any]:
         """Persist one paper-watcher lifecycle batch in one transaction.
 
@@ -5156,22 +5133,17 @@ class SQLiteScanStore:
                     scoped_account_id = str(portfolio_account_id or "").strip()
                     if scoped_account_id and row_account_id != scoped_account_id:
                         raise StorageError(
-                            "trade intent account conflicts with scoped portfolio: "
-                            f"{intent_id}"
+                            f"trade intent account conflicts with scoped portfolio: {intent_id}"
                         )
                     account_id = row_account_id or scoped_account_id
                     cap_date = str(portfolio_market_date or market_date)[:10]
-                    if (
-                        action in {"ENTER_LONG", "ENTER_SHORT"}
-                        and (
-                            cap_date != market_date
-                            or not account_id
-                            or account_id != "alphaops_v5_simulated"
-                        )
+                    if action in {"ENTER_LONG", "ENTER_SHORT"} and (
+                        cap_date != market_date
+                        or not account_id
+                        or account_id != "alphaops_v5_simulated"
                     ):
                         raise StorageError(
-                            "trade intent account/date conflicts with paper portfolio: "
-                            f"{intent_id}"
+                            f"trade intent account/date conflicts with paper portfolio: {intent_id}"
                         )
                     if existing_intent is None and action in {"ENTER_LONG", "ENTER_SHORT"}:
                         rejection = _entry_admission_rejection(
@@ -5255,8 +5227,7 @@ class SQLiteScanStore:
                     str(row.get("intent_id") or "")
                     for row in intents
                     if str(row.get("intent_id") or "") in admitted_intent_ids
-                    and _trade_intent_action(row)
-                    in {"ENTER_LONG", "ENTER_SHORT"}
+                    and _trade_intent_action(row) in {"ENTER_LONG", "ENTER_SHORT"}
                 }
                 admitted_exit_intent_ids = {
                     str(row.get("intent_id") or "")
@@ -5278,8 +5249,7 @@ class SQLiteScanStore:
                     status = str(row.get("status") or "").upper()
                     if status not in {"OPEN", "PENDING", "CLOSED"}:
                         raise StorageError(
-                            "paper position has unsupported lifecycle status: "
-                            f"{position_id}"
+                            f"paper position has unsupported lifecycle status: {position_id}"
                         )
                     lifecycle_intent_id = str(
                         row.get("entry_intent_id")
@@ -5296,8 +5266,7 @@ class SQLiteScanStore:
                         # A closed snapshot is an exit side effect.  Do not
                         # admit unbound lifecycle truth through this watcher API.
                         raise StorageError(
-                            "paper position close requires an admitted exit intent: "
-                            f"{position_id}"
+                            f"paper position close requires an admitted exit intent: {position_id}"
                         )
                     existing_position = connection.execute(
                         "SELECT * FROM paper_positions WHERE position_id = ?",
@@ -5322,8 +5291,7 @@ class SQLiteScanStore:
                             entry_intent=admitted_intents_by_id.get(lifecycle_intent_id),
                         ):
                             raise StorageError(
-                                "paper position entry requires one valid bound fill: "
-                                f"{position_id}"
+                                f"paper position entry requires one valid bound fill: {position_id}"
                             )
                     elif status == "CLOSED":
                         existing_status = str(existing_position["status"] or "").upper()
@@ -5411,7 +5379,7 @@ class SQLiteScanStore:
                         admitted_intent, row, position_id=position_id
                     ):
                         raise StorageError(
-                            "paper fill is not bound to an admitted intent: " f"{fill_id}"
+                            f"paper fill is not bound to an admitted intent: {fill_id}"
                         )
                     durable_position = connection.execute(
                         "SELECT * FROM paper_positions WHERE position_id = ?",
@@ -5419,7 +5387,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if durable_position is None:
                         raise StorageError(
-                            "paper fill requires a durable bound position: " f"{fill_id}"
+                            f"paper fill requires a durable bound position: {fill_id}"
                         )
                     position_status = str(durable_position["status"] or "").upper()
                     action = _trade_intent_action(admitted_intent)
@@ -5441,8 +5409,7 @@ class SQLiteScanStore:
                         or position_status not in expected_statuses
                     ):
                         raise StorageError(
-                            "paper fill does not match durable position lifecycle: "
-                            f"{fill_id}"
+                            f"paper fill does not match durable position lifecycle: {fill_id}"
                         )
                     claimed_fills = connection.execute(
                         "SELECT * FROM paper_trade_fills WHERE intent_id = ?",
@@ -5502,6 +5469,7 @@ class SQLiteScanStore:
                     monitor_rows,
                     admitted_intents_by_id=admitted_intents_by_id,
                     candidate_fills=paper_fills,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
 
                 admitted_signal_events: list[dict[str, Any]] = []
@@ -7799,9 +7767,7 @@ class SQLiteScanStore:
                         "Scenario materialization requires an existing authoritative decision: "
                         + decision_id
                     )
-                authoritative = {
-                    key: authoritative_row[key] for key in authoritative_row.keys()
-                }
+                authoritative = {key: authoritative_row[key] for key in authoritative_row.keys()}
                 authoritative_projection = _scenario_decision_projection(authoritative)
                 decision_projection = _scenario_decision_projection(decision)
                 if authoritative_projection != decision_projection:
@@ -7901,8 +7867,7 @@ class SQLiteScanStore:
                         _selection_semantics(selection)
                     ):
                         raise StorageError(
-                            "Scenario selection conflicts with authoritative truth: "
-                            + selection_id
+                            "Scenario selection conflicts with authoritative truth: " + selection_id
                         )
                 else:
                     duplicate_selection = connection.execute(
@@ -7956,16 +7921,10 @@ class SQLiteScanStore:
                     "SELECT decision_id FROM scenario_signal_links WHERE signal_id = ?",
                     (signal_id,),
                 ).fetchall()
-                if len(signal_links) > 1 or any(
-                    str(row[0]) != decision_id for row in signal_links
-                ):
-                    raise StorageError(
-                        "Scenario signal link identity is ambiguous: " + signal_id
-                    )
+                if len(signal_links) > 1 or any(str(row[0]) != decision_id for row in signal_links):
+                    raise StorageError("Scenario signal link identity is ambiguous: " + signal_id)
                 if existing_link is not None:
-                    if _scenario_link_projection(existing_link) != _scenario_link_projection(
-                        link
-                    ):
+                    if _scenario_link_projection(existing_link) != _scenario_link_projection(link):
                         raise StorageError(
                             "Scenario signal link conflicts with authoritative truth: "
                             + decision_id
@@ -8500,9 +8459,7 @@ class SQLiteScanStore:
 
                 for result in receipt.condition_results:
                     row = result.to_dict() if hasattr(result, "to_dict") else dict(result)
-                    condition_payload = json.dumps(
-                        row, sort_keys=True, separators=(",", ":")
-                    )
+                    condition_payload = json.dumps(row, sort_keys=True, separators=(",", ":"))
                     existing_condition = connection.execute(
                         """SELECT payload_json FROM strategy_condition_results
                         WHERE receipt_id = ? AND condition_id = ?""",
@@ -8510,9 +8467,7 @@ class SQLiteScanStore:
                     ).fetchone()
                     if existing_condition is not None:
                         if str(existing_condition[0]) != condition_payload:
-                            raise StorageError(
-                                "strategy decision condition payload mismatch"
-                            )
+                            raise StorageError("strategy decision condition payload mismatch")
                         continue
                     connection.execute(
                         """INSERT INTO strategy_condition_results
@@ -8542,9 +8497,7 @@ class SQLiteScanStore:
                     claim_id = str(claim.get("claim_id") or "")
                     if not claim_id:
                         raise StorageError("strategy evidence claim ID is required")
-                    claim_payload = json.dumps(
-                        dict(claim), sort_keys=True, separators=(",", ":")
-                    )
+                    claim_payload = json.dumps(dict(claim), sort_keys=True, separators=(",", ":"))
                     existing_claim = connection.execute(
                         """SELECT receipt_id, payload_json FROM strategy_evidence_claims
                         WHERE claim_id = ?""",
@@ -9046,9 +8999,7 @@ def _historical_signal_row(row: sqlite3.Row) -> dict[str, Any]:
     return hydrated
 
 
-def _hydrate_contributor_projection(
-    target: dict[str, Any], source: Mapping[str, Any]
-) -> None:
+def _hydrate_contributor_projection(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Expose and validate merged contributor receipts after SQLite roundtrip."""
 
     contributors = source.get("strategy_contributors")
@@ -9056,6 +9007,28 @@ def _hydrate_contributor_projection(
         return
     if not isinstance(contributors, list):
         raise StorageError("historical signal contributor projection is malformed")
+    if not contributors:
+        if source.get("strategy_contributor_count") not in {None, 0}:
+            raise StorageError("historical signal contributor count conflicts")
+        empty_declared_ids = source.get("strategy_contributor_ids")
+        if empty_declared_ids is not None and empty_declared_ids not in ([], ()):
+            raise StorageError("historical signal contributor IDs conflict")
+        empty_receipts = source.get("strategy_decision_receipts")
+        if empty_receipts is not None and empty_receipts not in ([], ()):
+            raise StorageError("historical signal contributor receipts contain unbound rows")
+        if str(source.get("strategy_contribution_status") or "").upper() == "COMPLETE":
+            raise StorageError("empty contributor projection cannot be COMPLETE")
+        if source.get("strongest_eligible_contributor_score") is not None:
+            raise StorageError("empty contributor projection cannot carry a strongest score")
+        target["strategy_contributors"] = []
+        target["strategy_contributor_count"] = 0
+        target["strategy_contributor_ids"] = []
+        target["strategy_decision_receipts"] = []
+        target["strongest_eligible_contributor_score"] = None
+        for field in ("canonical_primary_strategy_id", "strategy_contribution_status"):
+            if field in source:
+                target[field] = deepcopy(source[field])
+        return
     normalized: list[dict[str, Any]] = []
     contributor_ids: list[str] = []
     seen_keys: set[tuple[str, str]] = set()
@@ -9065,9 +9038,7 @@ def _hydrate_contributor_projection(
             raise StorageError("historical signal contributor row is malformed")
         strategy_id = str(item.get("strategy_id") or "").strip()
         strategy_version = str(item.get("strategy_version") or "").strip()
-        source_signal_id = str(
-            item.get("source_signal_id") or item.get("signal_id") or ""
-        ).strip()
+        source_signal_id = str(item.get("source_signal_id") or item.get("signal_id") or "").strip()
         if not strategy_id or not strategy_version or not source_signal_id:
             raise StorageError("historical signal contributor identity is incomplete")
         key = (strategy_id, source_signal_id)
@@ -9076,24 +9047,26 @@ def _hydrate_contributor_projection(
         seen_keys.add(key)
         receipt_id = str(item.get("receipt_id") or "").strip()
         receipt_hash = str(item.get("receipt_hash_sha256") or "").strip().lower()
-        if bool(receipt_id) != bool(receipt_hash):
-            raise StorageError("historical signal contributor receipt identity is incomplete")
-        if receipt_hash and not _is_sha256(receipt_hash):
+        if not receipt_id or not receipt_hash:
+            raise StorageError("historical signal contributor receipt identity is required")
+        if not _is_sha256(receipt_hash):
             raise StorageError("historical signal contributor receipt hash is invalid")
         if receipt_id and receipt_id in seen_receipt_ids:
             raise StorageError("historical signal contributor receipt is duplicated")
-        if receipt_id:
-            seen_receipt_ids.add(receipt_id)
+        seen_receipt_ids.add(receipt_id)
         adapter = str(item.get("strategy_adapter") or "").strip()
         lineage = item.get("prior_session_lineage")
         if adapter:
-            if not isinstance(lineage, dict) or str(
-                lineage.get("source_signal_id") or ""
-            ).strip() != source_signal_id:
+            if (
+                not isinstance(lineage, dict)
+                or str(lineage.get("source_signal_id") or "").strip() != source_signal_id
+            ):
                 raise StorageError("historical signal contributor adapter lineage is invalid")
-        elif source_signal_id != str(target.get("signal_id") or "").strip() and str(
-            item.get("signal_id") or ""
-        ).strip() != str(target.get("signal_id") or "").strip():
+        elif (
+            source_signal_id != str(target.get("signal_id") or "").strip()
+            and str(item.get("signal_id") or "").strip()
+            != str(target.get("signal_id") or "").strip()
+        ):
             raise StorageError("historical signal contributor source signal is not bound")
         normalized_item = {
             key: deepcopy(item[key])
@@ -9107,6 +9080,10 @@ def _hydrate_contributor_projection(
                 "receipt_id",
                 "receipt_hash_sha256",
                 "receipt_status",
+                "research_pick_eligible",
+                "paper_entry_eligible",
+                "final_score",
+                "direction",
                 "prior_session_lineage",
                 "decision_receipt",
             )
@@ -9128,14 +9105,17 @@ def _hydrate_contributor_projection(
     declared_ids = source.get("strategy_contributor_ids")
     if declared_ids is not None and (
         not isinstance(declared_ids, list)
-        or sorted(str(value).strip() for value in declared_ids)
-        != sorted(contributor_ids)
+        or sorted(str(value).strip() for value in declared_ids) != sorted(contributor_ids)
     ):
         raise StorageError("historical signal contributor IDs conflict")
     receipts = source.get("strategy_decision_receipts")
+    if (
+        not isinstance(receipts, list)
+        or not receipts
+        or any(not isinstance(item, dict) for item in receipts)
+    ):
+        raise StorageError("historical signal contributor receipts are required")
     if receipts is not None:
-        if not isinstance(receipts, list) or any(not isinstance(item, dict) for item in receipts):
-            raise StorageError("historical signal contributor receipts are malformed")
         receipt_by_id: dict[str, dict[str, Any]] = {}
         for receipt in receipts:
             receipt_id = str(receipt.get("receipt_id") or "").strip()
@@ -9154,30 +9134,19 @@ def _hydrate_contributor_projection(
             receipt = receipt_by_id.get(receipt_id)
             if receipt is None:
                 raise StorageError("historical signal contributor receipt is not bound")
+            embedded_receipt = item.get("decision_receipt")
+            if embedded_receipt is not None and embedded_receipt != receipt:
+                raise StorageError("historical signal contributor embedded receipt conflicts")
             contributor_hash = str(item.get("receipt_hash_sha256") or "").strip().lower()
             receipt_hash = str(receipt.get("receipt_hash_sha256") or "").strip().lower()
             if contributor_hash != receipt_hash:
                 raise StorageError("historical signal contributor receipt hash conflicts")
             try:
-                receipt_payload = {
-                    field.name: receipt[field.name]
-                    for field in fields(StrategyDecisionReceipt)
-                    if field.name in receipt
-                }
-                condition_results = receipt_payload.get("condition_results") or []
-                receipt_payload["condition_results"] = tuple(
-                    item
-                    if isinstance(item, ConditionResult)
-                    else ConditionResult(**item)
-                    for item in condition_results
-                )
-                typed_receipt = StrategyDecisionReceipt(**receipt_payload)
+                typed_receipt = parse_strategy_decision_receipt(receipt, require_v2=True)
             except (TypeError, ValueError, KeyError) as exc:
                 raise StorageError(
                     "historical signal contributor receipt typed schema is invalid"
                 ) from exc
-            if canonical_json(typed_receipt.to_dict()) != canonical_json(receipt):
-                raise StorageError("historical signal contributor receipt payload is not exact")
             expected_hash = typed_receipt.receipt_hash_sha256
             if receipt_hash != expected_hash or receipt_id != typed_receipt.receipt_id:
                 raise StorageError(
@@ -9190,14 +9159,14 @@ def _hydrate_contributor_projection(
             if receipt_version != str(item.get("strategy_version") or "").strip():
                 raise StorageError("historical signal contributor receipt version conflicts")
             contributor_source = str(item.get("source_signal_id") or "").strip()
-            if typed_receipt.schema_version == "dawnstrike.strategy_decision_receipt.v2":
-                try:
-                    input_payload = json.loads(typed_receipt.input_payload_json)
-                except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise StorageError(
-                        "historical signal contributor receipt input is invalid"
-                    ) from exc
-                input_source = next(
+            try:
+                input_payload = json.loads(typed_receipt.input_payload_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise StorageError(
+                    "historical signal contributor receipt input is invalid"
+                ) from exc
+            input_source = (
+                next(
                     (
                         str(input_payload.get(key) or "").strip()
                         for key in (
@@ -9209,15 +9178,12 @@ def _hydrate_contributor_projection(
                         if str(input_payload.get(key) or "").strip()
                     ),
                     "",
-                ) if isinstance(input_payload, dict) else ""
-                if input_source != contributor_source:
-                    raise StorageError(
-                        "historical signal contributor receipt source conflicts"
-                    )
-            else:
-                raise StorageError(
-                    "historical signal contributor receipt lacks replayable source input"
                 )
+                if isinstance(input_payload, dict)
+                else ""
+            )
+            if input_source != contributor_source:
+                raise StorageError("historical signal contributor receipt source conflicts")
             if typed_receipt.symbol != str(target.get("ticker") or "").strip().upper():
                 raise StorageError("historical signal contributor receipt symbol conflicts")
             if typed_receipt.market_date != str(target.get("market_date") or "").strip():
@@ -9225,9 +9191,10 @@ def _hydrate_contributor_projection(
             receipt_source_signal = str(
                 receipt.get("source_signal_id") or receipt.get("signal_id") or ""
             ).strip()
-            if receipt_source_signal and receipt_source_signal != str(
-                item.get("source_signal_id") or ""
-            ).strip():
+            if (
+                receipt_source_signal
+                and receipt_source_signal != str(item.get("source_signal_id") or "").strip()
+            ):
                 raise StorageError("historical signal contributor receipt source conflicts")
             contributor_status = str(item.get("receipt_status") or "").strip()
             receipt_status = str(
@@ -9241,21 +9208,72 @@ def _hydrate_contributor_projection(
                 raise StorageError("historical signal contributor receipt status is unverified")
             if contributor_status.upper() != "COMPLETE":
                 raise StorageError("historical signal contributor receipt status is unverified")
+            if item.get("research_pick_eligible") is not None and (
+                item.get("research_pick_eligible") is not typed_receipt.research_pick_eligible
+            ):
+                raise StorageError("historical signal contributor research eligibility conflicts")
+            if item.get("paper_entry_eligible") is not None and (
+                item.get("paper_entry_eligible") is not typed_receipt.paper_entry_eligible
+            ):
+                raise StorageError("historical signal contributor paper eligibility conflicts")
+            for score_key in ("final_score", "alpha_score", "score"):
+                if score_key not in item or item.get(score_key) in {None, ""}:
+                    continue
+                try:
+                    score_value = float(item[score_key])
+                except (TypeError, ValueError) as exc:
+                    raise StorageError("historical signal contributor score is invalid") from exc
+                if not math.isfinite(score_value) or score_value != typed_receipt.final_score:
+                    raise StorageError("historical signal contributor score conflicts with receipt")
+            input_direction = str(input_payload.get("direction") or "").strip().lower()
+            contributor_direction = str(item.get("direction") or "").strip().lower()
+            if contributor_direction and (
+                contributor_direction not in {"long", "short"}
+                or input_direction != contributor_direction
+            ):
+                raise StorageError("historical signal contributor direction conflicts with receipt")
+            normalized_item = next(
+                row
+                for row in normalized
+                if row["strategy_id"] == item["strategy_id"]
+                and row["source_signal_id"] == item["source_signal_id"]
+            )
+            normalized_item["research_pick_eligible"] = typed_receipt.research_pick_eligible
+            normalized_item["paper_entry_eligible"] = typed_receipt.paper_entry_eligible
+            normalized_item["final_score"] = typed_receipt.final_score
+            if input_direction:
+                if input_direction not in {"long", "short"}:
+                    raise StorageError("historical signal contributor receipt direction is invalid")
+                normalized_item["direction"] = input_direction
             if not contributor_status and receipt_status:
-                normalized_item = next(
-                    row for row in normalized if row["strategy_id"] == item["strategy_id"]
-                    and row["source_signal_id"] == item["source_signal_id"]
-                )
                 normalized_item["receipt_status"] = receipt_status
         if referenced_receipt_ids != set(receipt_by_id):
             raise StorageError("historical signal contributor receipts contain unbound rows")
-    elif seen_receipt_ids:
-        raise StorageError("historical signal contributor receipts are missing")
+    eligible_scores = [
+        float(item["final_score"])
+        for item in normalized
+        if item.get("research_pick_eligible") is True or item.get("paper_entry_eligible") is True
+    ]
+    strongest = max(eligible_scores) if eligible_scores else None
+    if "strongest_eligible_contributor_score" in source:
+        declared_strongest = source.get("strongest_eligible_contributor_score")
+        if declared_strongest is None:
+            if strongest is not None:
+                raise StorageError("historical signal contributor strongest score conflicts")
+        else:
+            try:
+                declared_number = float(declared_strongest)
+            except (TypeError, ValueError) as exc:
+                raise StorageError(
+                    "historical signal contributor strongest score is invalid"
+                ) from exc
+            if not math.isfinite(declared_number) or declared_number != strongest:
+                raise StorageError("historical signal contributor strongest score conflicts")
     target["strategy_contributors"] = normalized
     target["strategy_contributor_count"] = len(normalized)
     target["strategy_contributor_ids"] = sorted(contributor_ids)
-    if receipts is not None:
-        target["strategy_decision_receipts"] = deepcopy(receipts)
+    target["strategy_decision_receipts"] = deepcopy(receipts)
+    target["strongest_eligible_contributor_score"] = strongest
     for field in ("canonical_primary_strategy_id", "strategy_contribution_status"):
         if field in source:
             target[field] = deepcopy(source[field])
@@ -9417,9 +9435,7 @@ def _scenario_decision_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         "target_1": _float_or_none(_mapping_value(row, "target_1")),
         "time_stop": str(_mapping_value(row, "time_stop") or ""),
         "source_tier": str(_mapping_value(row, "source_tier") or ""),
-        "source_lineage_hash_sha256": str(
-            _mapping_value(row, "source_lineage_hash_sha256") or ""
-        ),
+        "source_lineage_hash_sha256": str(_mapping_value(row, "source_lineage_hash_sha256") or ""),
         "feature_hash_sha256": str(_mapping_value(row, "feature_hash_sha256") or ""),
         "cohort": str(_mapping_value(row, "cohort") or ""),
         "policy_version": str(_mapping_value(row, "policy_version") or ""),
@@ -9471,8 +9487,7 @@ def _scenario_historical_mirror_matches(
         str(_mapping_value(actual, "signal_id") or "") == f"scenario:{decision['decision_id']}"
         and str(_mapping_value(actual, "market_date") or "")[:10] == decision["market_date"]
         and str(_mapping_value(actual, "ticker") or "").upper() == decision["ticker"]
-        and _float_or_none(_mapping_value(actual, "entry_watch_level"))
-        == decision["entry_trigger"]
+        and _float_or_none(_mapping_value(actual, "entry_watch_level")) == decision["entry_trigger"]
         and _float_or_none(_mapping_value(actual, "invalidation_level"))
         == decision["invalidation_level"]
         and _float_or_none(_mapping_value(actual, "target_1")) == decision["target_1"]
@@ -9485,9 +9500,7 @@ def _scenario_plan_projection(payload: Any) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
     return {
-        "decision_id": str(
-            parsed.get("decision_id") or parsed.get("scenario_decision_id") or ""
-        ),
+        "decision_id": str(parsed.get("decision_id") or parsed.get("scenario_decision_id") or ""),
         "market_date": str(parsed.get("market_date") or "")[:10],
         "ticker": str(parsed.get("ticker") or "").upper(),
         "direction": str(parsed.get("direction") or "").lower(),
@@ -9499,9 +9512,7 @@ def _scenario_plan_projection(payload: Any) -> dict[str, Any] | None:
         "policy_version": str(parsed.get("policy_version") or ""),
         "feature_schema_version": str(parsed.get("feature_schema_version") or ""),
         "research_only": _scenario_optional_bool(parsed, "research_only"),
-        "broker_execution_enabled": _scenario_optional_bool(
-            parsed, "broker_execution_enabled"
-        ),
+        "broker_execution_enabled": _scenario_optional_bool(parsed, "broker_execution_enabled"),
     }
 
 
@@ -9607,11 +9618,7 @@ def _validate_signal_parent_rows(
     and bind outcome rows to the governed parent's day/ticker.
     """
 
-    candidates = [
-        row
-        for row in rows
-        if str(row.get("signal_id") or "")
-    ]
+    candidates = [row for row in rows if str(row.get("signal_id") or "")]
     if not candidates:
         return
 
@@ -9713,8 +9720,7 @@ def _validate_signal_parent_rows(
                     _float_or_none(decision_entry_trigger)
                     > _float_or_none(decision_invalidation_level)
                     > 0
-                    and _float_or_none(decision_target_1)
-                    > _float_or_none(decision_entry_trigger)
+                    and _float_or_none(decision_target_1) > _float_or_none(decision_entry_trigger)
                 )
                 and link_cohort == decision_cohort
                 and link_strategy_id == SCENARIO_STRATEGY_ID
@@ -9789,9 +9795,7 @@ def _validate_signal_parent_rows(
         if scenario_entries:
             mismatched += 1
             continue
-        parents = [
-            parent for parent in (historical_parent, shadow_parent) if parent is not None
-        ]
+        parents = [parent for parent in (historical_parent, shadow_parent) if parent is not None]
         if len(parents) == 0:
             missing += 1
             continue
@@ -9898,6 +9902,7 @@ def _persist_bound_monitor_receipts(
     *,
     admitted_intents_by_id: Mapping[str, Mapping[str, Any]],
     candidate_fills: list[dict[str, Any]],
+    contributor_receipt_verifier: Any | None = None,
 ) -> dict[str, int]:
     inserted = 0
     reused = 0
@@ -9935,12 +9940,15 @@ def _persist_bound_monitor_receipts(
         proof_hash = _canonical_sha256(
             {key: value for key, value in proof.items() if key != "proof_hash_sha256"}
         )
-        expected_receipt_id = "monitor-publication-" + hashlib.sha256(
-            (
-                f"{intent.get('signal_id')}:{intent_id}:"
-                f"{trace.get('plan_hash_sha256')}:{proof_hash}"
-            ).encode()
-        ).hexdigest()[:24]
+        expected_receipt_id = (
+            "monitor-publication-"
+            + hashlib.sha256(
+                (
+                    f"{intent.get('signal_id')}:{intent_id}:"
+                    f"{trace.get('plan_hash_sha256')}:{proof_hash}"
+                ).encode()
+            ).hexdigest()[:24]
+        )
         validation_row = intent.get("watcher_validation_row")
         if not isinstance(validation_row, dict):
             raise StorageError(
@@ -9950,34 +9958,29 @@ def _persist_bound_monitor_receipts(
             validate_watcher_current_proof,
         )
 
-        if not validate_watcher_current_proof(validation_row):
+        if not validate_watcher_current_proof(
+            validation_row,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        ):
             raise StorageError(
                 "monitor publication receipt requires strict watcher validation envelope"
             )
         if (
             not receipt_id
             or not content_hash
-            or row.get("schema_version")
-            != "dawnstrike.alphaops.monitor_publication_receipt.v1"
+            or row.get("schema_version") != "dawnstrike.alphaops.monitor_publication_receipt.v1"
             or row.get("publication_tier") != "ALERTABLE_PAPER_ENTRY"
             or int(row.get("publication_count") or 0) != 1
             or row.get("research_only") is not True
             or row.get("broker_execution") != "disabled"
             or _trade_intent_action(intent) not in {"ENTER_LONG", "ENTER_SHORT"}
-            or str(row.get("market_date") or "")[:10]
-            != str(intent.get("market_date") or "")[:10]
+            or str(row.get("market_date") or "")[:10] != str(intent.get("market_date") or "")[:10]
             or str(row.get("signal_id") or "") != str(intent.get("signal_id") or "")
-            or str(row.get("ticker") or "").upper()
-            != str(intent.get("ticker") or "").upper()
+            or str(row.get("ticker") or "").upper() != str(intent.get("ticker") or "").upper()
             or str(row.get("simulated_account_id") or "") != intent_account
-            or str(row.get("plan_hash_sha256") or "")
-            != str(trace.get("plan_hash_sha256") or "")
+            or str(row.get("plan_hash_sha256") or "") != str(trace.get("plan_hash_sha256") or "")
             or str(row.get("decision_trace_fingerprint") or "")
-            != str(
-                intent.get("decision_fingerprint")
-                or trace.get("decision_fingerprint")
-                or ""
-            )
+            != str(intent.get("decision_fingerprint") or trace.get("decision_fingerprint") or "")
             or not proof
             or str(proof.get("proof_hash_sha256") or "") != proof_hash
             or str(proof.get("quote_hash_sha256") or "") != quote_hash
@@ -10001,16 +10004,13 @@ def _persist_bound_monitor_receipts(
                 )
             )
             or str(quote.get("signal_id") or "") != str(intent.get("signal_id") or "")
-            or str(portfolio.get("signal_id") or "")
-            != str(intent.get("signal_id") or "")
+            or str(portfolio.get("signal_id") or "") != str(intent.get("signal_id") or "")
             or str(portfolio.get("simulated_account_id") or "") != intent_account
             or content_hash != recomputed_hash
         ):
             raise StorageError("monitor publication receipt is not bound to admitted intent")
         intent_candidate_fills = [
-            fill
-            for fill in candidate_fills
-            if str(fill.get("intent_id") or "") == intent_id
+            fill for fill in candidate_fills if str(fill.get("intent_id") or "") == intent_id
         ]
         matching_fills = [
             fill
@@ -10031,9 +10031,7 @@ def _persist_bound_monitor_receipts(
             durable_fills[0],
             position_id=str(durable_fills[0].get("position_id") or ""),
         )
-        candidate_fill_valid = (
-            len(intent_candidate_fills) == 1 and len(matching_fills) == 1
-        )
+        candidate_fill_valid = len(intent_candidate_fills) == 1 and len(matching_fills) == 1
         if not candidate_fill_valid and not durable_fill_valid:
             raise StorageError("monitor publication receipt lacks exact admitted fill")
         canonical_payload = json.dumps(row, sort_keys=True)
@@ -10086,9 +10084,7 @@ def _persist_bound_monitor_receipts(
 
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(
-            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        ).encode()
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
 
 
@@ -10148,10 +10144,26 @@ def _entry_admission_rejection(
 
 
 _TRADE_INTENT_SEMANTIC_KEYS = (
-    "signal_id", "market_date", "ticker", "episode_id", "strategy_id",
-    "account_id", "mode", "lifecycle_state", "action", "decision_time",
-    "decision_price", "trigger_price", "stop_price", "target_price", "quantity",
-    "notional", "risk_amount", "reason", "blocked_reason", "source_observation_id",
+    "signal_id",
+    "market_date",
+    "ticker",
+    "episode_id",
+    "strategy_id",
+    "account_id",
+    "mode",
+    "lifecycle_state",
+    "action",
+    "decision_time",
+    "decision_price",
+    "trigger_price",
+    "stop_price",
+    "target_price",
+    "quantity",
+    "notional",
+    "risk_amount",
+    "reason",
+    "blocked_reason",
+    "source_observation_id",
     "notification_event_key",
 )
 _TRADE_INTENT_NUMERIC_KEYS = frozenset(
@@ -10166,10 +10178,26 @@ _TRADE_INTENT_NUMERIC_KEYS = frozenset(
     }
 )
 _PAPER_POSITION_SEMANTIC_KEYS = (
-    "position_id", "signal_id", "market_date", "ticker", "status", "quantity",
-    "entry_intent_id", "exit_intent_id", "opened_at", "closed_at", "entry_price",
-    "exit_price", "stop_price", "target_price", "notional", "realized_pnl",
-    "realized_return_pct", "max_favorable_excursion", "max_adverse_excursion", "updated_at",
+    "position_id",
+    "signal_id",
+    "market_date",
+    "ticker",
+    "status",
+    "quantity",
+    "entry_intent_id",
+    "exit_intent_id",
+    "opened_at",
+    "closed_at",
+    "entry_price",
+    "exit_price",
+    "stop_price",
+    "target_price",
+    "notional",
+    "realized_pnl",
+    "realized_return_pct",
+    "max_favorable_excursion",
+    "max_adverse_excursion",
+    "updated_at",
 )
 _PAPER_POSITION_NUMERIC_KEYS = frozenset(
     {
@@ -10217,8 +10245,18 @@ _PAPER_POSITION_CLOSE_MUTABLE_PAYLOAD_KEYS = frozenset(
     }
 )
 _PAPER_FILL_SEMANTIC_KEYS = (
-    "fill_id", "position_id", "intent_id", "signal_id", "market_date", "ticker", "side",
-    "fill_time", "fill_price", "quantity", "gross_notional", "slippage_bps",
+    "fill_id",
+    "position_id",
+    "intent_id",
+    "signal_id",
+    "market_date",
+    "ticker",
+    "side",
+    "fill_time",
+    "fill_price",
+    "quantity",
+    "gross_notional",
+    "slippage_bps",
 )
 _PAPER_FILL_NUMERIC_KEYS = frozenset({"fill_price", "quantity", "gross_notional", "slippage_bps"})
 
@@ -10268,8 +10306,11 @@ def _trade_intent_semantics_match(
 
 
 def _lifecycle_semantics_match(
-    stored: sqlite3.Row | Mapping[str, Any], incoming: Mapping[str, Any], *,
-    keys: tuple[str, ...], numeric_keys: frozenset[str],
+    stored: sqlite3.Row | Mapping[str, Any],
+    incoming: Mapping[str, Any],
+    *,
+    keys: tuple[str, ...],
+    numeric_keys: frozenset[str],
 ) -> bool:
     """Reject a retry that would rewrite an existing position or fill."""
 
@@ -10343,17 +10384,11 @@ def _valid_position_close_transition(
         ("ticker", "ticker"),
         ("exit_intent_id", "intent_id"),
     ):
-        if str(incoming.get(position_key) or "") != str(
-            bound_exit_fill.get(fill_key) or ""
-        ):
+        if str(incoming.get(position_key) or "") != str(bound_exit_fill.get(fill_key) or ""):
             return False
-    if _float_or_none(incoming.get("quantity")) != _float_or_none(
-        bound_exit_fill.get("quantity")
-    ):
+    if _float_or_none(incoming.get("quantity")) != _float_or_none(bound_exit_fill.get("quantity")):
         return False
-    if str(incoming.get("closed_at") or "") != str(
-        bound_exit_fill.get("fill_time") or ""
-    ):
+    if str(incoming.get("closed_at") or "") != str(bound_exit_fill.get("fill_time") or ""):
         return False
 
     entry_price = _float_or_none(stored["entry_price"])
@@ -10504,8 +10539,7 @@ def _valid_intent_fill(
         reconciliation_id = str(intent.get("source_reconciliation_trade_id") or "").strip()
         return (
             bool(reconciliation_id)
-            and reconciliation_id
-            == str(fill.get("source_reconciliation_trade_id") or "").strip()
+            and reconciliation_id == str(fill.get("source_reconciliation_trade_id") or "").strip()
             and fill_price == decision_price
         )
     expected_price: float | None = None
@@ -10522,12 +10556,15 @@ def _valid_intent_fill(
     return fill_price == round(expected_price, 6)
 
 
-def _exact_research_identity(
-    intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]
-) -> bool:
+def _exact_research_identity(intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]) -> bool:
     for key in (
-        "account_id", "strategy_id", "strategy_version", "episode_id",
-        "selection_id", "cohort", "decision_fingerprint",
+        "account_id",
+        "strategy_id",
+        "strategy_version",
+        "episode_id",
+        "selection_id",
+        "cohort",
+        "decision_fingerprint",
     ):
         expected = str(intent.get(key) or "").strip()
         if not expected or str(lifecycle_row.get(key) or "").strip() != expected:
@@ -10535,12 +10572,14 @@ def _exact_research_identity(
     return _exact_safety_identity(intent, lifecycle_row)
 
 
-def _exact_position_identity(
-    intent: Mapping[str, Any], position: Mapping[str, Any]
-) -> bool:
+def _exact_position_identity(intent: Mapping[str, Any], position: Mapping[str, Any]) -> bool:
     for key in (
-        "account_id", "strategy_id", "strategy_version", "episode_id",
-        "selection_id", "cohort",
+        "account_id",
+        "strategy_id",
+        "strategy_version",
+        "episode_id",
+        "selection_id",
+        "cohort",
     ):
         expected = str(intent.get(key) or "").strip()
         if not expected or str(position.get(key) or "").strip() != expected:
@@ -10548,9 +10587,7 @@ def _exact_position_identity(
     return _exact_safety_identity(intent, position)
 
 
-def _exact_safety_identity(
-    intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]
-) -> bool:
+def _exact_safety_identity(intent: Mapping[str, Any], lifecycle_row: Mapping[str, Any]) -> bool:
     return (
         intent.get("research_only") is True
         and lifecycle_row.get("research_only") is True
@@ -10559,8 +10596,7 @@ def _exact_safety_identity(
         and intent.get("broker_execution_enabled") is False
         and lifecycle_row.get("broker_execution_enabled") is False
         and "official_paper_eligible" in intent
-        and lifecycle_row.get("official_paper_eligible")
-        == intent.get("official_paper_eligible")
+        and lifecycle_row.get("official_paper_eligible") == intent.get("official_paper_eligible")
     )
 
 
@@ -10625,17 +10661,10 @@ def _backfill_trade_intent_identity(connection: sqlite3.Connection) -> None:
         episode_id = str(row[6] or payload.get("episode_id") or "").strip()
         strategy_id = str(row[7] or payload.get("strategy_id") or "").strip()
         account_id = str(
-            row[8]
-            or payload.get("account_id")
-            or payload.get("simulated_account_id")
-            or ""
+            row[8] or payload.get("account_id") or payload.get("simulated_account_id") or ""
         ).strip()
         claim_key = (market_date, account_id, strategy_id, episode_id)
-        if (
-            episode_id
-            and action in {"ENTER_LONG", "ENTER_SHORT"}
-            and claim_key in claimed_episodes
-        ):
+        if episode_id and action in {"ENTER_LONG", "ENTER_SHORT"} and claim_key in claimed_episodes:
             episode_id = ""
         elif episode_id and action in {"ENTER_LONG", "ENTER_SHORT"}:
             claimed_episodes.add(claim_key)

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -14,12 +15,28 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from intraday_scanner.alpha.v5_policy import ALPHAOPS_V5_ACCOUNT_ID, DEFAULT_V5_POLICY
+from intraday_scanner.decisioning.contracts import (
+    canonical_json,
+    parse_strategy_decision_receipt,
+)
 
 TIER1 = "RANKED_RESEARCH_CANDIDATE"
 TIER2 = "PAPER_PLAN_QUALIFIED"
 TIER2_WAITING = "WAITING_CURRENT_CHECKS"
 TIER3 = "ALERTABLE_PAPER_ENTRY"
 WAITING_EXECUTION_COSTS = "WAITING_EXECUTION_COSTS"
+_STRATEGY_CONTRIBUTOR_PROJECTION_FIELDS = frozenset(
+    {
+        "strategy_contributors",
+        "strategy_contributor_count",
+        "strategy_contributor_ids",
+        "strategy_decision_receipts",
+        "strategy_contribution_status",
+        "strategy_contribution_gaps",
+        "strongest_eligible_contributor_score",
+        "canonical_primary_strategy_id",
+    }
+)
 EASTERN = ZoneInfo("America/New_York")
 RANKED_RESEARCH_SLATE_V1 = "dawnstrike.luna.ranked_research_slate.v1"
 RANKED_RESEARCH_SLATE_V2 = "dawnstrike.luna.ranked_research_slate.v2"
@@ -65,7 +82,7 @@ class AuthenticatedStrategyReceiptResolver:
         *,
         store: Any,
         market_date: str,
-        strategy_id: str,
+        strategy_id: str | None,
         _token: object,
     ) -> None:
         if _token is not self._TOKEN:
@@ -75,13 +92,16 @@ class AuthenticatedStrategyReceiptResolver:
         if type(store) is not SQLiteScanStore:
             raise TypeError("strategy receipt resolver requires SQLiteScanStore")
         self._market_date = str(market_date)
-        self._strategy_id = str(strategy_id)
+        self._strategy_id = str(strategy_id or "")
         persisted = {
             str(item.get("receipt_id") or ""): item
             for item in store.load_strategy_decision_receipts(
                 market_date=self._market_date,
-                strategy_id=self._strategy_id,
-                limit=5_000,
+                strategy_id=self._strategy_id or None,
+                # A governed 598-name core union across the nine-strategy
+                # catalog can exceed 5,000 receipts in one session.  Load a
+                # bounded but comfortably fleet-complete daily identity set.
+                limit=100_000,
             )
             if str(item.get("receipt_id") or "")
         }
@@ -97,7 +117,7 @@ class AuthenticatedStrategyReceiptResolver:
         store: Any,
         *,
         market_date: str,
-        strategy_id: str = "alphaops_v5",
+        strategy_id: str | None = "alphaops_v5",
     ) -> AuthenticatedStrategyReceiptResolver:
         """Create a resolver from the concrete immutable SQLite receipt API."""
 
@@ -114,7 +134,6 @@ class AuthenticatedStrategyReceiptResolver:
 
     def verify(self, row: dict[str, Any]) -> bool:
         from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
-        from intraday_scanner.decisioning.contracts import canonical_json
 
         payload = row.get("strategy_decision_receipt")
         if not isinstance(payload, dict):
@@ -123,11 +142,57 @@ class AuthenticatedStrategyReceiptResolver:
             return False
         if str(row.get("market_date") or self._market_date) != self._market_date:
             return False
-        if str(payload.get("strategy_id") or "") != self._strategy_id:
+        if self._strategy_id and str(payload.get("strategy_id") or "") != self._strategy_id:
             return False
         if not validate_strategy_receipt_envelope(row):
             return False
-        receipt_id = str(payload.get("receipt_id") or "")
+        return self.verify_payload(
+            payload,
+            market_date=self._market_date,
+            strategy_id=str(payload.get("strategy_id") or ""),
+            strategy_version=str(payload.get("strategy_version") or ""),
+            symbol=str(payload.get("symbol") or ""),
+            code_sha=str(payload.get("code_sha") or ""),
+        )
+
+    def verify_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        market_date: str,
+        strategy_id: str,
+        strategy_version: str,
+        symbol: str,
+        code_sha: str,
+    ) -> bool:
+        """Verify an exact typed receipt without trusting a row envelope.
+
+        Contributor projections use this boundary because nested adapter rows
+        carry ``decision_receipt`` rather than the Alpha publication envelope.
+        Exact immutable-store equality remains mandatory.
+        """
+
+        from intraday_scanner.decisioning.contracts import (
+            canonical_json,
+            parse_strategy_decision_receipt,
+        )
+
+        if not isinstance(payload, dict):
+            return False
+        try:
+            typed = parse_strategy_decision_receipt(payload, require_v2=True)
+        except (TypeError, ValueError, KeyError):
+            return False
+        if (
+            typed.market_date != str(market_date)
+            or typed.strategy_id != str(strategy_id)
+            or typed.strategy_version != str(strategy_version)
+            or typed.symbol != str(symbol).strip().upper()
+            or typed.code_sha != str(code_sha)
+            or (self._strategy_id and typed.strategy_id != self._strategy_id)
+        ):
+            return False
+        receipt_id = typed.receipt_id
         stored = self._persisted.get(receipt_id)
         if stored is None:
             return False
@@ -135,7 +200,7 @@ class AuthenticatedStrategyReceiptResolver:
             # The persisted API returns the StrategyDecisionReceipt's exact
             # canonical serialization. Requiring canonical equality here
             # binds every receipt field, including plan and eligibility.
-            return canonical_json(stored) == canonical_json(payload)
+            return canonical_json(stored) == canonical_json(typed.to_dict())
         except (TypeError, ValueError):
             return False
 
@@ -158,6 +223,7 @@ def build_ranked_research_slate(
     coverage_status: str = "",
     lane_statuses: dict[str, Any] | None = None,
     coverage_limitations: Iterable[str] | None = None,
+    producer_code_sha: str | None = None,
 ) -> dict[str, Any]:
     """Rank distinct, non-vetoed rows for research observation only.
 
@@ -260,11 +326,27 @@ def build_ranked_research_slate(
     member_ids = sorted(
         {str(item).strip().upper() for item in (canonical_member_ids or []) if str(item).strip()}
     )
+    receipt_code_shas: set[str] = set()
+    for row in selected:
+        row_code_shas = _strategy_receipt_code_shas(row)
+        if row_code_shas is None:
+            raise ValueError("ranked research slate receipt code SHA is invalid")
+        receipt_code_shas.update(row_code_shas)
+    declared_code_sha = str(producer_code_sha or "").strip()
+    if declared_code_sha and not re.fullmatch(r"[0-9a-f]{40}", declared_code_sha):
+        raise ValueError("ranked research slate producer code SHA is invalid")
+    if len(receipt_code_shas) > 1:
+        raise ValueError("ranked research slate spans multiple producer code SHAs")
+    if not declared_code_sha and len(receipt_code_shas) == 1:
+        declared_code_sha = next(iter(receipt_code_shas))
+    if receipt_code_shas and receipt_code_shas != {declared_code_sha}:
+        raise ValueError("ranked research slate receipt code SHA does not match producer")
     payload = {
         "schema_version": RANKED_RESEARCH_SLATE_V2,
         "generated_at": generated,
         "market_date": slate_market_date,
         "scan_id": producer_scan_id,
+        "producer_code_sha": declared_code_sha,
         "canonical_input_ids": input_ids,
         "canonical_member_ids": member_ids,
         "coverage_status": coverage_status.strip().upper()
@@ -303,6 +385,7 @@ def apply_publication_semantics(
     coverage: dict[str, Any] | None = None,
     require_watcher_proof: bool = False,
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Annotate rows with Tier 1/2/3 fields without changing legacy classification."""
 
@@ -312,6 +395,7 @@ def apply_publication_semantics(
                 slate,
                 market_date=str(slate.get("market_date") or ""),
                 production=True,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
         except (TypeError, ValueError):
             # A production caller must never derive publication semantics from
@@ -358,9 +442,7 @@ def apply_publication_semantics(
         # A carried research_source_signal_id is an assertion about that
         # primary identity and must agree with it; it cannot mask a changed
         # signal_id/signal_key on a same-ticker replacement.
-        current_primary_source_signal_id = str(
-            row.get("signal_id") or row.get("signal_key") or ""
-        )
+        current_primary_source_signal_id = str(row.get("signal_id") or row.get("signal_key") or "")
         current_source_signal_ids = [
             value
             for value in (
@@ -376,8 +458,7 @@ def apply_publication_semantics(
                     (
                         bool(current_source_signal_ids)
                         and all(
-                            value == frozen_source_signal_id
-                            for value in current_source_signal_ids
+                            value == frozen_source_signal_id for value in current_source_signal_ids
                         )
                     )
                     or (
@@ -400,9 +481,7 @@ def apply_publication_semantics(
             enriched["research_selection_id"] = slate_row.get("research_selection_id")
             # Re-bind the immutable source identity after stripping all
             # caller-supplied publication annotations above.
-            enriched["research_source_signal_id"] = slate_row.get(
-                "research_source_signal_id"
-            )
+            enriched["research_source_signal_id"] = slate_row.get("research_source_signal_id")
             enriched["publication_tier"] = TIER1
             enriched["entry_state"] = "RESEARCH_ONLY"
             row_ceiling_block = _row_promotion_limited(row, coverage_payload)
@@ -413,9 +492,7 @@ def apply_publication_semantics(
             )
             enriched["execution_cost_status"] = (
                 "READY"
-                if _valid_modeled_cost_receipt(
-                    row, str(row.get("plan_hash_sha256") or "")
-                )
+                if _valid_modeled_cost_receipt(row, str(row.get("plan_hash_sha256") or ""))
                 else WAITING_EXECUTION_COSTS
             )
             # Preserve the broader publication status vocabulary while making
@@ -427,7 +504,11 @@ def apply_publication_semantics(
                 enriched["publication_tier"] = TIER2
             alertable = (
                 qualified
-                and _alertable(row, require_watcher_proof=require_watcher_proof)
+                and _alertable(
+                    row,
+                    require_watcher_proof=require_watcher_proof,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
+                )
                 and not row_ceiling_block
             )
             if alertable:
@@ -449,16 +530,12 @@ def apply_publication_semantics(
     return output
 
 
-def _matches_synthesized_frozen_source(
-    row: dict[str, Any], frozen_row: dict[str, Any]
-) -> bool:
+def _matches_synthesized_frozen_source(row: dict[str, Any], frozen_row: dict[str, Any]) -> bool:
     """Bind legacy ID-less inputs by their complete pre-annotation content."""
 
     ticker = str(frozen_row.get("ticker") or "").upper()
     rank = frozen_row.get("research_rank")
-    if str(frozen_row.get("research_source_signal_id") or "") != (
-        f"luna-research:{ticker}:{rank}"
-    ):
+    if str(frozen_row.get("research_source_signal_id") or "") != (f"luna-research:{ticker}:{rank}"):
         return False
     annotation_fields = {
         "research_rank",
@@ -479,9 +556,7 @@ def _matches_synthesized_frozen_source(
     frozen_source = {
         key: value for key, value in frozen_row.items() if key not in annotation_fields
     }
-    current_source = {
-        key: value for key, value in row.items() if key not in annotation_fields
-    }
+    current_source = {key: value for key, value in row.items() if key not in annotation_fields}
     return current_source == frozen_source
 
 
@@ -507,6 +582,7 @@ def official_publication_rows(
     limit: int = 3,
     slate: dict[str, Any] | None = None,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Return the exact frozen Tier 2/3 rows represented as official plans.
 
@@ -521,6 +597,7 @@ def official_publication_rows(
             source_rows,
             slate=slate,
             production=production,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     selected: list[dict[str, Any]] = []
     seen_tickers: set[str] = set()
@@ -564,6 +641,7 @@ def validate_frozen_publication_rows(
     slate: dict[str, Any],
     market_date: str | None = None,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Bind publication rows to one exact frozen slate cohort.
 
@@ -579,6 +657,7 @@ def validate_frozen_publication_rows(
         slate,
         market_date=market_date or str(slate.get("market_date") or ""),
         production=production,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     values = [dict(row) for row in (publication_rows or [])]
     frozen_rows = list(slate.get("rows") or [])
@@ -588,9 +667,7 @@ def validate_frozen_publication_rows(
         raise ValueError("publication rows do not match frozen slate count")
     if actual_ids != expected_ids:
         raise ValueError("publication rows do not match frozen slate selection IDs")
-    if [str(row.get("ticker") or "").upper() for row in values] != list(
-        slate.get("symbols") or []
-    ):
+    if [str(row.get("ticker") or "").upper() for row in values] != list(slate.get("symbols") or []):
         raise ValueError("publication rows do not match frozen slate symbols")
     for actual, frozen in zip(values, frozen_rows, strict=True):
         if not isinstance(actual, dict):
@@ -617,14 +694,10 @@ def validate_frozen_publication_rows(
         ):
             raise ValueError("publication row safety flags are invalid")
         actual_source = {
-            key: value
-            for key, value in actual.items()
-            if key not in _PUBLICATION_MUTABLE_FIELDS
+            key: value for key, value in actual.items() if key not in _PUBLICATION_MUTABLE_FIELDS
         }
         frozen_source = {
-            key: value
-            for key, value in frozen.items()
-            if key not in _PUBLICATION_MUTABLE_FIELDS
+            key: value for key, value in frozen.items() if key not in _PUBLICATION_MUTABLE_FIELDS
         }
         if actual_source != frozen_source:
             raise ValueError("publication row source differs from frozen slate")
@@ -704,6 +777,8 @@ def validate_ranked_research_slate(
     *,
     market_date: str | None = None,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    expected_code_sha: str | None = None,
 ) -> dict[str, Any]:
     """Verify a frozen slate before it is reused by a retry or monitor."""
 
@@ -741,6 +816,15 @@ def validate_ranked_research_slate(
         raise ValueError("ranked research slate safety contract is invalid")
     if production and slate.get("require_safety") is not True:
         raise ValueError("production ranked research slate requires safety")
+    producer_code_sha = str(slate.get("producer_code_sha") or "").strip()
+    if producer_code_sha and not re.fullmatch(r"[0-9a-f]{40}", producer_code_sha):
+        raise ValueError("ranked research slate producer code SHA is invalid")
+    if production and not producer_code_sha:
+        raise ValueError("production ranked research slate requires producer code SHA")
+    if expected_code_sha is not None:
+        expected = str(expected_code_sha).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", expected) or producer_code_sha != expected:
+            raise ValueError("ranked research slate producer code SHA mismatch")
     if schema_version == RANKED_RESEARCH_SLATE_V2:
         try:
             _bounded_enrichment_max_age_seconds(slate.get("enrichment_max_age_seconds"))
@@ -755,12 +839,20 @@ def validate_ranked_research_slate(
     rows = slate.get("rows")
     if not isinstance(rows, list):
         raise ValueError("ranked research slate rows are invalid")
-    try:
-        published_count = int(slate.get("published_count"))
-        ranked_count = int(slate.get("ranked_research_count"))
-        target_count = int(slate.get("target_count"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("ranked research slate counts are invalid") from exc
+    if (
+        production
+        and rows
+        and type(contributor_receipt_verifier) is not AuthenticatedStrategyReceiptResolver
+    ):
+        raise ValueError("production ranked research slate requires persisted contributor receipts")
+    count_values = (
+        slate.get("published_count"),
+        slate.get("ranked_research_count"),
+        slate.get("target_count"),
+    )
+    if any(type(value) is not int for value in count_values):
+        raise ValueError("ranked research slate counts are invalid")
+    published_count, ranked_count, target_count = count_values
     if (
         published_count != len(rows)
         or ranked_count != len(rows)
@@ -782,10 +874,41 @@ def validate_ranked_research_slate(
     for rank, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ValueError("ranked research slate row is not an object")
+        if production and "strategy_contributors" not in row:
+            raise ValueError(
+                "production ranked research slate requires complete contributor projection"
+            )
         if not _row_lane_eligible(row, slate.get("lane_statuses")):
             raise ValueError("ranked research slate row lane is not eligible")
         if not _receipt_research_admissibility(row)[0]:
             raise ValueError("ranked research slate row receipt is not research eligible")
+        if not _strategy_contributor_projection_valid(row):
+            raise ValueError("ranked research slate contributor projection is invalid")
+        row_code_shas = _strategy_receipt_code_shas(row)
+        if row_code_shas is None:
+            raise ValueError("ranked research slate receipt code SHA is invalid")
+        if row_code_shas and row_code_shas != {producer_code_sha}:
+            raise ValueError("ranked research slate receipt code SHA does not match producer")
+        if (
+            any(field in row for field in _STRATEGY_CONTRIBUTOR_PROJECTION_FIELDS)
+            and contributor_receipt_verifier is not None
+        ):
+            for payload in row.get("strategy_decision_receipts") or []:
+                try:
+                    typed = parse_strategy_decision_receipt(payload, require_v2=True)
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise ValueError(
+                        "ranked research slate contributor receipt is invalid"
+                    ) from exc
+                if not contributor_receipt_verifier.verify_payload(
+                    typed.to_dict(),
+                    market_date=typed.market_date,
+                    strategy_id=typed.strategy_id,
+                    strategy_version=typed.strategy_version,
+                    symbol=typed.symbol,
+                    code_sha=typed.code_sha,
+                ):
+                    raise ValueError("ranked research slate contributor receipt is not persisted")
         if not _row_scan_identity_valid(row, str(slate.get("scan_id") or ""), schema_version):
             raise ValueError("ranked research slate row scan identity is invalid")
         if schema_version == RANKED_RESEARCH_SLATE_V2 and slate.get("require_safety") is True:
@@ -803,7 +926,8 @@ def validate_ranked_research_slate(
             or row.get("missing_truth_is_zero") is True
             or row.get("publication_tier") != TIER1
             or row.get("entry_state") != "RESEARCH_ONLY"
-            or int(row.get("research_rank") or 0) != rank
+            or type(row.get("research_rank")) is not int
+            or row.get("research_rank") != rank
         ):
             raise ValueError("ranked research slate row semantics are invalid")
         if production and (
@@ -836,6 +960,8 @@ def validated_frozen_selection_signal(
     market_date: str,
     allowed_cohorts: Iterable[str] = ("research_radar", "official_telegram"),
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    expected_code_sha: str | None = None,
 ) -> dict[str, Any] | None:
     """Resolve one exact cross-scan selection from its immutable slate lineage."""
 
@@ -845,8 +971,10 @@ def validated_frozen_selection_signal(
     slate = payload.get("frozen_ranked_research_slate")
     lineage = payload.get("frozen_slate_lineage")
     frozen_signal = payload.get("signal")
-    if not isinstance(slate, dict) or not isinstance(lineage, dict) or not isinstance(
-        frozen_signal, dict
+    if (
+        not isinstance(slate, dict)
+        or not isinstance(lineage, dict)
+        or not isinstance(frozen_signal, dict)
     ):
         return None
     try:
@@ -854,24 +982,20 @@ def validated_frozen_selection_signal(
             slate,
             market_date=market_date,
             production=production,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=expected_code_sha,
         )
     except (TypeError, ValueError):
         return None
     allowed = {str(value) for value in allowed_cohorts}
     frozen_scan_id = str(slate.get("scan_id") or "")
     selection_scan_id = str(selection.get("scan_id") or "")
-    source_scan_id = str(
-        selection.get("source_scan_id") or payload.get("source_scan_id") or ""
-    )
+    source_scan_id = str(selection.get("source_scan_id") or payload.get("source_scan_id") or "")
     scan_lineage_status = str(
-        selection.get("scan_lineage_status")
-        or payload.get("scan_lineage_status")
-        or ""
+        selection.get("scan_lineage_status") or payload.get("scan_lineage_status") or ""
     )
     expected_status = (
-        "CURRENT_SCAN"
-        if frozen_scan_id == selection_scan_id
-        else "GOVERNED_DAILY_FREEZE_REUSE"
+        "CURRENT_SCAN" if frozen_scan_id == selection_scan_id else "GOVERNED_DAILY_FREEZE_REUSE"
     )
     frozen_selection_id = str(frozen_signal.get("research_selection_id") or "")
     matching_rows = [
@@ -880,9 +1004,7 @@ def validated_frozen_selection_signal(
         if str(row.get("research_selection_id") or "") == frozen_selection_id
     ]
     signal_id = str(selection.get("signal_id") or "")
-    frozen_signal_id = str(
-        frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or ""
-    )
+    frozen_signal_id = str(frozen_signal.get("signal_id") or frozen_signal.get("signal_key") or "")
     if (
         str(selection.get("cohort") or "") not in allowed
         or str(lineage.get("schema_version") or "")
@@ -891,6 +1013,8 @@ def validated_frozen_selection_signal(
         or str(lineage.get("slate_content_hash_sha256") or "")
         != str(slate.get("content_hash_sha256") or "")
         or str(lineage.get("frozen_source_scan_id") or "") != frozen_scan_id
+        or str(lineage.get("frozen_source_code_sha") or "")
+        != str(slate.get("producer_code_sha") or "")
         or str(lineage.get("current_scan_id") or "") != selection_scan_id
         or str(lineage.get("reuse_status") or "") != expected_status
         or source_scan_id != frozen_scan_id
@@ -928,9 +1052,8 @@ def _receipt_research_admissibility(row: dict[str, Any]) -> tuple[bool, str]:
     """
 
     payload = row.get("strategy_decision_receipt")
-    receipt_present = (
-        "strategy_decision_receipt" in row
-        or _truthy(row.get("strategy_receipt_enabled"))
+    receipt_present = "strategy_decision_receipt" in row or _truthy(
+        row.get("strategy_receipt_enabled")
     )
     if not receipt_present:
         receipt_present = any(
@@ -943,9 +1066,7 @@ def _receipt_research_admissibility(row: dict[str, Any]) -> tuple[bool, str]:
         # attempted; never reinterpret a partially stripped envelope as the
         # legacy no-receipt path (including explicit false values).
         receipt_present = any(
-            str(field).startswith("strategy_receipt_")
-            and value is not None
-            and value != ""
+            str(field).startswith("strategy_receipt_") and value is not None and value != ""
             for field, value in row.items()
         )
     if not receipt_present:
@@ -977,10 +1098,7 @@ def _receipt_research_admissibility(row: dict[str, Any]) -> tuple[bool, str]:
     if not envelope_valid:
         return False, "strategy_receipt_unavailable_or_unauthenticated"
     alias_eligibility = row.get("strategy_receipt_research_eligible")
-    if (
-        alias_eligibility is not None
-        and alias_eligibility != payload.get("research_pick_eligible")
-    ):
+    if alias_eligibility is not None and alias_eligibility != payload.get("research_pick_eligible"):
         return False, "strategy_receipt_eligibility_binding_mismatch"
     if payload.get("research_pick_eligible") is not True:
         return False, "strategy_receipt_research_ineligible"
@@ -993,10 +1111,7 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
         return False
     if (
         _truthy(row.get("broker_execution_enabled"))
-        or (
-            str(row.get("broker_execution") or "").strip().lower()
-            not in {"", "disabled"}
-        )
+        or (str(row.get("broker_execution") or "").strip().lower() not in {"", "disabled"})
         or row.get("research_only") is False
         or row.get("missing_truth_is_zero") is True
     ):
@@ -1021,6 +1136,25 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
         "ineligible",
     }:
         return False
+    for key in (
+        "alpha_score",
+        "score",
+        "total_score",
+        "final_score",
+        "strongest_eligible_contributor_score",
+    ):
+        if key in row and row.get(key) not in {None, ""} and _number(row.get(key)) is None:
+            return False
+    # Once the merge seam annotates a row, the receipt-derived contributor
+    # score is authoritative.  Explicitly empty means that no eligible,
+    # authenticated contributor exists; it must not fall back to a row alias.
+    if (
+        "strongest_eligible_contributor_score" in row
+        and _number(row.get("strongest_eligible_contributor_score")) is None
+    ):
+        return False
+    if not _strategy_contributor_projection_valid(row):
+        return False
     for key in ("hard_avoid_reasons", "hard_veto_reasons", "hard_no_trade_reason"):
         value = row.get(key)
         if isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value):
@@ -1032,6 +1166,173 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
     if require_safety and _safety_blockers(row):
         return False
     return True
+
+
+def _strategy_contributor_projection_valid(row: dict[str, Any]) -> bool:
+    """Validate every receipt-derived contributor field at rest.
+
+    Slate hashes are integrity checks, not authentication.  This semantic
+    validator prevents a caller from editing a nested score/direction and
+    recomputing the public row/slate hashes after the production merge.
+    """
+
+    if not any(field in row for field in _STRATEGY_CONTRIBUTOR_PROJECTION_FIELDS):
+        return True
+    if "strategy_contributors" not in row:
+        return False
+    contributors = row.get("strategy_contributors")
+    if not isinstance(contributors, list) or not contributors:
+        return False
+    receipts = row.get("strategy_decision_receipts")
+    if not isinstance(receipts, list) or not receipts:
+        return False
+    receipt_by_id: dict[str, Any] = {}
+    for payload in receipts:
+        if not isinstance(payload, dict):
+            return False
+        try:
+            typed = parse_strategy_decision_receipt(payload, require_v2=True)
+        except (TypeError, ValueError, KeyError):
+            return False
+        if typed.receipt_id in receipt_by_id:
+            return False
+        receipt_by_id[typed.receipt_id] = typed
+
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    market_date = str(row.get("market_date") or "").strip()
+    referenced: set[str] = set()
+    contributor_keys: set[tuple[str, str]] = set()
+    contributor_ids: set[str] = set()
+    eligible_scores: list[float] = []
+    receipt_code_shas: set[str] = set()
+    for contributor in contributors:
+        if not isinstance(contributor, dict):
+            return False
+        strategy_id = str(contributor.get("strategy_id") or "").strip()
+        strategy_version = str(contributor.get("strategy_version") or "").strip()
+        source_signal_id = str(contributor.get("source_signal_id") or "").strip()
+        receipt_id = str(contributor.get("receipt_id") or "").strip()
+        key = (strategy_id, source_signal_id)
+        typed = receipt_by_id.get(receipt_id)
+        if (
+            not strategy_id
+            or not strategy_version
+            or not source_signal_id
+            or key in contributor_keys
+            or typed is None
+            or receipt_id in referenced
+            or str(contributor.get("receipt_hash_sha256") or "").lower()
+            != typed.receipt_hash_sha256
+            or str(contributor.get("receipt_status") or "").upper() != "COMPLETE"
+            or typed.strategy_id != strategy_id
+            or typed.strategy_version != strategy_version
+            or typed.symbol != ticker
+            or (market_date and typed.market_date != market_date)
+        ):
+            return False
+        embedded = contributor.get("decision_receipt")
+        if embedded is not None:
+            if not isinstance(embedded, dict):
+                return False
+            try:
+                if canonical_json(embedded) != canonical_json(typed.to_dict()):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        try:
+            input_payload = json.loads(typed.input_payload_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(input_payload, dict):
+            return False
+        input_source = next(
+            (
+                str(input_payload.get(field) or "").strip()
+                for field in (
+                    "source_signal_id",
+                    "prior_session_signal_id",
+                    "signal_id",
+                    "signal_key",
+                )
+                if str(input_payload.get(field) or "").strip()
+            ),
+            "",
+        )
+        direction = str(input_payload.get("direction") or "").strip().lower()
+        contributor_score = contributor.get("final_score")
+        if (
+            input_source != source_signal_id
+            or direction not in {"long", "short"}
+            or str(contributor.get("direction") or "").strip().lower() != direction
+            or isinstance(contributor_score, bool)
+            or not isinstance(contributor_score, (int, float))
+            or not math.isfinite(contributor_score)
+            or contributor_score != typed.final_score
+            or contributor.get("research_pick_eligible") is not typed.research_pick_eligible
+            or contributor.get("paper_entry_eligible") is not typed.paper_entry_eligible
+        ):
+            return False
+        contributor_keys.add(key)
+        contributor_ids.add(strategy_id)
+        referenced.add(receipt_id)
+        receipt_code_shas.add(typed.code_sha)
+        if typed.research_pick_eligible or typed.paper_entry_eligible:
+            eligible_scores.append(typed.final_score)
+    if referenced != set(receipt_by_id) or len(receipt_code_shas) != 1:
+        return False
+    top_receipt = row.get("strategy_decision_receipt")
+    if isinstance(top_receipt, dict) and str(top_receipt.get("code_sha") or "") not in (
+        receipt_code_shas
+    ):
+        return False
+    count = row.get("strategy_contributor_count")
+    declared_ids = row.get("strategy_contributor_ids")
+    strongest = row.get("strongest_eligible_contributor_score")
+    gaps = row.get("strategy_contribution_gaps") or []
+    status = str(row.get("strategy_contribution_status") or "").upper()
+    expected_strongest = max(eligible_scores) if eligible_scores else None
+    return bool(
+        type(count) is int
+        and count == len(contributors)
+        and isinstance(declared_ids, list)
+        and declared_ids == sorted(contributor_ids)
+        and not isinstance(strongest, bool)
+        and isinstance(strongest, (int, float))
+        and math.isfinite(strongest)
+        and strongest == expected_strongest
+        and isinstance(gaps, list)
+        and status == ("DISCLOSED_GAPS" if gaps else "COMPLETE")
+    )
+
+
+def _strategy_receipt_code_shas(row: dict[str, Any]) -> set[str] | None:
+    """Return the canonical v2 receipt release identities carried by a row."""
+
+    payloads: list[dict[str, Any]] = []
+    top_receipt = row.get("strategy_decision_receipt")
+    if isinstance(top_receipt, dict) and str(top_receipt.get("schema_version") or "") == (
+        "dawnstrike.strategy_decision_receipt.v2"
+    ):
+        payloads.append(top_receipt)
+    nested_receipts = row.get("strategy_decision_receipts")
+    if nested_receipts is not None:
+        if not isinstance(nested_receipts, list):
+            return None
+        for payload in nested_receipts:
+            if not isinstance(payload, dict):
+                return None
+            if str(payload.get("schema_version") or "") == (
+                "dawnstrike.strategy_decision_receipt.v2"
+            ):
+                payloads.append(payload)
+    code_shas: set[str] = set()
+    for payload in payloads:
+        try:
+            typed = parse_strategy_decision_receipt(payload, require_v2=True)
+        except (TypeError, ValueError, KeyError):
+            return None
+        code_shas.add(typed.code_sha)
+    return code_shas
 
 
 def row_research_admissible(row: dict[str, Any]) -> bool:
@@ -1054,23 +1355,20 @@ def _row_promotion_limited(row: dict[str, Any], coverage: dict[str, Any]) -> boo
         return True
     lane_payloads = coverage.get("lanes")
     if isinstance(lane_payloads, dict):
-        evidence_lane = str(
-            row.get("evidence_lane") or row.get("universe_lane") or "mover"
-        ).lower()
+        evidence_lane = str(row.get("evidence_lane") or row.get("universe_lane") or "mover").lower()
         if evidence_lane == "mover+core":
             evidence_lane = "mover"
         lane = lane_payloads.get(evidence_lane)
         if isinstance(lane, dict):
-            return _truthy(lane.get("promotion_limited")) or str(
-                lane.get("secondary_fallback_status") or ""
-            ).lower() in blocked_statuses
+            return (
+                _truthy(lane.get("promotion_limited"))
+                or str(lane.get("secondary_fallback_status") or "").lower() in blocked_statuses
+            )
         return True
     return str(coverage.get("secondary_fallback_status") or "").lower() in blocked_statuses
 
 
-def _row_lane_eligible(
-    row: dict[str, Any], lane_statuses: dict[str, Any] | None
-) -> bool:
+def _row_lane_eligible(row: dict[str, Any], lane_statuses: dict[str, Any] | None) -> bool:
     """Require a selected row to use an explicitly eligible evidence lane."""
 
     if not lane_statuses:
@@ -1152,9 +1450,7 @@ def _plan_qualified(
         ),
         ("target_1", "target", "first_target"): ("target_1", "target", "first_target"),
     }.items():
-        row_value = next(
-            (row.get(key) for key in row_keys if row.get(key) is not None), None
-        )
+        row_value = next((row.get(key) for key in row_keys if row.get(key) is not None), None)
         plan_value = next(
             (market_plan.get(key) for key in plan_keys if market_plan.get(key) is not None), None
         )
@@ -1288,8 +1584,7 @@ def _valid_modeled_cost_receipt(row: dict[str, Any], plan_hash: str) -> bool:
 
     return (
         receipt.get("direction") == direction
-        and
-        matches("entry_price", entry)
+        and matches("entry_price", entry)
         and matches("stop_price", stop)
         and matches("target_price", target)
         and matches("expected_entry_price", expected_entry)
@@ -1302,7 +1597,12 @@ def _valid_modeled_cost_receipt(row: dict[str, Any], plan_hash: str) -> bool:
     )
 
 
-def _alertable(row: dict[str, Any], *, require_watcher_proof: bool = False) -> bool:
+def _alertable(
+    row: dict[str, Any],
+    *,
+    require_watcher_proof: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+) -> bool:
     plan = row.get("alphaops_market_structure_plan")
     # Short geometry is useful for research and paper-plan accounting, but
     # there is no authenticated, current Alpaca borrow/locate receipt in this
@@ -1311,13 +1611,23 @@ def _alertable(row: dict[str, Any], *, require_watcher_proof: bool = False) -> b
         return False
     return (
         bool(row.get("can_alert"))
-        and (not require_watcher_proof or _watcher_current(row))
+        and (
+            not require_watcher_proof
+            or _watcher_current(
+                row,
+                contributor_receipt_verifier=contributor_receipt_verifier,
+            )
+        )
         and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
         and _static_hard_gates(row)
     )
 
 
-def _watcher_current(row: dict[str, Any]) -> bool:
+def _watcher_current(
+    row: dict[str, Any],
+    *,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+) -> bool:
     proof = row.get("watcher_current_proof")
     if not isinstance(proof, dict):
         return False
@@ -1353,11 +1663,16 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         return False
     if str(proof.get("plan_hash_sha256") or "") != plan_hash:
         return False
-    if str(proof.get("direction") or "").lower() != str(
-        plan.get("direction") if isinstance(plan, dict) else ""
-    ).lower():
+    if (
+        str(proof.get("direction") or "").lower()
+        != str(plan.get("direction") if isinstance(plan, dict) else "").lower()
+    ):
         return False
-    lineage = _frozen_lineage_for_validation(row, ticker)
+    lineage = _frozen_lineage_for_validation(
+        row,
+        ticker,
+        contributor_receipt_verifier=contributor_receipt_verifier,
+    )
     required_lineage = (
         "selection_id",
         "cohort",
@@ -1412,11 +1727,13 @@ def _watcher_current(row: dict[str, Any]) -> bool:
             or str(receipt.get("ticker") or receipt.get("symbol") or "").upper() != ticker
             or receipt.get("research_only") is not True
             or receipt.get("broker_execution") != "disabled"
-            or (lineage and any(
-                expected
-                and str(receipt.get(field) or "") != str(expected)
-                for field, expected in lineage.items()
-            ))
+            or (
+                lineage
+                and any(
+                    expected and str(receipt.get(field) or "") != str(expected)
+                    for field, expected in lineage.items()
+                )
+            )
         ):
             return False
     quote = proof["quote_receipt"]
@@ -1486,8 +1803,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or spread_pct is None
         or spread_pct > 2.0
         or not trigger_consistent
-        or quote.get("quote_side")
-        != ("ask" if plan_direction == "long" else "bid")
+        or quote.get("quote_side") != ("ask" if plan_direction == "long" else "bid")
         or _number(quote.get("decision_price")) != last
         or last != (ask if plan_direction == "long" else bid)
         or not _valid_hash(quote_source_hash)
@@ -1496,8 +1812,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
         or str(quote_raw.get("ticker") or "").upper() != ticker
         or _number(raw_quote.get("bp")) != bid
         or _number(raw_quote.get("ap")) != ask
-        or _parse_watcher_time(raw_quote.get("t"))
-        != _parse_watcher_time(quote.get("observed_at"))
+        or _parse_watcher_time(raw_quote.get("t")) != _parse_watcher_time(quote.get("observed_at"))
         or quote_time != checked_at
         or plan_direction not in {"long", "short"}
         or (
@@ -1524,8 +1839,7 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     )
     trace = proof.get("evaluate_v5_official_paper")
     if (
-        str(portfolio.get("schema_version") or "")
-        != "dawnstrike.alphaops.portfolio_admission.v1"
+        str(portfolio.get("schema_version") or "") != "dawnstrike.alphaops.portfolio_admission.v1"
         or str(portfolio.get("status") or "").upper() != "ADMITTED"
         or portfolio.get("admitted") is not True
         or list(portfolio.get("blocking_reasons") or [])
@@ -1665,7 +1979,10 @@ def _strict_v5_trace(
 
 
 def _frozen_lineage_for_validation(
-    row: dict[str, Any], ticker: str
+    row: dict[str, Any],
+    ticker: str,
+    *,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, str]:
     """Extract the authoritative frozen slate identity carried by a signal."""
 
@@ -1683,6 +2000,7 @@ def _frozen_lineage_for_validation(
             slate,
             market_date=str(row.get("market_date") or "")[:10],
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except (TypeError, ValueError):
         return {"_invalid": "frozen ranked slate failed validation"}
@@ -1692,8 +2010,12 @@ def _frozen_lineage_for_validation(
         or str(lineage.get("slate_id") or "") != str(slate.get("slate_id") or "")
         or str(lineage.get("slate_content_hash_sha256") or "")
         != str(slate.get("content_hash_sha256") or "")
-        or str(lineage.get("frozen_source_scan_id") or "")
-        != str(slate.get("scan_id") or "")
+        or str(lineage.get("frozen_source_scan_id") or "") != str(slate.get("scan_id") or "")
+        or (
+            str(slate.get("producer_code_sha") or "")
+            and str(lineage.get("frozen_source_code_sha") or "")
+            != str(slate.get("producer_code_sha") or "")
+        )
     ):
         return {"_invalid": "frozen slate lineage envelope is invalid"}
     current_scan_id = str(row.get("scan_id") or "")
@@ -1725,9 +2047,7 @@ def _frozen_lineage_for_validation(
             else row.get("source_scan_id") or row.get("scan_id") or ""
         ),
         "frozen_slate_id": str(slate.get("slate_id") or ""),
-        "frozen_slate_content_hash_sha256": str(
-            slate.get("content_hash_sha256") or ""
-        ),
+        "frozen_slate_content_hash_sha256": str(slate.get("content_hash_sha256") or ""),
         "frozen_research_selection_id": member,
     }
     if values["source_scan_id"] != str(slate.get("scan_id") or ""):
@@ -1738,10 +2058,17 @@ def _frozen_lineage_for_validation(
     return {key: value for key, value in values.items() if value}
 
 
-def validate_watcher_current_proof(row: dict[str, Any]) -> bool:
+def validate_watcher_current_proof(
+    row: dict[str, Any],
+    *,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+) -> bool:
     """Public strict validator shared by watcher production and publication."""
 
-    return _watcher_current(dict(row))
+    return _watcher_current(
+        dict(row),
+        contributor_receipt_verifier=contributor_receipt_verifier,
+    )
 
 
 def _parse_watcher_time(value: Any) -> datetime | None:
@@ -1804,9 +2131,7 @@ def _supported_strategy(row: dict[str, Any]) -> bool:
     } or strategy.startswith("dawnstrike-alphaops")
 
 
-def _immutable_plan_provenance(
-    row: dict[str, Any], *, expected_ticker: str | None = None
-) -> bool:
+def _immutable_plan_provenance(row: dict[str, Any], *, expected_ticker: str | None = None) -> bool:
     contract = row.get("alphaops_market_structure_plan")
     if not isinstance(contract, dict) or str(contract.get("status") or "").upper() != "COMPLETE":
         return False
@@ -1815,9 +2140,7 @@ def _immutable_plan_provenance(
     except ImportError:
         return False
     try:
-        if validate_alphaops_v5_plan(
-            contract, expected_ticker=expected_ticker or None
-        ) is False:
+        if validate_alphaops_v5_plan(contract, expected_ticker=expected_ticker or None) is False:
             return False
     except (TypeError, ValueError):
         return False
@@ -1845,9 +2168,7 @@ def _source_bound_plan_observations(
     value, timestamps, source, and hash.
     """
 
-    ticker = str(
-        expected_ticker or row.get("ticker") or row.get("symbol") or ""
-    ).strip().upper()
+    ticker = str(expected_ticker or row.get("ticker") or row.get("symbol") or "").strip().upper()
     if not ticker:
         return False
     observations = contract.get("observations")
@@ -1913,9 +2234,7 @@ def _source_bound_plan_observations(
         )
 
     premarket_source = str(
-        row.get("premarket_range_source")
-        or row.get("enrichment_primary_source")
-        or ""
+        row.get("premarket_range_source") or row.get("enrichment_primary_source") or ""
     ).strip()
     premarket_hash = str(row.get("premarket_source_hash_sha256") or "").lower()
     premarket_raw_json = str(row.get("premarket_raw_payload_json") or "").strip()
@@ -2099,9 +2418,9 @@ def _annotate(
     )
     output["research_source_signal_id"] = source_signal_id
     selection_basis = f"{output['ticker']}|{source_signal_id}"
-    output["research_selection_id"] = "luna-research:" + hashlib.sha256(
-        selection_basis.encode("utf-8")
-    ).hexdigest()[:24]
+    output["research_selection_id"] = (
+        "luna-research:" + hashlib.sha256(selection_basis.encode("utf-8")).hexdigest()[:24]
+    )
     output["publication_tier"] = tier
     output["plan_qualification_status"] = "WAITING_CURRENT_CHECKS"
     output["entry_state"] = "RESEARCH_ONLY"
@@ -2110,7 +2429,13 @@ def _annotate(
     output["broker_execution_enabled"] = False
     output["missing_truth_is_zero"] = False
     output["research_row_hash_sha256"] = hashlib.sha256(
-        json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        json.dumps(
+            output,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()
     ).hexdigest()
     return output
 
@@ -2130,9 +2455,7 @@ def _row_scan_identity_valid(row: dict[str, Any], scan_id: str, schema_version: 
     return row_scan == expected and research_scan == expected
 
 
-def _current_row_scan_identity_compatible(
-    row: dict[str, Any], slate: dict[str, Any]
-) -> bool:
+def _current_row_scan_identity_compatible(row: dict[str, Any], slate: dict[str, Any]) -> bool:
     """Reject explicit cross-scan replacements while keeping raw replay input compatible."""
 
     expected = str(slate.get("scan_id") or "").strip()
@@ -2264,20 +2587,20 @@ def _production_observation_freshness_valid(
 
 def _rank_key(row: dict[str, Any]) -> tuple[float, float, str]:
     def number(value: Any) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return float("-inf")
+        parsed = _number(value)
+        return float("-inf") if parsed is None else parsed
 
     # Overlapping strategy contributors remain one canonical row, but the
     # strongest eligible contributor is the authoritative cross-sectional
-    # ranking score.  Rows without the merge annotation retain legacy scoring.
+    # ranking score.  Only rows without the merge annotation retain legacy
+    # scoring; the explicit empty annotation is rejected by `_safe_for_research`.
+    contributor_score = (
+        row.get("strongest_eligible_contributor_score")
+        if "strongest_eligible_contributor_score" in row
+        else row.get("alpha_score")
+    )
     return (
-        number(
-            row.get("strongest_eligible_contributor_score")
-            if row.get("strongest_eligible_contributor_score") is not None
-            else row.get("alpha_score")
-        ),
+        number(contributor_score),
         number(row.get("score") or row.get("total_score")),
         str(row.get("ticker") or row.get("symbol") or ""),
     )
@@ -2313,7 +2636,13 @@ def _slate_content_hash(slate: dict[str, Any]) -> str:
         key: value for key, value in slate.items() if key not in {"content_hash_sha256", "slate_id"}
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()
     ).hexdigest()
 
 

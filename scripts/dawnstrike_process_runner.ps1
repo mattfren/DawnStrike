@@ -83,17 +83,81 @@ function Resolve-DawnstrikeReleaseSha {
         [Parameter(Mandatory = $true)][string]$LogRoot
     )
 
-    $receipt = Invoke-DawnstrikeNativeProcess `
+    $runtimePath = [System.IO.Path]::GetFullPath(
+        (Resolve-Path -LiteralPath $RuntimeRoot).Path
+    ).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $rootReceipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "git.exe" `
-        -ArgumentList @("-C", $RuntimeRoot, "rev-parse", "HEAD") `
+        -ArgumentList @("-C", $runtimePath, "rev-parse", "--show-toplevel") `
         -LogRoot $LogRoot `
-        -LogName "resolve_release_sha"
-    if ($receipt.exit_code -ne 0) {
+        -LogName "resolve_release_root"
+    if ($rootReceipt.exit_code -ne 0) {
+        throw "Could not resolve the deployed runtime Git root."
+    }
+    $resolvedRoot = [System.IO.Path]::GetFullPath(
+        (Get-Content -LiteralPath $rootReceipt.stdout_path -Raw).Trim()
+    ).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    if (-not [string]::Equals(
+        $runtimePath,
+        $resolvedRoot,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Runtime root must be the exact deployed Git worktree root."
+    }
+
+    $beforeReceipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "git.exe" `
+        -ArgumentList @("-C", $runtimePath, "rev-parse", "HEAD") `
+        -LogRoot $LogRoot `
+        -LogName "resolve_release_sha_before_cleanliness"
+    if ($beforeReceipt.exit_code -ne 0) {
         throw "Could not resolve the deployed runtime release SHA."
     }
-    $sha = (Get-Content -LiteralPath $receipt.stdout_path -Raw).Trim()
-    if ($sha -notmatch "^[0-9a-fA-F]{40}$") {
+    $shaBefore = (Get-Content -LiteralPath $beforeReceipt.stdout_path -Raw).Trim()
+    if ($shaBefore -notmatch "^[0-9a-fA-F]{40}$") {
         throw "Runtime release SHA was not a full Git commit SHA."
     }
-    return $sha.ToLowerInvariant()
+
+    # A commit identity is truthful only when every executable byte in the
+    # deployed worktree is represented by that commit.  Include index,
+    # worktree, submodule, and non-ignored untracked paths; ignored runtime
+    # state remains outside the release identity by repository policy.
+    $statusReceipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "git.exe" `
+        -ArgumentList @(
+            "-C", $runtimePath,
+            "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"
+        ) `
+        -LogRoot $LogRoot `
+        -LogName "resolve_release_cleanliness"
+    if ($statusReceipt.exit_code -ne 0) {
+        throw "Could not verify deployed runtime worktree cleanliness."
+    }
+    $status = Get-Content -LiteralPath $statusReceipt.stdout_path -Raw
+    if (-not [string]::IsNullOrWhiteSpace($status)) {
+        throw "Runtime release SHA is untrustworthy because the deployed worktree is dirty."
+    }
+
+    $afterReceipt = Invoke-DawnstrikeNativeProcess `
+        -FilePath "git.exe" `
+        -ArgumentList @("-C", $runtimePath, "rev-parse", "HEAD") `
+        -LogRoot $LogRoot `
+        -LogName "resolve_release_sha_after_cleanliness"
+    if ($afterReceipt.exit_code -ne 0) {
+        throw "Could not confirm the deployed runtime release SHA."
+    }
+    $shaAfter = (Get-Content -LiteralPath $afterReceipt.stdout_path -Raw).Trim()
+    if (
+        $shaAfter -notmatch "^[0-9a-fA-F]{40}$" -or
+        $shaBefore -ne $shaAfter
+    ) {
+        throw "Runtime release SHA changed while verifying deployed bytes."
+    }
+    return $shaAfter.ToLowerInvariant()
 }

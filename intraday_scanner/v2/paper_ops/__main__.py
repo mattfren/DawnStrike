@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", default="data/v2_paper_ops")
     parser.add_argument("--universe-handoff")
     parser.add_argument(
+        "--expected-code-sha",
+        help="Exact runtime release SHA required by scheduled handoff and observers",
+    )
+    parser.add_argument(
         "--scheduled-production",
         action="store_true",
         help="Require and bind the current-day Morning PIT universe handoff",
@@ -105,7 +109,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if observer_command:
         try:
-            require_observer_command(output_root, args.command, mode=mode.value)
+            require_observer_command(
+                output_root,
+                args.command,
+                mode=mode.value,
+                expected_code_sha=args.expected_code_sha,
+            )
         except PaperOpsObserverBlocked as exc:
             print(f"status: {exc.status}")
             print(f"detail: {exc.detail}")
@@ -119,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "scan":
         result = scan(
@@ -127,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "enter":
         result = enter(
@@ -135,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "check":
         result = check(
@@ -143,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "close":
         result = close(
@@ -151,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "run-day":
         result = run_day(
@@ -159,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             universe_handoff_path=args.universe_handoff,
             scheduled_production=args.scheduled_production,
+            expected_code_sha=args.expected_code_sha,
         )
     elif args.command == "replay":
         start = date.fromisoformat(args.start or args.date)

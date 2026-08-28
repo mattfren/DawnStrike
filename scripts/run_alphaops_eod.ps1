@@ -40,7 +40,7 @@ if (-not $dailyLock.acquired) {
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
-    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "eod_outcome_capture", "--status", "RUNNING") `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "eod_outcome_capture", "--status", "RUNNING", "--release-sha", $releaseSha) `
     -LogRoot $logRoot `
     -LogName "alpha_eod_heartbeat-$MarketDate"
 if ($heartbeat.exit_code -ne 0) {
@@ -67,6 +67,7 @@ function Write-Stage {
         "--status", $Status,
         "--runtime-root", $runtime,
         "--state-root", $state,
+        "--release-sha", $releaseSha,
         "--exit-code", "$ExitCode",
         "--started-at", $StartedAt
     )
@@ -111,6 +112,67 @@ try {
     }
     if ($calendarExit -ne 0) {
         throw "Market calendar failed with exit code $calendarExit"
+    }
+
+    # Authenticate the immutable Morning universe and its exact release before
+    # any outcome, reconciliation, or learning writer can mutate EOD state.
+    # Reuse this result for PaperOps below so validation order and identity do
+    # not depend on a second, later observation.
+    $universeHandoffPath = Join-Path $outputRoot "alpha_cycle\$MarketDate\paperops_universe_handoff.json"
+    $handoffValidation = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @(
+            "scripts\build_paperops_universe_handoff.py",
+            "--validate",
+            "--handoff", $universeHandoffPath,
+            "--market-date", $MarketDate,
+            "--expected-code-sha", $releaseSha
+        ) `
+        -LogRoot $logRoot `
+        -LogName "paperops_universe_handoff_validate-$MarketDate"
+    if ($handoffValidation.exit_code -ne 0) {
+        $handoffFailureExit = [int]$handoffValidation.exit_code
+        if ($handoffFailureExit -eq 0) { $handoffFailureExit = 2 }
+        $preconditionStarted = (Get-Date).ToUniversalTime().ToString("o")
+        foreach ($failureStage in @(
+            @{ Name = "eod_outcome_capture"; Error = "eod_precondition_universe_handoff_invalid" },
+            @{ Name = "paper_reconciliation"; Error = "blocked_by_eod_precondition" },
+            @{ Name = "alpha_learning"; Error = "blocked_by_eod_precondition" },
+            @{ Name = "paperops_forward"; Error = "blocked_by_eod_precondition" }
+        )) {
+            Write-Stage `
+                -Name $failureStage.Name `
+                -Status FAILED `
+                -ExitCode $handoffFailureExit `
+                -StartedAt $preconditionStarted `
+                -ResultFile $universeHandoffPath `
+                -ErrorCode $failureStage.Error
+        }
+        $terminalHeartbeat = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @(
+                "-m", "intraday_scanner.cli", "daily-heartbeat",
+                "--state-root", $state,
+                "--runtime-root", $runtime,
+                "--market-date", $MarketDate,
+                "--stage", "eod_outcome_capture",
+                "--status", "FAILED",
+                "--release-sha", $releaseSha
+            ) `
+            -LogRoot $logRoot `
+            -LogName "alpha_eod_terminal_heartbeat-$MarketDate"
+        if ($terminalHeartbeat.exit_code -ne 0) {
+            Write-Warning "Could not persist the terminal EOD precondition heartbeat."
+        }
+        $failureNotification = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("scripts\send_stage_failure_notification.py", "--db-path", $dbPath, "--market-date", $MarketDate) `
+            -LogRoot $logRoot `
+            -LogName "stage_failure_notification-$MarketDate"
+        if ($failureNotification.exit_code -ne 0) {
+            Write-Warning "Required-stage precondition failure alert could not be recorded or sent."
+        }
+        exit $handoffFailureExit
     }
 
     $captureRoot = Join-Path $outputRoot "alpha_outcomes\$MarketDate"
@@ -390,17 +452,6 @@ try {
     }
 
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")
-    $universeHandoffPath = Join-Path $outputRoot "alpha_cycle\$MarketDate\paperops_universe_handoff.json"
-    $handoffValidation = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @(
-            "scripts\build_paperops_universe_handoff.py",
-            "--validate",
-            "--handoff", $universeHandoffPath,
-            "--market-date", $MarketDate
-        ) `
-        -LogRoot $logRoot `
-        -LogName "paperops_universe_handoff_validate-$MarketDate"
     $paperExit = $handoffValidation.exit_code
     $paperInit = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
@@ -427,7 +478,8 @@ try {
                 -FilePath "py.exe" `
                 -ArgumentList @(
                     "-m", "intraday_scanner.v2.paper_ops", "verify-blotter",
-                    "--mode", "forward", "--output-root", $paperOpsRoot
+                    "--mode", "forward", "--output-root", $paperOpsRoot,
+                    "--expected-code-sha", $releaseSha
                 ) `
                 -LogRoot $logRoot `
                 -LogName "paperops-resume-handoff-$MarketDate"
@@ -444,6 +496,7 @@ try {
                     "--date", $MarketDate, "--mode", "forward",
                     "--output-root", $paperOpsRoot,
                     "--universe-handoff", $universeHandoffPath,
+                    "--expected-code-sha", $releaseSha,
                     "--scheduled-production"
                 ) `
                 -LogRoot $logRoot `
@@ -468,6 +521,7 @@ try {
             "readiness"
         )) {
             $extra = @()
+            $extra += @("--expected-code-sha", $releaseSha)
             if ($command -in @("verify-source-bars", "blotter", "verify-blotter")) {
                 $extra += @("--mode", "forward")
             }

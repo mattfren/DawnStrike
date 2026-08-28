@@ -16,7 +16,11 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
-from intraday_scanner.decisioning.contracts import StrategyDecisionReceipt
+from intraday_scanner.decisioning.contracts import (
+    StrategyDecisionReceipt,
+    canonical_json,
+)
+from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import (
     ALPHAOPS_OFFICIAL_COHORT,
@@ -29,14 +33,78 @@ from intraday_scanner.services.alpha_cycle_service import (
     recover_legacy_alpha_notification_memberships,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     build_ranked_research_slate,
 )
 from intraday_scanner.services.trade_watcher_service import _watch_signals
 from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, get_schema_version
-from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from intraday_scanner.storage.sqlite_store import (
+    SQLiteScanStore,
+    _hydrate_contributor_projection,
+)
 
 SCAN_ID = "scan-exact-membership"
 SELECTED_AT = "2026-07-15T13:10:00+00:00"
+
+
+def test_hydration_rejects_receipt_free_modern_contributor_projection() -> None:
+    target = {
+        "ticker": "SOBR",
+        "market_date": "2026-07-15",
+        "signal_id": "alpha-source",
+    }
+    source = {
+        "strategy_contributors": [
+            {
+                "strategy_id": "alphaops_v5",
+                "strategy_version": "fixture-v1",
+                "source_signal_id": "alpha-source",
+                "signal_id": "alpha-source",
+                "receipt_status": "COMPLETE",
+                "research_pick_eligible": True,
+                "final_score": 99.0,
+            }
+        ],
+        "strategy_contributor_count": 1,
+        "strategy_contributor_ids": ["alphaops_v5"],
+        "strategy_decision_receipts": [],
+        "strategy_contribution_status": "COMPLETE",
+        "strongest_eligible_contributor_score": 99.0,
+    }
+
+    with pytest.raises(StorageError, match="receipt identity is required"):
+        _hydrate_contributor_projection(target, source)
+
+
+def test_hydration_rejects_duplicate_contributor_receipt_identity() -> None:
+    target = {
+        "ticker": "SOBR",
+        "market_date": "2026-07-15",
+        "signal_id": "alpha-source",
+    }
+    duplicate_id = "sdr-" + "a" * 24
+    source = {
+        "strategy_contributors": [
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": "fixture-v1",
+                "source_signal_id": source_id,
+                "receipt_id": duplicate_id,
+                "receipt_hash_sha256": "a" * 64,
+                "receipt_status": "COMPLETE",
+            }
+            for strategy_id, source_id in (
+                ("alphaops_v5", "alpha-source"),
+                ("gap_up_continuation", "gap-source"),
+            )
+        ],
+        "strategy_contributor_count": 2,
+        "strategy_contributor_ids": ["alphaops_v5", "gap_up_continuation"],
+        "strategy_decision_receipts": [],
+    }
+
+    with pytest.raises(StorageError, match="receipt is duplicated"):
+        _hydrate_contributor_projection(target, source)
 
 
 def test_notification_delivery_retries_unsent_but_preserves_sent(
@@ -73,9 +141,7 @@ def test_exact_selected_membership_excludes_blocked_and_survives_dedupe(
     store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     selected = _signal("SOBR", rank=1, can_alert=True)
     blocked = _signal("ELVA", rank=2, can_alert=False)
-    store.persist_historical_signals(
-        [_historical_signal(selected), _historical_signal(blocked)]
-    )
+    store.persist_historical_signals([_historical_signal(selected), _historical_signal(blocked)])
 
     event = _official_selection_notification_event(
         SCAN_ID,
@@ -138,9 +204,7 @@ def test_exact_selected_membership_excludes_blocked_and_survives_dedupe(
         notification_deliveries=deliveries,
     )
 
-    historical = {
-        row["signal_id"]: row for row in store.load_historical_signals(scan_id=SCAN_ID)
-    }
+    historical = {row["signal_id"]: row for row in store.load_historical_signals(scan_id=SCAN_ID)}
     assert link["was_alerted"] is True
     assert historical[selected["signal_key"]]["was_alerted"] is True
     assert historical[selected["signal_key"]]["telegram_event_key"] == notification_key
@@ -176,10 +240,11 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
     source_signal_id = f"{source_scan_id}:1:SOBR"
 
     def fixture_receipt(strategy_id: str, source_id: str) -> dict[str, object]:
-        input_payload = {"source_signal_id": source_id}
-        input_payload_json = json.dumps(
-            input_payload, sort_keys=True, separators=(",", ":")
-        )
+        input_payload = {
+            "direction": "short" if strategy_id == "gap_up_continuation" else "long",
+            "source_signal_id": source_id,
+        }
+        input_payload_json = json.dumps(input_payload, sort_keys=True, separators=(",", ":"))
         receipt = StrategyDecisionReceipt(
             schema_version="dawnstrike.strategy_decision_receipt.v2",
             receipt_id="",
@@ -208,6 +273,7 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
             input_hash_sha256=hashlib.sha256(input_payload_json.encode()).hexdigest(),
             input_payload_json=input_payload_json,
         )
+        store.persist_strategy_decision_receipt(receipt)
         return receipt.to_dict()
 
     alpha_receipt = fixture_receipt("alphaops_v5", source_signal_id)
@@ -227,6 +293,11 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
                 "receipt_id": alpha_receipt["receipt_id"],
                 "receipt_hash_sha256": alpha_receipt["receipt_hash_sha256"],
                 "receipt_status": "COMPLETE",
+                "research_pick_eligible": True,
+                "paper_entry_eligible": False,
+                "final_score": 75.0,
+                "direction": "long",
+                "decision_receipt": alpha_receipt,
             },
             {
                 "strategy_id": "gap_up_continuation",
@@ -235,7 +306,12 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
                 "receipt_id": gap_receipt["receipt_id"],
                 "receipt_hash_sha256": gap_receipt["receipt_hash_sha256"],
                 "receipt_status": "COMPLETE",
+                "research_pick_eligible": True,
+                "paper_entry_eligible": False,
+                "final_score": 75.0,
+                "direction": "short",
                 "strategy_adapter": "morning_strategy_adapter_v3",
+                "decision_receipt": gap_receipt,
                 "prior_session_lineage": {
                     "source_signal_id": "gap-prior",
                     "prior_session_date": "2026-07-14",
@@ -244,6 +320,9 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
         ],
         "strategy_contributor_count": 2,
         "strategy_contributor_ids": ["alphaops_v5", "gap_up_continuation"],
+        "strongest_eligible_contributor_score": 75.0,
+        "strategy_contribution_gaps": [],
+        "strategy_contribution_status": "COMPLETE",
         "strategy_decision_receipts": [
             alpha_receipt,
             gap_receipt,
@@ -315,26 +394,47 @@ def test_cross_scan_frozen_official_selection_remains_watchable_and_canonical(
     context = canonical_paper_selection_context(
         persisted,
         delivery=deliveries[0],
+        contributor_receipt_verifier=AuthenticatedStrategyReceiptResolver.from_store(
+            store,
+            market_date="2026-07-15",
+            strategy_id=None,
+        ),
     )
-    watched = _watch_signals(store, market_date="2026-07-15")
+    with pytest.raises(SnapshotValidationError, match="current watcher"):
+        _watch_signals(
+            store,
+            market_date="2026-07-15",
+        )
+    assert store.load_trade_intents() == []
+    with pytest.raises(SnapshotValidationError, match="current watcher"):
+        _watch_signals(
+            store,
+            market_date="2026-07-15",
+            expected_code_sha="b" * 40,
+        )
+    assert store.load_trade_intents() == []
+    watched = _watch_signals(
+        store,
+        market_date="2026-07-15",
+        expected_code_sha="a" * 40,
+    )
 
     assert context["signal_id"] == source_signal["signal_key"]
-    assert context["authoritative_signal"]["strategy_contributors"] == frozen_signal[
-        "strategy_contributors"
-    ]
+    assert canonical_json(
+        context["authoritative_signal"]["strategy_contributors"]
+    ) == canonical_json(frozen_signal["strategy_contributors"])
     assert [
         item["receipt_id"] for item in context["authoritative_signal"]["strategy_contributors"]
     ] == [alpha_receipt["receipt_id"], gap_receipt["receipt_id"]]
     assert watched[0]["signal_id"] == source_signal["signal_key"]
     assert watched[0]["selection_id"] == persisted["selection_id"]
-    assert [
-        item["receipt_id"] for item in watched[0]["strategy_contributors"]
-    ] == [alpha_receipt["receipt_id"], gap_receipt["receipt_id"]]
+    assert [item["receipt_id"] for item in watched[0]["strategy_contributors"]] == [
+        alpha_receipt["receipt_id"],
+        gap_receipt["receipt_id"],
+    ]
+    assert {item["direction"] for item in watched[0]["strategy_contributors"]} == {"long", "short"}
     assert persisted["payload_json"]["source_scan_id"] == source_scan_id
-    assert (
-        persisted["payload_json"]["scan_lineage_status"]
-        == "GOVERNED_DAILY_FREEZE_REUSE"
-    )
+    assert persisted["payload_json"]["scan_lineage_status"] == "GOVERNED_DAILY_FREEZE_REUSE"
 
 
 @pytest.mark.parametrize("schema_version", ["v2_unsafe", "v1"])
@@ -459,9 +559,7 @@ def test_legacy_recovery_trusts_only_an_unambiguous_rendered_body(tmp_path: Path
     store = SQLiteScanStore(db_path)
     selected = _signal("SOBR", rank=1, can_alert=True)
     blocked = _signal("ELVA", rank=2, can_alert=False)
-    store.persist_historical_signals(
-        [_historical_signal(selected), _historical_signal(blocked)]
-    )
+    store.persist_historical_signals([_historical_signal(selected), _historical_signal(blocked)])
     body = "\n".join(
         [
             "🚀 Dawnstrike Alpha Watch",
@@ -490,15 +588,13 @@ def test_legacy_recovery_trusts_only_an_unambiguous_rendered_body(tmp_path: Path
 
     assert result["notifications_recovered"] == 1
     assert result["memberships_recovered"] == 1
-    assert [
-        row["signal_id"] for row in store.load_signal_selections(scan_id=SCAN_ID)
-    ] == [selected["signal_key"]]
+    assert [row["signal_id"] for row in store.load_signal_selections(scan_id=SCAN_ID)] == [
+        selected["signal_key"]
+    ]
     memberships = store.load_notification_deliveries(scan_id=SCAN_ID)
     assert [row["signal_id"] for row in memberships] == [selected["signal_key"]]
     assert memberships[0]["payload_json"]["legacy_recovery"] == "exact_rendered_body"
-    historical = {
-        row["signal_id"]: row for row in store.load_historical_signals(scan_id=SCAN_ID)
-    }
+    historical = {row["signal_id"]: row for row in store.load_historical_signals(scan_id=SCAN_ID)}
     assert historical[selected["signal_key"]]["was_alerted"] is True
     assert historical[blocked["signal_key"]]["was_alerted"] is False
 
@@ -552,9 +648,7 @@ def _authenticated_observation(ticker: str, generated_at: str) -> dict[str, obje
         max_age_seconds=600,
         feed="iex",
     )
-    observation_hash, observation_payload = premarket._canonical_observation_payload(
-        observation
-    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(observation)
     return {
         "source_count": 1,
         "source_quality_status": "VERIFIED",

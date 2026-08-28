@@ -67,6 +67,7 @@ function Test-DawnstrikeAlphaCycleArtifact {
         [Parameter(Mandatory = $true)][string]$ArtifactPath,
         [AllowNull()][object]$ProcessReceipt = $null,
         [Parameter(Mandatory = $true)][string]$MarketDate,
+        [string]$ReleaseSha = "",
         [switch]$RequireCoreCoverage,
         [switch]$AllowCoreShortfall
     )
@@ -108,6 +109,19 @@ function Test-DawnstrikeAlphaCycleArtifact {
     }
     if ([string]$contract.market_date -ne $MarketDate) {
         throw "AlphaOps cycle artifact market_date does not match the scheduled session."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseSha)) {
+        $expectedReleaseSha = $ReleaseSha.ToLowerInvariant()
+        if ($expectedReleaseSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Scheduled AlphaOps release SHA is invalid."
+        }
+        if (
+            [string]$payload.code_sha -cne $expectedReleaseSha -or
+            [string]$contract.code_sha -cne $expectedReleaseSha -or
+            [string]$payload.source_summary.code_sha -cne $expectedReleaseSha
+        ) {
+            throw "AlphaOps cycle artifact release identity does not match the scheduled runtime."
+        }
     }
     $scanId = [string]$payload.scan_id
     $producerRunId = [string]$contract.producer_run_id

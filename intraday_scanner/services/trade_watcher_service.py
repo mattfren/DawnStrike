@@ -49,6 +49,7 @@ from intraday_scanner.services.alpha_paper_reconciliation_service import (
     recover_legacy_alpha_delivery_membership,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     validate_watcher_current_proof,
     validated_frozen_selection_signal,
 )
@@ -118,6 +119,7 @@ def run_trade_watcher(
     notify_blocked: bool = False,
     include_scenarios: bool = False,
     config: ScannerConfig | None = None,
+    expected_code_sha: str | None = None,
 ) -> dict[str, Any]:
     """Run one watch cycle and optionally create paper trade fills."""
 
@@ -141,6 +143,17 @@ def run_trade_watcher(
         raise SnapshotValidationError("max_daily_entries must be at least 1.")
     if min_reward_risk <= 0:
         raise SnapshotValidationError("min_reward_risk must be positive.")
+    normalized_expected_code_sha = (
+        str(expected_code_sha).strip() if expected_code_sha is not None else None
+    )
+    if normalized_expected_code_sha is not None and (
+        len(normalized_expected_code_sha) != 40
+        or normalized_expected_code_sha != normalized_expected_code_sha.lower()
+        or any(char not in "0123456789abcdef" for char in normalized_expected_code_sha)
+    ):
+        raise SnapshotValidationError(
+            "trade watcher expected_code_sha must be one full lowercase Git SHA."
+        )
 
     scanner_config = config or load_config(database_path=Path(db_path))
     settings = WatcherSettings(
@@ -156,10 +169,17 @@ def run_trade_watcher(
     store.initialize()
     resolved_at = parse_requested_at(requested_at, market_date=market_date)
     resolved_day = market_date or resolved_at.astimezone(EASTERN).date().isoformat()
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=resolved_day,
+        strategy_id=None,
+    )
     session_signals = _watch_signals(
         store,
         market_date=resolved_day,
         include_scenarios=include_scenarios,
+        contributor_receipt_verifier=contributor_receipt_verifier,
+        expected_code_sha=normalized_expected_code_sha,
     )
     existing_intents = store.load_trade_intents(limit=50_000)
     existing_intent_ids = {str(row.get("intent_id") or "") for row in existing_intents}
@@ -278,6 +298,7 @@ def run_trade_watcher(
             daily_entry_count=daily_entry_count,
             existing_symbol_notional=existing_symbol_notional,
             scanner_config=scanner_config,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         proof = (
             dict(decision["watcher_current_proof"])
@@ -321,6 +342,7 @@ def run_trade_watcher(
                         proof=proof,
                         intent_id=str(intent["intent_id"]),
                         checked_at=str(proof.get("checked_at") or created_at),
+                        contributor_receipt_verifier=contributor_receipt_verifier,
                     )
                 )
             continue
@@ -349,6 +371,7 @@ def run_trade_watcher(
                     proof=proof,
                     intent_id=str(intent["intent_id"]),
                     checked_at=str(proof.get("checked_at") or created_at),
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
             )
         if episode_id:
@@ -394,6 +417,7 @@ def run_trade_watcher(
         portfolio_market_date=resolved_day,
         max_open_positions=settings.max_open_positions,
         max_daily_entries=settings.max_daily_entries,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     rejected_intents = dict(lifecycle_stats["rejected_intents"])
     rejected_intent_ids = set(rejected_intents)
@@ -511,6 +535,8 @@ def _watch_signals(
     *,
     market_date: str,
     include_scenarios: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    expected_code_sha: str | None = None,
 ) -> list[dict[str, Any]]:
     recover_legacy_alpha_delivery_membership(
         store,
@@ -534,6 +560,12 @@ def _watch_signals(
         if str(row.get("strategy_id") or "") == expected_strategy_id
         and str(row.get("strategy_version") or "") == expected_strategy_version
     ]
+    if contributor_receipt_verifier is None and type(store) is SQLiteScanStore:
+        contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+            store,
+            market_date=market_date,
+            strategy_id=None,
+        )
     if session_selections and not all_selections:
         observed = sorted(
             {
@@ -566,9 +598,7 @@ def _watch_signals(
             for row in store.load_signal_selections(cohort=SCENARIO_FORWARD_COHORT, limit=50_000)
             if str(row.get("selected_at") or "")[:10] == market_date
         ]
-        open_signal_ids = {
-            str(row.get("signal_id") or "") for row in scenario_open_positions
-        }
+        open_signal_ids = {str(row.get("signal_id") or "") for row in scenario_open_positions}
         new_scenario_selections = [
             row
             for row in scenario_selections
@@ -638,6 +668,8 @@ def _watch_signals(
             selection,
             historical_row,
             market_date=market_date,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=expected_code_sha,
         )
     # Apply the frozen episode boundary immediately before watcher intent
     # creation. Legacy selections without an episode contract remain compatible;
@@ -663,9 +695,7 @@ def _watch_signals(
         for selection in selected_rows
     ]
     alpha_candidate_rows = [
-        row
-        for row in candidate_rows
-        if str(row.get("cohort") or "") != SCENARIO_FORWARD_COHORT
+        row for row in candidate_rows if str(row.get("cohort") or "") != SCENARIO_FORWARD_COHORT
     ]
     identity_marked = [row for row in alpha_candidate_rows if _identity_fields_present(row)]
     if identity_marked:
@@ -683,9 +713,7 @@ def _watch_signals(
                 "Conflicting or incomplete episode candidates are blocked before "
                 "PaperOps intent creation."
             )
-        selected_identity_ids = {
-            str(row.get("selection_id") or "") for row in deduped["selected"]
-        }
+        selected_identity_ids = {str(row.get("selection_id") or "") for row in deduped["selected"]}
         selected_identity_rows = {
             str(row.get("selection_id") or ""): row
             for row in deduped["selected"]
@@ -753,19 +781,55 @@ def _validate_selection_historical_scan_binding(
     historical: dict[str, Any],
     *,
     market_date: str,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    expected_code_sha: str | None = None,
 ) -> None:
     """Reject cross-scan joins unless an exact frozen slate authorizes reuse."""
 
     selection_scan_id = str(selection.get("scan_id") or "")
     historical_scan_id = str(historical.get("scan_id") or "")
+    selection_payload = selection.get("payload_json")
+    frozen_slate = (
+        selection_payload.get("frozen_ranked_research_slate")
+        if isinstance(selection_payload, dict)
+        else None
+    )
+    has_modern_frozen_slate = (
+        isinstance(frozen_slate, dict)
+        and str(frozen_slate.get("schema_version") or "")
+        == "dawnstrike.luna.ranked_research_slate.v2"
+    )
+    if has_modern_frozen_slate and expected_code_sha is None:
+        raise SnapshotValidationError(
+            "Modern frozen Alpha selection requires the current watcher release SHA."
+        )
+    frozen_signal: dict[str, Any] | None = None
+    if expected_code_sha is not None and str(selection.get("cohort") or "") != (
+        SCENARIO_FORWARD_COHORT
+    ):
+        frozen_signal = validated_frozen_selection_signal(
+            selection,
+            market_date=market_date,
+            allowed_cohorts=("research_radar", "official_telegram"),
+            production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=expected_code_sha,
+        )
+        if frozen_signal is None:
+            raise SnapshotValidationError(
+                "Selection frozen-slate release identity does not match the current watcher."
+            )
     if selection_scan_id and selection_scan_id == historical_scan_id:
         return
-    frozen_signal = validated_frozen_selection_signal(
-        selection,
-        market_date=market_date,
-        allowed_cohorts=("research_radar", "official_telegram"),
-        production=True,
-    )
+    if frozen_signal is None:
+        frozen_signal = validated_frozen_selection_signal(
+            selection,
+            market_date=market_date,
+            allowed_cohorts=("research_radar", "official_telegram"),
+            production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=expected_code_sha,
+        )
     payload = selection.get("payload_json")
     slate = payload.get("frozen_ranked_research_slate") if isinstance(payload, dict) else None
     frozen_scan_id = str(slate.get("scan_id") or "") if isinstance(slate, dict) else ""
@@ -978,9 +1042,7 @@ def _scenario_plan_projection(value: Any) -> dict[str, Any] | None:
         "policy_version": str(value.get("policy_version") or ""),
         "feature_schema_version": str(value.get("feature_schema_version") or ""),
         "research_only": (
-            None
-            if value.get("research_only") in (None, "")
-            else value.get("research_only") is True
+            None if value.get("research_only") in (None, "") else value.get("research_only") is True
         ),
         "broker_execution_enabled": (
             None
@@ -1022,8 +1084,7 @@ def _validate_scenario_selection_bindings(
     """Require one exact Scenario link/decision/mirror before watcher side effects."""
 
     by_selection_id = {
-        str(binding.get("selection", {}).get("selection_id") or ""): binding
-        for binding in bindings
+        str(binding.get("selection", {}).get("selection_id") or ""): binding for binding in bindings
     }
     if len(by_selection_id) != len(bindings) or len(by_selection_id) != len(selections):
         raise SnapshotValidationError(
@@ -1093,8 +1154,7 @@ def _validate_scenario_selection_bindings(
             or str(selection.get("cohort") or "") != SCENARIO_FORWARD_COHORT
             or str(selection.get("decision") or "").lower() != "paper_entry"
             or str(selection.get("selected_at") or "") != str(decision.get("decision_at") or "")
-            or str(selection.get("event_key") or "")
-            != f"scenario-paper:{plan['decision_id']}"
+            or str(selection.get("event_key") or "") != f"scenario-paper:{plan['decision_id']}"
             or decision.get("_canonical_payload_matches") is not True
             or str(selection.get("body_sha256") or "") != _scenario_decision_hash(decision)
             or _scenario_plan_projection(selection.get("payload_json")) != plan
@@ -1420,6 +1480,7 @@ def _decision_for_signal(
     daily_entry_count: int,
     existing_symbol_notional: float,
     scanner_config: ScannerConfig,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any]:
     if not observation:
         return {"state": STATE_STALE_DATA, "reason": "No usable current price observation."}
@@ -1465,6 +1526,7 @@ def _decision_for_signal(
         open_count=open_count,
         daily_entry_count=daily_entry_count,
         existing_symbol_notional=existing_symbol_notional,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
 
 
@@ -1534,6 +1596,7 @@ def _entry_decision(
     open_count: int,
     daily_entry_count: int,
     existing_symbol_notional: float,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any]:
     price = float(_number(observation.get("price")) or 0.0)
     direction = _signal_direction(signal)
@@ -1590,7 +1653,12 @@ def _entry_decision(
                 target=target,
                 decision_trace=trace,
             )
-        current_proof = _build_watcher_current_proof(signal, observation, trace)
+        current_proof = _build_watcher_current_proof(
+            signal,
+            observation,
+            trace,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        )
         if current_proof is None:
             return {
                 "state": STATE_STAND_DOWN,
@@ -1893,12 +1961,14 @@ def _intent(
             "identity-active paper watcher signal is missing its authenticated episode identity"
         )
     if not episode_id:
-        episode_id = "episode:" + hashlib.sha256(
-            (
-                f"{signal_id}:{market_date}:"
-                f"{signal.get('strategy_id') or ALPHAOPS_STRATEGY_ID}"
-            ).encode()
-        ).hexdigest()[:24]
+        episode_id = (
+            "episode:"
+            + hashlib.sha256(
+                (
+                    f"{signal_id}:{market_date}:{signal.get('strategy_id') or ALPHAOPS_STRATEGY_ID}"
+                ).encode()
+            ).hexdigest()[:24]
+        )
     intent_id = _intent_id(
         mode=mode,
         market_date=market_date,
@@ -2315,7 +2385,11 @@ def _state_row(
 
 
 def _build_watcher_current_proof(
-    signal: dict[str, Any], observation: dict[str, Any], trace: dict[str, Any]
+    signal: dict[str, Any],
+    observation: dict[str, Any],
+    trace: dict[str, Any],
+    *,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any] | None:
     """Build immutable Tier 3 monitor evidence from the persisted quote/trace."""
 
@@ -2528,7 +2602,14 @@ def _build_watcher_current_proof(
         "current_price": last,
         "watcher_current_proof": proof,
     }
-    return proof if validate_watcher_current_proof(validation_row) else None
+    return (
+        proof
+        if validate_watcher_current_proof(
+            validation_row,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        )
+        else None
+    )
 
 
 def _monitor_publication_receipt(
@@ -2537,6 +2618,7 @@ def _monitor_publication_receipt(
     proof: dict[str, Any],
     intent_id: str,
     checked_at: str,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any]:
     intent_id = str(intent_id or "").strip()
     if not intent_id:
@@ -2547,7 +2629,8 @@ def _monitor_publication_receipt(
             **signal,
             "current_price": quote.get("last"),
             "watcher_current_proof": proof,
-        }
+        },
+        contributor_receipt_verifier=contributor_receipt_verifier,
     ):
         raise SnapshotValidationError("monitor publication requires a strict current watcher proof")
     proof_checked_at = str(proof.get("checked_at") or "")

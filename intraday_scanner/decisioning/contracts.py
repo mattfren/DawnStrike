@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -43,6 +43,7 @@ class PickTier(StrEnum):
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 
 
@@ -112,6 +113,29 @@ def _public_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _require_string(value: Any, field_name: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    if not allow_empty and not value.strip():
+        raise ValueError(f"{field_name} is required")
+    return value
+
+
+def _require_string_sequence(value: Any, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must contain strings")
+    return tuple(value)
+
+
+def _require_number(value: Any, field_name: str, *, optional: bool = False) -> None:
+    if optional and value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a number")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite")
+
+
 @dataclass(frozen=True)
 class ConditionSpec:
     condition_id: str
@@ -163,16 +187,35 @@ class ConditionResult:
     unresolved_unknowns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "status", ConditionStatus(self.status))
+        _require_string(self.condition_id, "condition_id")
+        if not isinstance(self.status, (str, ConditionStatus)):
+            raise ValueError("status must be a condition-status string")
+        for field_name in (
+            "reason",
+            "resolver_id",
+            "resolution_method",
+            "requested_model",
+            "actual_model",
+        ):
+            _require_string(getattr(self, field_name), field_name, allow_empty=True)
+        for field_name in ("observed_at", "effective_at"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _require_string(value, field_name)
         for field_name in (
             "source_urls",
             "source_hashes",
             "contradictions",
             "unresolved_unknowns",
         ):
-            object.__setattr__(self, field_name, _tuple(getattr(self, field_name)))
-        if not self.condition_id.strip():
-            raise ValueError("condition_id is required")
+            object.__setattr__(
+                self,
+                field_name,
+                _require_string_sequence(getattr(self, field_name), field_name),
+            )
+        if self.confidence is not None:
+            _require_number(self.confidence, "confidence")
+        object.__setattr__(self, "status", ConditionStatus(self.status))
         _reject_nonfinite(asdict(self))
         if self.confidence is not None and not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
@@ -320,26 +363,89 @@ class StrategyDecisionReceipt:
     _HASH_FIELDS: ClassVar[set[str]] = {"receipt_hash_sha256", "receipt_id"}
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "schema_version",
+            "receipt_id",
+            "strategy_id",
+            "strategy_version",
+            "symbol",
+            "market_date",
+            "decision_at",
+            "code_sha",
+            "policy_version",
+            "source_identity",
+            "input_hash_sha256",
+            "receipt_hash_sha256",
+            "input_payload_json",
+            "plan_hash_sha256",
+        ):
+            _require_string(
+                getattr(self, field_name),
+                field_name,
+                allow_empty=field_name
+                in {
+                    "receipt_id",
+                    "receipt_hash_sha256",
+                    "input_payload_json",
+                    "plan_hash_sha256",
+                },
+            )
+        if self.first_blocking_failure is not None:
+            _require_string(self.first_blocking_failure, "first_blocking_failure")
+        if not isinstance(self.pick_tier, (str, PickTier)):
+            raise ValueError("pick_tier must be a pick-tier string")
+        for field_name in (
+            "research_pick_eligible",
+            "paper_entry_eligible",
+            "research_only",
+            "broker_execution_enabled",
+        ):
+            if type(getattr(self, field_name)) is not bool:
+                raise ValueError(f"{field_name} must be a boolean")
+        for field_name in (
+            "base_strategy_score",
+            "score_adjustment",
+            "final_score",
+        ):
+            _require_number(getattr(self, field_name), field_name)
+        for field_name in (
+            "entry_reference",
+            "stop",
+            "target",
+            "reward_risk_ratio",
+            "gross_reward_risk_ratio",
+            "after_cost_reward_risk_ratio",
+            "stop_distance_pct",
+        ):
+            _require_number(getattr(self, field_name), field_name, optional=True)
+        for field_name in (
+            "all_blocking_failures",
+            "disclosed_gaps",
+            "paper_entry_blockers",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _require_string_sequence(getattr(self, field_name), field_name),
+            )
         object.__setattr__(self, "pick_tier", PickTier(self.pick_tier))
-        if not self.schema_version.strip():
-            raise ValueError("schema_version is required")
-        if not self.strategy_id.strip() or not self.strategy_version.strip():
-            raise ValueError("strategy identity and version are required")
         symbol = self.symbol.strip().upper()
         if not _SYMBOL.fullmatch(symbol):
             raise ValueError("symbol must be a valid uppercase ticker")
         object.__setattr__(self, "symbol", symbol)
         _iso_date(self.market_date, "market_date")
         _iso_datetime(self.decision_at, "decision_at")
-        if not self.code_sha.strip() or not self.source_identity.strip():
-            raise ValueError("code_sha and source_identity are required")
+        if (
+            self.schema_version == "dawnstrike.strategy_decision_receipt.v2"
+            and not _GIT_SHA.fullmatch(self.code_sha)
+        ):
+            raise ValueError("v2 receipt code_sha must be a full lowercase Git SHA")
         if not isinstance(self.condition_results, tuple):
+            if not isinstance(self.condition_results, list):
+                raise ValueError("condition_results must be a list or tuple")
             object.__setattr__(self, "condition_results", tuple(self.condition_results))
         if any(not isinstance(item, ConditionResult) for item in self.condition_results):
             raise ValueError("condition_results must contain typed ConditionResult values")
-        for field_name in ("all_blocking_failures", "disclosed_gaps"):
-            object.__setattr__(self, field_name, _tuple(getattr(self, field_name)))
-        object.__setattr__(self, "paper_entry_blockers", _tuple(self.paper_entry_blockers))
         if not _SHA256.fullmatch(self.input_hash_sha256):
             raise ValueError("input_hash_sha256 must be a SHA-256 hex digest")
         if self.schema_version == "dawnstrike.strategy_decision_receipt.v2":
@@ -411,6 +517,44 @@ class StrategyDecisionReceipt:
         return canonical_json(self.to_dict())
 
 
+def parse_strategy_decision_receipt(
+    payload: Any,
+    *,
+    require_v2: bool = False,
+) -> StrategyDecisionReceipt:
+    """Rebuild and exactly validate a serialized strategy decision receipt.
+
+    Reconstructing the frozen dataclass is the single canonical validation
+    boundary for hashes, IDs, finite numerics, research-only safety, and v2
+    input replay.  The final canonical equality check rejects both omitted and
+    unrecognized fields instead of silently accepting a partial projection.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("strategy decision receipt must be a JSON object")
+    receipt_payload = {
+        contract_field.name: payload[contract_field.name]
+        for contract_field in fields(StrategyDecisionReceipt)
+        if contract_field.name in payload
+    }
+    condition_results = receipt_payload.get("condition_results") or []
+    if not isinstance(condition_results, (list, tuple)):
+        raise ValueError("strategy decision receipt condition_results must be a list")
+    try:
+        receipt_payload["condition_results"] = tuple(
+            item if isinstance(item, ConditionResult) else ConditionResult(**item)
+            for item in condition_results
+        )
+        receipt = StrategyDecisionReceipt(**receipt_payload)
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError("strategy decision receipt typed schema is invalid") from exc
+    if require_v2 and receipt.schema_version != "dawnstrike.strategy_decision_receipt.v2":
+        raise ValueError("strategy decision receipt must use replayable v2 schema")
+    if canonical_json(receipt.to_dict()) != canonical_json(payload):
+        raise ValueError("strategy decision receipt payload is not exact")
+    return receipt
+
+
 __all__ = [
     "ConditionCategory",
     "ConditionResult",
@@ -421,4 +565,5 @@ __all__ = [
     "PickTier",
     "StrategyDecisionReceipt",
     "canonical_json",
+    "parse_strategy_decision_receipt",
 ]

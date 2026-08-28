@@ -10,12 +10,19 @@ from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
 from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_no_trade,
     format_alpha_watch,
 )
 from intraday_scanner.services import premarket_enrichment_service as premarket
-from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
+from intraday_scanner.services.alpha_cycle_service import (
+    _apply_strategy_decision_receipts,
+    _load_frozen_luna_slate,
+    _merge_strategy_adapter_signals,
+    _official_selection_notification_event,
+    _persist_official_selections,
+)
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
@@ -25,6 +32,7 @@ from intraday_scanner.services.luna_core_universe_service import (
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
     AuthenticatedStrategyReceiptResolver,
+    _slate_content_hash,
     apply_publication_semantics,
     build_ranked_research_slate,
     official_publication_rows,
@@ -106,9 +114,7 @@ def _receipted_signal(
         max_age_seconds=600,
         feed="iex",
     )
-    observation_hash, observation_payload = premarket._canonical_observation_payload(
-        observation
-    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(observation)
     row = {
         "ticker": ticker,
         "strategy_id": "ts_momentum_sma_atr",
@@ -150,9 +156,7 @@ def _persist_receipt(row: dict, tmp_path: Path, monkeypatch) -> SQLiteScanStore:
         decision_at="2026-08-26T13:30:00+00:00",
         source_summary={"source_identity": "fixture-source"},
     )
-    row["strategy_receipt_research_eligible"] = row[
-        "strategy_receipt_research_pick_eligible"
-    ]
+    row["strategy_receipt_research_eligible"] = row["strategy_receipt_research_pick_eligible"]
     return store
 
 
@@ -360,9 +364,10 @@ def test_positive_persisted_receipt_survives_frozen_slate_validation(tmp_path, m
         strategy_id="ts_momentum_sma_atr",
     )
     assert resolver.verify(row)
-    assert apply_publication_semantics(
-        [frozen["rows"][0]], slate=frozen
-    )[0]["publication_tier"] == TIER1
+    assert (
+        apply_publication_semantics([frozen["rows"][0]], slate=frozen)[0]["publication_tier"]
+        == TIER1
+    )
 
     negative = deepcopy(frozen)
     negative_row = negative["rows"][0]
@@ -398,6 +403,359 @@ def test_positive_persisted_receipt_survives_frozen_slate_validation(tmp_path, m
 
     with pytest.raises(ValueError, match="receipt"):
         validate_ranked_research_slate(negative, market_date="2026-08-26")
+
+
+@pytest.mark.parametrize(
+    ("field", "hostile_value"),
+    (("final_score", 999.0), ("direction", "short")),
+)
+def test_production_slate_rejects_resigned_nested_contributor_semantic_forgery(
+    tmp_path,
+    monkeypatch,
+    field: str,
+    hostile_value: object,
+) -> None:
+    row = _receipted_signal(
+        ticker="NESTED",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    row.update(
+        {
+            "direction": "long",
+            "signal_id": "nested-source",
+            "source_signal_id": "nested-source",
+        }
+    )
+    store = _persist_receipt(row, tmp_path, monkeypatch)
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    merged = _merge_strategy_adapter_signals(
+        [row],
+        expected_code_sha="a" * 40,
+        receipt_verifier=resolver,
+    )
+    slate = build_ranked_research_slate(
+        merged,
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-nested",
+        require_safety=True,
+    )
+    validate_ranked_research_slate(
+        slate,
+        market_date="2026-08-26",
+        production=True,
+        contributor_receipt_verifier=resolver,
+    )
+
+    hostile = deepcopy(slate)
+    hostile_row = hostile["rows"][0]
+    hostile_row["strategy_contributors"][0][field] = hostile_value
+    row_payload = {
+        key: value for key, value in hostile_row.items() if key != "research_row_hash_sha256"
+    }
+    hostile_row["research_row_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            row_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    hostile["content_hash_sha256"] = _slate_content_hash(hostile)
+    hostile["slate_id"] = "luna-slate-" + hostile["content_hash_sha256"][:24]
+
+    with pytest.raises(ValueError, match="contributor projection"):
+        validate_ranked_research_slate(
+            hostile,
+            market_date="2026-08-26",
+            production=True,
+            contributor_receipt_verifier=resolver,
+        )
+
+
+def test_production_slate_rejects_fully_resigned_unpersisted_nested_receipt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    row = _receipted_signal(
+        ticker="RESIGNED",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    row.update(
+        {
+            "direction": "long",
+            "signal_id": "resigned-source",
+            "source_signal_id": "resigned-source",
+        }
+    )
+    store = _persist_receipt(row, tmp_path, monkeypatch)
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    merged = _merge_strategy_adapter_signals(
+        [row],
+        expected_code_sha="a" * 40,
+        receipt_verifier=resolver,
+    )
+    slate = build_ranked_research_slate(
+        merged,
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-fully-resigned",
+        require_safety=True,
+    )
+    validate_ranked_research_slate(
+        slate,
+        market_date="2026-08-26",
+        production=True,
+        contributor_receipt_verifier=resolver,
+    )
+
+    hostile = deepcopy(slate)
+    hostile_row = hostile["rows"][0]
+    hostile_contributor = hostile_row["strategy_contributors"][0]
+    hostile_receipt = deepcopy(hostile_contributor["decision_receipt"])
+    hostile_input = json.loads(hostile_receipt["input_payload_json"])
+    hostile_input["direction"] = "short"
+    hostile_receipt["input_payload_json"] = canonical_json(hostile_input)
+    hostile_receipt["input_hash_sha256"] = hashlib.sha256(
+        hostile_receipt["input_payload_json"].encode("utf-8")
+    ).hexdigest()
+    hostile_receipt["final_score"] = 999.0
+    receipt_payload = {
+        key: value
+        for key, value in hostile_receipt.items()
+        if key not in {"receipt_hash_sha256", "receipt_id"}
+    }
+    hostile_receipt_hash = hashlib.sha256(
+        canonical_json(receipt_payload).encode("utf-8")
+    ).hexdigest()
+    hostile_receipt["receipt_hash_sha256"] = hostile_receipt_hash
+    hostile_receipt["receipt_id"] = "sdr-" + hostile_receipt_hash[:24]
+
+    hostile_contributor.update(
+        {
+            "receipt_id": hostile_receipt["receipt_id"],
+            "receipt_hash_sha256": hostile_receipt_hash,
+            "final_score": 999.0,
+            "direction": "short",
+            "decision_receipt": deepcopy(hostile_receipt),
+        }
+    )
+    hostile_row["strategy_decision_receipts"] = [deepcopy(hostile_receipt)]
+    hostile_row["strongest_eligible_contributor_score"] = 999.0
+    row_payload = {
+        key: value for key, value in hostile_row.items() if key != "research_row_hash_sha256"
+    }
+    hostile_row["research_row_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            row_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    hostile["content_hash_sha256"] = _slate_content_hash(hostile)
+    hostile["slate_id"] = "luna-slate-" + hostile["content_hash_sha256"][:24]
+
+    # Every public hash and ID is internally self-consistent after the
+    # attacker re-signs the nested projection.  Only immutable receipt-store
+    # authentication can distinguish this artifact from the receipt Dawnstrike
+    # actually persisted for the session.
+    validate_ranked_research_slate(
+        hostile,
+        market_date="2026-08-26",
+        production=False,
+    )
+    with pytest.raises(ValueError, match="requires persisted contributor receipts"):
+        validate_ranked_research_slate(
+            hostile,
+            market_date="2026-08-26",
+            production=True,
+        )
+    with pytest.raises(ValueError, match="contributor receipt is not persisted"):
+        validate_ranked_research_slate(
+            hostile,
+            market_date="2026-08-26",
+            production=True,
+            contributor_receipt_verifier=resolver,
+        )
+
+    event = _official_selection_notification_event(
+        "scan-fully-resigned",
+        "alpha_morning_watch",
+        "Dawnstrike Alpha Watch",
+        "RESIGNED hostile receipt must not publish",
+        selected_signals=[hostile_row],
+    )
+    hostile_publication = {
+        **hostile_row,
+        "publication_tier": "PAPER_PLAN_QUALIFIED",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+    }
+    with pytest.raises(
+        SnapshotValidationError,
+        match="exact frozen publication cohort",
+    ):
+        _persist_official_selections(
+            store,
+            scan_id="scan-fully-resigned",
+            selected_signals=[hostile_row],
+            decision={"no_trade": False, "decision_tier": "clean_edge"},
+            selected_at="2026-08-26T13:30:00+00:00",
+            event=event,
+            slate=hostile,
+            publication_rows=[hostile_publication],
+            production=True,
+            contributor_receipt_verifier=resolver,
+        )
+    assert store.load_signal_selections() == []
+    assert store.load_trade_intents() == []
+    assert store.load_signal_outcomes() == []
+    assert store.load_strategy_learning_labels() == []
+
+    contributor_fields = {
+        "strategy_contributors",
+        "strategy_contributor_count",
+        "strategy_contributor_ids",
+        "strategy_decision_receipts",
+        "strategy_contribution_status",
+        "strategy_contribution_gaps",
+        "strongest_eligible_contributor_score",
+        "canonical_primary_strategy_id",
+    }
+    for fields_to_strip in ({"strategy_contributors"}, contributor_fields):
+        stripped = deepcopy(slate)
+        stripped_row = stripped["rows"][0]
+        for field in fields_to_strip:
+            stripped_row.pop(field, None)
+        stripped_payload = {
+            key: value for key, value in stripped_row.items() if key != "research_row_hash_sha256"
+        }
+        stripped_row["research_row_hash_sha256"] = hashlib.sha256(
+            json.dumps(
+                stripped_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        stripped["content_hash_sha256"] = _slate_content_hash(stripped)
+        stripped["slate_id"] = "luna-slate-" + stripped["content_hash_sha256"][:24]
+        with pytest.raises(ValueError, match="complete contributor projection"):
+            validate_ranked_research_slate(
+                stripped,
+                market_date="2026-08-26",
+                production=True,
+                contributor_receipt_verifier=resolver,
+            )
+
+
+def test_empty_production_slate_requires_exact_producer_code_sha() -> None:
+    slate = build_ranked_research_slate(
+        [],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-empty-release",
+        require_safety=True,
+    )
+
+    with pytest.raises(ValueError, match="requires producer code SHA"):
+        validate_ranked_research_slate(
+            slate,
+            market_date="2026-08-26",
+            production=True,
+        )
+
+
+def test_frozen_slate_retry_rejects_cross_release_code_sha(tmp_path) -> None:
+    slate = build_ranked_research_slate(
+        [],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-release-a",
+        require_safety=True,
+        producer_code_sha="a" * 40,
+    )
+    slate_path = persist_ranked_research_slate(
+        slate,
+        tmp_path / "ranked_research_slate.json",
+    )
+
+    with pytest.raises(SnapshotValidationError, match="FROZEN_SLATE_CODE_SHA_MISMATCH"):
+        _load_frozen_luna_slate(
+            slate_path,
+            market_date="2026-08-26",
+            expected_code_sha="b" * 40,
+        )
+
+
+@pytest.mark.parametrize("hostile_count", [True, 1.0, "1"])
+@pytest.mark.parametrize(
+    "count_field",
+    ["published_count", "ranked_research_count", "target_count"],
+)
+def test_slate_rejects_resigned_non_integer_count_metadata(
+    hostile_count: object,
+    count_field: str,
+) -> None:
+    slate = build_ranked_research_slate(
+        [{"ticker": "COUNT", "alpha_score": 1}],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-count",
+    )
+    slate[count_field] = hostile_count
+    slate["content_hash_sha256"] = _slate_content_hash(slate)
+    slate["slate_id"] = "luna-slate-" + slate["content_hash_sha256"][:24]
+
+    with pytest.raises(ValueError, match="counts"):
+        validate_ranked_research_slate(slate, market_date="2026-08-26")
+
+
+@pytest.mark.parametrize("hostile_rank", [True, 1.0, "1"])
+def test_slate_rejects_resigned_non_integer_research_rank(hostile_rank: object) -> None:
+    slate = build_ranked_research_slate(
+        [{"ticker": "RANK", "alpha_score": 1}],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-rank",
+    )
+    row = slate["rows"][0]
+    row["research_rank"] = hostile_rank
+    row_payload = {key: value for key, value in row.items() if key != "research_row_hash_sha256"}
+    row["research_row_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            row_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    slate["content_hash_sha256"] = _slate_content_hash(slate)
+    slate["slate_id"] = "luna-slate-" + slate["content_hash_sha256"][:24]
+
+    with pytest.raises(ValueError, match="semantics"):
+        validate_ranked_research_slate(slate, market_date="2026-08-26")
 
 
 def test_no_receipt_legacy_row_remains_research_only_tier_one():

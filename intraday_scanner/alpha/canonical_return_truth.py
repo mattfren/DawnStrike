@@ -47,9 +47,7 @@ CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED = "CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED"
 CURRENT_CENSORED_PATH = "CURRENT_CENSORED_PATH"
 LEGACY_OR_INCOMPLETE = "LEGACY_OR_INCOMPLETE"
 TERMINAL_MISSING = "TERMINAL_MISSING"
-PAPER_ENTER_INTENT_RECEIPT_SCHEMA_VERSION = (
-    "dawnstrike.alphaops.paper_enter_intent.v2"
-)
+PAPER_ENTER_INTENT_RECEIPT_SCHEMA_VERSION = "dawnstrike.alphaops.paper_enter_intent.v2"
 PAPER_ENTER_INTENT_RECEIPT_ID_PREFIX = "paper-enter-intent-v2-"
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -275,11 +273,7 @@ def classify_canonical_return_truth(
 
     try:
         if isinstance(payload, Mapping) and payload.get("outcome_status") == TERMINAL_MISSING:
-            return (
-                TERMINAL_MISSING
-                if set(payload) == {"outcome_status"}
-                else LEGACY_OR_INCOMPLETE
-            )
+            return TERMINAL_MISSING if set(payload) == {"outcome_status"} else LEGACY_OR_INCOMPLETE
         common = _common_current_path_violations(payload, decision)
         if common:
             return LEGACY_OR_INCOMPLETE
@@ -324,11 +318,7 @@ def canonical_return_truth_projection(
             }
         )
     try:
-        return {
-            key: copy.deepcopy(payload[key])
-            for key in sorted(keys)
-            if key in payload
-        }
+        return {key: copy.deepcopy(payload[key]) for key in sorted(keys) if key in payload}
     except Exception:
         return {}
 
@@ -337,6 +327,7 @@ def canonical_paper_selection_context(
     selection: Mapping[str, object],
     *,
     delivery: Mapping[str, object],
+    contributor_receipt_verifier: Any | None = None,
 ) -> dict[str, object]:
     """Build the current paper-decision context from exact persisted evidence.
 
@@ -400,11 +391,7 @@ def canonical_paper_selection_context(
     payload_decision = (
         "no_trade"
         if decision_payload.get("no_trade") is True
-        else str(
-            decision_payload.get("decision_tier")
-            or decision_payload.get("decision")
-            or ""
-        )
+        else str(decision_payload.get("decision_tier") or decision_payload.get("decision") or "")
     )
     if payload_decision != selected_decision:
         raise ValueError("paper selection decision conflicts with decision payload")
@@ -425,6 +412,7 @@ def canonical_paper_selection_context(
             market_date=market_date,
             allowed_cohorts=("official_telegram",),
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         if frozen_signal is None or not _json_equal(frozen_signal, signal_payload):
             raise ValueError(
@@ -499,10 +487,7 @@ def canonical_paper_selection_context(
         raise ValueError("paper delivery is not research-only")
     if selected_decision != "no_trade":
         official_tickers = _rendered_official_candidate_tickers(delivered_body)
-        if (
-            official_tickers is None
-            or official_tickers.count(str(selected["ticker"]).upper()) != 1
-        ):
+        if official_tickers is None or official_tickers.count(str(selected["ticker"]).upper()) != 1:
             raise ValueError(
                 "paper delivery official candidate section must contain selected "
                 "ticker exactly once"
@@ -558,9 +543,7 @@ def canonical_paper_selection_context(
         "input_hash_sha256": input_hash,
         "source_lineage_hash_sha256": lineage_hash,
         "delivery_identity": delivery_identity,
-        "source_artifact_identity": (
-            f"alpha-paper-selection:{selected['selection_id']}"
-        ),
+        "source_artifact_identity": (f"alpha-paper-selection:{selected['selection_id']}"),
         "source_artifact_hash_sha256": source_hash,
         "research_only": True,
         "broker_execution_enabled": False,
@@ -718,8 +701,7 @@ def build_canonical_path_entry_receipt(
         "source_observed_at": intent["source_observed_at"],
         "source_bar_completed_at": intent["source_bar_completed_at"],
         "replay_origin": {
-            key: copy.deepcopy(binding_origin[key])
-            for key in ("kind", "id", "lineage")
+            key: copy.deepcopy(binding_origin[key]) for key in ("kind", "id", "lineage")
         },
     }
     digest = _hash_payload(body)
@@ -862,13 +844,11 @@ def build_canonical_return_truth(
     entry_fill = entry * (1.0 + float(entry_slippage_bps) / 10_000.0)
     exit_fill = exit_price * (1.0 - float(exit_slippage_bps) / 10_000.0)
     quantity = float(notional_per_trade) / entry_fill
-    entry_fee = (
-        entry_fill * quantity * float(fee_bps_per_side) / 10_000.0
-        + quantity * float(commission_per_share_per_side)
+    entry_fee = entry_fill * quantity * float(fee_bps_per_side) / 10_000.0 + quantity * float(
+        commission_per_share_per_side
     )
-    exit_fee = (
-        exit_fill * quantity * float(fee_bps_per_side) / 10_000.0
-        + quantity * float(commission_per_share_per_side)
+    exit_fee = exit_fill * quantity * float(fee_bps_per_side) / 10_000.0 + quantity * float(
+        commission_per_share_per_side
     )
     after_cost = (
         (((exit_fill - entry_fill) * quantity) - entry_fee - exit_fee)
@@ -923,9 +903,7 @@ def build_canonical_return_truth(
         "primary_benchmark_source_bar_hash_sha256": benchmark_source_bar_hash_sha256,
         "secondary_benchmark_symbol": "IWM",
         "secondary_benchmark_return_pct": secondary_return,
-        "secondary_benchmark_source_bar_hash_sha256": (
-            secondary_benchmark_source_bar_hash_sha256
-        ),
+        "secondary_benchmark_source_bar_hash_sha256": (secondary_benchmark_source_bar_hash_sha256),
         "after_cost_return_pct": after_cost,
         "net_excess_return_pct": net_excess,
         "causal_decision_identity": causal,
@@ -963,9 +941,7 @@ def build_canonical_return_truth(
         "benchmark_independent_reconciliation_status": "PASSED",
         "secondary_benchmark_symbol": "IWM",
         "secondary_benchmark_return_pct": secondary_return,
-        "secondary_benchmark_source_bar_hash_sha256": (
-            secondary_benchmark_source_bar_hash_sha256
-        ),
+        "secondary_benchmark_source_bar_hash_sha256": (secondary_benchmark_source_bar_hash_sha256),
         "secondary_benchmark_independent_reconciliation_status": "PASSED",
         "net_excess_return_pct": net_excess,
         "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
@@ -1027,9 +1003,7 @@ def _build_canonical_nonreturn_truth(
         {
             "schema_version": RETURN_TRUTH_SCHEMA_VERSION,
             "path_replay_id": receipt.get("path_replay_id"),
-            "path_replay_receipt_hash_sha256": receipt.get(
-                "replay_receipt_hash_sha256"
-            ),
+            "path_replay_receipt_hash_sha256": receipt.get("replay_receipt_hash_sha256"),
             "causal_decision_identity": common["causal_decision_identity"],
             "replay_binding": common["replay_binding"],
         }
@@ -1103,39 +1077,25 @@ def _canonical_return_truth_hash(
     body = {
         "schema_version": RETURN_TRUTH_SCHEMA_VERSION,
         "path_replay_id": receipt.get("path_replay_id"),
-        "path_replay_receipt_hash_sha256": receipt.get(
-            "replay_receipt_hash_sha256"
-        ),
-        "source_artifact_hash_sha256": receipt.get(
-            "source_artifact_hash_sha256"
-        ),
+        "path_replay_receipt_hash_sha256": receipt.get("replay_receipt_hash_sha256"),
+        "source_artifact_hash_sha256": receipt.get("source_artifact_hash_sha256"),
         "source_bar_count": payload.get("source_bar_count"),
         "replay_binding": payload.get("replay_binding"),
         "cost_receipt_hash_sha256": payload.get("cost_receipt_hash_sha256"),
-        "benchmark_source_bar_hash_sha256": payload.get(
-            "benchmark_source_bar_hash_sha256"
-        ),
+        "benchmark_source_bar_hash_sha256": payload.get("benchmark_source_bar_hash_sha256"),
         "secondary_benchmark_source_bar_hash_sha256": payload.get(
             "secondary_benchmark_source_bar_hash_sha256"
         ),
-        "reconciliation_receipt_hash_sha256": payload.get(
-            "reconciliation_receipt_hash_sha256"
-        ),
+        "reconciliation_receipt_hash_sha256": payload.get("reconciliation_receipt_hash_sha256"),
         "after_cost_return_pct": payload.get("after_cost_return_pct"),
         "net_excess_return_pct": payload.get("net_excess_return_pct"),
         "causal_decision_identity": payload.get("causal_decision_identity"),
         "eligibility_policy_version": payload.get("eligibility_policy_version"),
-        "retrospective_research_eligible": payload.get(
-            "retrospective_research_eligible"
-        ),
-        "prospective_promotion_eligible": payload.get(
-            "prospective_promotion_eligible"
-        ),
+        "retrospective_research_eligible": payload.get("retrospective_research_eligible"),
+        "prospective_promotion_eligible": payload.get("prospective_promotion_eligible"),
         "evidence_cohort": payload.get("evidence_cohort"),
         "no_lookahead": payload.get("no_lookahead"),
-        "validated_against_signal_timestamp": payload.get(
-            "validated_against_signal_timestamp"
-        ),
+        "validated_against_signal_timestamp": payload.get("validated_against_signal_timestamp"),
         "research_only": payload.get("research_only"),
         "broker_execution_enabled": payload.get("broker_execution_enabled"),
     }
@@ -1278,25 +1238,17 @@ def _validate_replay_binding(
         return
     _require_equal(violations, payload, "replay_binding", binding)
     future_receipt = (
-        manifest.get("future_evidence_receipt")
-        if isinstance(manifest, Mapping)
-        else None
+        manifest.get("future_evidence_receipt") if isinstance(manifest, Mapping) else None
     )
-    future_subject = (
-        future_receipt.get("subject")
-        if isinstance(future_receipt, Mapping)
-        else None
-    )
+    future_subject = future_receipt.get("subject") if isinstance(future_receipt, Mapping) else None
     if not isinstance(future_subject, Mapping) or not _json_equal(
         binding.get("subject"),
         future_subject,
     ):
         _add(violations, "replay_binding:future_evidence_receipt_binding")
     if not isinstance(future_receipt, Mapping) or not (
-        receipt.get("source_artifact_identity")
-        == future_receipt.get("receipt_id")
-        and receipt.get("source_artifact_hash_sha256")
-        == future_receipt.get("receipt_hash_sha256")
+        receipt.get("source_artifact_identity") == future_receipt.get("receipt_id")
+        and receipt.get("source_artifact_hash_sha256") == future_receipt.get("receipt_hash_sha256")
     ):
         _add(violations, "replay_binding:future_evidence_source_binding")
     if not isinstance(decision, Mapping):
@@ -1440,18 +1392,10 @@ def _validate_cost_truth(
     entry_fill = raw_entry_number * (1.0 + entry_slippage_number / 10_000.0)
     exit_fill = raw_exit_number * (1.0 - exit_slippage_number / 10_000.0)
     quantity = notional_number / entry_fill
-    entry_fee = (
-        entry_fill * quantity * fee_number / 10_000.0
-        + quantity * commission_number
-    )
-    exit_fee = (
-        exit_fill * quantity * fee_number / 10_000.0
-        + quantity * commission_number
-    )
+    entry_fee = entry_fill * quantity * fee_number / 10_000.0 + quantity * commission_number
+    exit_fee = exit_fill * quantity * fee_number / 10_000.0 + quantity * commission_number
     after_cost = (
-        (((exit_fill - entry_fill) * quantity) - entry_fee - exit_fee)
-        / notional_number
-        * 100.0
+        (((exit_fill - entry_fill) * quantity) - entry_fee - exit_fee) / notional_number * 100.0
     )
     if not _close(cost.get("gross_return_pct"), gross):
         _add(violations, "cost_receipt:gross_arithmetic")
@@ -1556,18 +1500,12 @@ def _validate_reconciliation_truth(
     )
     expected_components = {
         "path_replay_id": payload.get("path_replay_id"),
-        "cost_receipt_hash_sha256": (
-            cost.get("receipt_hash_sha256") if cost is not None else None
-        ),
+        "cost_receipt_hash_sha256": (cost.get("receipt_hash_sha256") if cost is not None else None),
         "primary_benchmark_symbol": payload.get("benchmark_symbol"),
         "primary_benchmark_return_pct": payload.get("benchmark_return_pct"),
-        "primary_benchmark_source_bar_hash_sha256": payload.get(
-            "benchmark_source_bar_hash_sha256"
-        ),
+        "primary_benchmark_source_bar_hash_sha256": payload.get("benchmark_source_bar_hash_sha256"),
         "secondary_benchmark_symbol": payload.get("secondary_benchmark_symbol"),
-        "secondary_benchmark_return_pct": payload.get(
-            "secondary_benchmark_return_pct"
-        ),
+        "secondary_benchmark_return_pct": payload.get("secondary_benchmark_return_pct"),
         "secondary_benchmark_source_bar_hash_sha256": payload.get(
             "secondary_benchmark_source_bar_hash_sha256"
         ),
@@ -1587,46 +1525,30 @@ def _validate_return_truth_hash(
     body = {
         "schema_version": RETURN_TRUTH_SCHEMA_VERSION,
         "path_replay_id": path_receipt.get("path_replay_id"),
-        "path_replay_receipt_hash_sha256": path_receipt.get(
-            "replay_receipt_hash_sha256"
-        ),
-        "source_artifact_hash_sha256": path_receipt.get(
-            "source_artifact_hash_sha256"
-        ),
+        "path_replay_receipt_hash_sha256": path_receipt.get("replay_receipt_hash_sha256"),
+        "source_artifact_hash_sha256": path_receipt.get("source_artifact_hash_sha256"),
         "source_bar_count": payload.get("source_bar_count"),
         "replay_binding": payload.get("replay_binding"),
         "cost_receipt_hash_sha256": payload.get("cost_receipt_hash_sha256"),
-        "benchmark_source_bar_hash_sha256": payload.get(
-            "benchmark_source_bar_hash_sha256"
-        ),
+        "benchmark_source_bar_hash_sha256": payload.get("benchmark_source_bar_hash_sha256"),
         "secondary_benchmark_source_bar_hash_sha256": payload.get(
             "secondary_benchmark_source_bar_hash_sha256"
         ),
-        "reconciliation_receipt_hash_sha256": payload.get(
-            "reconciliation_receipt_hash_sha256"
-        ),
+        "reconciliation_receipt_hash_sha256": payload.get("reconciliation_receipt_hash_sha256"),
         "after_cost_return_pct": payload.get("after_cost_return_pct"),
         "net_excess_return_pct": payload.get("net_excess_return_pct"),
         "causal_decision_identity": payload.get("causal_decision_identity"),
         "eligibility_policy_version": payload.get("eligibility_policy_version"),
-        "retrospective_research_eligible": payload.get(
-            "retrospective_research_eligible"
-        ),
-        "prospective_promotion_eligible": payload.get(
-            "prospective_promotion_eligible"
-        ),
+        "retrospective_research_eligible": payload.get("retrospective_research_eligible"),
+        "prospective_promotion_eligible": payload.get("prospective_promotion_eligible"),
         "evidence_cohort": payload.get("evidence_cohort"),
         "no_lookahead": payload.get("no_lookahead"),
-        "validated_against_signal_timestamp": payload.get(
-            "validated_against_signal_timestamp"
-        ),
+        "validated_against_signal_timestamp": payload.get("validated_against_signal_timestamp"),
         "research_only": payload.get("research_only"),
         "broker_execution_enabled": payload.get("broker_execution_enabled"),
     }
     truth_hash = _hash_payload(body)
-    if truth_hash is None or not _secure_equal(
-        payload.get("return_truth_hash_sha256"), truth_hash
-    ):
+    if truth_hash is None or not _secure_equal(payload.get("return_truth_hash_sha256"), truth_hash):
         _add(violations, "return_truth_hash_sha256:mismatch")
     return truth_hash
 
@@ -1720,9 +1642,7 @@ def _validate_causal_identity(
         "decision_id": decision.get(id_key),
         "decision_at": decision.get(time_key),
         "input_hash_sha256": decision.get("input_hash_sha256"),
-        "source_lineage_hash_sha256": decision.get(
-            "source_lineage_hash_sha256"
-        ),
+        "source_lineage_hash_sha256": decision.get("source_lineage_hash_sha256"),
         "decision_context_hash_sha256": _decision_context_hash(
             decision,
             kind=kind,
@@ -1741,9 +1661,7 @@ def _validate_causal_identity(
     causal_at = _canonical_utc(causal.get("decision_at"))
     manifest = path_receipt.get("replay_input_manifest")
     replay_at = (
-        _canonical_utc(manifest.get("decision_at"))
-        if isinstance(manifest, Mapping)
-        else None
+        _canonical_utc(manifest.get("decision_at")) if isinstance(manifest, Mapping) else None
     )
     if causal_at is None or replay_at is None or causal_at > replay_at:
         _add(violations, "causal_decision_identity:time_binding")
@@ -1833,9 +1751,7 @@ def _validate_decision_context_safety(
         _add(violations, f"decision_context:{violation}")
     if payload.get("research_only") is not decision.get("research_only"):
         _add(violations, "decision_context:research_only_binding")
-    if payload.get("broker_execution_enabled") is not decision.get(
-        "broker_execution_enabled"
-    ):
+    if payload.get("broker_execution_enabled") is not decision.get("broker_execution_enabled"):
         _add(violations, "decision_context:broker_binding")
     if kind == "alpha_v6_shadow_decision":
         if decision.get("evidence_cohort") != "forward-current-v2":
@@ -1902,9 +1818,10 @@ def _decision_context_contract_violations(
         if decision.get("evidence_cohort") != "forward-current-v2":
             _add(violations, "evidence_cohort")
         point_in_time = decision.get("point_in_time")
-        if not isinstance(point_in_time, Mapping) or point_in_time.get(
-            "all_inputs_observed_at_or_before_decision"
-        ) is not True:
+        if (
+            not isinstance(point_in_time, Mapping)
+            or point_in_time.get("all_inputs_observed_at_or_before_decision") is not True
+        ):
             _add(violations, "point_in_time")
         safety_vetoes = decision.get("safety_vetoes")
         if not isinstance(safety_vetoes, list) or safety_vetoes:
@@ -1985,10 +1902,7 @@ def _decision_context_contract_violations(
                     _add(violations, f"signal_facts_{field}")
             if signal_facts.get("no_trade_reason") not in {None, ""}:
                 _add(violations, "signal_facts_no_trade_reason")
-        if (
-            decision.get("cost_model_version")
-            != "dawnstrike-alphaops-v6-conservative-cost-v1"
-        ):
+        if decision.get("cost_model_version") != "dawnstrike-alphaops-v6-conservative-cost-v1":
             _add(violations, "cost_model_version")
         cost_bps = _number(decision.get("estimated_round_trip_cost_bps"))
         if cost_bps is None or cost_bps <= 0.0:
@@ -2032,8 +1946,7 @@ def _decision_context_contract_violations(
         _add(violations, "broker_execution_enabled")
     delivery = decision.get("delivery_identity")
     if not isinstance(delivery, Mapping) or not (
-        delivery.get("channel") == "telegram"
-        and delivery.get("delivery_status") == "delivered"
+        delivery.get("channel") == "telegram" and delivery.get("delivery_status") == "delivered"
     ):
         _add(violations, "delivery_identity")
     if kind == "alpha_paper_enter_intent":
@@ -2122,9 +2035,7 @@ def _nonreturn_violations(
         {
             "schema_version": RETURN_TRUTH_SCHEMA_VERSION,
             "path_replay_id": receipt.get("path_replay_id"),
-            "path_replay_receipt_hash_sha256": receipt.get(
-                "replay_receipt_hash_sha256"
-            ),
+            "path_replay_receipt_hash_sha256": receipt.get("replay_receipt_hash_sha256"),
             "causal_decision_identity": payload.get("causal_decision_identity"),
             "replay_binding": payload.get("replay_binding"),
         }
@@ -2190,9 +2101,7 @@ def _require_current_paper_selection(selection: Mapping[str, object]) -> None:
         kind="alpha_paper_selection",
     )
     if violations:
-        raise ValueError(
-            "paper selection context is invalid: " + ", ".join(violations)
-        )
+        raise ValueError("paper selection context is invalid: " + ", ".join(violations))
 
 
 def _raw_record_parts(
@@ -2375,8 +2284,7 @@ def _canonical_source_observation_receipt(
         and payload.get("is_complete") is True
         and payload.get("no_lookahead") is True
         and columns.get("price_type") == "last_bar_close_at_or_before"
-        and payload.get("price_rule")
-        == "latest minute bar with completion <= requested_at"
+        and payload.get("price_rule") == "latest minute bar with completion <= requested_at"
     ):
         raise ValueError("price observation completeness contract is invalid")
     source = columns.get("source")
@@ -2385,9 +2293,10 @@ def _canonical_source_observation_receipt(
         "yahoo": ("public_web_market_data", "yahoo_finance_chart"),
         "alpaca": ("market_data_api", "alpaca_market_data"),
     }.get(source if isinstance(source, str) else "")
-    if expected_provider is None or (
-        columns.get("source_kind"), columns.get("provider")
-    ) != expected_provider:
+    if (
+        expected_provider is None
+        or (columns.get("source_kind"), columns.get("provider")) != expected_provider
+    ):
         raise ValueError("price observation provider identity is invalid")
     expected_status = "exact" if freshness == 0 else "fresh_prior_bar"
     if columns.get("provider_status") != expected_status:
@@ -2423,14 +2332,11 @@ def _canonical_source_observation_receipt(
         and _canonical_utc(raw_quote.get("t")) == quote_observed_at
         and quote_observed_at <= requested_at
         and quote_freshness is not None
-        and quote_freshness
-        == (requested_at - quote_observed_at).total_seconds()
+        and quote_freshness == (requested_at - quote_observed_at).total_seconds()
         and 0 <= quote_freshness <= tolerance
         and payload.get("quote_status") == "USABLE"
         and str(payload.get("quote_source") or "").startswith("alpaca_market_data_")
-        and _secure_equal(
-            payload.get("quote_source_hash_sha256"), _hash_payload(quote_raw)
-        )
+        and _secure_equal(payload.get("quote_source_hash_sha256"), _hash_payload(quote_raw))
     ):
         raise ValueError("price observation quote truth is invalid")
     observation_id = columns.get("observation_id")
@@ -2491,9 +2397,7 @@ def _validate_current_v5_entry_intent(
         "broker_execution": "disabled",
         "broker_execution_enabled": False,
         "source_observation_id": source_columns.get("observation_id"),
-        "source_bar_hash_sha256": source_payload.get(
-            "source_bar_hash_sha256"
-        ),
+        "source_bar_hash_sha256": source_payload.get("source_bar_hash_sha256"),
         "source_observed_at": source_payload.get("quote_observed_at"),
         "source_bar_completed_at": source_payload.get("bar_completed_at"),
     }
@@ -2532,8 +2436,7 @@ def _validate_current_v5_entry_intent(
         isinstance(matched_strategy_ids, list)
         and matched_strategy_ids
         and all(
-            isinstance(item, str) and item == item.strip() and item
-            for item in matched_strategy_ids
+            isinstance(item, str) and item == item.strip() and item for item in matched_strategy_ids
         )
         and matched_strategy_ids == sorted(set(matched_strategy_ids))
         and ALPHAOPS_V5_STRATEGY_ID in matched_strategy_ids
@@ -2675,10 +2578,8 @@ def _canonical_paper_enter_intent_receipt_valid(value: object) -> bool:
     digest = _hash_payload(body)
     return bool(
         digest is not None
-        and value.get("schema_version")
-        == PAPER_ENTER_INTENT_RECEIPT_SCHEMA_VERSION
-        and value.get("receipt_id")
-        == f"{PAPER_ENTER_INTENT_RECEIPT_ID_PREFIX}{digest}"
+        and value.get("schema_version") == PAPER_ENTER_INTENT_RECEIPT_SCHEMA_VERSION
+        and value.get("receipt_id") == f"{PAPER_ENTER_INTENT_RECEIPT_ID_PREFIX}{digest}"
         and _secure_equal(value.get("receipt_hash_sha256"), digest)
     )
 
@@ -2720,10 +2621,11 @@ def _canonical_paper_enter_decision_valid(
             selection=decision,
             source_receipt=expected_source,
         )
-        for field in (
-            _PAPER_ENTER_INTENT_BODY_KEYS
-            - {"schema_version", "source_observation_receipt", "raw_intent_record"}
-        ):
+        for field in _PAPER_ENTER_INTENT_BODY_KEYS - {
+            "schema_version",
+            "source_observation_receipt",
+            "raw_intent_record",
+        }:
             if field == "scan_id":
                 expected = decision.get("scan_id")
             else:

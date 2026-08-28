@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     official_publication_rows,
     validate_frozen_publication_rows,
     validate_ranked_research_slate,
@@ -258,6 +259,7 @@ def format_alpha_watch(
     published_count: int | None = None,
     slate_shortfall_reason: str | None = None,
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> str:
     source_summary = dict(source_summary or {})
     blocked_signals = list(blocked_signals or [])
@@ -280,6 +282,7 @@ def format_alpha_watch(
                 slate,
                 market_date=str(slate.get("market_date") or ""),
                 production=True,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
             if not isinstance(frozen_publication_rows, list):
                 raise ValueError("frozen publication rows are missing")
@@ -288,6 +291,7 @@ def format_alpha_watch(
                 slate=slate,
                 market_date=str(slate.get("market_date") or ""),
                 production=True,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
             authoritative_slate_valid = True
         except (TypeError, ValueError):
@@ -309,19 +313,13 @@ def format_alpha_watch(
     if has_authoritative_slate:
         # Counts are immutable slate facts.  Ignore all caller overrides once
         # a full artifact is present, including on a failed validation path.
-        raw_published_count = (
-            slate.get("published_count") if authoritative_slate_valid else 0
-        )
+        raw_published_count = slate.get("published_count") if authoritative_slate_valid else 0
         raw_target_count = slate.get("target_count") if authoritative_slate_valid else 0
     else:
         raw_published_count = (
-            published_count
-            if published_count is not None
-            else slate.get("published_count")
+            published_count if published_count is not None else slate.get("published_count")
         )
-        raw_target_count = (
-            target_count if target_count is not None else slate.get("target_count")
-        )
+        raw_target_count = target_count if target_count is not None else slate.get("target_count")
     slate_published_count = (
         _nonnegative_count(raw_published_count, len(slate_candidates))
         if raw_published_count is not None
@@ -367,6 +365,7 @@ def format_alpha_watch(
             slate=slate,
             production=True,
             limit=3,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     elif has_authoritative_slate:
         official_candidates = []
@@ -382,9 +381,7 @@ def format_alpha_watch(
             and str(row.get("alert_gate_status") or "").upper() in {"PASS", "ALERT_OK"}
             and row.get("manual_confirmation_required") is False
         ][:3]
-    official_tickers = {
-        str(row.get("ticker") or "").upper() for row in official_candidates
-    }
+    official_tickers = {str(row.get("ticker") or "").upper() for row in official_candidates}
     research_watchlist = [
         row
         for row in slate_candidates
@@ -528,9 +525,7 @@ def format_alpha_no_trade(
     # all five when Telegram length permits so a no-official-plan day is not
     # mistaken for a no-research-candidate day.
     radar = list(research_signals or [])[:5]
-    raw_published_count = (
-        published_count if published_count is not None else research_total
-    )
+    raw_published_count = published_count if published_count is not None else research_total
     slate_published_count = (
         _nonnegative_count(raw_published_count, len(research_signals or []))
         if raw_published_count is not None
@@ -790,9 +785,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
             str(item.get("source_signal_id") or "").strip()
             or (
                 isinstance(item.get("prior_session_lineage"), dict)
-                and str(
-                    item["prior_session_lineage"].get("source_signal_id") or ""
-                ).strip()
+                and str(item["prior_session_lineage"].get("source_signal_id") or "").strip()
             )
         )
         for item in contributor_rows
@@ -843,8 +836,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
             }
         )
         lines.append(
-            "Contributors (one ranked row): "
-            + (", ".join(contributor_ids) or "not reported")
+            "Contributors (one ranked row): " + (", ".join(contributor_ids) or "not reported")
         )
         adapter_lineage = []
         for item in contributor_rows:
@@ -854,9 +846,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
             if not isinstance(lineage, dict):
                 lineage = {}
             source_signal = str(
-                lineage.get("source_signal_id")
-                or item.get("source_signal_id")
-                or ""
+                lineage.get("source_signal_id") or item.get("source_signal_id") or ""
             ).strip()
             prior_date = str(lineage.get("prior_session_date") or "").strip()
             if source_signal:
@@ -866,8 +856,7 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
                 )
         if adapter_lineage:
             lines.append(
-                "Adapter prior-session lineage: "
-                + ", ".join(sorted(set(adapter_lineage)))
+                "Adapter prior-session lineage: " + ", ".join(sorted(set(adapter_lineage)))
             )
 
     core = row.get("core_conditions_passed") or []

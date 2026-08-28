@@ -14,7 +14,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from intraday_scanner.ai.strategy_gap_resolver import StrategyGapResolver
-from intraday_scanner.alpha.alert_gate import apply_alert_gates
+from intraday_scanner.alpha.alert_gate import (
+    apply_alert_gates,
+    validate_strategy_receipt_envelope,
+)
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION, AlphaModel
 from intraday_scanner.alpha.feature_factory import build_feature_vector
 from intraday_scanner.alpha.performance_truth import build_truth_report
@@ -30,7 +33,10 @@ from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, alphaops_strateg
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
 from intraday_scanner.dashboard.operator_data_service import calculate_missing_outcome_status
-from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.decisioning.contracts import (
+    canonical_json,
+    parse_strategy_decision_receipt,
+)
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
@@ -149,6 +155,7 @@ def alpha_morning(
     core_universe_manifest: str | Path | None = None,
     market_date: str | None = None,
     paper_ops_root: str | Path | None = None,
+    code_sha: str | None = None,
 ) -> dict[str, Any]:
     return alpha_cycle(
         config_path=config_path,
@@ -161,6 +168,7 @@ def alpha_morning(
         core_universe_manifest=core_universe_manifest,
         market_date=market_date,
         paper_ops_root=paper_ops_root,
+        code_sha=code_sha,
     )
 
 
@@ -176,7 +184,16 @@ def alpha_cycle(
     core_universe_manifest: str | Path | None = None,
     market_date: str | None = None,
     paper_ops_root: str | Path | None = None,
+    code_sha: str | None = None,
 ) -> dict[str, Any]:
+    code_sha_candidate = (
+        str(code_sha).strip()
+        if code_sha is not None
+        else str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
+    )
+    if code_sha_candidate and not re.fullmatch(r"[0-9a-fA-F]{40}", code_sha_candidate):
+        raise ValueError("code_sha must be a full Git commit SHA")
+    resolved_code_sha = code_sha_candidate.lower()
     if market_date:
         parsed_market_date = _parse_market_date(market_date)
         if as_of is not None and as_of.date().isoformat() != parsed_market_date:
@@ -237,6 +254,7 @@ def alpha_cycle(
         observed_at=cycle_decision_at,
     )
     source_summary = dict(collection.get("source_summary") or {})
+    source_summary["code_sha"] = resolved_code_sha
     source_summary["require_watcher_proof"] = True
     source_summary["core_universe"] = {
         "contract_status": core_universe.get("status"),
@@ -285,6 +303,10 @@ def alpha_cycle(
                 source_summary.get("top_failure_reason") or "mover collection failed"
             )
             source_summary["status"] = "success"
+            source_summary["failed_mover_snapshot_path"] = str(
+                source_summary.get("snapshot_path") or ""
+            )
+            source_summary["snapshot_path"] = str(recovery_path)
             core_only_recovery = True
             core_discovery_recovery = recovery
             source_summary["core_universe"] = {
@@ -331,11 +353,20 @@ def alpha_cycle(
                 for row in core_universe.get("members") or []
             ],
             require_safety=True,
+            producer_code_sha=resolved_code_sha,
         )
         slate_path = output_dir / "ranked_research_slate.json"
         persist_ranked_research_slate(luna_research_slate, slate_path)
+        contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+            store,
+            market_date=no_data_generated_at[:10],
+            strategy_id=None,
+        )
         luna_research_slate = _load_frozen_luna_slate(
-            slate_path, market_date=no_data_generated_at[:10]
+            slate_path,
+            market_date=no_data_generated_at[:10],
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=resolved_code_sha,
         )
         # A source outage can be a retry of a successful same-day cycle.  The
         # first-writer slate, rather than the failed attempt's empty input, is
@@ -357,15 +388,14 @@ def alpha_cycle(
                     coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
                     require_watcher_proof=True,
                     receipt_verifier=receipt_verifier,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
             except (TypeError, ValueError, SnapshotValidationError) as exc:
                 raise SnapshotValidationError(
                     "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted frozen "
                     "slate could not be authenticated for source-failure retry"
                 ) from exc
-            if len(slate_publication_rows) != int(
-                luna_research_slate.get("published_count") or 0
-            ):
+            if len(slate_publication_rows) != int(luna_research_slate.get("published_count") or 0):
                 raise SnapshotValidationError(
                     "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted frozen "
                     "slate publication rows could not be rehydrated"
@@ -385,10 +415,8 @@ def alpha_cycle(
                     cohort=ALPHAOPS_OFFICIAL_COHORT,
                     limit=100,
                 )
-                if (
-                    not existing_selections
-                    or membership_sha256(existing_selections)
-                    != str(existing_cohort.get("membership_sha256") or "")
+                if not existing_selections or membership_sha256(existing_selections) != str(
+                    existing_cohort.get("membership_sha256") or ""
                 ):
                     raise SnapshotValidationError(
                         "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted official "
@@ -429,10 +457,9 @@ def alpha_cycle(
         source_summary["ranked_research_slate_lineage"] = {
             "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
             "slate_id": str(luna_research_slate.get("slate_id") or ""),
-            "slate_content_hash_sha256": str(
-                luna_research_slate.get("content_hash_sha256") or ""
-            ),
+            "slate_content_hash_sha256": str(luna_research_slate.get("content_hash_sha256") or ""),
             "frozen_source_scan_id": str(luna_research_slate.get("scan_id") or ""),
+            "frozen_source_code_sha": str(luna_research_slate.get("producer_code_sha") or ""),
             "current_scan_id": no_data_scan_id,
             "reuse_status": (
                 "CURRENT_SCAN"
@@ -440,7 +467,13 @@ def alpha_cycle(
                 else "GOVERNED_DAILY_FREEZE_REUSE"
             ),
         }
-        selected_signals = official_publication_rows(slate_publication_rows, limit=3)
+        selected_signals = official_publication_rows(
+            slate_publication_rows,
+            slate=luna_research_slate,
+            production=True,
+            limit=3,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        )
         official_no_trade = not selected_signals
         publication_review = dict(review)
         publication_decision = dict(review["decision"])
@@ -473,6 +506,7 @@ def alpha_cycle(
                     slate_shortfall_reason=str(
                         luna_research_slate.get("slate_shortfall_reason") or ""
                     ),
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
                 if not official_no_trade
                 else format_alpha_no_trade(
@@ -527,6 +561,9 @@ def alpha_cycle(
                 selected_at=no_data_generated_at,
                 event=events[0],
                 slate=luna_research_slate if frozen_slate_nonempty else None,
+                publication_rows=(slate_publication_rows if frozen_slate_nonempty else None),
+                production=frozen_slate_nonempty,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
             if official_no_trade:
                 record_no_trade_historical_signal(
@@ -552,10 +589,10 @@ def alpha_cycle(
             slate=luna_research_slate,
             selected_at=selection_selected_at,
             event=events[0],
+            production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
-        official_signal_ids = {
-            str(row.get("signal_id") or "") for row in selected_rows
-        }
+        official_signal_ids = {str(row.get("signal_id") or "") for row in selected_rows}
         delivery_selection_rows = [
             *selected_rows,
             *[
@@ -578,6 +615,7 @@ def alpha_cycle(
             "source_summary": source_summary,
             "enrichment_summary": None,
             "receipt_verifier": receipt_verifier,
+            "contributor_receipt_verifier": contributor_receipt_verifier,
         }
         canonical_contract_path = output_dir / "alpha_run_contract.json"
         prior_canonical_contract = (
@@ -659,6 +697,7 @@ def alpha_cycle(
             "status": "source_failed_retry" if frozen_slate_nonempty else "no_trade",
             "run_type": cycle_name,
             "scan_id": no_data_scan_id,
+            "code_sha": resolved_code_sha,
             "source_summary": source_summary,
             "review": publication_review,
             "selection_stats": selection_stats,
@@ -850,9 +889,7 @@ def alpha_cycle(
                 in {"complete", "partial"}
             ),
         }
-        ranked = _merge_lane_candidates(
-            ranked, core_ranked, lane_eligibility=lane_eligibility
-        )
+        ranked = _merge_lane_candidates(ranked, core_ranked, lane_eligibility=lane_eligibility)
         all_candidates = _merge_lane_candidates(
             all_candidates, core_all, lane_eligibility=lane_eligibility
         )
@@ -919,12 +956,8 @@ def alpha_cycle(
             "total_input_count": len(all_candidates),
             "non_avoid_count": len(scoring_cohort),
             "avoided_count": max(0, len(all_candidates) - len(scoring_cohort)),
-            "sec_verified_count": len(
-                set(ranked_sec_summary.get("checked_tickers") or [])
-            ),
-            "sec_unverified_count": len(
-                set(ranked_sec_summary.get("unchecked_tickers") or [])
-            ),
+            "sec_verified_count": len(set(ranked_sec_summary.get("checked_tickers") or [])),
+            "sec_unverified_count": len(set(ranked_sec_summary.get("unchecked_tickers") or [])),
         }
     )
     reliability_by_source = {row["source"]: row for row in source_reliability}
@@ -971,10 +1004,9 @@ def alpha_cycle(
             str(source_summary.get("source_identity") or "").strip()
             or f"alpha_cycle:{scan_result.run_id}"
         ),
-        current_code_sha=str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip(),
+        current_code_sha=resolved_code_sha,
         current_universe_membership=[
-            str(row.get("ticker") or row.get("symbol") or "").upper()
-            for row in all_candidates
+            str(row.get("ticker") or row.get("symbol") or "").upper() for row in all_candidates
         ],
         current_core_membership=[
             str(row.get("symbol") or row.get("ticker") or "").upper()
@@ -993,13 +1025,24 @@ def alpha_cycle(
         config=scanner_config,
         decision_at=timestamp,
         source_summary=source_summary,
+        code_sha=resolved_code_sha,
     )
     # Receipts are built for every strategy contribution before this grouping;
     # the frozen slate then has one deterministic row per ticker while retaining
     # each contributor's identity and exact receipt lineage.
-    signals = _merge_strategy_adapter_signals(signals, [])
-    strategy_adapter_result["receipt_contributor_count"] = (
-        _strategy_adapter_contributor_count(signals)
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=timestamp[:10],
+        strategy_id=None,
+    )
+    signals = _merge_strategy_adapter_signals(
+        signals,
+        [],
+        expected_code_sha=resolved_code_sha,
+        receipt_verifier=contributor_receipt_verifier,
+    )
+    strategy_adapter_result["receipt_contributor_count"] = _strategy_adapter_contributor_count(
+        signals
     )
     source_summary["morning_strategy_adapter"] = strategy_adapter_result
     if scanner_config.strategy_evidence_enabled:
@@ -1014,13 +1057,13 @@ def alpha_cycle(
     mover_enrichment_status = str(enrichment["summary"].get("status") or "").lower()
     core_snapshot_status = str(core_discovery.get("status") or "DATA_UNAVAILABLE").upper()
     core_enrichment_status = str(core_enrichment_summary.get("status") or "not_run").lower()
-    mover_lane_eligible = (
-        not mover_source_failed and mover_enrichment_status in {"complete", "partial"}
-    )
-    core_lane_eligible = (
-        core_discovery_data_eligible(core_discovery)
-        and core_enrichment_status in {"complete", "partial"}
-    )
+    mover_lane_eligible = not mover_source_failed and mover_enrichment_status in {
+        "complete",
+        "partial",
+    }
+    core_lane_eligible = core_discovery_data_eligible(
+        core_discovery
+    ) and core_enrichment_status in {"complete", "partial"}
     coverage_limitations: list[str] = []
     if str(core_universe.get("status") or "") != "READY":
         coverage_limitations.append("core_membership_contract_unavailable")
@@ -1112,19 +1155,24 @@ def alpha_cycle(
             },
         },
         coverage_limitations=coverage_limitations,
+        producer_code_sha=resolved_code_sha,
     )
     slate_path = output_dir / "ranked_research_slate.json"
     persist_ranked_research_slate(luna_research_slate, slate_path)
-    luna_research_slate = _load_frozen_luna_slate(slate_path, market_date=timestamp[:10])
+    luna_research_slate = _load_frozen_luna_slate(
+        slate_path,
+        market_date=timestamp[:10],
+        contributor_receipt_verifier=contributor_receipt_verifier,
+        expected_code_sha=resolved_code_sha,
+    )
     source_summary["ranked_research_slate"] = luna_research_slate
     frozen_source_scan_id = str(luna_research_slate.get("scan_id") or "")
     source_summary["ranked_research_slate_lineage"] = {
         "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
         "slate_id": str(luna_research_slate.get("slate_id") or ""),
-        "slate_content_hash_sha256": str(
-            luna_research_slate.get("content_hash_sha256") or ""
-        ),
+        "slate_content_hash_sha256": str(luna_research_slate.get("content_hash_sha256") or ""),
         "frozen_source_scan_id": frozen_source_scan_id,
+        "frozen_source_code_sha": str(luna_research_slate.get("producer_code_sha") or ""),
         "current_scan_id": scan_result.run_id,
         "reuse_status": (
             "CURRENT_SCAN"
@@ -1138,6 +1186,7 @@ def alpha_cycle(
         coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
         require_watcher_proof=True,
         receipt_verifier=receipt_verifier,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     if len(slate_publication_rows) != int(luna_research_slate.get("published_count") or 0):
         raise SnapshotValidationError(
@@ -1150,6 +1199,7 @@ def alpha_cycle(
             slate=luna_research_slate,
             market_date=timestamp[:10],
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except (TypeError, ValueError) as exc:
         raise SnapshotValidationError(
@@ -1163,14 +1213,14 @@ def alpha_cycle(
         coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
         require_watcher_proof=True,
         receipt_verifier=receipt_verifier,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     # The persisted daily slate is authoritative.  An empty frozen slate is a
     # deliberate no-research result and must not be repopulated from the
     # current signal set during a retry or no-edge rendering path.
     research_radar = (
         _research_radar(signals)
-        if decision.get("no_trade")
-        and int(luna_research_slate.get("published_count") or 0) > 0
+        if decision.get("no_trade") and int(luna_research_slate.get("published_count") or 0) > 0
         else []
     )
     signals = _annotate_research_radar(signals, research_radar)
@@ -1219,6 +1269,7 @@ def alpha_cycle(
         slate=luna_research_slate,
         production=True,
         limit=3,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     source_summary["official_publication_rows"] = selected_signals
     official_no_trade = not selected_signals
@@ -1263,9 +1314,7 @@ def alpha_cycle(
             candidate_count=len(ranked),
         )
     if official_no_trade:
-        frozen_manifest = _load_frozen_official_notification_manifest(
-            store, selected_at=timestamp
-        )
+        frozen_manifest = _load_frozen_official_notification_manifest(store, selected_at=timestamp)
         message = (
             str(frozen_manifest.get("body") or "")
             if frozen_manifest is not None
@@ -1275,9 +1324,7 @@ def alpha_cycle(
                 research_signals=slate_publication_rows,
                 target_count=int(luna_research_slate.get("target_count") or 0),
                 published_count=int(luna_research_slate.get("published_count") or 0),
-                slate_shortfall_reason=str(
-                    luna_research_slate.get("slate_shortfall_reason") or ""
-                ),
+                slate_shortfall_reason=str(luna_research_slate.get("slate_shortfall_reason") or ""),
             )
         )
         hint = "alpha_no_trade"
@@ -1288,9 +1335,7 @@ def alpha_cycle(
             if str(decision.get("decision_tier") or "") == "probability_fallback"
             else _edge_label(selected_signals)
         )
-        frozen_manifest = _load_frozen_official_notification_manifest(
-            store, selected_at=timestamp
-        )
+        frozen_manifest = _load_frozen_official_notification_manifest(store, selected_at=timestamp)
         message = (
             str(frozen_manifest.get("body") or "")
             if frozen_manifest is not None
@@ -1302,9 +1347,8 @@ def alpha_cycle(
                 generated_at=timestamp,
                 target_count=int(luna_research_slate.get("target_count") or 0),
                 published_count=int(luna_research_slate.get("published_count") or 0),
-                slate_shortfall_reason=str(
-                    luna_research_slate.get("slate_shortfall_reason") or ""
-                ),
+                slate_shortfall_reason=str(luna_research_slate.get("slate_shortfall_reason") or ""),
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
         )
         hint = "alpha_morning_watch"
@@ -1339,6 +1383,7 @@ def alpha_cycle(
             slate=luna_research_slate,
             publication_rows=slate_publication_rows,
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         selection_scan_id = scan_result.run_id
         selection_selected_at = timestamp
@@ -1359,18 +1404,17 @@ def alpha_cycle(
         selected_at=selection_selected_at,
         event=events[0],
         production=True,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
-    official_signal_ids = {
-        str(row.get("signal_id") or "") for row in selected_rows
-    }
+    official_signal_ids = {str(row.get("signal_id") or "") for row in selected_rows}
     delivery_radar_rows = [
         row
         for row in radar_selection_rows
         if str(row.get("signal_id") or "") not in official_signal_ids
     ]
-    radar_selection_stats["delivery_overlap_excluded"] = len(
-        radar_selection_rows
-    ) - len(delivery_radar_rows)
+    radar_selection_stats["delivery_overlap_excluded"] = len(radar_selection_rows) - len(
+        delivery_radar_rows
+    )
     delivery_selection_rows = [*selected_rows, *delivery_radar_rows]
     if frozen_cohort_retry is None:
         historical_rows = record_alpha_historical_signals(
@@ -1419,6 +1463,7 @@ def alpha_cycle(
         "source_summary": source_summary,
         "enrichment_summary": dict(enrichment["summary"]),
         "receipt_verifier": receipt_verifier,
+        "contributor_receipt_verifier": contributor_receipt_verifier,
     }
     _persist_run_contract(
         output_dir,
@@ -1480,6 +1525,7 @@ def alpha_cycle(
         "run_type": cycle_name,
         "scan_id": scan_result.run_id,
         "model_version": ALPHA_MODEL_VERSION,
+        "code_sha": resolved_code_sha,
         "source_summary": source_summary,
         "source_reliability": source_reliability,
         "premarket_enrichment": enrichment["summary"],
@@ -1548,9 +1594,7 @@ def alpha_monitor(
     store = SQLiteScanStore(db_path)
     latest_attempt_signals = store.load_alpha_signals(limit=25)
     latest_attempt_scan_id = (
-        str(latest_attempt_signals[0].get("scan_id") or "")
-        if latest_attempt_signals
-        else ""
+        str(latest_attempt_signals[0].get("scan_id") or "") if latest_attempt_signals else ""
     )
     latest_attempt_signals = [
         row
@@ -1558,20 +1602,14 @@ def alpha_monitor(
         if str(row.get("scan_id") or "") == latest_attempt_scan_id
     ]
     latest_attempt_date = (
-        _signal_market_date(latest_attempt_signals[0])
-        if latest_attempt_signals
-        else ""
+        _signal_market_date(latest_attempt_signals[0]) if latest_attempt_signals else ""
     )
     required_market_date = (
         session_gate.market_date if session_gate is not None else latest_attempt_date
     )
     contract_reference: str | datetime = (
         as_of
-        or (
-            str(latest_attempt_signals[0].get("timestamp") or "")
-            if latest_attempt_signals
-            else ""
-        )
+        or (str(latest_attempt_signals[0].get("timestamp") or "") if latest_attempt_signals else "")
         or f"{required_market_date}T12:00:00+00:00"
     )
     strategy_id, strategy_version = alphaops_strategy_contract(contract_reference)
@@ -1589,17 +1627,9 @@ def alpha_monitor(
     # date-level official cohort deliberately remains frozen on its original
     # scan.  Monitoring follows the authoritative cohort, never whichever
     # alpha_signal row happened to be written most recently.
-    latest_scan_id = str(
-        (official_cohort or {}).get("scan_id") or latest_attempt_scan_id
-    )
-    latest_signal_date = str(
-        (official_cohort or {}).get("market_date") or latest_attempt_date
-    )[:10]
-    signals = (
-        store.load_alpha_signals(scan_id=latest_scan_id, limit=500)
-        if latest_scan_id
-        else []
-    )
+    latest_scan_id = str((official_cohort or {}).get("scan_id") or latest_attempt_scan_id)
+    latest_signal_date = str((official_cohort or {}).get("market_date") or latest_attempt_date)[:10]
+    signals = store.load_alpha_signals(scan_id=latest_scan_id, limit=500) if latest_scan_id else []
     if not signals and official_cohort is None:
         signals = latest_attempt_signals
     if session_gate is not None and signals and latest_signal_date != session_gate.market_date:
@@ -1646,6 +1676,11 @@ def alpha_monitor(
         cohort=ALPHAOPS_RADAR_COHORT,
         limit=50,
     )
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=required_market_date,
+        strategy_id=None,
+    )
     try:
         if official_cohort is not None:
             if not _valid_monitor_official_cohort(
@@ -1679,12 +1714,14 @@ def alpha_monitor(
                 store,
                 market_date=required_market_date,
             ),
+            contributor_receipt_verifier=contributor_receipt_verifier,
             production=True,
         )
         radar_monitor_signals = _radar_monitor_signals(
             signals,
             radar_selections,
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except SnapshotValidationError as exc:
         return {
@@ -1736,9 +1773,7 @@ def alpha_monitor(
                         "no monitor notification was created."
                     ),
                     "latest_watchlist_market_date": latest_signal_date or "unknown",
-                    "required_market_date": (
-                        session_gate.market_date if session_gate else None
-                    ),
+                    "required_market_date": (session_gate.market_date if session_gate else None),
                     "tickers": [],
                     "events": [],
                     "notification_stats": {"sent": 0, "skipped": 0},
@@ -1929,22 +1964,24 @@ def _valid_monitor_official_cohort(
         or str(cohort.get("strategy_id") or "") != strategy_id
         or str(cohort.get("strategy_version") or "") != strategy_version
         or str(cohort.get("cohort") or "") != ALPHAOPS_OFFICIAL_COHORT
-        or membership_sha256(selections)
-        != str(cohort.get("membership_sha256") or "")
+        or membership_sha256(selections) != str(cohort.get("membership_sha256") or "")
     ):
         return False
     for selection in selections:
-        if any(
-            str(selection.get(field) or "") != str(cohort.get(field) or "")
-            for field in (
-                "scan_id",
-                "event_key",
-                "body_sha256",
-                "strategy_id",
-                "strategy_version",
-                "cohort",
+        if (
+            any(
+                str(selection.get(field) or "") != str(cohort.get(field) or "")
+                for field in (
+                    "scan_id",
+                    "event_key",
+                    "body_sha256",
+                    "strategy_id",
+                    "strategy_version",
+                    "cohort",
+                )
             )
-        ) or str(selection.get("selected_at") or "")[:10] != market_date:
+            or str(selection.get("selected_at") or "")[:10] != market_date
+        ):
             return False
     payload = cohort.get("payload_json")
     manifest = payload.get("notification_manifest") if isinstance(payload, dict) else None
@@ -1966,8 +2003,7 @@ def _valid_monitor_official_cohort(
         and manifest.get("schema_version")
         == "dawnstrike.alphaops.official_notification_manifest.v1"
         and str(manifest.get("event_key") or "") == str(cohort.get("event_key") or "")
-        and str(manifest.get("body_sha256") or "")
-        == str(cohort.get("body_sha256") or "")
+        and str(manifest.get("body_sha256") or "") == str(cohort.get("body_sha256") or "")
         and _body_sha256(body) == str(cohort.get("body_sha256") or "")
         and str(manifest.get("title") or "")
         and str(manifest.get("channel_hint") or "")
@@ -1981,6 +2017,7 @@ def _official_monitor_signals(
     selections: list[dict[str, Any]],
     *,
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
     production: bool = False,
 ) -> list[dict[str, Any]]:
     """Rehydrate the exact official cohort, including governed scan retries."""
@@ -2009,12 +2046,13 @@ def _official_monitor_signals(
             market_date=str(selection.get("selected_at") or "")[:10],
             allowed_cohorts=(ALPHAOPS_OFFICIAL_COHORT,),
             production=production,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         if signal is not None:
             payload = selection.get("payload_json")
-            slate = payload.get("frozen_ranked_research_slate") if isinstance(
-                payload, dict
-            ) else None
+            slate = (
+                payload.get("frozen_ranked_research_slate") if isinstance(payload, dict) else None
+            )
             if not isinstance(slate, dict):  # pragma: no cover - validator requires it
                 raise SnapshotValidationError(
                     "Official selection is missing its frozen research slate."
@@ -2028,6 +2066,7 @@ def _official_monitor_signals(
                 coverage={"lanes": slate.get("lane_statuses") or {}},
                 require_watcher_proof=True,
                 receipt_verifier=receipt_verifier,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )[0]
             if str(signal.get("publication_tier") or "") not in {
                 "PAPER_PLAN_QUALIFIED",
@@ -2071,6 +2110,7 @@ def _radar_monitor_signals(
     selections: list[dict[str, Any]],
     *,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     signal_by_id = {
         str(row.get("signal_id") or row.get("signal_key") or ""): row
@@ -2088,7 +2128,11 @@ def _radar_monitor_signals(
         source_scan_id = str(selection.get("source_scan_id") or "")
         cross_scan = bool(source_scan_id and source_scan_id != selection_scan_id)
         if cross_scan:
-            radar_signal = _validated_frozen_radar_signal(selection, production=production)
+            radar_signal = _validated_frozen_radar_signal(
+                selection,
+                production=production,
+                contributor_receipt_verifier=contributor_receipt_verifier,
+            )
             if radar_signal is None:
                 raise SnapshotValidationError(
                     "Persisted research slate selection has invalid governed frozen-slate lineage."
@@ -2099,7 +2143,11 @@ def _radar_monitor_signals(
             if signal is None:
                 if not radar_signal:
                     continue
-                validated = _validated_frozen_radar_signal(selection, production=production)
+                validated = _validated_frozen_radar_signal(
+                    selection,
+                    production=production,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
+                )
                 if validated is None:
                     continue
                 signal = validated
@@ -2120,7 +2168,10 @@ def _radar_monitor_signals(
 
 
 def _validated_frozen_radar_signal(
-    selection: dict[str, Any], *, production: bool = False
+    selection: dict[str, Any],
+    *,
+    production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any] | None:
     """Return the exact slate row carried by a governed radar selection."""
 
@@ -2136,6 +2187,7 @@ def _validated_frozen_radar_signal(
         market_date=market_date,
         allowed_cohorts=(ALPHAOPS_RADAR_COHORT,),
         production=production,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
 
 
@@ -2341,6 +2393,7 @@ def _persist_run_contract(
     notification_dry_run: bool,
     notification_status_override: str = "",
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
     artifact_name: str = "alpha_run_contract.json",
 ) -> AlphaRunContract:
     contract = build_alpha_run_contract(
@@ -2356,12 +2409,19 @@ def _persist_run_contract(
         notification_dry_run=notification_dry_run,
         notification_status_override=notification_status_override,
         receipt_verifier=receipt_verifier,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     _write_json(output_dir / artifact_name, contract.to_dict())
     return contract
 
 
-def _load_frozen_luna_slate(path: Path, *, market_date: str) -> dict[str, Any]:
+def _load_frozen_luna_slate(
+    path: Path,
+    *,
+    market_date: str,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    expected_code_sha: str | None = None,
+) -> dict[str, Any]:
     """Reuse the first valid daily slate on retries; never replace its bytes."""
 
     try:
@@ -2375,8 +2435,15 @@ def _load_frozen_luna_slate(path: Path, *, market_date: str) -> dict[str, Any]:
             payload,
             market_date=market_date,
             production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=expected_code_sha,
         )
     except ValueError as exc:
+        if "code SHA" in str(exc):
+            raise SnapshotValidationError(
+                "FROZEN_SLATE_CODE_SHA_MISMATCH: persisted Luna slate release "
+                "identity does not match the current cycle"
+            ) from exc
         raise SnapshotValidationError("Persisted Luna slate failed integrity checks") from exc
 
 
@@ -2412,12 +2479,8 @@ def _merge_lane_candidates(
         prior_lane = str(prior.get("evidence_lane") or "mover").strip().lower()
         prior_admissible = row_research_admissible(prior)
         row_admissible = row_research_admissible(row)
-        prior_lane_eligible = (
-            lane_eligibility.get(prior_lane, False) if lane_eligibility else True
-        )
-        row_lane_eligible = (
-            lane_eligibility.get(lane, False) if lane_eligibility else True
-        )
+        prior_lane_eligible = lane_eligibility.get(prior_lane, False) if lane_eligibility else True
+        row_lane_eligible = lane_eligibility.get(lane, False) if lane_eligibility else True
         prior_rank = (
             prior_admissible and prior_lane_eligible,
             prior_admissible,
@@ -2871,7 +2934,11 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
 
 
 def _merge_strategy_adapter_signals(
-    signals: list[dict[str, Any]], adapter_rows: list[dict[str, Any]] | None = None
+    signals: list[dict[str, Any]],
+    adapter_rows: list[dict[str, Any]] | None = None,
+    *,
+    expected_code_sha: str | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Dedupe one Morning row per ticker while retaining all contributors.
 
@@ -2882,9 +2949,7 @@ def _merge_strategy_adapter_signals(
     """
 
     source = [
-        dict(row)
-        for row in [*(signals or []), *(adapter_rows or [])]
-        if isinstance(row, dict)
+        dict(row) for row in [*(signals or []), *(adapter_rows or [])] if isinstance(row, dict)
     ]
     grouped: dict[str, list[dict[str, Any]]] = {}
     passthrough: list[dict[str, Any]] = []
@@ -2895,23 +2960,193 @@ def _merge_strategy_adapter_signals(
             continue
         grouped.setdefault(ticker, []).append(row)
 
-    def score_value(row: dict[str, Any]) -> float:
+    def receipt_authentication(
+        row: dict[str, Any], *, ticker: str, market_date: str
+    ) -> dict[str, Any] | None:
+        receipt = row.get("strategy_decision_receipt") or row.get("decision_receipt")
+        if not isinstance(receipt, dict):
+            return None
         try:
-            return float(row.get("alpha_score") or row.get("score") or float("-inf"))
-        except (TypeError, ValueError):
-            return float("-inf")
-
-    def eligible(row: dict[str, Any]) -> bool:
-        return row.get("research_pick_eligible") is True or row.get(
-            "paper_entry_eligible"
-        ) is True
+            typed = parse_strategy_decision_receipt(receipt, require_v2=True)
+            input_payload = json.loads(typed.input_payload_json)
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+        if "strategy_decision_receipt" in row:
+            try:
+                if not validate_strategy_receipt_envelope(row):
+                    return None
+            except (TypeError, ValueError, KeyError):
+                return None
+        receipt_id = str(row.get("receipt_id") or "").strip()
+        receipt_hash = str(row.get("receipt_hash_sha256") or "").strip().lower()
+        status = (
+            str(row.get("receipt_status") or row.get("strategy_receipt_construction_status") or "")
+            .strip()
+            .upper()
+        )
+        if (
+            receipt_id != typed.receipt_id
+            or receipt_hash != typed.receipt_hash_sha256
+            or status != "COMPLETE"
+            or typed.strategy_id
+            != str(row.get("strategy_id") or row.get("decision_strategy_id") or "").strip()
+            or typed.strategy_version != str(row.get("strategy_version") or "").strip()
+            or typed.symbol != ticker
+            or (market_date and typed.market_date != market_date)
+        ):
+            return None
+        if expected_code_sha is not None and (
+            not re.fullmatch(r"[0-9a-f]{40}", expected_code_sha)
+            or typed.code_sha != expected_code_sha
+        ):
+            return None
+        if receipt_verifier is not None and (
+            type(receipt_verifier) is not AuthenticatedStrategyReceiptResolver
+            or not receipt_verifier.verify_payload(
+                typed.to_dict(),
+                market_date=typed.market_date,
+                strategy_id=typed.strategy_id,
+                strategy_version=typed.strategy_version,
+                symbol=typed.symbol,
+                code_sha=typed.code_sha,
+            )
+        ):
+            return None
+        if "strategy_decision_receipt" in row and str(
+            row.get("strategy_receipt_persistence_status") or ""
+        ).upper() not in {"PERSISTED", "REUSED"}:
+            return None
+        source_signal_id = next(
+            (
+                str(row.get(key) or "").strip()
+                for key in (
+                    "source_signal_id",
+                    "prior_session_signal_id",
+                    "signal_id",
+                    "signal_key",
+                )
+                if str(row.get(key) or "").strip()
+            ),
+            "",
+        )
+        input_source_signal_id = (
+            next(
+                (
+                    str(input_payload.get(key) or "").strip()
+                    for key in (
+                        "source_signal_id",
+                        "prior_session_signal_id",
+                        "signal_id",
+                        "signal_key",
+                    )
+                    if str(input_payload.get(key) or "").strip()
+                ),
+                "",
+            )
+            if isinstance(input_payload, dict)
+            else ""
+        )
+        if not source_signal_id or input_source_signal_id != source_signal_id:
+            return None
+        for key, expected in (
+            ("alpha_score", typed.final_score),
+            ("score", typed.final_score),
+            ("final_score", typed.final_score),
+            ("base_strategy_score", typed.base_strategy_score),
+            ("score_adjustment", typed.score_adjustment),
+        ):
+            if key not in row or row.get(key) in {None, ""}:
+                continue
+            parsed = _number(row.get(key))
+            if parsed is None or not math.isfinite(parsed) or parsed != expected:
+                return None
+        for key, expected in (
+            ("research_pick_eligible", typed.research_pick_eligible),
+            ("paper_entry_eligible", typed.paper_entry_eligible),
+        ):
+            if row.get(key) is not None and row.get(key) is not expected:
+                return None
+        input_direction = str(input_payload.get("direction") or "").strip().lower()
+        row_direction = str(row.get("direction") or "").strip().lower()
+        if row_direction and (
+            row_direction not in {"long", "short"} or input_direction != row_direction
+        ):
+            return None
+        if input_direction not in {"long", "short"}:
+            return None
+        return {
+            "receipt": typed.to_dict(),
+            "receipt_id": typed.receipt_id,
+            "receipt_hash_sha256": typed.receipt_hash_sha256,
+            "source_signal_id": source_signal_id,
+            "research_pick_eligible": typed.research_pick_eligible,
+            "paper_entry_eligible": typed.paper_entry_eligible,
+            "final_score": typed.final_score,
+            "direction": input_direction,
+        }
 
     output: list[dict[str, Any]] = []
     for rows in grouped.values():
-        eligible_rows = [row for row in rows if eligible(row)]
-        ranked_pool = eligible_rows or rows
+        ticker = str(rows[0].get("ticker") or rows[0].get("symbol") or "").strip().upper()
+        declared_market_dates = {
+            str(row.get("market_date") or "").strip()
+            for row in rows
+            if str(row.get("market_date") or "").strip()
+        }
+        receipt_market_dates: set[str] = set()
+        for row in rows:
+            receipt_payload = row.get("strategy_decision_receipt") or row.get("decision_receipt")
+            if not isinstance(receipt_payload, dict):
+                continue
+            try:
+                receipt_market_dates.add(
+                    parse_strategy_decision_receipt(
+                        receipt_payload,
+                        require_v2=True,
+                    ).market_date
+                )
+            except (TypeError, ValueError, KeyError):
+                continue
+        market_dates = declared_market_dates | receipt_market_dates
+        mixed_market_dates = len(market_dates) > 1
+        group_market_date = next(iter(market_dates)) if len(market_dates) == 1 else ""
+        authenticated = {
+            id(row): (
+                None
+                if mixed_market_dates
+                else receipt_authentication(
+                    row,
+                    ticker=ticker,
+                    market_date=group_market_date,
+                )
+            )
+            for row in rows
+        }
 
-        def primary_bucket(row: dict[str, Any]) -> int:
+        def eligible(
+            row: dict[str, Any],
+            _authenticated: dict[int, dict[str, Any] | None] = authenticated,
+        ) -> bool:
+            receipt = _authenticated.get(id(row))
+            return bool(
+                receipt
+                and (
+                    receipt["research_pick_eligible"] is True
+                    or receipt["paper_entry_eligible"] is True
+                )
+            )
+
+        def score_value(
+            row: dict[str, Any],
+            _authenticated: dict[int, dict[str, Any] | None] = authenticated,
+        ) -> float:
+            receipt = _authenticated.get(id(row))
+            return float(receipt["final_score"]) if receipt else float("-inf")
+
+        def primary_bucket(
+            row: dict[str, Any],
+            _authenticated: dict[int, dict[str, Any] | None] = authenticated,
+        ) -> int:
             # Keep the canonical identity stable: an eligible native Alpha
             # row remains primary over an eligible adapter row.  The ranking
             # score below is deliberately independent of this identity.
@@ -2920,28 +3155,30 @@ def _merge_strategy_adapter_signals(
                 return 0
             if eligible(row) and adapter:
                 return 1
-            if not adapter:
+            if _authenticated.get(id(row)) is not None and not adapter:
                 return 2
-            return 3
+            if _authenticated.get(id(row)) is not None:
+                return 3
+            if not adapter:
+                return 4
+            return 5
 
         ordered = sorted(
             rows,
             key=lambda row: (
                 primary_bucket(row),
-                -score_value(row) if row in ranked_pool else 0.0,
+                -score_value(row),
                 str(row.get("strategy_id") or ""),
                 str(row.get("signal_id") or row.get("signal_key") or ""),
             ),
         )
         primary = dict(ordered[0])
-        strongest_eligible = max(
-            (score_value(row) for row in ranked_pool),
-            default=float("-inf"),
-        )
         contributors: list[dict[str, Any]] = []
         receipts: list[dict[str, Any]] = []
+        contribution_gaps: list[dict[str, Any]] = []
         seen_contributors: set[tuple[str, str, str, str]] = set()
         seen_receipts: set[str] = set()
+        seen_gaps: set[tuple[str, str, str]] = set()
 
         def add_contributor(
             row: dict[str, Any],
@@ -2950,6 +3187,11 @@ def _merge_strategy_adapter_signals(
             _seen_receipts: set[str] = seen_receipts,
             _contributors: list[dict[str, Any]] = contributors,
             _receipts: list[dict[str, Any]] = receipts,
+            _ticker: str = ticker,
+            _market_date: str = group_market_date,
+            _mixed_market_dates: bool = mixed_market_dates,
+            _seen_gaps: set[tuple[str, str, str]] = seen_gaps,
+            _contribution_gaps: list[dict[str, Any]] = contribution_gaps,
         ) -> None:
             strategy_id = str(
                 row.get("strategy_id") or row.get("decision_strategy_id") or ""
@@ -2966,32 +3208,41 @@ def _merge_strategy_adapter_signals(
             key = (strategy_id, strategy_version, strategy_fp, source_id)
             if not strategy_id or key in _seen_contributors:
                 return
+            auth = (
+                None
+                if _mixed_market_dates
+                else receipt_authentication(
+                    row,
+                    ticker=_ticker,
+                    market_date=_market_date,
+                )
+            )
+            if auth is None:
+                gap_key = (strategy_id, strategy_version, source_id)
+                if gap_key not in _seen_gaps:
+                    _contribution_gaps.append(
+                        {
+                            "strategy_id": strategy_id,
+                            "strategy_version": strategy_version,
+                            "source_signal_id": source_id,
+                            "reason": (
+                                "mixed_strategy_receipt_market_dates"
+                                if _mixed_market_dates
+                                else "canonical_v2_strategy_receipt_unavailable_or_unbound"
+                            ),
+                        }
+                    )
+                    _seen_gaps.add(gap_key)
+                return
+            source_id = str(auth["source_signal_id"])
+            key = (strategy_id, strategy_version, strategy_fp, source_id)
+            if key in _seen_contributors:
+                return
             _seen_contributors.add(key)
-            receipt = row.get("strategy_decision_receipt") or row.get("decision_receipt")
-            receipt_id = str(row.get("receipt_id") or "").strip()
-            receipt_input: dict[str, Any] = {}
-            if isinstance(receipt, dict):
-                receipt_id = str(receipt.get("receipt_id") or receipt_id).strip()
-                try:
-                    decoded_input = json.loads(str(receipt.get("input_payload_json") or ""))
-                    if isinstance(decoded_input, dict):
-                        receipt_input = decoded_input
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    receipt_input = {}
-                if receipt_id and receipt_id not in _seen_receipts:
-                    _receipts.append(dict(receipt))
-                    _seen_receipts.add(receipt_id)
-            receipt_plan = receipt_input.get("alphaops_market_structure_plan")
-            if not isinstance(receipt_plan, dict):
-                receipt_plan = {}
-            direction = str(
-                row.get("direction")
-                or row.get("trade_direction")
-                or receipt_input.get("direction")
-                or receipt_input.get("trade_direction")
-                or receipt_plan.get("direction")
-                or ""
-            ).strip().lower()
+            receipt_id = str(auth["receipt_id"])
+            if receipt_id not in _seen_receipts:
+                _receipts.append(dict(auth["receipt"]))
+                _seen_receipts.add(receipt_id)
             _contributors.append(
                 {
                     "strategy_id": strategy_id,
@@ -2999,21 +3250,20 @@ def _merge_strategy_adapter_signals(
                     "strategy_semantics_fingerprint": strategy_fp,
                     "source_signal_id": source_id,
                     "signal_id": str(row.get("signal_id") or ""),
-                    "direction": direction,
                     "strategy_adapter": str(row.get("strategy_adapter") or ""),
                     "receipt_id": receipt_id,
-                    "receipt_hash_sha256": str(row.get("receipt_hash_sha256") or ""),
-                    "receipt_status": str(
-                        row.get("strategy_receipt_construction_status") or "MISSING"
-                    ),
-                    "research_pick_eligible": row.get("research_pick_eligible"),
-                    "paper_entry_eligible": row.get("paper_entry_eligible"),
+                    "receipt_hash_sha256": str(auth["receipt_hash_sha256"]),
+                    "receipt_status": "COMPLETE",
+                    "research_pick_eligible": auth["research_pick_eligible"],
+                    "paper_entry_eligible": auth["paper_entry_eligible"],
+                    "final_score": auth["final_score"],
+                    "direction": auth["direction"],
                     "prior_session_lineage": (
                         dict(row.get("prior_session_paper_ops") or {})
                         if isinstance(row.get("prior_session_paper_ops"), dict)
                         else None
                     ),
-                    "decision_receipt": dict(receipt) if isinstance(receipt, dict) else None,
+                    "decision_receipt": dict(auth["receipt"]),
                 }
             )
 
@@ -3037,14 +3287,19 @@ def _merge_strategy_adapter_signals(
             }
         )
         primary["strategy_decision_receipts"] = receipts
+        eligible_scores = [
+            float(item["final_score"])
+            for item in contributors
+            if item.get("research_pick_eligible") is True
+            or item.get("paper_entry_eligible") is True
+        ]
         primary["strongest_eligible_contributor_score"] = (
-            None if strongest_eligible == float("-inf") else strongest_eligible
+            max(eligible_scores) if eligible_scores else None
         )
         primary["canonical_primary_strategy_id"] = str(primary.get("strategy_id") or "")
+        primary["strategy_contribution_gaps"] = contribution_gaps
         primary["strategy_contribution_status"] = (
-            "COMPLETE"
-            if contributors and all(item.get("receipt_id") for item in contributors)
-            else "DISCLOSED_GAPS"
+            "COMPLETE" if contributors and not contribution_gaps else "DISCLOSED_GAPS"
         )
         primary["research_only"] = True
         primary["broker_execution"] = "disabled"
@@ -3081,16 +3336,12 @@ def _attach_authenticated_alpaca_structure(
     expected_strategy_id, _ = alphaops_strategy_contract(decision_at)
     primary = str(output.get("enrichment_primary_source") or "").lower()
     source = str(
-        output.get("enrichment_range_source")
-        or output.get("premarket_range_source")
-        or ""
+        output.get("enrichment_range_source") or output.get("premarket_range_source") or ""
     ).lower()
     observed = str(output.get("enrichment_observed_at") or "").strip()
     completed = str(output.get("enrichment_bar_completed_at") or "").strip()
     source_hash = str(output.get("enrichment_observation_sha256") or "").strip().lower()
-    observation_payload_json = str(
-        output.get("enrichment_observation_payload_json") or ""
-    ).strip()
+    observation_payload_json = str(output.get("enrichment_observation_payload_json") or "").strip()
     observation_payload: dict[str, Any] | None = None
     observation_payload_hash_ok = False
     if observation_payload_json:
@@ -3103,9 +3354,10 @@ def _attach_authenticated_alpaca_structure(
                     separators=(",", ":"),
                     ensure_ascii=True,
                 )
-                observation_payload_hash_ok = _valid_sha256(source_hash) and hashlib.sha256(
-                    canonical_payload.encode("utf-8")
-                ).hexdigest() == source_hash
+                observation_payload_hash_ok = (
+                    _valid_sha256(source_hash)
+                    and hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest() == source_hash
+                )
                 if observation_payload_hash_ok:
                     observation_payload = parsed_payload
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -3143,10 +3395,8 @@ def _attach_authenticated_alpaca_structure(
             session_valid = bool(session_date) and all(
                 item is not None
                 and item.astimezone(EASTERN).date() == session_date
-                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute)
-                >= (4, 0)
-                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute)
-                < (9, 30)
+                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute) >= (4, 0)
+                and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute) < (9, 30)
                 for item in bar_times
             )
             complete_by_request = bool(requested_dt) and all(
@@ -3155,29 +3405,22 @@ def _attach_authenticated_alpaca_structure(
             )
             latest_matches_aggregate = bool(bar_times) and (
                 bar_times[-1] == _parse_structure_time(observed)
-                and bar_times[-1] + timedelta(minutes=1)
-                == _parse_structure_time(completed)
+                and bar_times[-1] + timedelta(minutes=1) == _parse_structure_time(completed)
             )
             high_values = [
-                _number(item.get("high"))
-                for item in raw_bars or []
-                if isinstance(item, dict)
+                _number(item.get("high")) for item in raw_bars or [] if isinstance(item, dict)
             ]
             low_values = [
-                _number(item.get("low"))
-                for item in raw_bars or []
-                if isinstance(item, dict)
+                _number(item.get("low")) for item in raw_bars or [] if isinstance(item, dict)
             ]
             premarket_reconciles = (
                 _valid_sha256(premarket_hash)
                 and hashlib.sha256(canonical_premarket.encode("utf-8")).hexdigest()
                 == premarket_hash
                 and isinstance(raw_premarket, dict)
-                and str(raw_premarket.get("ticker") or "").upper() == str(
-                    output.get("ticker") or output.get("symbol") or ""
-                ).upper()
-                and str(raw_premarket.get("feed") or "").lower()
-                == source.rsplit("_", 1)[-1]
+                and str(raw_premarket.get("ticker") or "").upper()
+                == str(output.get("ticker") or output.get("symbol") or "").upper()
+                and str(raw_premarket.get("feed") or "").lower() == source.rsplit("_", 1)[-1]
                 and requested_dt is not None
                 and decision_dt is not None
                 and requested_dt == decision_dt
@@ -3222,17 +3465,12 @@ def _attach_authenticated_alpaca_structure(
                 separators=(",", ":"),
                 ensure_ascii=True,
             )
-            prior_raw_hash_ok = _valid_sha256(prior_hash) and hashlib.sha256(
-                canonical_prior_raw.encode("utf-8")
-            ).hexdigest() == prior_hash
-            raw_bar = (
-                parsed_prior_raw.get("bar")
-                if isinstance(parsed_prior_raw, dict)
-                else None
+            prior_raw_hash_ok = (
+                _valid_sha256(prior_hash)
+                and hashlib.sha256(canonical_prior_raw.encode("utf-8")).hexdigest() == prior_hash
             )
-            raw_bar_high = (
-                _number(raw_bar.get("h")) if isinstance(raw_bar, dict) else None
-            )
+            raw_bar = parsed_prior_raw.get("bar") if isinstance(parsed_prior_raw, dict) else None
+            raw_bar_high = _number(raw_bar.get("h")) if isinstance(raw_bar, dict) else None
             raw_high = (
                 _number(parsed_prior_raw.get("high"))
                 if isinstance(parsed_prior_raw, dict)
@@ -3313,23 +3551,37 @@ def _attach_authenticated_alpaca_structure(
         return output
     output["market_structure_observations"] = {
         "entry": _strict_structure_observation(
-            ticker=ticker, role="entry", value=high, observed_at=observed,
+            ticker=ticker,
+            role="entry",
+            value=high,
+            observed_at=observed,
             completed_at=completed,
             source=source,
             source_url=str(output.get("premarket_range_source_url") or ""),
-            source_hash=premarket_hash, observation_kind="premarket_high",
+            source_hash=premarket_hash,
+            observation_kind="premarket_high",
         ),
         "stop": _strict_structure_observation(
-            ticker=ticker, role="stop", value=low, observed_at=observed,
+            ticker=ticker,
+            role="stop",
+            value=low,
+            observed_at=observed,
             completed_at=completed,
             source=source,
             source_url=str(output.get("premarket_range_source_url") or ""),
-            source_hash=premarket_hash, observation_kind="premarket_low",
+            source_hash=premarket_hash,
+            observation_kind="premarket_low",
         ),
         "target": _strict_structure_observation(
-            ticker=ticker, role="target", value=prior_high, observed_at=prior_observed,
-            completed_at=prior_completed, source=prior_source, source_url=prior_url,
-            source_hash=prior_hash, observation_kind="prior_day_resistance",
+            ticker=ticker,
+            role="target",
+            value=prior_high,
+            observed_at=prior_observed,
+            completed_at=prior_completed,
+            source=prior_source,
+            source_url=prior_url,
+            source_hash=prior_hash,
+            observation_kind="prior_day_resistance",
             completion_semantics=prior_completion_semantics,
         ),
     }
@@ -3342,9 +3594,17 @@ def _attach_authenticated_alpaca_structure(
 
 
 def _strict_structure_observation(
-    *, ticker: str, role: str, value: float, observed_at: str,
-    completed_at: str, source: str, source_url: str, source_hash: str,
-    observation_kind: str, completion_semantics: str = "bar_completion",
+    *,
+    ticker: str,
+    role: str,
+    value: float,
+    observed_at: str,
+    completed_at: str,
+    source: str,
+    source_url: str,
+    source_hash: str,
+    observation_kind: str,
+    completion_semantics: str = "bar_completion",
 ) -> dict[str, Any]:
     return {
         "ticker": ticker,
@@ -3385,6 +3645,7 @@ def _apply_strategy_decision_receipts(
     decision_at: str,
     source_summary: dict[str, Any],
     gap_resolver: Any | None = None,
+    code_sha: str | None = None,
 ) -> dict[str, Any]:
     """Build, resolve, re-evaluate, and persist receipts before final gates."""
 
@@ -3398,7 +3659,14 @@ def _apply_strategy_decision_receipts(
     from intraday_scanner.decisioning.contracts import ConditionCategory, ConditionStatus
     from intraday_scanner.decisioning.evidence_resolver import CONDITION_CLAIM_TYPES
 
-    code_sha = str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
+    code_sha = (
+        str(code_sha).strip()
+        if code_sha is not None
+        else str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip()
+    )
+    if code_sha and not re.fullmatch(r"[0-9a-fA-F]{40}", code_sha):
+        raise ValueError("code_sha must be a full Git commit SHA")
+    code_sha = code_sha.lower()
     shadow_only = bool(getattr(config, "strategy_evidence_shadow_only", True))
     max_candidates = max(1, int(getattr(config, "strategy_evidence_max_candidates", 1)))
     max_symbols = max(
@@ -3761,6 +4029,11 @@ def _apply_strategy_decision_receipts(
                 "core_conditions_passed": core_passed,
                 "ai_resolved_evidence": ai_evidence,
                 "reward_risk_ratio": receipt.reward_risk_ratio,
+                "alpha_score": receipt.final_score,
+                "score": receipt.final_score,
+                "final_score": receipt.final_score,
+                "base_strategy_score": receipt.base_strategy_score,
+                "score_adjustment": receipt.score_adjustment,
                 "strategy_receipt_tier": tier,
                 "strategy_receipt_research_pick_eligible": receipt.research_pick_eligible,
                 "strategy_receipt_paper_entry_eligible": receipt.paper_entry_eligible,
@@ -3788,9 +4061,7 @@ def _apply_strategy_decision_receipts(
             evidence_claims=bundle.get("claims") or (),
             resolution_run=run,
         )
-        row["strategy_receipt_persistence_status"] = (
-            "PERSISTED" if inserted else "REUSED"
-        )
+        row["strategy_receipt_persistence_status"] = "PERSISTED" if inserted else "REUSED"
         if inserted:
             persisted_count += 1
         else:
@@ -4016,10 +4287,7 @@ def _govern_frozen_official_cohort_retry(
         cohort=ALPHAOPS_OFFICIAL_COHORT,
         limit=100,
     )
-    if (
-        not rows
-        or membership_sha256(rows) != str(existing.get("membership_sha256") or "")
-    ):
+    if not rows or membership_sha256(rows) != str(existing.get("membership_sha256") or ""):
         raise SnapshotValidationError(
             "FROZEN_COHORT_CONFLICT: persisted official membership is incomplete "
             "or does not match its immutable hash"
@@ -4040,17 +4308,14 @@ def _govern_frozen_official_cohort_retry(
         if _selection_signal_id(signal, scan_id)
     )
     frozen_members = sorted(
-        (str(row.get("signal_id") or ""), str(row.get("ticker") or "").upper())
-        for row in rows
+        (str(row.get("signal_id") or ""), str(row.get("ticker") or "").upper()) for row in rows
     )
     if decision_name == "no_trade":
         current_is_no_trade = (
             len(selected_signals) == 1
             and str(selected_signals[0].get("ticker") or "").upper() == "NO_TRADE"
         )
-        frozen_is_no_trade = (
-            len(frozen_members) == 1 and frozen_members[0][1] == "NO_TRADE"
-        )
+        frozen_is_no_trade = len(frozen_members) == 1 and frozen_members[0][1] == "NO_TRADE"
         membership_matches = current_is_no_trade and frozen_is_no_trade
     else:
         membership_matches = bool(current_members) and current_members == frozen_members
@@ -4064,9 +4329,7 @@ def _govern_frozen_official_cohort_retry(
     # an adversarial retry can otherwise reuse an ID with a different source
     # payload and silently cross-join the watcher to new historical truth.
     if decision_name != "no_trade":
-        frozen_by_signal_id = {
-            str(row.get("signal_id") or ""): row for row in rows
-        }
+        frozen_by_signal_id = {str(row.get("signal_id") or ""): row for row in rows}
         for signal in selected_signals:
             signal_id = _selection_signal_id(signal, scan_id)
             frozen_row = frozen_by_signal_id.get(signal_id)
@@ -4074,22 +4337,16 @@ def _govern_frozen_official_cohort_retry(
                 continue
             frozen_payload = frozen_row.get("payload_json")
             frozen_signal = (
-                frozen_payload.get("signal")
-                if isinstance(frozen_payload, dict)
-                else None
+                frozen_payload.get("signal") if isinstance(frozen_payload, dict) else None
             )
             frozen_source_scan_id = (
-                str(frozen_signal.get("scan_id") or "")
-                if isinstance(frozen_signal, dict)
-                else ""
+                str(frozen_signal.get("scan_id") or "") if isinstance(frozen_signal, dict) else ""
             )
             if not frozen_source_scan_id and isinstance(frozen_payload, dict):
                 frozen_source_scan_id = str(
                     frozen_payload.get("source_scan_id")
                     or (
-                        frozen_payload.get("frozen_slate_lineage", {}).get(
-                            "frozen_source_scan_id"
-                        )
+                        frozen_payload.get("frozen_slate_lineage", {}).get("frozen_source_scan_id")
                         if isinstance(frozen_payload.get("frozen_slate_lineage"), dict)
                         else ""
                     )
@@ -4124,9 +4381,7 @@ def _govern_frozen_official_cohort_retry(
         )
     cohort_payload = existing.get("payload_json")
     notification_manifest = (
-        cohort_payload.get("notification_manifest")
-        if isinstance(cohort_payload, dict)
-        else None
+        cohort_payload.get("notification_manifest") if isinstance(cohort_payload, dict) else None
     )
     if isinstance(notification_manifest, dict):
         frozen_body = str(notification_manifest.get("body") or "")
@@ -4205,6 +4460,7 @@ def _persist_official_selections(
     slate: dict[str, Any] | None = None,
     publication_rows: list[dict[str, Any]] | None = None,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Freeze the exact signal identities represented by one operator message."""
 
@@ -4220,11 +4476,25 @@ def _persist_official_selections(
     reuse_status = ""
     validated_publication_by_id: dict[str, dict[str, Any]] = {}
     if frozen_slate or production:
+        if (
+            production
+            and contributor_receipt_verifier is None
+            and any(
+                isinstance(row, dict) and "strategy_contributors" in row
+                for row in frozen_slate.get("rows") or []
+            )
+        ):
+            contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+                store,
+                market_date=selected_at[:10],
+                strategy_id=None,
+            )
         try:
             validate_ranked_research_slate(
                 frozen_slate,
                 market_date=selected_at[:10],
                 production=production,
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
             if production:
                 if not isinstance(publication_rows, list):
@@ -4234,6 +4504,7 @@ def _persist_official_selections(
                     slate=frozen_slate,
                     market_date=selected_at[:10],
                     production=True,
+                    contributor_receipt_verifier=contributor_receipt_verifier,
                 )
                 validated_publication_by_id = {
                     str(row.get("research_selection_id") or ""): row
@@ -4245,17 +4516,14 @@ def _persist_official_selections(
             ) from exc
         frozen_source_scan_id = str(frozen_slate.get("scan_id") or "")
         reuse_status = (
-            "CURRENT_SCAN"
-            if frozen_source_scan_id == scan_id
-            else "GOVERNED_DAILY_FREEZE_REUSE"
+            "CURRENT_SCAN" if frozen_source_scan_id == scan_id else "GOVERNED_DAILY_FREEZE_REUSE"
         )
         frozen_lineage = {
             "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
             "slate_id": str(frozen_slate.get("slate_id") or ""),
-            "slate_content_hash_sha256": str(
-                frozen_slate.get("content_hash_sha256") or ""
-            ),
+            "slate_content_hash_sha256": str(frozen_slate.get("content_hash_sha256") or ""),
             "frozen_source_scan_id": frozen_source_scan_id,
+            "frozen_source_code_sha": str(frozen_slate.get("producer_code_sha") or ""),
             "current_scan_id": scan_id,
             "reuse_status": reuse_status,
         }
@@ -4286,9 +4554,7 @@ def _persist_official_selections(
                     "Official selection is not an exact frozen Tier 2/3 publication row."
                 )
         if frozen_slate and not is_no_trade:
-            research_selection_id = str(
-                signal.get("research_selection_id") or ""
-            )
+            research_selection_id = str(signal.get("research_selection_id") or "")
             frozen_signal = frozen_rows_by_id.get(research_selection_id)
             if (
                 frozen_signal is None
@@ -4416,14 +4682,29 @@ def _persist_research_radar_selections(
     selected_at: str,
     event: NotificationEvent,
     production: bool = False,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Persist the exact conditional radar plans represented in Telegram."""
 
+    if (
+        production
+        and contributor_receipt_verifier is None
+        and any(
+            isinstance(row, dict) and "strategy_contributors" in row
+            for row in slate.get("rows") or []
+        )
+    ):
+        contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+            store,
+            market_date=selected_at[:10],
+            strategy_id=None,
+        )
     try:
         validate_ranked_research_slate(
             slate,
             market_date=selected_at[:10],
             production=production,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except (TypeError, ValueError) as exc:
         raise SnapshotValidationError(
@@ -4453,15 +4734,14 @@ def _persist_research_radar_selections(
     if not frozen_source_scan_id:
         raise SnapshotValidationError("Frozen research slate has no source scan identity")
     reuse_status = (
-        "CURRENT_SCAN"
-        if frozen_source_scan_id == scan_id
-        else "GOVERNED_DAILY_FREEZE_REUSE"
+        "CURRENT_SCAN" if frozen_source_scan_id == scan_id else "GOVERNED_DAILY_FREEZE_REUSE"
     )
     frozen_lineage = {
         "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
         "slate_id": str(slate.get("slate_id") or ""),
         "slate_content_hash_sha256": str(slate.get("content_hash_sha256") or ""),
         "frozen_source_scan_id": frozen_source_scan_id,
+        "frozen_source_code_sha": str(slate.get("producer_code_sha") or ""),
         "current_scan_id": scan_id,
         "reuse_status": reuse_status,
     }
@@ -4503,9 +4783,7 @@ def _persist_research_radar_selections(
             raise SnapshotValidationError(
                 "FROZEN_COHORT_CONFLICT: research selection membership changed"
             )
-        stored_by_id = {
-            str(row.get("selection_id") or ""): row for row in existing_rows
-        }
+        stored_by_id = {str(row.get("selection_id") or ""): row for row in existing_rows}
         for expected in rows:
             actual = stored_by_id.get(str(expected.get("selection_id") or ""))
             expected_stored = {

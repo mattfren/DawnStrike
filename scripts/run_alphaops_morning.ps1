@@ -28,6 +28,7 @@ if (-not $CoreUniverseManifest -and (Test-Path -LiteralPath $defaultCoreUniverse
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $recordStageFailed = $false
 function Write-MorningStage {
@@ -46,6 +47,7 @@ function Write-MorningStage {
         "--status", $Status,
         "--runtime-root", $runtime,
         "--state-root", $state,
+        "--release-sha", $releaseSha,
         "--exit-code", "$ExitCode",
         "--started-at", $startedAt
     )
@@ -76,7 +78,7 @@ if (-not $dailyLock.acquired) {
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
-    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "morning_collection", "--status", "RUNNING") `
+    -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "morning_collection", "--status", "RUNNING", "--release-sha", $releaseSha) `
     -LogRoot $logRoot `
     -LogName "alpha_morning_heartbeat-$MarketDate"
 if ($heartbeat.exit_code -ne 0) {
@@ -148,6 +150,7 @@ try {
             "--notify", $Notify,
             "--market-date", $MarketDate,
             "--as-of", $cycleObservedAt,
+            "--code-sha", $releaseSha,
             "--paper-ops-root", $paperOpsRoot
         )
         if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
@@ -182,6 +185,7 @@ try {
                     -ArtifactPath $alphaCyclePath `
                     -ProcessReceipt $alphaCycle `
                     -MarketDate $MarketDate `
+                    -ReleaseSha $releaseSha `
                     -RequireCoreCoverage
             }
             else {
@@ -192,6 +196,7 @@ try {
                     -ArtifactPath $alphaCyclePath `
                     -ProcessReceipt $alphaCycle `
                     -MarketDate $MarketDate `
+                    -ReleaseSha $releaseSha `
                     -AllowCoreShortfall
             }
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count

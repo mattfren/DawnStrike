@@ -8,11 +8,14 @@ import pytest
 
 from intraday_scanner.services.luna_core_universe_service import _canonical_member_hash
 from intraday_scanner.v2.data import MarketBar, MarketDataset
+from intraday_scanner.v2.data_truth.models import DataTruthManifest
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.lifecycle_backtest import _signal_cards
 from intraday_scanner.v2.paper_ops.models import PaperRun, PaperRunMode
+from intraday_scanner.v2.paper_ops.observer_safety import _is_complete_manifest
 from intraday_scanner.v2.paper_ops.universe_handoff import (
     UniverseHandoffError,
+    _expected_strategy_ids,
     load_universe_handoff,
 )
 from intraday_scanner.v2.paper_ops.universe_handoff import (
@@ -222,11 +225,23 @@ def _morning_root(tmp_path: Path, *, source_status: str = "success") -> Path:
         "market_date": MARKET_DATE,
         "generated_at": f"{MARKET_DATE}T12:00:00+00:00",
         "source_status": source_status,
+        "code_sha": "a" * 40,
     }
     (root / "alpha_run_contract.json").write_text(
         json.dumps(contract, sort_keys=True), encoding="utf-8"
     )
-    cycle = {"scan_id": "scan-fixture", "generated_at": f"{MARKET_DATE}T12:00:00+00:00"}
+    cycle = {
+        "scan_id": "scan-fixture",
+        "generated_at": f"{MARKET_DATE}T12:00:00+00:00",
+        "code_sha": "a" * 40,
+        "source_summary": {
+            **source,
+            "code_sha": "a" * 40,
+            "morning_strategy_adapter": {
+                "enabled_strategy_ids": list(_expected_strategy_ids()),
+            },
+        },
+    }
     (root / "alpha_cycle.json").write_text(json.dumps(cycle, sort_keys=True), encoding="utf-8")
     return root
 
@@ -238,6 +253,7 @@ def test_handoff_exactly_deduplicates_core_and_mover_union(tmp_path: Path) -> No
     payload = build_universe_handoff(root, MARKET_DATE, output_path=handoff_path)
 
     assert payload["universe_symbols"] == ["AAA", "BBB"]
+    assert payload["code_sha"] == "a" * 40
     aaa = next(row for row in payload["members"] if row["symbol"] == "AAA")
     assert aaa["lanes"] == ["core", "mover"]
     assert payload["coverage"]["status"] == "COMPLETE"
@@ -457,6 +473,7 @@ def test_self_consistent_forged_union_membership_and_coverage_are_rejected_by_lo
             mode=PaperRunMode.FORWARD,
             universe_handoff_path=handoff_path,
             scheduled_production=True,
+            expected_code_sha="a" * 40,
         )
 
 
@@ -599,6 +616,7 @@ def test_scheduled_production_without_handoff_is_terminal_before_run_manifest(
             mode=PaperRunMode.FORWARD,
             universe_handoff_path=None,
             scheduled_production=True,
+            expected_code_sha="a" * 40,
         )
     assert not list(paths.manifests.glob("*.json"))
 
@@ -616,6 +634,7 @@ def test_bound_manifest_rejects_mutated_handoff_source_before_observation(tmp_pa
         "universe_handoff_id": handoff["handoff_id"],
         "universe_handoff_content_hash_sha256": handoff["content_hash_sha256"],
         "universe_handoff_path": str(handoff_path),
+        "release_code_sha": handoff["code_sha"],
         "universe_coverage_status": coverage["status"],
         "universe_shortfall_reasons": coverage["shortfall_reasons"],
     }
@@ -630,6 +649,110 @@ def test_bound_manifest_rejects_mutated_handoff_source_before_observation(tmp_pa
         paper_ops_engine._validate_manifest_universe_handoff(paths, manifest)
 
 
+def test_scheduled_consumer_and_loader_reject_cross_release_handoff(
+    tmp_path: Path,
+) -> None:
+    morning = _morning_root(tmp_path)
+    handoff_path = morning / "paperops_universe_handoff.json"
+    build_universe_handoff(morning, MARKET_DATE, output_path=handoff_path)
+
+    with pytest.raises(UniverseHandoffError, match="release SHA conflicts"):
+        load_universe_handoff(
+            handoff_path,
+            market_date=MARKET_DATE,
+            require_production=True,
+            expected_code_sha="b" * 40,
+        )
+    paths = paper_ops_engine.PaperOpsPaths.create(tmp_path / "paper_ops")
+    with pytest.raises(UniverseHandoffError, match="release SHA conflicts"):
+        paper_ops_engine._run_config_with_universe_handoff(
+            paths,
+            run_date=date.fromisoformat(MARKET_DATE),
+            mode=PaperRunMode.FORWARD,
+            universe_handoff_path=handoff_path,
+            scheduled_production=True,
+            expected_code_sha="b" * 40,
+        )
+
+
+def test_observer_manifest_revalidation_rejects_cross_release_runtime(
+    tmp_path: Path,
+) -> None:
+    morning = _morning_root(tmp_path)
+    handoff_path = morning / "paperops_universe_handoff.json"
+    handoff = build_universe_handoff(morning, MARKET_DATE, output_path=handoff_path)
+    paths = paper_ops_engine.PaperOpsPaths.create(tmp_path / "paper_ops")
+    config, _ = paper_ops_engine._run_config_with_universe_handoff(
+        paths,
+        run_date=date.fromisoformat(MARKET_DATE),
+        mode=PaperRunMode.REPLAY,
+        universe_handoff_path=handoff_path,
+        scheduled_production=False,
+        expected_code_sha="a" * 40,
+    )
+    data_manifest = DataTruthManifest(
+        snapshot_id="observer-release-snapshot",
+        created_at=f"{MARKET_DATE}T13:00:00+00:00",
+        provider_id="fixture",
+        provider_name="Fixture",
+        symbols=tuple(handoff["universe_symbols"]),
+        timeframe="1d",
+        requested_start=MARKET_DATE,
+        requested_end=MARKET_DATE,
+        accepted_start=MARKET_DATE,
+        accepted_end=MARKET_DATE,
+        bar_count=2,
+        accepted_bar_count=2,
+        rejected_bar_count=0,
+        skipped_incomplete_bars=0,
+        validation_status="passed",
+        warnings=(),
+        raw_artifact_hashes={"fixture": "raw"},
+        normalized_artifact_hash="normalized",
+        source_url_or_reference=("fixture://release",),
+        normalized_artifact_path="snapshots/release/normalized.csv",
+        snapshot_content_hash="snapshot-hash",
+        manifest_payload_hash="manifest-hash",
+    )
+    run = paper_ops_engine._paper_run(
+        run_date=date.fromisoformat(MARKET_DATE),
+        mode=PaperRunMode.REPLAY,
+        data_snapshot_id=data_manifest.snapshot_id,
+    )
+    manifest = paper_ops_engine._ensure_run_manifest(
+        paths,
+        run,
+        config=config,
+        data_manifest=data_manifest,
+        data_truth_root=paths.root / "replay_data_truth",
+        universe_handoff=handoff,
+        universe_handoff_path=handoff_path,
+    )
+    policy = str(manifest["execution_policy_version"])
+    identity = {
+        run.run_id: {
+            "mode": "replay",
+            "run_date": MARKET_DATE,
+            "data_snapshot_id": data_manifest.snapshot_id,
+            "calendar_policies": {policy},
+            "ledger_policies": {policy},
+        }
+    }
+
+    assert _is_complete_manifest(
+        manifest,
+        identity,
+        "replay",
+        expected_code_sha="a" * 40,
+    )
+    assert not _is_complete_manifest(
+        manifest,
+        identity,
+        "replay",
+        expected_code_sha="b" * 40,
+    )
+
+
 def test_scheduled_powershell_path_requires_handoff_without_implicit_default_fallback() -> None:
     morning = Path("scripts/run_alphaops_morning.ps1").read_text(encoding="utf-8")
     eod = Path("scripts/run_alphaops_eod.ps1").read_text(encoding="utf-8")
@@ -640,5 +763,30 @@ def test_scheduled_powershell_path_requires_handoff_without_implicit_default_fal
     assert '"--validate"' in eod
     assert '"--handoff", $universeHandoffPath' in eod
     assert '"--universe-handoff", $universeHandoffPath' in eod
+    assert '"--expected-code-sha", $releaseSha' in eod
     assert '"--scheduled-production"' in eod
     assert eod.index("$handoffValidation") < eod.index('"--scheduled-production"')
+    handoff_validation = eod.index("$handoffValidation = Invoke-DawnstrikeNativeProcess")
+    expected_sha_binding = eod.index('"--expected-code-sha", $releaseSha', handoff_validation)
+    assert expected_sha_binding < eod.index('"alpha-capture-outcomes"')
+    assert expected_sha_binding < eod.index('"strategy-learning-daily"')
+
+
+def test_eod_cross_release_handoff_failure_is_terminal_and_observable_before_writes() -> None:
+    eod = Path("scripts/run_alphaops_eod.ps1").read_text(encoding="utf-8")
+    guard_start = eod.index("if ($handoffValidation.exit_code -ne 0)")
+    first_mutating_capture = eod.index('"alpha-capture-outcomes"')
+    failure_path = eod[guard_start:first_mutating_capture]
+
+    assert '"--expected-code-sha", $releaseSha' in eod[:guard_start]
+    assert '"--release-sha", $releaseSha' in failure_path
+    assert 'Name = "eod_outcome_capture"' in failure_path
+    assert 'Name = "paper_reconciliation"' in failure_path
+    assert 'Name = "alpha_learning"' in failure_path
+    assert 'Name = "paperops_forward"' in failure_path
+    assert 'Error = "eod_precondition_universe_handoff_invalid"' in failure_path
+    assert failure_path.count('Error = "blocked_by_eod_precondition"') == 3
+    assert "-Status FAILED" in failure_path
+    assert '"--status", "FAILED"' in failure_path
+    assert '"stage_failure_notification-$MarketDate"' in failure_path
+    assert "exit $handoffFailureExit" in failure_path

@@ -13,7 +13,10 @@ from intraday_scanner.alpha.v5_policy import (
     DEFAULT_V5_POLICY,
     modeled_alphaops_v5_plan_metrics,
 )
-from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.decisioning.contracts import (
+    canonical_json,
+    parse_strategy_decision_receipt,
+)
 
 ALERT_OK = "ALERT_OK"
 PASS = "PASS"
@@ -550,21 +553,15 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
     payload = row.get("strategy_decision_receipt")
     if not isinstance(payload, dict):
         return False
-    receipt_hash = str(payload.get("receipt_hash_sha256") or "").lower()
-    receipt_id = str(payload.get("receipt_id") or "")
-    if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+    try:
+        typed_receipt = parse_strategy_decision_receipt(payload)
+    except (TypeError, ValueError, KeyError):
         return False
-    hash_payload = {
-        key: value
-        for key, value in payload.items()
-        if key not in {"receipt_hash_sha256", "receipt_id"}
-    }
-    expected_hash = hashlib.sha256(canonical_json(hash_payload).encode("utf-8")).hexdigest()
-    if receipt_hash != expected_hash or receipt_id != "sdr-" + receipt_hash[:24]:
-        return False
+    receipt_hash = typed_receipt.receipt_hash_sha256
+    receipt_id = typed_receipt.receipt_id
     ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
-    schema_version = str(payload.get("schema_version") or "")
-    strategy_id = str(payload.get("strategy_id") or "")
+    schema_version = typed_receipt.schema_version
+    strategy_id = typed_receipt.strategy_id
     if (
         schema_version
         not in {
@@ -575,9 +572,13 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
             strategy_id == "alphaops_v5"
             and schema_version != "dawnstrike.strategy_decision_receipt.v2"
         )
-        or str(payload.get("symbol") or "").upper() != ticker
+        or typed_receipt.symbol != ticker
         or strategy_id != str(row.get("strategy_id") or "")
-        or str(payload.get("strategy_version") or "") != str(row.get("strategy_version") or "")
+        or typed_receipt.strategy_version != str(row.get("strategy_version") or "")
+        or (
+            str(row.get("market_date") or "").strip()
+            and typed_receipt.market_date != str(row.get("market_date") or "").strip()
+        )
         or receipt_hash != str(row.get("receipt_hash_sha256") or "").lower()
         or receipt_id != str(row.get("receipt_id") or "")
         or str(row.get("strategy_receipt_persistence_status") or "").upper()
@@ -593,7 +594,7 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
     ):
         return False
     if schema_version == "dawnstrike.strategy_decision_receipt.v2":
-        input_payload_text = payload.get("input_payload_json")
+        input_payload_text = typed_receipt.input_payload_json
         if not isinstance(input_payload_text, str) or not input_payload_text:
             return False
         try:
@@ -610,6 +611,52 @@ def validate_strategy_receipt_envelope(row: dict[str, Any]) -> bool:
         if strategy_id == "alphaops_v5" and not _valid_v5_receipt_plan_binding(
             row, payload, input_payload
         ):
+            return False
+        input_source_signal_id = next(
+            (
+                str(input_payload.get(key) or "").strip()
+                for key in (
+                    "source_signal_id",
+                    "prior_session_signal_id",
+                    "signal_id",
+                    "signal_key",
+                )
+                if str(input_payload.get(key) or "").strip()
+            ),
+            "",
+        )
+        row_source_signal_id = next(
+            (
+                str(row.get(key) or "").strip()
+                for key in (
+                    "source_signal_id",
+                    "prior_session_signal_id",
+                    "signal_id",
+                    "signal_key",
+                )
+                if str(row.get(key) or "").strip()
+            ),
+            "",
+        )
+        if row_source_signal_id and input_source_signal_id != row_source_signal_id:
+            return False
+        input_direction = str(input_payload.get("direction") or "").strip().lower()
+        row_direction = str(row.get("direction") or "").strip().lower()
+        if row_direction and (
+            row_direction not in {"long", "short"} or input_direction != row_direction
+        ):
+            return False
+    for key, expected in (
+        ("alpha_score", typed_receipt.final_score),
+        ("score", typed_receipt.final_score),
+        ("final_score", typed_receipt.final_score),
+        ("base_strategy_score", typed_receipt.base_strategy_score),
+        ("score_adjustment", typed_receipt.score_adjustment),
+    ):
+        if key not in row or row.get(key) in {None, ""}:
+            continue
+        parsed = _optional_float(row.get(key))
+        if parsed is None or parsed != expected:
             return False
     for payload_key, row_keys in (
         ("entry_reference", ("entry_reference", "entry_watch_level", "entry_trigger")),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ import pytest
 
 from intraday_scanner import cli
 from intraday_scanner.alpha import run_contracts
+from intraday_scanner.decisioning.contracts import StrategyDecisionReceipt
 from intraday_scanner.errors import SnapshotValidationError
 from intraday_scanner.notifiers import NotificationEvent
 from intraday_scanner.services import alpha_cycle_service
@@ -22,6 +25,8 @@ from intraday_scanner.services.premarket_enrichment_service import (
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
+RELEASE_SHA = "a" * 40
+
 
 def _run_source_failure(
     tmp_path: Path,
@@ -35,6 +40,7 @@ def _run_source_failure(
         "utc_now_iso",
         lambda: wall_clock,
     )
+
     def failed_collection(**kwargs):
         assert kwargs["observed_at"] == as_of.astimezone(timezone.utc)
         return {
@@ -55,11 +61,15 @@ def _run_source_failure(
         notify="console",
         dry_run=True,
         as_of=as_of,
+        code_sha=RELEASE_SHA,
     )
     return result, SQLiteScanStore(db_path)
 
 
-def _fresh_frozen_signal(cycle_at: datetime) -> dict[str, object]:
+def _fresh_frozen_signal(
+    cycle_at: datetime,
+    store: SQLiteScanStore,
+) -> dict[str, object]:
     bar_at = cycle_at - timedelta(minutes=2)
     observation = observation_from_alpaca_bars(
         "FROZEN",
@@ -79,6 +89,41 @@ def _fresh_frozen_signal(cycle_at: datetime) -> dict[str, object]:
         feed="iex",
     )
     observation_hash, observation_payload = _canonical_observation_payload(observation)
+    input_payload_json = json.dumps(
+        {"direction": "long", "source_signal_id": "signal-frozen"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    receipt = StrategyDecisionReceipt(
+        schema_version="dawnstrike.strategy_decision_receipt.v2",
+        receipt_id="",
+        strategy_id="fixture_frozen_strategy",
+        strategy_version="fixture-v1",
+        symbol="FROZEN",
+        market_date=cycle_at.date().isoformat(),
+        decision_at=cycle_at.isoformat(),
+        code_sha=RELEASE_SHA,
+        policy_version="fixture-policy-v1",
+        condition_results=(),
+        first_blocking_failure=None,
+        all_blocking_failures=(),
+        disclosed_gaps=(),
+        research_pick_eligible=True,
+        paper_entry_eligible=False,
+        pick_tier="WATCH_ONLY",
+        base_strategy_score=75.0,
+        score_adjustment=0.0,
+        final_score=75.0,
+        entry_reference=10.0,
+        stop=9.0,
+        target=12.0,
+        reward_risk_ratio=2.0,
+        source_identity="fixture-frozen-source",
+        input_hash_sha256=hashlib.sha256(input_payload_json.encode("utf-8")).hexdigest(),
+        input_payload_json=input_payload_json,
+    )
+    store.persist_strategy_decision_receipt(receipt)
+    receipt_payload = receipt.to_dict()
     return {
         "ticker": "FROZEN",
         "signal_id": "signal-frozen",
@@ -97,6 +142,28 @@ def _fresh_frozen_signal(cycle_at: datetime) -> dict[str, object]:
         "manual_confirmation_required": False,
         "enrichment_observation_sha256": observation_hash,
         "enrichment_observation_payload_json": observation_payload,
+        "strategy_contributors": [
+            {
+                "strategy_id": receipt.strategy_id,
+                "strategy_version": receipt.strategy_version,
+                "source_signal_id": "signal-frozen",
+                "receipt_id": receipt.receipt_id,
+                "receipt_hash_sha256": receipt.receipt_hash_sha256,
+                "receipt_status": "COMPLETE",
+                "research_pick_eligible": True,
+                "paper_entry_eligible": False,
+                "final_score": 75.0,
+                "direction": "long",
+                "decision_receipt": receipt_payload,
+            }
+        ],
+        "strategy_contributor_count": 1,
+        "strategy_contributor_ids": [receipt.strategy_id],
+        "strongest_eligible_contributor_score": 75.0,
+        "strategy_contribution_gaps": [],
+        "strategy_contribution_status": "COMPLETE",
+        "strategy_decision_receipts": [receipt_payload],
+        "canonical_primary_strategy_id": receipt.strategy_id,
     }
 
 
@@ -192,20 +259,21 @@ def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_arti
     cycle_at = datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc)
     out_dir = tmp_path / "alpha"
     out_dir.mkdir()
+    store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     slate = build_ranked_research_slate(
-        [_fresh_frozen_signal(cycle_at)],
+        [_fresh_frozen_signal(cycle_at, store)],
         generated_at=cycle_at.isoformat(),
         market_date=cycle_at.date().isoformat(),
         scan_id="scan-success",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
         require_safety=True,
+        producer_code_sha=RELEASE_SHA,
     )
     persist_ranked_research_slate(slate, out_dir / "ranked_research_slate.json")
     canonical_cycle = b'{"authoritative":"cycle"}\n'
     canonical_contract = b'{"authoritative":"contract"}\n'
     (out_dir / "alpha_cycle.json").write_bytes(canonical_cycle)
     (out_dir / "alpha_run_contract.json").write_bytes(canonical_contract)
-    store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     frozen_row = dict(slate["rows"][0])
     _persist_official_selections(
         store,
@@ -232,6 +300,7 @@ def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_arti
         "_persisted_strategy_receipt_verifier",
         lambda *args, **kwargs: PersistedResolver(),
     )
+
     def publish(rows, **_kwargs):
         published = [dict(row) for row in rows]
         for row in published:
@@ -244,8 +313,9 @@ def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_arti
     monkeypatch.setattr(
         alpha_cycle_service,
         "_dispatch",
-        lambda *args, **kwargs: dispatch_calls.append(args[0])
-        or {"sent": 0, "skipped": 0, "errors": []},
+        lambda *args, **kwargs: (
+            dispatch_calls.append(args[0]) or {"sent": 0, "skipped": 0, "errors": []}
+        ),
     )
     result, _ = _run_source_failure(
         tmp_path,
@@ -280,13 +350,15 @@ def test_frozen_source_retry_missing_evidence_fails_before_dispatch_and_preserve
     cycle_at = datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc)
     out_dir = tmp_path / "alpha"
     out_dir.mkdir()
+    store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     slate = build_ranked_research_slate(
-        [_fresh_frozen_signal(cycle_at)],
+        [_fresh_frozen_signal(cycle_at, store)],
         generated_at=cycle_at.isoformat(),
         market_date=cycle_at.date().isoformat(),
         scan_id="scan-success",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
         require_safety=True,
+        producer_code_sha=RELEASE_SHA,
     )
     persist_ranked_research_slate(slate, out_dir / "ranked_research_slate.json")
     canonical_cycle = b'{"authoritative":"cycle"}\n'
@@ -375,3 +447,6 @@ def test_morning_wrapper_passes_one_live_utc_cycle_timestamp() -> None:
 
     assert '$cycleObservedAt = (Get-Date).ToUniversalTime().ToString("o")' in script
     assert '"--as-of", $cycleObservedAt' in script
+    assert "$releaseSha = Resolve-DawnstrikeReleaseSha" in script
+    assert '"--code-sha", $releaseSha' in script
+    assert "-ReleaseSha $releaseSha" in script

@@ -31,14 +31,10 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert '"strategy_learning_daily_failed"' in eod
     assert "Write-DawnstrikeLockDenialReceipt" in runner
 
-    weekly = Path("scripts/run_alphaops_weekly_training.ps1").read_text(
-        encoding="utf-8"
-    )
+    weekly = Path("scripts/run_alphaops_weekly_training.ps1").read_text(encoding="utf-8")
     assert "Write-DawnstrikeLockDenialReceipt" in weekly
 
-    lock_helper = Path("scripts/invoke_dawnstrike_stage.ps1").read_text(
-        encoding="utf-8"
-    )
+    lock_helper = Path("scripts/invoke_dawnstrike_stage.ps1").read_text(encoding="utf-8")
     assert "dawnstrike.daily_run_lock.v2" in lock_helper
     assert "lock_token" in lock_helper
     assert "Get-Process -Id" in lock_helper
@@ -50,6 +46,10 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert "Required AlphaOps monitor run blocked by daily lock" in monitor
     assert "daily_lock_unavailable" in morning
     assert "daily_lock_unavailable" in monitor
+    assert "$releaseSha = Resolve-DawnstrikeReleaseSha" in monitor
+    assert "-ReleaseSha $releaseSha" in monitor
+    assert '"--expected-code-sha", $releaseSha' in monitor
+    assert '"--release-sha", $releaseSha' in monitor
 
 
 def test_task_scripts_use_the_installed_windows_battery_safe_switches() -> None:
@@ -66,15 +66,9 @@ def test_task_scripts_use_the_installed_windows_battery_safe_switches() -> None:
 
 
 def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation() -> None:
-    helper = Path("scripts/resolve_dawnstrike_task_principal.ps1").read_text(
-        encoding="utf-8"
-    )
-    alphaops = Path("scripts/register_alphaops_tasks.ps1").read_text(
-        encoding="utf-8"
-    )
-    finalize = Path("scripts/register_daily_finalize_task.ps1").read_text(
-        encoding="utf-8"
-    )
+    helper = Path("scripts/resolve_dawnstrike_task_principal.ps1").read_text(encoding="utf-8")
+    alphaops = Path("scripts/register_alphaops_tasks.ps1").read_text(encoding="utf-8")
+    finalize = Path("scripts/register_daily_finalize_task.ps1").read_text(encoding="utf-8")
 
     assert "Resolve-DawnstrikeTaskPrincipal" in helper
     assert "IdentityNotMappedException" in helper
@@ -82,7 +76,7 @@ def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation()
     assert "canonicalAccount.Value" in helper
     assert "cannot be mapped to a Windows SID" in helper
     for script in (alphaops, finalize):
-        assert 'resolve_dawnstrike_task_principal.ps1' in script
+        assert "resolve_dawnstrike_task_principal.ps1" in script
         assert "Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential" in script
         assert "-User $taskPrincipal" in script
         assert script.index("Resolve-DawnstrikeTaskPrincipal") < script.index(
@@ -91,15 +85,13 @@ def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation()
 
 
 def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
-    register = Path("scripts/register_alphaops_tasks.ps1").read_text(
-        encoding="utf-8"
-    )
+    register = Path("scripts/register_alphaops_tasks.ps1").read_text(encoding="utf-8")
 
     assert '-ClassName "MSFT_TaskRepetitionPattern"' in register
-    assert '-ClientOnly' in register
+    assert "-ClientOnly" in register
     assert 'Interval = "PT5M"' in register
     assert 'RepetitionDuration = "PT6H35M"' in register
-    assert 'Duration = [string]$definition.RepetitionDuration' in register
+    assert "Duration = [string]$definition.RepetitionDuration" in register
     assert 'Start = "21:00"' in register
     assert "ExecutionLimitMinutes = 60" in register
     assert "ExecutionLimitMinutes = 4" in register
@@ -124,12 +116,8 @@ def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
 
 
 def test_weekly_training_waits_for_exact_release_finalize_receipt() -> None:
-    runner = Path("scripts/run_alphaops_weekly_training.ps1").read_text(
-        encoding="utf-8"
-    )
-    verifier = Path("scripts/verify_daily_finalize_receipt.py").read_text(
-        encoding="utf-8"
-    )
+    runner = Path("scripts/run_alphaops_weekly_training.ps1").read_text(encoding="utf-8")
+    verifier = Path("scripts/verify_daily_finalize_receipt.py").read_text(encoding="utf-8")
 
     assert "verify_daily_finalize_receipt.py" in runner
     assert "Task Scheduler will apply bounded retry" in runner
@@ -139,9 +127,7 @@ def test_weekly_training_waits_for_exact_release_finalize_receipt() -> None:
 
 
 def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:
-    helper = Path("scripts/import_dawnstrike_environment.ps1").read_text(
-        encoding="utf-8"
-    )
+    helper = Path("scripts/import_dawnstrike_environment.ps1").read_text(encoding="utf-8")
     runners = (
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
@@ -165,13 +151,11 @@ def test_all_scheduled_runners_import_allowlisted_state_secrets() -> None:
 
 
 def test_native_process_runner_preserves_real_exit_code_when_stderr_is_used() -> None:
-    runner = Path("scripts/dawnstrike_process_runner.ps1").read_text(
-        encoding="utf-8"
-    )
+    runner = Path("scripts/dawnstrike_process_runner.ps1").read_text(encoding="utf-8")
 
-    assert '$previousErrorActionPreference = $ErrorActionPreference' in runner
+    assert "$previousErrorActionPreference = $ErrorActionPreference" in runner
     assert '$ErrorActionPreference = "Continue"' in runner
-    assert '$ErrorActionPreference = $previousErrorActionPreference' in runner
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in runner
     assert "$exitCode = if ($null -eq $LASTEXITCODE)" in runner
 
 

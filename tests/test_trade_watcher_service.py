@@ -121,7 +121,7 @@ def test_selection_historical_cross_scan_requires_governed_frozen_slate() -> Non
         )
 
 
-def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() -> None:
+def test_selection_historical_cross_scan_rejects_premerge_frozen_slate() -> None:
     slate = build_ranked_research_slate(
         [
             {
@@ -144,6 +144,7 @@ def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() 
         market_date="2026-08-26",
         scan_id="scan-old",
         require_safety=True,
+        producer_code_sha="a" * 40,
     )
     frozen_signal = slate["rows"][0]
     selection = {
@@ -160,6 +161,7 @@ def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() 
                 "slate_id": slate["slate_id"],
                 "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-old",
+                "frozen_source_code_sha": "a" * 40,
                 "current_scan_id": "scan-new",
                 "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
             },
@@ -167,11 +169,13 @@ def test_selection_historical_cross_scan_accepts_exact_validated_frozen_slate() 
         },
     }
 
-    _validate_selection_historical_scan_binding(
-        selection,
-        {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
-        market_date="2026-08-26",
-    )
+    with pytest.raises(SnapshotValidationError, match="current watcher"):
+        _validate_selection_historical_scan_binding(
+            selection,
+            {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
+            market_date="2026-08-26",
+            expected_code_sha="a" * 40,
+        )
 
 
 @pytest.mark.parametrize("schema_version", ["v2_unsafe", "v1"])
@@ -199,6 +203,7 @@ def test_selection_historical_cross_scan_rejects_nonproduction_frozen_slates(
         market_date="2026-08-26",
         scan_id="scan-old",
         require_safety=False,
+        producer_code_sha="a" * 40,
     )
     if schema_version == "v1":
         slate = dict(slate)
@@ -221,17 +226,19 @@ def test_selection_historical_cross_scan_rejects_nonproduction_frozen_slates(
                 "slate_id": slate["slate_id"],
                 "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-old",
+                "frozen_source_code_sha": "a" * 40,
                 "current_scan_id": "scan-new",
                 "reuse_status": "GOVERNED_DAILY_FREEZE_REUSE",
             },
             "frozen_ranked_research_slate": slate,
         },
     }
-    with pytest.raises(SnapshotValidationError, match="frozen-slate lineage"):
+    with pytest.raises(SnapshotValidationError, match="current watcher"):
         _validate_selection_historical_scan_binding(
             selection,
             {"signal_id": "sig-frozen", "scan_id": "scan-old", "ticker": "NOVA"},
             market_date="2026-08-26",
+            expected_code_sha="a" * 40,
         )
 
 
@@ -1747,9 +1754,7 @@ def _authenticated_observation(ticker: str, generated_at: str) -> dict[str, obje
         max_age_seconds=600,
         feed="iex",
     )
-    observation_hash, observation_payload = premarket._canonical_observation_payload(
-        observation
-    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(observation)
     return {
         "enrichment_observation_sha256": observation_hash,
         "enrichment_observation_payload_json": observation_payload,

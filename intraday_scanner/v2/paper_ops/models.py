@@ -437,6 +437,7 @@ class PaperOpsManifest:
     universe_handoff_id: str | None = None
     universe_handoff_content_hash_sha256: str | None = None
     universe_handoff_path: str | None = None
+    release_code_sha: str | None = None
     universe_coverage_status: str | None = None
     universe_shortfall_reasons: tuple[str, ...] = ()
     schema_version: str = "v2.paper_ops_manifest.v3"

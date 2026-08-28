@@ -63,6 +63,9 @@ from intraday_scanner.services.benchmark_service import (
     PRIMARY_BENCHMARK,
     SECONDARY_BENCHMARK,
 )
+from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
+)
 from intraday_scanner.services.price_observation_service import parse_requested_at
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -166,14 +169,17 @@ def capture_sourced_alpha_outcomes(
         raise SnapshotValidationError("max_close_staleness_seconds must be positive.")
     at = parse_requested_at(requested_at, market_date=market_date)
     resolved_date = market_date or at.astimezone(EASTERN).date().isoformat()
-    strategy_id, strategy_version = alphaops_strategy_contract(
-        f"{resolved_date}T12:00:00-04:00"
-    )
+    strategy_id, strategy_version = alphaops_strategy_contract(f"{resolved_date}T12:00:00-04:00")
     session = _session_window(resolved_date)
     captured_at = utc_now_iso()
     output_dir = Path(out_dir)
     store = SQLiteScanStore(db_path, read_only=not persist)
     store.initialize()
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=resolved_date,
+        strategy_id=None,
+    )
     official = validate_or_recover_official_cohort(
         store,
         market_date=resolved_date,
@@ -183,8 +189,7 @@ def capture_sourced_alpha_outcomes(
     )
     if official.errors:
         raise SnapshotValidationError(
-            "Exact AlphaOps official cohort is invalid: "
-            + "; ".join(official.errors)
+            "Exact AlphaOps official cohort is invalid: " + "; ".join(official.errors)
         )
     selection_rows = list(official.selections)
     _validate_exact_session_selections(selection_rows, market_date=resolved_date)
@@ -245,6 +250,7 @@ def capture_sourced_alpha_outcomes(
             context = canonical_paper_selection_context(
                 row,
                 delivery=matches[0],
+                contributor_receipt_verifier=contributor_receipt_verifier,
             )
         except ValueError as exc:
             raise SnapshotValidationError(
@@ -265,9 +271,7 @@ def capture_sourced_alpha_outcomes(
                 "Exact AlphaOps official cohort could not be frozen: "
                 + "; ".join(frozen_official.errors)
             )
-    historical_signals = store.load_historical_signals(
-        market_date=resolved_date, limit=50_000
-    )
+    historical_signals = store.load_historical_signals(market_date=resolved_date, limit=50_000)
     signals = _outcome_targets(
         historical_signals,
         selected_signal_ids=selected_ids,
@@ -319,9 +323,7 @@ def capture_sourced_alpha_outcomes(
         if existing_row is None:
             continue
         decision = signal.get("_canonical_return_decision")
-        classification = classify_canonical_return_truth(
-            existing_row, decision=decision
-        )
+        classification = classify_canonical_return_truth(existing_row, decision=decision)
         if classification in {
             CURRENT_RETURN_TRUTH,
             CURRENT_ACTIVATION_ONLY_NOT_TRIGGERED,
@@ -333,8 +335,7 @@ def capture_sourced_alpha_outcomes(
     pending = [
         signal
         for signal in signals
-        if replace
-        or str(signal.get("signal_id") or "") not in current_existing
+        if replace or str(signal.get("signal_id") or "") not in current_existing
     ]
     diagnostics: list[dict[str, Any]] = [
         _existing_diagnostic(
@@ -342,8 +343,7 @@ def capture_sourced_alpha_outcomes(
             current_existing[str(signal.get("signal_id") or "")],
         )
         for signal in signals
-        if not replace
-        and str(signal.get("signal_id") or "") in current_existing
+        if not replace and str(signal.get("signal_id") or "") in current_existing
     ]
     revision_summary = {
         "legacy_outcome_quarantined_count": len(legacy_existing),
@@ -500,11 +500,7 @@ def capture_sourced_alpha_outcomes(
         payload = record.get("payload_json")
         source_observation_id = str(
             (columns.get("source_observation_id") if isinstance(columns, dict) else None)
-            or (
-                payload.get("source_observation_id")
-                if isinstance(payload, dict)
-                else None
-            )
+            or (payload.get("source_observation_id") if isinstance(payload, dict) else None)
             or ""
         )
         observations = store.load_price_observation_records(
@@ -512,9 +508,7 @@ def capture_sourced_alpha_outcomes(
             limit=2,
         )
         if len(observations) != 1:
-            signal["_canonical_entry_error"] = (
-                "entry intent lacks one exact source observation"
-            )
+            signal["_canonical_entry_error"] = "entry intent lacks one exact source observation"
             continue
         selection_context = signal.get("_canonical_return_decision")
         if not isinstance(selection_context, dict):
@@ -576,9 +570,7 @@ def capture_sourced_alpha_outcomes(
                 benchmark_bars=bars_by_ticker.get(PRIMARY_BENCHMARK, []),
                 benchmark_evidence=source_evidence_by_ticker.get(PRIMARY_BENCHMARK, {}),
                 secondary_benchmark_bars=bars_by_ticker.get(SECONDARY_BENCHMARK, []),
-                secondary_benchmark_evidence=source_evidence_by_ticker.get(
-                    SECONDARY_BENCHMARK, {}
-                ),
+                secondary_benchmark_evidence=source_evidence_by_ticker.get(SECONDARY_BENCHMARK, {}),
             )
         else:
             outcome = _derive_canonical_outcome(
@@ -593,9 +585,7 @@ def capture_sourced_alpha_outcomes(
                 benchmark_bars=bars_by_ticker.get(PRIMARY_BENCHMARK, []),
                 benchmark_evidence=source_evidence_by_ticker.get(PRIMARY_BENCHMARK, {}),
                 secondary_benchmark_bars=bars_by_ticker.get(SECONDARY_BENCHMARK, []),
-                secondary_benchmark_evidence=source_evidence_by_ticker.get(
-                    SECONDARY_BENCHMARK, {}
-                ),
+                secondary_benchmark_evidence=source_evidence_by_ticker.get(SECONDARY_BENCHMARK, {}),
                 entry_intent=entry_intents.get(str(signal.get("signal_id") or "")),
                 paper_fills=fills_by_signal.get(str(signal.get("signal_id") or ""), []),
             )
@@ -649,12 +639,14 @@ def capture_sourced_alpha_outcomes(
         )
         persisted = atomic_stats["outcomes"]
         new_event_stats = atomic_stats["events"]
-        audit_event_stats.update({
-            "inserted": audit_event_stats["inserted"] + new_event_stats["inserted"],
-            "skipped": audit_event_stats["skipped"] + new_event_stats["skipped"],
-            "new_inserted": new_event_stats["inserted"],
-            "new_skipped": new_event_stats["skipped"],
-        })
+        audit_event_stats.update(
+            {
+                "inserted": audit_event_stats["inserted"] + new_event_stats["inserted"],
+                "skipped": audit_event_stats["skipped"] + new_event_stats["skipped"],
+                "new_inserted": new_event_stats["inserted"],
+                "new_skipped": new_event_stats["skipped"],
+            }
+        )
     else:
         persisted = {"inserted": 0, "skipped": 0}
     radar_bridge_stats: dict[str, Any] = {
@@ -688,9 +680,7 @@ def capture_sourced_alpha_outcomes(
         else {"inserted": 0, "skipped": 0, "row_count": len(capture_attempts)}
     )
     unresolved_count = sum(
-        1
-        for row in capture_attempts
-        if str(row.get("status") or "") == "terminal_missing"
+        1 for row in capture_attempts if str(row.get("status") or "") == "terminal_missing"
     )
     status = "partial" if unresolved_count else "complete"
     if radar_selections and radar_bridge_stats.get("status") != "COMPLETE":
@@ -746,10 +736,7 @@ def _outcome_targets(
             not ticker
             or not signal_id
             or signal_id in seen_signal_ids
-            or (
-                selected_signal_ids is not None
-                and signal_id not in selected_signal_ids
-            )
+            or (selected_signal_ids is not None and signal_id not in selected_signal_ids)
             or not signal_requires_outcome(row)
         ):
             continue
@@ -774,9 +761,7 @@ def _v6_shadow_outcome_targets(
 ) -> list[dict[str, Any]]:
     """Materialize V6 decisions as independent sourced paper-observation targets."""
 
-    by_signal = {
-        str(row.get("signal_id") or ""): row for row in historical_signals
-    }
+    by_signal = {str(row.get("signal_id") or ""): row for row in historical_signals}
     targets: list[dict[str, Any]] = []
     for decision in store.load_alpha_v6_decisions(market_date=market_date):
         source_signal_id = str(decision.get("source_signal_id") or "")
@@ -788,8 +773,7 @@ def _v6_shadow_outcome_targets(
         sampling = decision.get("rejected_sampling")
         sampling_data = sampling if isinstance(sampling, dict) else {}
         sampled_reject = bool(
-            action == "SHADOW_REJECTED_POLICY"
-            and sampling_data.get("included") is True
+            action == "SHADOW_REJECTED_POLICY" and sampling_data.get("included") is True
         )
         if action == "SHADOW_TRACK" and source is not None:
             facts = decision.get("signal_facts")
@@ -816,23 +800,23 @@ def _v6_shadow_outcome_targets(
             }
         else:
             continue
-        targets.append({
-            **target,
-            "signal_id": shadow_signal_id,
-            "alpha_signal_id": source_signal_id,
-            "generated_at": decision.get("decision_at"),
-            "strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
-            "outcome_strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
-            "v6_decision_id": decision.get("decision_id"),
-            "v6_cost_model_version": decision.get("cost_model_version"),
-            "v6_estimated_round_trip_cost_bps": decision.get(
-                "estimated_round_trip_cost_bps"
-            ),
-            "research_only": True,
-            "broker_execution_enabled": False,
-            "_canonical_return_decision": dict(decision),
-            "_canonical_return_decision_kind": "alpha_v6_shadow_decision",
-        })
+        targets.append(
+            {
+                **target,
+                "signal_id": shadow_signal_id,
+                "alpha_signal_id": source_signal_id,
+                "generated_at": decision.get("decision_at"),
+                "strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+                "outcome_strategy_id": ALPHAOPS_V6_STRATEGY_VERSION,
+                "v6_decision_id": decision.get("decision_id"),
+                "v6_cost_model_version": decision.get("cost_model_version"),
+                "v6_estimated_round_trip_cost_bps": decision.get("estimated_round_trip_cost_bps"),
+                "research_only": True,
+                "broker_execution_enabled": False,
+                "_canonical_return_decision": dict(decision),
+                "_canonical_return_decision_kind": "alpha_v6_shadow_decision",
+            }
+        )
     return targets
 
 
@@ -1029,17 +1013,19 @@ def _collect_yahoo_candidates(
         except (DataProviderError, ValueError, TypeError) as exc:
             detail = f"{YAHOO_SOURCE_NAME} attempt {attempt}: {exc}"
             errors.append(detail)
-            requests.append({
-                "ticker": ticker,
-                "status": "provider_error",
-                "source": YAHOO_SOURCE_NAME,
-                "source_url": yahoo_url,
-                "attempt": attempt,
-                "attempt_limit": attempt_limit,
-                "fetched_at": captured_at,
-                "bar_count": 0,
-                "error": str(exc),
-            })
+            requests.append(
+                {
+                    "ticker": ticker,
+                    "status": "provider_error",
+                    "source": YAHOO_SOURCE_NAME,
+                    "source_url": yahoo_url,
+                    "attempt": attempt,
+                    "attempt_limit": attempt_limit,
+                    "fetched_at": captured_at,
+                    "bar_count": 0,
+                    "error": str(exc),
+                }
+            )
 
 
 def _collect_alpaca_candidates(
@@ -1058,17 +1044,19 @@ def _collect_alpaca_candidates(
     alpaca_source = f"alpaca_market_data_{config.alpaca_data_feed}"
     alpaca_url = "https://data.alpaca.markets/v2/stocks/bars"
     if fetcher is None:
-        requests.append({
-            "ticker": ticker,
-            "status": "not_configured",
-            "source": alpaca_source,
-            "source_url": alpaca_url,
-            "attempt": 0,
-            "attempt_limit": attempt_limit,
-            "fetched_at": captured_at,
-            "bar_count": 0,
-            "error": "Read-only Alpaca market-data credentials are not configured.",
-        })
+        requests.append(
+            {
+                "ticker": ticker,
+                "status": "not_configured",
+                "source": alpaca_source,
+                "source_url": alpaca_url,
+                "attempt": 0,
+                "attempt_limit": attempt_limit,
+                "fetched_at": captured_at,
+                "bar_count": 0,
+                "error": "Read-only Alpaca market-data credentials are not configured.",
+            }
+        )
         return
     for attempt in range(1, attempt_limit + 1):
         try:
@@ -1112,17 +1100,19 @@ def _collect_alpaca_candidates(
         except (DataProviderError, ValueError, TypeError) as exc:
             detail = f"{alpaca_source} attempt {attempt}: {exc}"
             errors.append(detail)
-            requests.append({
-                "ticker": ticker,
-                "status": "provider_error",
-                "source": alpaca_source,
-                "source_url": alpaca_url,
-                "attempt": attempt,
-                "attempt_limit": attempt_limit,
-                "fetched_at": captured_at,
-                "bar_count": 0,
-                "error": str(exc),
-            })
+            requests.append(
+                {
+                    "ticker": ticker,
+                    "status": "provider_error",
+                    "source": alpaca_source,
+                    "source_url": alpaca_url,
+                    "attempt": attempt,
+                    "attempt_limit": attempt_limit,
+                    "fetched_at": captured_at,
+                    "bar_count": 0,
+                    "error": str(exc),
+                }
+            )
 
 
 def _fetch_alpaca_rows(
@@ -1174,8 +1164,7 @@ def _provider_request(
         "last_bar_at": _iso_utc(bars[-1].observed_at) if bars else None,
         "source_bar_hash_sha256": source_bar_hash,
         "source_artifact_identity": (
-            f"market-bars:{source}:{ticker}:{session.market_date}:"
-            f"{BAR_INTERVAL}:{source_bar_hash}"
+            f"market-bars:{source}:{ticker}:{session.market_date}:{BAR_INTERVAL}:{source_bar_hash}"
         ),
         **coverage.to_dict(),
     }
@@ -1843,9 +1832,7 @@ def _derive_canonical_outcome(
     decision_at = _parse_datetime(
         str(
             decision.get(
-                "selected_at"
-                if decision_kind == "alpha_paper_selection"
-                else "decision_at"
+                "selected_at" if decision_kind == "alpha_paper_selection" else "decision_at"
             )
             or ""
         )
@@ -1854,9 +1841,7 @@ def _derive_canonical_outcome(
         return _ineligible(base, "ineligible_missing_recommendation_timestamp")
     first_eligible_at = max(session.opened_at, _ceil_minute(decision_at))
     eligible_bars = [
-        bar
-        for bar in bars
-        if first_eligible_at <= bar.observed_at < session.closed_at
+        bar for bar in bars if first_eligible_at <= bar.observed_at < session.closed_at
     ]
     if not eligible_bars:
         return _ineligible(base, "ineligible_no_post_recommendation_bars")
@@ -1868,10 +1853,7 @@ def _derive_canonical_outcome(
     base.update(coverage.to_dict())
     if not coverage.is_complete:
         return _ineligible(base, coverage.status, coverage.detail)
-    if any(
-        bar.open is None or bar.high is None or bar.low is None
-        for bar in eligible_bars
-    ):
+    if any(bar.open is None or bar.high is None or bar.low is None for bar in eligible_bars):
         return _ineligible(base, "ineligible_incomplete_source_bars")
     malformed_ohlc = _malformed_ohlc_detail(eligible_bars)
     if malformed_ohlc:
@@ -1916,9 +1898,7 @@ def _derive_canonical_outcome(
         intent_target = _float(intent_receipt.get("target_price"))
         intent_stop = _float(intent_receipt.get("stop_price"))
         if not (
-            intent_trigger == trigger
-            and intent_target == target
-            and intent_stop == invalidation
+            intent_trigger == trigger and intent_target == target and intent_stop == invalidation
         ):
             return _ineligible(
                 base,
@@ -1960,29 +1940,19 @@ def _derive_canonical_outcome(
         halt_intervals=source_evidence.get("halt_intervals") or (),
         session_close=session.closed_at,
         source_conflict=source_evidence.get("source_conflict") is True,
-        corporate_action_unresolved=(
-            source_evidence.get("corporate_action_unresolved") is True
-        ),
+        corporate_action_unresolved=(source_evidence.get("corporate_action_unresolved") is True),
         source_artifact_identity=future_receipt["receipt_id"],
         source_artifact_hash_sha256=future_receipt["receipt_hash_sha256"],
         source_coverage_complete=coverage.is_complete,
         ordered_events=source_evidence.get("ordered_events") or (),
-        ordered_evidence_complete=(
-            source_evidence.get("ordered_evidence_complete") is True
-        ),
-        ordered_evidence_identity=source_evidence.get(
-            "ordered_evidence_identity"
-        ),
-        ordered_evidence_hash_sha256=source_evidence.get(
-            "ordered_evidence_hash_sha256"
-        ),
+        ordered_evidence_complete=(source_evidence.get("ordered_evidence_complete") is True),
+        ordered_evidence_identity=source_evidence.get("ordered_evidence_identity"),
+        ordered_evidence_hash_sha256=source_evidence.get("ordered_evidence_hash_sha256"),
         ordered_evidence_start=source_evidence.get("ordered_evidence_start"),
         ordered_evidence_end=source_evidence.get("ordered_evidence_end"),
         replay_binding=replay_binding,
         future_evidence_receipt=future_receipt,
-        entry_mode=(
-            ENTRY_MODE_ALREADY_ENTERED if path_entry_receipt is not None else None
-        ),
+        entry_mode=(ENTRY_MODE_ALREADY_ENTERED if path_entry_receipt is not None else None),
         entry_receipt=path_entry_receipt,
     )
     path_receipt = path_replay.to_dict()
@@ -2029,17 +1999,13 @@ def _derive_canonical_outcome(
         entry_slippage_bps = DEFAULT_V5_POLICY.entry_slippage_bps
         exit_slippage_bps = DEFAULT_V5_POLICY.exit_slippage_bps
         fee_bps_per_side = 0.0
-        commission_per_share_per_side = (
-            DEFAULT_V5_POLICY.commission_per_share_per_side
-        )
+        commission_per_share_per_side = DEFAULT_V5_POLICY.commission_per_share_per_side
         modeled_cost_identity = DEFAULT_V5_POLICY.cost_model_version
     canonical_notional = 1_000.0
     if decision_kind == "alpha_paper_enter_intent":
         intent_receipt = decision.get("entry_intent_receipt")
         parsed_notional = _float(
-            intent_receipt.get("notional")
-            if isinstance(intent_receipt, dict)
-            else None
+            intent_receipt.get("notional") if isinstance(intent_receipt, dict) else None
         )
         canonical_notional = parsed_notional if parsed_notional is not None else 0.0
         if canonical_notional <= 0.0:
@@ -2061,9 +2027,7 @@ def _derive_canonical_outcome(
             observed_cost_model_identity="alpha-outcome-capture-observed-bars.v2",
             modeled_cost_model_identity=modeled_cost_identity,
             benchmark_return_pct=benchmark_return,
-            benchmark_source_bar_hash_sha256=benchmark_evidence.get(
-                "source_bar_hash_sha256"
-            ),
+            benchmark_source_bar_hash_sha256=benchmark_evidence.get("source_bar_hash_sha256"),
             benchmark_independent_reconciliation_status=str(
                 benchmark_evidence.get("independent_reconciliation_status") or ""
             ),
@@ -2072,10 +2036,7 @@ def _derive_canonical_outcome(
                 secondary_benchmark_evidence.get("source_bar_hash_sha256")
             ),
             secondary_benchmark_independent_reconciliation_status=str(
-                secondary_benchmark_evidence.get(
-                    "independent_reconciliation_status"
-                )
-                or ""
+                secondary_benchmark_evidence.get("independent_reconciliation_status") or ""
             ),
             prospective_promotion_eligible=True,
         )
@@ -2304,9 +2265,7 @@ def _derive_outcome(
                 secondary_benchmark_return is not None
                 and source_evidence.get("independent_reconciliation_status") == "PASSED"
                 and benchmark_evidence.get("independent_reconciliation_status") == "PASSED"
-                and secondary_benchmark_evidence.get(
-                    "independent_reconciliation_status"
-                )
+                and secondary_benchmark_evidence.get("independent_reconciliation_status")
                 == "PASSED"
             )
         )
@@ -2314,99 +2273,92 @@ def _derive_outcome(
     learning_eligible = bool(
         benchmark_contract_complete
         and (
-            strategy_id not in {
+            strategy_id
+            not in {
                 ALPHAOPS_V5_STRATEGY_ID,
                 ALPHAOPS_V6_STRATEGY_VERSION,
             }
             or entry_intent is not None
         )
     )
-    base.update({
-        "entry_opportunity": True,
-        "entry_time": _iso_utc(trigger_bar.observed_at),
-        "entry_price": entry_price,
-        "entry_trigger": trigger,
-        "entry_price_policy": "bar_open_if_gap_through_else_saved_trigger",
-        "price_1m": price_1m,
-        "price_1m_observed_at": price_1m_at,
-        "price_5m": price_5m,
-        "price_5m_observed_at": price_5m_at,
-        "price_15m": price_15m,
-        "price_15m_observed_at": price_15m_at,
-        "lunch_price": lunch_price,
-        "lunch_price_observed_at": lunch_at,
-        "close_price": post_entry[-1].close,
-        "close_price_observed_at": _iso_utc(post_entry[-1].observed_at),
-        "high_after_entry": high,
-        "high_after_entry_observed_at": _iso_utc(high_bar.observed_at),
-        "low_after_entry": low,
-        "low_after_entry_observed_at": _iso_utc(low_bar.observed_at),
-        "max_favorable_excursion_pct": _return_pct(high, entry_price),
-        "max_adverse_excursion_pct": _return_pct(low, entry_price),
-        "time_to_mfe_minutes": _elapsed_minutes(
-            trigger_bar.observed_at, high_bar.observed_at
-        ),
-        "time_to_mae_minutes": _elapsed_minutes(
-            trigger_bar.observed_at, low_bar.observed_at
-        ),
-        "target_price": target,
-        "invalidation_price": invalidation,
-        "target_touched_at": _iso_utc(target_at) if target_at else None,
-        "invalidation_touched_at": _iso_utc(invalidation_at) if invalidation_at else None,
-        "planned_first_touch_outcome": first_touch,
-        "exit_reason": exit_reason,
-        "exit_time": _iso_utc(exit_at),
-        "exit_price": raw_exit_price,
-        "holding_duration_minutes": _elapsed_minutes(
-            trigger_bar.observed_at, exit_at
-        ),
-        "gross_return_pct": raw_return,
-        "benchmark_symbol": PRIMARY_BENCHMARK,
-        "benchmark_return_pct": benchmark_return,
-        "excess_return_pct": (
-            round(raw_return - benchmark_return, 4)
-            if raw_return is not None and benchmark_return is not None
-            else None
-        ),
-        "benchmark_source": benchmark_evidence.get("source"),
-        "benchmark_source_url": benchmark_evidence.get("source_url"),
-        "benchmark_source_bar_hash_sha256": benchmark_evidence.get(
-            "source_bar_hash_sha256"
-        ),
-        "benchmark_independent_reconciliation_status": benchmark_evidence.get(
-            "independent_reconciliation_status"
-        ),
-        "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
-        "secondary_benchmark_return_pct": secondary_benchmark_return,
-        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
-        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
-            "source_url"
-        ),
-        "secondary_benchmark_source_bar_hash_sha256": secondary_benchmark_evidence.get(
-            "source_bar_hash_sha256"
-        ),
-        "secondary_benchmark_independent_reconciliation_status": (
-            secondary_benchmark_evidence.get("independent_reconciliation_status")
-        ),
-        "attribution_complete": benchmark_return is not None,
-        "benchmark_contract_complete": benchmark_contract_complete,
-        "first_touch_precision": BAR_INTERVAL,
-        "outcome_status": "complete_sourced",
-        "learning_eligible": learning_eligible,
-        "learning_contract": (
-            "v6_shadow_outcome_requires_frozen_cost_label"
-            if strategy_id == ALPHAOPS_V6_STRATEGY_VERSION
-            else "candidate_outcome_requires_reconciled_trade_label"
-        ),
-        "validated_against_signal_timestamp": True,
-        **context,
-        **execution,
-        "notes": (
-            "Automatic read-only multi-provider EOD observation; one-minute bars; "
-            "same-bar target/stop ambiguity is counted conservatively as invalidation. "
-            "Production return learning still requires an exact reconciled trade label."
-        ),
-    })
+    base.update(
+        {
+            "entry_opportunity": True,
+            "entry_time": _iso_utc(trigger_bar.observed_at),
+            "entry_price": entry_price,
+            "entry_trigger": trigger,
+            "entry_price_policy": "bar_open_if_gap_through_else_saved_trigger",
+            "price_1m": price_1m,
+            "price_1m_observed_at": price_1m_at,
+            "price_5m": price_5m,
+            "price_5m_observed_at": price_5m_at,
+            "price_15m": price_15m,
+            "price_15m_observed_at": price_15m_at,
+            "lunch_price": lunch_price,
+            "lunch_price_observed_at": lunch_at,
+            "close_price": post_entry[-1].close,
+            "close_price_observed_at": _iso_utc(post_entry[-1].observed_at),
+            "high_after_entry": high,
+            "high_after_entry_observed_at": _iso_utc(high_bar.observed_at),
+            "low_after_entry": low,
+            "low_after_entry_observed_at": _iso_utc(low_bar.observed_at),
+            "max_favorable_excursion_pct": _return_pct(high, entry_price),
+            "max_adverse_excursion_pct": _return_pct(low, entry_price),
+            "time_to_mfe_minutes": _elapsed_minutes(trigger_bar.observed_at, high_bar.observed_at),
+            "time_to_mae_minutes": _elapsed_minutes(trigger_bar.observed_at, low_bar.observed_at),
+            "target_price": target,
+            "invalidation_price": invalidation,
+            "target_touched_at": _iso_utc(target_at) if target_at else None,
+            "invalidation_touched_at": _iso_utc(invalidation_at) if invalidation_at else None,
+            "planned_first_touch_outcome": first_touch,
+            "exit_reason": exit_reason,
+            "exit_time": _iso_utc(exit_at),
+            "exit_price": raw_exit_price,
+            "holding_duration_minutes": _elapsed_minutes(trigger_bar.observed_at, exit_at),
+            "gross_return_pct": raw_return,
+            "benchmark_symbol": PRIMARY_BENCHMARK,
+            "benchmark_return_pct": benchmark_return,
+            "excess_return_pct": (
+                round(raw_return - benchmark_return, 4)
+                if raw_return is not None and benchmark_return is not None
+                else None
+            ),
+            "benchmark_source": benchmark_evidence.get("source"),
+            "benchmark_source_url": benchmark_evidence.get("source_url"),
+            "benchmark_source_bar_hash_sha256": benchmark_evidence.get("source_bar_hash_sha256"),
+            "benchmark_independent_reconciliation_status": benchmark_evidence.get(
+                "independent_reconciliation_status"
+            ),
+            "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
+            "secondary_benchmark_return_pct": secondary_benchmark_return,
+            "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+            "secondary_benchmark_source_url": secondary_benchmark_evidence.get("source_url"),
+            "secondary_benchmark_source_bar_hash_sha256": secondary_benchmark_evidence.get(
+                "source_bar_hash_sha256"
+            ),
+            "secondary_benchmark_independent_reconciliation_status": (
+                secondary_benchmark_evidence.get("independent_reconciliation_status")
+            ),
+            "attribution_complete": benchmark_return is not None,
+            "benchmark_contract_complete": benchmark_contract_complete,
+            "first_touch_precision": BAR_INTERVAL,
+            "outcome_status": "complete_sourced",
+            "learning_eligible": learning_eligible,
+            "learning_contract": (
+                "v6_shadow_outcome_requires_frozen_cost_label"
+                if strategy_id == ALPHAOPS_V6_STRATEGY_VERSION
+                else "candidate_outcome_requires_reconciled_trade_label"
+            ),
+            "validated_against_signal_timestamp": True,
+            **context,
+            **execution,
+            "notes": (
+                "Automatic read-only multi-provider EOD observation; one-minute bars; "
+                "same-bar target/stop ambiguity is counted conservatively as invalidation. "
+                "Production return learning still requires an exact reconciled trade label."
+            ),
+        }
+    )
     base["payload_json"] = dict(base)
     return base
 
@@ -2497,65 +2449,62 @@ def _derive_rejected_counterfactual_outcome(
         and secondary_benchmark_return is not None
         and source_evidence.get("independent_reconciliation_status") == "PASSED"
         and benchmark_evidence.get("independent_reconciliation_status") == "PASSED"
-        and secondary_benchmark_evidence.get("independent_reconciliation_status")
-        == "PASSED"
+        and secondary_benchmark_evidence.get("independent_reconciliation_status") == "PASSED"
     )
-    base.update({
-        "entry_opportunity": True,
-        "entry_time": _iso_utc(entry_bar.observed_at),
-        "entry_price": entry_price,
-        "entry_price_policy": "sampled_reject_first_eligible_bar_open_v1",
-        "close_price": exit_price,
-        "close_price_observed_at": _iso_utc(exit_bar.observed_at),
-        "high_after_entry": high_bar.high,
-        "low_after_entry": low_bar.low,
-        "max_favorable_excursion_pct": _return_pct(high_bar.high, entry_price),
-        "max_adverse_excursion_pct": _return_pct(low_bar.low, entry_price),
-        "planned_first_touch_outcome": None,
-        "exit_reason": "sampled_reject_regular_session_close_v1",
-        "exit_time": _iso_utc(exit_bar.observed_at),
-        "exit_price": exit_price,
-        "holding_duration_minutes": _elapsed_minutes(
-            entry_bar.observed_at, exit_bar.observed_at
-        ),
-        "gross_return_pct": gross_return,
-        "benchmark_symbol": PRIMARY_BENCHMARK,
-        "benchmark_return_pct": benchmark_return,
-        "benchmark_source": benchmark_evidence.get("source"),
-        "benchmark_source_url": benchmark_evidence.get("source_url"),
-        "benchmark_source_bar_hash_sha256": benchmark_evidence.get(
-            "source_bar_hash_sha256"
-        ),
-        "benchmark_independent_reconciliation_status": benchmark_evidence.get(
-            "independent_reconciliation_status"
-        ),
-        "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
-        "secondary_benchmark_return_pct": secondary_benchmark_return,
-        "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
-        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
-            "source_url"
-        ),
-        "secondary_benchmark_source_bar_hash_sha256": (
-            secondary_benchmark_evidence.get("source_bar_hash_sha256")
-        ),
-        "secondary_benchmark_independent_reconciliation_status": (
-            secondary_benchmark_evidence.get("independent_reconciliation_status")
-        ),
-        "attribution_complete": benchmark_complete,
-        "benchmark_contract_complete": benchmark_complete,
-        "outcome_status": (
-            "complete_sourced" if benchmark_complete else "ineligible_missing_benchmark"
-        ),
-        "learning_eligible": benchmark_complete,
-        "learning_contract": "sampled_rejected_open_to_close_regret_v1",
-        "validated_against_signal_timestamp": True,
-        "counterfactual_rejected_candidate": True,
-        "counterfactual_policy": "OPEN_TO_CLOSE_V1",
-        "notes": (
-            "Research-only sampled rejected-candidate counterfactual. This is not a "
-            "simulated V5 trade and cannot enter the official paper scorecard."
-        ),
-    })
+    base.update(
+        {
+            "entry_opportunity": True,
+            "entry_time": _iso_utc(entry_bar.observed_at),
+            "entry_price": entry_price,
+            "entry_price_policy": "sampled_reject_first_eligible_bar_open_v1",
+            "close_price": exit_price,
+            "close_price_observed_at": _iso_utc(exit_bar.observed_at),
+            "high_after_entry": high_bar.high,
+            "low_after_entry": low_bar.low,
+            "max_favorable_excursion_pct": _return_pct(high_bar.high, entry_price),
+            "max_adverse_excursion_pct": _return_pct(low_bar.low, entry_price),
+            "planned_first_touch_outcome": None,
+            "exit_reason": "sampled_reject_regular_session_close_v1",
+            "exit_time": _iso_utc(exit_bar.observed_at),
+            "exit_price": exit_price,
+            "holding_duration_minutes": _elapsed_minutes(
+                entry_bar.observed_at, exit_bar.observed_at
+            ),
+            "gross_return_pct": gross_return,
+            "benchmark_symbol": PRIMARY_BENCHMARK,
+            "benchmark_return_pct": benchmark_return,
+            "benchmark_source": benchmark_evidence.get("source"),
+            "benchmark_source_url": benchmark_evidence.get("source_url"),
+            "benchmark_source_bar_hash_sha256": benchmark_evidence.get("source_bar_hash_sha256"),
+            "benchmark_independent_reconciliation_status": benchmark_evidence.get(
+                "independent_reconciliation_status"
+            ),
+            "secondary_benchmark_symbol": SECONDARY_BENCHMARK,
+            "secondary_benchmark_return_pct": secondary_benchmark_return,
+            "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
+            "secondary_benchmark_source_url": secondary_benchmark_evidence.get("source_url"),
+            "secondary_benchmark_source_bar_hash_sha256": (
+                secondary_benchmark_evidence.get("source_bar_hash_sha256")
+            ),
+            "secondary_benchmark_independent_reconciliation_status": (
+                secondary_benchmark_evidence.get("independent_reconciliation_status")
+            ),
+            "attribution_complete": benchmark_complete,
+            "benchmark_contract_complete": benchmark_complete,
+            "outcome_status": (
+                "complete_sourced" if benchmark_complete else "ineligible_missing_benchmark"
+            ),
+            "learning_eligible": benchmark_complete,
+            "learning_contract": "sampled_rejected_open_to_close_regret_v1",
+            "validated_against_signal_timestamp": True,
+            "counterfactual_rejected_candidate": True,
+            "counterfactual_policy": "OPEN_TO_CLOSE_V1",
+            "notes": (
+                "Research-only sampled rejected-candidate counterfactual. This is not a "
+                "simulated V5 trade and cannot enter the official paper scorecard."
+            ),
+        }
+    )
     base["payload_json"] = dict(base)
     return base
 
@@ -2604,12 +2553,8 @@ def _outcome_base(
         ),
         "source_fetched_at": source_evidence.get("source_fetched_at"),
         "source_lineage": source_evidence.get("source_lineage") or [],
-        "provider_chain_exhausted": bool(
-            source_evidence.get("provider_chain_exhausted")
-        ),
-        "independent_source_reconciliation": source_evidence.get(
-            "independent_reconciliation"
-        ),
+        "provider_chain_exhausted": bool(source_evidence.get("provider_chain_exhausted")),
+        "independent_source_reconciliation": source_evidence.get("independent_reconciliation"),
         "independent_reconciliation_status": source_evidence.get(
             "independent_reconciliation_status"
         ),
@@ -2650,38 +2595,40 @@ def _conclusive_without_entry(
     trigger: float,
     note: str,
 ) -> dict[str, Any]:
-    base.update({
-        "entry_trigger": trigger,
-        "entry_opportunity": False,
-        "fill_status": "not_filled_no_trigger",
-        "non_fill_reason": status,
-        "entry_time": None,
-        "entry_price": None,
-        "price_1m": None,
-        "price_5m": None,
-        "price_15m": None,
-        "lunch_price": None,
-        "close_price": None,
-        "high_after_entry": None,
-        "low_after_entry": None,
-        "max_favorable_excursion_pct": None,
-        "max_adverse_excursion_pct": None,
-        "time_to_mfe_minutes": None,
-        "time_to_mae_minutes": None,
-        "exit_time": None,
-        "exit_price": None,
-        "exit_reason": None,
-        "holding_duration_minutes": None,
-        "gross_return_pct": None,
-        "benchmark_return_pct": None,
-        "excess_return_pct": None,
-        "realized_slippage_cost": None,
-        "modeled_fees": None,
-        "outcome_status": status,
-        "learning_eligible": False,
-        "validated_against_signal_timestamp": True,
-        "notes": note,
-    })
+    base.update(
+        {
+            "entry_trigger": trigger,
+            "entry_opportunity": False,
+            "fill_status": "not_filled_no_trigger",
+            "non_fill_reason": status,
+            "entry_time": None,
+            "entry_price": None,
+            "price_1m": None,
+            "price_5m": None,
+            "price_15m": None,
+            "lunch_price": None,
+            "close_price": None,
+            "high_after_entry": None,
+            "low_after_entry": None,
+            "max_favorable_excursion_pct": None,
+            "max_adverse_excursion_pct": None,
+            "time_to_mfe_minutes": None,
+            "time_to_mae_minutes": None,
+            "exit_time": None,
+            "exit_price": None,
+            "exit_reason": None,
+            "holding_duration_minutes": None,
+            "gross_return_pct": None,
+            "benchmark_return_pct": None,
+            "excess_return_pct": None,
+            "realized_slippage_cost": None,
+            "modeled_fees": None,
+            "outcome_status": status,
+            "learning_eligible": False,
+            "validated_against_signal_timestamp": True,
+            "notes": note,
+        }
+    )
     base["payload_json"] = dict(base)
     return base
 
@@ -2695,49 +2642,53 @@ def _captured_ineligible_plan(
     entry_bar: OutcomeBar,
     note: str,
 ) -> dict[str, Any]:
-    base.update({
-        "entry_trigger": trigger,
-        "entry_opportunity": True,
-        "fill_status": "not_filled_invalid_plan",
-        "non_fill_reason": status,
-        "entry_time": _iso_utc(entry_bar.observed_at),
-        "entry_price": entry_price,
-        "price_1m": None,
-        "price_5m": None,
-        "price_15m": None,
-        "lunch_price": None,
-        "close_price": None,
-        "high_after_entry": None,
-        "low_after_entry": None,
-        "max_favorable_excursion_pct": None,
-        "max_adverse_excursion_pct": None,
-        "time_to_mfe_minutes": None,
-        "time_to_mae_minutes": None,
-        "exit_time": None,
-        "exit_price": None,
-        "exit_reason": None,
-        "holding_duration_minutes": None,
-        "gross_return_pct": None,
-        "benchmark_return_pct": None,
-        "excess_return_pct": None,
-        "realized_slippage_cost": None,
-        "modeled_fees": None,
-        "outcome_status": status,
-        "learning_eligible": False,
-        "validated_against_signal_timestamp": True,
-        "notes": note,
-    })
+    base.update(
+        {
+            "entry_trigger": trigger,
+            "entry_opportunity": True,
+            "fill_status": "not_filled_invalid_plan",
+            "non_fill_reason": status,
+            "entry_time": _iso_utc(entry_bar.observed_at),
+            "entry_price": entry_price,
+            "price_1m": None,
+            "price_5m": None,
+            "price_15m": None,
+            "lunch_price": None,
+            "close_price": None,
+            "high_after_entry": None,
+            "low_after_entry": None,
+            "max_favorable_excursion_pct": None,
+            "max_adverse_excursion_pct": None,
+            "time_to_mfe_minutes": None,
+            "time_to_mae_minutes": None,
+            "exit_time": None,
+            "exit_price": None,
+            "exit_reason": None,
+            "holding_duration_minutes": None,
+            "gross_return_pct": None,
+            "benchmark_return_pct": None,
+            "excess_return_pct": None,
+            "realized_slippage_cost": None,
+            "modeled_fees": None,
+            "outcome_status": status,
+            "learning_eligible": False,
+            "validated_against_signal_timestamp": True,
+            "notes": note,
+        }
+    )
     base["payload_json"] = dict(base)
     return base
 
 
 def _ineligible(base: dict[str, Any], status: str, detail: str = "") -> dict[str, Any]:
-    base.update({
-        "outcome_status": status,
-        "learning_eligible": False,
-        "validated_against_signal_timestamp": False,
-        "notes": detail or status.replace("_", " "),
-    })
+    base.update(
+        {
+            "outcome_status": status,
+            "learning_eligible": False,
+            "validated_against_signal_timestamp": False,
+            "notes": detail or status.replace("_", " "),
+        }
+    )
     return base
 
 
@@ -2847,11 +2798,7 @@ def _bar_at_or_after(
     value: datetime,
 ) -> OutcomeBar | None:
     return next(
-        (
-            bar
-            for bar in bars
-            if value <= bar.observed_at <= value + timedelta(seconds=90)
-        ),
+        (bar for bar in bars if value <= bar.observed_at <= value + timedelta(seconds=90)),
         None,
     )
 
@@ -2886,9 +2833,7 @@ def _outcome_context(signal: dict[str, Any]) -> dict[str, Any]:
     return {
         "gap_pct": gap,
         "gap_bucket": _gap_bucket(gap),
-        "catalyst_class": catalyst or (
-            "sourced_unspecified" if catalyst_summary else "missing"
-        ),
+        "catalyst_class": catalyst or ("sourced_unspecified" if catalyst_summary else "missing"),
         "float_shares": float_shares,
         "float_bucket": _float_bucket(float_shares),
         "premarket_dollar_volume": dollar_volume,
@@ -2899,19 +2844,11 @@ def _outcome_context(signal: dict[str, Any]) -> dict[str, Any]:
             or signal.get("market_regime")
             or "unknown"
         ),
-        "sector_regime": (
-            raw.get("sector_regime")
-            or signal.get("sector_regime")
-            or "unknown"
-        ),
+        "sector_regime": (raw.get("sector_regime") or signal.get("sector_regime") or "unknown"),
         "source_confidence": confidence,
         "source_confidence_bucket": _confidence_bucket(confidence),
-        "vetoes": _tokens(
-            signal.get("avoid_reasons_json") or raw.get("avoid_reasons")
-        ),
-        "risk_flags": _tokens(
-            signal.get("risk_flags_json") or raw.get("risk_flags")
-        ),
+        "vetoes": _tokens(signal.get("avoid_reasons_json") or raw.get("avoid_reasons")),
+        "risk_flags": _tokens(signal.get("risk_flags_json") or raw.get("risk_flags")),
     }
 
 
@@ -2940,12 +2877,14 @@ def _execution_outcome_fields(
     }
     if strategy_id != ALPHAOPS_V5_STRATEGY_ID:
         return base
-    base.update({
-        "fill_status": "not_filled_official_policy",
-        "non_fill_reason": "no_eligible_enter_long_intent",
-        "execution_policy_version": DEFAULT_V5_POLICY.policy_version,
-        "cost_model_version": DEFAULT_V5_POLICY.cost_model_version,
-    })
+    base.update(
+        {
+            "fill_status": "not_filled_official_policy",
+            "non_fill_reason": "no_eligible_enter_long_intent",
+            "execution_policy_version": DEFAULT_V5_POLICY.policy_version,
+            "cost_model_version": DEFAULT_V5_POLICY.cost_model_version,
+        }
+    )
     if entry_intent is None:
         return base
     trace = dict(entry_intent.get("decision_trace") or {})
@@ -2955,20 +2894,14 @@ def _execution_outcome_fields(
         computed.get("expected_entry_price"),
         entry_intent.get("decision_price"),
     )
-    expected_exit = raw_exit * (
-        1.0 - DEFAULT_V5_POLICY.exit_slippage_bps / 10_000.0
-    )
+    expected_exit = raw_exit * (1.0 - DEFAULT_V5_POLICY.exit_slippage_bps / 10_000.0)
     modeled_fees = (
         quantity * DEFAULT_V5_POLICY.commission_per_share_per_side * 2
         if quantity is not None
         else None
     )
     modeled_slippage = (
-        (
-            abs((expected_entry or raw_entry) - trigger)
-            + abs(raw_exit - expected_exit)
-        )
-        * quantity
+        (abs((expected_entry or raw_entry) - trigger) + abs(raw_exit - expected_exit)) * quantity
         if quantity is not None
         else None
     )
@@ -2980,48 +2913,41 @@ def _execution_outcome_fields(
     exit_fill = _float(ordered_fills[-1].get("fill_price")) if len(ordered_fills) > 1 else None
     realized_slippage = (
         (abs(entry_fill - raw_entry) + abs(exit_fill - raw_exit)) * quantity
-        if (
-            entry_fill is not None
-            and exit_fill is not None
-            and quantity is not None
-        )
+        if (entry_fill is not None and exit_fill is not None and quantity is not None)
         else None
     )
-    base.update({
-        "fill_status": (
-            "paper_filled_and_closed"
-            if exit_fill is not None
-            else "paper_entry_filled"
-            if entry_fill is not None
-            else "eligible_intent_pending_fill"
-        ),
-        "non_fill_reason": None,
-        "official_entry_intent_id": entry_intent.get("intent_id"),
-        "paper_quantity": quantity,
-        "paper_entry_fill_price": entry_fill or expected_entry,
-        "paper_exit_fill_price": exit_fill,
-        "modeled_fees": round(modeled_fees, 4) if modeled_fees is not None else None,
-        "modeled_slippage_cost": (
-            round(modeled_slippage, 4) if modeled_slippage is not None else None
-        ),
-        "realized_slippage_cost": (
-            round(realized_slippage, 4)
-            if realized_slippage is not None
-            else None
-        ),
-        "execution_policy_version": (
-            entry_intent.get("execution_policy_version")
-            or DEFAULT_V5_POLICY.policy_version
-        ),
-        "cost_model_version": (
-            entry_intent.get("cost_model_version")
-            or DEFAULT_V5_POLICY.cost_model_version
-        ),
-        "decision_fingerprint": (
-            entry_intent.get("decision_fingerprint")
-            or trace.get("decision_fingerprint")
-        ),
-    })
+    base.update(
+        {
+            "fill_status": (
+                "paper_filled_and_closed"
+                if exit_fill is not None
+                else "paper_entry_filled"
+                if entry_fill is not None
+                else "eligible_intent_pending_fill"
+            ),
+            "non_fill_reason": None,
+            "official_entry_intent_id": entry_intent.get("intent_id"),
+            "paper_quantity": quantity,
+            "paper_entry_fill_price": entry_fill or expected_entry,
+            "paper_exit_fill_price": exit_fill,
+            "modeled_fees": round(modeled_fees, 4) if modeled_fees is not None else None,
+            "modeled_slippage_cost": (
+                round(modeled_slippage, 4) if modeled_slippage is not None else None
+            ),
+            "realized_slippage_cost": (
+                round(realized_slippage, 4) if realized_slippage is not None else None
+            ),
+            "execution_policy_version": (
+                entry_intent.get("execution_policy_version") or DEFAULT_V5_POLICY.policy_version
+            ),
+            "cost_model_version": (
+                entry_intent.get("cost_model_version") or DEFAULT_V5_POLICY.cost_model_version
+            ),
+            "decision_fingerprint": (
+                entry_intent.get("decision_fingerprint") or trace.get("decision_fingerprint")
+            ),
+        }
+    )
     return base
 
 
@@ -3119,11 +3045,7 @@ def _lunch_price(
     if entry_at >= lunch_at:
         return None, None
     bar = next(
-        (
-            item
-            for item in bars
-            if lunch_at <= item.observed_at <= lunch_at + timedelta(seconds=90)
-        ),
+        (item for item in bars if lunch_at <= item.observed_at <= lunch_at + timedelta(seconds=90)),
         None,
     )
     return (bar.close, _iso_utc(bar.observed_at)) if bar else (None, None)
@@ -3148,23 +3070,21 @@ def _capture_attempt(
         or source_evidence.get("source_bar_hash_sha256")
         or ""
     )
-    attribution_missing = bool(
-        outcome is not None and outcome.get("attribution_complete") is False
-    )
+    attribution_missing = bool(outcome is not None and outcome.get("attribution_complete") is False)
     terminal_missing = outcome_status.startswith("ineligible_") or attribution_missing
     status = "terminal_missing" if terminal_missing else "resolved"
     relevant_requests = [
-        dict(row)
-        for row in source_requests
-        if str(row.get("ticker") or "").upper() == ticker
+        dict(row) for row in source_requests if str(row.get("ticker") or "").upper() == ticker
     ]
-    identity = ":".join((
-        market_date,
-        signal_id,
-        _iso_utc(requested_at),
-        outcome_status,
-        source_hash,
-    ))
+    identity = ":".join(
+        (
+            market_date,
+            signal_id,
+            _iso_utc(requested_at),
+            outcome_status,
+            source_hash,
+        )
+    )
     attempt_id = "outcome-attempt:" + hashlib.sha256(identity.encode()).hexdigest()
     source_refs = [
         {
@@ -3379,9 +3299,7 @@ def _outcome_event(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _existing_diagnostic(
-    signal: dict[str, Any], outcome: dict[str, Any]
-) -> dict[str, Any]:
+def _existing_diagnostic(signal: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
     return {
         "signal_id": signal.get("signal_id"),
         "ticker": signal.get("ticker"),
@@ -3546,10 +3464,7 @@ def _malformed_ohlc_detail(bars: list[OutcomeBar]) -> str:
         high = float(bar.high) if bar.high is not None else 0.0
         low = float(bar.low) if bar.low is not None else 0.0
         close = float(bar.close)
-        if not all(
-            math.isfinite(value) and value > 0
-            for value in (open_price, high, low, close)
-        ):
+        if not all(math.isfinite(value) and value > 0 for value in (open_price, high, low, close)):
             return f"Non-finite or non-positive OHLC at {_iso_utc(bar.observed_at)}."
         if not low <= min(open_price, close) <= max(open_price, close) <= high:
             return f"Invalid OHLC ordering at {_iso_utc(bar.observed_at)}."
@@ -3700,9 +3615,7 @@ def _canonical_compatibility_projection(
         "benchmark_source": benchmark_evidence.get("source"),
         "benchmark_source_url": benchmark_evidence.get("source_url"),
         "secondary_benchmark_source": secondary_benchmark_evidence.get("source"),
-        "secondary_benchmark_source_url": secondary_benchmark_evidence.get(
-            "source_url"
-        ),
+        "secondary_benchmark_source_url": secondary_benchmark_evidence.get("source_url"),
         "attribution_complete": classification == CURRENT_RETURN_TRUTH,
         "benchmark_contract_complete": classification == CURRENT_RETURN_TRUTH,
         "first_touch_precision": projection.get("event_time_precision"),
@@ -3758,8 +3671,4 @@ def _tokens(value: Any) -> list[str]:
             parsed = None
         if isinstance(parsed, list):
             return [str(item).strip() for item in parsed if str(item).strip()]
-    return [
-        token.strip()
-        for token in text.replace(",", ";").split(";")
-        if token.strip()
-    ]
+    return [token.strip() for token in text.replace(",", ";").split(";") if token.strip()]
