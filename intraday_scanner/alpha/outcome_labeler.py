@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
 def label_outcome(signal: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
-    entry = _float(
-        outcome.get("entry")
-        or outcome.get("entry_price")
-        or signal.get("entry_trigger")
-        or signal.get("breakout_trigger")
-        or signal.get("entry_watch_level")
-        or signal.get("premarket_price")
-    )
-    high = _float(outcome.get("high") or outcome.get("high_after_entry"))
-    low = _float(outcome.get("low") or outcome.get("low_after_entry"))
-    close = _float(outcome.get("close") or outcome.get("close_price"))
-    price_1m = _float(outcome.get("price_1m") or outcome.get("one_minute"))
-    price_5m = _float(outcome.get("price_5m") or outcome.get("five_minute"))
-    price_15m = _float(outcome.get("price_15m") or outcome.get("fifteen_minute"))
-    lunch = _float(outcome.get("lunch") or outcome.get("lunch_price"))
-    target = _float(signal.get("first_target") or signal.get("target_1"))
-    invalidation = _float(signal.get("invalidation_level") or signal.get("invalidation"))
+    entry_present, entry = _first_price(outcome, "entry", "entry_price")
+    if not entry_present:
+        _, entry = _first_price(
+            signal,
+            "entry_trigger",
+            "breakout_trigger",
+            "entry_watch_level",
+            "premarket_price",
+        )
+    high_present, high = _first_price(outcome, "high", "high_after_entry")
+    low_present, low = _first_price(outcome, "low", "low_after_entry")
+    close_present, close = _first_price(outcome, "close", "close_price")
+    price_1m_present, price_1m = _first_price(outcome, "price_1m", "one_minute")
+    price_5m_present, price_5m = _first_price(outcome, "price_5m", "five_minute")
+    price_15m_present, price_15m = _first_price(outcome, "price_15m", "fifteen_minute")
+    lunch_present, lunch = _first_price(outcome, "lunch", "lunch_price")
+    _, target = _first_price(signal, "first_target", "target_1")
+    _, invalidation = _first_price(signal, "invalidation_level", "invalidation")
     hit_target_1 = bool(target is not None and high is not None and high >= target)
     hit_invalidation = bool(
         invalidation is not None and low is not None and low <= invalidation
@@ -53,6 +55,18 @@ def label_outcome(signal: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
         and high is not None
         and low is not None
         and close is not None
+        and all(
+            not present or value is not None
+            for present, value in (
+                (high_present, high),
+                (low_present, low),
+                (close_present, close),
+                (price_1m_present, price_1m),
+                (price_5m_present, price_5m),
+                (price_15m_present, price_15m),
+                (lunch_present, lunch),
+            )
+        )
         and outcome_source
     )
     return {
@@ -251,9 +265,23 @@ def _planned_r_multiple(
 
 
 def _float(value: Any) -> float | None:
-    if value in {None, ""}:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _first_price(source: dict[str, Any], *keys: str) -> tuple[bool, float | None]:
+    """Return the first non-blank alias, with invalid present values failing closed."""
+
+    for key in keys:
+        if key not in source:
+            continue
+        value = source[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        return True, _float(value)
+    return False, None

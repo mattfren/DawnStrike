@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from html import escape
 from typing import Any
 
@@ -233,7 +234,7 @@ def display_pick_from_raw(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "score": score,
         "gap_pct": row.get("gap_pct"),
-        "price": row.get("premarket_price") or row.get("current_price") or row.get("price"),
+        "price": _first_display_price(row, "premarket_price", "current_price", "price"),
         "watch_level": row.get("breakout_trigger") or row.get("entry_trigger"),
         "exit_line": row.get("invalidation_level") or row.get("invalidation"),
         "target": row.get("first_target") or row.get("target_1"),
@@ -294,3 +295,20 @@ def _format_pct(value: Any) -> str:
     except (TypeError, ValueError):
         return "Pending"
     return f"{number:.2f}%".rstrip("0").rstrip(".")
+
+
+def _first_display_price(row: dict[str, Any], *keys: str) -> float | None:
+    """Use the first non-blank price alias; present invalid truth stays Pending."""
+
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
+    return None

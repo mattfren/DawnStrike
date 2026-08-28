@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -1806,11 +1807,11 @@ def alpha_monitor(
                 "research_only": True,
                 "broker_execution_enabled": False,
             }
-        current_prices = {
-            str(row.get("ticker") or "").upper(): float(row["current_price"])
-            for row in price_observation.get("observations", [])
-            if row.get("is_usable") and row.get("current_price") not in {None, ""}
-        }
+        current_prices = {}
+        for row in price_observation.get("observations", []):
+            current_price = _positive_finite_price(row.get("current_price"))
+            if row.get("is_usable") and current_price is not None:
+                current_prices[str(row.get("ticker") or "").upper()] = current_price
         try:
             live_config = load_config(database_path=Path(db_path))
             quote_provider = AlpacaProvider(live_config)
@@ -2804,6 +2805,13 @@ def _number(value: Any) -> float | None:
         return float(str(value).replace("$", "").replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _positive_finite_price(value: Any) -> float | None:
+    """Accept only usable market prices for the monitor's current-price map."""
+
+    parsed = _number(value)
+    return parsed if parsed is not None and math.isfinite(parsed) and parsed > 0 else None
 
 
 def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int) -> dict[str, Any]:

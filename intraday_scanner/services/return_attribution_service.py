@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import date, datetime
@@ -246,9 +247,7 @@ def record_monitor_signal_events(
                 signal_id=str(hist["signal_id"]),
                 event_type=event_type,
                 event_timestamp=str(event.get("created_at") or utc_now_iso()),
-                event_price=_optional_float(
-                    event.get("current_price") or event.get("exit_price") or event.get("price")
-                ),
+                event_price=_first_price(event, "current_price", "exit_price", "price"),
                 source="alpha_monitor",
                 notes=str(event.get("label") or event.get("status") or ""),
                 payload=event,
@@ -590,7 +589,7 @@ def _signal_event(
         "signal_id": signal_id,
         "event_type": event_type,
         "event_timestamp": event_timestamp,
-        "event_price": _optional_float(event_price),
+        "event_price": _optional_price(event_price),
         "source": source,
         "notes": notes,
         "payload_json": payload,
@@ -627,14 +626,14 @@ def _normalize_historical_outcome(
         "recommendation_timestamp": signal.get("generated_at") or "",
         "outcome_source": str(row.get("source") or "manual_outcome_upload"),
         "entry_time": entry_time,
-        "entry_price": _optional_float(row.get("entry_price")),
-        "price_1m": _optional_float(row.get("price_1m")),
-        "price_5m": _optional_float(row.get("price_5m")),
-        "price_15m": _optional_float(row.get("price_15m")),
-        "lunch_price": _optional_float(row.get("lunch_price")),
-        "close_price": _optional_float(row.get("close_price")),
-        "high_after_entry": _optional_float(row.get("high_after_entry")),
-        "low_after_entry": _optional_float(row.get("low_after_entry")),
+        "entry_price": _optional_price(row.get("entry_price")),
+        "price_1m": _optional_price(row.get("price_1m")),
+        "price_5m": _optional_price(row.get("price_5m")),
+        "price_15m": _optional_price(row.get("price_15m")),
+        "lunch_price": _optional_price(row.get("lunch_price")),
+        "close_price": _optional_price(row.get("close_price")),
+        "high_after_entry": _optional_price(row.get("high_after_entry")),
+        "low_after_entry": _optional_price(row.get("low_after_entry")),
         "halted": _bool(row.get("halted")),
         "notes": str(row.get("notes") or ""),
         "imported_at": imported_at,
@@ -680,10 +679,10 @@ def _attribution_for_signal(
     outcome: dict[str, Any],
     events_by_signal: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
-    entry = _optional_float(outcome.get("entry_price"))
+    entry = _optional_price(outcome.get("entry_price"))
     rows = []
     for exit_policy, field in SCENARIO_POLICIES.items():
-        exit_price = _optional_float(outcome.get(field))
+        exit_price = _optional_price(outcome.get(field))
         rows.append(
             _attribution_row(
                 signal,
@@ -711,9 +710,9 @@ def _attribution_for_signal(
 
 
 def _target_row(signal: dict[str, Any], outcome: dict[str, Any], target_key: str) -> dict[str, Any]:
-    entry = _optional_float(outcome.get("entry_price"))
+    entry = _optional_price(outcome.get("entry_price"))
     target = _optional_float(signal.get(target_key))
-    high = _optional_float(outcome.get("high_after_entry"))
+    high = _optional_price(outcome.get("high_after_entry"))
     hit = target is not None and high is not None and high >= target
     return _attribution_row(
         signal,
@@ -728,9 +727,9 @@ def _target_row(signal: dict[str, Any], outcome: dict[str, Any], target_key: str
 
 
 def _invalidation_row(signal: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
-    entry = _optional_float(outcome.get("entry_price"))
+    entry = _optional_price(outcome.get("entry_price"))
     invalidation = _optional_float(signal.get("invalidation_level") or signal.get("exit_line"))
-    low = _optional_float(outcome.get("low_after_entry"))
+    low = _optional_price(outcome.get("low_after_entry"))
     hit = invalidation is not None and low is not None and low <= invalidation
     return _attribution_row(
         signal,
@@ -762,18 +761,18 @@ def _monitor_exit_row(
         outcome,
         entry_policy=ENTRY_POLICY,
         exit_policy="monitor_exit_signal",
-        entry_price=_optional_float(outcome.get("entry_price")),
-        exit_price=_optional_float(event.get("event_price")),
+        entry_price=_optional_price(outcome.get("entry_price")),
+        exit_price=_optional_price(event.get("event_price")),
         scenario_or_recommended="recommended",
         audit_status=(
-            "audited" if _optional_float(event.get("event_price")) is not None else "unavailable"
+            "audited" if _optional_price(event.get("event_price")) is not None else "unavailable"
         ),
     )
 
 
 def _trigger_row(signal: dict[str, Any], outcome: dict[str, Any]) -> list[dict[str, Any]]:
     trigger = _optional_float(signal.get("entry_watch_level"))
-    high = _optional_float(outcome.get("high_after_entry"))
+    high = _optional_price(outcome.get("high_after_entry"))
     if trigger is None or high is None or high < trigger:
         return []
     rows = []
@@ -789,10 +788,10 @@ def _trigger_row(signal: dict[str, Any], outcome: dict[str, Any]) -> list[dict[s
                 entry_policy="trigger_touch",
                 exit_policy=exit_policy,
                 entry_price=trigger,
-                exit_price=_optional_float(outcome.get(field)),
+                exit_price=_optional_price(outcome.get(field)),
                 scenario_or_recommended="scenario",
                 audit_status=(
-                    "audited" if _optional_float(outcome.get(field)) is not None else "unavailable"
+                    "audited" if _optional_price(outcome.get(field)) is not None else "unavailable"
                 ),
             )
         )
@@ -812,8 +811,8 @@ def _attribution_row(
 ) -> dict[str, Any]:
     signal_id = str(signal.get("signal_id") or "")
     ret = _return_pct(entry_price, exit_price)
-    high = _optional_float(outcome.get("high_after_entry"))
-    low = _optional_float(outcome.get("low_after_entry"))
+    high = _optional_price(outcome.get("high_after_entry"))
+    low = _optional_price(outcome.get("low_after_entry"))
     target_1 = _optional_float(signal.get("target_1"))
     target_2 = _optional_float(signal.get("target_2"))
     invalidation = _optional_float(signal.get("invalidation_level") or signal.get("exit_line"))
@@ -1363,6 +1362,26 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _optional_price(value: Any) -> float | None:
+    """Parse a positive finite price; invalid values remain unavailable."""
+
+    parsed = _optional_float(value)
+    return parsed if parsed is not None and math.isfinite(parsed) and parsed > 0 else None
+
+
+def _first_price(row: dict[str, Any], *keys: str) -> float | None:
+    """Use the first non-blank alias, preserving invalid-primary fail-closed semantics."""
+
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        return _optional_price(value)
+    return None
+
+
 def _optional_int(value: Any) -> int | None:
     parsed = _optional_float(value)
     return int(parsed) if parsed is not None else None
@@ -1380,7 +1399,13 @@ def _bool(value: Any) -> bool | None:
 
 
 def _return_pct(entry: float | None, exit_price: float | None) -> float | None:
-    if entry is None or exit_price is None or entry <= 0:
+    if (
+        entry is None
+        or exit_price is None
+        or entry <= 0
+        or not math.isfinite(entry)
+        or not math.isfinite(exit_price)
+    ):
         return None
     return round(((exit_price - entry) / entry) * 100, 4)
 
