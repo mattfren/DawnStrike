@@ -1812,7 +1812,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
-        paper_ops_root=args.paper_ops_root,
+        paper_ops_root=getattr(args, "paper_ops_root", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1828,7 +1828,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
-        paper_ops_root=args.paper_ops_root,
+        paper_ops_root=getattr(args, "paper_ops_root", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
