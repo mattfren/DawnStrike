@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import os
+import re
+import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -24,6 +28,11 @@ from intraday_scanner.v2.data.yahoo_chart import (
 )
 
 YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+_CANONICAL_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
+_MAX_SYMBOL_LENGTH = 16
+_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+_CACHE_WRITE_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,7 @@ class _SymbolFetchResult:
     error: str | None = None
     from_cache: bool = False
     cache_path: Path | None = None
+    completed_at: float | None = None
 
 
 def fetch_yahoo_chart_daily_dataset(
@@ -71,10 +81,10 @@ def fetch_yahoo_chart_daily_dataset(
         raise ValueError("max_requests_per_second must be positive when supplied")
     if time_budget_seconds is not None and time_budget_seconds <= 0:
         raise ValueError("time_budget_seconds must be positive when supplied")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    requested_symbols = tuple(
-        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
-    )
+    requested_symbols = canonicalize_yahoo_symbols(symbols)
+    provider_symbols = _provider_symbol_map(requested_symbols)
+    cache_root = cache_dir.resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = [
         "public_yahoo_chart: free public chart data; not an institutional feed",
         "public_yahoo_chart: no independent corporate-action reconciliation",
@@ -82,7 +92,11 @@ def fetch_yahoo_chart_daily_dataset(
     urls: dict[str, str] = {}
     urls.update(
         {
-            symbol: _chart_url(symbol, range_period=range_period, interval=interval)
+            symbol: _chart_url(
+                provider_symbols[symbol],
+                range_period=range_period,
+                interval=interval,
+            )
             for symbol in requested_symbols
         }
     )
@@ -97,14 +111,16 @@ def fetch_yahoo_chart_daily_dataset(
         symbol: executor.submit(
             _fetch_symbol,
             symbol=symbol,
+            provider_symbol=provider_symbols[symbol],
             url=urls[symbol],
-            cache_dir=cache_dir,
+            cache_dir=cache_root,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_backoff_seconds=retry_backoff_seconds,
             required_bar_date=required_bar_date,
             deadline=deadline,
             request_gate=request_gate,
+            cache_root=cache_root,
         )
         for symbol in requested_symbols
     }
@@ -142,7 +158,14 @@ def fetch_yahoo_chart_daily_dataset(
     payloads: dict[str, dict[str, Any]] = {}
     for symbol in requested_symbols:
         result = results[symbol]
-        if result.payload is None:
+        if (
+            result.payload is None
+            or (
+                deadline is not None
+                and result.completed_at is not None
+                and result.completed_at >= deadline
+            )
+        ):
             detail = result.error or "unknown acquisition error"
             warnings.append(
                 f"{symbol}: public chart fetch failed after "
@@ -151,7 +174,11 @@ def fetch_yahoo_chart_daily_dataset(
             )
             continue
         payloads[symbol] = result.payload
-        if result.from_cache:
+        if (
+            result.from_cache
+            and result.cache_path is not None
+            and ".partial" in result.cache_path.parts
+        ):
             warnings.append(f"{symbol}: resumed from immutable partial cache")
         elif result.attempts > 1:
             warnings.append(
@@ -164,7 +191,15 @@ def fetch_yahoo_chart_daily_dataset(
         payloads,
         dataset_id=f"public_yahoo_chart_{range_period}_{interval}",
         source_kind="public_yahoo_chart",
-        source_refs=tuple(urls[symbol] for symbol in requested_symbols),
+        source_refs=tuple(
+            reference
+            for symbol in requested_symbols
+            for reference in (
+                f"canonical_symbol:{symbol}",
+                f"yahoo_symbol:{provider_symbols[symbol]}",
+                urls[symbol],
+            )
+        ),
         warnings=tuple(warnings),
     )
     missing_symbols = tuple(
@@ -196,10 +231,16 @@ def fetch_yahoo_chart_daily_dataset(
             payloads[normalized],
         )
         raw_paths.append(raw_path)
-        source_refs.extend((urls[normalized], raw_path.as_posix()))
+        source_refs.extend(
+            (
+                f"canonical_symbol:{normalized}",
+                f"yahoo_symbol:{provider_symbols[normalized]}",
+                urls[normalized],
+                raw_path.as_posix(),
+            )
+        )
 
-    csv_path = cache_dir / "public_yahoo_ohlcv.csv"
-    write_ohlcv_csv(dataset, csv_path)
+    csv_path = _write_csv_immutable(dataset, cache_root=cache_root)
     dataset = MarketDataset(
         dataset_id=dataset.dataset_id,
         source_kind=dataset.source_kind,
@@ -246,6 +287,7 @@ class _RequestRateGate:
 def _fetch_symbol(
     *,
     symbol: str,
+    provider_symbol: str,
     url: str,
     cache_dir: Path,
     timeout_seconds: float,
@@ -254,20 +296,33 @@ def _fetch_symbol(
     required_bar_date: date | None,
     deadline: float | None,
     request_gate: _RequestRateGate,
+    cache_root: Path,
 ) -> _SymbolFetchResult:
     cached = _read_cached_payload(
-        cache_dir,
+        cache_root,
         symbol,
+        provider_symbol=provider_symbol,
         required_bar_date=required_bar_date,
+        cache_root=cache_root,
     )
     if cached is not None:
         payload, cache_path = cached
+        completed_at = time.monotonic()
+        if deadline is not None and completed_at >= deadline:
+            return _SymbolFetchResult(
+                symbol=symbol,
+                payload=None,
+                attempts=0,
+                error="acquisition request-admission budget exhausted",
+                completed_at=completed_at,
+            )
         return _SymbolFetchResult(
             symbol=symbol,
             payload=payload,
             attempts=0,
             from_cache=True,
             cache_path=cache_path,
+            completed_at=completed_at,
         )
     last_error: Exception | None = None
     attempts = 0
@@ -287,7 +342,37 @@ def _fetch_symbol(
                 error="acquisition wall-clock budget exhausted",
             )
         try:
-            payload = _fetch_json(url, timeout_seconds=timeout_seconds)
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                return _SymbolFetchResult(
+                    symbol=symbol,
+                    payload=None,
+                    attempts=attempts - 1,
+                    error="acquisition wall-clock budget exhausted",
+                )
+            fetch_kwargs: dict[str, Any] = {
+                "timeout_seconds": (
+                    timeout_seconds
+                    if remaining is None
+                    else min(timeout_seconds, remaining)
+                )
+            }
+            # Keep test/in-process adapters that implement the historical
+            # private signature usable, while the production transport gets
+            # the total deadline for bounded body reads.
+            if "deadline" in inspect.signature(_fetch_json).parameters:
+                fetch_kwargs["deadline"] = deadline
+            payload = _fetch_json(url, **fetch_kwargs)
+            completed_at = time.monotonic()
+            if deadline is not None and completed_at >= deadline:
+                return _SymbolFetchResult(
+                    symbol=symbol,
+                    payload=None,
+                    attempts=attempts,
+                    error="response completed after request-admission budget",
+                    completed_at=completed_at,
+                )
+            _validate_payload_symbol(provider_symbol, payload)
             bars, parse_warnings = _bars_from_payload(symbol, payload)
             del parse_warnings
             if not bars:
@@ -298,7 +383,12 @@ def _fetch_symbol(
                 raise ValueError(
                     f"response lacks required completed bar {required_bar_date.isoformat()}"
                 )
-            return _SymbolFetchResult(symbol=symbol, payload=payload, attempts=attempts)
+            return _SymbolFetchResult(
+                symbol=symbol,
+                payload=payload,
+                attempts=attempts,
+                completed_at=completed_at,
+            )
         except (OSError, TimeoutError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
             if attempts < max_attempts and retry_backoff_seconds:
@@ -351,7 +441,9 @@ def _read_cached_payload(
     cache_dir: Path,
     symbol: str,
     *,
+    provider_symbol: str,
     required_bar_date: date | None,
+    cache_root: Path,
 ) -> tuple[dict[str, Any], Path] | None:
     # Root cache files predate this bounded-resume implementation.  They are
     # usable only when the caller supplies an exact required date; otherwise a
@@ -363,12 +455,14 @@ def _read_cached_payload(
         symbol,
         required_bar_date=required_bar_date,
     ):
+        _assert_cache_path(cache_root, path)
         if required_bar_date is None:
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 continue
+            _validate_payload_symbol(provider_symbol, payload)
             bars, _warnings = _bars_from_payload(symbol, payload)
             if not bars:
                 continue
@@ -395,20 +489,20 @@ def _canonical_payload_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def _write_immutable_payload(cache_dir: Path, symbol: str, payload: dict[str, Any]) -> Path:
+    cache_root = cache_dir.resolve()
+    _validate_symbol(symbol)
     content = _canonical_payload_bytes(payload)
-    legacy_path = cache_dir / f"{symbol.lower()}_chart.json"
-    if legacy_path.exists():
-        try:
-            if legacy_path.read_bytes() == content:
-                return legacy_path
-        except OSError:
-            pass
-        digest = hashlib.sha256(content).hexdigest()[:16]
-        target = cache_dir / f"{symbol.lower()}_chart_{digest}.json"
-    else:
-        target = legacy_path
-    _write_exclusive(target, content)
-    return target
+    digest = hashlib.sha256(content).hexdigest()[:16]
+    content_path = cache_dir / f"{symbol.lower()}_chart_{digest}.json"
+    # The digest path is the sole authoritative source identity.  The old
+    # ``<symbol>_chart.json`` alias is intentionally never returned: another
+    # process may replace it between acquisition and DataTruth hashing.
+    _assert_cache_path(cache_root, content_path)
+    with _CACHE_WRITE_LOCK:
+        if content_path.exists() and content_path.read_bytes() != content:
+            _quarantine_corrupt_cache(content_path, cache_root)
+        _write_exclusive(content_path, content, cache_root=cache_root)
+    return content_path
 
 
 def _write_partial_payloads(
@@ -419,22 +513,157 @@ def _write_partial_payloads(
 ) -> None:
     if required_bar_date is None:
         return
+    cache_root = cache_dir.resolve()
     partial_dir = cache_dir / ".partial" / required_bar_date.isoformat()
+    _assert_cache_path(cache_root, partial_dir)
     partial_dir.mkdir(parents=True, exist_ok=True)
     for symbol in sorted(payloads):
         _write_immutable_payload(partial_dir, symbol, payloads[symbol])
 
 
-def _write_exclusive(path: Path, content: bytes) -> None:
+def _write_exclusive(path: Path, content: bytes, *, cache_root: Path) -> None:
+    _assert_cache_path(cache_root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    with _CACHE_WRITE_LOCK:
+        if path.exists():
+            if path.read_bytes() == content:
+                return
+            raise ValueError(f"immutable Yahoo cache conflict: {path}")
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # The lock makes create/replace atomic for concurrent workers in
+            # this process; a pre-existing target is never overwritten.
+            if path.exists():
+                if path.read_bytes() == content:
+                    return
+                raise ValueError(f"immutable Yahoo cache conflict: {path}")
+            os.replace(temporary_path, path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _write_csv_immutable(dataset: MarketDataset, *, cache_root: Path) -> Path:
+    """Write a content-addressed CSV and retain a non-authoritative alias."""
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=cache_root,
+        prefix=".public_yahoo_ohlcv.",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
     try:
-        with path.open("xb") as handle:
-            handle.write(content)
-    except FileExistsError:
-        # Existing bytes are immutable.  A differing payload gets a
-        # content-addressed sibling in _write_immutable_payload instead.
-        if path.read_bytes() != content:
-            raise ValueError(f"immutable Yahoo cache conflict: {path}") from None
+        write_ohlcv_csv(dataset, temporary_path)
+        with temporary_path.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        content = temporary_path.read_bytes()
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    digest = hashlib.sha256(content).hexdigest()
+    immutable_path = cache_root / f"public_yahoo_ohlcv_{digest}.csv"
+    _assert_cache_path(cache_root, immutable_path)
+    if immutable_path.exists() and immutable_path.read_bytes() != content:
+        _quarantine_corrupt_cache(immutable_path, cache_root)
+    _write_exclusive(immutable_path, content, cache_root=cache_root)
+    alias_path = cache_root / "public_yahoo_ohlcv.csv"
+    _assert_cache_path(cache_root, alias_path)
+    if not alias_path.exists():
+        try:
+            _write_exclusive(alias_path, content, cache_root=cache_root)
+        except ValueError:
+            pass
+    return immutable_path
+
+
+def _quarantine_corrupt_cache(path: Path, cache_root: Path) -> None:
+    _assert_cache_path(cache_root, path)
+    quarantine_root = cache_root / ".quarantine"
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    with _CACHE_WRITE_LOCK:
+        if not path.exists():
+            return
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        quarantine_path = quarantine_root / f"{path.name}.{digest}.corrupt"
+        _assert_cache_path(cache_root, quarantine_path)
+        if path.exists():
+            if not quarantine_path.exists():
+                try:
+                    os.replace(path, quarantine_path)
+                except FileNotFoundError:
+                    # A separate process may have quarantined this exact
+                    # corrupt object between the existence check and replace.
+                    return
+            elif path.read_bytes() == quarantine_path.read_bytes():
+                path.unlink()
+
+
+def _assert_cache_path(cache_root: Path, path: Path) -> None:
+    root = cache_root.resolve()
+    candidate = path.resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Yahoo cache path escapes configured cache root") from exc
+
+
+def canonicalize_yahoo_symbols(symbols: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate and return a stable canonical symbol set before I/O."""
+
+    normalized: set[str] = set()
+    for raw_symbol in symbols:
+        if not isinstance(raw_symbol, str):
+            raise ValueError("Yahoo acquisition symbols must be strings")
+        symbol = raw_symbol.strip().upper()
+        if not symbol:
+            continue
+        _validate_symbol(symbol)
+        normalized.add(symbol)
+    return tuple(sorted(normalized))
+
+
+def _provider_symbol_map(symbols: tuple[str, ...]) -> dict[str, str]:
+    mapping = {symbol: symbol.replace(".", "-") for symbol in symbols}
+    aliases: dict[str, str] = {}
+    for canonical, provider in mapping.items():
+        previous = aliases.get(provider)
+        if previous is not None and previous != canonical:
+            raise ValueError(
+                "Yahoo provider-symbol alias collision for canonical symbols "
+                f"{previous} and {canonical} ({provider})"
+            )
+        aliases[provider] = canonical
+    return mapping
+
+
+def _validate_symbol(symbol: str) -> None:
+    if len(symbol) > _MAX_SYMBOL_LENGTH or _CANONICAL_SYMBOL_RE.fullmatch(symbol) is None:
+        raise ValueError(
+            "Yahoo acquisition requires canonical US market symbols "
+            "(ASCII letters/digits with optional '.' or '-'); symbol rejected"
+        )
+
+
+def _validate_payload_symbol(symbol: str, payload: dict[str, Any]) -> None:
+    chart = payload.get("chart")
+    result_items = chart.get("result") if isinstance(chart, dict) else None
+    result = result_items[0] if isinstance(result_items, list) and result_items else None
+    meta = result.get("meta") if isinstance(result, dict) else None
+    payload_symbol = meta.get("symbol") if isinstance(meta, dict) else None
+    if payload_symbol != symbol:
+        raise ValueError(
+            f"Yahoo response provider-symbol identity mismatch for {symbol}; "
+            "payload metadata was not an exact governed provider match"
+        )
 
 
 def _chart_url(symbol: str, *, range_period: str, interval: str) -> str:
@@ -449,7 +678,16 @@ def _chart_url(symbol: str, *, range_period: str, interval: str) -> str:
     return f"{YAHOO_CHART_BASE_URL.format(symbol=symbol)}?{query}"
 
 
-def _fetch_json(url: str, *, timeout_seconds: float) -> dict[str, Any]:
+def _fetch_json(
+    url: str,
+    *,
+    timeout_seconds: float,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    if timeout_seconds <= 0:
+        raise TimeoutError("request transport timeout exhausted")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("request transport deadline exhausted")
     request = Request(
         url,
         headers={
@@ -457,13 +695,50 @@ def _fetch_json(url: str, *, timeout_seconds: float) -> dict[str, Any]:
             "User-Agent": "Dawnstrike-v2-AlphaLab/1.0 research-only",
         },
     )
+    open_timeout = timeout_seconds
+    if deadline is not None:
+        open_timeout = min(open_timeout, max(0.001, deadline - time.monotonic()))
     with open_allowlisted_url(
         request,
-        timeout=timeout_seconds,
+        timeout=open_timeout,
         allowed_hosts=("query1.finance.yahoo.com",),
     ) as response:
-        payload = response.read().decode("utf-8")
+        chunks: list[bytes] = []
+        total_bytes = 0
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("response exceeded request transport deadline")
+            read_timeout = timeout_seconds if remaining is None else min(timeout_seconds, remaining)
+            _set_response_read_timeout(response, read_timeout)
+            read_size = min(_READ_CHUNK_BYTES, _MAX_PAYLOAD_BYTES + 1 - total_bytes)
+            chunk = response.read(read_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_PAYLOAD_BYTES:
+                raise ValueError("Yahoo response exceeded maximum payload size")
+            chunks.append(chunk)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("response exceeded request transport deadline")
+        payload = b"".join(chunks).decode("utf-8")
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
         raise TypeError("expected JSON object")
     return loaded
+
+
+def _set_response_read_timeout(response: Any, timeout_seconds: float) -> None:
+    """Cap each blocking body read when urllib exposes its underlying socket."""
+
+    bounded_timeout = max(0.001, timeout_seconds)
+    candidates = [
+        getattr(response, "_sock", None),
+        getattr(getattr(response, "fp", None), "_sock", None),
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+    ]
+    for socket in candidates:
+        setter = getattr(socket, "settimeout", None)
+        if callable(setter):
+            setter(bounded_timeout)
+            return

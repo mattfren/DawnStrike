@@ -105,6 +105,12 @@ def build_data_truth_snapshot(
     fetch_max_requests_per_second: float | None = 8.0,
     fetch_time_budget_seconds: float | None = 90 * 60,
 ) -> DataTruthBuildResult:
+    if symbols is not None:
+        from intraday_scanner.public_data.yahoo_chart_fetcher import (
+            canonicalize_yahoo_symbols,
+        )
+
+        symbols = canonicalize_yahoo_symbols(symbols)
     now = created_at or datetime.now(timezone.utc)
     paths = DataTruthPaths.create(output_root)
     source_csv, raw_dir, source_refs, source_warnings = _resolve_public_yahoo_source(
@@ -129,6 +135,32 @@ def build_data_truth_snapshot(
         as_of_date=as_of_date,
         source_refs=source_refs,
     )
+    if symbols is not None:
+        required_bar_date = as_of_date - timedelta(days=1)
+        requested_symbols = tuple(
+            sorted(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+        )
+        missing_exact = tuple(
+            symbol
+            for symbol in requested_symbols
+            if not any(
+                bar.timestamp.date() == required_bar_date
+                for bar in normalized.bars_by_symbol.get(symbol, ())
+            )
+        )
+        minimum_history = _governed_minimum_history_bars()
+        insufficient_history = tuple(
+            symbol
+            for symbol in requested_symbols
+            if len(normalized.bars_by_symbol.get(symbol, ())) < minimum_history
+        )
+        if missing_exact or insufficient_history:
+            raise DataTruthAcquisitionIncomplete(
+                "DataTruth acquisition PARTIAL; explicit universe failed governed "
+                f"completed-bar/history requirements; missing_exact={list(missing_exact)}; "
+                f"insufficient_history={list(insufficient_history)}; "
+                f"minimum_history_bars={minimum_history}"
+            )
     normalized_bytes = _serialize_ohlcv(normalized)
     validation = validate_dataset(
         normalized,
@@ -1241,11 +1273,16 @@ def _normalize_daily(
 
 def _source_refs_from_cache(source_csv: Path, raw_dir: Path) -> tuple[str, ...]:
     refs = [source_csv.as_posix()]
-    for path in sorted(raw_dir.glob("*_chart.json")):
+    for path in sorted(raw_dir.glob("*_chart*.json")):
         symbol = path.name.split("_", 1)[0].upper()
+        provider_symbol = symbol.replace(".", "-")
+        refs.append(
+            f"canonical_symbol:{symbol}"
+        )
+        refs.append(f"yahoo_symbol:{provider_symbol}")
         refs.append(
             "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{symbol}?range=2y&interval=1d&includePrePost=false&events=history"
+            f"{provider_symbol}?range=2y&interval=1d&includePrePost=false&events=history"
         )
         refs.append(path.as_posix())
     return tuple(refs)
@@ -1268,6 +1305,28 @@ def _date_range(dataset: MarketDataset) -> tuple[str, str]:
     if not timestamps:
         return "n/a", "n/a"
     return min(timestamps).date().isoformat(), max(timestamps).date().isoformat()
+
+
+def _governed_minimum_history_bars() -> int:
+    """Derive the fleet warm-up floor from the active strategy catalog."""
+
+    from intraday_scanner.v2.strategies import build_strategy_catalog
+
+    warmup_values: list[int] = []
+    for strategy in build_strategy_catalog():
+        for name, value in strategy.parameters.items():
+            if not any(
+                token in name.lower()
+                for token in ("period", "window", "lookback", "index")
+            ):
+                continue
+            if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+                continue
+            warmup_values.append(int(value))
+    if not warmup_values:
+        raise ValueError("active strategy catalog has no governed history requirement")
+    # An indicator that starts at index N needs N+1 observations.
+    return max(warmup_values) + 1
 
 
 def _write_json(path: Path, payload: object) -> None:

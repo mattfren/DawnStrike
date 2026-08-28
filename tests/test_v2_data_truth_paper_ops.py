@@ -626,6 +626,56 @@ def test_datatruth_explicit_universe_rejects_partial_fetch_instead_of_stale_fall
         )
 
 
+def test_datatruth_explicit_universe_validates_symbols_before_output_root_use(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "datatruth"
+    with pytest.raises(ValueError, match="canonical US market symbols"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 3),
+            output_root=output_root,
+            allow_fetch=True,
+            symbols=("../ESCAPE",),
+        )
+    assert not output_root.exists()
+
+
+def test_datatruth_explicit_universe_rejects_one_bar_strategy_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    def one_bar_fetch(**kwargs: object) -> SimpleNamespace:
+        cache_dir = Path(str(kwargs["cache_dir"]))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        source_csv = cache_dir / "one-bar.csv"
+        dataset = MarketDataset(
+            dataset_id="one-bar",
+            source_kind="public_yahoo_chart",
+            timeframe="1d",
+            bars_by_symbol={
+                "SPY": (_bar("SPY", date(2026, 1, 2), 9, 10, 8, 9.5),),
+            },
+            source_path=source_csv.as_posix(),
+            source_refs=("canonical_symbol:SPY",),
+        )
+        write_ohlcv_csv(dataset, source_csv)
+        return SimpleNamespace(dataset=dataset, warnings=())
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", one_bar_fetch)
+    monkeypatch.setattr(data_truth_core, "_comparison_datasets", lambda **_kwargs: {})
+    with pytest.raises(DataTruthAcquisitionIncomplete, match="insufficient_history"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 3),
+            output_root=Path("data/v2_data_truth"),
+            created_at=NOW,
+            allow_fetch=True,
+            symbols=("SPY",),
+        )
+
+
 def test_datatruth_provider_reconciliation_detects_mismatch() -> None:
     canonical = MarketDataset(
         dataset_id="canonical",

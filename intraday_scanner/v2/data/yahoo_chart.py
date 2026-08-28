@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +90,27 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
         high_price = float(high_value)
         low_price = float(low_value)
         close_price = float(close_value)
+        if not all(
+            math.isfinite(value)
+            for value in (open_price, high_price, low_price, close_price)
+        ):
+            warnings.append(f"{symbol}: skipped bar {index} with non-finite OHLC")
+            continue
+        volume = float(volume_value or 0)
+        if not math.isfinite(volume) or volume < 0:
+            warnings.append(f"{symbol}: skipped bar {index} with invalid volume")
+            continue
+        try:
+            timestamp = float(timestamp_value)
+        except (TypeError, ValueError):
+            warnings.append(f"{symbol}: skipped bar {index} with invalid timestamp")
+            continue
+        if isinstance(timestamp_value, bool):
+            warnings.append(f"{symbol}: skipped bar {index} with invalid timestamp")
+            continue
+        if not math.isfinite(timestamp):
+            warnings.append(f"{symbol}: skipped bar {index} with non-finite timestamp")
+            continue
         if min(open_price, high_price, low_price, close_price) <= 0:
             warnings.append(f"{symbol}: skipped bar {index} with non-positive OHLC")
             continue
@@ -98,15 +120,20 @@ def _bars_from_payload(symbol: str, payload: dict[str, Any]) -> tuple[list[Marke
         if low_price > min(open_price, close_price, high_price):
             warnings.append(f"{symbol}: skipped bar {index} with invalid low")
             continue
+        try:
+            parsed_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            warnings.append(f"{symbol}: skipped bar {index} with invalid timestamp")
+            continue
         bars.append(
             MarketBar(
                 symbol=symbol,
-                timestamp=datetime.fromtimestamp(float(timestamp_value), tz=timezone.utc),
+                timestamp=parsed_timestamp,
                 open=open_price,
                 high=high_price,
                 low=low_price,
                 close=close_price,
-                volume=int(float(volume_value or 0)),
+                volume=int(volume),
             )
         )
     return bars, warnings
