@@ -16,7 +16,10 @@ from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
     persist_ranked_research_slate,
 )
-from intraday_scanner.services.premarket_enrichment_service import observation_from_alpaca_bars
+from intraday_scanner.services.premarket_enrichment_service import (
+    _canonical_observation_payload,
+    observation_from_alpaca_bars,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -54,6 +57,47 @@ def _run_source_failure(
         as_of=as_of,
     )
     return result, SQLiteScanStore(db_path)
+
+
+def _fresh_frozen_signal(cycle_at: datetime) -> dict[str, object]:
+    bar_at = cycle_at - timedelta(minutes=2)
+    observation = observation_from_alpaca_bars(
+        "FROZEN",
+        [
+            {
+                "ticker": "FROZEN",
+                "timestamp": bar_at.isoformat(),
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=cycle_at,
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = _canonical_observation_payload(observation)
+    return {
+        "ticker": "FROZEN",
+        "signal_id": "signal-frozen",
+        "market_date": cycle_at.date().isoformat(),
+        "universe_lane": "mover",
+        "evidence_lane": "mover",
+        "source_count": 1,
+        "source_quality_status": "VERIFIED",
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+    }
 
 
 def test_backdated_source_failure_uses_explicit_cycle_timestamp_everywhere(
@@ -149,11 +193,12 @@ def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_arti
     out_dir = tmp_path / "alpha"
     out_dir.mkdir()
     slate = build_ranked_research_slate(
-        [{"ticker": "FROZEN", "signal_id": "signal-frozen", "universe_lane": "mover"}],
+        [_fresh_frozen_signal(cycle_at)],
         generated_at=cycle_at.isoformat(),
         market_date=cycle_at.date().isoformat(),
         scan_id="scan-success",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
+        require_safety=True,
     )
     persist_ranked_research_slate(slate, out_dir / "ranked_research_slate.json")
     canonical_cycle = b'{"authoritative":"cycle"}\n'
@@ -192,9 +237,6 @@ def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_arti
         for row in published:
             row["publication_tier"] = "PAPER_PLAN_QUALIFIED"
             row["plan_qualification_status"] = "QUALIFIED"
-            row["alert_gate_status"] = "PASS"
-            row["manual_confirmation_required"] = False
-            row["source_scan_id"] = "scan-success"
         return published
 
     monkeypatch.setattr(alpha_cycle_service, "apply_publication_semantics", publish)
@@ -239,11 +281,12 @@ def test_frozen_source_retry_missing_evidence_fails_before_dispatch_and_preserve
     out_dir = tmp_path / "alpha"
     out_dir.mkdir()
     slate = build_ranked_research_slate(
-        [{"ticker": "FROZEN", "signal_id": "signal-frozen", "universe_lane": "mover"}],
+        [_fresh_frozen_signal(cycle_at)],
         generated_at=cycle_at.isoformat(),
         market_date=cycle_at.date().isoformat(),
         scan_id="scan-success",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
+        require_safety=True,
     )
     persist_ranked_research_slate(slate, out_dir / "ranked_research_slate.json")
     canonical_cycle = b'{"authoritative":"cycle"}\n'
