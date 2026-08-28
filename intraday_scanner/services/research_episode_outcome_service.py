@@ -28,6 +28,7 @@ from intraday_scanner.providers.yahoo_chart_provider import (
     yahoo_provider_symbol,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     validate_ranked_research_slate,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -47,6 +48,7 @@ def build_research_episode_outcome_bridges(
     cutoff: str,
     source_identity: str = "",
     created_at: str | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Build deterministic selection/contributor outcome joins.
 
@@ -72,7 +74,12 @@ def build_research_episode_outcome_bridges(
             continue
         if str(selection.get("cohort") or "").strip() != RADAR_COHORT:
             continue
-        base = _selection_identity(selection, day=day, cutoff=cutoff_dt)
+        base = _selection_identity(
+            selection,
+            day=day,
+            cutoff=cutoff_dt,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        )
         source_outcome = _exact_outcome(selection, outcome_by_identity)
         contributors = _contributors(
             selection,
@@ -114,6 +121,11 @@ def build_and_persist_research_episode_outcome_bridges(
 ) -> dict[str, Any]:
     """Build and persist one governed radar bridge batch."""
 
+    contributor_receipt_verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=str(market_date)[:10],
+        strategy_id=None,
+    )
     rows = build_research_episode_outcome_bridges(
         selections,
         outcomes,
@@ -121,6 +133,7 @@ def build_and_persist_research_episode_outcome_bridges(
         cutoff=cutoff,
         source_identity=source_identity,
         created_at=created_at,
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
     stats = persist_research_episode_outcome_bridges(store, rows)
     persisted_rows = [
@@ -220,7 +233,11 @@ run_research_episode_outcome_bridge = build_and_persist_research_episode_outcome
 
 
 def _selection_identity(
-    selection: Mapping[str, Any], *, day: str, cutoff: datetime
+    selection: Mapping[str, Any],
+    *,
+    day: str,
+    cutoff: datetime,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None,
 ) -> dict[str, Any]:
     selection_id = str(selection.get("selection_id") or "").strip()
     ticker = str(selection.get("ticker") or "").strip().upper()
@@ -246,7 +263,12 @@ def _selection_identity(
         raise SnapshotValidationError("research radar selection lacks frozen slate")
     slate = dict(slate)
     try:
-        validate_ranked_research_slate(slate, market_date=day, production=True)
+        validate_ranked_research_slate(
+            slate,
+            market_date=day,
+            production=True,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+        )
     except (TypeError, ValueError) as exc:
         raise SnapshotValidationError("research radar frozen slate is not valid") from exc
     slate_id = str(slate.get("slate_id") or "").strip()

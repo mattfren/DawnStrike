@@ -627,6 +627,7 @@ def capture_sourced_alpha_outcomes(
             # close, never to the wall-clock acquisition retry time.
             requested_at=session.closed_at.astimezone(UTC),
             captured_at=captured_at,
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
         for selection in radar_selections
     ]
@@ -1282,6 +1283,7 @@ def _derive_research_selection_outcome(
     session: SessionWindow,
     requested_at: datetime,
     captured_at: str,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> dict[str, Any]:
     """Derive selection-only research metrics from the frozen radar row.
 
@@ -1558,6 +1560,7 @@ def _derive_research_selection_outcome(
             selection,
             day=session.market_date,
             cutoff=requested_at.astimezone(UTC),
+            contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except (SnapshotValidationError, TypeError, ValueError) as exc:
         base.update({

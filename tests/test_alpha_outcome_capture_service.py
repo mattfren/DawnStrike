@@ -107,7 +107,7 @@ def _typed_strategy_contributor(
         symbol=ticker,
         market_date=market_date,
         decision_at=f"{market_date}T12:59:00+00:00",
-        code_sha="test-sha",
+        code_sha="a" * 40,
         policy_version="test-policy-v1",
         condition_results=(),
         first_blocking_failure=None,
@@ -135,6 +135,9 @@ def _typed_strategy_contributor(
         "receipt_id": receipt["receipt_id"],
         "receipt_hash_sha256": receipt["receipt_hash_sha256"],
         "receipt_status": "COMPLETE",
+        "research_pick_eligible": True,
+        "paper_entry_eligible": False,
+        "final_score": 1.0,
         "decision_receipt": receipt,
     }
 
@@ -1380,6 +1383,21 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
             ),
         ],
     }
+    radar_signal.update(
+        {
+            "strategy_decision_receipts": [
+                deepcopy(row["decision_receipt"])
+                for row in radar_signal["strategy_contributors"]
+            ],
+            "strategy_contributor_count": len(radar_signal["strategy_contributors"]),
+            "strategy_contributor_ids": sorted(
+                row["strategy_id"] for row in radar_signal["strategy_contributors"]
+            ),
+            "strongest_eligible_contributor_score": 1.0,
+            "strategy_contribution_gaps": [],
+            "strategy_contribution_status": "COMPLETE",
+        }
+    )
     for contributor in radar_signal["strategy_contributors"]:
         receipt_payload = contributor["decision_receipt"]
         store.persist_strategy_decision_receipt(
@@ -1432,7 +1450,9 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
         row["receipt_id"] for row in radar_signal["strategy_contributors"]
     }
     assert {row["receipt_id"] for row in bridges} == expected_receipt_ids
-    assert all(row["source_outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
+    assert all(
+        row["source_outcome_status"] == "COMPLETE_SOURCED" for row in bridges
+    ), json.dumps(bridges, sort_keys=True, indent=2, default=str)
     assert all(row["outcome_status"] == "FLAT_CLOSE" for row in bridges)
     assert all(row["learning_eligible"] is True for row in bridges)
     assert all(row["selection_outcome_metrics"]["reference_price"] == 100.0 for row in bridges)

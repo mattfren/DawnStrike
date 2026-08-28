@@ -27,7 +27,10 @@ from intraday_scanner.services.daily_strategy_learning_service import (
     _bridge_learning_summary,
     _validated_research_bridges,
 )
-from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
+from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
+    build_ranked_research_slate,
+)
 from intraday_scanner.services.premarket_enrichment_service import (
     _canonical_observation_payload,
     observation_from_alpaca_bars,
@@ -58,7 +61,7 @@ def _contributor(
         symbol="NOVA",
         market_date="2026-08-28",
         decision_at="2026-08-28T13:59:00+00:00",
-        code_sha="test-sha",
+        code_sha="a" * 40,
         policy_version="test-policy-v1",
         condition_results=(),
         first_blocking_failure=None,
@@ -86,6 +89,9 @@ def _contributor(
         "receipt_id": receipt["receipt_id"],
         "receipt_hash_sha256": receipt["receipt_hash_sha256"],
         "receipt_status": "COMPLETE",
+        "research_pick_eligible": True,
+        "paper_entry_eligible": False,
+        "final_score": 1.0,
         "decision_receipt": receipt,
     }
 
@@ -99,7 +105,7 @@ def _v1_contributor() -> dict[str, object]:
         symbol="NOVA",
         market_date="2026-08-28",
         decision_at="2026-08-28T13:59:00+00:00",
-        code_sha="test-sha",
+        code_sha="a" * 40,
         policy_version="test-policy-v1",
         condition_results=(),
         first_blocking_failure=None,
@@ -258,6 +264,106 @@ def _selection() -> dict[str, object]:
     }
 
 
+def _production_selection() -> dict[str, object]:
+    selected_at = "2026-08-28T13:30:00+00:00"
+    contributor = _contributor("primary", "v1")
+    receipt = contributor["decision_receipt"]
+    assert isinstance(receipt, dict)
+    observation = observation_from_alpaca_bars(
+        "NOVA",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-08-28T13:28:00+00:00",
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=datetime.fromisoformat(selected_at),
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = _canonical_observation_payload(observation)
+    signal = {
+        "signal_id": "signal:nova",
+        "ticker": "NOVA",
+        "episode_id": "episode:" + "a" * 32,
+        "market_date": "2026-08-28",
+        "selected_at": selected_at,
+        "universe_lane": "mover",
+        "evidence_lane": "mover",
+        "source_count": 1,
+        "source_quality_status": "VERIFIED",
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
+        "strategy_contributors": [deepcopy(contributor)],
+        "strategy_decision_receipts": [deepcopy(receipt)],
+        "strategy_contributor_count": 1,
+        "strategy_contributor_ids": ["primary"],
+        "strongest_eligible_contributor_score": 1.0,
+        "strategy_contribution_gaps": [],
+        "strategy_contribution_status": "COMPLETE",
+    }
+    slate = build_ranked_research_slate(
+        [signal],
+        target=1,
+        generated_at=selected_at,
+        market_date="2026-08-28",
+        scan_id="scan:production-nova",
+        require_safety=True,
+        enrichment_max_age_seconds=600,
+        producer_code_sha="a" * 40,
+    )
+    assert slate["published_count"] == 1, json.dumps(slate, sort_keys=True, default=str)
+    frozen_signal = deepcopy(slate["rows"][0])
+    return {
+        "selection_id": "selection:nova",
+        "signal_id": "signal:nova",
+        "ticker": "NOVA",
+        "market_date": "2026-08-28",
+        "cohort": "research_radar",
+        "strategy_id": "research_radar",
+        "strategy_version": "v1",
+        "selected_at": selected_at,
+        "episode_id": signal["episode_id"],
+        "payload_json": {
+            "selection_id": "selection:nova",
+            "signal_id": "signal:nova",
+            "ticker": "NOVA",
+            "market_date": "2026-08-28",
+            "selected_at": selected_at,
+            "episode_id": signal["episode_id"],
+            "frozen_ranked_research_slate": slate,
+            "signal": frozen_signal,
+        },
+    }
+
+
+def _production_selection_outcome(
+    store: SQLiteScanStore,
+    selection: dict[str, object],
+) -> dict[str, object]:
+    verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-28",
+        strategy_id=None,
+    )
+    return _complete_selection_outcome(
+        selection=selection,
+        contributor_receipt_verifier=verifier,
+    )
+
+
 def _outcome() -> dict[str, object]:
     return {
         "selection_id": "selection:nova",
@@ -371,7 +477,12 @@ def _legacy_complete_selection_outcome() -> dict[str, object]:
     }
 
 
-def _complete_selection_outcome(*, post_price: float = 101.0) -> dict[str, object]:
+def _complete_selection_outcome(
+    *,
+    post_price: float = 101.0,
+    selection: dict[str, object] | None = None,
+    contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+) -> dict[str, object]:
     eastern = capture.EASTERN
     opened = datetime.fromisoformat("2026-08-28T09:30:00").replace(tzinfo=eastern)
     closed = datetime.fromisoformat("2026-08-28T16:00:00").replace(tzinfo=eastern)
@@ -427,12 +538,13 @@ def _complete_selection_outcome(*, post_price: float = 101.0) -> dict[str, objec
     )
     evidence = capture._selected_source_evidence(request, [request], [(bars, request)])
     return capture._derive_research_selection_outcome(
-        _selection(),
+        selection or _selection(),
         bars,
         evidence,
         session=session,
         requested_at=closed.astimezone(capture.UTC),
         captured_at=closed.astimezone(capture.UTC).isoformat(),
+        contributor_receipt_verifier=contributor_receipt_verifier,
     )
 
 
@@ -491,97 +603,55 @@ def test_nested_json_envelopes_preserve_primary_and_secondary_receipts(monkeypat
 def test_production_persist_shape_binds_nested_contributors_once(
     tmp_path: Path,
 ) -> None:
-    selected_at = "2026-08-28T13:00:00+00:00"
-    cycle_at = datetime.fromisoformat(selected_at)
-    observation = observation_from_alpaca_bars(
-        "NOVA",
-        [
-            {
-                "ticker": "NOVA",
-                "timestamp": (cycle_at - timedelta(minutes=2)).isoformat(),
-                "high": 10.2,
-                "low": 9.8,
-                "close": 10.0,
-                "volume": 1_000,
-            }
-        ],
-        previous_close=9.5,
-        requested_at=cycle_at,
-        max_age_seconds=600,
-        feed="iex",
-    )
-    observation_hash, observation_payload = _canonical_observation_payload(observation)
-    signal = {
-        "signal_id": "signal:production-nova",
-        "ticker": "NOVA",
-        "episode_id": "episode:" + "f" * 32,
-        "market_date": "2026-08-28",
-        "universe_lane": "mover",
-        "evidence_lane": "mover",
-        "source_count": 1,
-        "source_quality_status": "VERIFIED",
-        "freshness_status": "FRESH",
-        "halt_status": "CLEAR",
-        "sec_risk_status": "CLEAR",
-        "corporate_action_status": "CLEAR",
-        "input_status": "VERIFIED",
-        "evidence_status": "VERIFIED",
-        "enrichment_observation_sha256": observation_hash,
-        "enrichment_observation_payload_json": observation_payload,
-        "strategy_contributors": [
-            {
-                "strategy_id": "primary",
-                "strategy_version": "v1",
-                "receipt_id": "sdr-primary",
-                "receipt_hash_sha256": "d" * 64,
-            },
-            {
-                "strategy_id": "secondary",
-                "strategy_version": "v2",
-                "receipt_id": "sdr-secondary",
-                "receipt_hash_sha256": "e" * 64,
-            },
-        ],
-    }
-    slate = build_ranked_research_slate(
-        [signal],
-        generated_at=selected_at,
-        market_date="2026-08-28",
-        scan_id="scan-production",
-        require_safety=True,
-    )
+    selected_at = "2026-08-28T13:30:00+00:00"
+    source_selection = _production_selection()
+    payload = source_selection["payload_json"]
+    assert isinstance(payload, dict)
+    slate = payload["frozen_ranked_research_slate"]
+    assert isinstance(slate, dict)
     store = SQLiteScanStore(tmp_path / "production-shape.sqlite")
+    _persist_contributor_receipts(store, source_selection)
     event = NotificationEvent(
-        event_key="alphaops:scan-production:alpha_morning_watch",
+        event_key="alphaops:scan:production-nova:alpha_morning_watch",
         title="Dawnstrike Alpha Watch",
         body="Research radar: NOVA",
         channel_hint="alpha_morning_watch",
-        payload={"run_id": "scan-production", "signals": []},
+        payload={"run_id": slate["scan_id"], "signals": []},
     )
     _persist_research_radar_selections(
         store,
-        scan_id="scan-production",
+        scan_id=str(slate["scan_id"]),
         radar=list(slate["rows"]),
         slate=slate,
         selected_at=selected_at,
         event=event,
+        production=True,
     )
     persisted = store.load_signal_selections(cohort="research_radar")
     assert len(persisted) == 1
     nested = persisted[0]["payload_json"]["signal"]["strategy_contributors"]
-    assert [item["receipt_id"] for item in nested] == ["sdr-primary", "sdr-secondary"]
+    expected_receipt_ids = [
+        item["receipt_id"] for item in slate["rows"][0]["strategy_contributors"]
+    ]
+    assert [item["receipt_id"] for item in nested] == expected_receipt_ids
     outcome = {
         **_outcome(),
         "selection_id": persisted[0]["selection_id"],
         "signal_id": persisted[0]["signal_id"],
     }
+    verifier = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-28",
+        strategy_id=None,
+    )
     rows = bridge.build_research_episode_outcome_bridges(
         persisted,
         [outcome],
         market_date="2026-08-28",
         cutoff="2026-08-28T21:00:00+00:00",
+        contributor_receipt_verifier=verifier,
     )
-    assert [row["receipt_id"] for row in rows] == ["sdr-primary", "sdr-secondary"]
+    assert [row["receipt_id"] for row in rows] == expected_receipt_ids
     assert all(row["learning_eligible"] is False for row in rows)
 
 
@@ -758,6 +828,36 @@ def test_bridge_batch_reports_exact_ambiguous_and_unmatched_counts(
     assert all(
         row["outcome_match_status"] == "AMBIGUOUS" for row in stats["bridges"]
     )
+
+
+def test_direct_production_bridge_requires_persisted_contributor_receipts() -> None:
+    with pytest.raises(SnapshotValidationError, match="frozen slate is not valid"):
+        bridge.build_research_episode_outcome_bridges(
+            [_production_selection()],
+            [],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
+
+
+def test_persisted_bridge_uses_generic_authenticated_receipt_resolver(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "authenticated-bridge.sqlite")
+    selection = _production_selection()
+    _persist_contributor_receipts(store, selection)
+    outcome = _production_selection_outcome(store, selection)
+    stats = bridge.build_and_persist_research_episode_outcome_bridges(
+        store,
+        [selection],
+        [outcome],
+        market_date="2026-08-28",
+        cutoff="2026-08-28T21:00:00+00:00",
+    )
+
+    assert stats["status"] == "COMPLETE", json.dumps(stats, sort_keys=True, default=str)
+    assert stats["expected_contributor_count"] == 1
+    assert stats["eligible_count"] == 1
 
 
 def test_retained_canonical_bar_payload_tamper_fails_even_after_rehash(monkeypatch) -> None:

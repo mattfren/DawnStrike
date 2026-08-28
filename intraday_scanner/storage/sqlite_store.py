@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.decisioning.contracts import (
+    canonical_json,
     parse_strategy_decision_receipt,
 )
 from intraday_scanner.errors import SnapshotValidationError, StorageError
