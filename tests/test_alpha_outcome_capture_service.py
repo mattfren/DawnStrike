@@ -31,7 +31,11 @@ from intraday_scanner.alpha.v5_policy import (
 )
 from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.decisioning.contracts import StrategyDecisionReceipt, canonical_json
+from intraday_scanner.decisioning.contracts import (
+    StrategyDecisionReceipt,
+    canonical_json,
+    parse_strategy_decision_receipt,
+)
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
 from intraday_scanner.notifiers import NotificationEvent
 from intraday_scanner.services.alpha_cycle_service import _persist_research_radar_selections
@@ -2872,6 +2876,27 @@ def _run_v5_watcher_entry(
     requested_at: str = "10:00",
 ) -> dict[str, Any]:
     del tmp_path
+    persisted_selections = [
+        selection
+        for selection in SQLiteScanStore(db_path).load_signal_selections(
+            cohort="official_telegram"
+        )
+        if isinstance(selection.get("payload_json"), dict)
+        and str(selection["payload_json"].get("market_date") or "") == day
+    ]
+    frozen_code_shas = {
+        str(
+            selection.get("payload_json", {})
+            .get("frozen_ranked_research_slate", {})
+            .get("producer_code_sha")
+            or ""
+        )
+        for selection in persisted_selections
+        if isinstance(selection.get("payload_json"), dict)
+    }
+    assert len(frozen_code_shas) == 1
+    expected_code_sha = frozen_code_shas.pop()
+    assert len(expected_code_sha) == 40
     requested = datetime.fromisoformat(f"{day}T{requested_at}").replace(tzinfo=EASTERN)
     quote_at = requested.astimezone(timezone.utc).isoformat()
     bar_at = (
@@ -2930,6 +2955,7 @@ def _run_v5_watcher_entry(
             requested_at=requested_at,
             dry_run=True,
             simulated_equity=100_000,
+            expected_code_sha=expected_code_sha,
         )
     assert result["intent_stats"]["inserted"] == 1, json.dumps(
         result, sort_keys=True, indent=2, default=str
@@ -2945,6 +2971,36 @@ def _persist_selected_signals(
 ) -> None:
     batch_scan_id = str(signals[0].get("scan_id") or "scan-fixture")
     canonical_signals = [{**signal, "scan_id": batch_scan_id} for signal in signals]
+    strict_slate = authenticated_entry or any(
+        str(row.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID
+        for row in canonical_signals
+    )
+    if strict_slate:
+        for signal in canonical_signals:
+            if "strategy_contributors" in signal:
+                continue
+            contributor = _typed_strategy_contributor(
+                strategy_id=str(signal.get("strategy_id") or ALPHAOPS_V5_STRATEGY_ID),
+                strategy_version=str(
+                    signal.get("strategy_version") or ALPHAOPS_V5_STRATEGY_VERSION
+                ),
+                signal_id=str(signal["signal_id"]),
+                ticker=str(signal["ticker"]),
+                market_date=str(signal["market_date"]),
+            )
+            signal.update(
+                {
+                    "strategy_contributors": [contributor],
+                    "strategy_decision_receipts": [
+                        deepcopy(contributor["decision_receipt"])
+                    ],
+                    "strategy_contributor_count": 1,
+                    "strategy_contributor_ids": [contributor["strategy_id"]],
+                    "strongest_eligible_contributor_score": contributor["final_score"],
+                    "strategy_contribution_gaps": [],
+                    "strategy_contribution_status": "COMPLETE",
+                }
+            )
     store.persist_historical_signals(canonical_signals)
     selections: list[dict[str, Any]] = []
     deliveries: list[dict[str, Any]] = []
@@ -2972,17 +3028,20 @@ def _persist_selected_signals(
     slate_generated_at = str(canonical_signals[0].get("generated_at") or "")
     if not slate_generated_at.startswith(slate_day):
         slate_generated_at = f"{slate_day}T13:00:00+00:00"
-    strict_slate = authenticated_entry or any(
-        str(row.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID
-        for row in canonical_signals
-    )
     frozen_slate = build_ranked_research_slate(
         canonical_signals,
         generated_at=slate_generated_at,
         market_date=slate_day,
         scan_id=batch_scan_id,
         require_safety=strict_slate,
+        producer_code_sha="a" * 40 if strict_slate else None,
     )
+    if strict_slate:
+        store.persist_strategy_decision_receipts(
+            parse_strategy_decision_receipt(receipt, require_v2=True)
+            for row in frozen_slate["rows"]
+            for receipt in row.get("strategy_decision_receipts") or ()
+        )
     frozen_by_signal = {
         str(row.get("signal_id") or ""): row for row in frozen_slate["rows"]
     }
@@ -2991,6 +3050,7 @@ def _persist_selected_signals(
         "slate_id": frozen_slate["slate_id"],
         "slate_content_hash_sha256": frozen_slate["content_hash_sha256"],
         "frozen_source_scan_id": batch_scan_id,
+        "frozen_source_code_sha": str(frozen_slate.get("producer_code_sha") or ""),
         "current_scan_id": batch_scan_id,
         "reuse_status": "CURRENT_SCAN",
     }
@@ -3021,6 +3081,7 @@ def _persist_selected_signals(
             "body_sha256": body_sha256,
             "input_hash_sha256": "8" * 64,
             "source_lineage_hash_sha256": "9" * 64,
+            "scan_lineage_status": "CURRENT_SCAN",
             "delivery_identity": {
                 "membership_id": f"delivery-{signal_id}",
                 "channel": "telegram",

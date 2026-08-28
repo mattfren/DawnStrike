@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -136,6 +137,11 @@ def build_alpha_run_contract(
     persisted_slate = dict(source_summary.get("ranked_research_slate") or {})
     require_watcher_proof = bool(source_summary.get("require_watcher_proof"))
     current_code_sha = str(source_summary.get("code_sha") or "").strip()
+    if require_watcher_proof and not re.fullmatch(r"[0-9a-f]{40}", current_code_sha):
+        raise ValueError(
+            "WATCHER_PROOF_CODE_SHA_INVALID: watcher proof requires a full lowercase "
+            "40-hex code SHA."
+        )
     if persisted_slate:
         slate = validate_ranked_research_slate(
             persisted_slate,
@@ -155,6 +161,14 @@ def build_alpha_run_contract(
             require_safety=require_watcher_proof,
             producer_code_sha=current_code_sha,
         )
+        if require_watcher_proof:
+            slate = validate_ranked_research_slate(
+                slate,
+                market_date=generated_at[:10],
+                production=True,
+                contributor_receipt_verifier=contributor_receipt_verifier,
+                expected_code_sha=current_code_sha,
+            )
     slate_code_sha = str(slate.get("producer_code_sha") or "").strip()
     if persisted_slate and require_watcher_proof and slate_code_sha != current_code_sha:
         raise ValueError(

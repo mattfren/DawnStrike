@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from intraday_scanner.config import ScannerConfig
+from intraday_scanner.config import ScannerConfig, load_config
+from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
@@ -20,8 +21,10 @@ from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
 from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import (
+    _apply_strategy_decision_receipts,
     _load_frozen_luna_slate,
     _merge_lane_candidates,
+    _merge_strategy_adapter_signals,
 )
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
@@ -31,6 +34,7 @@ from intraday_scanner.services.luna_core_universe_service import (
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
     TIER2,
+    AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
     official_publication_rows,
@@ -38,6 +42,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     publication_counts,
     validate_ranked_research_slate,
 )
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def _manifest(index: str, symbol: str, *, observed: str = "2026-08-26T12:00:00Z") -> dict:
@@ -910,7 +915,7 @@ def test_lane_local_fallback_ceiling_does_not_demote_independent_core(
     monkeypatch.setattr(
         slate_service,
         "_alertable",
-        lambda row, *, require_watcher_proof: False,
+        lambda row, *, require_watcher_proof, contributor_receipt_verifier: False,
     )
     published = apply_publication_semantics(
         rows,
@@ -1530,10 +1535,55 @@ def test_production_loader_rejects_v1_and_non_safety_v2(tmp_path: Path) -> None:
         _load_frozen_luna_slate(legacy_path, market_date="2026-08-28")
 
 
-def test_telegram_rejects_forged_publication_rows_and_count_overrides() -> None:
+def test_telegram_rejects_forged_publication_rows_and_count_overrides(
+    tmp_path: Path,
+) -> None:
     row = _safe_overlap_row("REAL", "mover", receipt="real-receipt")
-    slate = build_ranked_research_slate(
+    row.update(
+        {
+            "strategy_id": "ts_momentum_sma_atr",
+            "strategy_version": "v1",
+            "direction": "long",
+            "signal_id": "real-source",
+            "source_signal_id": "real-source",
+            "entry_watch_level": 10.0,
+            "breakout_trigger": 10.0,
+            "invalidation": 9.0,
+            "target_1": 12.0,
+            "reward_risk_ratio": 2.0,
+            "alpha_score": 90.0,
+            "source_quality_status": "VERIFIED",
+        }
+    )
+    row.update({spec.condition_id: True for spec in registry_for_strategy(row["strategy_id"])})
+    store = SQLiteScanStore(tmp_path / "forged-publication.sqlite")
+    _apply_strategy_decision_receipts(
         [row],
+        store=store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+            alert_score_threshold=0,
+        ),
+        decision_at="2026-08-27T13:00:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+        code_sha="a" * 40,
+    )
+    row["strategy_receipt_research_eligible"] = row[
+        "strategy_receipt_research_pick_eligible"
+    ]
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-27",
+        strategy_id=None,
+    )
+    merged = _merge_strategy_adapter_signals(
+        [row],
+        expected_code_sha="a" * 40,
+        receipt_verifier=resolver,
+    )
+    slate = build_ranked_research_slate(
+        merged,
         target=1,
         require_safety=True,
         generated_at="2026-08-27T13:00:00+00:00",
@@ -1544,6 +1594,7 @@ def test_telegram_rejects_forged_publication_rows_and_count_overrides() -> None:
         list(slate["rows"]),
         slate=slate,
         require_watcher_proof=True,
+        contributor_receipt_verifier=resolver,
     )
     forged = {
         **publication_rows[0],
@@ -1562,6 +1613,7 @@ def test_telegram_rejects_forged_publication_rows_and_count_overrides() -> None:
         },
         target_count=88,
         published_count=1,
+        contributor_receipt_verifier=resolver,
     )
 
     assert "FORGED" not in message

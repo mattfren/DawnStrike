@@ -855,15 +855,35 @@ def test_official_rows_are_exact_frozen_promotions_not_current_review_rows():
     assert official_publication_rows([current]) == []
 
 
-def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacements():
+def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacements(
+    tmp_path, monkeypatch
+):
     frozen_signal = _receipted_signal(
         ticker="FROZEN",
         reward_risk_ratio=2.0,
         stop=9.0,
         target=12.0,
     )
-    slate = build_ranked_research_slate(
+    frozen_signal.update(
+        {
+            "direction": "long",
+            "signal_id": "frozen-source",
+            "source_signal_id": "frozen-source",
+        }
+    )
+    store = _persist_receipt(frozen_signal, tmp_path, monkeypatch)
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    merged = _merge_strategy_adapter_signals(
         [frozen_signal],
+        expected_code_sha="a" * 40,
+        receipt_verifier=resolver,
+    )
+    slate = build_ranked_research_slate(
+        merged,
         target=1,
         generated_at="2026-08-26T13:30:00+00:00",
         market_date="2026-08-26",
@@ -874,6 +894,7 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
         list(slate["rows"]),
         slate=slate,
         require_watcher_proof=True,
+        contributor_receipt_verifier=resolver,
     )
     current = {
         "ticker": "CURRENT",
@@ -888,6 +909,7 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
             "ranked_research_slate": slate,
             "ranked_research_publication_rows": frozen_rows,
         },
+        contributor_receipt_verifier=resolver,
     )
 
     assert "FROZEN" in text
