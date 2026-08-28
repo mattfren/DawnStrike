@@ -7,6 +7,7 @@ import pytest
 
 from intraday_scanner.ai.scenario_claim_extractor import extract_claims
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.errors import StorageError
 from intraday_scanner.providers.news_provider import _scenario_article_from_alpaca
 from intraday_scanner.scenario.contracts import ScenarioExtraction, ScenarioNewsArticle
 from intraday_scanner.scenario.engine import PriceContext, evaluate_scenario
@@ -639,6 +640,222 @@ def test_finalize_excludes_closed_position_without_complete_return_truth(tmp_pat
     assert public["records"][0]["paper_lifecycle"]["status"] == "CLOSED"
     assert public["records"][0]["paper_lifecycle"]["return_eligibility_status"] == "missing"
     assert public["records"][0]["paper_lifecycle"]["outcome_id"] == "scenario:decision-1"
+
+
+def _persist_scenario_signal_parent(
+    store: SQLiteScanStore,
+    *,
+    decision_id: str = "decision-parent",
+    signal_id: str = "scenario:decision-parent",
+    market_date: str = "2026-08-03",
+    ticker: str = "NOVA",
+    persist_historical_mirror: bool = False,
+    research_only: bool = True,
+    broker_execution_enabled: bool = False,
+) -> None:
+    store.persist_scenario_decisions(
+        [
+            {
+                "decision_id": decision_id,
+                "article_id": "article-parent",
+                "ticker": ticker,
+                "market_date": market_date,
+                "decision_at": f"{market_date}T14:00:00Z",
+                "event_type": "contract_customer",
+                "direction": "bullish",
+                "directional_evidence_score": 6.0,
+                "action": "ENTER_LONG",
+                "cohort": "scenario_forward",
+                "policy_version": "dawnstrike-news-scenario-v1",
+                "source_tier": "T1",
+                "source_lineage_hash_sha256": "source",
+                "feature_hash_sha256": "features",
+                "features": {},
+                "research_only": research_only,
+                "broker_execution_enabled": broker_execution_enabled,
+            }
+        ]
+    )
+    store.upsert_scenario_signal_links(
+        [
+            {
+                "decision_id": decision_id,
+                "signal_id": signal_id,
+                "cohort": "scenario_forward",
+                "strategy_id": "news_scenario_v1",
+                "strategy_version": "dawnstrike-news-scenario-v1",
+                "created_at": f"{market_date}T14:00:00Z",
+                "updated_at": f"{market_date}T14:00:00Z",
+            }
+        ]
+    )
+    if persist_historical_mirror:
+        store.persist_historical_signals(
+            [
+                {
+                    "signal_id": signal_id,
+                    "generated_at": f"{market_date}T14:00:00Z",
+                    "market_date": market_date,
+                    "ticker": ticker,
+                    "signal_label": "scenario_enter_long",
+                    "risk_flags_json": ["research_only"],
+                    "avoid_reasons_json": [],
+                    "raw_payload_json": {
+                        "scenario_decision": {"decision_id": decision_id}
+                    },
+                }
+            ]
+        )
+
+
+def _scenario_signal_outcome(
+    *,
+    signal_id: str,
+    market_date: str = "2026-08-03",
+    ticker: str = "NOVA",
+) -> dict[str, object]:
+    return {
+        "signal_id": signal_id,
+        "market_date": market_date,
+        "ticker": ticker,
+        "outcome_source": "scenario-test",
+        "imported_at": f"{market_date}T20:00:00Z",
+        "outcome_status": "missing",
+        "payload_json": {"decision_id": "decision-parent"},
+    }
+
+
+def test_signal_children_accept_governed_scenario_parent(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent.sqlite")
+    _persist_scenario_signal_parent(store, persist_historical_mirror=True)
+    outcome = _scenario_signal_outcome(signal_id="scenario:decision-parent")
+    event = {
+        "event_id": "scenario-parent-event",
+        "signal_id": "scenario:decision-parent",
+        "event_type": "OUTCOME_CAPTURED",
+        "event_timestamp": "2026-08-03T20:00:00Z",
+    }
+
+    assert store.persist_signal_outcomes([outcome]) == {"inserted": 1, "skipped": 0}
+    assert store.persist_signal_events([event]) == {"inserted": 1, "skipped": 0}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"market_date": "2026-08-04"},
+        {"ticker": "OTHER"},
+        {"payload_json": {"decision_id": "different-decision"}},
+    ),
+)
+def test_scenario_outcome_parent_binding_rejects_mismatch(
+    tmp_path: Path,
+    mutation: dict[str, object],
+) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-mismatch.sqlite")
+    _persist_scenario_signal_parent(store)
+    outcome = _scenario_signal_outcome(signal_id="scenario:decision-parent")
+    outcome.update(mutation)
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes([outcome])
+
+
+def test_signal_children_reject_unknown_scenario_parent(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-orphan.sqlite")
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes(
+            [_scenario_signal_outcome(signal_id="scenario:missing")]
+        )
+
+
+def test_signal_children_reject_conflicting_scenario_and_historical_parents(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-ambiguous.sqlite")
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "scenario:shared",
+                "generated_at": "2026-08-03T14:00:00Z",
+                "market_date": "2026-08-03",
+                "ticker": "NOVA",
+                "signal_label": "CLEAN EDGE",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {},
+            }
+        ]
+    )
+    _persist_scenario_signal_parent(
+        store,
+        decision_id="decision-shared",
+        signal_id="scenario:shared",
+        ticker="OTHER",
+    )
+    outcome = _scenario_signal_outcome(signal_id="scenario:shared", ticker="OTHER")
+    outcome["payload_json"] = {"decision_id": "decision-shared"}
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes([outcome])
+
+
+def test_signal_children_reject_multiple_scenario_parents_with_same_identity(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-duplicate.sqlite")
+    _persist_scenario_signal_parent(
+        store,
+        decision_id="decision-one",
+        signal_id="scenario:shared",
+    )
+    _persist_scenario_signal_parent(
+        store,
+        decision_id="decision-two",
+        signal_id="scenario:shared",
+    )
+    outcome = _scenario_signal_outcome(signal_id="scenario:shared")
+    outcome["payload_json"] = {"decision_id": "decision-one"}
+
+    with pytest.raises(StorageError, match="ambiguous_parent=1"):
+        store.persist_signal_outcomes([outcome])
+
+
+def test_scenario_prefix_requires_governed_scenario_link(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-historical-only.sqlite")
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "scenario:historical-only",
+                "generated_at": "2026-08-03T14:00:00Z",
+                "market_date": "2026-08-03",
+                "ticker": "NOVA",
+                "signal_label": "scenario_enter_long",
+                "risk_flags_json": ["research_only"],
+                "avoid_reasons_json": [],
+            }
+        ]
+    )
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes(
+            [_scenario_signal_outcome(signal_id="scenario:historical-only")]
+        )
+
+
+def test_scenario_parent_rejects_live_enabled_decision(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "scenario-parent-live.sqlite")
+    _persist_scenario_signal_parent(
+        store,
+        research_only=False,
+        broker_execution_enabled=True,
+    )
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes(
+            [_scenario_signal_outcome(signal_id="scenario:decision-parent")]
+        )
 
 
 def test_finalize_uses_sourced_spy_bars_for_after_cost_excess(tmp_path: Path) -> None:

@@ -1736,7 +1736,7 @@ def test_signal_child_parent_identity_rejects_conflicting_v5_and_v6_parents(
         {
             "shadow_signal_id": "shared-signal",
             "market_date": DAY,
-            "ticker": "OTHER",
+            "ticker": "NOVA",
         }
     )
     store.persist_alpha_v6_decisions([decision])

@@ -12,6 +12,11 @@ from typing import Any
 
 from intraday_scanner.errors import StorageError
 from intraday_scanner.models import ScanResult
+from intraday_scanner.scenario.contracts import (
+    SCENARIO_FORWARD_COHORT,
+    SCENARIO_POLICY_VERSION,
+    SCENARIO_STRATEGY_ID,
+)
 from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
 from intraday_scanner.storage.read_only import connect_read_only
 from intraday_scanner.storage.test_isolation import assert_test_database_isolated
@@ -5343,6 +5348,7 @@ class SQLiteScanStore:
                     candidate_fills=paper_fills,
                 )
 
+                admitted_signal_events: list[dict[str, Any]] = []
                 for row in signal_events:
                     event_id = str(row.get("event_id") or "")
                     signal_id = str(row.get("signal_id") or "")
@@ -5356,6 +5362,26 @@ class SQLiteScanStore:
                     )
                     if bound_intent_id and bound_intent_id not in admitted_intent_ids:
                         continue
+                    if bound_intent_id:
+                        bound_signal_id = str(
+                            admitted_intents_by_id[bound_intent_id].get("signal_id") or ""
+                        )
+                        if bound_signal_id != signal_id:
+                            raise StorageError(
+                                "Signal event intent binding failed: "
+                                f"{event_id} does not match {bound_intent_id}"
+                            )
+                    admitted_signal_events.append(row)
+
+                # Lifecycle events are durable signal children too.  Filter
+                # skipped intents first, then validate the admitted events
+                # before any event insert so an orphan rolls back the batch.
+                _validate_signal_parent_rows(
+                    connection, admitted_signal_events, require_market_identity=False
+                )
+                for row in admitted_signal_events:
+                    event_id = str(row.get("event_id") or "")
+                    signal_id = str(row.get("signal_id") or "")
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO signal_events
@@ -8384,20 +8410,34 @@ def _official_strategy_cohort_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _embedded_scenario_decision_id(payload: Any) -> str:
+    parsed = _json_value(payload)
+    if not isinstance(parsed, dict):
+        return ""
+    direct = parsed.get("decision_id") or parsed.get("scenario_decision_id")
+    if direct:
+        return str(direct)
+    scenario_decision = parsed.get("scenario_decision")
+    if isinstance(scenario_decision, dict):
+        return str(scenario_decision.get("decision_id") or "")
+    return ""
+
+
 def _validate_signal_parent_rows(
     connection: sqlite3.Connection,
     rows: list[dict[str, Any]],
     *,
     require_market_identity: bool,
 ) -> None:
-    """Reject child rows without a governed historical or V6 shadow parent.
+    """Reject child rows without a governed historical, V6, or Scenario parent.
 
     The legacy signal child tables predate the V6 shadow ledger and retain a
     historical_signals foreign-key declaration.  V6 shadow outcomes/events are
-    intentionally keyed by ``alpha_v6_decisions.shadow_signal_id`` instead, so
-    SQLite's single-parent constraint cannot express the valid domain.  Keep
-    the write boundary fail-closed with an application-level, exact identity
-    check and bind outcome rows to the decision's day/ticker.
+    intentionally keyed by ``alpha_v6_decisions.shadow_signal_id`` instead,
+    and Scenario lifecycle outcomes use ``scenario_signal_links.signal_id``.
+    SQLite's single-parent constraint cannot express the valid domain. Keep the
+    write boundary fail-closed with an application-level, exact identity check
+    and bind outcome rows to the governed parent's day/ticker.
     """
 
     candidates = [
@@ -8411,57 +8451,151 @@ def _validate_signal_parent_rows(
     signal_ids = sorted({str(row["signal_id"]) for row in candidates})
     placeholders = ",".join("?" for _ in signal_ids)
     historical = {
-        str(row[0]): (str(row[1] or ""), str(row[2] or ""))
+        str(row[0]): (
+            str(row[1] or ""),
+            str(row[2] or ""),
+            _embedded_scenario_decision_id(row[3]),
+        )
         for row in connection.execute(
-            "SELECT signal_id, market_date, ticker "
+            "SELECT signal_id, market_date, ticker, raw_payload_json "
             f"FROM historical_signals WHERE signal_id IN ({placeholders})",  # nosec B608
             signal_ids,
         ).fetchall()
     }
     shadow_decisions = {
-        str(row[0]): (str(row[1] or ""), str(row[2] or ""))
+        str(row[0]): (str(row[1] or ""), str(row[2] or ""), "")
         for row in connection.execute(
             "SELECT shadow_signal_id, market_date, ticker "
             f"FROM alpha_v6_decisions WHERE shadow_signal_id IN ({placeholders})",  # nosec B608
             signal_ids,
         ).fetchall()
     }
+    scenario_parents: dict[str, set[tuple[str, ...]]] = {}
+    for row in connection.execute(
+        "SELECT l.signal_id, d.decision_id, d.market_date, d.ticker, "
+        "d.cohort, d.policy_version, d.research_only, d.broker_execution_enabled, "
+        "l.cohort, l.strategy_id, l.strategy_version "
+        "FROM scenario_signal_links AS l "
+        "JOIN scenario_decisions AS d ON d.decision_id = l.decision_id "
+        f"WHERE l.signal_id IN ({placeholders})",  # nosec B608
+        signal_ids,
+    ).fetchall():
+        signal_id = str(row[0] or "")
+        if signal_id:
+            scenario_parents.setdefault(signal_id, set()).add(
+                tuple(str(value if value is not None else "") for value in row[1:])
+            )
 
     missing = 0
     mismatched = 0
+    ambiguous = 0
     for row in candidates:
         signal_id = str(row["signal_id"])
         historical_parent = historical.get(signal_id)
         shadow_parent = shadow_decisions.get(signal_id)
-        if historical_parent is not None and shadow_parent is not None:
-            if tuple(value.casefold() for value in historical_parent) != tuple(
-                value.casefold() for value in shadow_parent
-            ):
+        scenario_entries = scenario_parents.get(signal_id, set())
+        if signal_id.startswith("scenario:"):
+            if len(scenario_entries) == 0:
                 mismatched += 1
                 continue
-            parent = historical_parent
-        elif historical_parent is not None:
-            parent = historical_parent
-        else:
-            parent = shadow_parent
-        if parent is None:
+            if len(scenario_entries) != 1 or shadow_parent is not None:
+                ambiguous += 1
+                continue
+            (
+                expected_decision_id,
+                expected_date,
+                expected_ticker,
+                decision_cohort,
+                decision_policy_version,
+                decision_research_only,
+                decision_broker_execution_enabled,
+                link_cohort,
+                link_strategy_id,
+                link_strategy_version,
+            ) = next(iter(scenario_entries))
+            contract_matches = (
+                bool(expected_decision_id)
+                and bool(expected_date[:10])
+                and bool(expected_ticker)
+                and signal_id == f"scenario:{expected_decision_id}"
+                and decision_cohort == SCENARIO_FORWARD_COHORT
+                and decision_policy_version == SCENARIO_POLICY_VERSION
+                and decision_research_only == "1"
+                and decision_broker_execution_enabled == "0"
+                and link_cohort == decision_cohort
+                and link_strategy_id == SCENARIO_STRATEGY_ID
+                and link_strategy_version == decision_policy_version
+            )
+            historical_matches = True
+            if historical_parent is not None:
+                historical_date, historical_ticker, historical_decision_id = historical_parent
+                historical_matches = (
+                    bool(historical_date)
+                    and historical_date[:10] == expected_date[:10]
+                    and bool(historical_ticker)
+                    and historical_ticker.upper() == expected_ticker.upper()
+                    and (
+                        not historical_decision_id
+                        or historical_decision_id == expected_decision_id
+                    )
+                )
+            if not contract_matches or not historical_matches:
+                mismatched += 1
+                continue
+            if not require_market_identity:
+                claimed_decision_id = str(
+                    (row.get("payload_json") or {}).get("decision_id") or ""
+                    if isinstance(row.get("payload_json"), dict)
+                    else ""
+                )
+                if claimed_decision_id and claimed_decision_id != expected_decision_id:
+                    mismatched += 1
+                continue
+            market_date = str(row.get("market_date") or row.get("date") or "")[:10]
+            ticker = str(row.get("ticker") or "").upper()
+            date_matches = bool(market_date) and market_date == expected_date[:10]
+            ticker_matches = bool(ticker) and ticker == expected_ticker.upper()
+            claimed_decision_id = str(
+                (row.get("payload_json") or {}).get("decision_id") or ""
+                if isinstance(row.get("payload_json"), dict)
+                else ""
+            )
+            if (
+                not date_matches
+                or not ticker_matches
+                or claimed_decision_id != expected_decision_id
+            ):
+                mismatched += 1
+            continue
+
+        if scenario_entries:
+            mismatched += 1
+            continue
+        parents = [
+            parent for parent in (historical_parent, shadow_parent) if parent is not None
+        ]
+        if len(parents) == 0:
             missing += 1
+            continue
+        if len(parents) != 1:
+            ambiguous += 1
             continue
         if not require_market_identity:
             continue
+        expected_date, expected_ticker, _ = parents[0]
         market_date = str(row.get("market_date") or row.get("date") or "")[:10]
         ticker = str(row.get("ticker") or "").upper()
-        expected_date, expected_ticker = parent
         date_matches = bool(market_date) and market_date == expected_date[:10]
         ticker_matches = bool(ticker) and ticker == expected_ticker.upper()
         if not date_matches or not ticker_matches:
             mismatched += 1
 
-    rejected = missing + mismatched
+    rejected = missing + mismatched + ambiguous
     if rejected:
         raise StorageError(
             "Signal child parent validation failed: "
-            f"rejected={rejected}, missing_parent={missing}, identity_mismatch={mismatched}"
+            f"rejected={rejected}, missing_parent={missing}, "
+            f"identity_mismatch={mismatched}, ambiguous_parent={ambiguous}"
         )
 
 

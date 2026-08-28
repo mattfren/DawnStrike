@@ -9,7 +9,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
 from intraday_scanner.cli import main
-from intraday_scanner.errors import SnapshotValidationError
+from intraday_scanner.errors import SnapshotValidationError, StorageError
 from intraday_scanner.scenario.contracts import (
     SCENARIO_FORWARD_COHORT,
     SCENARIO_POLICY_VERSION,
@@ -508,6 +508,28 @@ def test_trade_watcher_executes_only_valid_scenario_paper_selection(tmp_path: Pa
             }
         ]
     )
+    store.persist_scenario_decisions(
+        [
+            {
+                "decision_id": "decision-1",
+                "article_id": "article-1",
+                "ticker": "NOVA",
+                "market_date": market_date,
+                "decision_at": "2026-08-03T14:00:00Z",
+                "event_type": "contract_customer",
+                "direction": "bullish",
+                "directional_evidence_score": 6.0,
+                "action": "ENTER_LONG",
+                "cohort": SCENARIO_FORWARD_COHORT,
+                "policy_version": SCENARIO_POLICY_VERSION,
+                "source_tier": "T1",
+                "source_lineage_hash_sha256": "source",
+                "feature_hash_sha256": "features",
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        ]
+    )
     store.upsert_scenario_signal_links(
         [
             {
@@ -777,6 +799,20 @@ def test_prior_day_open_position_is_safely_carried_and_revisited_without_eod_tru
 
 def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) -> None:
     store = SQLiteScanStore(tmp_path / "scanner.sqlite")
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "signal-atomic",
+                "generated_at": "2026-06-22T13:20:00+00:00",
+                "market_date": "2026-06-22",
+                "ticker": "NOVA",
+                "signal_label": "WATCH",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {},
+            }
+        ]
+    )
     unencodable = object()
 
     with pytest.raises(TypeError, match="JSON serializable"):
@@ -879,6 +915,120 @@ def test_trade_watcher_lifecycle_batch_rolls_back_every_table(tmp_path: Path) ->
     assert store.load_paper_positions(market_date="2026-06-22") == []
     assert store.load_paper_trade_fills(market_date="2026-06-22") == []
     assert store.load_signal_events(signal_id="signal-atomic") == []
+
+
+def test_trade_watcher_lifecycle_rejects_orphan_event_atomically(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "orphan-event.sqlite")
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": "signal-valid",
+                "generated_at": "2026-06-22T13:20:00+00:00",
+                "market_date": "2026-06-22",
+                "ticker": "NOVA",
+                "signal_label": "WATCH",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {},
+            }
+        ]
+    )
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_trade_watcher_lifecycle(
+            intents=[
+                {
+                    "intent_id": "intent-valid",
+                    "signal_id": "signal-valid",
+                    "market_date": "2026-06-22",
+                    "ticker": "NOVA",
+                    "account_id": "alphaops_v5_simulated",
+                    "strategy_id": "alphaops_v5",
+                    "strategy_version": "dawnstrike-alphaops-v5",
+                    "mode": "observe_only",
+                    "lifecycle_state": "WATCHING",
+                    "action": "STAND_DOWN",
+                    "decision_time": "2026-06-22T13:35:00+00:00",
+                    "reason": "test",
+                    "created_at": "2026-06-22T13:35:00+00:00",
+                }
+            ],
+            paper_positions=[],
+            paper_fills=[],
+            signal_events=[
+                {
+                    "event_id": "event-valid",
+                    "signal_id": "signal-valid",
+                    "event_type": "ENTRY_SIGNAL",
+                    "event_timestamp": "2026-06-22T13:35:00+00:00",
+                },
+                {
+                    "event_id": "event-orphan",
+                    "signal_id": "signal-missing",
+                    "event_type": "ENTRY_SIGNAL",
+                    "event_timestamp": "2026-06-22T13:35:01+00:00",
+                },
+            ],
+        )
+
+    assert store.load_trade_intents(market_date="2026-06-22") == []
+    assert store.load_signal_events() == []
+
+
+def test_trade_watcher_lifecycle_rejects_event_intent_signal_swap_atomically(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "event-intent-swap.sqlite")
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": signal_id,
+                "generated_at": "2026-06-22T13:20:00+00:00",
+                "market_date": "2026-06-22",
+                "ticker": "NOVA",
+                "signal_label": "WATCH",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {},
+            }
+            for signal_id in ("signal-valid", "signal-other")
+        ]
+    )
+
+    with pytest.raises(StorageError, match="Signal event intent binding failed"):
+        store.persist_trade_watcher_lifecycle(
+            intents=[
+                {
+                    "intent_id": "intent-valid",
+                    "signal_id": "signal-valid",
+                    "market_date": "2026-06-22",
+                    "ticker": "NOVA",
+                    "account_id": "alphaops_v5_simulated",
+                    "strategy_id": "alphaops_v5",
+                    "strategy_version": "dawnstrike-alphaops-v5",
+                    "mode": "observe_only",
+                    "lifecycle_state": "WATCHING",
+                    "action": "STAND_DOWN",
+                    "decision_time": "2026-06-22T13:35:00+00:00",
+                    "reason": "test",
+                    "created_at": "2026-06-22T13:35:00+00:00",
+                }
+            ],
+            paper_positions=[],
+            paper_fills=[],
+            signal_events=[
+                {
+                    "event_id": "event-swapped",
+                    "signal_id": "signal-other",
+                    "event_type": "ENTRY_SIGNAL",
+                    "event_timestamp": "2026-06-22T13:35:00+00:00",
+                    "payload_json": {"intent_id": "intent-valid"},
+                }
+            ],
+        )
+
+    assert store.load_trade_intents(market_date="2026-06-22") == []
+    assert store.load_signal_events() == []
 
 
 def test_trade_watcher_lifecycle_batch_accepts_empty_inputs(tmp_path: Path) -> None:
