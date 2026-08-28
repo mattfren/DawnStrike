@@ -33,6 +33,24 @@ research-only/no-broker boundary. Learning is stricter still: without a governed
 committed FillTruth identity, the return remains quarantined even when operational lifecycle rows
 exist. EOD repair or reconciliation output cannot authenticate itself as realized return truth.
 
+### Signal-child parentage audit
+
+A read-only SQLite audit returned `quick_check=ok` and 40 rows from the generic
+`foreign_key_check`: 20 `signal_outcomes` and 20 `signal_events`. None was an unbound or fabricated
+signal. Every row uses a `v6s-*` shadow identity; 20/20 resolve to the exact
+`alpha_v6_decisions.shadow_signal_id`, 20/20 resolve to `alpha_v6_outcomes`, every outcome's market
+date and ticker agree with its V6 decision, and each V6 decision retains its original
+`historical_signals` source through `source_signal_id`.
+
+The report exposed a schema-expression gap: the legacy child tables declare only
+`historical_signals.signal_id` as their SQLite parent, while governed V6 shadow children use the
+separate immutable decision ledger. The existing 40 rows were left byte-for-byte unchanged. The
+candidate now validates the polymorphic parent at every signal-outcome/event write boundary,
+accepting only an exact historical signal or V6 shadow decision, requiring exact day/ticker for
+outcomes, rejecting ambiguous dual parents, and preserving atomic rollback. A raw SQLite
+single-parent report must therefore be interpreted with this domain-aware lineage check; it is not
+permission to delete, relink, or promote the V6 evidence.
+
 `Mean return` below is the arithmetic mean of `trade_return_pct` for closed rows. `PF` is gross
 positive net P&L divided by absolute gross negative net P&L. `Ex-best` removes the single best
 closed trade to expose concentration.
