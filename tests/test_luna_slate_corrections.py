@@ -14,6 +14,7 @@ import pytest
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
+from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
@@ -29,6 +30,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     TIER2,
     apply_publication_semantics,
     build_ranked_research_slate,
+    official_publication_rows,
     persist_ranked_research_slate,
     publication_counts,
     validate_ranked_research_slate,
@@ -1286,3 +1288,127 @@ def test_tier_one_requires_positive_current_clear_safety_evidence() -> None:
     slate = build_ranked_research_slate([unknown, safe], target=5, require_safety=True)
     assert slate["symbols"] == ["SAFE"]
     assert "sec_risk_status_not_clear" in slate["safety_blockers"]
+
+
+def test_v2_slate_binds_operational_scan_identity_and_preserves_upstream_identity() -> None:
+    row = {
+        "ticker": "BOUND",
+        "scan_id": "producer-scan",
+        "source_scan_id": "upstream-scan",
+    }
+    slate = build_ranked_research_slate(
+        [row],
+        generated_at="2026-08-28T13:00:00+00:00",
+        market_date="2026-08-28",
+        scan_id="producer-scan",
+    )
+
+    published = slate["rows"][0]
+    assert slate["schema_version"] == "dawnstrike.luna.ranked_research_slate.v2"
+    assert published["scan_id"] == "producer-scan"
+    assert published["research_source_scan_id"] == "producer-scan"
+    assert published["upstream_scan_id"] == "upstream-scan"
+    validate_ranked_research_slate(slate, market_date="2026-08-28")
+
+
+def test_slate_rejects_cross_scan_input_identity() -> None:
+    with pytest.raises(ValueError, match="scan_id.*conflicts"):
+        build_ranked_research_slate(
+            [{"ticker": "ATTACK", "scan_id": "attacker-scan"}],
+            generated_at="2026-08-28T13:00:00+00:00",
+            market_date="2026-08-28",
+            scan_id="producer-scan",
+        )
+
+
+def test_v1_slate_compatibility_allows_absent_row_scan_but_rejects_conflict() -> None:
+    slate = build_ranked_research_slate(
+        [{"ticker": "LEGACY"}],
+        generated_at="2026-08-28T13:00:00+00:00",
+        market_date="2026-08-28",
+        scan_id="producer-scan",
+    )
+    legacy = json.loads(json.dumps(slate))
+    legacy["schema_version"] = "dawnstrike.luna.ranked_research_slate.v1"
+    legacy.pop("require_safety", None)
+    for row in legacy["rows"]:
+        row.pop("scan_id", None)
+        row.pop("research_source_scan_id", None)
+        row.pop("upstream_scan_id", None)
+        row.pop("broker_execution_enabled", None)
+        row.pop("research_row_hash_sha256", None)
+        row["research_row_hash_sha256"] = hashlib.sha256(
+            json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        ).hexdigest()
+    legacy["content_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in legacy.items()
+                if key not in {"content_hash_sha256", "slate_id"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    legacy["slate_id"] = "luna-slate-" + legacy["content_hash_sha256"][:24]
+    validate_ranked_research_slate(legacy, market_date="2026-08-28")
+    legacy["rows"][0]["scan_id"] = "attacker-scan"
+    with pytest.raises(ValueError, match="scan identity"):
+        validate_ranked_research_slate(legacy, market_date="2026-08-28")
+
+
+def test_production_slate_does_not_trust_fresh_label_without_authenticated_observation() -> None:
+    slate = build_ranked_research_slate(
+        [
+            {
+                "ticker": "FAKEFRESH",
+                "market_date": "2026-08-28",
+                "freshness_status": "FRESH",
+                "source_count": 1,
+                "source_quality_status": "VERIFIED",
+                "halt_status": "CLEAR",
+                "sec_risk_status": "CLEAR",
+                "corporate_action_status": "CLEAR",
+                "input_status": "VERIFIED",
+                "evidence_status": "VERIFIED",
+            }
+        ],
+        generated_at="2026-08-28T13:00:00+00:00",
+        market_date="2026-08-28",
+        scan_id="scan-freshness-boundary",
+        require_safety=True,
+    )
+    assert slate["symbols"] == []
+    assert "freshness_observation_unbound_or_invalid" in slate["safety_blockers"]
+
+
+def test_official_and_telegram_boundaries_reject_hostile_execution_rows() -> None:
+    hostile = {
+        "ticker": "LIVE",
+        "publication_tier": TIER2,
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+        "research_only": False,
+        "broker_execution": "live",
+        "broker_execution_enabled": True,
+    }
+    safe = {
+        "ticker": "PAPER",
+        "publication_tier": TIER2,
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+    }
+    official = official_publication_rows([hostile, safe], limit=3)
+    assert [row["ticker"] for row in official] == ["PAPER"]
+    assert official[0]["research_only"] is True
+    assert official[0]["broker_execution"] == "disabled"
+    assert official[0]["broker_execution_enabled"] is False
+    message = format_alpha_watch(
+        signals=[hostile, safe],
+        edge_label="test",
+        source_summary={"ranked_research_publication_rows": [hostile, safe]},
+    )
+    assert "LIVE" not in message
+    assert "PAPER" in message

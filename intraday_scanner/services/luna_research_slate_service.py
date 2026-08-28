@@ -20,6 +20,9 @@ TIER2_WAITING = "WAITING_CURRENT_CHECKS"
 TIER3 = "ALERTABLE_PAPER_ENTRY"
 WAITING_EXECUTION_COSTS = "WAITING_EXECUTION_COSTS"
 EASTERN = ZoneInfo("America/New_York")
+RANKED_RESEARCH_SLATE_V1 = "dawnstrike.luna.ranked_research_slate.v1"
+RANKED_RESEARCH_SLATE_V2 = "dawnstrike.luna.ranked_research_slate.v2"
+_DEFAULT_ENRICHMENT_MAX_AGE_SECONDS = 1_200
 
 _RECEIPT_METADATA_FIELDS = (
     "receipt_id",
@@ -158,6 +161,24 @@ def build_ranked_research_slate(
 
     requested = max(int(target), 0)
     source = [dict(row) for row in (rows or [])]
+    generated = generated_at or datetime.now(timezone.utc).isoformat()
+    slate_market_date = (market_date or generated[:10])[:10]
+    producer_scan_id = str(scan_id or f"luna-research:{slate_market_date}").strip()
+    if not producer_scan_id:
+        raise ValueError("ranked research slate producer scan ID is invalid")
+    # A non-empty operational scan identity is never allowed to cross the
+    # publication boundary.  An upstream/source identity, when supplied under
+    # its own field, is carried separately by _annotate and does not alter the
+    # slate's producer identity.
+    conflicting_scan_rows = [
+        row
+        for row in source
+        if str(row.get("scan_id") or "").strip()
+        and str(row.get("scan_id") or "").strip() != producer_scan_id
+    ]
+    if conflicting_scan_rows:
+        raise ValueError("ranked research slate row scan_id conflicts with producer scan")
+    enforce_observation_freshness = bool(require_safety)
     safety_blockers: list[str] = []
     if not data_eligible or requested == 0:
         selected: list[dict[str, Any]] = []
@@ -173,14 +194,35 @@ def build_ranked_research_slate(
                 or not _row_lane_eligible(row, lane_statuses)
                 or not _safe_for_research(row, require_safety=require_safety)
                 or not receipt_research_admissible
+                or (
+                    enforce_observation_freshness
+                    and not _production_observation_freshness_valid(
+                        row,
+                        slate_market_date=slate_market_date,
+                        generated_at=generated,
+                    )
+                )
             ):
                 if ticker and require_safety:
                     safety_blockers.extend(_safety_blockers(row))
                     if receipt_blocker:
                         safety_blockers.append(receipt_blocker)
+                    if enforce_observation_freshness and not (
+                        _production_observation_freshness_valid(
+                            row, slate_market_date=slate_market_date, generated_at=generated
+                        )
+                    ):
+                        safety_blockers.append("freshness_observation_unbound_or_invalid")
                 continue
             seen.add(ticker)
-            selected.append(_annotate(row, rank=len(selected) + 1, tier=TIER1))
+            selected.append(
+                _annotate(
+                    row,
+                    rank=len(selected) + 1,
+                    tier=TIER1,
+                    scan_id=producer_scan_id,
+                )
+            )
             if len(selected) >= requested:
                 break
     reason = shortfall_reason.strip()
@@ -188,7 +230,6 @@ def build_ranked_research_slate(
         reason = (
             "DATA_UNAVAILABLE" if not data_eligible else "fewer than target safe-to-study episodes"
         )
-    generated = generated_at or datetime.now(timezone.utc).isoformat()
     input_ids = sorted(
         {
             str(
@@ -214,10 +255,10 @@ def build_ranked_research_slate(
         {str(item).strip().upper() for item in (canonical_member_ids or []) if str(item).strip()}
     )
     payload = {
-        "schema_version": "dawnstrike.luna.ranked_research_slate.v1",
+        "schema_version": RANKED_RESEARCH_SLATE_V2,
         "generated_at": generated,
-        "market_date": (market_date or generated[:10])[:10],
-        "scan_id": str(scan_id or f"luna-research:{(market_date or generated[:10])[:10]}"),
+        "market_date": slate_market_date,
+        "scan_id": producer_scan_id,
         "canonical_input_ids": input_ids,
         "canonical_member_ids": member_ids,
         "coverage_status": coverage_status.strip().upper()
@@ -238,6 +279,7 @@ def build_ranked_research_slate(
         "research_only": True,
         "broker_execution": "disabled",
         "missing_truth_is_zero": False,
+        "require_safety": bool(require_safety),
     }
     payload["content_hash_sha256"] = _slate_content_hash(payload)
     payload["slate_id"] = "luna-slate-" + payload["content_hash_sha256"][:24]
@@ -327,6 +369,7 @@ def apply_publication_semantics(
         )
         selected_and_safe = (
             exact_frozen_source
+            and _current_row_scan_identity_compatible(row, slate or {})
             and _safe_for_research(row, require_safety=require_watcher_proof)
             and _receipt_research_admissibility(row)[0]
         )
@@ -400,6 +443,10 @@ def _matches_synthesized_frozen_source(
         "entry_state",
         "research_only",
         "broker_execution",
+        "broker_execution_enabled",
+        "scan_id",
+        "research_source_scan_id",
+        "upstream_scan_id",
         "research_row_hash_sha256",
     }
     frozen_source = {
@@ -450,13 +497,28 @@ def official_publication_rows(
             or row.get("publication_tier") not in {TIER2, TIER3}
             or str(row.get("alert_gate_status") or "").upper() not in {"PASS", "ALERT_OK"}
             or row.get("manual_confirmation_required") is not False
+            or not _publication_execution_safe(row)
         ):
             continue
+        # The returned object is a publication copy. Do not let a caller's
+        # mutable execution flags flow into the official Telegram cohort.
+        row["research_only"] = True
+        row["broker_execution"] = "disabled"
+        row["broker_execution_enabled"] = False
         selected.append(row)
         seen_tickers.add(ticker)
         if len(selected) >= max(int(limit), 0):
             break
     return selected
+
+
+def _publication_execution_safe(row: dict[str, Any]) -> bool:
+    """Return false for explicit live/broker/research rows at the selector seam."""
+
+    if row.get("research_only") is False or _truthy(row.get("broker_execution_enabled")):
+        return False
+    execution = str(row.get("broker_execution") or "").strip().lower()
+    return execution in {"", "disabled"}
 
 
 def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path) -> Path:
@@ -519,7 +581,8 @@ def validate_ranked_research_slate(
 ) -> dict[str, Any]:
     """Verify a frozen slate before it is reused by a retry or monitor."""
 
-    if slate.get("schema_version") != "dawnstrike.luna.ranked_research_slate.v1":
+    schema_version = str(slate.get("schema_version") or "")
+    if schema_version not in {RANKED_RESEARCH_SLATE_V1, RANKED_RESEARCH_SLATE_V2}:
         raise ValueError("ranked research slate schema is invalid")
     if not str(slate.get("scan_id") or "").strip():
         raise ValueError("ranked research slate producer scan ID is invalid")
@@ -535,6 +598,10 @@ def validate_ranked_research_slate(
         raise ValueError("ranked research slate market date is invalid")
     if slate.get("research_only") is not True or slate.get("broker_execution") != "disabled":
         raise ValueError("ranked research slate execution flags are invalid")
+    if schema_version == RANKED_RESEARCH_SLATE_V2 and not isinstance(
+        slate.get("require_safety"), bool
+    ):
+        raise ValueError("ranked research slate safety contract is invalid")
     if not str(slate.get("coverage_status") or "").strip() or not isinstance(
         slate.get("lane_statuses"), dict
     ):
@@ -573,6 +640,15 @@ def validate_ranked_research_slate(
             raise ValueError("ranked research slate row lane is not eligible")
         if not _receipt_research_admissibility(row)[0]:
             raise ValueError("ranked research slate row receipt is not research eligible")
+        if not _row_scan_identity_valid(row, str(slate.get("scan_id") or ""), schema_version):
+            raise ValueError("ranked research slate row scan identity is invalid")
+        if schema_version == RANKED_RESEARCH_SLATE_V2 and slate.get("require_safety") is True:
+            if not _production_observation_freshness_valid(
+                row,
+                slate_market_date=slate_market_date,
+                generated_at=str(slate.get("generated_at") or ""),
+            ):
+                raise ValueError("ranked research slate row freshness is not authenticated")
         if (
             row.get("research_only") is not True
             or row.get("broker_execution") != "disabled"
@@ -666,6 +742,11 @@ def validated_frozen_selection_signal(
         != json.dumps(frozen_signal, sort_keys=True, separators=(",", ":"))
         or not signal_id
         or signal_id != frozen_signal_id
+        or not _row_scan_identity_valid(
+            frozen_signal,
+            frozen_scan_id,
+            str(slate.get("schema_version") or RANKED_RESEARCH_SLATE_V1),
+        )
         or str(selection.get("ticker") or "").upper()
         != str(frozen_signal.get("ticker") or "").upper()
     ):
@@ -1817,10 +1898,27 @@ def _number(value: Any) -> float | None:
     return parsed if parsed == parsed else None
 
 
-def _annotate(row: dict[str, Any], *, rank: int, tier: str) -> dict[str, Any]:
+def _annotate(
+    row: dict[str, Any], *, rank: int, tier: str, scan_id: str | None = None
+) -> dict[str, Any]:
     output = dict(row)
     output["ticker"] = str(output.get("ticker") or output.get("symbol") or "").upper()
     output["research_rank"] = rank
+    operational_scan_id = str(scan_id or output.get("scan_id") or "").strip()
+    if operational_scan_id:
+        # v2 makes the producer identity explicit on every operational row.
+        # Preserve a distinct source/upstream identity under a non-operational
+        # key before stamping the two boundary fields.
+        upstream_scan_id = str(
+            output.get("upstream_scan_id")
+            or output.get("research_upstream_scan_id")
+            or output.get("source_scan_id")
+            or ""
+        ).strip()
+        if upstream_scan_id:
+            output["upstream_scan_id"] = upstream_scan_id
+        output["scan_id"] = operational_scan_id
+        output["research_source_scan_id"] = operational_scan_id
     source_signal_id = str(
         output.get("signal_id")
         or output.get("signal_key")
@@ -1836,10 +1934,155 @@ def _annotate(row: dict[str, Any], *, rank: int, tier: str) -> dict[str, Any]:
     output["entry_state"] = "RESEARCH_ONLY"
     output["research_only"] = True
     output["broker_execution"] = "disabled"
+    output["broker_execution_enabled"] = False
     output["research_row_hash_sha256"] = hashlib.sha256(
         json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
     return output
+
+
+def _row_scan_identity_valid(row: dict[str, Any], scan_id: str, schema_version: str) -> bool:
+    """Validate row-level producer identity without rewriting legacy v1 rows."""
+
+    expected = str(scan_id or "").strip()
+    if not expected:
+        return False
+    row_scan = str(row.get("scan_id") or "").strip()
+    research_scan = str(row.get("research_source_scan_id") or "").strip()
+    if schema_version == RANKED_RESEARCH_SLATE_V1:
+        return (not row_scan or row_scan == expected) and (
+            not research_scan or research_scan == expected
+        )
+    return row_scan == expected and research_scan == expected
+
+
+def _current_row_scan_identity_compatible(
+    row: dict[str, Any], slate: dict[str, Any]
+) -> bool:
+    """Reject explicit cross-scan replacements while keeping raw replay input compatible."""
+
+    expected = str(slate.get("scan_id") or "").strip()
+    # Raw legacy slate dictionaries used by offline compatibility callers do
+    # not carry producer identity; preserve their exact-row behavior.
+    if not expected:
+        return True
+    for field in ("scan_id", "research_source_scan_id"):
+        value = str(row.get(field) or "").strip()
+        if value and value != expected:
+            return False
+    return True
+
+
+def _production_observation_freshness_valid(
+    row: dict[str, Any], *, slate_market_date: str, generated_at: str
+) -> bool:
+    """Require an authenticated, current observation for production slates.
+
+    The human-readable ``FRESH`` label is deliberately not consulted as a
+    source of truth. Core rows use their immutable coverage receipt; mover
+    rows use the exact authenticated Alpaca enrichment observation and raw-bar
+    digest. Both clocks must be parseable, nonfuture relative to slate
+    generation, and within their recorded/configured age limit.
+    """
+
+    row_date = str(row.get("market_date") or "").strip()[:10]
+    expected_date = str(slate_market_date or "").strip()[:10]
+    if not row_date or row_date != expected_date:
+        return False
+    generated = _parse_watcher_time(generated_at)
+    if generated is None or generated.date().isoformat() != expected_date:
+        return False
+
+    # A receipt marker is authoritative when present. An invalid receipt must
+    # not be rescued by a second, weaker enrichment path.
+    receipt_marked = any(
+        key in row
+        for key in (
+            "core_coverage_receipt_id",
+            "core_coverage_receipt_hash_sha256",
+            "core_coverage_receipt_payload_json",
+            "core_coverage_row_binding_hash_sha256",
+        )
+    )
+    if receipt_marked:
+        try:
+            from intraday_scanner.services.luna_core_universe_service import (
+                _core_coverage_binding_valid,
+            )
+
+            receipt_valid = _core_coverage_binding_valid(row)
+        except (ImportError, TypeError, ValueError):
+            receipt_valid = False
+        if not receipt_valid:
+            return False
+        try:
+            receipt = json.loads(str(row.get("core_coverage_receipt_payload_json") or ""))
+            observed = _parse_watcher_time(receipt.get("observed_at"))
+            source_timestamp = _parse_watcher_time(
+                row.get("source_timestamp") or row.get("as_of_timestamp")
+            )
+            max_age = int(receipt.get("max_age_seconds") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            return False
+        if observed is None or source_timestamp is None or max_age <= 0:
+            return False
+        return (
+            observed <= generated
+            and source_timestamp <= generated
+            and 0 <= (generated - source_timestamp).total_seconds() <= max_age
+            and 0 <= (generated - observed).total_seconds() <= max_age
+            and observed.date().isoformat() == expected_date
+            and source_timestamp.date().isoformat() == expected_date
+        )
+
+    # Reconstruct the exact frozen dataclass payload emitted by premarket
+    # enrichment. This validates canonical payload/hash and authenticated raw
+    # Alpaca bars rather than trusting flattened FRESH/status fields.
+    payload_text = str(row.get("enrichment_observation_payload_json") or "").strip()
+    digest = str(row.get("enrichment_observation_sha256") or "").strip().lower()
+    if not payload_text or not _valid_hash(digest):
+        return False
+    try:
+        payload = json.loads(payload_text)
+        from intraday_scanner.services.premarket_enrichment_service import (
+            PremarketObservation,
+            _alpaca_raw_binding_valid,
+            _canonical_observation_payload,
+        )
+
+        if not isinstance(payload, dict):
+            return False
+        observation = PremarketObservation(**payload)
+        expected_digest, expected_payload = _canonical_observation_payload(observation)
+        if digest != expected_digest or payload_text != expected_payload:
+            return False
+        if not observation.source.startswith("alpaca_market_data_"):
+            return False
+        observed = _parse_watcher_time(observation.observed_at)
+        completed = _parse_watcher_time(observation.bar_completed_at)
+        if observed is None or completed is None or completed > generated:
+            return False
+        raw_payload = json.loads(str(observation.premarket_raw_payload_json or ""))
+        requested_at = _parse_watcher_time(
+            raw_payload.get("requested_at") if isinstance(raw_payload, dict) else None
+        )
+        if requested_at is None or requested_at > generated:
+            return False
+        max_age_value = (
+            row.get("enrichment_max_age_seconds")
+            or row.get("premarket_enrichment_max_age_seconds")
+            or _DEFAULT_ENRICHMENT_MAX_AGE_SECONDS
+        )
+        max_age = int(max_age_value)
+        return (
+            observation.is_usable
+            and _alpaca_raw_binding_valid(observation, requested_at=requested_at)
+            and 0 <= (generated - completed).total_seconds() <= max_age
+            and observed.date().isoformat() == expected_date
+            and completed.date().isoformat() == expected_date
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, ImportError):
+        return False
 
 
 def _rank_key(row: dict[str, Any]) -> tuple[float, float, str]:

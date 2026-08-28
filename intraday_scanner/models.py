@@ -14,6 +14,7 @@ EVIDENCE_CONFIDENCE_VERSION = "evidence-confidence-v1"
 
 SNAPSHOT_COLUMNS = [
     "ticker",
+    "market_date",
     "company",
     "previous_close",
     "premarket_price",
@@ -377,6 +378,7 @@ class SnapshotRow:
     reverse_split_90d: bool
     source: str
     as_of_timestamp: str
+    market_date: str = ""
     source_url: str = ""
     extraction_mode: str = ""
     source_timestamp: str = ""
@@ -512,6 +514,7 @@ class SnapshotRow:
             reverse_split_90d=parse_bool(row.get("reverse_split_90d")),
             source=str(row.get("source") or "unknown").strip(),
             as_of_timestamp=str(row.get("as_of_timestamp") or utc_now_iso()).strip(),
+            market_date=str(row.get("market_date") or "").strip()[:10],
             source_url=str(row.get("source_url") or "").strip(),
             extraction_mode=str(
                 row.get("extraction_mode") or row.get("data_source_kind") or ""
@@ -1056,6 +1059,7 @@ class ScoredCandidate:
         payload = {
             "rank": self.rank,
             "ticker": self.snapshot.ticker,
+            "market_date": self.snapshot.market_date,
             "company": self.snapshot.company,
             "total_score": self.score,
             "score": self.score,

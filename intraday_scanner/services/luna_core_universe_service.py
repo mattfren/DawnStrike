@@ -1545,6 +1545,10 @@ def _classify_core_snapshot_batch(
         row["discovery_context"] = "luna_core:" + ",".join(requested_memberships.get(ticker, []))
         row["universe_lane"] = "core"
         row["evidence_lane"] = "core"
+        # Carry the provider observation's session identity onto every
+        # production row. The slate boundary requires an explicit market date
+        # rather than inferring it from a mutable freshness label downstream.
+        row["market_date"] = observed_at.date().isoformat()
         row["core_universe_memberships"] = list(requested_memberships.get(ticker, []))
         row["source_quality_status"] = "VERIFIED"
         row["freshness_status"] = "FRESH"

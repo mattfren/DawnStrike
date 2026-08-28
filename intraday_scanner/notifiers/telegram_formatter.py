@@ -849,6 +849,18 @@ def _nonnegative_count(value: Any, default: int) -> int:
 
 
 def _telegram_candidate_allowed(row: dict[str, Any]) -> bool:
+    # Telegram is an official research/paper publication channel. A hostile
+    # caller must not turn a live/broker row into an apparently safe message
+    # merely by supplying an otherwise valid publication tier.
+    if row.get("research_only") is False:
+        return False
+    if row.get("broker_execution_enabled") is True or str(
+        row.get("broker_execution_enabled") or ""
+    ).strip().lower() in {"1", "true", "yes", "y"}:
+        return False
+    execution = str(row.get("broker_execution") or "").strip().lower()
+    if execution not in {"", "disabled"}:
+        return False
     tier = str(row.get("publication_tier") or "")
     if tier:
         return tier in {
