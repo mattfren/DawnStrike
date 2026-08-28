@@ -2922,10 +2922,13 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
             # These are the already-frozen values, carried forward unchanged
             # for downstream receipts and alert gates.
             payload["direction"] = plan.direction
+            payload["entry_reference"] = plan.entry
             payload["entry_watch_level"] = plan.entry
             payload["breakout_trigger"] = plan.entry
+            payload["stop"] = plan.stop
             payload["invalidation_level"] = plan.stop
             payload["invalidation"] = plan.stop
+            payload["target"] = plan.target
             payload["target_1"] = plan.target
             payload["first_target"] = plan.target
             payload["target_basis_kind"] = plan.target_basis_kind

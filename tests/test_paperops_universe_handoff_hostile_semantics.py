@@ -34,6 +34,37 @@ def _rehash_core(core: dict[str, object]) -> None:
     core["content_hash"] = digest
 
 
+def _rehash_handoff(handoff: dict[str, object]) -> None:
+    unhashed = {
+        key: value
+        for key, value in handoff.items()
+        if key not in {"content_hash_sha256", "content_hash", "handoff_id", "universe_id"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    handoff["content_hash_sha256"] = digest
+    handoff["content_hash"] = digest
+    handoff["handoff_id"] = "paperops-universe-" + digest[:24]
+    handoff["universe_id"] = "paperops-pit-universe-" + digest[:24]
+
+
+def _attempts_with_one_failure() -> list[dict[str, object]]:
+    return [
+        {
+            "source": "local_inbox",
+            "status": "empty",
+            "failure_reason": "local inbox is empty",
+        },
+        {"source": "fixture_success", "status": "success", "failure_reason": ""},
+        {
+            "source": "fixture_failure",
+            "status": "failed",
+            "failure_reason": "fixture provider failed",
+        },
+    ]
+
+
 def _copy_source_summary_into_cycle(root: Path) -> dict[str, object]:
     summary_path = root / "web_collect" / "source_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -150,6 +181,82 @@ def test_data_unavailable_cannot_claim_both_ready_index_lanes(tmp_path: Path) ->
         build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
 
 
+@pytest.mark.parametrize("forged_count", [99, True, 1.0])
+def test_core_membership_count_must_equal_exact_unique_members(
+    tmp_path: Path, forged_count: object
+) -> None:
+    root = _morning_root(tmp_path)
+    core_path = root / "core_universe_contract.json"
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    core["membership_count"] = forged_count
+    _rehash_core(core)
+    _rewrite_json(core_path, core)
+
+    with pytest.raises(UniverseHandoffError, match=r"membership[_ ]count(?: binding)?"):
+        build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
+
+
+def test_failed_mover_attempt_cannot_be_resigned_as_zero_source_failures(
+    tmp_path: Path,
+) -> None:
+    root = _morning_root(tmp_path)
+    summary_path = root / "web_collect" / "source_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.update(
+        attempts=_attempts_with_one_failure(),
+        sources_attempted=3,
+        sources_succeeded=1,
+        source_failures=0,
+    )
+    _rewrite_json(summary_path, summary)
+    _sync_source_summary_preserving_fleet(root, summary)
+
+    with pytest.raises(UniverseHandoffError, match="attempt counts conflict"):
+        build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
+
+
+def test_genuine_mover_attempt_failure_remains_named_partial(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    summary_path = root / "web_collect" / "source_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.update(
+        attempts=_attempts_with_one_failure(),
+        sources_attempted=3,
+        sources_succeeded=1,
+        source_failures=1,
+    )
+    _rewrite_json(summary_path, summary)
+    _sync_source_summary_preserving_fleet(root, summary)
+
+    payload = build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
+
+    assert payload["coverage"]["status"] == "PARTIAL"
+    assert "provider_failures_present" in payload["coverage"]["shortfall_reasons"]
+
+
+def test_rehashed_handoff_union_counts_must_match_exact_members(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    handoff_path = root / "paperops_universe_handoff.json"
+    build_universe_handoff(
+        root,
+        MARKET_DATE,
+        output_path=handoff_path,
+        allow_test_override=True,
+    )
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    handoff["coverage"]["union_count"] = 99
+    _rehash_handoff(handoff)
+    _rewrite_json(handoff_path, handoff)
+
+    with pytest.raises(UniverseHandoffError, match="coverage union_count binding"):
+        load_universe_handoff(
+            handoff_path,
+            market_date=MARKET_DATE,
+            require_production=False,
+            verify_sources=False,
+        )
+
+
 def test_duplicate_and_partial_mover_truth_is_named_and_unique(tmp_path: Path) -> None:
     root = _morning_root(tmp_path)
     snapshot = root / "web_collect" / "premarket_snapshot.csv"
@@ -157,7 +264,14 @@ def test_duplicate_and_partial_mover_truth_is_named_and_unique(tmp_path: Path) -
         csv.writer(handle).writerow(["BBB", MARKET_DATE, "mover"])
     summary_path = root / "web_collect" / "source_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    summary.update(status="partial", candidate_count=3, source_failures=1)
+    summary.update(
+        status="partial",
+        candidate_count=3,
+        attempts=_attempts_with_one_failure(),
+        sources_attempted=3,
+        sources_succeeded=1,
+        source_failures=1,
+    )
     _rewrite_json(summary_path, summary)
     _sync_source_summary_preserving_fleet(root, summary)
 

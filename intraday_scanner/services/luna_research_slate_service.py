@@ -2494,10 +2494,11 @@ def _production_observation_freshness_valid(
     if generated is None or generated.date().isoformat() != expected_date:
         return False
 
-    # A receipt marker is authoritative when present. An invalid receipt must
-    # not be rescued by a second, weaker enrichment path.
+    # A non-empty receipt marker is authoritative. Model serializers retain
+    # empty core placeholders on mover rows; any partial non-empty receipt must
+    # still fail closed rather than fall through to the mover enrichment path.
     receipt_marked = any(
-        key in row
+        str(row.get(key) or "").strip()
         for key in (
             "core_coverage_receipt_id",
             "core_coverage_receipt_hash_sha256",

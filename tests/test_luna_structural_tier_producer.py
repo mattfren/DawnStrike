@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,17 +21,22 @@ from intraday_scanner.alpha.v5_policy import (
     evaluate_v5_official_paper,
 )
 from intraday_scanner.config import ScannerConfig, load_config
+from intraday_scanner.decisioning.condition_registry import registry_for_strategy
+from intraday_scanner.decisioning.contracts import parse_strategy_decision_receipt
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services.alpha_cycle_service import (
+    _apply_strategy_decision_receipts,
     _attach_authenticated_alpaca_structure,
     _build_modeled_cost_receipt,
+    _merge_strategy_adapter_signals,
     _signal_payload,
 )
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
+    AuthenticatedStrategyReceiptResolver,
     _valid_modeled_cost_receipt,
     apply_publication_semantics,
     build_ranked_research_slate,
@@ -58,6 +65,12 @@ def _hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+WATCHER_FIXTURE_CODE_SHA = "a" * 40
+_WATCHER_FIXTURE_STATE: dict[
+    str, tuple[Path, SQLiteScanStore, AuthenticatedStrategyReceiptResolver]
+] = {}
 
 
 def _production_row() -> dict[str, object]:
@@ -394,6 +407,11 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         "frozen_ranked_research_slate",
         "frozen_slate_lineage",
         "source_scan_id",
+        "source_signal_id",
+        "alphaops_market_structure_plan",
+        "plan_hash_sha256",
+        "market_structure_observations",
+        "condition_results",
     ):
         candidate.pop(preexisting_selection_field, None)
     cycle_at = datetime(2026, 8, 26, 13, 30, 0, 123456, tzinfo=timezone.utc)
@@ -473,6 +491,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
             assert rows
             return [dict(candidate)]
 
+    original_apply_receipts = alpha_cycle_module._apply_strategy_decision_receipts
     original_record_historical = alpha_cycle_module.record_alpha_historical_signals
     original_persist_selection = alpha_cycle_module._persist_official_selections
 
@@ -494,6 +513,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
                 "status": "success",
                 "candidate_count": 1,
                 "eligible_count": 1,
+                "source_identity": "fixture-source",
             },
         },
     )
@@ -525,10 +545,24 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         "_verify_ranked_sec_safety",
         lambda rows, **_kwargs: (rows, {"status": "complete"}),
     )
+    def persist_fixture_receipts(signals, *, store, **_kwargs):
+        return original_apply_receipts(
+            signals,
+            store=store,
+            **{
+                **_kwargs,
+                "config": load_config(
+                    strategy_evidence_enabled=True,
+                    strategy_evidence_shadow_only=True,
+                    alert_score_threshold=0,
+                ),
+            },
+        )
+
     monkeypatch.setattr(
         alpha_cycle_module,
         "_apply_strategy_decision_receipts",
-        lambda *args, **kwargs: {},
+        persist_fixture_receipts,
     )
     monkeypatch.setattr(alpha_cycle_module, "apply_alert_gates", lambda rows: rows)
     monkeypatch.setattr(
@@ -614,6 +648,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         notify="console",
         dry_run=True,
         as_of=cycle_at,
+        code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
 
     assert enrichment_requested_at == [cycle_timestamp]
@@ -677,7 +712,11 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         market_date="2026-08-26", ticker="NOVA", usable_only=True
     )[0]
     assert loaded_quote["quote_ask"] == 10.0
-    watch_signal = trade_watcher_module._watch_signals(store, market_date="2026-08-26")[0]
+    watch_signal = trade_watcher_module._watch_signals(
+        store,
+        market_date="2026-08-26",
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
+    )[0]
     assert luna_slate_module._source_bound_plan_observations(
         watch_signal,
         watch_signal["alphaops_market_structure_plan"],
@@ -685,7 +724,16 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
     ), json.dumps(watch_signal, indent=2, sort_keys=True)
     lineage = trade_watcher_module._selection_lineage(watch_signal)
     assert lineage.get("selection_ids"), json.dumps(lineage, indent=2, sort_keys=True)
-    strict_lineage = luna_slate_module._frozen_lineage_for_validation(watch_signal, "NOVA")
+    alpha_resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    strict_lineage = luna_slate_module._frozen_lineage_for_validation(
+        watch_signal,
+        "NOVA",
+        contributor_receipt_verifier=alpha_resolver,
+    )
     assert "_invalid" not in strict_lineage, json.dumps(
         {
             "strict_lineage": strict_lineage,
@@ -703,7 +751,12 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         existing_symbol_notional=0.0,
         decision_time=cycle_timestamp,
     ).to_dict()
-    direct_proof = _build_watcher_current_proof(watch_signal, loaded_quote, direct_trace)
+    direct_proof = _build_watcher_current_proof(
+        watch_signal,
+        loaded_quote,
+        direct_trace,
+        contributor_receipt_verifier=alpha_resolver,
+    )
     assert direct_proof is not None, json.dumps(direct_trace, indent=2, sort_keys=True)
     monkeypatch.setattr(
         trade_watcher_module,
@@ -733,6 +786,7 @@ def test_alpha_cycle_reuses_one_microsecond_decision_timestamp_end_to_end(
         notify="console",
         dry_run=True,
         config=load_config(database_path=db_path),
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
     assert watcher["intents"], json.dumps(watcher, indent=2, sort_keys=True)
     assert watcher["intents"][0]["action"] == "ENTER_LONG"
@@ -824,6 +878,7 @@ def test_publication_without_modeled_cost_receipt_stays_tier_one() -> None:
 def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
     row = _production_row()
     row["signal_id"] = "sig-nova"
+    row["source_signal_id"] = "sig-nova"
     payload = _signal_payload(
         _attach_authenticated_alpaca_structure(row, decision_at="2026-08-26T13:30:00+00:00"),
         "scan-watcher",
@@ -841,6 +896,7 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
             "manual_confirmation_required": False,
             "source_confidence": 92,
             "source_count": 3,
+            "alpha_score": 90,
             "source_quality_status": "verified",
             "freshness_status": "FRESH",
             "input_status": "VERIFIED",
@@ -865,6 +921,31 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
             "liquidity_tier": "high_liquidity",
         }
     )
+    payload.update({spec.condition_id: True for spec in registry_for_strategy("alphaops_v5")})
+    fixture_dir = Path(tempfile.mkdtemp(prefix="dawnstrike-luna-watcher-"))
+    store = SQLiteScanStore(fixture_dir / "receipts.sqlite")
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+            alert_score_threshold=0,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+        code_sha=WATCHER_FIXTURE_CODE_SHA,
+    )
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    payload = _merge_strategy_adapter_signals(
+        [payload],
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
+        receipt_verifier=resolver,
+    )[0]
     # The legacy fixture's source bar is intentionally older than the quote
     # proof clock. Rebind only the immutable slate input to a short, valid
     # observation window so this operational fixture can satisfy production
@@ -890,10 +971,11 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
         generated_at="2026-08-26T13:02:00+00:00",
         scan_id="scan-watcher",
         require_safety=True,
+        producer_code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
     payload.update(
         {
-            "selection_id": "selection-nova",
+            "selection_id": slate["rows"][0]["research_selection_id"],
             "cohort": "official_telegram",
             "frozen_ranked_research_slate": slate,
             "frozen_slate_lineage": {
@@ -901,11 +983,13 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
                 "slate_id": slate["slate_id"],
                 "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-watcher",
+                "frozen_source_code_sha": WATCHER_FIXTURE_CODE_SHA,
                 "current_scan_id": "scan-watcher",
                 "reuse_status": "CURRENT_SCAN",
             },
         }
     )
+    _WATCHER_FIXTURE_STATE[str(payload["signal_id"])] = (fixture_dir, store, resolver)
     quote_raw = {
         "ticker": "NOVA",
         "quote": {
@@ -932,6 +1016,28 @@ def _watcher_signal() -> tuple[dict[str, object], dict[str, object]]:
     }
 
 
+def _watcher_receipt_verifier(signal: dict[str, object]) -> AuthenticatedStrategyReceiptResolver:
+    return _WATCHER_FIXTURE_STATE[str(signal["signal_id"])][2]
+
+
+def _watcher_proof(
+    signal: dict[str, object], observation: dict[str, object], trace: dict[str, object]
+) -> dict[str, object] | None:
+    return _build_watcher_current_proof(
+        signal,
+        observation,
+        trace,
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
+    )
+
+
+def _watcher_validate(signal: dict[str, object], proof: dict[str, object]) -> bool:
+    return validate_watcher_current_proof(
+        {**signal, "current_price": 10.0, "watcher_current_proof": proof},
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
+    )
+
+
 def _watcher_trace(signal: dict[str, object], observation: dict[str, object]) -> dict[str, object]:
     decision = evaluate_v5_official_paper(
         signal,
@@ -947,30 +1053,26 @@ def _watcher_trace(signal: dict[str, object], observation: dict[str, object]) ->
 def test_watcher_proof_requires_valid_frozen_lineage_and_strict_identity() -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
-    assert proof is None or validate_watcher_current_proof(
-        {**signal, "current_price": observation["quote_ask"], "watcher_current_proof": proof}
-    )
+    proof = _watcher_proof(signal, observation, trace)
+    assert proof is None or _watcher_validate(signal, proof)
     assert proof is not None
     tampered = {**proof, "ticker": "BAD"}
-    assert not validate_watcher_current_proof(
-        {**signal, "current_price": observation["quote_ask"], "watcher_current_proof": tampered}
-    )
+    assert not _watcher_validate(signal, tampered)
     no_lineage = {
         key: value for key, value in signal.items() if key != "frozen_ranked_research_slate"
     }
-    assert _build_watcher_current_proof(no_lineage, observation, trace) is None
+    assert _watcher_proof(no_lineage, observation, trace) is None
     bad_slate = dict(signal["frozen_ranked_research_slate"])
     bad_slate["content_hash_sha256"] = "d" * 64
     bad_signal = {**signal, "frozen_ranked_research_slate": bad_slate}
-    assert _build_watcher_current_proof(bad_signal, observation, trace) is None
+    assert _watcher_proof(bad_signal, observation, trace) is None
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
 def test_watcher_rejects_invalid_primary_quote_and_row_aliases(invalid: float) -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
+    proof = _watcher_proof(signal, observation, trace)
     assert proof is not None
 
     invalid_quote_receipt = {
@@ -992,9 +1094,13 @@ def test_watcher_rejects_invalid_primary_quote_and_row_aliases(invalid: float) -
         "current_quote_price": 10.0,
         "watcher_current_proof": proof,
     }
-    assert not validate_watcher_current_proof(invalid_row)
     assert not validate_watcher_current_proof(
-        {**signal, "current_price": 10.0, "watcher_current_proof": invalid_quote}
+        invalid_row,
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
+    )
+    assert not validate_watcher_current_proof(
+        {**signal, "current_price": 10.0, "watcher_current_proof": invalid_quote},
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
 
 
@@ -1002,7 +1108,7 @@ def test_watcher_rejects_invalid_primary_quote_and_row_aliases(invalid: float) -
 def test_watcher_allows_missing_primary_quote_and_row_alias_fallback(missing: object) -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
+    proof = _watcher_proof(signal, observation, trace)
     assert proof is not None
     quote = {**proof["quote_receipt"], "last": missing, "price": 10.0}
     fallback_proof = {
@@ -1019,7 +1125,10 @@ def test_watcher_allows_missing_primary_quote_and_row_alias_fallback(missing: ob
         "current_quote_price": 10.0,
         "watcher_current_proof": fallback_proof,
     }
-    assert validate_watcher_current_proof(row)
+    assert validate_watcher_current_proof(
+        row,
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
+    )
 
 
 @pytest.mark.parametrize("slate_kind", ["v2_unsafe", "v1"])
@@ -1051,7 +1160,11 @@ def test_frozen_lineage_validation_rejects_nonproduction_slates(
         },
     }
 
-    result = luna_slate_module._frozen_lineage_for_validation(hostile, "NOVA")
+    result = luna_slate_module._frozen_lineage_for_validation(
+        hostile,
+        "NOVA",
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
+    )
 
     assert result["_invalid"] == "frozen ranked slate failed validation"
 
@@ -1059,7 +1172,7 @@ def test_frozen_lineage_validation_rejects_nonproduction_slates(
 def test_watcher_rejects_wrong_account_quote_ticker_plan_and_entry_window() -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
+    proof = _watcher_proof(signal, observation, trace)
     assert proof is not None
     for mutation in (
         {"simulated_account_id": "wrong-account"},
@@ -1098,20 +1211,22 @@ def test_watcher_rejects_wrong_account_quote_ticker_plan_and_entry_window() -> N
             ).encode()
         ).hexdigest()
         assert not validate_watcher_current_proof(
-            {**signal, "current_price": observation["quote_ask"], "watcher_current_proof": mutated}
+            {**signal, "current_price": observation["quote_ask"], "watcher_current_proof": mutated},
+            contributor_receipt_verifier=_watcher_receipt_verifier(signal),
         )
 
 
 def test_monitor_receipt_binds_frozen_lineage_and_is_research_only() -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
+    proof = _watcher_proof(signal, observation, trace)
     assert proof is not None
     receipt = _monitor_publication_receipt(
         signal=signal,
         proof=proof,
         intent_id="intent-test",
         checked_at=proof["checked_at"],
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
     assert receipt["selection_id"] == signal["selection_id"]
     assert receipt["source_scan_id"] == "scan-watcher"
@@ -1310,12 +1425,23 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, 
     slate = signal["frozen_ranked_research_slate"]
     lineage = signal["frozen_slate_lineage"]
     store = SQLiteScanStore(tmp_path / "operational.sqlite")
+    receipt_payloads = [signal["strategy_decision_receipt"], *signal["strategy_decision_receipts"]]
+    receipts_by_id = {
+        receipt.receipt_id: receipt
+        for receipt in (
+            parse_strategy_decision_receipt(payload, require_v2=True)
+            for payload in receipt_payloads
+        )
+    }
+    store.persist_strategy_decision_receipts(receipts_by_id.values())
     store.persist_historical_signals([{**signal, "raw_payload_json": signal}])
     store.persist_signal_selections(
         [
             {
                 "selection_id": signal["selection_id"],
                 "scan_id": "scan-watcher",
+                "source_scan_id": "scan-watcher",
+                "scan_lineage_status": "CURRENT_SCAN",
                 "signal_id": signal["signal_id"],
                 "ticker": "NOVA",
                 "rank": 1,
@@ -1327,7 +1453,9 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, 
                 "event_key": "alphaops:scan-watcher:alpha_morning_watch",
                 "body_sha256": "watcher-body",
                 "payload_json": {
-                    "signal": signal,
+                    "signal": slate["rows"][0],
+                    "source_scan_id": "scan-watcher",
+                    "scan_lineage_status": "CURRENT_SCAN",
                     "frozen_ranked_research_slate": slate,
                     "frozen_slate_lineage": lineage,
                 },
@@ -1394,6 +1522,7 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, 
         requested_at="2026-08-26T13:30:00+00:00",
         dry_run=True,
         notify="console",
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
     assert first["intent_stats"]["inserted"] == 1
     assert first["monitor_publication_stats"]["inserted"] == 1
@@ -1410,6 +1539,7 @@ def test_alpaca_quote_collect_to_watcher_creates_one_paper_receipt(monkeypatch, 
         requested_at="2026-08-26T13:30:00+00:00",
         dry_run=True,
         notify="console",
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
     assert second["intent_stats"]["inserted"] == 0
     assert second["monitor_publication_receipts"] == []
@@ -1513,7 +1643,7 @@ def _rehash_watcher_proof(proof: dict[str, object]) -> dict[str, object]:
 def test_rehashed_watcher_trace_mutation_fails_strict_validator(field, mutation) -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    proof = _build_watcher_current_proof(signal, observation, trace)
+    proof = _watcher_proof(signal, observation, trace)
     assert proof is not None
     forged = json.loads(json.dumps(proof))
     forged_trace = json.loads(json.dumps(trace))
@@ -1526,15 +1656,16 @@ def test_rehashed_watcher_trace_mutation_fails_strict_validator(field, mutation)
             **signal,
             "current_price": observation["quote_ask"],
             "watcher_current_proof": forged,
-        }
+        },
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     ), field
 
 
 def test_watcher_proof_and_monitor_receipt_replay_is_deterministic() -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    first = _build_watcher_current_proof(signal, observation, trace)
-    second = _build_watcher_current_proof(signal, observation, trace)
+    first = _watcher_proof(signal, observation, trace)
+    second = _watcher_proof(signal, observation, trace)
     assert first is not None and second is not None
     assert first["proof_hash_sha256"] == second["proof_hash_sha256"]
     first_receipt = _monitor_publication_receipt(
@@ -1542,12 +1673,14 @@ def test_watcher_proof_and_monitor_receipt_replay_is_deterministic() -> None:
         proof=first,
         intent_id="intent-test",
         checked_at=first["checked_at"],
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
     second_receipt = _monitor_publication_receipt(
         signal=signal,
         proof=second,
         intent_id="intent-test",
         checked_at=second["checked_at"],
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
     assert first_receipt["receipt_id"] == second_receipt["receipt_id"]
     assert first_receipt["content_hash_sha256"] == second_receipt["content_hash_sha256"]
@@ -1556,7 +1689,7 @@ def test_watcher_proof_and_monitor_receipt_replay_is_deterministic() -> None:
 def test_changed_quote_creates_new_governed_watcher_receipt() -> None:
     signal, observation = _watcher_signal()
     trace = _watcher_trace(signal, observation)
-    first = _build_watcher_current_proof(signal, observation, trace)
+    first = _watcher_proof(signal, observation, trace)
     assert first is not None
     changed = json.loads(json.dumps(observation))
     changed_raw = {
@@ -1577,7 +1710,7 @@ def test_changed_quote_creates_new_governed_watcher_receipt() -> None:
         }
     )
     changed_trace = _watcher_trace(signal, changed)
-    second = _build_watcher_current_proof(signal, changed, changed_trace)
+    second = _watcher_proof(signal, changed, changed_trace)
     assert second is not None
     assert second["checked_at"] != first["checked_at"]
     first_receipt = _monitor_publication_receipt(
@@ -1585,12 +1718,14 @@ def test_changed_quote_creates_new_governed_watcher_receipt() -> None:
         proof=first,
         intent_id="intent-test",
         checked_at=first["checked_at"],
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
     second_receipt = _monitor_publication_receipt(
         signal=signal,
         proof=second,
         intent_id="intent-test",
         checked_at=second["checked_at"],
+        contributor_receipt_verifier=_watcher_receipt_verifier(signal),
     )
     assert second_receipt["receipt_id"] != first_receipt["receipt_id"]
     assert second_receipt["content_hash_sha256"] != first_receipt["content_hash_sha256"]

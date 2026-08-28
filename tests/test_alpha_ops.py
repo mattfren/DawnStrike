@@ -670,6 +670,8 @@ def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkey
         "--notify",
         "console",
         "--dry-run",
+        "--code-sha",
+        "a" * 40,
     ])
     status_code = main(["alpha-status", "--db-path", str(db_path)])
     report_code = main([

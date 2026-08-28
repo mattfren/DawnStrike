@@ -1141,7 +1141,9 @@ def _seed_v5_reconciliation(
             persist=True,
             config=_two_source_config(),
             fetcher=lambda *_args, **_kwargs: _chart_payload(rows),
-            fallback_fetcher=lambda *_args, **_kwargs: rows,
+            fallback_fetcher=lambda ticker, *_args, **_kwargs: [
+                {**row, "ticker": ticker} for row in rows
+            ],
         )
         return
     signal_id = "scan-v5:1:NOVA"

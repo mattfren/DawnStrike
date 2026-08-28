@@ -315,7 +315,7 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
     tmp_path: Path,
 ):
     requested_at = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
-    source_timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    source_timestamp = requested_at.isoformat()
 
     class CurrentAlpacaProvider:
         def validate_credentials(self):
@@ -345,6 +345,7 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
                 source_timestamp=source_timestamp,
                 source_quality_status="VERIFIED",
                 source_count=1,
+                market_date=requested_at.date().isoformat(),
                 halt_status="CLEAR",
                 sec_risk_status="CLEAR",
                 corporate_action_status="CLEAR",
@@ -401,7 +402,7 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
         hostile[field] = value
         assert SnapshotRow.from_mapping(hostile).freshness_status == ""
 
-    candidate = score_snapshot(snapshot, ScannerConfig()).to_dict()
+    candidate = score_snapshot(snapshot, ScannerConfig(), as_of=requested_at).to_dict()
     assert candidate["freshness_status"] == "FRESH"
     assert candidate["evidence_lane"] == "mover"
     assert (
@@ -413,13 +414,34 @@ def test_authenticated_current_mover_freshness_survives_snapshot_model_roundtrip
     lineage = candidate["source_lineage"]
     assert lineage["freshness_status"] == "FRESH"
     assert lineage["premarket_observation"]["freshness_status"] == "FRESH"
+    persisted_observation = PremarketObservation(
+        **json.loads(candidate["enrichment_observation_payload_json"])
+    )
+    assert enrichment_service._alpaca_raw_binding_valid(
+        persisted_observation,
+        requested_at=requested_at,
+    )
+    assert candidate["market_date"] == requested_at.date().isoformat()
     slate = build_ranked_research_slate(
         [candidate],
         target=1,
         require_safety=True,
         generated_at=source_timestamp,
+        market_date=requested_at.date().isoformat(),
     )
-    assert slate["symbols"] == ["NOVA"]
+    assert slate["symbols"] == ["NOVA"], slate["safety_blockers"]
+
+    forged_core_marker = dict(candidate)
+    forged_core_marker["core_coverage_receipt_id"] = "forged-core-receipt"
+    blocked = build_ranked_research_slate(
+        [forged_core_marker],
+        target=1,
+        require_safety=True,
+        generated_at=source_timestamp,
+        market_date=requested_at.date().isoformat(),
+    )
+    assert blocked["symbols"] == []
+    assert "freshness_observation_unbound_or_invalid" in blocked["safety_blockers"]
 
 
 def test_tampered_alpaca_observation_payload_does_not_claim_freshness(monkeypatch):

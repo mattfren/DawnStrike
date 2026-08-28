@@ -207,11 +207,21 @@ def _morning_root(tmp_path: Path, *, source_status: str = "success") -> Path:
         if source_status == "success":
             writer.writerow({"ticker": "AAA", "market_date": MARKET_DATE, "source": "mover"})
             writer.writerow({"ticker": "BBB", "market_date": MARKET_DATE, "source": "mover"})
+    source_failed = source_status != "success"
     source = {
         "status": source_status,
         "run_id": "mover-run",
         "candidate_count": 2 if source_status == "success" else 0,
-        "source_failures": 0,
+        "sources_attempted": 1,
+        "sources_succeeded": 0 if source_failed else 1,
+        "source_failures": 1 if source_failed else 0,
+        "attempts": [
+            {
+                "source": "fixture_mover",
+                "status": source_status,
+                "failure_reason": "fixture source unavailable" if source_failed else "",
+            }
+        ],
         "snapshot_path": str(source_path),
         "requested_observed_at": f"{MARKET_DATE}T12:00:00+00:00",
     }
@@ -458,14 +468,14 @@ def test_self_consistent_forged_union_membership_and_coverage_are_rejected_by_lo
 
     with pytest.raises(
         UniverseHandoffError,
-        match="(?:semantic binding|source root is not trusted)",
+        match="(?:count binding|semantic binding|source root is not trusted)",
     ):
         load_universe_handoff(handoff_path, market_date=MARKET_DATE, require_production=True)
 
     paths = paper_ops_engine.PaperOpsPaths.create(tmp_path / "paper_ops")
     with pytest.raises(
         UniverseHandoffError,
-        match="(?:semantic binding|source root is not trusted)",
+        match="(?:count binding|semantic binding|source root is not trusted)",
     ):
         paper_ops_engine._run_config_with_universe_handoff(
             paths,

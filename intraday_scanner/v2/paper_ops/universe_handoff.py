@@ -84,7 +84,12 @@ def build_universe_handoff(
     core_ready_indexes = _validate_core_contract(
         core, requested_date, allow_test_override=allow_test_override
     )
-    _validate_source_summary(source_summary, requested_date, root=root)
+    _validate_source_summary(
+        source_summary,
+        requested_date,
+        root=root,
+        require_production=not allow_test_override,
+    )
 
     cycle_source_summary = cycle.get("source_summary")
     core_only_recovery = _is_core_only_recovery(cycle_source_summary, source_summary)
@@ -295,10 +300,9 @@ def load_universe_handoff(
     if symbols != _validate_symbols(payload.get("symbols"), "symbols"):
         raise UniverseHandoffError("universe handoff symbol aliases conflict")
     members = payload.get("members")
-    if (
-        not isinstance(members, list)
-        or [str(row.get("symbol")) for row in members if isinstance(row, dict)] != symbols
-    ):
+    if not isinstance(members, list) or any(not isinstance(row, dict) for row in members):
+        raise UniverseHandoffError("universe handoff member union is invalid")
+    if [str(row.get("symbol")) for row in members] != symbols:
         raise UniverseHandoffError("universe handoff member union is invalid")
     _validate_core_binding(payload, actual_date)
     coverage = payload.get("coverage")
@@ -307,6 +311,7 @@ def load_universe_handoff(
         "PARTIAL",
     }:
         raise UniverseHandoffError("universe handoff coverage is invalid")
+    _validate_union_count_binding(payload, members)
     safety = payload.get("safety")
     if require_production and (
         not isinstance(safety, dict)
@@ -644,11 +649,19 @@ def _validate_core_contract(
     members = core.get("members")
     if not isinstance(members, list):
         raise UniverseHandoffError("core universe members are missing")
-    core_symbols = [row.get("symbol") for row in members if isinstance(row, dict)]
+    if any(not isinstance(row, dict) for row in members):
+        raise UniverseHandoffError("core universe member is malformed")
+    core_symbols = [row.get("symbol") for row in members]
     if core_symbols:
         _validate_symbols(core_symbols, "core members")
     elif str(core.get("status") or "").upper() == "READY":
         raise UniverseHandoffError("READY core universe has no members")
+    membership_count = _exact_nonnegative_int(
+        core.get("membership_count"),
+        "core universe membership_count",
+    )
+    if membership_count != len(core_symbols):
+        raise UniverseHandoffError("core universe membership count binding is invalid")
     declared_member_hash = str(core.get("canonical_member_set_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(declared_member_hash):
         raise UniverseHandoffError("core universe canonical member hash is missing")
@@ -964,7 +977,11 @@ def _validate_core_contract(
 
 
 def _validate_source_summary(
-    source: dict[str, Any], market_date: str, *, root: Path | None = None
+    source: dict[str, Any],
+    market_date: str,
+    *,
+    root: Path | None = None,
+    require_production: bool = False,
 ) -> None:
     status = str(source.get("status") or "").strip().lower()
     if status not in _ALLOWED_SOURCE_STATUSES:
@@ -984,6 +1001,117 @@ def _validate_source_summary(
             root, str(paths["premarket_snapshot"])
         ):
             raise UniverseHandoffError("Morning source summary snapshot binding is invalid")
+    attempt_fields = {"attempts", "sources_attempted", "sources_succeeded"}
+    if require_production or any(field in source for field in attempt_fields):
+        required_fields = attempt_fields | {"source_failures"}
+        if any(field not in source for field in required_fields):
+            raise UniverseHandoffError("Morning source summary attempt truth is incomplete")
+        attempts = source.get("attempts")
+        if not isinstance(attempts, list):
+            raise UniverseHandoffError("Morning source summary attempts are malformed")
+        statuses: list[tuple[str, str]] = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise UniverseHandoffError("Morning source summary attempt is malformed")
+            source_name = str(attempt.get("source") or attempt.get("name") or "").strip()
+            attempt_status = str(attempt.get("status") or "").strip()
+            if not source_name or not attempt_status or attempt_status != attempt_status.lower():
+                raise UniverseHandoffError("Morning source summary attempt identity is invalid")
+            reason = str(
+                attempt.get("failure_reason") or attempt.get("reason") or ""
+            ).strip()
+            if attempt_status == "success" and reason:
+                raise UniverseHandoffError("Morning source summary success attempt has failure")
+            statuses.append((source_name, attempt_status))
+        attempted_count = _exact_nonnegative_int(
+            source.get("sources_attempted"),
+            "Morning source summary sources_attempted",
+        )
+        succeeded_count = _exact_nonnegative_int(
+            source.get("sources_succeeded"),
+            "Morning source summary sources_succeeded",
+        )
+        failure_count = _exact_nonnegative_int(
+            source.get("source_failures"),
+            "Morning source summary source_failures",
+        )
+        derived_succeeded = sum(1 for _, attempt_status in statuses if attempt_status == "success")
+        derived_failures = sum(
+            1
+            for source_name, attempt_status in statuses
+            if attempt_status != "success"
+            and not (source_name == "local_inbox" and attempt_status == "empty")
+        )
+        if (
+            attempted_count != len(statuses)
+            or succeeded_count != derived_succeeded
+            or failure_count != derived_failures
+        ):
+            raise UniverseHandoffError("Morning source summary attempt counts conflict")
+
+
+def _validate_union_count_binding(
+    payload: dict[str, Any], members: list[dict[str, Any]]
+) -> None:
+    core = payload.get("core_universe")
+    mover = payload.get("mover_source")
+    coverage = payload.get("coverage")
+    if not isinstance(core, dict) or not isinstance(mover, dict) or not isinstance(coverage, dict):
+        raise UniverseHandoffError("universe handoff count binding is invalid")
+    core_count = 0
+    mover_count = 0
+    overlap_count = 0
+    for member in members:
+        lanes = member.get("lanes")
+        if (
+            not isinstance(lanes, list)
+            or any(not isinstance(lane, str) for lane in lanes)
+            or lanes != sorted(set(lanes))
+            or not set(lanes)
+            or not set(lanes).issubset({"core", "mover"})
+            or str(member.get("lane") or "") != "+".join(lanes)
+        ):
+            raise UniverseHandoffError("universe handoff member lanes are invalid")
+        has_core = "core" in lanes
+        has_mover = "mover" in lanes
+        core_count += int(has_core)
+        mover_count += int(has_mover)
+        overlap_count += int(has_core and has_mover)
+
+    core_membership_count = _exact_nonnegative_int(
+        core.get("membership_count"),
+        "universe handoff core membership_count",
+    )
+    bindings = {
+        "core included_count": (core.get("included_count"), core_count),
+        "mover available_count": (mover.get("available_count"), mover_count),
+        "coverage core_membership_count": (
+            coverage.get("core_membership_count"),
+            core_membership_count,
+        ),
+        "coverage core_included_count": (coverage.get("core_included_count"), core_count),
+        "coverage mover_declared_count": (
+            coverage.get("mover_declared_count"),
+            _exact_nonnegative_int(
+                mover.get("declared_count"),
+                "universe handoff mover declared_count",
+            ),
+        ),
+        "coverage mover_included_count": (coverage.get("mover_included_count"), mover_count),
+        "coverage union_count": (coverage.get("union_count"), len(members)),
+        "coverage overlap_count": (coverage.get("overlap_count"), overlap_count),
+    }
+    for label, (raw_value, expected_value) in bindings.items():
+        if _exact_nonnegative_int(raw_value, label) != expected_value:
+            raise UniverseHandoffError(f"universe handoff {label} binding is invalid")
+    if core_count + mover_count - overlap_count != len(members):
+        raise UniverseHandoffError("universe handoff union count binding is invalid")
+
+
+def _exact_nonnegative_int(value: Any, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise UniverseHandoffError(f"{label} is invalid")
+    return value
 
 
 def _validate_core_binding(payload: dict[str, Any], market_date: str) -> None:

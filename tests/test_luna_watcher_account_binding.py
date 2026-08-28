@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,22 +11,34 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
     evaluate_v5_official_paper,
 )
+from intraday_scanner.config import load_config
+from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.services.alpha_cycle_service import (
+    _apply_strategy_decision_receipts,
     _attach_authenticated_alpaca_structure,
+    _merge_strategy_adapter_signals,
     _signal_payload,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     _first_nonblank,
     _watcher_current,
     build_ranked_research_slate,
 )
 from intraday_scanner.services.trade_watcher_service import _build_watcher_current_proof
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def _hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+WATCHER_FIXTURE_CODE_SHA = "a" * 40
+_WATCHER_FIXTURE_STATE: dict[
+    str, tuple[Path, SQLiteScanStore, AuthenticatedStrategyReceiptResolver]
+] = {}
 
 
 def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, object]:
@@ -117,6 +131,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         decision_at,
         1,
     )
+    signal["source_signal_id"] = signal_id
     signal["signal_id"] = signal_id
     signal["market_date"] = "2026-08-26"
     signal.update(
@@ -127,6 +142,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
             "manual_confirmation_required": False,
             "source_confidence": 92,
             "source_count": 3,
+            "alpha_score": 90,
             "source_quality_status": "verified",
             "freshness_status": "FRESH",
             "input_status": "VERIFIED",
@@ -151,6 +167,31 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
             "liquidity_tier": "high_liquidity",
         }
     )
+    signal.update({spec.condition_id: True for spec in registry_for_strategy("alphaops_v5")})
+    fixture_dir = Path(tempfile.mkdtemp(prefix="dawnstrike-luna-account-"))
+    store = SQLiteScanStore(fixture_dir / "receipts.sqlite")
+    _apply_strategy_decision_receipts(
+        [signal],
+        store=store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+            alert_score_threshold=0,
+        ),
+        decision_at=decision_at,
+        source_summary={"source_identity": "fixture-source"},
+        code_sha=WATCHER_FIXTURE_CODE_SHA,
+    )
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id=None,
+    )
+    signal = _merge_strategy_adapter_signals(
+        [signal],
+        expected_code_sha=WATCHER_FIXTURE_CODE_SHA,
+        receipt_verifier=resolver,
+    )[0]
     slate = build_ranked_research_slate(
         [signal],
         target=1,
@@ -158,6 +199,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         market_date="2026-08-26",
         scan_id="scan-account-binding",
         require_safety=True,
+        producer_code_sha=WATCHER_FIXTURE_CODE_SHA,
     )
     signal.update(
         {
@@ -169,6 +211,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
                 "slate_id": slate["slate_id"],
                 "slate_content_hash_sha256": slate["content_hash_sha256"],
                 "frozen_source_scan_id": "scan-account-binding",
+                "frozen_source_code_sha": WATCHER_FIXTURE_CODE_SHA,
                 "current_scan_id": "scan-account-binding",
                 "reuse_status": "CURRENT_SCAN",
             },
@@ -203,7 +246,13 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         decision_time=decision_at,
     )
     assert trace.eligible_for_official_paper, trace.reasons
-    proof = _build_watcher_current_proof(signal, observation, trace.to_dict())
+    _WATCHER_FIXTURE_STATE[signal_id] = (fixture_dir, store, resolver)
+    proof = _build_watcher_current_proof(
+        signal,
+        observation,
+        trace.to_dict(),
+        contributor_receipt_verifier=resolver,
+    )
     assert proof is not None
     if portfolio_account_id != ALPHAOPS_V5_ACCOUNT_ID:
         portfolio = dict(proof["portfolio_receipt"])
@@ -219,8 +268,13 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
     return signal
 
 
+def _resolver(row: dict[str, object]) -> AuthenticatedStrategyReceiptResolver:
+    return _WATCHER_FIXTURE_STATE["signal-account-binding"][2]
+
+
 def test_watcher_rejects_hash_valid_admission_for_wrong_simulated_account() -> None:
-    assert not _watcher_current(_row(portfolio_account_id="WRONG_ACCOUNT"))
+    row = _row(portfolio_account_id="WRONG_ACCOUNT")
+    assert not _watcher_current(row, contributor_receipt_verifier=_resolver(row))
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
@@ -234,18 +288,19 @@ def test_watcher_price_alias_allows_missing_primary_fallback(missing: object) ->
 
 
 def test_watcher_requires_row_and_trace_account_to_match_v5_account() -> None:
-    assert _watcher_current(
-        _row(
+    row = _row(
             portfolio_account_id=ALPHAOPS_V5_ACCOUNT_ID,
             row_account_id=ALPHAOPS_V5_ACCOUNT_ID,
         )
-    )
-    assert not _watcher_current(
-        _row(
+    assert _watcher_current(row, contributor_receipt_verifier=_resolver(row))
+    row = _row(
             portfolio_account_id=ALPHAOPS_V5_ACCOUNT_ID,
             row_account_id="WRONG_ACCOUNT",
         )
-    )
+    assert not _watcher_current(row, contributor_receipt_verifier=_resolver(row))
     trace_mismatch = _row(portfolio_account_id=ALPHAOPS_V5_ACCOUNT_ID)
     trace_mismatch["decision_trace"] = {"account_id": "WRONG_ACCOUNT"}
-    assert not _watcher_current(trace_mismatch)
+    assert not _watcher_current(
+        trace_mismatch,
+        contributor_receipt_verifier=_resolver(trace_mismatch),
+    )
