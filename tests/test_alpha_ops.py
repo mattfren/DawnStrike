@@ -3,6 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.alpha.alert_gate import (
+    _price,
+    _reward_risk_ratio,
+    _stop_distance_pct,
+    _volume,
+    apply_alert_gate,
+)
 from intraday_scanner.alpha.alpha_model import AlphaModel
 from intraday_scanner.alpha.edge_calibrator import (
     calibrate_edge,
@@ -127,6 +134,64 @@ def test_risk_governor_hard_avoids_block_alerts():
     assert decision.can_alert is False
     assert "current_halt" in decision.hard_avoid_reasons
     assert "current_halt" in decision.avoid_reasons
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
+def test_risk_governor_candidate_price_and_volume_own_precedence(invalid: float) -> None:
+    price_decision = evaluate_risk(
+        _candidate(premarket_price=invalid), {"premarket_price": 5.25}
+    )
+    volume_decision = evaluate_risk(
+        _candidate(premarket_volume=invalid), {"premarket_volume": 1_200_000}
+    )
+    assert "missing_price" in price_decision.hard_avoid_reasons
+    assert "zero_volume" in volume_decision.hard_avoid_reasons
+
+
+def test_risk_governor_null_blank_primary_controls_fall_back_to_features() -> None:
+    for missing in (None, "", "   "):
+        decision = evaluate_risk(
+            _candidate(premarket_price=missing, premarket_volume=missing),
+            {"premarket_price": 5.25, "premarket_volume": 1_200_000},
+        )
+        assert "missing_price" not in decision.hard_avoid_reasons
+        assert "zero_volume" not in decision.hard_avoid_reasons
+
+
+def test_alert_gate_price_volume_and_plan_aliases_are_presence_ordered() -> None:
+    assert _price({"premarket_price": 0, "price": 10}) == 0
+    assert _price({"premarket_price": None, "price": 10}) == 10
+    assert _volume({"premarket_volume": 0, "volume": 100}) is None
+    assert _volume({"premarket_volume": None, "volume": 100}) == 100
+    assert _reward_risk_ratio(
+        {"reward_risk_ratio": 0, "entry_trigger": 10, "target_1": 20, "invalidation": 5}
+    ) == 0
+    assert _reward_risk_ratio(
+        {"entry_trigger": 0, "premarket_price": 10, "target_1": 20, "invalidation": 5}
+    ) is None
+    assert _stop_distance_pct(
+        {"entry_trigger": 0, "premarket_price": 10, "invalidation": 5}
+    ) is None
+    assert _stop_distance_pct(
+        {"entry_trigger": None, "premarket_price": 10, "invalidation": 5}
+    ) == 50.0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"premarket_price": 0.0, "price": 10.0},
+        {"premarket_volume": 0.0, "volume": 100.0},
+        {"entry_trigger": 0.0, "breakout_trigger": 5.4},
+    ),
+)
+def test_alert_gate_rejects_invalid_primary_alias_without_fallback(
+    overrides: dict[str, object],
+) -> None:
+    gated = apply_alert_gate({**_candidate(), **overrides, "can_alert": True})
+
+    assert gated["alert_gate_status"] == "BLOCKED"
+    assert gated["can_alert"] is False
 
 
 def test_no_trade_filter_allows_no_clean_edge():

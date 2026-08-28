@@ -373,7 +373,7 @@ def evaluate_v5_official_paper(
     equity = (
         policy.simulated_opening_equity if simulated_equity is None else _number(simulated_equity)
     )
-    entry = _number(observation.get("price") or observation.get("current_price"))
+    entry = _number(_first_nonblank(observation, "price", "current_price"))
     trigger = source.number(
         "entry_watch_level",
         "entry_trigger",
@@ -1032,7 +1032,7 @@ class _SignalFacts:
     def value(self, *names: str) -> Any:
         for source in self._sources:
             for name in names:
-                if name in source and source[name] is not None and source[name] != "":
+                if name in source and not _blank(source[name]):
                     return source[name]
         return None
 
@@ -1101,6 +1101,19 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return None if math.isnan(number) or math.isinf(number) else number
+
+
+def _first_nonblank(mapping: dict[str, Any], *names: str) -> Any:
+    """Return the first non-null/non-blank alias, preserving numeric zero."""
+
+    for name in names:
+        if name in mapping and not _blank(mapping[name]):
+            return mapping[name]
+    return None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _boolean(value: Any) -> bool | None:

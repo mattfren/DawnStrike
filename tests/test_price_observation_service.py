@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
+
 import intraday_scanner.services.price_observation_service as price_service
 from intraday_scanner.cli import main
 from intraday_scanner.dashboard.data_loader import build_operator_today_model
@@ -186,6 +188,21 @@ def test_cli_price_observe_csv_updates_dashboard_current_price(
     assert observations[0]["provider_status"] == "exact"
     assert row["Current"] == "$10.5"
     assert row["_current_source"] == "price_observations"
+
+
+@pytest.mark.parametrize("invalid", (float("nan"), float("inf"), float("-inf")))
+def test_bar_price_rejects_nonfinite_primary_without_falling_back(invalid: float) -> None:
+    assert price_service._bar_price({"close": invalid, "price": 10.0}) is None
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0))
+def test_bar_price_preserves_invalid_primary_for_canonical_rejection(invalid: float) -> None:
+    assert price_service._bar_price({"close": invalid, "price": 10.0}) == invalid
+
+
+@pytest.mark.parametrize("missing", (None, "", "   "))
+def test_bar_price_allows_missing_primary_fallback(missing: object) -> None:
+    assert price_service._bar_price({"close": missing, "price": 10.0}) == 10.0
 
 
 def test_yahoo_price_observation_persists_public_chart_price(

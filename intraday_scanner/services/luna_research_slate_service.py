@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Iterable
@@ -1433,11 +1434,9 @@ def _watcher_current(row: dict[str, Any]) -> bool:
     bid = _number(quote.get("bid"))
     ask = _number(quote.get("ask"))
     quote_age = _number(quote.get("quote_age_seconds"))
-    last = _number(quote.get("last") or quote.get("price"))
+    last = _number(_first_nonblank(quote, "last", "price"))
     current_price = _number(
-        row.get("current_price")
-        or row.get("current_quote_price")
-        or row.get("observed_price")
+        _first_nonblank(row, "current_price", "current_quote_price", "observed_price")
     )
     plan_entry = _number(plan.get("entry") if isinstance(plan, dict) else None)
     plan_stop = _number(plan.get("stop") if isinstance(plan, dict) else None)
@@ -1608,7 +1607,7 @@ def _strict_v5_trace(
     sizing = trace["sizing"]
     decision_time = str(computed.get("decision_time") or "")
     observed_at = str(quote.get("observed_at") or "")
-    last = _number(quote.get("last") or quote.get("price"))
+    last = _number(_first_nonblank(quote, "last", "price"))
     freshness = _number(quote.get("quote_age_seconds"))
     if freshness is None:
         freshness = _number(quote.get("bar_freshness_seconds"))
@@ -2056,7 +2055,20 @@ def _number(value: Any) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed == parsed else None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _first_nonblank(mapping: dict[str, Any], *names: str) -> Any:
+    """Return the first non-null/non-blank alias, preserving numeric zero."""
+
+    for name in names:
+        if name in mapping and not _blank(mapping[name]):
+            return mapping[name]
+    return None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _annotate(

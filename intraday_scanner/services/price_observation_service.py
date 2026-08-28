@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from collections import defaultdict
@@ -489,7 +490,7 @@ def _validated_quote(
     else:
         raw_json = json.dumps(quote.get("raw") or {}, sort_keys=True, separators=(",", ":"))
     try:
-        raw = json.loads(raw_json)
+        raw = json.loads(raw_json, parse_constant=_reject_nonfinite_json_constant)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     canonical_raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
@@ -620,28 +621,36 @@ def _bar_time(row: dict[str, Any]) -> datetime | None:
 
 def _bar_price(row: dict[str, Any]) -> float | None:
     for key in ("close", "c", "price", "last_price", "current_price"):
-        value = _clean_float(row.get(key))
-        if value is not None:
-            return value
+        if key in row and not _blank(row[key]):
+            return _clean_float(row[key])
     return None
 
 
 def _clean_float(value: Any) -> float | None:
-    if value in {None, ""}:
+    if _blank(value):
         return None
     text = str(value).replace("$", "").replace(",", "").strip()
     if not text:
         return None
     try:
-        return float(text)
+        parsed = float(text)
     except (TypeError, ValueError):
         cleaned = re.sub(r"[^0-9.\-]", "", text)
         if cleaned in {"", ".", "-", "-."}:
             return None
         try:
-            return float(cleaned)
+            parsed = float(cleaned)
         except ValueError:
             return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _parse_datetime(value: str) -> datetime:

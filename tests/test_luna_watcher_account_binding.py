@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACCOUNT_ID,
     evaluate_v5_official_paper,
@@ -12,6 +14,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     _signal_payload,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    _first_nonblank,
     _watcher_current,
     build_ranked_research_slate,
 )
@@ -209,6 +212,16 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
 
 def test_watcher_rejects_hash_valid_admission_for_wrong_simulated_account() -> None:
     assert not _watcher_current(_row(portfolio_account_id="WRONG_ACCOUNT"))
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
+def test_watcher_price_alias_presence_does_not_mask_invalid_primary(invalid: float) -> None:
+    assert _first_nonblank({"last": invalid, "price": 10.0}, "last", "price") is invalid
+
+
+@pytest.mark.parametrize("missing", (None, "", "   "))
+def test_watcher_price_alias_allows_missing_primary_fallback(missing: object) -> None:
+    assert _first_nonblank({"last": missing, "price": 10.0}, "last", "price") == 10.0
 
 
 def test_watcher_requires_row_and_trace_account_to_match_v5_account() -> None:

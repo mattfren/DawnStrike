@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from intraday_scanner.alpha.alert_gate import apply_alert_gate
 from intraday_scanner.alpha.plan_constructor import construct_alphaops_v5_plan
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_ACTIVATION_TIMESTAMP,
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
+    _first_nonblank,
     alphaops_strategy_contract,
     evaluate_v5_official_paper,
     is_v5_active,
@@ -148,6 +151,35 @@ def test_v5_clean_candidate_is_risk_sized_from_simulated_equity() -> None:
     assert decision.feasibility_score == 100
     assert len(decision.decision_fingerprint) == 64
     assert decision.broker_execution_enabled is False
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
+def test_v5_observation_price_alias_does_not_mask_invalid_primary(invalid: float) -> None:
+    selected = _first_nonblank(
+        {"price": invalid, "current_price": 10.0}, "price", "current_price"
+    )
+    assert selected is invalid
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
+def test_v5_policy_rejects_invalid_observation_price_even_with_valid_fallback(
+    invalid: float,
+) -> None:
+    observation = _observation()
+    observation.update({"price": invalid, "current_price": 10.05})
+
+    decision = evaluate_v5_official_paper(_clean_signal(), observation)
+
+    assert decision.eligible_for_official_paper is False
+    assert "entry_stop_target_geometry_invalid" in decision.reasons
+
+
+@pytest.mark.parametrize("missing", (None, "", "   "))
+def test_v5_observation_price_alias_allows_missing_primary_fallback(missing: object) -> None:
+    assert (
+        _first_nonblank({"price": missing, "current_price": 10.0}, "price", "current_price")
+        == 10.0
+    )
 
 
 def test_v5_direct_policy_rejects_allowlisted_target_without_strict_plan() -> None:

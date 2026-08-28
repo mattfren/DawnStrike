@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -151,8 +152,26 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         reasons.append("source confidence below hard threshold")
     elif source_confidence < ALERT_SOURCE_CONFIDENCE_FLOOR:
         reasons.append("source confidence below alert threshold")
-    if _price(row) is None:
+    price = _price(row)
+    if price is None or price <= 0:
         reasons.append("missing price")
+    if _invalid_positive_alias(row, "premarket_price", "price", "current_price"):
+        reasons.append("invalid price")
+    if _invalid_positive_alias(
+        row,
+        "entry_trigger",
+        "breakout_trigger",
+        "entry_watch_level",
+        "premarket_price",
+        "price",
+    ):
+        reasons.append("invalid entry trigger")
+    if _invalid_positive_alias(row, "target_1", "first_target"):
+        reasons.append("invalid target")
+    if _invalid_positive_alias(row, "invalidation", "invalidation_level", "exit_line"):
+        reasons.append("invalid invalidation")
+    if _invalid_positive_alias(row, "reward_risk_ratio"):
+        reasons.append("invalid reward/risk")
     if _volume(row) is None:
         reasons.append("missing volume")
     spread = _float(row.get("spread_pct"), 0.0)
@@ -318,9 +337,7 @@ def _data_quality_label(grade: str) -> str:
 
 
 def _price(row: dict[str, Any]) -> float | None:
-    return _optional_float(
-        row.get("premarket_price") or row.get("price") or row.get("current_price")
-    )
+    return _optional_float(_first_nonblank(row, "premarket_price", "price", "current_price"))
 
 
 def _previous_close(row: dict[str, Any]) -> float | None:
@@ -329,9 +346,7 @@ def _previous_close(row: dict[str, Any]) -> float | None:
 
 
 def _volume(row: dict[str, Any]) -> float | None:
-    value = _optional_float(
-        row.get("premarket_volume") or row.get("volume") or row.get("dollar_volume")
-    )
+    value = _optional_float(_first_nonblank(row, "premarket_volume", "volume", "dollar_volume"))
     return value if value and value > 0 else None
 
 
@@ -351,19 +366,22 @@ def _premarket_range_missing(row: dict[str, Any]) -> bool:
 
 
 def _reward_risk_ratio(row: dict[str, Any]) -> float | None:
-    explicit = _optional_float(row.get("reward_risk_ratio"))
-    if explicit is not None and explicit > 0:
-        return explicit
+    explicit_value = _first_nonblank(row, "reward_risk_ratio")
+    if explicit_value is not None:
+        return _optional_float(explicit_value)
     trigger = _optional_float(
-        row.get("entry_trigger")
-        or row.get("breakout_trigger")
-        or row.get("entry_watch_level")
-        or row.get("premarket_price")
-        or row.get("price")
+        _first_nonblank(
+            row,
+            "entry_trigger",
+            "breakout_trigger",
+            "entry_watch_level",
+            "premarket_price",
+            "price",
+        )
     )
-    target = _optional_float(row.get("target_1") or row.get("first_target"))
+    target = _optional_float(_first_nonblank(row, "target_1", "first_target"))
     invalidation = _optional_float(
-        row.get("invalidation") or row.get("invalidation_level") or row.get("exit_line")
+        _first_nonblank(row, "invalidation", "invalidation_level", "exit_line")
     )
     if trigger is None or target is None or invalidation is None:
         return None
@@ -376,14 +394,17 @@ def _reward_risk_ratio(row: dict[str, Any]) -> float | None:
 
 def _stop_distance_pct(row: dict[str, Any]) -> float | None:
     trigger = _optional_float(
-        row.get("entry_trigger")
-        or row.get("breakout_trigger")
-        or row.get("entry_watch_level")
-        or row.get("premarket_price")
-        or row.get("price")
+        _first_nonblank(
+            row,
+            "entry_trigger",
+            "breakout_trigger",
+            "entry_watch_level",
+            "premarket_price",
+            "price",
+        )
     )
     invalidation = _optional_float(
-        row.get("invalidation") or row.get("invalidation_level") or row.get("exit_line")
+        _first_nonblank(row, "invalidation", "invalidation_level", "exit_line")
     )
     if trigger is None or invalidation is None or trigger <= 0 or invalidation >= trigger:
         return None
@@ -441,9 +462,29 @@ def _optional_float(value: Any) -> float | None:
     if value in {None, ""}:
         return None
     try:
-        return float(str(value).replace("$", "").replace(",", "").replace("%", ""))
-    except ValueError:
+        parsed = float(str(value).replace("$", "").replace(",", "").replace("%", ""))
+    except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _invalid_positive_alias(row: dict[str, Any], *names: str) -> bool:
+    value = _first_nonblank(row, *names)
+    parsed = _optional_float(value)
+    return value is not None and (parsed is None or parsed <= 0)
+
+
+def _first_nonblank(mapping: dict[str, Any], *names: str) -> Any:
+    """Return the first non-null/non-blank alias, preserving numeric zero."""
+
+    for name in names:
+        if name in mapping and not _blank(mapping[name]):
+            return mapping[name]
+    return None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _valid_ticker(value: str) -> bool:

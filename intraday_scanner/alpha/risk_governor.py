@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,13 +82,11 @@ def evaluate_risk(
     receipt_enabled = _truthy(candidate.get("strategy_receipt_enabled"))
     receipt_shadow_only = _truthy(candidate.get("strategy_receipt_shadow_only"))
 
-    price = _float(candidate.get("premarket_price") or features.get("premarket_price"))
-    volume = _float(candidate.get("premarket_volume") or features.get("premarket_volume"))
-    spread = _float(candidate.get("spread_pct") or features.get("spread_pct"), 0.0) or 0.0
-    source_confidence = (
-        _float(candidate.get("source_confidence"), None)
-        if candidate.get("source_confidence") not in {None, ""}
-        else _float(features.get("source_confidence"), None)
+    price = _float(_candidate_or_feature(candidate, features, "premarket_price"))
+    volume = _float(_candidate_or_feature(candidate, features, "premarket_volume"))
+    spread = _float(_candidate_or_feature(candidate, features, "spread_pct"), 0.0) or 0.0
+    source_confidence = _float(
+        _candidate_or_feature(candidate, features, "source_confidence"), None
     )
 
     if not ticker:
@@ -120,23 +119,23 @@ def evaluate_risk(
 
     if "unknown_float" in risk_flags:
         soft.append("unknown_float")
-    if _float(candidate.get("previous_close") or features.get("previous_close")) in {None, 0.0}:
+    if _float(_candidate_or_feature(candidate, features, "previous_close")) in {None, 0.0}:
         soft.append("missing_previous_close")
-    if _float(candidate.get("premarket_high") or features.get("premarket_high")) in {None, 0.0}:
+    if _float(_candidate_or_feature(candidate, features, "premarket_high")) in {None, 0.0}:
         soft.append("missing_high")
-    if _float(candidate.get("premarket_low") or features.get("premarket_low")) in {None, 0.0}:
+    if _float(_candidate_or_feature(candidate, features, "premarket_low")) in {None, 0.0}:
         soft.append("missing_low")
     if not str(candidate.get("catalyst_headline") or features.get("catalyst_headline") or ""):
         soft.append("no_catalyst")
     data_source_kind = str(
-        candidate.get("data_source_kind") or features.get("data_source_kind") or ""
+        _candidate_or_feature(candidate, features, "data_source_kind") or ""
     )
     if data_source_kind == "web_url":
         soft.append("public_url_unverified")
-    source_count = _float(candidate.get("source_count") or features.get("source_count"), 0.0)
+    source_count = _float(_candidate_or_feature(candidate, features, "source_count"), 0.0)
     if (source_count or 0.0) < 2:
         soft.append("low_source_count")
-    gap_pct = _float(candidate.get("gap_pct") or features.get("gap_pct"), 0.0)
+    gap_pct = _float(_candidate_or_feature(candidate, features, "gap_pct"), 0.0)
     if (gap_pct or 0.0) > 300:
         soft.append("mega_gap")
     if 0 < spread > 4.0:
@@ -217,9 +216,25 @@ def _float(value: Any, default: float | None = None) -> float | None:
     if value in {None, ""}:
         return default
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _candidate_or_feature(
+    candidate: dict[str, Any], features: dict[str, Any], name: str
+) -> Any:
+    """Use candidate data first while allowing null/blank legacy fallback."""
+
+    for mapping in (candidate, features):
+        if name in mapping and not _blank(mapping[name]):
+            return mapping[name]
+    return None
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _truthy(value: Any) -> bool:

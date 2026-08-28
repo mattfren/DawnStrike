@@ -53,6 +53,12 @@ from intraday_scanner.services.trade_watcher_service import (
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
+def _hash(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _production_row() -> dict[str, object]:
     raw = {
         "ticker": "NOVA",
@@ -957,6 +963,62 @@ def test_watcher_proof_requires_valid_frozen_lineage_and_strict_identity() -> No
     bad_slate["content_hash_sha256"] = "d" * 64
     bad_signal = {**signal, "frozen_ranked_research_slate": bad_slate}
     assert _build_watcher_current_proof(bad_signal, observation, trace) is None
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, float("nan"), float("inf")))
+def test_watcher_rejects_invalid_primary_quote_and_row_aliases(invalid: float) -> None:
+    signal, observation = _watcher_signal()
+    trace = _watcher_trace(signal, observation)
+    proof = _build_watcher_current_proof(signal, observation, trace)
+    assert proof is not None
+
+    invalid_quote_receipt = {
+        **proof["quote_receipt"],
+        "last": invalid,
+        "price": 10.0,
+    }
+    invalid_quote = {
+        **proof,
+        "quote_receipt": invalid_quote_receipt,
+        "quote_hash_sha256": _hash(invalid_quote_receipt),
+    }
+    invalid_quote["proof_hash_sha256"] = _hash(
+        {key: value for key, value in invalid_quote.items() if key != "proof_hash_sha256"}
+    )
+    invalid_row = {
+        **signal,
+        "current_price": invalid,
+        "current_quote_price": 10.0,
+        "watcher_current_proof": proof,
+    }
+    assert not validate_watcher_current_proof(invalid_row)
+    assert not validate_watcher_current_proof(
+        {**signal, "current_price": 10.0, "watcher_current_proof": invalid_quote}
+    )
+
+
+@pytest.mark.parametrize("missing", (None, "", "   "))
+def test_watcher_allows_missing_primary_quote_and_row_alias_fallback(missing: object) -> None:
+    signal, observation = _watcher_signal()
+    trace = _watcher_trace(signal, observation)
+    proof = _build_watcher_current_proof(signal, observation, trace)
+    assert proof is not None
+    quote = {**proof["quote_receipt"], "last": missing, "price": 10.0}
+    fallback_proof = {
+        **proof,
+        "quote_receipt": quote,
+        "quote_hash_sha256": _hash(quote),
+    }
+    fallback_proof["proof_hash_sha256"] = _hash(
+        {key: value for key, value in fallback_proof.items() if key != "proof_hash_sha256"}
+    )
+    row = {
+        **signal,
+        "current_price": missing,
+        "current_quote_price": 10.0,
+        "watcher_current_proof": fallback_proof,
+    }
+    assert validate_watcher_current_proof(row)
 
 
 @pytest.mark.parametrize("slate_kind", ["v2_unsafe", "v1"])
