@@ -1020,7 +1020,7 @@ def _attest_bound_datatruth_manifest(
         run_manifest.get("universe_id") != config.universe_id
         or not isinstance(raw_universe, list)
         or tuple(raw_universe) != config.universe_symbols
-        or data_manifest.symbols != config.universe_symbols
+        or set(data_manifest.symbols) != set(config.universe_symbols)
     ):
         raise ValueError("PaperOps attestation DataTruth/config universe conflicts")
 
