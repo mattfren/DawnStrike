@@ -566,12 +566,19 @@ def test_radar_retry_conflict_does_not_insert_replacement_rows(tmp_path: Path) -
     )
     before = store.load_signal_selections(cohort="research_radar")
 
-    replacement = dict(frozen)
-    replacement["ticker"] = "BBB"
-    replacement["research_selection_id"] = "research-selection-replacement"
-    replacement["research_row_hash_sha256"] = "0" * 64
-    changed_slate = dict(slate)
-    changed_slate["rows"] = [replacement]
+    replacement_source = {
+        **source,
+        "ticker": "BBB",
+        "signal_id": "signal-replacement",
+        "signal_key": "signal-replacement",
+    }
+    changed_slate = build_ranked_research_slate(
+        [replacement_source],
+        generated_at=SELECTED_AT,
+        market_date="2026-08-26",
+        scan_id="scan-original",
+    )
+    replacement = changed_slate["rows"][0]
     with pytest.raises(SnapshotValidationError, match="FROZEN_COHORT_CONFLICT"):
         _persist_research_radar_selections(
             store,
