@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -1284,9 +1284,9 @@ def _derive_research_selection_outcome(
     ticker = str(selection.get("ticker") or signal.get("ticker") or "").strip().upper()
     selected_at = str(selection.get("selected_at") or "").strip()
     selected_dt = _parse_datetime(selected_at)
-    source_bar_hash = str(
-        source_evidence.get("source_bar_hash_sha256") or _bars_hash(bars)
-    ).strip().lower()
+    declared_bar_hash = str(source_evidence.get("source_bar_hash_sha256") or "").strip().lower()
+    computed_bar_hash = _bars_hash(bars)
+    source_bar_hash = declared_bar_hash or computed_bar_hash
     source_artifact_identity = str(
         source_evidence.get("source_artifact_identity") or ""
     ).strip()
@@ -1307,21 +1307,127 @@ def _derive_research_selection_outcome(
         "source_last_bar_at": _iso_utc(bars[-1].observed_at) if bars else None,
         "source_bar_hash_sha256": source_bar_hash,
         "source_fetched_at": source_evidence.get("source_fetched_at"),
+        "source_artifact_identity": source_artifact_identity,
         "source_lineage": source_evidence.get("source_lineage") or [],
         "source_coverage_complete": source_evidence.get("source_coverage_complete"),
         "automatic_sourced_data": True,
-        "source_authenticated": bool(source_artifact_identity),
+        # Authentication is granted only after the structured source binding
+        # and exact bars hash have passed validation below.
+        "source_authenticated": False,
         "no_lookahead": True,
         "research_only": True,
         "broker_execution_enabled": False,
         "capture_model_version": CAPTURE_MODEL_VERSION,
         "capture_mode": "automatic_sourced_selection_observation",
     }
+    lineage_rows = source_evidence.get("source_lineage") or []
+    lineage_valid = bool(lineage_rows) and all(
+        isinstance(item, Mapping)
+        and str(item.get("source") or "").strip()
+        and str(item.get("source_url") or "").strip()
+        and item.get("attempt") is not None
+        and str(item.get("fetched_at") or "").strip()
+        for item in lineage_rows
+    )
+    lineage_sources = {
+        str(item.get("source") or "").strip()
+        for item in lineage_rows
+        if isinstance(item, Mapping)
+    }
+    source_binding = {
+        "provider": str(source_evidence.get("source") or "").strip(),
+        "source_url": str(source_evidence.get("source_url") or "").strip(),
+        "source_artifact_identity": source_artifact_identity,
+        "source_bar_hash_sha256": source_bar_hash,
+        "source_lineage": lineage_rows,
+        "source_cutoff": _iso_utc(requested_at),
+    }
+    try:
+        source_binding["source_request_hash_sha256"] = hashlib.sha256(
+            json.dumps(
+                lineage_rows,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        source_binding["source_request_hash_sha256"] = ""
+        lineage_valid = False
+    source_binding_valid = bool(
+        source_binding["provider"]
+        and source_binding["source_url"]
+        and source_binding["source_artifact_identity"]
+        and source_bar_hash in source_binding["source_artifact_identity"]
+        and source_binding["source_bar_hash_sha256"] == computed_bar_hash
+        and lineage_valid
+        and source_binding["provider"] in lineage_sources
+        and any(
+            isinstance(item, Mapping)
+            and str(item.get("source") or "").strip() == source_binding["provider"]
+            and str(item.get("source_url") or "").strip()
+            == source_binding["source_url"]
+            for item in lineage_rows
+        )
+    )
+    try:
+        from intraday_scanner.services.research_episode_outcome_service import (
+            _selection_identity,
+        )
+
+        frozen_identity = _selection_identity(
+            selection,
+            day=session.market_date,
+            cutoff=requested_at.astimezone(UTC),
+        )
+    except (SnapshotValidationError, TypeError, ValueError) as exc:
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": f"frozen selection lineage is invalid: {exc}",
+        })
+        return base
+    selection_id = str(frozen_identity["selection_id"])
+    signal_id = str(selection.get("signal_id") or "").strip()
+    ticker = str(frozen_identity["ticker"]).upper()
+    selected_at = str(frozen_identity["selected_at"])
+    selected_dt = _parse_datetime(selected_at)
+    base.update({
+        "selection_id": selection_id,
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "market_date": str(frozen_identity["market_date"]),
+        "selected_at": selected_at,
+        "episode_id": str(frozen_identity["episode_id"]),
+        "slate_id": str(frozen_identity["slate_id"]),
+        "slate_content_hash_sha256": str(
+            frozen_identity["slate_content_hash_sha256"]
+        ),
+    })
     if selected_dt is None:
         base.update({
             "outcome_status": "INELIGIBLE",
             "learning_eligible": False,
             "outcome_reason": "selection timestamp is invalid",
+        })
+        return base
+    if not bars:
+        base.update({
+            "outcome_status": "MISSING",
+            "learning_eligible": False,
+            "outcome_reason": "no current sourced bars are available",
+        })
+        return base
+    if (
+        not source_binding_valid
+        or declared_bar_hash != computed_bar_hash
+    ):
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": (
+                "source provider/artifact/request lineage or canonical bars hash is invalid"
+            ),
         })
         return base
     first_eligible_at = max(session.opened_at, _ceil_minute(selected_dt))
@@ -1336,6 +1442,13 @@ def _derive_research_selection_outcome(
             "outcome_status": "MISSING",
             "learning_eligible": False,
             "outcome_reason": "no complete sourced selection observation is available",
+        })
+        return base
+    if any(bar.observed_at > requested_at.astimezone(UTC) for bar in complete_bars):
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": "sourced selection bars exceed the outcome cutoff",
         })
         return base
     if len(complete_bars) != len(eligible_bars):
@@ -1365,26 +1478,39 @@ def _derive_research_selection_outcome(
         return base
     reference = complete_bars[0]
     reference_price = float(reference.close)
-    high = max(float(bar.high) for bar in complete_bars)
-    low = min(float(bar.low) for bar in complete_bars)
-    close = float(complete_bars[-1].close)
+    subsequent_bars = complete_bars[1:]
+    high = max((float(bar.high) for bar in subsequent_bars), default=None)
+    low = min((float(bar.low) for bar in subsequent_bars), default=None)
+    close = float(subsequent_bars[-1].close) if subsequent_bars else None
     metrics = {
         "reference_at": _iso_utc(reference.observed_at),
         "reference_price": reference_price,
-        "close_at": _iso_utc(complete_bars[-1].observed_at),
+        "close_at": (
+            _iso_utc(subsequent_bars[-1].observed_at) if subsequent_bars else None
+        ),
         "close_price": close,
         "high_after_reference": high,
         "low_after_reference": low,
-        "mfe_pct": round((high - reference_price) / reference_price * 100.0, 6),
-        "mae_pct": round((low - reference_price) / reference_price * 100.0, 6),
+        "mfe_pct": (
+            round((high - reference_price) / reference_price * 100.0, 6)
+            if high is not None
+            else None
+        ),
+        "mae_pct": (
+            round((low - reference_price) / reference_price * 100.0, 6)
+            if low is not None
+            else None
+        ),
         "path_status": (
-            "POSITIVE_CLOSE"
+            "NO_SUBSEQUENT_OBSERVATION"
+            if not subsequent_bars
+            else "POSITIVE_CLOSE"
             if close > reference_price
             else "NEGATIVE_CLOSE"
             if close < reference_price
             else "FLAT_CLOSE"
         ),
-        "bar_count": len(complete_bars),
+        "bar_count": len(subsequent_bars),
     }
     metric_body = {
         "selection_id": selection_id,
@@ -1392,6 +1518,7 @@ def _derive_research_selection_outcome(
         "ticker": ticker,
         "market_date": session.market_date,
         "source_bar_hash_sha256": source_bar_hash,
+        "source_binding": source_binding,
         "metrics": metrics,
     }
     metric_hash = hashlib.sha256(
@@ -1415,7 +1542,9 @@ def _derive_research_selection_outcome(
         ).encode()
     ).hexdigest()
     base.update({
-        "source_authenticated": True,
+        "source_authenticated": bool(
+            source_binding_valid
+        ),
         "source_observation_id": (
             f"selection-observation:{selection_id}:{reference.observed_at.isoformat()}"
         ),
@@ -1423,22 +1552,27 @@ def _derive_research_selection_outcome(
         "source_path_id": path_id,
         "source_path_hash_sha256": path_hash,
         "source_cutoff": _iso_utc(requested_at),
+        "source_binding": source_binding,
         "outcome_artifact_id": f"selection-outcome:{selection_id}:{metric_hash[:24]}",
         "outcome_artifact_hash_sha256": metric_hash,
         "selection_outcome_metrics": metrics,
-        "outcome_status": "COMPLETE_SOURCED",
-        "learning_eligible": True,
-        "outcome_reason": "complete sourced selection observation window",
+        "outcome_status": "COMPLETE_SOURCED" if subsequent_bars else "MISSING",
+        "learning_eligible": bool(subsequent_bars),
+        "outcome_reason": (
+            "complete sourced selection observation window"
+            if subsequent_bars
+            else "reference observation has no strictly subsequent path bar"
+        ),
     })
     return base
 
 
 def _research_bar_complete(bar: OutcomeBar) -> bool:
-    values = (bar.open, bar.high, bar.low, bar.close)
-    return all(
-        value is not None and math.isfinite(float(value)) and float(value) > 0
-        for value in values
-    )
+    try:
+        values = tuple(float(value) for value in (bar.open, bar.high, bar.low, bar.close))
+    except (TypeError, ValueError):
+        return False
+    return all(math.isfinite(value) and value > 0 for value in values)
 
 
 def _source_choice_key(bars: list[OutcomeBar]) -> tuple[int, int, int]:

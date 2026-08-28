@@ -173,7 +173,48 @@ def _selection_identity(
     frozen_signal = _decode_mapping(payload.get("signal"))
     if not frozen_signal:
         raise SnapshotValidationError("research radar selection lacks frozen signal")
+    for field in ("selection_id", "signal_id", "ticker", "market_date"):
+        payload_value = payload.get(field)
+        if payload_value in (None, ""):
+            continue
+        if field == "market_date":
+            expected_value = str(selection.get(field) or day)[:10]
+            actual_value = str(payload_value)[:10]
+        elif field == "ticker":
+            expected_value = str(selection.get(field) or "").upper()
+            actual_value = str(payload_value).upper()
+        else:
+            expected_value = str(selection.get(field) or "")
+            actual_value = str(payload_value)
+        if actual_value != expected_value:
+            raise SnapshotValidationError(
+                f"research radar selection {field} conflicts with payload"
+            )
+    if (
+        frozen_signal.get("market_date") not in (None, "")
+        and str(frozen_signal.get("market_date"))[:10] != day
+    ):
+        raise SnapshotValidationError("research radar frozen signal crosses market date")
+    selected_at_candidates = [
+        payload.get("selected_at"),
+        frozen_signal.get("selected_at"),
+    ]
     frozen_selection_id = str(frozen_signal.get("research_selection_id") or "").strip()
+    for row in slate.get("rows") or ():
+        if (
+            isinstance(row, Mapping)
+            and str(row.get("research_selection_id") or "").strip()
+            == frozen_selection_id
+        ):
+            selected_at_candidates.append(row.get("selected_at"))
+            break
+    for candidate in selected_at_candidates:
+        if candidate in (None, ""):
+            continue
+        if _aware_datetime(str(candidate), "frozen selected_at") != selected_dt:
+            raise SnapshotValidationError(
+                "research radar selection timestamp conflicts with frozen lineage"
+            )
     if not frozen_selection_id or frozen_selection_id not in {
         str(item).strip() for item in slate.get("selection_ids") or ()
     }:
@@ -184,12 +225,18 @@ def _selection_identity(
         )
     if str(frozen_signal.get("ticker") or "").upper() != ticker:
         raise SnapshotValidationError("research radar selection ticker conflicts with slate")
-    episode_id = str(
-        selection.get("episode_id")
-        or payload.get("episode_id")
-        or frozen_signal.get("episode_id")
-        or ""
-    ).strip()
+    episode_values = [
+        str(value).strip()
+        for value in (
+            selection.get("episode_id"),
+            payload.get("episode_id"),
+            frozen_signal.get("episode_id"),
+        )
+        if value not in (None, "")
+    ]
+    if len(set(episode_values)) > 1:
+        raise SnapshotValidationError("research radar episode identity conflicts with lineage")
+    episode_id = episode_values[0] if episode_values else ""
     if not episode_id:
         frozen_id = str(
             frozen_signal.get("research_selection_id")
@@ -208,6 +255,7 @@ def _selection_identity(
         raise SnapshotValidationError("research radar frozen identity is incomplete")
     return {
         "selection_id": selection_id,
+        "signal_id": str(selection.get("signal_id") or "").strip(),
         "slate_id": slate_id,
         "slate_content_hash_sha256": slate_hash,
         "episode_id": episode_id,
@@ -411,6 +459,22 @@ def _bridge_row(
     source_cutoff = _first(outcome, "source_cutoff", "cutoff", "requested_at") or cutoff.isoformat()
     artifact_id = _first(outcome, "outcome_artifact_id", "outcome_id", "signal_id")
     artifact_hash = _first(outcome, "outcome_artifact_hash_sha256", "source_bar_hash_sha256")
+    source_provider = _first(outcome, "source", "source_provider") or base.get("source")
+    source_url = _first(outcome, "source_url") or base.get("source_url")
+    source_artifact_identity = (
+        _first(outcome, "source_artifact_identity")
+        or base.get("source_artifact_identity")
+    )
+    source_lineage = (
+        outcome.get("source_lineage")
+        if isinstance(outcome, Mapping) and outcome.get("source_lineage") not in (None, "")
+        else base.get("source_lineage")
+    )
+    source_binding = (
+        outcome.get("source_binding")
+        if isinstance(outcome, Mapping) and outcome.get("source_binding") not in (None, "")
+        else base.get("source_binding")
+    )
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         **dict(base),
@@ -426,12 +490,24 @@ def _bridge_row(
         "source_path_id": source_path_id,
         "source_path_hash_sha256": source_path_hash,
         "source_cutoff": source_cutoff,
+        "source_provider": source_provider,
+        "source_url": source_url,
+        "source_artifact_identity": source_artifact_identity,
+        "source_lineage": source_lineage,
+        "source_binding": source_binding,
         "outcome_artifact_id": artifact_id,
         "outcome_artifact_hash_sha256": artifact_hash,
         "source_identity": source_identity,
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    payload["logical_key"] = _logical_key(
+        market_date=str(base.get("market_date") or "")[:10],
+        selection_id=str(base.get("selection_id") or ""),
+        strategy_id=str(contributor.get("strategy_id") or ""),
+        strategy_version=str(contributor.get("strategy_version") or ""),
+        receipt_id=str(contributor.get("receipt_id") or ""),
+    )
     metrics = outcome.get("selection_outcome_metrics") if isinstance(outcome, Mapping) else None
     if isinstance(metrics, Mapping):
         payload["selection_outcome_metrics"] = dict(metrics)
@@ -439,12 +515,33 @@ def _bridge_row(
     body = {
         key: value
         for key, value in payload.items()
-        if key not in {"bridge_id", "bridge_hash_sha256"}
+        if key not in {"bridge_id", "bridge_hash_sha256", "created_at"}
     }
     digest = _digest(body)
     payload["bridge_hash_sha256"] = digest
     payload["bridge_id"] = "rep-" + digest[:24]
     return payload
+
+
+def _logical_key(
+    *,
+    market_date: str,
+    selection_id: str,
+    strategy_id: str,
+    strategy_version: str,
+    receipt_id: str,
+) -> str:
+    identity = {
+        "market_date": str(market_date)[:10],
+        "selection_id": selection_id,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "receipt_id": receipt_id,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return "research-bridge-logical-v1-" + digest
 
 
 def _outcome_state(
@@ -455,6 +552,29 @@ def _outcome_state(
 ) -> tuple[str, bool, str]:
     if outcome is None:
         return MISSING, False, "exact sourced outcome is absent"
+    for field in ("selection_id", "signal_id", "episode_id", "slate_id"):
+        value = outcome.get(field)
+        expected = base.get(field)
+        if value not in (None, "") and str(value) != str(expected or ""):
+            return INELIGIBLE, False, f"outcome {field} conflicts with frozen selection"
+    outcome_ticker = str(outcome.get("ticker") or "").strip().upper()
+    if outcome_ticker and outcome_ticker != str(base.get("ticker") or "").upper():
+        return INELIGIBLE, False, "outcome ticker conflicts with frozen selection"
+    outcome_slate_hash = str(outcome.get("slate_content_hash_sha256") or "").strip().lower()
+    if outcome_slate_hash and outcome_slate_hash != str(
+        base.get("slate_content_hash_sha256") or ""
+    ).lower():
+        return INELIGIBLE, False, "outcome slate hash conflicts with frozen selection"
+    outcome_selected_at = outcome.get("selected_at")
+    if outcome_selected_at not in (None, ""):
+        try:
+            selected_at_matches = _aware_datetime(
+                str(outcome_selected_at), "outcome selected_at"
+            ) == _aware_datetime(str(base["selected_at"]), "selected_at")
+        except SnapshotValidationError:
+            selected_at_matches = False
+        if not selected_at_matches:
+            return INELIGIBLE, False, "outcome selected_at conflicts with frozen selection"
     outcome_day = str(outcome.get("market_date") or outcome.get("date") or "")[:10]
     if outcome_day != str(base["market_date"]):
         return INELIGIBLE, False, "outcome crosses market date"
@@ -468,10 +588,9 @@ def _outcome_state(
         return INELIGIBLE, False, "source cutoff is absent or precedes selection"
     if source_cutoff > cutoff:
         return INELIGIBLE, False, "source cutoff exceeds bridge cutoff"
-    if not (
-        outcome.get("source_authenticated") is True
-        or outcome.get("automatic_sourced_data") is True
-    ):
+    # ``automatic_sourced_data`` is provenance metadata, not authentication.
+    # Only the producer's validated source binding may authorize learning.
+    if outcome.get("source_authenticated") is not True:
         return INELIGIBLE, False, "outcome source is not authenticated"
     status = str(
         outcome.get("selection_outcome")
@@ -491,18 +610,18 @@ def _outcome_state(
     }:
         return INELIGIBLE, False, "sourced outcome is stale or incomplete"
     if (
-        outcome.get("source_coverage_complete") is False
+        outcome.get("source_coverage_complete") is not True
         or outcome.get("coverage_complete") is False
     ):
-        return INELIGIBLE, False, "sourced outcome has incomplete bar coverage"
+        return INELIGIBLE, False, "sourced outcome lacks complete bar coverage proof"
     maximum_gap = outcome.get("coverage_maximum_gap_seconds")
     allowed_gap = outcome.get("coverage_allowed_gap_seconds")
     try:
-        if (
-            maximum_gap is not None
-            and allowed_gap is not None
-            and float(maximum_gap) > float(allowed_gap)
-        ):
+        if maximum_gap is None or allowed_gap is None:
+            return INELIGIBLE, False, "sourced outcome lacks bar gap proof"
+        maximum_gap = float(maximum_gap)
+        allowed_gap = float(allowed_gap)
+        if maximum_gap < 0 or allowed_gap < 0 or maximum_gap > allowed_gap:
             return INELIGIBLE, False, "sourced outcome has a disallowed bar gap"
     except (TypeError, ValueError):
         return INELIGIBLE, False, "sourced outcome coverage metadata is invalid"

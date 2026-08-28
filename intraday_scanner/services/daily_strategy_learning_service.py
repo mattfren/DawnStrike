@@ -1873,6 +1873,7 @@ def _apply_research_episode_outcomes(
     """Overlay exact sidecar outcomes on receipt copies for this run only."""
 
     by_receipt: dict[str, Mapping[str, Any]] = {}
+    by_receipt_order: dict[str, tuple[str, str]] = {}
     valid_ids = {
         str(receipt.get("receipt_id") or "")
         for receipt in receipts
@@ -1882,7 +1883,7 @@ def _apply_research_episode_outcomes(
         if not isinstance(bridge, Mapping):
             continue
         receipt_id = str(bridge.get("receipt_id") or "").strip()
-        if not receipt_id or receipt_id not in valid_ids or receipt_id in by_receipt:
+        if not receipt_id or receipt_id not in valid_ids:
             continue
         # A bridge is allowed to affect a receipt only when the immutable hash
         # is exact.  Ticker/date are additionally checked so a same-ID fixture
@@ -1898,7 +1899,13 @@ def _apply_research_episode_outcomes(
                 and str(receipt.get("symbol") or "").upper()
                 == str(bridge.get("ticker") or "").upper()
             ):
-                by_receipt[receipt_id] = bridge
+                order = (
+                    str(bridge.get("logical_key") or ""),
+                    str(bridge.get("bridge_id") or ""),
+                )
+                if receipt_id not in by_receipt or order < by_receipt_order[receipt_id]:
+                    by_receipt[receipt_id] = bridge
+                    by_receipt_order[receipt_id] = order
                 break
     result: list[Mapping[str, Any]] = []
     for receipt in receipts:
@@ -1929,10 +1936,18 @@ def _bridge_learning_summary(
     all_bridges = [item for item in bridges or () if isinstance(item, Mapping)]
     usable = [item for item in all_bridges if str(item.get("receipt_id") or "") in receipt_ids]
     deduped: dict[str, Mapping[str, Any]] = {}
+    deduped_order: dict[str, tuple[str, str]] = {}
     for item in usable:
         receipt_id = str(item.get("receipt_id") or "")
-        if receipt_id and receipt_id not in deduped:
+        order = (
+            str(item.get("logical_key") or ""),
+            str(item.get("bridge_id") or ""),
+        )
+        if receipt_id and (
+            receipt_id not in deduped or order < deduped_order[receipt_id]
+        ):
             deduped[receipt_id] = item
+            deduped_order[receipt_id] = order
     return {
         "schema_version": "dawnstrike.research_episode_outcome_learning.v1",
         "bridge_count": len(usable),

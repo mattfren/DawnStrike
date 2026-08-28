@@ -8679,12 +8679,13 @@ class SQLiteScanStore:
                 for row in materialized:
                     bridge_id = str(row.get("bridge_id") or "").strip()
                     bridge_hash = str(row.get("bridge_hash_sha256") or "").strip().lower()
-                    if not bridge_id or not bridge_hash:
+                    logical_key = str(row.get("logical_key") or "").strip()
+                    if not bridge_id or not bridge_hash or not logical_key:
                         raise StorageError("research outcome bridge identity is required")
                     bridge_body = {
                         key: value
                         for key, value in row.items()
-                        if key not in {"bridge_id", "bridge_hash_sha256"}
+                        if key not in {"bridge_id", "bridge_hash_sha256", "created_at"}
                     }
                     expected_bridge_hash = hashlib.sha256(
                         json.dumps(
@@ -8699,15 +8700,43 @@ class SQLiteScanStore:
                     if bridge_id != "rep-" + bridge_hash[:24]:
                         raise StorageError("research outcome bridge ID is not derived from hash")
                     payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+                    def comparable_payload(value: str) -> str:
+                        payload = json.loads(value)
+                        if isinstance(payload, dict):
+                            payload.pop("created_at", None)
+                        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
                     existing = connection.execute(
                         "SELECT bridge_hash_sha256, payload_json "
                         "FROM research_episode_outcome_bridges WHERE bridge_id = ?",
                         (bridge_id,),
                     ).fetchone()
                     if existing is not None:
-                        if str(existing[0]) != bridge_hash or str(existing[1]) != payload_json:
+                        if (
+                            str(existing[0]) != bridge_hash
+                            or comparable_payload(str(existing[1]))
+                            != comparable_payload(payload_json)
+                        ):
                             raise StorageError(
                                 "research outcome bridge identity/payload mismatch: " + bridge_id
+                            )
+                        reused += 1
+                        continue
+                    logical_existing = connection.execute(
+                        "SELECT bridge_id, bridge_hash_sha256, payload_json "
+                        "FROM research_episode_outcome_bridges WHERE logical_key = ?",
+                        (logical_key,),
+                    ).fetchone()
+                    if logical_existing is not None:
+                        if (
+                            str(logical_existing[1]) != bridge_hash
+                            or comparable_payload(str(logical_existing[2]))
+                            != comparable_payload(payload_json)
+                        ):
+                            raise StorageError(
+                                "research outcome logical identity/payload mismatch: "
+                                + logical_key
                             )
                         reused += 1
                         continue
@@ -8723,7 +8752,7 @@ class SQLiteScanStore:
                     connection.execute(
                         """
                         INSERT INTO research_episode_outcome_bridges
-                        (bridge_id, bridge_hash_sha256, selection_id, slate_id,
+                        (bridge_id, bridge_hash_sha256, logical_key, selection_id, slate_id,
                          slate_content_hash_sha256, episode_id, ticker, market_date,
                          selected_at, strategy_id, strategy_version, receipt_id,
                          receipt_hash_sha256, outcome_status, learning_eligible,
@@ -8733,12 +8762,13 @@ class SQLiteScanStore:
                          payload_json, created_at)
                         VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         (
                             bridge_id,
                             bridge_hash,
+                            logical_key,
                             str(row.get("selection_id") or ""),
                             str(row.get("slate_id") or ""),
                             str(row.get("slate_content_hash_sha256") or ""),

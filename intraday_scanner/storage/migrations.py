@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -60,7 +62,7 @@ def run_migrations(connection: sqlite3.Connection) -> int:
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
             continue
-        if target_version in {31, 32, 33}:
+        if target_version in {31, 32, 33, 34}:
             missing_tables = {
                 name
                 for name in _STRATEGY_RECEIPT_TABLES
@@ -92,7 +94,22 @@ def run_migrations(connection: sqlite3.Connection) -> int:
                 is not None
                 and "stored_at" not in v6_columns
             )
-            if not missing_tables and not missing_triggers and not missing_v6_availability:
+            bridge_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(research_episode_outcome_bridges)"
+                ).fetchall()
+            }
+            missing_bridge_logical_key = (
+                target_version == 34
+                and "logical_key" not in bridge_columns
+            )
+            if (
+                not missing_tables
+                and not missing_triggers
+                and not missing_v6_availability
+                and not missing_bridge_logical_key
+            ):
                 continue
             migration(connection)
             # Do not advance schema_version: older governed stores validate
@@ -2459,6 +2476,49 @@ def _migration_033_research_episode_outcome_bridges(connection: sqlite3.Connecti
     )
 
 
+def _migration_034_research_episode_outcome_bridge_logical_key(
+    connection: sqlite3.Connection,
+) -> None:
+    """Bind one immutable bridge to its logical selection/contributor key."""
+
+    _add_column_if_missing(
+        connection,
+        "research_episode_outcome_bridges",
+        "logical_key TEXT NOT NULL DEFAULT ''",
+    )
+    existing_rows = connection.execute(
+        """
+        SELECT bridge_id, market_date, selection_id, strategy_id,
+               strategy_version, receipt_id
+        FROM research_episode_outcome_bridges
+        WHERE logical_key = ''
+        """
+    ).fetchall()
+    for row in existing_rows:
+        identity = {
+            "market_date": str(row[1] or "")[:10],
+            "selection_id": str(row[2] or ""),
+            "strategy_id": str(row[3] or ""),
+            "strategy_version": str(row[4] or ""),
+            "receipt_id": str(row[5] or ""),
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        logical_key = "research-bridge-logical-v1-" + digest
+        connection.execute(
+            "UPDATE research_episode_outcome_bridges SET logical_key = ? WHERE bridge_id = ?",
+            (logical_key, str(row[0])),
+        )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_research_episode_outcome_bridges_logical_key
+        ON research_episode_outcome_bridges(logical_key)
+        """
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -2502,4 +2562,5 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (31, _migration_031_strategy_decision_receipts),
     (32, _migration_032_v6_decision_availability),
     (33, _migration_033_research_episode_outcome_bridges),
+    (34, _migration_034_research_episode_outcome_bridge_logical_key),
 )

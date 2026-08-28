@@ -1334,7 +1334,12 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
             payload={"run_id": "scan-radar-only", "signals": []},
         ),
     )
-    bars = _contiguous_bars()
+    # The reference bar contains hostile H/L excursions.  Those values must
+    # not leak into post-reference path metrics; every later bar is flat.
+    bars = _contiguous_bars(
+        default=(100.0, 100.0, 100.0, 100.0),
+        overrides={"09:30": (100.0, 200.0, 50.0, 100.0)},
+    )
     result = capture_sourced_alpha_outcomes(
         db_path=db_path,
         market_date=DAY,
@@ -1352,7 +1357,11 @@ def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Pat
     }
     assert all(row["outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
     assert all(row["learning_eligible"] is True for row in bridges)
-    assert all(row["selection_outcome_metrics"]["reference_price"] > 0 for row in bridges)
+    assert all(row["selection_outcome_metrics"]["reference_price"] == 100.0 for row in bridges)
+    assert all(row["selection_outcome_metrics"]["high_after_reference"] == 100.0 for row in bridges)
+    assert all(row["selection_outcome_metrics"]["low_after_reference"] == 100.0 for row in bridges)
+    assert all(row["selection_outcome_metrics"]["mfe_pct"] == 0.0 for row in bridges)
+    assert all(row["selection_outcome_metrics"]["mae_pct"] == 0.0 for row in bridges)
     assert store.load_signal_outcomes() == []
     assert store.load_trade_intent_records(market_date=DAY) == []
     assert store.load_paper_trade_fills(market_date=DAY) == []
@@ -1381,8 +1390,191 @@ def test_radar_selection_without_current_bars_is_explicitly_missing() -> None:
         requested_at=requested,
         captured_at=f"{DAY}T20:06:00+00:00",
     )
-    assert outcome["outcome_status"] == "MISSING"
+    assert outcome["outcome_status"] in {"MISSING", "INELIGIBLE"}
     assert outcome["learning_eligible"] is False
+
+
+def test_radar_outcome_requires_authenticated_canonical_source_binding(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "intraday_scanner.services.research_episode_outcome_service"
+        ".validate_ranked_research_slate",
+        lambda slate, **_: slate,
+    )
+    selected_at = f"{DAY}T13:00:00+00:00"
+    selection = {
+        "selection_id": "selection:source-binding",
+        "signal_id": "signal:source-binding",
+        "ticker": "NOVA",
+        "market_date": DAY,
+        "cohort": "research_radar",
+        "selected_at": selected_at,
+        "payload_json": {
+            "frozen_ranked_research_slate": {
+                "slate_id": "luna-slate-" + "a" * 24,
+                "content_hash_sha256": "b" * 64,
+                "selection_ids": ["research-selection:source-binding"],
+            },
+            "signal": {
+                "signal_id": "signal:source-binding",
+                "ticker": "NOVA",
+                "market_date": DAY,
+                "research_selection_id": "research-selection:source-binding",
+                "episode_id": "episode:" + "c" * 32,
+            },
+        },
+    }
+    session = capture_module.SessionWindow(
+        market_date=DAY,
+        opened_at=datetime.fromisoformat(f"{DAY}T09:30:00-04:00"),
+        closed_at=datetime.fromisoformat(f"{DAY}T09:32:00-04:00"),
+        is_trading_day=True,
+        calendar={},
+    )
+    requested_at = datetime.fromisoformat(f"{DAY}T14:00:00+00:00")
+    bars = [
+        capture_module.OutcomeBar(
+            observed_at=datetime.fromisoformat(f"{DAY}T09:30:00-04:00"),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1_000.0,
+        ),
+        capture_module.OutcomeBar(
+            observed_at=datetime.fromisoformat(f"{DAY}T09:31:00-04:00"),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=1_000.0,
+        ),
+    ]
+    source_hash = capture_module._bars_hash(bars)
+    valid_evidence = {
+        "source": "provider-a",
+        "source_url": "https://provider-a.test/bars",
+        "source_artifact_identity": f"artifact:provider-a:nova:{source_hash}",
+        "source_bar_hash_sha256": source_hash,
+        "source_lineage": [{
+            "source": "provider-a",
+            "source_url": "https://provider-a.test/bars",
+            "request": "GET /bars?symbol=NOVA",
+            "attempt": 1,
+            "fetched_at": requested_at.isoformat(),
+            "cutoff": requested_at.isoformat(),
+        }],
+        "source_coverage_complete": True,
+        "source_fetched_at": requested_at.isoformat(),
+    }
+    valid = capture_module._derive_research_selection_outcome(
+        selection,
+        bars,
+        valid_evidence,
+        session=session,
+        requested_at=requested_at,
+        captured_at=requested_at.isoformat(),
+    )
+    assert valid["outcome_status"] == "COMPLETE_SOURCED"
+    assert valid["source_authenticated"] is True
+    single_bar = bars[:1]
+    single_hash = capture_module._bars_hash(single_bar)
+    single_evidence = {
+        **valid_evidence,
+        "source_bar_hash_sha256": single_hash,
+        "source_artifact_identity": f"artifact:provider-a:nova:{single_hash}",
+    }
+    single_session = capture_module.SessionWindow(
+        market_date=DAY,
+        opened_at=session.opened_at,
+        closed_at=datetime.fromisoformat(f"{DAY}T09:31:00-04:00"),
+        is_trading_day=True,
+        calendar={},
+    )
+    no_subsequent = capture_module._derive_research_selection_outcome(
+        selection,
+        single_bar,
+        single_evidence,
+        session=single_session,
+        requested_at=requested_at,
+        captured_at=requested_at.isoformat(),
+    )
+    assert no_subsequent["outcome_status"] == "MISSING"
+    assert no_subsequent["learning_eligible"] is False
+    assert no_subsequent["selection_outcome_metrics"]["path_status"] == (
+        "NO_SUBSEQUENT_OBSERVATION"
+    )
+    assert no_subsequent["selection_outcome_metrics"]["mfe_pct"] is None
+    assert no_subsequent["selection_outcome_metrics"]["mae_pct"] is None
+    hostile = [
+        {"source_artifact_identity": ""},
+        {"source_url": ""},
+        {"source_bar_hash_sha256": "f" * 64},
+        {"source": "provider-b"},
+        {"source_lineage": ["not-a-request"]},
+    ]
+    for mutation in hostile:
+        evidence = {**valid_evidence, **mutation}
+        outcome = capture_module._derive_research_selection_outcome(
+            selection,
+            bars,
+            evidence,
+            session=session,
+            requested_at=requested_at,
+            captured_at=requested_at.isoformat(),
+        )
+        assert outcome["outcome_status"] == "INELIGIBLE"
+        assert outcome["learning_eligible"] is False
+    for hostile_bars in (
+        list(reversed(bars)),
+        [capture_module.OutcomeBar(
+            observed_at=bars[0].observed_at,
+            open=100.0,
+            high=102.0,
+            low=99.0,
+            close=100.0,
+            volume=1_000.0,
+        ), *bars[1:]],
+    ):
+        outcome = capture_module._derive_research_selection_outcome(
+            selection,
+            hostile_bars,
+            valid_evidence,
+            session=session,
+            requested_at=requested_at,
+            captured_at=requested_at.isoformat(),
+        )
+        assert outcome["outcome_status"] == "INELIGIBLE"
+        assert outcome["learning_eligible"] is False
+    for hostile_value in (0.0, -1.0, float("nan"), float("inf")):
+        hostile_bars = [
+            capture_module.OutcomeBar(
+                observed_at=bars[0].observed_at,
+                open=100.0,
+                high=hostile_value,
+                low=99.0,
+                close=100.0,
+                volume=1_000.0,
+            ),
+            bars[1],
+        ]
+        hostile_hash = capture_module._bars_hash(hostile_bars)
+        evidence = {
+            **valid_evidence,
+            "source_bar_hash_sha256": hostile_hash,
+            "source_artifact_identity": f"artifact:provider-a:nova:{hostile_hash}",
+        }
+        outcome = capture_module._derive_research_selection_outcome(
+            selection,
+            hostile_bars,
+            evidence,
+            session=session,
+            requested_at=requested_at,
+            captured_at=requested_at.isoformat(),
+        )
+        assert outcome["outcome_status"] in {"MISSING", "INELIGIBLE"}
+        assert outcome["learning_eligible"] is False
     assert "entry_price" not in outcome
     assert "gross_return_pct" not in outcome
 

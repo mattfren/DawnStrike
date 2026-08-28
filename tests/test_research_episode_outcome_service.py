@@ -77,6 +77,9 @@ def _outcome() -> dict[str, object]:
         "source_bar_hash_sha256": "2" * 64,
         "path_replay_id": "path-v2-nova",
         "source_last_bar_at": "2026-08-28T19:59:00+00:00",
+        "source_coverage_complete": True,
+        "coverage_maximum_gap_seconds": 60,
+        "coverage_allowed_gap_seconds": 60,
         "learning_eligible": True,
         "entry_price": 999.0,
         "gross_return_pct": 99.0,
@@ -281,8 +284,13 @@ def test_missing_outcome_does_not_inherit_neighbor_or_become_zero(monkeypatch) -
 def test_cross_date_and_unauthenticated_outcomes_are_ineligible(monkeypatch) -> None:
     monkeypatch.setattr(bridge, "validate_ranked_research_slate", lambda slate, **_: slate)
     cross_date = {**_outcome(), "market_date": "2026-08-27"}
-    unauthenticated = {**_outcome(), "source_authenticated": False, "automatic_sourced_data": False}
-    for outcome in (cross_date, unauthenticated):
+    conflicting_lineage = {**_outcome(), "selection_id": "selection:evil"}
+    unauthenticated = {
+        **_outcome(),
+        "source_authenticated": False,
+        "automatic_sourced_data": True,
+    }
+    for outcome in (cross_date, conflicting_lineage, unauthenticated):
         rows = bridge.build_research_episode_outcome_bridges(
             [_selection()],
             [outcome],
@@ -298,6 +306,8 @@ def test_cross_date_and_unauthenticated_outcomes_are_ineligible(monkeypatch) -> 
     [
         {"outcome_status": "STALE_OBSERVATION"},
         {"source_coverage_complete": False},
+        {"source_coverage_complete": None},
+        {"coverage_maximum_gap_seconds": None},
         {"coverage_maximum_gap_seconds": 61, "coverage_allowed_gap_seconds": 60},
     ],
 )
@@ -324,10 +334,47 @@ def test_bridge_retry_is_idempotent_and_collision_rejected(tmp_path: Path, monke
     )
     store = SQLiteScanStore(tmp_path / "bridge.sqlite")
     assert bridge.persist_research_episode_outcome_bridges(store, rows)["inserted"] == 2
-    assert bridge.persist_research_episode_outcome_bridges(store, rows)["reused"] == 2
-    conflict = {**rows[0], "outcome_status": "LOSS"}
-    with pytest.raises(StorageError, match="hash mismatch|identity/payload mismatch"):
-        bridge.persist_research_episode_outcome_bridges(store, [conflict])
+    replay = bridge.build_research_episode_outcome_bridges(
+        [_selection()],
+        [_outcome()],
+        market_date="2026-08-28",
+        cutoff="2026-08-28T21:00:00+00:00",
+        created_at="2026-08-28T23:59:00+00:00",
+    )
+    assert [row["bridge_id"] for row in replay] == [row["bridge_id"] for row in rows]
+    assert bridge.persist_research_episode_outcome_bridges(store, replay)["reused"] == 2
+    for mutation in (
+        {"outcome_status": "LOSS"},
+        {"source_bar_hash_sha256": "3" * 64},
+        {"source_observation_hash_sha256": "4" * 64},
+        {"source_lineage": [{"source": "different-provider", "request": "changed"}]},
+    ):
+        conflict = bridge.build_research_episode_outcome_bridges(
+            [_selection()],
+            [{**_outcome(), **mutation}],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
+        with pytest.raises(StorageError, match="hash mismatch|identity/payload mismatch"):
+            bridge.persist_research_episode_outcome_bridges(store, [conflict[0]])
+
+
+def test_logical_key_is_delimiter_collision_safe() -> None:
+    left = bridge._logical_key(
+        market_date="2026-08-28",
+        selection_id="selection|primary",
+        strategy_id="v1",
+        strategy_version="receipt",
+        receipt_id="r",
+    )
+    right = bridge._logical_key(
+        market_date="2026-08-28",
+        selection_id="selection",
+        strategy_id="primary|v1",
+        strategy_version="receipt",
+        receipt_id="r",
+    )
+    assert left != right
 
 
 def test_invalid_frozen_selection_fails_closed(monkeypatch) -> None:
@@ -338,6 +385,30 @@ def test_invalid_frozen_selection_fails_closed(monkeypatch) -> None:
     with pytest.raises(SnapshotValidationError, match="frozen slate"):
         bridge.build_research_episode_outcome_bridges(
             [_selection()],
+            [_outcome()],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
+
+
+def test_frozen_timestamp_and_lineage_overrides_fail_closed(monkeypatch) -> None:
+    monkeypatch.setattr(bridge, "validate_ranked_research_slate", lambda slate, **_: slate)
+    selection = _selection()
+    payload = dict(selection["payload_json"])
+    payload["selected_at"] = "2026-08-28T14:01:00+00:00"
+    selection["payload_json"] = payload
+    with pytest.raises(SnapshotValidationError, match="timestamp"):
+        bridge.build_research_episode_outcome_bridges(
+            [selection],
+            [_outcome()],
+            market_date="2026-08-28",
+            cutoff="2026-08-28T21:00:00+00:00",
+        )
+    selection = _selection()
+    selection["episode_id"] = "episode:" + "e" * 32
+    with pytest.raises(SnapshotValidationError, match="episode identity"):
+        bridge.build_research_episode_outcome_bridges(
+            [selection],
             [_outcome()],
             market_date="2026-08-28",
             cutoff="2026-08-28T21:00:00+00:00",
@@ -406,3 +477,5 @@ def test_learning_overlay_matches_receipt_identity_once_without_inheriting() -> 
     summary = _aggregate_decision_receipts(overlaid)
     assert summary["outcome_state_counts"]["WIN"] == 2
     assert summary["outcome_state_counts"]["MISSING_OUTCOME"] == 1
+    reversed_overlay = _apply_research_episode_outcomes(receipts, list(reversed(joined)))
+    assert reversed_overlay == overlaid
