@@ -14,6 +14,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     build_ranked_research_slate,
     official_publication_rows,
     publication_counts,
+    validate_frozen_publication_rows,
     validate_ranked_research_slate,
 )
 
@@ -135,6 +136,7 @@ def build_alpha_run_contract(
         slate = validate_ranked_research_slate(
             persisted_slate,
             market_date=generated_at[:10],
+            production=bool(source_summary.get("require_watcher_proof")),
         )
     else:
         slate = build_ranked_research_slate(
@@ -156,6 +158,13 @@ def build_alpha_run_contract(
     )
     if isinstance(frozen_publication_rows, list):
         published_signals = [dict(row) for row in frozen_publication_rows]
+        if source_summary.get("require_watcher_proof"):
+            validate_frozen_publication_rows(
+                published_signals,
+                slate=slate,
+                market_date=generated_at[:10],
+                production=True,
+            )
         expected_selection_ids = list(slate.get("selection_ids") or [])
         actual_selection_ids = [
             str(row.get("research_selection_id") or "") for row in published_signals
@@ -177,7 +186,16 @@ def build_alpha_run_contract(
     authoritative_slate = bool(persisted_slate) or isinstance(
         frozen_publication_rows, list
     )
-    exact_official_rows = official_publication_rows(published_signals, limit=3)
+    exact_official_rows = (
+        official_publication_rows(
+            published_signals,
+            slate=slate,
+            production=True,
+            limit=3,
+        )
+        if authoritative_slate and source_summary.get("require_watcher_proof")
+        else []
+    )
     legacy_official_count = (
         len(watchlist)
         if not authoritative_slate

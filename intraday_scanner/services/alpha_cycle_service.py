@@ -91,6 +91,7 @@ from intraday_scanner.services.luna_research_slate_service import (
     official_publication_rows,
     persist_ranked_research_slate,
     row_research_admissible,
+    validate_frozen_publication_rows,
     validate_ranked_research_slate,
     validated_frozen_selection_signal,
 )
@@ -798,8 +799,10 @@ def alpha_cycle(
     ranked = [candidate.to_dict() for candidate in scan_result.ranked_candidates]
     all_candidates = [candidate.to_dict() for candidate in scan_result.all_candidates]
     for row in [*ranked, *all_candidates]:
-        row.setdefault("universe_lane", "mover")
-        row.setdefault("evidence_lane", "mover")
+        # The input list is the lane authority.  A carried label is data from
+        # an untrusted producer and must not let mover rows masquerade as core.
+        row["universe_lane"] = "mover"
+        row["evidence_lane"] = "mover"
     core_ranked: list[dict[str, Any]] = []
     core_all: list[dict[str, Any]] = []
     core_enrichment_summary: dict[str, Any] = {"status": "not_run"}
@@ -1064,6 +1067,7 @@ def alpha_cycle(
             for row in core_universe.get("members") or []
         ],
         require_safety=True,
+        enrichment_max_age_seconds=scanner_config.premarket_enrichment_max_age_seconds,
         coverage_status=combined_coverage_status,
         lane_statuses={
             "mover": {
@@ -1139,6 +1143,18 @@ def alpha_cycle(
             "FROZEN_SLATE_SIGNAL_MISSING: immutable research rows could not be "
             "reconstructed for publication"
         )
+    try:
+        validate_frozen_publication_rows(
+            slate_publication_rows,
+            slate=luna_research_slate,
+            market_date=timestamp[:10],
+            production=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError(
+            "FROZEN_SLATE_SIGNAL_MISSING: publication rows do not match the "
+            "immutable research slate"
+        ) from exc
     source_summary["ranked_research_publication_rows"] = slate_publication_rows
     signals = apply_publication_semantics(
         signals,
@@ -1197,7 +1213,12 @@ def alpha_cycle(
         universe_membership_by_ticker=universe_memberships,
     )
     v6_decision_stats = store.persist_alpha_v6_decisions(v6_decisions)
-    selected_signals = official_publication_rows(slate_publication_rows, limit=3)
+    selected_signals = official_publication_rows(
+        slate_publication_rows,
+        slate=luna_research_slate,
+        production=True,
+        limit=3,
+    )
     source_summary["official_publication_rows"] = selected_signals
     official_no_trade = not selected_signals
     publication_decision = dict(decision)
@@ -1315,6 +1336,8 @@ def alpha_cycle(
             selected_at=timestamp,
             event=events[0],
             slate=luna_research_slate,
+            publication_rows=slate_publication_rows,
+            production=True,
         )
         selection_scan_id = scan_result.run_id
         selection_selected_at = timestamp
@@ -1334,6 +1357,7 @@ def alpha_cycle(
         slate=luna_research_slate,
         selected_at=selection_selected_at,
         event=events[0],
+        production=True,
     )
     official_signal_ids = {
         str(row.get("signal_id") or "") for row in selected_rows
@@ -1654,8 +1678,13 @@ def alpha_monitor(
                 store,
                 market_date=required_market_date,
             ),
+            production=True,
         )
-        radar_monitor_signals = _radar_monitor_signals(signals, radar_selections)
+        radar_monitor_signals = _radar_monitor_signals(
+            signals,
+            radar_selections,
+            production=True,
+        )
     except SnapshotValidationError as exc:
         return {
             "status": "selection_evidence_unavailable",
@@ -1951,6 +1980,7 @@ def _official_monitor_signals(
     selections: list[dict[str, Any]],
     *,
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    production: bool = False,
 ) -> list[dict[str, Any]]:
     """Rehydrate the exact official cohort, including governed scan retries."""
 
@@ -1977,6 +2007,7 @@ def _official_monitor_signals(
             selection,
             market_date=str(selection.get("selected_at") or "")[:10],
             allowed_cohorts=(ALPHAOPS_OFFICIAL_COHORT,),
+            production=production,
         )
         if signal is not None:
             payload = selection.get("payload_json")
@@ -2037,6 +2068,8 @@ def _official_monitor_signals(
 def _radar_monitor_signals(
     signals: list[dict[str, Any]],
     selections: list[dict[str, Any]],
+    *,
+    production: bool = False,
 ) -> list[dict[str, Any]]:
     signal_by_id = {
         str(row.get("signal_id") or row.get("signal_key") or ""): row
@@ -2054,7 +2087,7 @@ def _radar_monitor_signals(
         source_scan_id = str(selection.get("source_scan_id") or "")
         cross_scan = bool(source_scan_id and source_scan_id != selection_scan_id)
         if cross_scan:
-            radar_signal = _validated_frozen_radar_signal(selection)
+            radar_signal = _validated_frozen_radar_signal(selection, production=production)
             if radar_signal is None:
                 raise SnapshotValidationError(
                     "Persisted research slate selection has invalid governed frozen-slate lineage."
@@ -2065,7 +2098,7 @@ def _radar_monitor_signals(
             if signal is None:
                 if not radar_signal:
                     continue
-                validated = _validated_frozen_radar_signal(selection)
+                validated = _validated_frozen_radar_signal(selection, production=production)
                 if validated is None:
                     continue
                 signal = validated
@@ -2085,7 +2118,9 @@ def _radar_monitor_signals(
     return monitored
 
 
-def _validated_frozen_radar_signal(selection: dict[str, Any]) -> dict[str, Any] | None:
+def _validated_frozen_radar_signal(
+    selection: dict[str, Any], *, production: bool = False
+) -> dict[str, Any] | None:
     """Return the exact slate row carried by a governed radar selection."""
 
     payload = selection.get("payload_json")
@@ -2099,6 +2134,7 @@ def _validated_frozen_radar_signal(selection: dict[str, Any]) -> dict[str, Any] 
         selection,
         market_date=market_date,
         allowed_cohorts=(ALPHAOPS_RADAR_COHORT,),
+        production=production,
     )
 
 
@@ -2334,7 +2370,11 @@ def _load_frozen_luna_slate(path: Path, *, market_date: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SnapshotValidationError("Persisted Luna slate is not an object")
     try:
-        return validate_ranked_research_slate(payload, market_date=market_date)
+        return validate_ranked_research_slate(
+            payload,
+            market_date=market_date,
+            production=True,
+        )
     except ValueError as exc:
         raise SnapshotValidationError("Persisted Luna slate failed integrity checks") from exc
 
@@ -2353,8 +2393,10 @@ def _merge_lane_candidates(
     ]
     for lane, source_row in lane_rows:
         row = dict(source_row)
-        row.setdefault("universe_lane", lane)
-        row.setdefault("evidence_lane", lane)
+        # Lane ownership comes from the actual input list, never from a
+        # carried row label that a hostile mover/core producer can spoof.
+        row["universe_lane"] = lane
+        row["evidence_lane"] = lane
         ticker = str(row.get("ticker") or "").upper()
         if not ticker:
             continue
@@ -4111,6 +4153,8 @@ def _persist_official_selections(
     selected_at: str,
     event: NotificationEvent,
     slate: dict[str, Any] | None = None,
+    publication_rows: list[dict[str, Any]] | None = None,
+    production: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Freeze the exact signal identities represented by one operator message."""
 
@@ -4124,11 +4168,31 @@ def _persist_official_selections(
     frozen_lineage: dict[str, Any] = {}
     frozen_source_scan_id = ""
     reuse_status = ""
-    if frozen_slate:
-        validate_ranked_research_slate(
-            frozen_slate,
-            market_date=selected_at[:10],
-        )
+    validated_publication_by_id: dict[str, dict[str, Any]] = {}
+    if frozen_slate or production:
+        try:
+            validate_ranked_research_slate(
+                frozen_slate,
+                market_date=selected_at[:10],
+                production=production,
+            )
+            if production:
+                if not isinstance(publication_rows, list):
+                    raise ValueError("publication rows are required for production selections")
+                validated_publication_rows = validate_frozen_publication_rows(
+                    publication_rows,
+                    slate=frozen_slate,
+                    market_date=selected_at[:10],
+                    production=True,
+                )
+                validated_publication_by_id = {
+                    str(row.get("research_selection_id") or ""): row
+                    for row in validated_publication_rows
+                }
+        except (TypeError, ValueError) as exc:
+            raise SnapshotValidationError(
+                "Official selection does not bind one exact frozen publication cohort."
+            ) from exc
         frozen_source_scan_id = str(frozen_slate.get("scan_id") or "")
         reuse_status = (
             "CURRENT_SCAN"
@@ -4158,6 +4222,19 @@ def _persist_official_selections(
         signal_payload = dict(signal)
         selection_lineage: dict[str, Any] = {}
         is_no_trade = str(signal.get("ticker") or "").upper() == "NO_TRADE"
+        if production and not is_no_trade:
+            research_selection_id = str(signal.get("research_selection_id") or "")
+            publication_row = validated_publication_by_id.get(research_selection_id)
+            if (
+                publication_row is None
+                or publication_row.get("publication_tier")
+                not in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+                or str(publication_row.get("ticker") or "").upper()
+                != str(signal.get("ticker") or "").upper()
+            ):
+                raise SnapshotValidationError(
+                    "Official selection is not an exact frozen Tier 2/3 publication row."
+                )
         if frozen_slate and not is_no_trade:
             research_selection_id = str(
                 signal.get("research_selection_id") or ""
@@ -4288,8 +4365,20 @@ def _persist_research_radar_selections(
     slate: dict[str, Any],
     selected_at: str,
     event: NotificationEvent,
+    production: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Persist the exact conditional radar plans represented in Telegram."""
+
+    try:
+        validate_ranked_research_slate(
+            slate,
+            market_date=selected_at[:10],
+            production=production,
+        )
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError(
+            "Research radar selection does not bind one exact frozen slate."
+        ) from exc
 
     existing_rows = store.load_signal_selections(
         scan_id=scan_id,

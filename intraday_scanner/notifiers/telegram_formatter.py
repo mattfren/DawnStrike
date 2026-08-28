@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.services.luna_research_slate_service import (
     official_publication_rows,
+    validate_frozen_publication_rows,
+    validate_ranked_research_slate,
 )
 from intraday_scanner.services.time_utils import get_operator_time_label
 
@@ -261,25 +263,65 @@ def format_alpha_watch(
     blocked_signals = list(blocked_signals or [])
     candidates = [row for row in signals if _telegram_candidate_allowed(row)]
     raw_slate = source_summary.get("ranked_research_slate")
+    # Any caller-supplied slate-shaped object is an attempted authority.  It
+    # must validate as the strict production artifact; an invalid schema may
+    # not fall through to self-asserted publication tiers/counts.
     has_authoritative_slate = isinstance(raw_slate, dict)
     slate = dict(raw_slate) if has_authoritative_slate else {}
     frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
-    if isinstance(frozen_publication_rows, list):
+    authoritative_publication_rows: list[dict[str, Any]] = []
+    authoritative_slate_valid = False
+    if has_authoritative_slate:
+        try:
+            # Official Telegram is a production publication boundary.  A
+            # legacy/v1 or non-safety v2 artifact is never allowed to supply
+            # rows or counts to this formatter.
+            validate_ranked_research_slate(
+                slate,
+                market_date=str(slate.get("market_date") or ""),
+                production=True,
+            )
+            if not isinstance(frozen_publication_rows, list):
+                raise ValueError("frozen publication rows are missing")
+            authoritative_publication_rows = validate_frozen_publication_rows(
+                frozen_publication_rows,
+                slate=slate,
+                market_date=str(slate.get("market_date") or ""),
+                production=True,
+            )
+            authoritative_slate_valid = True
+        except (TypeError, ValueError):
+            # Keep the message useful while failing closed: caller-provided
+            # signals and count overrides cannot replace a broken authority.
+            authoritative_publication_rows = []
+    if authoritative_slate_valid:
+        slate_candidates = [
+            row for row in authoritative_publication_rows if _telegram_candidate_allowed(row)
+        ]
+    elif has_authoritative_slate:
+        slate_candidates = []
+    elif isinstance(frozen_publication_rows, list):
         slate_candidates = [
             row for row in frozen_publication_rows if _telegram_candidate_allowed(row)
         ]
-    elif has_authoritative_slate:
-        slate_candidates = [
-            row for row in slate.get("rows") or [] if _telegram_candidate_allowed(row)
-        ]
     else:
         slate_candidates = candidates[:5]
-    raw_published_count = (
-        published_count
-        if published_count is not None
-        else slate.get("published_count")
-    )
-    raw_target_count = target_count if target_count is not None else slate.get("target_count")
+    if has_authoritative_slate:
+        # Counts are immutable slate facts.  Ignore all caller overrides once
+        # a full artifact is present, including on a failed validation path.
+        raw_published_count = (
+            slate.get("published_count") if authoritative_slate_valid else 0
+        )
+        raw_target_count = slate.get("target_count") if authoritative_slate_valid else 0
+    else:
+        raw_published_count = (
+            published_count
+            if published_count is not None
+            else slate.get("published_count")
+        )
+        raw_target_count = (
+            target_count if target_count is not None else slate.get("target_count")
+        )
     slate_published_count = (
         _nonnegative_count(raw_published_count, len(slate_candidates))
         if raw_published_count is not None
@@ -295,7 +337,9 @@ def format_alpha_watch(
         else max(slate_published_count, len(slate_candidates))
     )
     shortfall_reason = str(
-        slate_shortfall_reason
+        slate.get("slate_shortfall_reason")
+        if has_authoritative_slate and authoritative_slate_valid
+        else slate_shortfall_reason
         if slate_shortfall_reason is not None
         else slate.get("slate_shortfall_reason") or ""
     ).strip()
@@ -303,7 +347,9 @@ def format_alpha_watch(
     promotion_candidates: list[dict[str, Any]] = []
     seen_promotion_tickers: set[str] = set()
     promotion_source = (
-        slate_candidates
+        authoritative_publication_rows
+        if authoritative_slate_valid
+        else slate_candidates
         if has_authoritative_slate
         else [*slate_candidates, *candidates]
     )
@@ -312,11 +358,22 @@ def format_alpha_watch(
         if ticker and ticker not in seen_promotion_tickers:
             promotion_candidates.append(row)
             seen_promotion_tickers.add(ticker)
-    explicit_publication = any(
+    explicit_publication = has_authoritative_slate or any(
         "publication_tier" in row for row in promotion_candidates
     )
-    if explicit_publication:
-        official_candidates = official_publication_rows(promotion_candidates, limit=3)
+    if authoritative_slate_valid:
+        official_candidates = official_publication_rows(
+            authoritative_publication_rows,
+            slate=slate,
+            production=True,
+            limit=3,
+        )
+    elif has_authoritative_slate:
+        official_candidates = []
+    elif explicit_publication:
+        # Tier 2/3 is not an authority.  Without a validated frozen slate the
+        # formatter cannot publish an official candidate.
+        official_candidates = []
     else:
         official_candidates = [
             row
@@ -857,6 +914,8 @@ def _telegram_candidate_allowed(row: dict[str, Any]) -> bool:
     if row.get("broker_execution_enabled") is True or str(
         row.get("broker_execution_enabled") or ""
     ).strip().lower() in {"1", "true", "yes", "y"}:
+        return False
+    if row.get("missing_truth_is_zero") is True:
         return False
     execution = str(row.get("broker_execution") or "").strip().lower()
     if execution not in {"", "disabled"}:

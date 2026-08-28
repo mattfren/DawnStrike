@@ -23,6 +23,10 @@ EASTERN = ZoneInfo("America/New_York")
 RANKED_RESEARCH_SLATE_V1 = "dawnstrike.luna.ranked_research_slate.v1"
 RANKED_RESEARCH_SLATE_V2 = "dawnstrike.luna.ranked_research_slate.v2"
 _DEFAULT_ENRICHMENT_MAX_AGE_SECONDS = 1_200
+# The freshness window is a safety boundary, not a presentation field.  A
+# producer may use a shorter configured window, but no untrusted row can
+# widen the production default beyond this cap.
+_MIN_ENRICHMENT_MAX_AGE_SECONDS = 60
 
 _RECEIPT_METADATA_FIELDS = (
     "receipt_id",
@@ -149,6 +153,7 @@ def build_ranked_research_slate(
     scan_id: str | None = None,
     canonical_member_ids: Iterable[str] | None = None,
     require_safety: bool = False,
+    enrichment_max_age_seconds: int | None = None,
     coverage_status: str = "",
     lane_statuses: dict[str, Any] | None = None,
     coverage_limitations: Iterable[str] | None = None,
@@ -278,7 +283,11 @@ def build_ranked_research_slate(
         "publication_tier": TIER1 if selected else None,
         "research_only": True,
         "broker_execution": "disabled",
+        "broker_execution_enabled": False,
         "missing_truth_is_zero": False,
+        "enrichment_max_age_seconds": _bounded_enrichment_max_age_seconds(
+            enrichment_max_age_seconds
+        ),
         "require_safety": bool(require_safety),
     }
     payload["content_hash_sha256"] = _slate_content_hash(payload)
@@ -296,6 +305,17 @@ def apply_publication_semantics(
 ) -> list[dict[str, Any]]:
     """Annotate rows with Tier 1/2/3 fields without changing legacy classification."""
 
+    if require_watcher_proof and slate is not None:
+        try:
+            validate_ranked_research_slate(
+                slate,
+                market_date=str(slate.get("market_date") or ""),
+                production=True,
+            )
+        except (TypeError, ValueError):
+            # A production caller must never derive publication semantics from
+            # a stale, legacy, or contradictory frozen artifact.
+            return []
     source = [dict(row) for row in (rows or [])]
     slate_rows = list((slate or {}).get("rows") or [])
     slate_by_symbol = {str(row.get("ticker") or "").upper(): row for row in slate_rows}
@@ -377,6 +397,11 @@ def apply_publication_semantics(
             assert slate_row is not None
             enriched["research_rank"] = slate_row.get("research_rank")
             enriched["research_selection_id"] = slate_row.get("research_selection_id")
+            # Re-bind the immutable source identity after stripping all
+            # caller-supplied publication annotations above.
+            enriched["research_source_signal_id"] = slate_row.get(
+                "research_source_signal_id"
+            )
             enriched["publication_tier"] = TIER1
             enriched["entry_state"] = "RESEARCH_ONLY"
             row_ceiling_block = _row_promotion_limited(row, coverage_payload)
@@ -444,6 +469,7 @@ def _matches_synthesized_frozen_source(
         "research_only",
         "broker_execution",
         "broker_execution_enabled",
+        "missing_truth_is_zero",
         "scan_id",
         "research_source_scan_id",
         "upstream_scan_id",
@@ -478,6 +504,8 @@ def official_publication_rows(
     rows: Iterable[dict[str, Any]] | None,
     *,
     limit: int = 3,
+    slate: dict[str, Any] | None = None,
+    production: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the exact frozen Tier 2/3 rows represented as official plans.
 
@@ -486,9 +514,16 @@ def official_publication_rows(
     was absent from the immutable slate or revive an empty frozen cohort.
     """
 
+    source_rows = [dict(row) for row in (rows or [])]
+    if slate is not None:
+        source_rows = validate_frozen_publication_rows(
+            source_rows,
+            slate=slate,
+            production=production,
+        )
     selected: list[dict[str, Any]] = []
     seen_tickers: set[str] = set()
-    for source in rows or []:
+    for source in source_rows:
         row = dict(source)
         ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
         if (
@@ -512,10 +547,97 @@ def official_publication_rows(
     return selected
 
 
+_PUBLICATION_MUTABLE_FIELDS = frozenset(
+    {
+        "entry_state",
+        "execution_cost_status",
+        "plan_qualification_status",
+        "publication_tier",
+    }
+)
+
+
+def validate_frozen_publication_rows(
+    publication_rows: Iterable[dict[str, Any]] | None,
+    *,
+    slate: dict[str, Any],
+    market_date: str | None = None,
+    production: bool = False,
+) -> list[dict[str, Any]]:
+    """Bind publication rows to one exact frozen slate cohort.
+
+    Publication annotations are derived at the publication seam and are the
+    only fields permitted to differ from the immutable Tier 1 source rows.
+    Every identity, source, receipt, and count is therefore checked before a
+    Telegram/official selector can consume caller-provided rows.
+    """
+
+    if not isinstance(slate, dict):
+        raise ValueError("frozen ranked research slate is not an object")
+    validate_ranked_research_slate(
+        slate,
+        market_date=market_date or str(slate.get("market_date") or ""),
+        production=production,
+    )
+    values = [dict(row) for row in (publication_rows or [])]
+    frozen_rows = list(slate.get("rows") or [])
+    expected_ids = [str(row.get("research_selection_id") or "") for row in frozen_rows]
+    actual_ids = [str(row.get("research_selection_id") or "") for row in values]
+    if len(values) != int(slate.get("published_count") or 0):
+        raise ValueError("publication rows do not match frozen slate count")
+    if actual_ids != expected_ids:
+        raise ValueError("publication rows do not match frozen slate selection IDs")
+    if [str(row.get("ticker") or "").upper() for row in values] != list(
+        slate.get("symbols") or []
+    ):
+        raise ValueError("publication rows do not match frozen slate symbols")
+    for actual, frozen in zip(values, frozen_rows, strict=True):
+        if not isinstance(actual, dict):
+            raise ValueError("publication row is not an object")
+        if any(
+            actual.get(field) != frozen.get(field)
+            for field in (
+                "research_selection_id",
+                "research_rank",
+                "research_source_signal_id",
+                "research_row_hash_sha256",
+                "scan_id",
+                "research_source_scan_id",
+                "upstream_scan_id",
+                "ticker",
+            )
+        ):
+            raise ValueError("publication row identity does not match frozen slate")
+        if (
+            actual.get("research_only") is not True
+            or actual.get("broker_execution") != "disabled"
+            or actual.get("broker_execution_enabled") is True
+            or actual.get("missing_truth_is_zero") is True
+        ):
+            raise ValueError("publication row safety flags are invalid")
+        actual_source = {
+            key: value
+            for key, value in actual.items()
+            if key not in _PUBLICATION_MUTABLE_FIELDS
+        }
+        frozen_source = {
+            key: value
+            for key, value in frozen.items()
+            if key not in _PUBLICATION_MUTABLE_FIELDS
+        }
+        if actual_source != frozen_source:
+            raise ValueError("publication row source differs from frozen slate")
+    return values
+
+
 def _publication_execution_safe(row: dict[str, Any]) -> bool:
     """Return false for explicit live/broker/research rows at the selector seam."""
 
-    if row.get("research_only") is False or _truthy(row.get("broker_execution_enabled")):
+    if (
+        row.get("research_only") is False
+        or _truthy(row.get("broker_execution_enabled"))
+        or row.get("missing_truth_is_zero") is True
+    ):
         return False
     execution = str(row.get("broker_execution") or "").strip().lower()
     return execution in {"", "disabled"}
@@ -577,11 +699,16 @@ def persist_ranked_research_slate(slate: dict[str, Any], output_path: str | Path
 
 
 def validate_ranked_research_slate(
-    slate: dict[str, Any], *, market_date: str | None = None
+    slate: dict[str, Any],
+    *,
+    market_date: str | None = None,
+    production: bool = False,
 ) -> dict[str, Any]:
     """Verify a frozen slate before it is reused by a retry or monitor."""
 
     schema_version = str(slate.get("schema_version") or "")
+    if production and schema_version != RANKED_RESEARCH_SLATE_V2:
+        raise ValueError("production ranked research slate requires schema v2")
     if schema_version not in {RANKED_RESEARCH_SLATE_V1, RANKED_RESEARCH_SLATE_V2}:
         raise ValueError("ranked research slate schema is invalid")
     if not str(slate.get("scan_id") or "").strip():
@@ -598,10 +725,26 @@ def validate_ranked_research_slate(
         raise ValueError("ranked research slate market date is invalid")
     if slate.get("research_only") is not True or slate.get("broker_execution") != "disabled":
         raise ValueError("ranked research slate execution flags are invalid")
+    if slate.get("broker_execution_enabled") is True:
+        raise ValueError("ranked research slate execution flags are invalid")
+    if slate.get("missing_truth_is_zero") is True:
+        raise ValueError("ranked research slate missing-truth flag is invalid")
+    if production and (
+        slate.get("broker_execution_enabled") is not False
+        or slate.get("missing_truth_is_zero") is not False
+    ):
+        raise ValueError("production ranked research slate safety flags are invalid")
     if schema_version == RANKED_RESEARCH_SLATE_V2 and not isinstance(
         slate.get("require_safety"), bool
     ):
         raise ValueError("ranked research slate safety contract is invalid")
+    if production and slate.get("require_safety") is not True:
+        raise ValueError("production ranked research slate requires safety")
+    if schema_version == RANKED_RESEARCH_SLATE_V2:
+        try:
+            _bounded_enrichment_max_age_seconds(slate.get("enrichment_max_age_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ranked research slate freshness contract is invalid") from exc
     if not str(slate.get("coverage_status") or "").strip() or not isinstance(
         slate.get("lane_statuses"), dict
     ):
@@ -625,6 +768,8 @@ def validate_ranked_research_slate(
         or published_count > target_count
     ):
         raise ValueError("ranked research slate count is invalid")
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError("ranked research slate row is not an object")
     symbols = [str(row.get("ticker") or "").upper() for row in rows]
     if symbols != list(slate.get("symbols") or []) or len(set(symbols)) != len(symbols):
         raise ValueError("ranked research slate symbols are inconsistent")
@@ -647,16 +792,24 @@ def validate_ranked_research_slate(
                 row,
                 slate_market_date=slate_market_date,
                 generated_at=str(slate.get("generated_at") or ""),
+                max_age_seconds=slate.get("enrichment_max_age_seconds"),
             ):
                 raise ValueError("ranked research slate row freshness is not authenticated")
         if (
             row.get("research_only") is not True
             or row.get("broker_execution") != "disabled"
+            or row.get("broker_execution_enabled") is True
+            or row.get("missing_truth_is_zero") is True
             or row.get("publication_tier") != TIER1
             or row.get("entry_state") != "RESEARCH_ONLY"
             or int(row.get("research_rank") or 0) != rank
         ):
             raise ValueError("ranked research slate row semantics are invalid")
+        if production and (
+            row.get("broker_execution_enabled") is not False
+            or row.get("missing_truth_is_zero") is not False
+        ):
+            raise ValueError("production ranked research slate row safety flags are invalid")
         row_hash = str(row.get("research_row_hash_sha256") or "")
         row_payload = {
             key: value for key, value in row.items() if key != "research_row_hash_sha256"
@@ -681,6 +834,7 @@ def validated_frozen_selection_signal(
     *,
     market_date: str,
     allowed_cohorts: Iterable[str] = ("research_radar", "official_telegram"),
+    production: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve one exact cross-scan selection from its immutable slate lineage."""
 
@@ -695,7 +849,11 @@ def validated_frozen_selection_signal(
     ):
         return None
     try:
-        validate_ranked_research_slate(slate, market_date=market_date)
+        validate_ranked_research_slate(
+            slate,
+            market_date=market_date,
+            production=production,
+        )
     except (TypeError, ValueError):
         return None
     allowed = {str(value) for value in allowed_cohorts}
@@ -839,6 +997,7 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
             not in {"", "disabled"}
         )
         or row.get("research_only") is False
+        or row.get("missing_truth_is_zero") is True
     ):
         return False
     for key in (
@@ -1935,6 +2094,7 @@ def _annotate(
     output["research_only"] = True
     output["broker_execution"] = "disabled"
     output["broker_execution_enabled"] = False
+    output["missing_truth_is_zero"] = False
     output["research_row_hash_sha256"] = hashlib.sha256(
         json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
@@ -1974,7 +2134,11 @@ def _current_row_scan_identity_compatible(
 
 
 def _production_observation_freshness_valid(
-    row: dict[str, Any], *, slate_market_date: str, generated_at: str
+    row: dict[str, Any],
+    *,
+    slate_market_date: str,
+    generated_at: str,
+    max_age_seconds: int | None = None,
 ) -> bool:
     """Require an authenticated, current observation for production slates.
 
@@ -2021,7 +2185,7 @@ def _production_observation_freshness_valid(
             source_timestamp = _parse_watcher_time(
                 row.get("source_timestamp") or row.get("as_of_timestamp")
             )
-            max_age = int(receipt.get("max_age_seconds") or 0)
+            max_age = _bounded_enrichment_max_age_seconds(receipt.get("max_age_seconds"))
         except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
             return False
         if observed is None or source_timestamp is None or max_age <= 0:
@@ -2068,12 +2232,11 @@ def _production_observation_freshness_valid(
         )
         if requested_at is None or requested_at > generated:
             return False
-        max_age_value = (
-            row.get("enrichment_max_age_seconds")
-            or row.get("premarket_enrichment_max_age_seconds")
-            or _DEFAULT_ENRICHMENT_MAX_AGE_SECONDS
-        )
-        max_age = int(max_age_value)
+        # Row-level max-age fields are untrusted enrichment metadata.  Use the
+        # immutable v2 slate producer value when present and otherwise the
+        # bounded production default; a stale hostile row cannot widen this
+        # window by changing ``enrichment_max_age_seconds``.
+        max_age = _bounded_enrichment_max_age_seconds(max_age_seconds)
         return (
             observation.is_usable
             and _alpaca_raw_binding_valid(observation, requested_at=requested_at)
@@ -2103,6 +2266,25 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _bounded_enrichment_max_age_seconds(value: Any = None) -> int:
+    """Return the only freshness window accepted at a production boundary.
+
+    The default is deliberately bounded.  An explicit producer value may be
+    shorter, but malformed or over-cap values are rejected rather than
+    treated as permission to accept older market data.
+    """
+
+    if value is None or value == "":
+        return _DEFAULT_ENRICHMENT_MAX_AGE_SECONDS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("enrichment max age must be an integer") from exc
+    if not _MIN_ENRICHMENT_MAX_AGE_SECONDS <= parsed <= _DEFAULT_ENRICHMENT_MAX_AGE_SECONDS:
+        raise ValueError("enrichment max age is outside the bounded producer window")
+    return parsed
 
 
 def _slate_content_hash(slate: dict[str, Any]) -> str:
