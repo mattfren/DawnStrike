@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -615,6 +616,13 @@ def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkey
     ])
 
     status = SQLiteScanStore(db_path).load_alpha_signals(limit=10)
+    store = SQLiteScanStore(db_path)
+    slate = json.loads((out_dir / "ranked_research_slate.json").read_text(encoding="utf-8"))
+    notification = next(
+        item
+        for item in store.load_recent_notifications()
+        if item["event_key"].endswith(":alpha_no_trade:console")
+    )
     assert exit_code == 0
     assert status_code == 0
     assert report_code == 0
@@ -622,3 +630,10 @@ def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkey
     assert all("buy" not in str(row).lower() and "sell" not in str(row).lower() for row in status)
     assert (out_dir / "alpha_cycle.json").exists()
     assert (out_dir / "report" / "alpha_report.json").exists()
+    assert (
+        f"Research slate: {slate['published_count']} of {slate['target_count']} shown"
+        in notification["body"]
+    )
+    assert notification["body"].count("Slate shortfall reason:") == (
+        1 if slate["slate_shortfall_reason"] else 0
+    )

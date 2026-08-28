@@ -21,6 +21,22 @@ TIER3 = "ALERTABLE_PAPER_ENTRY"
 WAITING_EXECUTION_COSTS = "WAITING_EXECUTION_COSTS"
 EASTERN = ZoneInfo("America/New_York")
 
+_RECEIPT_METADATA_FIELDS = (
+    "receipt_id",
+    "receipt_hash",
+    "receipt_hash_sha256",
+    "strategy_receipt_status",
+    "decision_receipt_status",
+    "receipt_status",
+    "strategy_receipt_gap",
+    "strategy_receipt_tier",
+    "strategy_receipt_research_pick_eligible",
+    "strategy_receipt_research_eligible",
+    "strategy_receipt_paper_entry_eligible",
+    "strategy_receipt_construction_status",
+    "strategy_receipt_persistence_status",
+)
+
 
 class AuthenticatedStrategyReceiptResolver:
     """Resolve only receipts loaded from the immutable strategy receipt store.
@@ -150,14 +166,18 @@ def build_ranked_research_slate(
         seen: set[str] = set()
         for row in sorted(source, key=_rank_key, reverse=True):
             ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+            receipt_research_admissible, receipt_blocker = _receipt_research_admissibility(row)
             if (
                 not ticker
                 or ticker in seen
                 or not _row_lane_eligible(row, lane_statuses)
                 or not _safe_for_research(row, require_safety=require_safety)
+                or not receipt_research_admissible
             ):
                 if ticker and require_safety:
                     safety_blockers.extend(_safety_blockers(row))
+                    if receipt_blocker:
+                        safety_blockers.append(receipt_blocker)
                 continue
             seen.add(ticker)
             selected.append(_annotate(row, rank=len(selected) + 1, tier=TIER1))
@@ -305,8 +325,10 @@ def apply_publication_semantics(
             )
             or (not immutable_frozen_source and row == slate_row)
         )
-        selected_and_safe = exact_frozen_source and _safe_for_research(
-            row, require_safety=require_watcher_proof
+        selected_and_safe = (
+            exact_frozen_source
+            and _safe_for_research(row, require_safety=require_watcher_proof)
+            and _receipt_research_admissibility(row)[0]
         )
         if selected_and_safe:
             assert slate_row is not None
@@ -549,6 +571,8 @@ def validate_ranked_research_slate(
             raise ValueError("ranked research slate row is not an object")
         if not _row_lane_eligible(row, slate.get("lane_statuses")):
             raise ValueError("ranked research slate row lane is not eligible")
+        if not _receipt_research_admissibility(row)[0]:
+            raise ValueError("ranked research slate row receipt is not research eligible")
         if (
             row.get("research_only") is not True
             or row.get("broker_execution") != "disabled"
@@ -649,6 +673,80 @@ def validated_frozen_selection_signal(
     return dict(frozen_signal)
 
 
+def _receipt_research_admissibility(row: dict[str, Any]) -> tuple[bool, str]:
+    """Return the trusted research disposition for a present strategy receipt.
+
+    Shadow mode intentionally preserves the legacy disposition for rows that
+    have no receipt at all.  Once a row carries receipt metadata, however, it
+    is no longer an uninstrumented legacy row: a malformed envelope or a
+    present receipt that rejects research must be a hard exclusion.  The
+    envelope validator binds the nested payload hash and every row-level
+    identity/eligibility field before the disposition is consulted.  This is
+    a self-consistent row-envelope check, not persisted authentication;
+    ``AuthenticatedStrategyReceiptResolver`` remains the persistence-backed
+    trust boundary for Tier 2/3 promotion.
+    """
+
+    payload = row.get("strategy_decision_receipt")
+    receipt_present = (
+        "strategy_decision_receipt" in row
+        or _truthy(row.get("strategy_receipt_enabled"))
+    )
+    if not receipt_present:
+        receipt_present = any(
+            row.get(field) is not None and row.get(field) != ""
+            for field in _RECEIPT_METADATA_FIELDS
+        )
+    if not receipt_present:
+        # Instrumented rows can be flattened by persistence/serialization
+        # layers.  Any receipt-prefixed marker still means a receipt was
+        # attempted; never reinterpret a partially stripped envelope as the
+        # legacy no-receipt path (including explicit false values).
+        receipt_present = any(
+            str(field).startswith("strategy_receipt_")
+            and value is not None
+            and value != ""
+            for field, value in row.items()
+        )
+    if not receipt_present:
+        # A missing receipt remains a legacy research-only row by contract;
+        # it cannot be promoted later without the separate authenticated
+        # resolver used by the paper-plan boundary.
+        return True, ""
+    if not isinstance(payload, dict):
+        return False, "strategy_receipt_unavailable_or_unauthenticated"
+
+    from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
+
+    envelope_row = row
+    # ``strategy_receipt_research_eligible`` was used by an early shadow
+    # integration. Accept it only as a spelling alias while retaining the
+    # canonical envelope validator and hash/payload binding.
+    if (
+        "strategy_receipt_research_pick_eligible" not in row
+        and "strategy_receipt_research_eligible" in row
+    ):
+        envelope_row = dict(row)
+        envelope_row["strategy_receipt_research_pick_eligible"] = row[
+            "strategy_receipt_research_eligible"
+        ]
+    try:
+        envelope_valid = validate_strategy_receipt_envelope(envelope_row)
+    except (KeyError, TypeError, ValueError):
+        envelope_valid = False
+    if not envelope_valid:
+        return False, "strategy_receipt_unavailable_or_unauthenticated"
+    alias_eligibility = row.get("strategy_receipt_research_eligible")
+    if (
+        alias_eligibility is not None
+        and alias_eligibility != payload.get("research_pick_eligible")
+    ):
+        return False, "strategy_receipt_eligibility_binding_mismatch"
+    if payload.get("research_pick_eligible") is not True:
+        return False, "strategy_receipt_research_ineligible"
+    return True, ""
+
+
 def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> bool:
     ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     if not ticker or ticker == "NO_TRADE":
@@ -688,6 +786,8 @@ def _safe_for_research(row: dict[str, Any], *, require_safety: bool = False) -> 
             return False
         if isinstance(value, str) and value.strip():
             return False
+    if not _receipt_research_admissibility(row)[0]:
+        return False
     if require_safety and _safety_blockers(row):
         return False
     return True

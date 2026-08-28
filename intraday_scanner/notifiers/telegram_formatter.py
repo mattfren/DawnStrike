@@ -252,6 +252,9 @@ def format_alpha_watch(
     blocked_signals: list[dict[str, Any]] | None = None,
     timezone: str = "America/Chicago",
     generated_at: str | datetime | None = None,
+    target_count: int | None = None,
+    published_count: int | None = None,
+    slate_shortfall_reason: str | None = None,
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
 ) -> str:
     source_summary = dict(source_summary or {})
@@ -271,12 +274,31 @@ def format_alpha_watch(
         ]
     else:
         slate_candidates = candidates[:5]
-    published_count = slate.get("published_count")
-    slate_total = (
-        int(published_count)
+    raw_published_count = (
+        published_count
         if published_count is not None
+        else slate.get("published_count")
+    )
+    raw_target_count = target_count if target_count is not None else slate.get("target_count")
+    slate_published_count = (
+        _nonnegative_count(raw_published_count, len(slate_candidates))
+        if raw_published_count is not None
         else len(slate_candidates)
     )
+    slate_total = (
+        max(
+            _nonnegative_count(raw_target_count, slate_published_count),
+            slate_published_count,
+            len(slate_candidates),
+        )
+        if raw_target_count is not None
+        else max(slate_published_count, len(slate_candidates))
+    )
+    shortfall_reason = str(
+        slate_shortfall_reason
+        if slate_shortfall_reason is not None
+        else slate.get("slate_shortfall_reason") or ""
+    ).strip()
     slate_shown = len(slate_candidates)
     promotion_candidates: list[dict[str, Any]] = []
     seen_promotion_tickers: set[str] = set()
@@ -325,10 +347,16 @@ def format_alpha_watch(
         ),
         "",
         f"Research slate: {slate_shown} of {slate_total} shown",
-        "",
-        official_heading,
-        "(pending fresh quote, session, cost, chase, and portfolio checks)",
     ]
+    if shortfall_reason:
+        lines.append(f"Slate shortfall reason: {_truncate(shortfall_reason, 180)}")
+    lines.extend(
+        [
+            "",
+            official_heading,
+            "(pending fresh quote, session, cost, chase, and portfolio checks)",
+        ]
+    )
     if not official_candidates:
         lines.append("- None")
     for index, row in enumerate(official_candidates, start=1):
@@ -434,33 +462,59 @@ def format_alpha_no_trade(
     next_action: str,
     research_signals: list[dict[str, Any]] | None = None,
     research_total: int | None = None,
+    target_count: int | None = None,
+    published_count: int | None = None,
+    slate_shortfall_reason: str | None = None,
     max_chars: int = DEFAULT_ALERT_MAX_CHARS,
 ) -> str:
     # The immutable daily slate targets five distinct research names.  Show
     # all five when Telegram length permits so a no-official-plan day is not
     # mistaken for a no-research-candidate day.
     radar = list(research_signals or [])[:5]
-    total = int(research_total if research_total is not None else len(research_signals or []))
+    raw_published_count = (
+        published_count if published_count is not None else research_total
+    )
+    slate_published_count = (
+        _nonnegative_count(raw_published_count, len(research_signals or []))
+        if raw_published_count is not None
+        else len(research_signals or [])
+    )
+    total = (
+        max(
+            _nonnegative_count(target_count, slate_published_count),
+            slate_published_count,
+            len(radar),
+        )
+        if target_count is not None
+        else max(slate_published_count, len(radar))
+    )
+    shortfall_reason = str(slate_shortfall_reason or "").strip()
     lines = [
         "📡 Dawnstrike Alpha Check",
         "No clean edge today.",
         "",
         f"Research slate: {len(radar)} of {total} shown",
-        "",
-        (
-            "OFFICIAL PAPER CANDIDATES"
-            if any(
-                str(row.get("publication_tier") or "")
-                in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
-                for row in radar
-            )
-            or not any("publication_tier" in row for row in radar)
-            else "PAPER PLAN QUALIFIED"
-        ),
-        "- None",
-        "",
-        "RESEARCH WATCHLIST / RADAR — CONDITIONAL PAPER STUDY",
     ]
+    if shortfall_reason:
+        lines.append(f"Slate shortfall reason: {_truncate(shortfall_reason, 180)}")
+    lines.extend(
+        [
+            "",
+            (
+                "OFFICIAL PAPER CANDIDATES"
+                if any(
+                    str(row.get("publication_tier") or "")
+                    in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+                    for row in radar
+                )
+                or not any("publication_tier" in row for row in radar)
+                else "PAPER PLAN QUALIFIED"
+            ),
+            "- None",
+            "",
+            "RESEARCH WATCHLIST / RADAR — CONDITIONAL PAPER STUDY",
+        ]
+    )
     if not radar:
         lines.append(
             "- No safe/current Tier 1 research rows were available: "
@@ -785,6 +839,13 @@ def _number(value: Any) -> float | None:
         return float(text) * multiplier
     except ValueError:
         return None
+
+
+def _nonnegative_count(value: Any, default: int) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(default), 0)
 
 
 def _telegram_candidate_allowed(row: dict[str, Any]) -> bool:

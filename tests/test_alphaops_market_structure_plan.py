@@ -650,7 +650,7 @@ def test_strict_plan_without_provider_raw_artifact_stays_tier_one(tmp_path, monk
                 market_date="2026-08-26",
             ),
         )[0]["publication_tier"]
-        == TIER1
+        is None
     )
 
 

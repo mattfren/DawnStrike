@@ -86,6 +86,14 @@ def test_backdated_source_failure_uses_explicit_cycle_timestamp_everywhere(
     assert deliveries[0]["scan_id"] == scan_id
     assert deliveries[0]["selected_at"] == cycle_timestamp
     assert deliveries[0]["attempted_at"] == "2026-08-27T23:59:59+00:00"
+    notification = next(
+        item
+        for item in store.load_recent_notifications(limit=10)
+        if item["event_key"].endswith(":alpha_no_trade:console")
+    )
+    assert "Research slate: 0 of 5 shown" in notification["body"]
+    assert notification["body"].count("Slate shortfall reason:") == 1
+    assert slate["slate_shortfall_reason"] in notification["body"]
 
 
 def test_source_failure_uses_utc_date_at_rollover_not_hostile_wall_clock(

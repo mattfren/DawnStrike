@@ -1,12 +1,20 @@
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
+from intraday_scanner.config import load_config
+from intraday_scanner.decisioning.condition_registry import registry_for_strategy
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_no_trade,
     format_alpha_watch,
 )
+from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
@@ -15,12 +23,16 @@ from intraday_scanner.services.luna_core_universe_service import (
 )
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
+    AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
     official_publication_rows,
+    persist_ranked_research_slate,
     publication_counts,
+    validate_ranked_research_slate,
 )
 from intraday_scanner.services.signal_review_service import monitor_alpha_signals
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def _manifest(
@@ -69,6 +81,57 @@ def test_core_union_dedupes_symbols_and_keeps_index_memberships():
     assert contract["content_hash_sha256"]
 
 
+def _receipted_signal(
+    *,
+    ticker: str,
+    reward_risk_ratio: float,
+    stop: float,
+    target: float,
+) -> dict:
+    row = {
+        "ticker": ticker,
+        "strategy_id": "ts_momentum_sma_atr",
+        "strategy_version": "v1",
+        "market_date": "2026-08-26",
+        "entry_watch_level": 10.0,
+        "breakout_trigger": 10.0,
+        "invalidation": stop,
+        "target_1": target,
+        "reward_risk_ratio": reward_risk_ratio,
+        "alpha_score": 90,
+        "source_count": 1,
+        "source_quality_status": "VERIFIED",
+        "freshness_status": "FRESH",
+        "halt_status": "CLEAR",
+        "sec_risk_status": "CLEAR",
+        "corporate_action_status": "CLEAR",
+        "input_status": "VERIFIED",
+        "evidence_status": "VERIFIED",
+    }
+    row.update({spec.condition_id: True for spec in registry_for_strategy(row["strategy_id"])})
+    return row
+
+
+def _persist_receipt(row: dict, tmp_path: Path, monkeypatch) -> SQLiteScanStore:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "a" * 40)
+    store = SQLiteScanStore(tmp_path / f"{row['ticker'].lower()}.sqlite")
+    _apply_strategy_decision_receipts(
+        [row],
+        store=store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+            alert_score_threshold=0,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "fixture-source"},
+    )
+    row["strategy_receipt_research_eligible"] = row[
+        "strategy_receipt_research_pick_eligible"
+    ]
+    return store
+
+
 def test_core_union_requires_both_complete_indexes_and_stale_is_unavailable():
     absent = build_core_universe_contract(None, observed_at="2026-08-26T13:00:00Z")
     stale = build_core_universe_contract(
@@ -101,6 +164,230 @@ def test_slate_publishes_five_distinct_safe_episodes_and_shortfall():
     shortfall = build_ranked_research_slate(rows[:2])
     assert shortfall["published_count"] == 2
     assert shortfall["slate_shortfall_reason"]
+
+
+def test_shadow_negative_receipt_is_excluded_before_tier_one_even_with_weak_geometry(
+    tmp_path, monkeypatch
+):
+    row = _receipted_signal(
+        ticker="WEAKRR",
+        reward_risk_ratio=0.25,
+        stop=7.0,
+        target=7.75,
+    )
+    store = _persist_receipt(row, tmp_path, monkeypatch)
+
+    assert row["strategy_receipt_shadow_only"] is True
+    assert row["strategy_receipt_research_pick_eligible"] is False
+    assert row["strategy_receipt_tier"] == "BLOCKED_SAFETY"
+    assert row["reward_risk_ratio"] == 0.25
+    assert (row["entry_watch_level"] - row["invalidation"]) / row["entry_watch_level"] == 0.3
+    assert validate_strategy_receipt_envelope(row)
+    assert store.load_strategy_decision_receipts(market_date="2026-08-26")
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-weakrr",
+        require_safety=True,
+    )
+
+    assert slate["symbols"] == []
+    assert slate["published_count"] == 0
+    assert "strategy_receipt_research_ineligible" in slate["safety_blockers"]
+
+
+def test_malformed_present_receipt_metadata_is_fail_closed_for_research_slate():
+    row = _receipted_signal(
+        ticker="MALFORMED",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    row.update(
+        {
+            "strategy_receipt_enabled": True,
+            "strategy_receipt_shadow_only": True,
+            "strategy_receipt_construction_status": "COMPLETE",
+            "strategy_receipt_persistence_status": "PERSISTED",
+            "strategy_receipt_research_pick_eligible": False,
+            "strategy_receipt_research_eligible": False,
+            "strategy_receipt_paper_entry_eligible": False,
+            "strategy_receipt_tier": "BLOCKED_SAFETY",
+            "receipt_id": "sdr-malformed",
+        }
+    )
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-malformed",
+        require_safety=True,
+    )
+
+    assert slate["symbols"] == []
+    assert "strategy_receipt_unavailable_or_unauthenticated" in slate["safety_blockers"]
+
+
+def test_non_mapping_receipt_payload_is_fail_closed_for_research_slate():
+    row = _receipted_signal(
+        ticker="NONMAPPING",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    row["strategy_decision_receipt"] = []
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-nonmapping",
+        require_safety=True,
+    )
+
+    assert slate["symbols"] == []
+    assert "strategy_receipt_unavailable_or_unauthenticated" in slate["safety_blockers"]
+
+
+def test_partial_flattened_receipt_markers_cannot_revert_to_legacy_tier_one():
+    row = _receipted_signal(
+        ticker="PARTIAL",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    row.update(
+        {
+            "receipt_id": "sdr-partial",
+            "receipt_hash_sha256": "a" * 64,
+            "strategy_receipt_status": "COMPLETE",
+        }
+    )
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-partial",
+        require_safety=True,
+    )
+
+    assert slate["symbols"] == []
+    assert "strategy_receipt_unavailable_or_unauthenticated" in slate["safety_blockers"]
+
+
+def test_flattened_receipt_prefix_marker_cannot_revert_to_legacy_tier_one():
+    row = _receipted_signal(
+        ticker="PREFIXONLY",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    # A serializer may retain a marker outside the common flattened fields;
+    # even an explicit false value means the receipt path was attempted.
+    row["strategy_receipt_shadow_only"] = False
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-prefix-only",
+        require_safety=True,
+    )
+
+    assert slate["symbols"] == []
+    assert "strategy_receipt_unavailable_or_unauthenticated" in slate["safety_blockers"]
+
+
+def test_positive_persisted_receipt_survives_frozen_slate_validation(tmp_path, monkeypatch):
+    row = _receipted_signal(
+        ticker="GOODRR",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    store = _persist_receipt(row, tmp_path, monkeypatch)
+
+    assert row["strategy_receipt_research_pick_eligible"] is True
+    assert validate_strategy_receipt_envelope(row)
+    slate = build_ranked_research_slate(
+        [row],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-goodrr",
+        require_safety=True,
+    )
+    slate_path = persist_ranked_research_slate(slate, tmp_path / "ranked_research_slate.json")
+    frozen = json.loads(slate_path.read_text(encoding="utf-8"))
+
+    validate_ranked_research_slate(frozen, market_date="2026-08-26")
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date="2026-08-26",
+        strategy_id="ts_momentum_sma_atr",
+    )
+    assert resolver.verify(row)
+    assert apply_publication_semantics(
+        [frozen["rows"][0]], slate=frozen
+    )[0]["publication_tier"] == TIER1
+
+    negative = deepcopy(frozen)
+    negative_row = negative["rows"][0]
+    negative_receipt = negative_row["strategy_decision_receipt"]
+    negative_receipt["research_pick_eligible"] = False
+    negative_row["strategy_receipt_research_pick_eligible"] = False
+    negative_row["strategy_receipt_research_eligible"] = False
+    receipt_payload = {
+        key: value
+        for key, value in negative_receipt.items()
+        if key not in {"receipt_hash_sha256", "receipt_id"}
+    }
+    receipt_hash = hashlib.sha256(canonical_json(receipt_payload).encode("utf-8")).hexdigest()
+    negative_receipt["receipt_hash_sha256"] = receipt_hash
+    negative_receipt["receipt_id"] = "sdr-" + receipt_hash[:24]
+    negative_row["receipt_hash_sha256"] = receipt_hash
+    negative_row["receipt_id"] = negative_receipt["receipt_id"]
+    row_payload = {
+        key: value for key, value in negative_row.items() if key != "research_row_hash_sha256"
+    }
+    negative_row["research_row_hash_sha256"] = hashlib.sha256(
+        json.dumps(row_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    slate_payload = {
+        key: value
+        for key, value in negative.items()
+        if key not in {"content_hash_sha256", "slate_id"}
+    }
+    negative["content_hash_sha256"] = hashlib.sha256(
+        json.dumps(slate_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    negative["slate_id"] = "luna-slate-" + negative["content_hash_sha256"][:24]
+
+    with pytest.raises(ValueError, match="receipt"):
+        validate_ranked_research_slate(negative, market_date="2026-08-26")
+
+
+def test_no_receipt_legacy_row_remains_research_only_tier_one():
+    slate = build_ranked_research_slate(
+        [{"ticker": "LEGACY", "alpha_score": 99}],
+        target=5,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-legacy",
+    )
+
+    assert slate["symbols"] == ["LEGACY"]
+    assert slate["rows"][0]["publication_tier"] == TIER1
+    validate_ranked_research_slate(slate, market_date="2026-08-26")
 
 
 def test_slate_target_zero_publishes_no_rows():
@@ -213,6 +500,48 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
     assert "Research slate: 1 of 1 shown" in text
 
 
+def test_alpha_watch_discloses_target_and_shortfall_once():
+    row = {
+        "ticker": "ONLYONE",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    reason = "one safe row survived the authoritative research gates"
+
+    text = format_alpha_watch(
+        signals=[row],
+        edge_label="research",
+        target_count=5,
+        published_count=1,
+        slate_shortfall_reason=reason,
+    )
+
+    assert "Research slate: 1 of 5 shown" in text
+    assert "Slate symbols (1/5): ONLYONE" in text
+    assert text.count("Slate shortfall reason:") == 1
+    assert reason in text
+
+
+def test_alpha_watch_clamps_target_below_published_count():
+    row = {
+        "ticker": "ONLYONE",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+
+    text = format_alpha_watch(
+        signals=[row],
+        edge_label="research",
+        target_count=0,
+        published_count=1,
+    )
+
+    assert "Research slate: 1 of 1 shown" in text
+    assert "Slate symbols (1/1): ONLYONE" in text
+
+
 def test_alpha_no_trade_shows_all_five_frozen_research_candidates():
     rows = [
         {
@@ -234,6 +563,50 @@ def test_alpha_no_trade_shows_all_five_frozen_research_candidates():
     assert "Research slate: 5 of 5 shown" in text
     for index in range(1, 6):
         assert f"RANK{index}" in text
+
+
+def test_alpha_no_trade_discloses_target_and_shortfall_once():
+    row = {
+        "ticker": "ONLYONE",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+    reason = "one safe row survived the authoritative research gates"
+
+    text = format_alpha_no_trade(
+        reason="No official paper plan qualified.",
+        next_action="Keep the research slate under observation.",
+        research_signals=[row],
+        target_count=5,
+        published_count=1,
+        slate_shortfall_reason=reason,
+    )
+
+    assert "Research slate: 1 of 5 shown" in text
+    assert "Slate symbols (1/5): ONLYONE" in text
+    assert text.count("Slate shortfall reason:") == 1
+    assert reason in text
+
+
+def test_alpha_no_trade_clamps_target_below_published_count():
+    row = {
+        "ticker": "ONLYONE",
+        "publication_tier": TIER1,
+        "research_only": True,
+        "broker_execution": "disabled",
+    }
+
+    text = format_alpha_no_trade(
+        reason="No official paper plan qualified.",
+        next_action="Wait.",
+        research_signals=[row],
+        target_count=0,
+        published_count=1,
+    )
+
+    assert "Research slate: 1 of 1 shown" in text
+    assert "Slate symbols (1/1): ONLYONE" in text
 
 
 def test_alpha_no_trade_length_limit_preserves_slate_and_research_only_footer():
@@ -340,7 +713,6 @@ def test_tier_semantics_and_research_monitor_label():
         "plan_qualified": True,
         "publication_tier": TIER1,
         "strategy_id": "alphaops_v4",
-        "strategy_receipt_status": "COMPLETE",
         "structural_plan_contract": plan,
         "after_cost_rr": 1.5,
     }
@@ -377,7 +749,6 @@ def test_live_fallback_ceiling_demotes_a_genuinely_qualified_plan_to_tier_one():
         "invalidation": 9,
         "target_1": 12,
         "strategy_id": "alphaops_v4",
-        "strategy_receipt_status": "COMPLETE",
         "structural_plan_contract": plan,
         "after_cost_rr": 1.5,
         "can_alert": True,
@@ -414,7 +785,7 @@ def test_receipt_hash_or_three_urls_cannot_stand_in_for_structural_plan():
         "after_cost_rr": 1.5,
     }
     slate = build_ranked_research_slate([row])
-    assert apply_publication_semantics([row], slate=slate)[0]["publication_tier"] == TIER1
+    assert apply_publication_semantics([row], slate=slate)[0]["publication_tier"] is None
 
 
 def test_core_discovery_uses_only_ready_members_and_merges_lanes():

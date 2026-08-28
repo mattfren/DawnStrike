@@ -351,7 +351,11 @@ def alpha_cycle(
             else format_alpha_no_trade(
                 reason=str(review["decision"]["reason"]),
                 next_action=str(review["decision"]["next_action"]),
-                research_total=int(luna_research_slate.get("published_count") or 0),
+                target_count=int(luna_research_slate.get("target_count") or 0),
+                published_count=int(luna_research_slate.get("published_count") or 0),
+                slate_shortfall_reason=str(
+                    luna_research_slate.get("slate_shortfall_reason") or ""
+                ),
             )
         )
         events = [
@@ -1026,7 +1030,11 @@ def alpha_cycle(
                 reason=str(publication_decision.get("reason") or ""),
                 next_action=str(publication_decision.get("next_action") or ""),
                 research_signals=slate_publication_rows,
-                research_total=int(luna_research_slate.get("published_count") or 0),
+                target_count=int(luna_research_slate.get("target_count") or 0),
+                published_count=int(luna_research_slate.get("published_count") or 0),
+                slate_shortfall_reason=str(
+                    luna_research_slate.get("slate_shortfall_reason") or ""
+                ),
             )
         )
         hint = "alpha_no_trade"
@@ -1049,6 +1057,11 @@ def alpha_cycle(
                 source_summary=source_summary,
                 blocked_signals=list(review["blocked"]),
                 generated_at=timestamp,
+                target_count=int(luna_research_slate.get("target_count") or 0),
+                published_count=int(luna_research_slate.get("published_count") or 0),
+                slate_shortfall_reason=str(
+                    luna_research_slate.get("slate_shortfall_reason") or ""
+                ),
             )
         )
         hint = "alpha_morning_watch"
