@@ -683,6 +683,9 @@ def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkey
     status = SQLiteScanStore(db_path).load_alpha_signals(limit=10)
     store = SQLiteScanStore(db_path)
     slate = json.loads((out_dir / "ranked_research_slate.json").read_text(encoding="utf-8"))
+    ranked_header = (out_dir / "scan" / "ranked_candidates.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()[0].split(",")
     notification = next(
         item
         for item in store.load_recent_notifications()
@@ -695,6 +698,7 @@ def test_alpha_cycle_cli_fixture_persists_research_only_outputs(tmp_path, monkey
     assert all("buy" not in str(row).lower() and "sell" not in str(row).lower() for row in status)
     assert (out_dir / "alpha_cycle.json").exists()
     assert (out_dir / "report" / "alpha_report.json").exists()
+    assert "market_date" in ranked_header
     assert (
         f"Research slate: {slate['published_count']} of {slate['target_count']} shown"
         in notification["body"]

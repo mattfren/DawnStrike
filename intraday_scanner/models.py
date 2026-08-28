@@ -141,6 +141,7 @@ SNAPSHOT_REQUIRED_COLUMNS = [
 CANDIDATE_COLUMNS = [
     "rank",
     "ticker",
+    "market_date",
     "company",
     "total_score",
     "score",
