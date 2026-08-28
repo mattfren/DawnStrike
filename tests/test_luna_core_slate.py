@@ -14,6 +14,7 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_no_trade,
     format_alpha_watch,
 )
+from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import _apply_strategy_decision_receipts
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
@@ -88,6 +89,26 @@ def _receipted_signal(
     stop: float,
     target: float,
 ) -> dict:
+    observation = premarket.observation_from_alpaca_bars(
+        ticker,
+        [
+            {
+                "ticker": ticker,
+                "timestamp": "2026-08-26T13:28:00Z",
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc),
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
     row = {
         "ticker": ticker,
         "strategy_id": "ts_momentum_sma_atr",
@@ -107,6 +128,9 @@ def _receipted_signal(
         "corporate_action_status": "CLEAR",
         "input_status": "VERIFIED",
         "evidence_status": "VERIFIED",
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
     }
     row.update({spec.condition_id: True for spec in registry_for_strategy(row["strategy_id"])})
     return row

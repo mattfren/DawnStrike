@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from intraday_scanner.alpha.alert_gate import (
     apply_alert_gates,
@@ -22,6 +23,7 @@ from intraday_scanner.alpha.v5_policy import evaluate_v5_official_paper
 from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
 from intraday_scanner.decisioning.contracts import canonical_json
+from intraday_scanner.services import premarket_enrichment_service as premarket
 from intraday_scanner.services.alpha_cycle_service import (
     _apply_strategy_decision_receipts,
     _persisted_strategy_receipt_verifier,
@@ -72,6 +74,35 @@ def _signal(target: float = 12.75) -> dict[str, object]:
                 "target_basis_kind": "sourced_resistance",
             },
         },
+    }
+
+
+def _authenticated_freshness(ticker: str = "NOVA") -> dict[str, object]:
+    observation = premarket.observation_from_alpaca_bars(
+        ticker,
+        [
+            {
+                "ticker": ticker,
+                "timestamp": "2026-08-26T13:28:00Z",
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc),
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
+    return {
+        "market_date": "2026-08-26",
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
     }
 
 
@@ -605,6 +636,7 @@ def test_strict_plan_without_provider_raw_artifact_stays_tier_one(tmp_path, monk
             "evidence_status": "VERIFIED",
         }
     )
+    source.update(_authenticated_freshness())
     payload = _signal_payload(source, "scan-tier-two", "2026-08-26T13:30:00+00:00", 1)
     receipt_store = SQLiteScanStore(tmp_path / "tier-two.sqlite")
     _apply_strategy_decision_receipts(
@@ -670,6 +702,7 @@ def test_tier_two_requires_the_exact_alphaops_v5_strategy_version(tmp_path, monk
             "evidence_status": "VERIFIED",
         }
     )
+    source.update(_authenticated_freshness())
     payload = _signal_payload(source, "scan-wrong-version", "2026-08-26T13:30:00+00:00", 1)
     payload["strategy_version"] = "attacker-version"
     receipt_store = SQLiteScanStore(tmp_path / "wrong-version.sqlite")

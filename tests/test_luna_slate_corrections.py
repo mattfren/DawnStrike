@@ -1057,9 +1057,31 @@ def test_overlap_candidate_retains_the_core_row_as_its_evidence_lane() -> None:
 
 
 def _safe_overlap_row(ticker: str, lane: str, *, receipt: str) -> dict:
+    requested_at = datetime(2026, 8, 27, 13, 0, tzinfo=timezone.utc)
+    observation = premarket.observation_from_alpaca_bars(
+        ticker,
+        [
+            {
+                "ticker": ticker,
+                "timestamp": "2026-08-27T12:58:00Z",
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=requested_at,
+        max_age_seconds=600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
     return {
         "ticker": ticker,
         "score": 10,
+        "market_date": "2026-08-27",
         "universe_lane": lane,
         "evidence_lane": lane,
         "source_count": 1,
@@ -1070,6 +1092,9 @@ def _safe_overlap_row(ticker: str, lane: str, *, receipt: str) -> dict:
         "input_status": "VERIFIED",
         "evidence_status": "VERIFIED",
         "lane_receipt": receipt,
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 600,
     }
 
 
@@ -1144,10 +1169,20 @@ def test_overlap_keeps_safe_eligible_mover_when_safe_core_lane_is_ineligible() -
         lane_eligibility={"mover": True, "core": False},
     )
     mover_only = build_ranked_research_slate(
-        [mover], target=1, require_safety=True, lane_statuses=lane_statuses
+        [mover],
+        target=1,
+        require_safety=True,
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        lane_statuses=lane_statuses,
     )
     merged_slate = build_ranked_research_slate(
-        merged, target=1, require_safety=True, lane_statuses=lane_statuses
+        merged,
+        target=1,
+        require_safety=True,
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        lane_statuses=lane_statuses,
     )
 
     assert mover_only["symbols"] == ["OVER"]
@@ -1274,18 +1309,18 @@ def test_publication_cannot_inflate_counts_with_unsafe_or_nonselected_tiers() ->
 
 
 def test_tier_one_requires_positive_current_clear_safety_evidence() -> None:
-    safe = {
-        "ticker": "SAFE",
-        "source_count": 1,
-        "freshness_status": "FRESH",
-        "halt_status": "CLEAR",
-        "sec_risk_status": "CLEAR",
-        "corporate_action_status": "CLEAR",
-        "input_status": "VERIFIED",
-        "evidence_status": "VERIFIED",
+    safe = _safe_overlap_row("SAFE", "mover", receipt="safe-receipt")
+    unknown = {
+        **_safe_overlap_row("UNKNOWN", "mover", receipt="unknown-receipt"),
+        "sec_risk_status": "UNKNOWN",
     }
-    unknown = {**safe, "ticker": "UNKNOWN", "sec_risk_status": "UNKNOWN"}
-    slate = build_ranked_research_slate([unknown, safe], target=5, require_safety=True)
+    slate = build_ranked_research_slate(
+        [unknown, safe],
+        target=5,
+        require_safety=True,
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+    )
     assert slate["symbols"] == ["SAFE"]
     assert "sec_risk_status_not_clear" in slate["safety_blockers"]
 
