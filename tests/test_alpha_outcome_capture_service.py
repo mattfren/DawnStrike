@@ -31,6 +31,8 @@ from intraday_scanner.alpha.v5_policy import (
 from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
+from intraday_scanner.notifiers import NotificationEvent
+from intraday_scanner.services.alpha_cycle_service import _persist_research_radar_selections
 from intraday_scanner.services.alpha_official_cohort_service import (
     validate_or_recover_official_cohort,
 )
@@ -1236,6 +1238,153 @@ def test_sourced_capture_allows_explicit_recorded_no_trade(tmp_path: Path) -> No
 
     assert result["status"] == "no_targets"
     assert result["signal_count"] == 0
+
+
+def test_no_trade_still_captures_radar_only_selection_contributors(tmp_path: Path) -> None:
+    db_path = tmp_path / "no-trade-radar.sqlite"
+    store = SQLiteScanStore(db_path)
+    selected_at = f"{DAY}T13:00:00+00:00"
+    strategy_id, strategy_version = alphaops_strategy_contract(selected_at)
+    body_sha256 = hashlib.sha256(b"canonical-no-trade-radar").hexdigest()
+    official = {
+        "selection_id": "selection-no-trade-radar",
+        "scan_id": "scan-no-trade-radar",
+        "signal_id": f"no_trade:{DAY}",
+        "ticker": "NO_TRADE",
+        "rank": 0,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "cohort": "official_telegram",
+        "decision": "no_trade",
+        "selected_at": selected_at,
+        "event_key": "alphaops:no-trade-radar:alpha_no_trade",
+        "body_sha256": body_sha256,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    official["payload_json"] = {
+        **official,
+        "signal": {
+            "signal_id": official["signal_id"],
+            "scan_id": official["scan_id"],
+            "ticker": "NO_TRADE",
+            "market_date": DAY,
+        },
+        "decision_payload": {
+            "decision": "no_trade",
+            "no_trade": True,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
+    }
+    store.persist_signal_selections([official])
+    delivery = {
+        **official,
+        "membership_id": "delivery-no-trade-radar",
+        "channel": "telegram",
+        "delivery_status": "delivered",
+        "attempted_at": selected_at,
+        "delivered_at": selected_at,
+    }
+    delivery["payload_json"] = {
+        **delivery,
+        "body": "canonical-no-trade-radar",
+        "research_only": True,
+    }
+    store.persist_notification_deliveries([delivery])
+
+    radar_signal = {
+        **_canonical_signal(),
+        "signal_id": "radar-only-signal",
+        "scan_id": "scan-radar-only",
+        "episode_id": "episode:" + "c" * 32,
+        "strategy_contributors": [
+            {
+                "strategy_id": "radar-primary",
+                "strategy_version": "v1",
+                "receipt_id": "radar-primary-receipt",
+                "receipt_hash_sha256": "a" * 64,
+            },
+            {
+                "strategy_id": "radar-secondary",
+                "strategy_version": "v2",
+                "receipt_id": "radar-secondary-receipt",
+                "receipt_hash_sha256": "b" * 64,
+            },
+        ],
+    }
+    slate = build_ranked_research_slate(
+        [radar_signal],
+        generated_at=selected_at,
+        market_date=DAY,
+        scan_id="scan-radar-only",
+        require_safety=True,
+    )
+    _persist_research_radar_selections(
+        store,
+        scan_id="scan-radar-only",
+        radar=list(slate["rows"]),
+        slate=slate,
+        selected_at=selected_at,
+        event=NotificationEvent(
+            event_key="alphaops:scan-radar-only:alpha_morning_watch",
+            title="Dawnstrike Alpha Watch",
+            body="Research radar: NOVA",
+            channel_hint="alpha_morning_watch",
+            payload={"run_id": "scan-radar-only", "signals": []},
+        ),
+    )
+    bars = _contiguous_bars()
+    result = capture_sourced_alpha_outcomes(
+        db_path=db_path,
+        market_date=DAY,
+        requested_at=f"{DAY}T16:05:00-04:00",
+        out_dir=tmp_path / "capture",
+        config=ScannerConfig(),
+        fetcher=lambda *_args, **_kwargs: _chart_payload(bars),
+    )
+    bridges = store.load_research_episode_outcome_bridges(market_date=DAY)
+    assert result["signal_count"] == 0
+    assert len(bridges) == 2, json.dumps(result, sort_keys=True, indent=2, default=str)
+    assert {row["receipt_id"] for row in bridges} == {
+        "radar-primary-receipt",
+        "radar-secondary-receipt",
+    }
+    assert all(row["outcome_status"] == "COMPLETE_SOURCED" for row in bridges)
+    assert all(row["learning_eligible"] is True for row in bridges)
+    assert all(row["selection_outcome_metrics"]["reference_price"] > 0 for row in bridges)
+    assert store.load_signal_outcomes() == []
+    assert store.load_trade_intent_records(market_date=DAY) == []
+    assert store.load_paper_trade_fills(market_date=DAY) == []
+
+
+def test_radar_selection_without_current_bars_is_explicitly_missing() -> None:
+    requested = datetime.fromisoformat(f"{DAY}T16:05:00-04:00")
+    session = capture_module._session_window(DAY)
+    selection = {
+        "selection_id": "selection-radar-missing",
+        "signal_id": "radar-missing-signal",
+        "ticker": "NOVA",
+        "selected_at": f"{DAY}T13:00:00+00:00",
+        "payload_json": {
+            "signal": {
+                "signal_id": "radar-missing-signal",
+                "ticker": "NOVA",
+            }
+        },
+    }
+    outcome = capture_module._derive_research_selection_outcome(
+        selection,
+        [],
+        {},
+        session=session,
+        requested_at=requested,
+        captured_at=f"{DAY}T20:06:00+00:00",
+    )
+    assert outcome["outcome_status"] == "MISSING"
+    assert outcome["learning_eligible"] is False
+    assert "entry_price" not in outcome
+    assert "gross_return_pct" not in outcome
 
 
 def test_verified_not_triggered_is_persisted_but_never_learned(tmp_path: Path) -> None:

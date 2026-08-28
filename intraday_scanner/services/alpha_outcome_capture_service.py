@@ -206,6 +206,17 @@ def capture_sourced_alpha_outcomes(
             "AlphaOps session selection evidence is contradictory: explicit no-trade "
             "and selected signals coexist."
         )
+    radar_selections = (
+        [
+            row
+            for row in store.load_signal_selections(
+                cohort="research_radar", limit=50_000
+            )
+            if str(row.get("selected_at") or "")[:10] == resolved_date
+        ]
+        if persist
+        else []
+    )
     delivery_rows = store.load_notification_deliveries(
         channel="telegram",
         cohort="official_telegram",
@@ -394,7 +405,7 @@ def capture_sourced_alpha_outcomes(
         _write_artifacts(output_dir, summary, [], diagnostics, source_bars)
         return {**summary, "outcomes": [], "diagnostics": diagnostics, "out_dir": str(output_dir)}
 
-    if not pending:
+    if not pending and not radar_selections:
         status = "already_captured" if signals else "no_targets"
         summary = _summary(
             status=status,
@@ -428,7 +439,9 @@ def capture_sourced_alpha_outcomes(
     source_evidence_by_ticker: dict[str, dict[str, Any]] = {}
     errors_by_ticker: dict[str, str] = {}
     signal_tickers = sorted({
-        str(row.get("ticker") or "").upper() for row in pending
+        str(row.get("ticker") or "").upper()
+        for row in [*pending, *radar_selections]
+        if str(row.get("ticker") or "").strip()
     })
     requested_tickers = [*signal_tickers]
     for benchmark in (PRIMARY_BENCHMARK, SECONDARY_BENCHMARK):
@@ -610,6 +623,18 @@ def capture_sourced_alpha_outcomes(
         if conclusive and signal_id not in legacy_existing:
             outcomes.append(outcome)
 
+    radar_outcomes = [
+        _derive_research_selection_outcome(
+            selection,
+            bars_by_ticker.get(str(selection.get("ticker") or "").upper(), []),
+            source_evidence_by_ticker.get(str(selection.get("ticker") or "").upper(), {}),
+            session=session,
+            requested_at=at,
+            captured_at=captured_at,
+        )
+        for selection in radar_selections
+    ]
+
     if persist and outcomes:
         atomic_stats = store.persist_signal_outcomes_with_events(
             outcomes,
@@ -637,15 +662,12 @@ def capture_sourced_alpha_outcomes(
             build_and_persist_research_episode_outcome_bridges,
         )
 
-        radar_selections = store.load_signal_selections(
-            cohort="research_radar", limit=50_000
-        )
         if radar_selections:
             try:
                 radar_bridge_stats = build_and_persist_research_episode_outcome_bridges(
                     store,
                     radar_selections,
-                    outcomes,
+                    [*outcomes, *radar_outcomes],
                     market_date=resolved_date,
                     cutoff=at.isoformat(),
                     source_identity="alpha_sourced_eod_outcomes",
@@ -1224,6 +1246,199 @@ def _independent_source_reconciliation(
             else "Independent bars do not satisfy the frozen overlap and price thresholds."
         ),
     }
+
+
+def _derive_research_selection_outcome(
+    selection: dict[str, Any],
+    bars: list[OutcomeBar],
+    source_evidence: dict[str, Any],
+    *,
+    session: SessionWindow,
+    requested_at: datetime,
+    captured_at: str,
+) -> dict[str, Any]:
+    """Derive selection-only research metrics from the frozen radar row.
+
+    This deliberately has no plan, entry, fill, return, or P&L semantics.  A
+    radar episode is anchored at its first complete sourced bar at/after the
+    frozen selection timestamp and can only become eligible with a complete,
+    contiguous current-day source window through the regular close.
+    """
+
+    payload = selection.get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    signal = payload.get("signal")
+    if isinstance(signal, str):
+        try:
+            signal = json.loads(signal)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            signal = {}
+    signal = signal if isinstance(signal, dict) else {}
+    selection_id = str(selection.get("selection_id") or "").strip()
+    signal_id = str(selection.get("signal_id") or signal.get("signal_id") or "").strip()
+    ticker = str(selection.get("ticker") or signal.get("ticker") or "").strip().upper()
+    selected_at = str(selection.get("selected_at") or "").strip()
+    selected_dt = _parse_datetime(selected_at)
+    source_bar_hash = str(
+        source_evidence.get("source_bar_hash_sha256") or _bars_hash(bars)
+    ).strip().lower()
+    source_artifact_identity = str(
+        source_evidence.get("source_artifact_identity") or ""
+    ).strip()
+    base: dict[str, Any] = {
+        "selection_id": selection_id,
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "market_date": session.market_date,
+        "date": session.market_date,
+        "selected_at": selected_at,
+        "requested_at": _iso_utc(requested_at),
+        "captured_at": captured_at,
+        "source": source_evidence.get("source") or "",
+        "source_url": source_evidence.get("source_url") or "",
+        "source_bar_interval": BAR_INTERVAL,
+        "source_bar_count": len(bars),
+        "source_first_bar_at": _iso_utc(bars[0].observed_at) if bars else None,
+        "source_last_bar_at": _iso_utc(bars[-1].observed_at) if bars else None,
+        "source_bar_hash_sha256": source_bar_hash,
+        "source_fetched_at": source_evidence.get("source_fetched_at"),
+        "source_lineage": source_evidence.get("source_lineage") or [],
+        "source_coverage_complete": source_evidence.get("source_coverage_complete"),
+        "automatic_sourced_data": True,
+        "source_authenticated": bool(source_artifact_identity),
+        "no_lookahead": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "capture_model_version": CAPTURE_MODEL_VERSION,
+        "capture_mode": "automatic_sourced_selection_observation",
+    }
+    if selected_dt is None:
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": "selection timestamp is invalid",
+        })
+        return base
+    first_eligible_at = max(session.opened_at, _ceil_minute(selected_dt))
+    eligible_bars = [
+        bar
+        for bar in bars
+        if first_eligible_at <= bar.observed_at < session.closed_at
+    ]
+    complete_bars = [bar for bar in eligible_bars if _research_bar_complete(bar)]
+    if not complete_bars:
+        base.update({
+            "outcome_status": "MISSING",
+            "learning_eligible": False,
+            "outcome_reason": "no complete sourced selection observation is available",
+        })
+        return base
+    if len(complete_bars) != len(eligible_bars):
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": "sourced selection window contains incomplete OHLC bars",
+        })
+        return base
+    coverage = _validate_bar_coverage(
+        complete_bars,
+        expected_start_at=first_eligible_at,
+        expected_end_at=session.closed_at - timedelta(minutes=1),
+    )
+    base.update(coverage.to_dict())
+    malformed = _malformed_ohlc_detail(complete_bars)
+    if not coverage.is_complete or malformed or source_evidence.get(
+        "source_coverage_complete"
+    ) is not True:
+        base.update({
+            "outcome_status": "INELIGIBLE",
+            "learning_eligible": False,
+            "outcome_reason": malformed
+            or coverage.detail
+            or "sourced selection coverage is incomplete",
+        })
+        return base
+    reference = complete_bars[0]
+    reference_price = float(reference.close)
+    high = max(float(bar.high) for bar in complete_bars)
+    low = min(float(bar.low) for bar in complete_bars)
+    close = float(complete_bars[-1].close)
+    metrics = {
+        "reference_at": _iso_utc(reference.observed_at),
+        "reference_price": reference_price,
+        "close_at": _iso_utc(complete_bars[-1].observed_at),
+        "close_price": close,
+        "high_after_reference": high,
+        "low_after_reference": low,
+        "mfe_pct": round((high - reference_price) / reference_price * 100.0, 6),
+        "mae_pct": round((low - reference_price) / reference_price * 100.0, 6),
+        "path_status": (
+            "POSITIVE_CLOSE"
+            if close > reference_price
+            else "NEGATIVE_CLOSE"
+            if close < reference_price
+            else "FLAT_CLOSE"
+        ),
+        "bar_count": len(complete_bars),
+    }
+    metric_body = {
+        "selection_id": selection_id,
+        "signal_id": signal_id,
+        "ticker": ticker,
+        "market_date": session.market_date,
+        "source_bar_hash_sha256": source_bar_hash,
+        "metrics": metrics,
+    }
+    metric_hash = hashlib.sha256(
+        json.dumps(metric_body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+    reference_hash = hashlib.sha256(
+        json.dumps(
+            reference.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    path_id = f"selection-path:{selection_id}:{source_bar_hash[:24]}"
+    path_hash = hashlib.sha256(
+        json.dumps(
+            {"path_id": path_id, "metrics": metrics, "source_bar_hash_sha256": source_bar_hash},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    base.update({
+        "source_authenticated": True,
+        "source_observation_id": (
+            f"selection-observation:{selection_id}:{reference.observed_at.isoformat()}"
+        ),
+        "source_observation_hash_sha256": reference_hash,
+        "source_path_id": path_id,
+        "source_path_hash_sha256": path_hash,
+        "source_cutoff": _iso_utc(requested_at),
+        "outcome_artifact_id": f"selection-outcome:{selection_id}:{metric_hash[:24]}",
+        "outcome_artifact_hash_sha256": metric_hash,
+        "selection_outcome_metrics": metrics,
+        "outcome_status": "COMPLETE_SOURCED",
+        "learning_eligible": True,
+        "outcome_reason": "complete sourced selection observation window",
+    })
+    return base
+
+
+def _research_bar_complete(bar: OutcomeBar) -> bool:
+    values = (bar.open, bar.high, bar.low, bar.close)
+    return all(
+        value is not None and math.isfinite(float(value)) and float(value) > 0
+        for value in values
+    )
 
 
 def _source_choice_key(bars: list[OutcomeBar]) -> tuple[int, int, int]:

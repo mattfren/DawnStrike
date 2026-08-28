@@ -432,6 +432,9 @@ def _bridge_row(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    metrics = outcome.get("selection_outcome_metrics") if isinstance(outcome, Mapping) else None
+    if isinstance(metrics, Mapping):
+        payload["selection_outcome_metrics"] = dict(metrics)
     payload["created_at"] = str(created_at or source_cutoff)
     body = {
         key: value
