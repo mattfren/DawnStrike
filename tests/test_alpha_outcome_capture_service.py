@@ -30,7 +30,7 @@ from intraday_scanner.alpha.v5_policy import (
 )
 from intraday_scanner.alpha.v6_shadow import build_v6_shadow_decisions
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.errors import DataProviderError, SnapshotValidationError
+from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
 from intraday_scanner.services.alpha_official_cohort_service import (
     validate_or_recover_official_cohort,
 )
@@ -43,7 +43,7 @@ from intraday_scanner.services.luna_research_slate_service import (
 )
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
-from tests._alpha_path_truth import canonical_path_result
+from tests._alpha_path_truth import canonical_path_result, canonical_v6_decision
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -1665,6 +1665,96 @@ def test_outcome_and_event_persistence_is_atomic(tmp_path: Path) -> None:
 
     assert store.load_signal_outcomes() == []
     assert store.load_signal_events(signal_id="signal-1") == []
+
+
+def test_signal_children_require_governed_parent_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "foreign-key.sqlite"
+    store = SQLiteScanStore(db_path)
+    orphan_outcome = {
+        "signal_id": "missing-historical-signal",
+        "market_date": DAY,
+        "ticker": "NOVA",
+        "outcome_source": "test",
+        "imported_at": f"{DAY}T20:05:00Z",
+        "outcome_status": "complete_sourced",
+    }
+    orphan_event = {
+        "event_id": "orphan-event",
+        "signal_id": "missing-historical-signal",
+        "event_type": "OUTCOME_CAPTURED",
+        "event_timestamp": f"{DAY}T20:05:00Z",
+        "source": "test",
+    }
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes([orphan_outcome])
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_events([orphan_event])
+
+    _persist_selected_signals(store, [_signal()])
+    valid_v5_outcome = {**orphan_outcome, "signal_id": "signal-1"}
+    for mutation in ({"market_date": "2026-08-04"}, {"ticker": "OTHER"}):
+        with pytest.raises(StorageError, match="Signal child parent validation failed"):
+            store.persist_signal_outcomes([{**valid_v5_outcome, **mutation}])
+
+    v6_decision = canonical_v6_decision("shadow-parent")
+    store.persist_alpha_v6_decisions([v6_decision])
+    valid_v6_outcome = {
+        **orphan_outcome,
+        "signal_id": v6_decision["shadow_signal_id"],
+        "market_date": v6_decision["market_date"],
+        "ticker": v6_decision["ticker"],
+    }
+    assert store.persist_signal_outcomes([valid_v6_outcome]) == {"inserted": 1, "skipped": 0}
+    valid_v6_event = {**orphan_event, "signal_id": v6_decision["shadow_signal_id"]}
+    assert store.persist_signal_events([valid_v6_event]) == {"inserted": 1, "skipped": 0}
+    for mutation in ({"market_date": "2026-08-04"}, {"ticker": "OTHER"}):
+        with pytest.raises(StorageError, match="Signal child parent validation failed"):
+            store.persist_signal_outcomes([{**valid_v6_outcome, **mutation}])
+
+    atomic_store = SQLiteScanStore(tmp_path / "atomic-parent.sqlite")
+    _persist_selected_signals(atomic_store, [_signal()])
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        atomic_store.persist_signal_outcomes_with_events(
+            [valid_v5_outcome], [orphan_event]
+        )
+
+    # The atomic path must roll back the valid child row when its sibling is
+    # rejected, so no partial outcome/evidence can survive the failure.
+    assert atomic_store.load_signal_outcomes() == []
+    assert atomic_store.load_signal_events() == []
+
+
+def test_signal_child_parent_identity_rejects_conflicting_v5_and_v6_parents(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "ambiguous-parent.sqlite")
+    historical = {**_signal(), "signal_id": "shared-signal"}
+    store.persist_historical_signals([historical])
+    decision = canonical_v6_decision("ambiguous-parent")
+    decision.update(
+        {
+            "shadow_signal_id": "shared-signal",
+            "market_date": DAY,
+            "ticker": "OTHER",
+        }
+    )
+    store.persist_alpha_v6_decisions([decision])
+    outcome = {
+        "signal_id": "shared-signal",
+        "market_date": DAY,
+        "ticker": "NOVA",
+        "outcome_source": "test",
+        "imported_at": f"{DAY}T20:05:00Z",
+        "outcome_status": "complete_sourced",
+    }
+
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_outcomes([outcome])
+    with pytest.raises(StorageError, match="Signal child parent validation failed"):
+        store.persist_signal_events(
+            [{"event_id": "ambiguous-event", "signal_id": "shared-signal"}]
+        )
 
 
 def test_existing_sourced_outcome_repairs_a_missing_audit_event(tmp_path: Path) -> None:

@@ -4355,6 +4355,7 @@ class SQLiteScanStore:
         skipped = 0
         try:
             with self._connect() as connection:
+                _validate_signal_parent_rows(connection, rows, require_market_identity=False)
                 for row in rows:
                     event_id = str(row.get("event_id") or "")
                     signal_id = str(row.get("signal_id") or "")
@@ -4430,6 +4431,7 @@ class SQLiteScanStore:
         skipped = 0
         try:
             with self._connect() as connection:
+                _validate_signal_parent_rows(connection, rows, require_market_identity=True)
                 for row in rows:
                     signal_id = str(row.get("signal_id") or "")
                     if not signal_id:
@@ -4493,6 +4495,10 @@ class SQLiteScanStore:
         event_stats = {"inserted": 0, "skipped": 0}
         try:
             with self._connect() as connection:
+                _validate_signal_parent_rows(
+                    connection, outcome_rows, require_market_identity=True
+                )
+                _validate_signal_parent_rows(connection, event_rows, require_market_identity=False)
                 if immutable:
                     outcome_count = len(outcome_rows)
                     event_count = len(event_rows)
@@ -8376,6 +8382,87 @@ def _official_strategy_cohort_row(row: sqlite3.Row) -> dict[str, Any]:
         "claimed_at": str(row["claimed_at"]),
         "payload_json": payload if isinstance(payload, dict) else {},
     }
+
+
+def _validate_signal_parent_rows(
+    connection: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    require_market_identity: bool,
+) -> None:
+    """Reject child rows without a governed historical or V6 shadow parent.
+
+    The legacy signal child tables predate the V6 shadow ledger and retain a
+    historical_signals foreign-key declaration.  V6 shadow outcomes/events are
+    intentionally keyed by ``alpha_v6_decisions.shadow_signal_id`` instead, so
+    SQLite's single-parent constraint cannot express the valid domain.  Keep
+    the write boundary fail-closed with an application-level, exact identity
+    check and bind outcome rows to the decision's day/ticker.
+    """
+
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("signal_id") or "")
+    ]
+    if not candidates:
+        return
+
+    signal_ids = sorted({str(row["signal_id"]) for row in candidates})
+    placeholders = ",".join("?" for _ in signal_ids)
+    historical = {
+        str(row[0]): (str(row[1] or ""), str(row[2] or ""))
+        for row in connection.execute(
+            "SELECT signal_id, market_date, ticker "
+            f"FROM historical_signals WHERE signal_id IN ({placeholders})",  # nosec B608
+            signal_ids,
+        ).fetchall()
+    }
+    shadow_decisions = {
+        str(row[0]): (str(row[1] or ""), str(row[2] or ""))
+        for row in connection.execute(
+            "SELECT shadow_signal_id, market_date, ticker "
+            f"FROM alpha_v6_decisions WHERE shadow_signal_id IN ({placeholders})",  # nosec B608
+            signal_ids,
+        ).fetchall()
+    }
+
+    missing = 0
+    mismatched = 0
+    for row in candidates:
+        signal_id = str(row["signal_id"])
+        historical_parent = historical.get(signal_id)
+        shadow_parent = shadow_decisions.get(signal_id)
+        if historical_parent is not None and shadow_parent is not None:
+            if tuple(value.casefold() for value in historical_parent) != tuple(
+                value.casefold() for value in shadow_parent
+            ):
+                mismatched += 1
+                continue
+            parent = historical_parent
+        elif historical_parent is not None:
+            parent = historical_parent
+        else:
+            parent = shadow_parent
+        if parent is None:
+            missing += 1
+            continue
+        if not require_market_identity:
+            continue
+        market_date = str(row.get("market_date") or row.get("date") or "")[:10]
+        ticker = str(row.get("ticker") or "").upper()
+        expected_date, expected_ticker = parent
+        date_matches = bool(market_date) and market_date == expected_date[:10]
+        ticker_matches = bool(ticker) and ticker == expected_ticker.upper()
+        if not date_matches or not ticker_matches:
+            mismatched += 1
+
+    rejected = missing + mismatched
+    if rejected:
+        raise StorageError(
+            "Signal child parent validation failed: "
+            f"rejected={rejected}, missing_parent={missing}, identity_mismatch={mismatched}"
+        )
 
 
 def _immutable_new_rows(
