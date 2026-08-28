@@ -875,6 +875,8 @@ def test_prior_adapter_rejects_long_setup_at_or_beyond_stop_or_target(current_pr
         ({"current_price": -1.0, "close": 100.0}, 0),
         ({"current_price": math.nan, "close": 100.0}, 0),
         ({"close": 100.0}, 1),
+        ({"current_price": None, "close": 100.0}, 1),
+        ({"current_price": "", "close": 100.0}, 1),
         ({"current_price": 100.0, "close": 84.0}, 1),
     ),
 )

@@ -1333,14 +1333,18 @@ def _number(value: Any) -> float | None:
 def _current_price_from_row(row: Mapping[str, Any]) -> float | None:
     """Return the highest-authority explicitly supplied current price.
 
-    Presence, rather than truthiness, determines precedence: an explicitly
-    supplied invalid value must remain invalid and fail closed instead of
-    being replaced by a lower-authority field.
+    Presence, rather than truthiness, determines precedence for numeric facts:
+    an explicitly supplied invalid number must remain invalid and fail closed
+    instead of being replaced by a lower-authority field. Null and blank values
+    remain missing truth and may fall through to the next named source.
     """
 
     for key in ("current_price", "premarket_price", "price", "close"):
         if key in row:
-            return _number(row[key])
+            value = row[key]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            return _number(value)
     return None
 
 
