@@ -151,17 +151,17 @@ def _selection_identity(
     selected_dt = _aware_datetime(selected_at, "selected_at")
     if selected_dt > cutoff:
         raise SnapshotValidationError("research radar selection is after outcome cutoff")
-    payload = selection.get("payload_json")
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise SnapshotValidationError("research radar selection payload is invalid") from exc
-    payload = payload if isinstance(payload, Mapping) else {}
+    payload_value = selection.get("payload_json")
+    if isinstance(payload_value, str):
+        payload_value = _decode_json(payload_value)
+        if not isinstance(payload_value, Mapping):
+            raise SnapshotValidationError("research radar selection payload is invalid")
+    payload = payload_value if isinstance(payload_value, Mapping) else {}
     slate = selection.get("frozen_ranked_research_slate") or payload.get(
         "frozen_ranked_research_slate"
     )
-    if not isinstance(slate, Mapping):
+    slate = _decode_mapping(slate)
+    if not slate:
         raise SnapshotValidationError("research radar selection lacks frozen slate")
     slate = dict(slate)
     try:
@@ -170,8 +170,8 @@ def _selection_identity(
         raise SnapshotValidationError("research radar frozen slate is not valid") from exc
     slate_id = str(slate.get("slate_id") or "").strip()
     slate_hash = str(slate.get("content_hash_sha256") or "").strip().lower()
-    frozen_signal = payload.get("signal")
-    if not isinstance(frozen_signal, Mapping):
+    frozen_signal = _decode_mapping(payload.get("signal"))
+    if not frozen_signal:
         raise SnapshotValidationError("research radar selection lacks frozen signal")
     frozen_selection_id = str(frozen_signal.get("research_selection_id") or "").strip()
     if not frozen_selection_id or frozen_selection_id not in {
@@ -240,39 +240,91 @@ def _selection_identity(
 
 
 def _contributors(selection: Mapping[str, Any]) -> list[dict[str, Any]]:
-    payload = selection.get("payload_json")
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-    payload = payload if isinstance(payload, Mapping) else {}
-    raw = selection.get("strategy_contributors") or payload.get("strategy_contributors")
-    rows = (
-        [dict(item) for item in raw if isinstance(item, Mapping)]
-        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes))
-        else []
+    # Production radar rows persist the merged strategy rows under
+    # payload_json.signal.strategy_contributors.  The store may return either
+    # decoded JSON or a serialized envelope, so decode each envelope without
+    # changing explicit-key precedence.  In particular, an explicitly empty
+    # contributor list must not fall through to a lower-level alias.
+    payload = _decode_mapping(selection.get("payload_json"))
+    signal = _decode_mapping(payload.get("signal"))
+    raw: Any = None
+    raw_present = False
+    for container in (selection, payload, signal):
+        if "strategy_contributors" in container:
+            raw = container.get("strategy_contributors")
+            raw_present = True
+            break
+    rows: list[dict[str, Any]] = []
+    if raw_present:
+        decoded_raw = _decode_json(raw)
+        if isinstance(decoded_raw, Sequence) and not isinstance(decoded_raw, (str, bytes)):
+            rows = [dict(item) for item in decoded_raw if isinstance(item, Mapping)]
+    elif signal:
+        # Some older producers put the primary receipt directly on signal.
+        # It is safe to retain it only when it is an authenticated receipt
+        # identity; otherwise the identity-active path below stays ineligible.
+        if any(
+            signal.get(key) not in (None, "")
+            for key in (
+                "receipt_id",
+                "receipt_hash_sha256",
+                "strategy_decision_receipt",
+                "decision_receipt",
+            )
+        ):
+            rows = [dict(signal)]
+
+    # A signal with frozen identity is an authenticated strategy join point.
+    # Do not invent a receiptless cohort-level contributor when its contributor
+    # list was stripped or malformed.  Retain one explicit ineligible row so
+    # the gap is durable and cannot accidentally inherit another strategy.
+    identity_active = bool(signal) and any(
+        signal.get(key) not in (None, "")
+        for key in (
+            "signal_id",
+            "research_selection_id",
+            "episode_id",
+            "strategy_id",
+            "strategy_version",
+        )
     )
-    if not rows:
+    if not rows and identity_active:
+        rows = [{
+            "strategy_id": (
+                signal.get("strategy_id") or selection.get("strategy_id") or RADAR_COHORT
+            ),
+            "strategy_version": (
+                signal.get("strategy_version") or selection.get("strategy_version") or ""
+            ),
+            "_missing_authenticated_contributor": True,
+        }]
+    elif not rows and not identity_active:
+        # Truly legacy, identity-absent rows remain readable for compatibility;
+        # _selection_identity rejects these from the governed bridge path.
         rows = [dict(selection)]
-    primary = dict(selection)
-    primary_receipt = primary.get("strategy_decision_receipt") or primary.get("decision_receipt")
-    if isinstance(primary_receipt, Mapping):
-        primary["receipt_id"] = primary.get("receipt_id") or primary_receipt.get("receipt_id")
-        primary["receipt_hash_sha256"] = primary.get(
-            "receipt_hash_sha256"
-        ) or primary_receipt.get("receipt_hash_sha256")
-    if not rows:
-        rows.insert(0, primary)
-    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for item in rows:
         strategy_id = str(item.get("strategy_id") or item.get("decision_strategy_id") or "").strip()
         strategy_version = str(item.get("strategy_version") or "").strip()
-        receipt_id = str(item.get("receipt_id") or "").strip()
-        receipt_hash = str(item.get("receipt_hash_sha256") or "").strip().lower()
+        receipt = _decode_mapping(
+            item.get("strategy_decision_receipt") or item.get("decision_receipt")
+        )
+        receipt_id = str(item.get("receipt_id") or receipt.get("receipt_id") or "").strip()
+        receipt_hash = str(
+            item.get("receipt_hash_sha256")
+            or receipt.get("receipt_hash_sha256")
+            or receipt.get("hash_sha256")
+            or ""
+        ).strip().lower()
+        receipt_status = str(
+            item.get("receipt_status")
+            or item.get("strategy_receipt_construction_status")
+            or receipt.get("receipt_status")
+            or ""
+        ).strip().upper()
         if not strategy_id:
             continue
-        key = (strategy_id, strategy_version, receipt_id)
+        key = (strategy_id, strategy_version, receipt_id, receipt_hash)
         unique.setdefault(
             key,
             {
@@ -280,9 +332,27 @@ def _contributors(selection: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "strategy_version": strategy_version,
                 "receipt_id": receipt_id,
                 "receipt_hash_sha256": receipt_hash,
+                "_receipt_status": receipt_status,
+                "_missing_authenticated_contributor": bool(
+                    item.get("_missing_authenticated_contributor")
+                ),
             },
         )
     return list(unique.values())
+
+
+def _decode_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _decode_mapping(value: Any) -> Mapping[str, Any]:
+    decoded = _decode_json(value)
+    return decoded if isinstance(decoded, Mapping) else {}
 
 
 def _exact_outcome(
@@ -292,9 +362,8 @@ def _exact_outcome(
     for key in ("selection_id", "signal_id"):
         identity = str(selection.get(key) or "").strip()
         if not identity:
-            payload = selection.get("payload_json")
-            if isinstance(payload, Mapping):
-                identity = str(payload.get(key) or "").strip()
+            payload = _decode_mapping(selection.get("payload_json"))
+            identity = str(payload.get(key) or "").strip()
         matches = by_identity.get((key, identity), [])
         if len(matches) > 1:
             raise SnapshotValidationError("research radar outcome identity is ambiguous")
@@ -313,6 +382,20 @@ def _bridge_row(
     created_at: str | None,
 ) -> dict[str, Any]:
     outcome_status, eligible, reason = _outcome_state(outcome, base, cutoff=cutoff)
+    if (
+        not str(contributor.get("receipt_id") or "").strip()
+        or not _sha256(str(contributor.get("receipt_hash_sha256") or "").strip().lower())
+        or (
+            contributor.get("_receipt_status")
+            and contributor.get("_receipt_status") != "COMPLETE"
+        )
+        or contributor.get("_missing_authenticated_contributor") is True
+    ):
+        outcome_status, eligible, reason = (
+            INELIGIBLE,
+            False,
+            "authenticated contributor receipt is absent or incomplete",
+        )
     source_observation_id = _first(outcome, "source_observation_id", "observation_id") or str(
         base.get("selection_source_observation_id") or ""
     )
