@@ -2067,10 +2067,31 @@ def _v5_signal(day: str = DAY) -> dict[str, Any]:
         "status": "verified",
         "premarket_high": 10.0,
         "premarket_low": 9.0,
+        "previous_close": 8.0,
+        "latest_price": 9.5,
+        "premarket_volume": 500_000,
         "observed_at": observed_at.isoformat(),
         "bar_completed_at": completed_at.isoformat(),
         "is_complete": True,
+        "bar_count": 1,
+        "age_seconds": int((decision_at - completed_at).total_seconds()),
         "source": source,
+        "source_url": source_url,
+        "failure_reason": "",
+        "prior_daily_high": 12.75,
+        "prior_daily_high_observed_at": f"{prior_day}T00:00:00+00:00",
+        "prior_daily_high_completed_at": f"{day}T00:00:00+00:00",
+        "prior_daily_high_completion_semantics": "availability_boundary",
+        "prior_daily_high_source": source,
+        "prior_daily_high_source_url": source_url,
+        "prior_daily_high_source_hash": hashlib.sha256(
+            prior_raw_json.encode()
+        ).hexdigest(),
+        "prior_daily_high_raw_payload_json": prior_raw_json,
+        "premarket_raw_payload_json": premarket_raw_json,
+        "premarket_source_hash_sha256": hashlib.sha256(
+            premarket_raw_json.encode()
+        ).hexdigest(),
     }
     observation_payload_json = json.dumps(
         observation_payload, sort_keys=True, separators=(",", ":")
@@ -2085,6 +2106,9 @@ def _v5_signal(day: str = DAY) -> dict[str, Any]:
             "enrichment_status": "verified",
             "enrichment_is_complete": True,
             "enrichment_was_fallback": False,
+            "freshness_status": "FRESH",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
             "enrichment_observed_at": observed_at.isoformat(),
             "enrichment_bar_completed_at": completed_at.isoformat(),
             "enrichment_observation_sha256": hashlib.sha256(
@@ -2271,11 +2295,16 @@ def _persist_selected_signals(
     slate_generated_at = str(canonical_signals[0].get("generated_at") or "")
     if not slate_generated_at.startswith(slate_day):
         slate_generated_at = f"{slate_day}T13:00:00+00:00"
+    strict_slate = authenticated_entry or any(
+        str(row.get("strategy_id") or "") == ALPHAOPS_V5_STRATEGY_ID
+        for row in canonical_signals
+    )
     frozen_slate = build_ranked_research_slate(
         canonical_signals,
         generated_at=slate_generated_at,
         market_date=slate_day,
         scan_id=batch_scan_id,
+        require_safety=strict_slate,
     )
     frozen_by_signal = {
         str(row.get("signal_id") or ""): row for row in frozen_slate["rows"]

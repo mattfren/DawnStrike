@@ -686,8 +686,13 @@ def _watch_signals(
         selected_identity_ids = {
             str(row.get("selection_id") or "") for row in deduped["selected"]
         }
+        selected_identity_rows = {
+            str(row.get("selection_id") or ""): row
+            for row in deduped["selected"]
+            if str(row.get("selection_id") or "")
+        }
         selected_rows = [
-            row
+            selected_identity_rows.get(str(row.get("selection_id") or ""), row)
             for row in candidate_rows
             if str(row.get("cohort") or "") == SCENARIO_FORWARD_COHORT
             or str(row.get("selection_id") or "") in selected_identity_ids
@@ -1865,6 +1870,18 @@ def _intent(
             "AlphaOps v5 decision trace does not match its requested evidence time."
         )
     price = _number(observation.get("price"))
+    episode_id = str(signal.get("episode_id") or "").strip()
+    if not episode_id and _identity_fields_present(signal):
+        raise SnapshotValidationError(
+            "identity-active paper watcher signal is missing its authenticated episode identity"
+        )
+    if not episode_id:
+        episode_id = "episode:" + hashlib.sha256(
+            (
+                f"{signal_id}:{market_date}:"
+                f"{signal.get('strategy_id') or ALPHAOPS_STRATEGY_ID}"
+            ).encode()
+        ).hexdigest()[:24]
     intent_id = _intent_id(
         mode=mode,
         market_date=market_date,
@@ -1875,7 +1892,7 @@ def _intent(
         price=price,
         blocked_reason=blocked_reason,
         stable_block=stable_block,
-        episode_id=str(signal.get("episode_id") or ""),
+        episode_id=episode_id,
     )
     raw_signal_payload = signal.get("raw_payload_json")
     if not isinstance(raw_signal_payload, dict):
@@ -1905,15 +1922,7 @@ def _intent(
         "source_observed_at": str(observation.get("observed_at") or ""),
         "source_bar_completed_at": str(observation.get("bar_completed_at") or ""),
         "selection_id": str(signal.get("selection_id") or f"selection:{signal_id}"),
-        "episode_id": str(
-            signal.get("episode_id")
-            or "episode:"
-            + hashlib.sha256(
-                (
-                    f"{signal_id}:{market_date}:{signal.get('strategy_id') or ALPHAOPS_STRATEGY_ID}"
-                ).encode()
-            ).hexdigest()[:24]
-        ),
+        "episode_id": episode_id,
         "matched_strategy_ids": list(signal.get("matched_strategy_ids") or []),
         "primary_strategy_id": str(signal.get("primary_strategy_id") or ""),
         "episode_dedup_counts": dict(signal.get("episode_dedup_counts") or {}),
