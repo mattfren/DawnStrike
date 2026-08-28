@@ -66,6 +66,25 @@ def evaluate_signal_risk(
         max_stop_distance_pct = (
             max_value if math.isfinite(max_value) and max_value > 0 else 0.0
         )
+    try:
+        valid_entry = math.isfinite(float(entry_price)) and float(entry_price) > 0
+        valid_stop = math.isfinite(float(signal.stop))
+    except (TypeError, ValueError):
+        valid_entry = False
+        valid_stop = False
+    if not valid_entry or not valid_stop:
+        # Keep malformed prices deterministic and avoid reaching sizing or
+        # reward/risk divisions with zero, negative, or non-finite values.
+        return RiskDecision(
+            allowed=False,
+            quantity=0,
+            notional=0.0,
+            risk_amount=0.0,
+            risk_per_unit=0.0,
+            reward=None,
+            reward_risk=None,
+            warnings=("invalid_stop_or_entry",),
+        )
     risk_per_unit = abs(entry_price - signal.stop)
     if risk_per_unit <= 0:
         return RiskDecision(

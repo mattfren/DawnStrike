@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -113,6 +114,35 @@ def test_common_risk_gate_rejects_1_20r_and_20_percent_stop() -> None:
     assert "stop_distance_exceeds_maximum" in decision.warnings
 
 
+@pytest.mark.parametrize("entry_price", (0.0, -100.0, math.nan, math.inf, -math.inf))
+def test_common_risk_gate_rejects_invalid_entry_without_division(
+    entry_price: float,
+) -> None:
+    decision = evaluate_signal_risk(
+        _signal(direction=Direction.LONG, stop=85.0, target=122.5),
+        entry_price=entry_price,
+        settings=RiskSettings(),
+    )
+
+    assert decision.allowed is False
+    assert decision.quantity == 0
+    assert decision.risk_per_unit == 0.0
+    assert decision.warnings == ("invalid_stop_or_entry",)
+
+
+@pytest.mark.parametrize("stop", (math.nan, math.inf, -math.inf))
+def test_common_risk_gate_rejects_nonfinite_stop(stop: float) -> None:
+    decision = evaluate_signal_risk(
+        _signal(direction=Direction.LONG, stop=stop, target=122.5),
+        entry_price=100.0,
+        settings=RiskSettings(),
+    )
+
+    assert decision.allowed is False
+    assert decision.quantity == 0
+    assert decision.warnings == ("invalid_stop_or_entry",)
+
+
 def test_legacy_risk_scan_preserves_warning_only_predicate() -> None:
     signal = _signal(direction=Direction.LONG, stop=80.0, target=90.0)
     decision = evaluate_signal_risk(
@@ -144,6 +174,12 @@ def _paper_run() -> PaperRun:
 
 def _attested_datatruth_fixture(tmp_path):
     paths = PaperOpsPaths.create(tmp_path / "paper_ops")
+    config = PaperOpsConfig(
+        execution_policy_version=PAPER_EXECUTION_POLICY_VERSION,
+        universe_id="fixture-universe-v1",
+        universe_symbols=("AAA",),
+    )
+    write_json(paths.state / "paper_ops_config.json", config.to_dict())
     normalized_hash = "a" * 64
     content_hash = _snapshot_content_hash_from_hashes(
         provider_id="fixture_provider",
@@ -204,8 +240,13 @@ def _attested_datatruth_fixture(tmp_path):
         "data_snapshot_normalized_hash": normalized_hash,
         "data_snapshot_normalized_path": payload["normalized_artifact_path"],
         "data_truth_root_relative": "../v2_data_truth",
+        "execution_policy_fingerprint": _execution_policy_fingerprint(config),
+        "execution_policy_version": config.execution_policy_version,
         "mode": "forward",
+        "run_date": "2026-08-27",
         "schema_version": "v2.paper_ops_manifest.v3",
+        "universe_id": config.universe_id,
+        "universe_symbols": list(config.universe_symbols),
     }
     run_manifest["manifest_payload_hash"] = _manifest_payload_hash(run_manifest)
     return paths, alias_path, payload, run_manifest
@@ -591,6 +632,39 @@ def test_datatruth_acl_sealed_attestation_rejects_mutated_or_missing_alias(tmp_p
 
     alias_path.unlink()
     with pytest.raises(ValueError, match="missing or malformed"):
+        _attest_bound_datatruth_manifest(paths, run_manifest)
+
+
+def test_datatruth_acl_sealed_attestation_rejects_accepted_end_mismatch(tmp_path) -> None:
+    paths, _alias_path, _payload, run_manifest = _attested_datatruth_fixture(tmp_path)
+    run_manifest["run_date"] = "2026-08-26"
+    run_manifest["manifest_payload_hash"] = _manifest_payload_hash(run_manifest)
+
+    with pytest.raises(ValueError, match="accepted end conflicts"):
+        _attest_bound_datatruth_manifest(paths, run_manifest)
+
+
+def test_datatruth_acl_sealed_attestation_rejects_config_policy_or_universe_drift(
+    tmp_path,
+) -> None:
+    paths, _alias_path, _payload, run_manifest = _attested_datatruth_fixture(tmp_path)
+    run_manifest["execution_policy_fingerprint"] = "0" * 64
+    run_manifest["manifest_payload_hash"] = _manifest_payload_hash(run_manifest)
+
+    with pytest.raises(ValueError, match="execution policy fingerprint conflicts"):
+        _attest_bound_datatruth_manifest(paths, run_manifest)
+
+    config = PaperOpsConfig(
+        execution_policy_version=PAPER_EXECUTION_POLICY_VERSION,
+        universe_id="fixture-universe-v1",
+        universe_symbols=("BBB",),
+    )
+    write_json(paths.state / "paper_ops_config.json", config.to_dict())
+    run_manifest["execution_policy_fingerprint"] = _execution_policy_fingerprint(config)
+    run_manifest["universe_symbols"] = list(config.universe_symbols)
+    run_manifest["manifest_payload_hash"] = _manifest_payload_hash(run_manifest)
+
+    with pytest.raises(ValueError, match="DataTruth/config universe conflicts"):
         _attest_bound_datatruth_manifest(paths, run_manifest)
 
 

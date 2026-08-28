@@ -901,6 +901,9 @@ def _attest_bound_datatruth_manifest(
         raise ValueError("PaperOps attestation requires a v3 run manifest")
     if run_manifest.get("mode") != "forward":
         raise ValueError("PaperOps DataTruth attestation is forward-only")
+    run_date = str(run_manifest.get("run_date") or "").strip()
+    if not run_date:
+        raise ValueError("PaperOps attestation run date is missing")
     root_binding = run_manifest.get("data_truth_root_relative")
     if not isinstance(root_binding, str) or not root_binding.strip():
         raise ValueError("PaperOps attestation DataTruth root binding is missing")
@@ -930,6 +933,8 @@ def _attest_bound_datatruth_manifest(
         raise ValueError("DataTruth alias artifact schema is unsupported")
     if data_manifest.snapshot_id != snapshot_id:
         raise ValueError("DataTruth alias snapshot identity conflicts")
+    if data_manifest.accepted_end != run_date:
+        raise ValueError("DataTruth alias accepted end conflicts with run date")
     expected_snapshot_relative = f"snapshots/{snapshot_id}"
     if data_manifest.snapshot_relative_path != expected_snapshot_relative:
         raise ValueError("DataTruth alias snapshot path conflicts")
@@ -994,6 +999,30 @@ def _attest_bound_datatruth_manifest(
         content_hash=recomputed_content_hash,
     ) != snapshot_id:
         raise ValueError("DataTruth alias snapshot ID is not content-bound")
+
+    # The alias is not sufficient by itself: it must be bound to the exact
+    # immutable PaperOps config that produced the inaccessible snapshot.  Read
+    # the config directly rather than calling ``engine._config`` so a missing
+    # config cannot trigger an init/write side effect during attestation.
+    from intraday_scanner.v2.paper_ops import engine
+
+    config_payload = read_json(paths.state / "paper_ops_config.json", None)
+    if not isinstance(config_payload, dict) or not config_payload:
+        raise ValueError("PaperOps attestation config is missing or malformed")
+    config = engine._config_from_payload(config_payload)
+    if run_manifest.get("execution_policy_version") != config.execution_policy_version:
+        raise ValueError("PaperOps attestation execution policy version conflicts")
+    expected_policy_fingerprint = engine._execution_policy_fingerprint(config)
+    if run_manifest.get("execution_policy_fingerprint") != expected_policy_fingerprint:
+        raise ValueError("PaperOps attestation execution policy fingerprint conflicts")
+    raw_universe = run_manifest.get("universe_symbols")
+    if (
+        run_manifest.get("universe_id") != config.universe_id
+        or not isinstance(raw_universe, list)
+        or tuple(raw_universe) != config.universe_symbols
+        or data_manifest.symbols != config.universe_symbols
+    ):
+        raise ValueError("PaperOps attestation DataTruth/config universe conflicts")
 
     run_bindings = {
         "data_snapshot_id": data_manifest.snapshot_id,
