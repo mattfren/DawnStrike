@@ -70,6 +70,7 @@ from intraday_scanner.v2.paper_ops.storage import (
     write_json,
     write_jsonl,
 )
+from intraday_scanner.v2.paper_ops.universe_handoff import load_universe_handoff
 from intraday_scanner.v2.risk import RiskSettings
 from intraday_scanner.v2.scanner import ScanCard, ScanOutput, run_latest_scan
 from intraday_scanner.v2.strategies import Direction, StrategySpec, build_strategy_catalog
@@ -214,17 +215,63 @@ def init(*, output_root: Path = Path("data/v2_paper_ops")) -> dict[str, object]:
     }
 
 
+def _run_config_with_universe_handoff(
+    paths: PaperOpsPaths,
+    *,
+    run_date: date,
+    mode: PaperRunMode,
+    universe_handoff_path: str | Path | None,
+    scheduled_production: bool,
+) -> tuple[PaperOpsConfig, dict[str, object] | None]:
+    """Bind a run to Morning's exact PIT universe without mutating state config."""
+
+    if scheduled_production and mode is not PaperRunMode.FORWARD:
+        raise ValueError("scheduled production PaperOps requires forward mode")
+    if scheduled_production and not universe_handoff_path:
+        raise ValueError("scheduled production PaperOps requires the Morning universe handoff")
+    base_config = _config(paths)
+    if not universe_handoff_path:
+        return base_config, None
+    handoff = load_universe_handoff(
+        universe_handoff_path,
+        market_date=run_date.isoformat(),
+        require_production=scheduled_production,
+    )
+    raw_symbols = handoff.get("universe_symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        raise ValueError("PaperOps universe handoff has no symbols")
+    symbols = tuple(str(item).strip().upper() for item in raw_symbols)
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("PaperOps universe handoff symbols are not deduplicated")
+    config = replace(
+        base_config,
+        universe_id=str(handoff.get("universe_id") or "").strip(),
+        universe_symbols=symbols,
+    )
+    if not config.universe_id:
+        raise ValueError("PaperOps universe handoff universe identity is missing")
+    return config, handoff
+
+
 def preflight(
     *,
     run_date: date,
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     init(output_root=output_root)
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
-    config = _config(paths)
+    config, handoff = _run_config_with_universe_handoff(
+        paths,
+        run_date=run_date,
+        mode=mode,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
         run_date=run_date,
@@ -241,6 +288,8 @@ def preflight(
         config=config,
         data_manifest=manifest,
         data_truth_root=data_truth_root,
+        universe_handoff=handoff,
+        universe_handoff_path=universe_handoff_path,
     )
     payload = {
         "data_snapshot_id": manifest.snapshot_id,
@@ -253,7 +302,16 @@ def preflight(
         "symbols": list(dataset.symbols),
         "universe_id": config.universe_id,
         "universe_symbols": list(config.universe_symbols),
-        "universe_status": "complete",
+        "universe_status": str(
+            (handoff or {}).get("coverage", {}).get("status") or "complete"
+        ).lower(),
+        "universe_handoff_id": (handoff or {}).get("handoff_id"),
+        "universe_handoff_content_hash_sha256": (handoff or {}).get(
+            "content_hash_sha256"
+        ),
+        "universe_shortfall_reasons": list(
+            (handoff or {}).get("coverage", {}).get("shortfall_reasons") or []
+        ),
         "warnings": list(warnings),
     }
     write_json(paths.exports / f"preflight_{mode.value}_{run_date.isoformat()}.json", payload)
@@ -266,10 +324,18 @@ def scan(
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
-    config = _config(paths)
+    config, handoff = _run_config_with_universe_handoff(
+        paths,
+        run_date=run_date,
+        mode=mode,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
         run_date=run_date,
@@ -286,6 +352,8 @@ def scan(
         config=config,
         data_manifest=manifest,
         data_truth_root=data_truth_root,
+        universe_handoff=handoff,
+        universe_handoff_path=universe_handoff_path,
     )
     strategies = _strategies_eligible_for_run(
         paths,
@@ -418,10 +486,18 @@ def enter(
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
-    config = _config(paths)
+    config, handoff = _run_config_with_universe_handoff(
+        paths,
+        run_date=run_date,
+        mode=mode,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
         run_date=run_date,
@@ -438,11 +514,20 @@ def enter(
         config=config,
         data_manifest=manifest,
         data_truth_root=data_truth_root,
+        universe_handoff=handoff,
+        universe_handoff_path=universe_handoff_path,
     )
     _repair_legacy_default_state(paths, config)
     picks = _load_picks(paths, mode, run_date)
     if not picks:
-        scan(run_date=run_date, mode=mode, output_root=output_root, allow_fetch=allow_fetch)
+        scan(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            allow_fetch=allow_fetch,
+            universe_handoff_path=universe_handoff_path,
+            scheduled_production=scheduled_production,
+        )
         picks = _load_picks(paths, mode, run_date)
     _validate_picks_for_run(picks, run, config, paths)
     pending_path = _pending_orders_path(paths, mode)
@@ -606,10 +691,18 @@ def check(
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
-    config = _config(paths)
+    config, handoff = _run_config_with_universe_handoff(
+        paths,
+        run_date=run_date,
+        mode=mode,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
         run_date=run_date,
@@ -626,6 +719,8 @@ def check(
         config=config,
         data_manifest=manifest,
         data_truth_root=data_truth_root,
+        universe_handoff=handoff,
+        universe_handoff_path=universe_handoff_path,
     )
     _repair_legacy_default_state(paths, config)
     pending_path = _pending_orders_path(paths, mode)
@@ -847,10 +942,18 @@ def close(
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     _recover_pending_transaction(paths)
-    config = _config(paths)
+    config, handoff = _run_config_with_universe_handoff(
+        paths,
+        run_date=run_date,
+        mode=mode,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     data_truth_root = _data_truth_root_for_mode(paths, mode)
     dataset, manifest, warnings = _load_dataset_for_mode(
         run_date=run_date,
@@ -867,6 +970,8 @@ def close(
         config=config,
         data_manifest=manifest,
         data_truth_root=data_truth_root,
+        universe_handoff=handoff,
+        universe_handoff_path=universe_handoff_path,
     )
     _repair_legacy_default_state(paths, config)
     if mode is PaperRunMode.FORWARD:
@@ -971,6 +1076,8 @@ def run_day(
     mode: PaperRunMode = PaperRunMode.FORWARD,
     output_root: Path = Path("data/v2_paper_ops"),
     allow_fetch: bool = True,
+    universe_handoff_path: str | Path | None = None,
+    scheduled_production: bool = False,
 ) -> dict[str, object]:
     paths = PaperOpsPaths.create(output_root)
     with exclusive_file_lock(paths.state / ".paper_ops_operation.lock"):
@@ -979,6 +1086,8 @@ def run_day(
             mode=mode,
             output_root=output_root,
             allow_fetch=allow_fetch,
+            universe_handoff_path=universe_handoff_path,
+            scheduled_production=scheduled_production,
         )
 
 
@@ -988,34 +1097,51 @@ def _run_day_unlocked(
     mode: PaperRunMode,
     output_root: Path,
     allow_fetch: bool,
+    universe_handoff_path: str | Path | None,
+    scheduled_production: bool,
 ) -> dict[str, object]:
     from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
     from intraday_scanner.v2.paper_ops.trade_blotter import verify_trade_blotter
 
-    preflight(run_date=run_date, mode=mode, output_root=output_root, allow_fetch=allow_fetch)
+    preflight(
+        run_date=run_date,
+        mode=mode,
+        output_root=output_root,
+        allow_fetch=allow_fetch,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
+    )
     scan_result = scan(
         run_date=run_date,
         mode=mode,
         output_root=output_root,
         allow_fetch=allow_fetch,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
     )
     enter_result = enter(
         run_date=run_date,
         mode=mode,
         output_root=output_root,
         allow_fetch=allow_fetch,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
     )
     check_result = check(
         run_date=run_date,
         mode=mode,
         output_root=output_root,
         allow_fetch=allow_fetch,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
     )
     close_result = close(
         run_date=run_date,
         mode=mode,
         output_root=output_root,
         allow_fetch=allow_fetch,
+        universe_handoff_path=universe_handoff_path,
+        scheduled_production=scheduled_production,
     )
     calendar_result = calendar(output_root=output_root)
     reconciliation = _reconcile_paths(PaperOpsPaths.create(output_root))
@@ -3565,12 +3691,21 @@ def _ensure_run_manifest(
     config: PaperOpsConfig,
     data_manifest: DataTruthManifest,
     data_truth_root: Path,
+    universe_handoff: dict[str, object] | None = None,
+    universe_handoff_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Persist one immutable, phase-independent binding for a PaperOps run."""
 
     if run.data_snapshot_id != data_manifest.snapshot_id:
         raise ValueError("PaperOps run snapshot does not match its DataTruth manifest")
-    _ensure_execution_policy_manifest(paths, config)
+    # The execution policy is persisted at the state-config level.  A
+    # Morning handoff changes only the per-run universe binding; it must not
+    # rewrite the frozen policy manifest or turn the dynamic universe into a
+    # mutable process-wide config.
+    policy_config = (
+        _config(paths) if (paths.state / "paper_ops_config.json").is_file() else config
+    )
+    _ensure_execution_policy_manifest(paths, policy_config)
     has_complete_data_binding = all(
         (
             data_manifest.snapshot_content_hash,
@@ -3584,7 +3719,7 @@ def _ensure_run_manifest(
         if has_complete_data_binding
         else None
     )
-    policy_fingerprint = _execution_policy_fingerprint(config)
+    policy_fingerprint = _execution_policy_fingerprint(policy_config)
     manifest = PaperOpsManifest(
         run_id=run.run_id,
         mode=run.mode,
@@ -3592,7 +3727,7 @@ def _ensure_run_manifest(
         data_snapshot_id=run.data_snapshot_id,
         output_artifacts=(),
         warnings=tuple(data_manifest.warnings),
-        execution_policy_version=config.execution_policy_version,
+        execution_policy_version=policy_config.execution_policy_version,
         execution_policy_fingerprint=policy_fingerprint,
         universe_id=config.universe_id,
         universe_symbols=config.universe_symbols,
@@ -3601,6 +3736,31 @@ def _ensure_run_manifest(
         data_snapshot_normalized_hash=data_manifest.normalized_artifact_hash,
         data_snapshot_normalized_path=data_manifest.normalized_artifact_path,
         data_truth_root_relative=data_truth_relative,
+        universe_handoff_id=(
+            str(universe_handoff.get("handoff_id") or "") if universe_handoff else None
+        ),
+        universe_handoff_content_hash_sha256=(
+            str(universe_handoff.get("content_hash_sha256") or "")
+            if universe_handoff
+            else None
+        ),
+        universe_handoff_path=(
+            str(Path(universe_handoff_path).resolve()) if universe_handoff_path else None
+        ),
+        universe_coverage_status=(
+            str(dict(universe_handoff.get("coverage") or {}).get("status") or "")
+            if universe_handoff
+            else None
+        ),
+        universe_shortfall_reasons=tuple(
+            str(item)
+            for item in dict(universe_handoff.get("coverage") or {}).get(
+                "shortfall_reasons", []
+            )
+            if str(item).strip()
+        )
+        if universe_handoff
+        else (),
     )
     manifest_payload = manifest.to_dict()
     manifest_payload.pop("manifest_payload_hash", None)
@@ -5794,6 +5954,7 @@ def _validate_run_and_origin_evidence(
                 or claimed_hash != expected_hash
             ):
                 raise ValueError("PaperOps transaction run manifest identity conflicts")
+            _validate_manifest_universe_handoff(paths, payload)
             manifest = payload
             manifests[run_id] = manifest
         event_payload = event["payload"]
@@ -5941,6 +6102,8 @@ def _load_bound_run_dataset(
 ) -> MarketDataset | None:
     """Load an immutable run snapshot without creating or fetching evidence."""
 
+    _validate_manifest_universe_handoff(paths, manifest)
+
     binding_fields = (
         "data_truth_root_relative",
         "data_snapshot_content_hash",
@@ -6001,14 +6164,57 @@ def _load_bound_run_dataset(
     ):
         raise ValueError("PaperOps transaction execution policy binding conflicts")
     raw_universe = manifest.get("universe_symbols")
+    manifest_symbols = (
+        tuple(str(value).strip().upper() for value in raw_universe)
+        if isinstance(raw_universe, list)
+        else ()
+    )
     if (
-        manifest.get("universe_id") != config.universe_id
+        not str(manifest.get("universe_id") or "").strip()
         or not isinstance(raw_universe, list)
-        or tuple(raw_universe) != config.universe_symbols
-        or set(dataset.symbols) != set(config.universe_symbols)
+        or len(manifest_symbols) != len(set(manifest_symbols))
+        or set(dataset.symbols) != set(manifest_symbols)
     ):
         raise ValueError("PaperOps transaction DataTruth universe binding conflicts")
     return dataset
+
+
+def _validate_manifest_universe_handoff(
+    paths: PaperOpsPaths,
+    manifest: dict[str, object],
+) -> dict[str, object] | None:
+    """Verify the optional handoff binding carried by a run manifest."""
+
+    handoff_path = str(manifest.get("universe_handoff_path") or "").strip()
+    identity_fields = (
+        manifest.get("universe_handoff_id"),
+        manifest.get("universe_handoff_content_hash_sha256"),
+        manifest.get("universe_coverage_status"),
+    )
+    if not handoff_path:
+        if any(value not in (None, "", ()) for value in identity_fields) or manifest.get(
+            "universe_shortfall_reasons"
+        ) not in (None, "", [], ()):
+            raise ValueError("PaperOps run manifest has incomplete universe handoff binding")
+        return None
+    handoff = load_universe_handoff(
+        handoff_path,
+        market_date=str(manifest.get("run_date") or ""),
+        require_production=str(manifest.get("mode") or "") == PaperRunMode.FORWARD.value,
+    )
+    if (
+        manifest.get("universe_handoff_id") != handoff.get("handoff_id")
+        or manifest.get("universe_handoff_content_hash_sha256")
+        != handoff.get("content_hash_sha256")
+        or manifest.get("universe_id") != handoff.get("universe_id")
+        or manifest.get("universe_symbols") != handoff.get("universe_symbols")
+        or manifest.get("universe_coverage_status")
+        != dict(handoff.get("coverage") or {}).get("status")
+        or tuple(manifest.get("universe_shortfall_reasons") or ())
+        != tuple(dict(handoff.get("coverage") or {}).get("shortfall_reasons") or ())
+    ):
+        raise ValueError("PaperOps run manifest universe handoff binding conflicts")
+    return handoff
 
 
 def _strategy_account_from_row(row: dict[str, object]) -> StrategyPaperAccount:

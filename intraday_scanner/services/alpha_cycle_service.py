@@ -2901,29 +2901,43 @@ def _merge_strategy_adapter_signals(
         except (TypeError, ValueError):
             return float("-inf")
 
-    def primary_bucket(row: dict[str, Any]) -> int:
-        adapter = bool(str(row.get("strategy_adapter") or "").strip())
-        eligible = row.get("research_pick_eligible") is True
-        if eligible and not adapter:
-            return 0
-        if eligible and adapter:
-            return 1
-        if not adapter:
-            return 2
-        return 3
+    def eligible(row: dict[str, Any]) -> bool:
+        return row.get("research_pick_eligible") is True or row.get(
+            "paper_entry_eligible"
+        ) is True
 
     output: list[dict[str, Any]] = []
     for rows in grouped.values():
+        eligible_rows = [row for row in rows if eligible(row)]
+        ranked_pool = eligible_rows or rows
+
+        def primary_bucket(row: dict[str, Any]) -> int:
+            # Keep the canonical identity stable: an eligible native Alpha
+            # row remains primary over an eligible adapter row.  The ranking
+            # score below is deliberately independent of this identity.
+            adapter = bool(str(row.get("strategy_adapter") or "").strip())
+            if eligible(row) and not adapter:
+                return 0
+            if eligible(row) and adapter:
+                return 1
+            if not adapter:
+                return 2
+            return 3
+
         ordered = sorted(
             rows,
             key=lambda row: (
                 primary_bucket(row),
-                -score_value(row),
+                -score_value(row) if row in ranked_pool else 0.0,
                 str(row.get("strategy_id") or ""),
                 str(row.get("signal_id") or row.get("signal_key") or ""),
             ),
         )
         primary = dict(ordered[0])
+        strongest_eligible = max(
+            (score_value(row) for row in ranked_pool),
+            default=float("-inf"),
+        )
         contributors: list[dict[str, Any]] = []
         receipts: list[dict[str, Any]] = []
         seen_contributors: set[tuple[str, str, str, str]] = set()
@@ -2994,6 +3008,11 @@ def _merge_strategy_adapter_signals(
                     ),
                     "research_pick_eligible": row.get("research_pick_eligible"),
                     "paper_entry_eligible": row.get("paper_entry_eligible"),
+                    "prior_session_lineage": (
+                        dict(row.get("prior_session_paper_ops") or {})
+                        if isinstance(row.get("prior_session_paper_ops"), dict)
+                        else None
+                    ),
                     "decision_receipt": dict(receipt) if isinstance(receipt, dict) else None,
                 }
             )
@@ -3018,6 +3037,10 @@ def _merge_strategy_adapter_signals(
             }
         )
         primary["strategy_decision_receipts"] = receipts
+        primary["strongest_eligible_contributor_score"] = (
+            None if strongest_eligible == float("-inf") else strongest_eligible
+        )
+        primary["canonical_primary_strategy_id"] = str(primary.get("strategy_id") or "")
         primary["strategy_contribution_status"] = (
             "COMPLETE"
             if contributors and all(item.get("receipt_id") for item in contributors)

@@ -434,6 +434,11 @@ class PaperOpsManifest:
     data_snapshot_normalized_path: str | None = None
     data_truth_root_relative: str | None = None
     manifest_payload_hash: str | None = None
+    universe_handoff_id: str | None = None
+    universe_handoff_content_hash_sha256: str | None = None
+    universe_handoff_path: str | None = None
+    universe_coverage_status: str | None = None
+    universe_shortfall_reasons: tuple[str, ...] = ()
     schema_version: str = "v2.paper_ops_manifest.v3"
 
     def to_dict(self) -> dict[str, object]:

@@ -86,6 +86,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end")
     parser.add_argument("--mode", choices=("forward", "replay", "demo"), default="forward")
     parser.add_argument("--output-root", default="data/v2_paper_ops")
+    parser.add_argument("--universe-handoff")
+    parser.add_argument(
+        "--scheduled-production",
+        action="store_true",
+        help="Require and bind the current-day Morning PIT universe handoff",
+    )
     parser.add_argument("--write-rebuilt", action="store_true")
     parser.add_argument("--manifest")
     parser.add_argument("--reason-code", default="historical_forward_run_absent")
@@ -107,17 +113,53 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         result = init(output_root=output_root)
     elif args.command == "preflight":
-        result = preflight(run_date=run_date, mode=mode, output_root=output_root)
+        result = preflight(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "scan":
-        result = scan(run_date=run_date, mode=mode, output_root=output_root)
+        result = scan(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "enter":
-        result = enter(run_date=run_date, mode=mode, output_root=output_root)
+        result = enter(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "check":
-        result = check(run_date=run_date, mode=mode, output_root=output_root)
+        result = check(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "close":
-        result = close(run_date=run_date, mode=mode, output_root=output_root)
+        result = close(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "run-day":
-        result = run_day(run_date=run_date, mode=mode, output_root=output_root)
+        result = run_day(
+            run_date=run_date,
+            mode=mode,
+            output_root=output_root,
+            universe_handoff_path=args.universe_handoff,
+            scheduled_production=args.scheduled_production,
+        )
     elif args.command == "replay":
         start = date.fromisoformat(args.start or args.date)
         end = date.fromisoformat(args.end or args.date)

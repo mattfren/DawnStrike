@@ -440,6 +440,44 @@ def _is_complete_manifest(
         return False
     if identity["ledger_policies"] != {policy}:
         return False
+    # Scheduled-production manifests are bound to the exact Morning universe
+    # handoff.  Re-validate the immutable handoff here as well as at EOD start
+    # so downstream observers cannot certify a run after its source truth has
+    # gone stale or been mutated.
+    handoff_path = str(payload.get("universe_handoff_path") or "").strip()
+    handoff_fields = (
+        "universe_handoff_id",
+        "universe_handoff_content_hash_sha256",
+        "universe_coverage_status",
+        "universe_shortfall_reasons",
+    )
+    if handoff_path:
+        try:
+            from intraday_scanner.v2.paper_ops.universe_handoff import load_universe_handoff
+
+            handoff = load_universe_handoff(
+                handoff_path,
+                market_date=str(payload["run_date"]),
+                require_production=payload["mode"] == "forward",
+            )
+        except (OSError, ValueError, TypeError):
+            return False
+        coverage = handoff.get("coverage")
+        if not isinstance(coverage, dict):
+            return False
+        if (
+            payload.get("universe_handoff_id") != handoff.get("handoff_id")
+            or payload.get("universe_handoff_content_hash_sha256")
+            != handoff.get("content_hash_sha256")
+            or payload.get("universe_id") != handoff.get("universe_id")
+            or payload.get("universe_symbols") != handoff.get("universe_symbols")
+            or payload.get("universe_coverage_status") != coverage.get("status")
+            or payload.get("universe_shortfall_reasons")
+            != coverage.get("shortfall_reasons", [])
+        ):
+            return False
+    elif any(payload.get(field) not in (None, "", []) for field in handoff_fields):
+        return False
     hash_payload = dict(payload)
     observed_hash = hash_payload.pop("manifest_payload_hash")
     canonical = json.dumps(hash_payload, sort_keys=True, separators=(",", ":"))

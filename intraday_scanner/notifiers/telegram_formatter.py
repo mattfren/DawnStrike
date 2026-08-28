@@ -781,7 +781,15 @@ def _action_parts(value: Any) -> tuple[str, str]:
 def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
     tier = str(row.get("pick_tier") or "").strip()
     receipt_id = str(row.get("receipt_id") or "").strip()
-    if not tier and not receipt_id and not row.get("strategy_receipt_gap"):
+    contributor_rows = [
+        item for item in row.get("strategy_contributors") or [] if isinstance(item, dict)
+    ]
+    if (
+        not tier
+        and not receipt_id
+        and not row.get("strategy_receipt_gap")
+        and len(contributor_rows) <= 1
+    ):
         return []
     strategy_id = _text(row.get("strategy_id"), "not reported")
     strategy_version = _text(
@@ -799,15 +807,54 @@ def _decision_receipt_lines(row: dict[str, Any]) -> list[str]:
         or row.get("strategy_receipt_gap"),
         "not reported",
     )
-    lines = [
-        f"Receipt {_text(receipt_id, 'not recorded')} | Tier {_text(tier, 'not reported')}",
-        (
-            f"Strategy {strategy_id} {strategy_version} | "
-            f"R/R {format_score(row.get('reward_risk_ratio'))}R"
-        ),
-        f"Entry: {entry}",
-        f"Why: {_truncate(why, 100)}",
-    ]
+    lines = []
+    if tier or receipt_id or row.get("strategy_receipt_gap"):
+        lines.extend(
+            [
+                f"Receipt {_text(receipt_id, 'not recorded')} | Tier {_text(tier, 'not reported')}",
+                (
+                    f"Strategy {strategy_id} {strategy_version} | "
+                    f"R/R {format_score(row.get('reward_risk_ratio'))}R"
+                ),
+                f"Entry: {entry}",
+                f"Why: {_truncate(why, 100)}",
+            ]
+        )
+    if len(contributor_rows) > 1:
+        contributor_ids = sorted(
+            {
+                str(item.get("strategy_id") or "").strip()
+                for item in contributor_rows
+                if str(item.get("strategy_id") or "").strip()
+            }
+        )
+        lines.append(
+            "Contributors (one ranked row): "
+            + (_truncate(", ".join(contributor_ids), 120) or "not reported")
+        )
+        adapter_lineage = []
+        for item in contributor_rows:
+            if not str(item.get("strategy_adapter") or "").strip():
+                continue
+            lineage = item.get("prior_session_lineage")
+            if not isinstance(lineage, dict):
+                lineage = {}
+            source_signal = str(
+                lineage.get("source_signal_id")
+                or item.get("source_signal_id")
+                or ""
+            ).strip()
+            prior_date = str(lineage.get("prior_session_date") or "").strip()
+            if source_signal:
+                adapter_lineage.append(
+                    f"{str(item.get('strategy_id') or '').strip()}<-{source_signal}"
+                    + (f"@{prior_date}" if prior_date else "")
+                )
+        if adapter_lineage:
+            lines.append(
+                "Adapter prior-session lineage: "
+                + _truncate(", ".join(sorted(set(adapter_lineage))), 120)
+            )
 
     core = row.get("core_conditions_passed") or []
     if isinstance(core, (list, tuple)):

@@ -2269,8 +2269,15 @@ def _rank_key(row: dict[str, Any]) -> tuple[float, float, str]:
         except (TypeError, ValueError):
             return float("-inf")
 
+    # Overlapping strategy contributors remain one canonical row, but the
+    # strongest eligible contributor is the authoritative cross-sectional
+    # ranking score.  Rows without the merge annotation retain legacy scoring.
     return (
-        number(row.get("alpha_score")),
+        number(
+            row.get("strongest_eligible_contributor_score")
+            if row.get("strongest_eligible_contributor_score") is not None
+            else row.get("alpha_score")
+        ),
         number(row.get("score") or row.get("total_score")),
         str(row.get("ticker") or row.get("symbol") or ""),
     )

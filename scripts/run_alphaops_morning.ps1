@@ -251,6 +251,26 @@ try {
             -ExitCode 0 `
             -NotRequired
     }
+    if ($coreStageExit -eq 0) {
+        # Persist the exact current-day PIT union used by scheduled PaperOps.
+        # The builder verifies the immutable Morning artifacts and fails closed
+        # on missing, stale, cross-date, or hash-invalid source evidence.
+        $universeHandoffPath = Join-Path $outputRoot "paperops_universe_handoff.json"
+        $universeHandoff = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @(
+                "scripts\build_paperops_universe_handoff.py",
+                "--morning-root", $outputRoot,
+                "--market-date", $MarketDate,
+                "--out", $universeHandoffPath
+            ) `
+            -LogRoot $logRoot `
+            -LogName "paperops_universe_handoff-$MarketDate"
+        if ($universeHandoff.exit_code -ne 0) {
+            $coreStageExit = 2
+            $coreErrorCode = "paperops_universe_handoff_invalid"
+        }
+    }
     if (
         $coreStageExit -eq 0 -and
         $env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$'

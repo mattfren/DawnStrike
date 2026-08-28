@@ -390,12 +390,24 @@ try {
     }
 
     $paperStarted = (Get-Date).ToUniversalTime().ToString("o")
+    $universeHandoffPath = Join-Path $outputRoot "alpha_cycle\$MarketDate\paperops_universe_handoff.json"
+    $handoffValidation = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @(
+            "scripts\build_paperops_universe_handoff.py",
+            "--validate",
+            "--handoff", $universeHandoffPath,
+            "--market-date", $MarketDate
+        ) `
+        -LogRoot $logRoot `
+        -LogName "paperops_universe_handoff_validate-$MarketDate"
+    $paperExit = $handoffValidation.exit_code
     $paperInit = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList @("-m", "intraday_scanner.v2.paper_ops", "init", "--output-root", $paperOpsRoot) `
         -LogRoot $logRoot `
         -LogName "paperops_init-$MarketDate"
-    $paperExit = $paperInit.exit_code
+    if ($paperExit -eq 0) { $paperExit = $paperInit.exit_code }
     $reuseExistingDailyReport = $false
     $existingDailyReport = Join-Path $paperOpsRoot "reports\daily\forward_$MarketDate.json"
     if ($paperExit -eq 0 -and (Test-Path -LiteralPath $existingDailyReport -PathType Leaf)) {
@@ -408,13 +420,32 @@ try {
             -LogRoot $logRoot `
             -LogName "paperops-resume-reconcile-$MarketDate"
         $paperExit = $paperResume.exit_code
+        if ($paperExit -eq 0) {
+            # Reuse is allowed only when the persisted v3 manifest still
+            # validates against this exact handoff and its source bytes.
+            $paperHandoffBinding = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList @(
+                    "-m", "intraday_scanner.v2.paper_ops", "verify-blotter",
+                    "--mode", "forward", "--output-root", $paperOpsRoot
+                ) `
+                -LogRoot $logRoot `
+                -LogName "paperops-resume-handoff-$MarketDate"
+            $paperExit = $paperHandoffBinding.exit_code
+        }
         $reuseExistingDailyReport = ($paperExit -eq 0)
     }
     if ($paperExit -eq 0 -and -not $reuseExistingDailyReport) {
         for ($attempt = 1; $attempt -le $PaperOpsRetryLimit; $attempt++) {
             $paperDay = Invoke-DawnstrikeNativeProcess `
                 -FilePath "py.exe" `
-                -ArgumentList @("-m", "intraday_scanner.v2.paper_ops", "run-day", "--date", $MarketDate, "--mode", "forward", "--output-root", $paperOpsRoot) `
+                -ArgumentList @(
+                    "-m", "intraday_scanner.v2.paper_ops", "run-day",
+                    "--date", $MarketDate, "--mode", "forward",
+                    "--output-root", $paperOpsRoot,
+                    "--universe-handoff", $universeHandoffPath,
+                    "--scheduled-production"
+                ) `
                 -LogRoot $logRoot `
                 -LogName "paperops-$MarketDate-attempt-$attempt"
             $paperExit = $paperDay.exit_code

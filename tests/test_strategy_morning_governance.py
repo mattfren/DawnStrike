@@ -11,10 +11,12 @@ from intraday_scanner.market_calendar import (
     NEXT_SESSION_ACTIVATION_POLICY,
     registration_coverage_inception_date,
 )
+from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.services.alpha_cycle_service import (
     _merge_strategy_adapter_signals,
     _strategy_adapter_contributor_count,
 )
+from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
 from intraday_scanner.services.morning_strategy_adapter import (
     DATATRUTH_MANIFEST_ATTESTATION_LABEL,
     GOVERNED_SOURCE_LABEL,
@@ -1035,6 +1037,63 @@ def test_strategy_merge_prefers_eligible_alpha_over_eligible_adapter() -> None:
     }
 
     assert _merge_strategy_adapter_signals([alpha, adapter])[0]["strategy_id"] == "alphaops_v5"
+
+
+def test_strategy_merge_ranks_strongest_eligible_overlap_and_discloses_lineage() -> None:
+    alpha = {
+        "ticker": "AAA",
+        "strategy_id": "alphaops_v5",
+        "strategy_version": "v5",
+        "signal_id": "alpha76",
+        "alpha_score": 76.0,
+        "research_pick_eligible": True,
+        "decision_tier": "clean_edge",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+        "can_alert": True,
+    }
+    adapter = {
+        "ticker": "AAA",
+        "strategy_id": "adapter99",
+        "strategy_version": "v1",
+        "signal_id": "adapter99-current",
+        "source_signal_id": "adapter99-prior-signal",
+        "alpha_score": 99.0,
+        "strategy_adapter": GOVERNED_SOURCE_LABEL,
+        "research_pick_eligible": True,
+        "decision_tier": "clean_edge",
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+        "can_alert": True,
+        "prior_session_paper_ops": {
+            "source_signal_id": "adapter99-prior-signal",
+            "prior_session_date": "2026-08-27",
+        },
+    }
+
+    merged = _merge_strategy_adapter_signals([alpha, adapter])
+    row = merged[0]
+    message = format_alpha_watch(signals=merged, edge_label="test")
+
+    assert row["strategy_id"] == "alphaops_v5"
+    assert row["canonical_primary_strategy_id"] == "alphaops_v5"
+    assert row["strongest_eligible_contributor_score"] == 99.0
+    assert row["strategy_contributor_ids"] == ["adapter99", "alphaops_v5"]
+    slate = build_ranked_research_slate(
+        [
+            row,
+            {
+                "ticker": "BBB",
+                "alpha_score": 90.0,
+                "score": 90.0,
+                "research_pick_eligible": True,
+            },
+        ],
+        target=2,
+    )
+    assert [item["ticker"] for item in slate["rows"]] == ["AAA", "BBB"]
+    assert "Contributors (one ranked row): adapter99, alphaops_v5" in message
+    assert "Adapter prior-session lineage: adapter99<-adapter99-prior-signal@2026-08-27" in message
 
 
 def test_strategy_adapter_contributor_count_includes_governed_v3_source() -> None:
