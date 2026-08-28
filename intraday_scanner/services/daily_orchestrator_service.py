@@ -59,14 +59,23 @@ def daily_orchestration_status(
     current = now or datetime.now(timezone.utc)
     runs = store.load_daily_runs(market_date=market_date, limit=10)
     stages = store.load_daily_run_stages(market_date=market_date, limit=10_000)
-    recorded = {str(row.get("stage_name") or "") for row in stages}
+    latest_run = runs[0] if runs else None
+    latest_run_id = str((latest_run or {}).get("run_id") or "")
+    scoped_stages = (
+        [row for row in stages if str(row.get("run_id") or "") == latest_run_id]
+        if latest_run_id
+        else stages
+    )
+    latest_stages = _latest_stage_attempts(scoped_stages)
+    recorded = set(latest_stages)
     heartbeat = _read_heartbeat(Path(state_root) / "heartbeats" / f"{market_date[:10]}.json")
     stale = _heartbeat_stale(heartbeat, current, heartbeat_ttl_minutes)
     missing = [stage for stage in DAILY_STAGE_ORDER if stage not in recorded]
     failed = [
-        row
-        for row in stages
-        if str(row.get("status") or "") in {"FAILED", "DEGRADED", "TERMINAL_MISSING"}
+        latest_stages[name]
+        for name in sorted(latest_stages)
+        if str(latest_stages[name].get("status") or "")
+        in {"FAILED", "DEGRADED", "TERMINAL_MISSING"}
     ]
     status = "HEALTHY"
     if failed:
@@ -79,7 +88,7 @@ def daily_orchestration_status(
         "schema_version": "dawnstrike.daily_orchestrator_status.v1",
         "status": status,
         "market_date": market_date[:10],
-        "latest_run": runs[0] if runs else None,
+        "latest_run": latest_run,
         "recorded_stages": sorted(recorded),
         "missing_stages": missing,
         "failed_stages": failed,
@@ -89,6 +98,28 @@ def daily_orchestration_status(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+
+
+def _latest_stage_attempts(stages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return only the terminal observation for each stage in the latest run."""
+
+    latest: dict[str, dict[str, Any]] = {}
+    for row in stages:
+        name = str(row.get("stage_name") or "")
+        if not name:
+            continue
+        current = latest.get(name)
+        candidate_key = (
+            int(row.get("attempt_no") or 0),
+            str(row.get("completed_at") or row.get("started_at") or ""),
+        )
+        current_key = (
+            int((current or {}).get("attempt_no") or 0),
+            str((current or {}).get("completed_at") or (current or {}).get("started_at") or ""),
+        )
+        if current is None or candidate_key > current_key:
+            latest[name] = row
+    return latest
 
 
 def _read_heartbeat(path: Path) -> dict[str, Any] | None:
