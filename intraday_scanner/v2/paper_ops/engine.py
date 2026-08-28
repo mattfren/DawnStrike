@@ -35,6 +35,7 @@ from intraday_scanner.v2.paper_ops.experiment_registry import (
 )
 from intraday_scanner.v2.paper_ops.models import (
     DEFAULT_PAPEROPS_UNIVERSE,
+    LEGACY_PAPER_EXECUTION_POLICY_VERSION,
     PAPER_EXECUTION_POLICY_VERSION,
     PaperAccountState,
     PaperClose,
@@ -302,7 +303,11 @@ def scan(
             risk_per_trade_pct=config.risk_per_trade_pct,
             max_position_pct=config.max_gross_exposure_pct,
             min_reward_risk=config.min_reward_risk,
+            max_stop_distance_pct=config.max_stop_distance_pct,
             max_risk_per_trade_pct=config.risk_per_trade_pct,
+            enforce_governed_common_gates=(
+                config.execution_policy_version != LEGACY_PAPER_EXECUTION_POLICY_VERSION
+            ),
         ),
         data_snapshot_id=manifest.snapshot_id,
         run_manifest_id=run.run_id,
@@ -491,6 +496,10 @@ def enter(
             account=account,
             config=config,
             daily_closed_net=daily_net.get(_strategy_version_key(order), 0.0),
+            management_only=(
+                config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                and mode is PaperRunMode.FORWARD
+            ),
         )
         if reason is not None:
             blocked.append(_blocked_order_payload(order, reason, run))
@@ -674,6 +683,10 @@ def check(
             account=account,
             config=config,
             daily_closed_net=daily_net.get(_strategy_version_key(order), 0.0),
+            management_only=(
+                config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                and mode is PaperRunMode.FORWARD
+            ),
         )
         if reason is not None:
             blocked_orders.append(_blocked_order_payload(order, reason, run, source_bar=fill_bar))
@@ -1809,9 +1822,40 @@ def _picks_from_scan(
         elif card.target is None:
             decision = PaperPickDecision.REJECTED
             reason = "missing_target"
-        elif card.reward_risk is not None and card.reward_risk < config.min_reward_risk:
+        elif config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+            # Preserve v2 scan/pick semantics for immutable historical source
+            # rows.  The legacy series is still barred from every new order and
+            # fill admission seam below.
+            if card.reward_risk is not None and card.reward_risk < config.min_reward_risk:
+                decision = PaperPickDecision.REJECTED
+                reason = "reward_risk_below_threshold"
+        elif card.reward_risk is None:
             decision = PaperPickDecision.REJECTED
-            reason = "reward_risk_below_threshold"
+            reason = "missing_reward_risk"
+        else:
+            recomputed_reward_risk = _reward_risk_from_levels(
+                card.direction,
+                entry,
+                card.stop,
+                card.target,
+            )
+            if recomputed_reward_risk is None:
+                decision = PaperPickDecision.REJECTED
+                reason = "invalid_level_geometry"
+            elif not math.isclose(
+                float(card.reward_risk),
+                recomputed_reward_risk,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            ):
+                decision = PaperPickDecision.REJECTED
+                reason = "reward_risk_mismatch"
+            elif recomputed_reward_risk < _governed_min_reward_risk(config):
+                decision = PaperPickDecision.REJECTED
+                reason = "reward_risk_below_threshold"
+            elif _stop_distance_pct(entry, card.stop) > _governed_max_stop_distance_pct(config):
+                decision = PaperPickDecision.REJECTED
+                reason = "stop_distance_exceeds_threshold"
         pick_id = stable_id(
             run.mode.value,
             run.run_date,
@@ -1839,8 +1883,29 @@ def _picks_from_scan(
                 stop=card.stop,
                 target=card.target,
                 risk_per_unit=card.risk_per_share,
-                reward_per_unit=card.reward,
-                reward_risk=card.reward_risk,
+                reward_per_unit=(
+                    card.reward
+                    if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                    else (
+                        abs(card.target - entry)
+                        if card.target is not None and entry is not None
+                        else None
+                    )
+                ),
+                reward_risk=(
+                    card.reward_risk
+                    if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                    else (
+                        _reward_risk_from_levels(
+                            card.direction,
+                            entry,
+                            card.stop,
+                            card.target,
+                        )
+                        if decision is PaperPickDecision.ACCEPTED
+                        else card.reward_risk
+                    )
+                ),
                 decision=decision,
                 reason=reason,
                 evidence=card.evidence,
@@ -1902,6 +1967,73 @@ def _entry_from_card(direction: str, stop: float | None, risk: float | None) -> 
     if direction == Direction.LONG:
         return stop + risk
     return stop - risk
+
+
+def _governed_min_reward_risk(config: PaperOpsConfig) -> float:
+    """Return the non-lowerable common reward/risk floor."""
+
+    value = float(config.min_reward_risk)
+    return max(value, 1.50) if math.isfinite(value) else math.inf
+
+
+def _governed_max_stop_distance_pct(config: PaperOpsConfig) -> float:
+    """Return the non-expandable common stop-distance ceiling."""
+
+    value = float(config.max_stop_distance_pct)
+    return min(value, 0.15) if math.isfinite(value) and value > 0 else 0.0
+
+
+def _admission_min_reward_risk(config: PaperOpsConfig) -> float:
+    """Use historical v2 thresholds only for explicitly replayed legacy rows."""
+
+    if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+        value = float(config.min_reward_risk)
+        return value if math.isfinite(value) else math.inf
+    return _governed_min_reward_risk(config)
+
+
+def _admission_max_stop_distance_pct(config: PaperOpsConfig) -> float:
+    """Use the v2 unbounded stop policy only for explicitly replayed legacy rows."""
+
+    if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+        return math.inf
+    return _governed_max_stop_distance_pct(config)
+
+
+def _stop_distance_pct(entry: float | None, stop: float | None) -> float:
+    if entry is None or stop is None or not math.isfinite(float(entry)) or float(entry) <= 0:
+        return math.inf
+    if not math.isfinite(float(stop)):
+        return math.inf
+    return abs(float(entry) - float(stop)) / float(entry)
+
+
+def _reward_risk_from_levels(
+    direction: str,
+    entry: float | None,
+    stop: float | None,
+    target: float | None,
+) -> float | None:
+    """Return a signed-direction level ratio, rejecting malformed geometry."""
+
+    if (
+        entry is None
+        or stop is None
+        or target is None
+        or not all(math.isfinite(float(value)) for value in (entry, stop, target))
+        or float(entry) <= 0
+        or float(entry) == float(stop)
+    ):
+        return None
+    if direction == Direction.LONG:
+        if not (float(stop) < float(entry) < float(target)):
+            return None
+    elif direction == Direction.SHORT:
+        if not (float(target) < float(entry) < float(stop)):
+            return None
+    else:
+        return None
+    return abs(float(target) - float(entry)) / abs(float(entry) - float(stop))
 
 
 def _order_from_pick(
@@ -1991,7 +2123,17 @@ def _fill_entry_block_reason(
     account: StrategyPaperAccount,
     config: PaperOpsConfig,
     daily_closed_net: float,
+    management_only: bool | None = None,
 ) -> str | None:
+    if management_only is None:
+        management_only = (
+            config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+        )
+    if management_only:
+        # Preserve historical v2 economics for audit/replay, but quarantine
+        # that series from every new order and fill admission.  Existing open
+        # positions remain manageable through the close/check paths.
+        return "legacy_policy_management_only"
     if (
         order.direction == Direction.LONG
         and fill_bar.open <= order.stop
@@ -2024,8 +2166,14 @@ def _fill_entry_block_reason(
         )
         target_fee = target_fill * fill.quantity * config.fee_bps / 10_000.0
         net_reward = gross_reward - fill.fee - target_fee
-        if net_reward <= 0 or net_reward / actual_risk < config.min_reward_risk:
+        if net_reward <= 0 or net_reward / actual_risk < _admission_min_reward_risk(config):
             return "fill_reward_risk_below_threshold"
+    if (
+        _stop_distance_pct(order.entry, order.stop) > _admission_max_stop_distance_pct(config)
+        or _stop_distance_pct(fill.fill_price, order.stop)
+        > _admission_max_stop_distance_pct(config)
+    ):
+        return "fill_stop_distance_exceeds_threshold"
     return _order_entry_block_reason(
         order,
         position_rows=position_rows,
@@ -2035,6 +2183,7 @@ def _fill_entry_block_reason(
         daily_closed_net=daily_closed_net,
         candidate_max_loss=actual_risk,
         candidate_notional=fill.fill_price * fill.quantity,
+        management_only=management_only,
     )
 
 
@@ -2066,10 +2215,42 @@ def _order_entry_block_reason(
     daily_closed_net: float,
     candidate_max_loss: float | None = None,
     candidate_notional: float | None = None,
+    management_only: bool | None = None,
 ) -> str | None:
+    if management_only is None:
+        management_only = (
+            config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+        )
+    if management_only:
+        return "legacy_policy_management_only"
     key = _strategy_version_key(order)
     matching_positions = [row for row in position_rows if _strategy_version_key(row) == key]
     matching_pending = [row for row in pending_rows if _strategy_version_key(row) == key]
+    if config.execution_policy_version != LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+        if order.target is None or order.reward_risk is None:
+            return "missing_or_invalid_reward_risk"
+        recomputed_reward_risk = _reward_risk_from_levels(
+            order.direction,
+            order.entry,
+            order.stop,
+            order.target,
+        )
+        if recomputed_reward_risk is None:
+            return "invalid_level_geometry"
+        if not math.isclose(
+            float(order.reward_risk),
+            recomputed_reward_risk,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return "reward_risk_mismatch"
+    if (
+        order.reward_risk is not None
+        and order.reward_risk < _admission_min_reward_risk(config)
+    ):
+        return "reward_risk_below_threshold"
+    if _stop_distance_pct(order.entry, order.stop) > _admission_max_stop_distance_pct(config):
+        return "stop_distance_exceeds_threshold"
     if order.quantity <= 0:
         return "zero_quantity"
     if any(
@@ -5488,6 +5669,34 @@ def _validate_order_economics(row: dict[str, object], config: PaperOpsConfig) ->
     entry = float(row["entry"])
     stop = float(row["stop"])
     direction = str(row["direction"])
+    if config.execution_policy_version != LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+        target = row.get("target")
+        reward_risk = row.get("reward_risk")
+        if target is None or reward_risk is None:
+            raise ValueError("PaperOps order is missing governed reward/risk levels")
+        try:
+            reward_risk_value = float(reward_risk)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("PaperOps order reward/risk is invalid") from exc
+        recomputed_reward_risk = _reward_risk_from_levels(
+            direction,
+            entry,
+            stop,
+            float(target) if target is not None else None,
+        )
+        if (
+            not math.isfinite(reward_risk_value)
+            or recomputed_reward_risk is None
+            or not math.isclose(
+                reward_risk_value,
+                recomputed_reward_risk,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or recomputed_reward_risk < _governed_min_reward_risk(config)
+            or _stop_distance_pct(entry, stop) > _governed_max_stop_distance_pct(config)
+        ):
+            raise ValueError("PaperOps order levels fail governed risk gates")
     rate = config.slippage_bps / 10_000.0
     entry_fill = entry * (1 + rate) if direction == Direction.LONG else entry * (1 - rate)
     stop_fill = stop * (1 - rate) if direction == Direction.LONG else stop * (1 + rate)
@@ -5981,6 +6190,10 @@ def _validate_enter_order_semantics(
                 account=account,
                 config=config,
                 daily_closed_net=daily_net,
+                management_only=(
+                    config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                    and mode is PaperRunMode.FORWARD
+                ),
             )
 
         if event["event_type"] == "paper_order_created":
@@ -6042,6 +6255,11 @@ def _validate_check_order_semantics(
         return
     if not check_blocks and not fills and not pending_checks and not require_complete_outcomes:
         return
+
+    management_only = (
+        config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+        and any(str(event.get("mode")) == PaperRunMode.FORWARD.value for event in event_rows)
+    )
 
     first = next(iter(check_blocks.values()), None)
     if first is None:
@@ -6137,6 +6355,7 @@ def _validate_check_order_semantics(
                 account=account,
                 config=config,
                 daily_closed_net=daily_net.get(_strategy_version_key(order), 0.0),
+                management_only=management_only,
             )
 
         if block_event is not None:
@@ -6635,6 +6854,29 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
     universe_symbols = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in raw_symbols))
     if not universe_symbols:
         raise ValueError("PaperOps universe_symbols must not be empty")
+    # Preserve the legacy policy for already-running series.  Its historical
+    # scan/economics remain replayable, while every new v2 order/fill seam is
+    # explicitly quarantined as management-only below.  v3 is the only new
+    # entry-eligible policy and carries the common 1.50R/15% gates.
+    requested_policy = str(payload.get("execution_policy_version") or "").strip()
+    if requested_policy not in {
+        "",
+        LEGACY_PAPER_EXECUTION_POLICY_VERSION,
+        PAPER_EXECUTION_POLICY_VERSION,
+    }:
+        raise ValueError("PaperOps execution_policy_version is unsupported")
+    execution_policy_version = (
+        PAPER_EXECUTION_POLICY_VERSION
+        if not requested_policy
+        else requested_policy
+    )
+    is_legacy_policy = execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+    raw_min_reward_risk = float(payload.get("min_reward_risk", 1.0 if is_legacy_policy else 1.5))
+    raw_max_stop_distance_pct = float(
+        payload.get("max_stop_distance_pct", 1.0 if is_legacy_policy else 0.15)
+    )
+    if not math.isfinite(raw_max_stop_distance_pct) or raw_max_stop_distance_pct <= 0:
+        raise ValueError("PaperOps max_stop_distance_pct must be a finite positive number")
     config = PaperOpsConfig(
         starting_equity=float(payload.get("starting_equity", 100_000.0)),
         risk_per_trade_pct=float(payload.get("risk_per_trade_pct", 0.005)),
@@ -6648,14 +6890,29 @@ def _config_from_payload(payload: dict[str, object]) -> PaperOpsConfig:
             "allow_single_provider_forward",
             True,
         ),
-        min_reward_risk=float(payload.get("min_reward_risk", 1.0)),
+        # Keep v2's declared values for historical management and make v3's
+        # common floor the default for every newly-created config.  New-entry
+        # callers use _governed_min_reward_risk/_governed_max_stop_distance_pct
+        # regardless of the active historical series.
+        min_reward_risk=raw_min_reward_risk,
+        max_stop_distance_pct=(
+            raw_max_stop_distance_pct
+            if is_legacy_policy
+            else min(raw_max_stop_distance_pct, 0.15)
+        ),
         fee_bps=float(payload.get("fee_bps", 1.0)),
         slippage_bps=float(payload.get("slippage_bps", 5.0)),
-        execution_policy_version=str(
-            payload.get("execution_policy_version") or PAPER_EXECUTION_POLICY_VERSION
-        ),
+        execution_policy_version=execution_policy_version,
         universe_id=str(payload.get("universe_id", "us_liquid_daily_v1")),
         universe_symbols=universe_symbols,
+        schema_version=str(
+            payload.get("schema_version")
+            or (
+                "v2.paper_ops_config.v4"
+                if is_legacy_policy
+                else "v2.paper_ops_config.v5"
+            )
+        ),
     )
     _validate_config(config)
     return config
@@ -6680,6 +6937,7 @@ def _validate_config(config: PaperOpsConfig) -> None:
         "max_open_risk_pct": config.max_open_risk_pct,
         "max_gross_exposure_pct": config.max_gross_exposure_pct,
         "min_reward_risk": config.min_reward_risk,
+        "max_stop_distance_pct": config.max_stop_distance_pct,
     }
     for name, value in positive.items():
         if not math.isfinite(value) or value <= 0:
@@ -6698,6 +6956,11 @@ def _validate_config(config: PaperOpsConfig) -> None:
             raise ValueError(f"PaperOps {name} must be finite and non-negative")
     if not config.execution_policy_version.strip():
         raise ValueError("PaperOps execution_policy_version must not be blank")
+    if config.execution_policy_version not in {
+        LEGACY_PAPER_EXECUTION_POLICY_VERSION,
+        PAPER_EXECUTION_POLICY_VERSION,
+    }:
+        raise ValueError("PaperOps execution_policy_version is unsupported")
     if not config.universe_id.strip() or not config.universe_symbols:
         raise ValueError("PaperOps universe identity and symbols must not be blank")
 
@@ -7048,16 +7311,24 @@ def _execution_policy_fingerprint(config: PaperOpsConfig) -> str:
 
 
 def _execution_policy_fingerprint_payload(config: PaperOpsConfig) -> dict[str, object]:
-    return {
+    payload = {
         "allow_experimental": config.allow_experimental,
         "allow_single_provider_forward": config.allow_single_provider_forward,
-        "engine_policy_implementation": PAPER_EXECUTION_POLICY_VERSION,
+        "engine_policy_implementation": (
+            LEGACY_PAPER_EXECUTION_POLICY_VERSION
+            if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+            else PAPER_EXECUTION_POLICY_VERSION
+        ),
         "fee_bps": config.fee_bps,
         "max_concurrent_positions": config.max_concurrent_positions,
         "max_daily_loss_pct": config.max_daily_loss_pct,
         "max_gross_exposure_pct": config.max_gross_exposure_pct,
         "max_open_risk_pct": config.max_open_risk_pct,
-        "min_reward_risk": config.min_reward_risk,
+        "min_reward_risk": (
+            config.min_reward_risk
+            if config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+            else _governed_min_reward_risk(config)
+        ),
         "paper_timeout_days": PAPER_TIMEOUT_DAYS,
         "risk_per_trade_pct": config.risk_per_trade_pct,
         "slippage_bps": config.slippage_bps,
@@ -7065,6 +7336,12 @@ def _execution_policy_fingerprint_payload(config: PaperOpsConfig) -> dict[str, o
         "universe_id": config.universe_id,
         "universe_symbols": list(config.universe_symbols),
     }
+    # The historical v2 fingerprint predates this field and must remain
+    # resolvable so open positions can be managed.  v3 fingerprints include
+    # it, making retry/config drift fail closed when the cap changes.
+    if config.execution_policy_version != LEGACY_PAPER_EXECUTION_POLICY_VERSION:
+        payload["max_stop_distance_pct"] = _governed_max_stop_distance_pct(config)
+    return payload
 
 
 def _assert_strategy_registry_upgrade_safe(

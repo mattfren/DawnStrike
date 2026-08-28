@@ -10,7 +10,11 @@ import pytest
 from intraday_scanner.v2.data import MarketDataset
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
-from intraday_scanner.v2.paper_ops.models import PaperOpsConfig, PaperRunMode
+from intraday_scanner.v2.paper_ops.models import (
+    PAPER_EXECUTION_POLICY_VERSION,
+    PaperOpsConfig,
+    PaperRunMode,
+)
 from intraday_scanner.v2.paper_ops.storage import read_json, write_json
 
 RUN_DATE = date(2026, 7, 14)
@@ -23,7 +27,7 @@ class _StopAfterManifest(RuntimeError):
 
 def _config() -> PaperOpsConfig:
     return PaperOpsConfig(
-        execution_policy_version="paperops_manifest_gate_test_v1",
+        execution_policy_version=PAPER_EXECUTION_POLICY_VERSION,
         universe_id="manifest-test-universe-v1",
         universe_symbols=("AAA", "BBB"),
     )

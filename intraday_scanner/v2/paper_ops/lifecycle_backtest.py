@@ -36,6 +36,7 @@ from intraday_scanner.v2.paper_ops.engine import (
     _strategy_semantics_fingerprint,
 )
 from intraday_scanner.v2.paper_ops.models import (
+    LEGACY_PAPER_EXECUTION_POLICY_VERSION,
     PaperClose,
     PaperFill,
     PaperOpsConfig,
@@ -145,7 +146,12 @@ class PaperOpsLifecycleBacktestEngine:
                     risk_per_trade_pct=config.risk_per_trade_pct,
                     max_position_pct=config.max_gross_exposure_pct,
                     min_reward_risk=config.min_reward_risk,
+                    max_stop_distance_pct=config.max_stop_distance_pct,
                     max_risk_per_trade_pct=config.risk_per_trade_pct,
+                    enforce_governed_common_gates=(
+                        config.execution_policy_version
+                        != LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                    ),
                 ),
             )
         )
@@ -271,6 +277,11 @@ class PaperOpsLifecycleBacktestEngine:
                         _strategy_lineage(order),
                         0.0,
                     ),
+                    management_only=(
+                        self.config.execution_policy_version
+                        == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                        and self.mode is PaperRunMode.FORWARD
+                    ),
                 )
                 if reason is not None:
                     entry_blocks.append(_blocked_order_payload(order, reason, run))
@@ -318,6 +329,11 @@ class PaperOpsLifecycleBacktestEngine:
                     daily_closed_net=daily_net_snapshot.get(
                         _strategy_lineage(order),
                         0.0,
+                    ),
+                    management_only=(
+                        self.config.execution_policy_version
+                        == LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                        and self.mode is PaperRunMode.FORWARD
                     ),
                 )
                 terminal_order_ids.add(order.order_id)
@@ -552,7 +568,11 @@ def _signal_cards(
         risk_per_trade_pct=config.risk_per_trade_pct,
         max_position_pct=config.max_gross_exposure_pct,
         min_reward_risk=config.min_reward_risk,
+        max_stop_distance_pct=config.max_stop_distance_pct,
         max_risk_per_trade_pct=config.risk_per_trade_pct,
+        enforce_governed_common_gates=(
+            config.execution_policy_version != LEGACY_PAPER_EXECUTION_POLICY_VERSION
+        ),
     )
     cards: list[ScanCard] = []
     for strategy in strategies:

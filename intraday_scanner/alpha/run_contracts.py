@@ -99,6 +99,8 @@ class AlphaRunContract:
     slate_reuse_status: str = "UNSPECIFIED"
     slate_published_count: int = 0
     slate_selection_ids: tuple[str, ...] = ()
+    strategy_contributions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    strategy_adapter_provenance: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "alphaops.run_contract.v1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -285,6 +287,11 @@ def build_alpha_run_contract(
         for name, value in dict(slate.get("lane_statuses") or {}).items()
         if isinstance(value, dict)
     }
+    strategy_contributions = _strategy_contribution_summary(
+        signals,
+        published_signals,
+        source_summary=source_summary,
+    )
     if persisted_slate:
         # The frozen slate, not the current mover-enrichment cohort, owns the
         # exact research identity.  This is especially important when a
@@ -442,7 +449,185 @@ def build_alpha_run_contract(
         slate_selection_ids=tuple(
             str(item) for item in slate.get("selection_ids") or []
         ),
+        strategy_contributions=strategy_contributions,
+        strategy_adapter_provenance=dict(
+            dict(source_summary.get("morning_strategy_adapter") or {}).get("provenance")
+            or {}
+        ),
     )
+
+
+def _strategy_contribution_summary(
+    signals: list[dict[str, Any]],
+    published_signals: list[dict[str, Any]],
+    *,
+    source_summary: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Summarize candidate attempts separately from the frozen slate cohort."""
+
+    observed: dict[str, dict[str, Any]] = {}
+    seen_by_cohort: dict[str, set[tuple[str, str, str, str]]] = {
+        "current": set(),
+        "slate": set(),
+    }
+
+    def add(
+        row: dict[str, Any],
+        *,
+        ticker: str,
+        cohort: str,
+        adapter: bool = False,
+    ) -> None:
+        strategy_id = str(row.get("strategy_id") or row.get("decision_strategy_id") or "").strip()
+        strategy_version = str(row.get("strategy_version") or "").strip()
+        semantics = str(row.get("strategy_semantics_fingerprint") or "").strip()
+        source_id = str(
+            row.get("source_signal_id")
+            or row.get("prior_session_signal_id")
+            or row.get("signal_id")
+            or row.get("signal_key")
+            or ""
+        ).strip()
+        if not strategy_id:
+            return
+        key = (strategy_id, strategy_version, semantics, source_id)
+        if key in seen_by_cohort[cohort]:
+            return
+        seen_by_cohort[cohort].add(key)
+        item = observed.setdefault(
+            strategy_id,
+            {
+                "strategy_id": strategy_id,
+                "current_versions": set(),
+                "current_semantics": set(),
+                "slate_versions": set(),
+                "slate_semantics": set(),
+                "current_attempt_candidate_count": 0,
+                "slate_count": 0,
+                "selected_symbols": set(),
+                "receipt_ids": set(),
+                "eligible_count": 0,
+                "adapter_candidate_count": 0,
+                "current_attempt_eligible_count": 0,
+                "slate_adapter_candidate_count": 0,
+            },
+        )
+        item[f"{cohort}_versions"].add(strategy_version)
+        item[f"{cohort}_semantics"].add(semantics)
+        if cohort == "current":
+            item["current_attempt_candidate_count"] += 1
+            if row.get("research_pick_eligible") is True:
+                item["current_attempt_eligible_count"] += 1
+            if adapter or str(row.get("strategy_adapter") or ""):
+                item["adapter_candidate_count"] += 1
+        else:
+            item["slate_count"] += 1
+            item["selected_symbols"].add(ticker)
+            if adapter or str(row.get("strategy_adapter") or ""):
+                item["slate_adapter_candidate_count"] += 1
+            if row.get("research_pick_eligible") is True:
+                item["eligible_count"] += 1
+            receipt_id = str(row.get("receipt_id") or "").strip()
+            receipt = row.get("strategy_decision_receipt") or row.get("decision_receipt")
+            if isinstance(receipt, dict):
+                receipt_id = str(receipt.get("receipt_id") or receipt_id).strip()
+            if receipt_id:
+                item["receipt_ids"].add(receipt_id)
+
+    for row in signals:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        add(row, ticker=ticker, cohort="current")
+        for contributor in row.get("strategy_contributors") or []:
+            if isinstance(contributor, dict):
+                add(
+                    contributor,
+                    ticker=ticker,
+                    cohort="current",
+                    adapter=bool(contributor.get("strategy_adapter")),
+                )
+    for row in published_signals:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        add(row, ticker=ticker, cohort="slate")
+        for contributor in row.get("strategy_contributors") or []:
+            if isinstance(contributor, dict):
+                add(
+                    contributor,
+                    ticker=ticker,
+                    cohort="slate",
+                    adapter=bool(contributor.get("strategy_adapter")),
+                )
+    adapter_summary = source_summary.get("morning_strategy_adapter")
+    enabled = (
+        adapter_summary.get("enabled_strategy_ids")
+        if isinstance(adapter_summary, dict)
+        else ()
+    )
+    enabled_identities = (
+        adapter_summary.get("enabled_strategy_identities")
+        if isinstance(adapter_summary, dict)
+        else {}
+    )
+    if not isinstance(enabled_identities, dict) and isinstance(adapter_summary, dict):
+        provenance = adapter_summary.get("provenance")
+        enabled_identities = (
+            provenance.get("enabled_strategy_identities")
+            if isinstance(provenance, dict)
+            else {}
+        )
+    for strategy_id in enabled or ():
+        identity = (
+            enabled_identities.get(str(strategy_id), {})
+            if isinstance(enabled_identities, dict)
+            else {}
+        )
+        item = observed.setdefault(
+            str(strategy_id),
+            {
+                "strategy_id": str(strategy_id),
+                "current_versions": set(),
+                "current_semantics": set(),
+                "slate_versions": set(),
+                "slate_semantics": set(),
+                "current_attempt_candidate_count": 0,
+                "slate_count": 0,
+                "selected_symbols": set(),
+                "receipt_ids": set(),
+                "eligible_count": 0,
+                "adapter_candidate_count": 0,
+                "current_attempt_eligible_count": 0,
+                "slate_adapter_candidate_count": 0,
+            },
+        )
+        if isinstance(identity, dict):
+            version = str(identity.get("strategy_version") or "").strip()
+            semantics = str(identity.get("strategy_semantics_fingerprint") or "").strip()
+            if version:
+                item["slate_versions"].add(version)
+            if semantics:
+                item["slate_semantics"].add(semantics)
+    return {
+        strategy_id: {
+            "strategy_id": strategy_id,
+            "strategy_versions": sorted(
+                item["slate_versions"] or item["current_versions"]
+            ),
+            "strategy_semantics_fingerprints": sorted(
+                item["slate_semantics"] or item["current_semantics"]
+            ),
+            "candidate_count": int(item["current_attempt_candidate_count"]),
+            "current_attempt_candidate_count": int(item["current_attempt_candidate_count"]),
+            "slate_count": int(item["slate_count"]),
+            "selected_symbols": sorted(item["selected_symbols"]),
+            "receipt_ids": sorted(item["receipt_ids"]),
+            "eligible_count": int(item["eligible_count"]),
+            "current_attempt_eligible_count": int(item["current_attempt_eligible_count"]),
+            "adapter_candidate_count": int(item["adapter_candidate_count"]),
+            "slate_adapter_candidate_count": int(item["slate_adapter_candidate_count"]),
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        for strategy_id, item in sorted(observed.items())
+    }
 
 
 def _all_plan_inputs_ineligible(signals: list[dict[str, Any]]) -> bool:

@@ -94,6 +94,11 @@ from intraday_scanner.services.luna_research_slate_service import (
     validate_ranked_research_slate,
     validated_frozen_selection_signal,
 )
+from intraday_scanner.services.morning_strategy_adapter import (
+    GOVERNED_SOURCE_LABEL,
+    LEGACY_SOURCE_LABEL,
+    adapt_prior_session_paper_ops,
+)
 from intraday_scanner.services.premarket_enrichment_service import enrich_premarket_rows
 from intraday_scanner.services.price_observation_service import collect_price_observations
 from intraday_scanner.services.return_attribution_service import (
@@ -141,6 +146,7 @@ def alpha_morning(
     as_of: datetime | None = None,
     core_universe_manifest: str | Path | None = None,
     market_date: str | None = None,
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
     return alpha_cycle(
         config_path=config_path,
@@ -152,6 +158,7 @@ def alpha_morning(
         as_of=as_of,
         core_universe_manifest=core_universe_manifest,
         market_date=market_date,
+        paper_ops_root=paper_ops_root,
     )
 
 
@@ -166,6 +173,7 @@ def alpha_cycle(
     as_of: datetime | None = None,
     core_universe_manifest: str | Path | None = None,
     market_date: str | None = None,
+    paper_ops_root: str | Path | None = None,
 ) -> dict[str, Any]:
     if market_date:
         parsed_market_date = _parse_market_date(market_date)
@@ -770,6 +778,31 @@ def alpha_cycle(
         )
         for index, row in enumerate(signals, 1)
     ]
+    strategy_adapter_result = adapt_prior_session_paper_ops(
+        output_root=paper_ops_root,
+        market_date=timestamp[:10],
+        current_candidates=all_candidates,
+        current_snapshot_id=scan_result.run_id,
+        current_source_identity=(
+            str(source_summary.get("source_identity") or "").strip()
+            or f"alpha_cycle:{scan_result.run_id}"
+        ),
+        current_code_sha=str(os.environ.get("DAWNSTRIKE_CODE_SHA") or "").strip(),
+        current_universe_membership=[
+            str(row.get("ticker") or row.get("symbol") or "").upper()
+            for row in all_candidates
+        ],
+        current_core_membership=[
+            str(row.get("symbol") or row.get("ticker") or "").upper()
+            for row in core_universe.get("members") or []
+        ],
+        decision_at=timestamp,
+    )
+    signals.extend(
+        dict(row)
+        for row in list(strategy_adapter_result.get("rows") or [])
+        if isinstance(row, dict)
+    )
     strategy_receipt_stats = _apply_strategy_decision_receipts(
         signals,
         store=store,
@@ -777,6 +810,14 @@ def alpha_cycle(
         decision_at=timestamp,
         source_summary=source_summary,
     )
+    # Receipts are built for every strategy contribution before this grouping;
+    # the frozen slate then has one deterministic row per ticker while retaining
+    # each contributor's identity and exact receipt lineage.
+    signals = _merge_strategy_adapter_signals(signals, [])
+    strategy_adapter_result["receipt_contributor_count"] = (
+        _strategy_adapter_contributor_count(signals)
+    )
+    source_summary["morning_strategy_adapter"] = strategy_adapter_result
     if scanner_config.strategy_evidence_enabled:
         signals = _apply_receipt_risk_gates(signals, feature_vectors)
     signals = apply_alert_gates(signals)
@@ -2596,6 +2637,158 @@ def _signal_payload(row: dict[str, Any], scan_id: str, timestamp: str, rank: int
             payload["target_basis_kind"] = plan.target_basis_kind
             payload["target_derived_from_risk"] = False
     return payload
+
+
+def _merge_strategy_adapter_signals(
+    signals: list[dict[str, Any]], adapter_rows: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Dedupe one Morning row per ticker while retaining all contributors.
+
+    Adapter rows are intentionally receipt-built before this function runs.
+    The selected row therefore carries the exact canonical receipt for the
+    primary strategy plus a lossless contributor list/receipt projection for
+    every other enabled strategy that independently qualified the same ticker.
+    """
+
+    source = [
+        dict(row)
+        for row in [*(signals or []), *(adapter_rows or [])]
+        if isinstance(row, dict)
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for row in source:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        if not ticker:
+            passthrough.append(row)
+            continue
+        grouped.setdefault(ticker, []).append(row)
+
+    def score_value(row: dict[str, Any]) -> float:
+        try:
+            return float(row.get("alpha_score") or row.get("score") or float("-inf"))
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    def primary_bucket(row: dict[str, Any]) -> int:
+        adapter = bool(str(row.get("strategy_adapter") or "").strip())
+        eligible = row.get("research_pick_eligible") is True
+        if eligible and not adapter:
+            return 0
+        if eligible and adapter:
+            return 1
+        if not adapter:
+            return 2
+        return 3
+
+    output: list[dict[str, Any]] = []
+    for rows in grouped.values():
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                primary_bucket(row),
+                -score_value(row),
+                str(row.get("strategy_id") or ""),
+                str(row.get("signal_id") or row.get("signal_key") or ""),
+            ),
+        )
+        primary = dict(ordered[0])
+        contributors: list[dict[str, Any]] = []
+        receipts: list[dict[str, Any]] = []
+        seen_contributors: set[tuple[str, str, str, str]] = set()
+        seen_receipts: set[str] = set()
+
+        def add_contributor(
+            row: dict[str, Any],
+            *,
+            _seen_contributors: set[tuple[str, str, str, str]] = seen_contributors,
+            _seen_receipts: set[str] = seen_receipts,
+            _contributors: list[dict[str, Any]] = contributors,
+            _receipts: list[dict[str, Any]] = receipts,
+        ) -> None:
+            strategy_id = str(
+                row.get("strategy_id") or row.get("decision_strategy_id") or ""
+            ).strip()
+            strategy_version = str(row.get("strategy_version") or "").strip()
+            strategy_fp = str(row.get("strategy_semantics_fingerprint") or "").strip()
+            source_id = str(
+                row.get("source_signal_id")
+                or row.get("prior_session_signal_id")
+                or row.get("signal_id")
+                or row.get("signal_key")
+                or ""
+            ).strip()
+            key = (strategy_id, strategy_version, strategy_fp, source_id)
+            if not strategy_id or key in _seen_contributors:
+                return
+            _seen_contributors.add(key)
+            receipt = row.get("strategy_decision_receipt") or row.get("decision_receipt")
+            receipt_id = str(row.get("receipt_id") or "").strip()
+            if isinstance(receipt, dict):
+                receipt_id = str(receipt.get("receipt_id") or receipt_id).strip()
+                if receipt_id and receipt_id not in _seen_receipts:
+                    _receipts.append(dict(receipt))
+                    _seen_receipts.add(receipt_id)
+            _contributors.append(
+                {
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "strategy_semantics_fingerprint": strategy_fp,
+                    "source_signal_id": source_id,
+                    "signal_id": str(row.get("signal_id") or ""),
+                    "strategy_adapter": str(row.get("strategy_adapter") or ""),
+                    "receipt_id": receipt_id,
+                    "receipt_hash_sha256": str(row.get("receipt_hash_sha256") or ""),
+                    "receipt_status": str(
+                        row.get("strategy_receipt_construction_status") or "MISSING"
+                    ),
+                    "research_pick_eligible": row.get("research_pick_eligible"),
+                    "paper_entry_eligible": row.get("paper_entry_eligible"),
+                    "decision_receipt": dict(receipt) if isinstance(receipt, dict) else None,
+                }
+            )
+
+        # Existing nested contributors are carried first, then every source
+        # row.  This makes the helper idempotent on a retry/review path.
+        for existing in primary.get("strategy_contributors") or []:
+            if isinstance(existing, dict):
+                add_contributor(existing)
+        for row in ordered:
+            add_contributor(row)
+            for existing in row.get("strategy_contributors") or []:
+                if isinstance(existing, dict):
+                    add_contributor(existing)
+        primary["strategy_contributors"] = contributors
+        primary["strategy_contributor_count"] = len(contributors)
+        primary["strategy_contributor_ids"] = sorted(
+            {
+                str(item["strategy_id"])
+                for item in contributors
+                if str(item.get("strategy_id") or "")
+            }
+        )
+        primary["strategy_decision_receipts"] = receipts
+        primary["strategy_contribution_status"] = (
+            "COMPLETE"
+            if contributors and all(item.get("receipt_id") for item in contributors)
+            else "DISCLOSED_GAPS"
+        )
+        primary["research_only"] = True
+        primary["broker_execution"] = "disabled"
+        primary["broker_execution_enabled"] = False
+        output.append(primary)
+    output.extend(passthrough)
+    return output
+
+
+def _strategy_adapter_contributor_count(signals: list[dict[str, Any]]) -> int:
+    accepted_labels = {LEGACY_SOURCE_LABEL, GOVERNED_SOURCE_LABEL}
+    return sum(
+        1
+        for row in signals
+        for contributor in row.get("strategy_contributors") or []
+        if str(contributor.get("strategy_adapter") or "").strip() in accepted_labels
+    )
 
 
 def _attach_authenticated_alpaca_structure(

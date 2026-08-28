@@ -4,13 +4,15 @@ param(
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [string]$Notify = "telegram",
-    [string]$CoreUniverseManifest = ""
+    [string]$CoreUniverseManifest = "",
+    [string]$PaperOpsRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
+$paperOpsRoot = if ($PaperOpsRoot) { [System.IO.Path]::GetFullPath($PaperOpsRoot) } else { Join-Path $state "v2_paper_ops_live" }
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
@@ -145,7 +147,8 @@ try {
             "--out-dir", $outputRoot,
             "--notify", $Notify,
             "--market-date", $MarketDate,
-            "--as-of", $cycleObservedAt
+            "--as-of", $cycleObservedAt,
+            "--paper-ops-root", $paperOpsRoot
         )
         if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
         $alphaCycle = Invoke-DawnstrikeNativeProcess `

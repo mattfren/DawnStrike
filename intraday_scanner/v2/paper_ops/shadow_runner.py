@@ -1077,7 +1077,12 @@ def _run_one_challenger(
             risk_per_trade_pct=config.risk_per_trade_pct,
             max_position_pct=config.max_gross_exposure_pct,
             min_reward_risk=config.min_reward_risk,
+            max_stop_distance_pct=config.max_stop_distance_pct,
             max_risk_per_trade_pct=config.risk_per_trade_pct,
+            enforce_governed_common_gates=(
+                config.execution_policy_version
+                != paper_engine.LEGACY_PAPER_EXECUTION_POLICY_VERSION
+            ),
         ),
         data_snapshot_id=run.data_snapshot_id,
         run_manifest_id=run.run_id,
@@ -1207,6 +1212,11 @@ def _run_one_challenger(
             account=account,
             config=config,
             daily_closed_net=daily_net,
+            management_only=(
+                config.execution_policy_version
+                == paper_engine.LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                and mode is PaperRunMode.FORWARD
+            ),
         )
         if reason is None:
             orders.append(order)
@@ -1291,6 +1301,11 @@ def _run_one_challenger(
             account=account,
             config=config,
             daily_closed_net=daily_net,
+            management_only=(
+                config.execution_policy_version
+                == paper_engine.LEGACY_PAPER_EXECUTION_POLICY_VERSION
+                and mode is PaperRunMode.FORWARD
+            ),
         )
         if reason is None:
             fills.append(fill)

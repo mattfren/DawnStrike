@@ -465,6 +465,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
     )
+    alpha_morning_parser.add_argument(
+        "--paper-ops-root",
+        default="data/v2_paper_ops_live",
+        help="Read-only governed prior-session PaperOps root for strategy research lineage",
+    )
 
     alpha_cycle_parser = subparsers.add_parser(
         "alpha-cycle", help="Run one AlphaOps collect-score-notify cycle"
@@ -484,6 +489,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--core-universe-manifest",
         default=None,
         help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
+    )
+    alpha_cycle_parser.add_argument(
+        "--paper-ops-root",
+        default="data/v2_paper_ops_live",
+        help="Read-only governed prior-session PaperOps root for strategy research lineage",
     )
 
     alpha_monitor_parser = subparsers.add_parser(
@@ -1802,6 +1812,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
+        paper_ops_root=args.paper_ops_root,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1817,6 +1828,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         core_universe_manifest=args.core_universe_manifest,
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
+        paper_ops_root=args.paper_ops_root,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

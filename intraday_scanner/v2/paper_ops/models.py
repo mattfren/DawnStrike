@@ -14,7 +14,11 @@ class PaperDataMode(str, Enum):
     SYNTHETIC = "synthetic"
 
 
-PAPER_EXECUTION_POLICY_VERSION = "paperops_daily_next_open_risk_v2"
+# The v2 policy admitted a one-R setup and did not carry a stop-distance cap.
+# Keep the old value recognizable for migration/audit, but never make it the
+# active policy for newly created entries.
+LEGACY_PAPER_EXECUTION_POLICY_VERSION = "paperops_daily_next_open_risk_v2"
+PAPER_EXECUTION_POLICY_VERSION = "paperops_daily_next_open_risk_v3"
 DEFAULT_PAPEROPS_UNIVERSE: tuple[str, ...] = (
     "SPY",
     "QQQ",
@@ -93,13 +97,14 @@ class PaperOpsConfig:
     max_concurrent_positions: int = 3
     allow_experimental: bool = True
     allow_single_provider_forward: bool = True
-    min_reward_risk: float = 1.0
+    min_reward_risk: float = 1.5
+    max_stop_distance_pct: float = 0.15
     fee_bps: float = 1.0
     slippage_bps: float = 5.0
     execution_policy_version: str = PAPER_EXECUTION_POLICY_VERSION
     universe_id: str = "us_liquid_daily_v1"
     universe_symbols: tuple[str, ...] = DEFAULT_PAPEROPS_UNIVERSE
-    schema_version: str = "v2.paper_ops_config.v4"
+    schema_version: str = "v2.paper_ops_config.v5"
 
     def to_dict(self) -> dict[str, object]:
         return _plain(self)
