@@ -498,12 +498,25 @@ def test_official_rows_are_exact_frozen_promotions_not_current_review_rows():
 
 
 def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacements():
-    frozen = {
-        "ticker": "FROZEN",
-        "publication_tier": TIER1,
-        "research_only": True,
-        "broker_execution": "disabled",
-    }
+    frozen_signal = _receipted_signal(
+        ticker="FROZEN",
+        reward_risk_ratio=2.0,
+        stop=9.0,
+        target=12.0,
+    )
+    slate = build_ranked_research_slate(
+        [frozen_signal],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-frozen-telegram",
+        require_safety=True,
+    )
+    frozen_rows = apply_publication_semantics(
+        list(slate["rows"]),
+        slate=slate,
+        require_watcher_proof=True,
+    )
     current = {
         "ticker": "CURRENT",
         "publication_tier": TIER1,
@@ -514,8 +527,8 @@ def test_alpha_watch_reports_the_exact_frozen_slate_instead_of_retry_replacement
         signals=[current],
         edge_label="research",
         source_summary={
-            "ranked_research_slate": {"published_count": 1, "rows": [frozen]},
-            "ranked_research_publication_rows": [frozen],
+            "ranked_research_slate": slate,
+            "ranked_research_publication_rows": frozen_rows,
         },
     )
 
@@ -898,10 +911,8 @@ def test_alpha_watch_length_limit_preserves_slate_blockers_and_no_broker_footer(
         signals=slate_rows,
         edge_label="research",
         blocked_signals=blocked_rows,
-        source_summary={
-            "ranked_research_slate": {"published_count": 5, "rows": slate_rows},
-            "ranked_research_publication_rows": slate_rows,
-        },
+        target_count=5,
+        published_count=5,
         max_chars=4096,
     )
 

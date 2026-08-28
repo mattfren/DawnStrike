@@ -12,14 +12,17 @@ from types import SimpleNamespace
 import pytest
 
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.errors import DataProviderError
+from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.models import SnapshotRow
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
 from intraday_scanner.services import premarket_enrichment_service as premarket
-from intraday_scanner.services.alpha_cycle_service import _merge_lane_candidates
+from intraday_scanner.services.alpha_cycle_service import (
+    _load_frozen_luna_slate,
+    _merge_lane_candidates,
+)
 from intraday_scanner.services.luna_core_universe_service import (
     build_core_universe_contract,
     discover_core_universe_rows,
@@ -1447,3 +1450,148 @@ def test_official_and_telegram_boundaries_reject_hostile_execution_rows() -> Non
     )
     assert "LIVE" not in message
     assert "PAPER" in message
+
+
+def test_row_cannot_widen_authenticated_freshness_window() -> None:
+    requested_at = datetime(2026, 8, 28, 13, 0, tzinfo=timezone.utc)
+    observation = premarket.observation_from_alpaca_bars(
+        "STALE",
+        [
+            {
+                "ticker": "STALE",
+                "timestamp": "2026-08-28T12:28:00Z",
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1_000,
+            }
+        ],
+        previous_close=9.5,
+        requested_at=requested_at,
+        max_age_seconds=3_600,
+        feed="iex",
+    )
+    observation_hash, observation_payload = premarket._canonical_observation_payload(
+        observation
+    )
+    row = {
+        **_safe_overlap_row("STALE", "mover", receipt="stale-receipt"),
+        "market_date": "2026-08-28",
+        "enrichment_observation_sha256": observation_hash,
+        "enrichment_observation_payload_json": observation_payload,
+        "enrichment_max_age_seconds": 100_000,
+    }
+
+    slate = build_ranked_research_slate(
+        [row],
+        target=1,
+        require_safety=True,
+        generated_at=requested_at.isoformat(),
+        market_date="2026-08-28",
+        scan_id="scan-stale-hostile",
+    )
+
+    assert slate["symbols"] == []
+    assert "freshness_observation_unbound_or_invalid" in slate["safety_blockers"]
+
+
+def test_production_loader_rejects_v1_and_non_safety_v2(tmp_path: Path) -> None:
+    unsafe_v2 = build_ranked_research_slate(
+        [{"ticker": "LEGACY"}],
+        generated_at="2026-08-28T13:00:00+00:00",
+        market_date="2026-08-28",
+        scan_id="scan-unsafe-v2",
+        require_safety=False,
+    )
+    unsafe_path = tmp_path / "unsafe-v2.json"
+    unsafe_path.write_text(json.dumps(unsafe_v2), encoding="utf-8")
+    with pytest.raises(SnapshotValidationError, match="integrity checks"):
+        _load_frozen_luna_slate(unsafe_path, market_date="2026-08-28")
+
+    legacy = json.loads(json.dumps(unsafe_v2))
+    legacy["schema_version"] = "dawnstrike.luna.ranked_research_slate.v1"
+    legacy.pop("require_safety", None)
+    legacy["content_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in legacy.items()
+                if key not in {"content_hash_sha256", "slate_id"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    legacy["slate_id"] = "luna-slate-" + legacy["content_hash_sha256"][:24]
+    legacy_path = tmp_path / "legacy-v1.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(SnapshotValidationError, match="integrity checks"):
+        _load_frozen_luna_slate(legacy_path, market_date="2026-08-28")
+
+
+def test_telegram_rejects_forged_publication_rows_and_count_overrides() -> None:
+    row = _safe_overlap_row("REAL", "mover", receipt="real-receipt")
+    slate = build_ranked_research_slate(
+        [row],
+        target=1,
+        require_safety=True,
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        scan_id="scan-real",
+    )
+    publication_rows = apply_publication_semantics(
+        list(slate["rows"]),
+        slate=slate,
+        require_watcher_proof=True,
+    )
+    forged = {
+        **publication_rows[0],
+        "ticker": "FORGED",
+        "publication_tier": TIER2,
+        "alert_gate_status": "PASS",
+        "manual_confirmation_required": False,
+    }
+
+    message = format_alpha_watch(
+        signals=[forged],
+        edge_label="hostile",
+        source_summary={
+            "ranked_research_slate": slate,
+            "ranked_research_publication_rows": [forged],
+        },
+        target_count=88,
+        published_count=1,
+    )
+
+    assert "FORGED" not in message
+    assert "1 of 88" not in message
+    assert "Research slate: 0 of 0 shown" in message
+
+
+def test_merge_overwrites_spoofed_lane_identity() -> None:
+    mover = {
+        **_safe_overlap_row("SPOOF", "mover", receipt="spoof-receipt"),
+        "universe_lane": "core",
+        "evidence_lane": "core",
+    }
+    merged = _merge_lane_candidates(
+        [mover],
+        [],
+        lane_eligibility={"mover": False, "core": True},
+    )
+
+    assert merged[0]["universe_lane"] == "mover"
+    assert merged[0]["evidence_lane"] == "mover"
+    slate = build_ranked_research_slate(
+        merged,
+        target=1,
+        generated_at="2026-08-27T13:00:00+00:00",
+        market_date="2026-08-27",
+        require_safety=True,
+        lane_statuses={
+            "mover": {"data_eligible": False},
+            "core": {"data_eligible": True},
+        },
+    )
+    assert slate["symbols"] == []
