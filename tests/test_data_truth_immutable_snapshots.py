@@ -46,6 +46,36 @@ def test_production_cache_rejects_mutable_csv_even_with_matching_contract(
         )
 
 
+def test_capture_reapplies_bounded_reader_at_filesystem_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_csv = tmp_path / "source.csv"
+    source_csv.write_text(
+        "symbol,timestamp,open,high,low,close,volume\n"
+        "TST,2026-01-02T00:00:00+00:00,10,11,9,10.5,100\n",
+        encoding="utf-8",
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    observed: list[Path] = []
+
+    def bounded(path: Path) -> bytes:
+        observed.append(path)
+        with path.open("rb") as handle:
+            return handle.read()
+
+    monkeypatch.setattr(datatruth_core, "_bounded_source_bytes", bounded)
+
+    artifacts = datatruth_core._capture_source_artifacts(
+        source_csv=source_csv,
+        raw_dir=raw_dir,
+    )
+
+    assert observed == [source_csv]
+    assert artifacts[0].content == source_csv.read_bytes()
+
+
 def test_production_snapshot_retains_request_contract_after_cache_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -478,7 +478,7 @@ def verify_datatruth_snapshot(
             raise FileNotFoundError(
                 f"DataTruth production request contract is missing: {request_contract_path}"
             )
-        if request_contract_path.read_bytes() != request_contract_bytes:
+        if _bounded_source_bytes(request_contract_path) != request_contract_bytes:
             raise ValueError("DataTruth production request contract bytes are not canonical")
         if _sha256(request_contract_path) != manifest.request_contract_artifact_hash:
             raise ValueError("DataTruth production request contract artifact hash mismatch")
@@ -617,7 +617,11 @@ def _capture_source_artifacts(
         raise ValueError("DataTruth source artifact names are not unique")
     captured: list[_CapturedArtifact] = []
     for logical_path, source_path in candidates:
-        content = source_path.read_bytes()
+        # Reapply the same payload ceiling at capture time.  Validation and
+        # capture are separate filesystem observations; a cache object can be
+        # replaced between them, so a plain ``read_bytes`` here would permit
+        # an oversized allocation before the content-address check rejects it.
+        content = _bounded_source_bytes(source_path)
         if logical_path == "source/source.csv" and require_content_addressed_csv:
             digest = source_path.stem.rsplit("_", 1)[-1]
             if hashlib.sha256(content).hexdigest() != digest:
