@@ -335,7 +335,95 @@ def alpha_cycle(
         luna_research_slate = _load_frozen_luna_slate(
             slate_path, market_date=no_data_generated_at[:10]
         )
+        # A source outage can be a retry of a successful same-day cycle.  The
+        # first-writer slate, rather than the failed attempt's empty input, is
+        # authoritative in that case.  Rehydrate its publication semantics
+        # against the persisted receipt store before constructing any retry
+        # event; a missing receipt must never be silently demoted to Tier 1.
+        receipt_verifier = _persisted_strategy_receipt_verifier(
+            store,
+            market_date=no_data_generated_at[:10],
+        )
+        frozen_slate_rows = list(luna_research_slate.get("rows") or [])
+        frozen_slate_nonempty = bool(frozen_slate_rows)
+        slate_publication_rows: list[dict[str, Any]] = []
+        if frozen_slate_nonempty:
+            try:
+                slate_publication_rows = apply_publication_semantics(
+                    frozen_slate_rows,
+                    slate=luna_research_slate,
+                    coverage={"lanes": luna_research_slate.get("lane_statuses") or {}},
+                    require_watcher_proof=True,
+                    receipt_verifier=receipt_verifier,
+                )
+            except (TypeError, ValueError, SnapshotValidationError) as exc:
+                raise SnapshotValidationError(
+                    "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted frozen "
+                    "slate could not be authenticated for source-failure retry"
+                ) from exc
+            if len(slate_publication_rows) != int(
+                luna_research_slate.get("published_count") or 0
+            ):
+                raise SnapshotValidationError(
+                    "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted frozen "
+                    "slate publication rows could not be rehydrated"
+                )
+            strategy_id, strategy_version = alphaops_strategy_contract(no_data_generated_at)
+            existing_cohort = store.load_official_strategy_cohort(
+                market_date=no_data_generated_at[:10],
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                cohort=ALPHAOPS_OFFICIAL_COHORT,
+            )
+            if existing_cohort is not None:
+                existing_selections = store.load_signal_selections(
+                    scan_id=str(existing_cohort.get("scan_id") or ""),
+                    event_key=str(existing_cohort.get("event_key") or ""),
+                    strategy_id=strategy_id,
+                    cohort=ALPHAOPS_OFFICIAL_COHORT,
+                    limit=100,
+                )
+                if (
+                    not existing_selections
+                    or membership_sha256(existing_selections)
+                    != str(existing_cohort.get("membership_sha256") or "")
+                ):
+                    raise SnapshotValidationError(
+                        "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted official "
+                        "cohort membership is incomplete"
+                    )
+                expected_official = [
+                    row
+                    for row in existing_selections
+                    if str(row.get("decision") or "").lower() != "no_trade"
+                    and str(row.get("ticker") or "").upper() != "NO_TRADE"
+                ]
+                publication_by_selection_id = {
+                    str(row.get("research_selection_id") or ""): row
+                    for row in slate_publication_rows
+                }
+                if expected_official:
+                    for selection in expected_official:
+                        publication_row = publication_by_selection_id.get(
+                            str(
+                                (selection.get("payload_json") or {})
+                                .get("publication_row", {})
+                                .get("research_selection_id")
+                                or ""
+                            )
+                        )
+                        if (
+                            publication_row is None
+                            or publication_row.get("publication_tier")
+                            not in {"PAPER_PLAN_QUALIFIED", "ALERTABLE_PAPER_ENTRY"}
+                            or not receipt_verifier.verify(publication_row)
+                        ):
+                            raise SnapshotValidationError(
+                                "FROZEN_SLATE_PUBLICATION_EVIDENCE_MISSING: persisted "
+                                "official Tier 2/3 row lacks exact authenticated receipt"
+                            )
         source_summary["ranked_research_slate"] = luna_research_slate
+        source_summary["ranked_research_publication_rows"] = slate_publication_rows
         source_summary["ranked_research_slate_lineage"] = {
             "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
             "slate_id": str(luna_research_slate.get("slate_id") or ""),
@@ -350,36 +438,80 @@ def alpha_cycle(
                 else "GOVERNED_DAILY_FREEZE_REUSE"
             ),
         }
+        selected_signals = official_publication_rows(slate_publication_rows, limit=3)
+        official_no_trade = not selected_signals
+        publication_review = dict(review)
+        publication_decision = dict(review["decision"])
+        if not official_no_trade:
+            publication_decision.update(
+                {
+                    "no_trade": False,
+                    "decision_tier": "clean_edge",
+                    "reason": "Immutable frozen Tier 2/3 paper-plan cohort selected.",
+                    "primary_reason_code": "frozen_slate_official_selection",
+                }
+            )
+            publication_review["decision"] = publication_decision
+            publication_review["watchlist"] = selected_signals
         frozen_manifest = _load_frozen_official_notification_manifest(
             store, selected_at=no_data_generated_at
         )
         message = (
             str(frozen_manifest.get("body") or "")
             if frozen_manifest is not None
-            else format_alpha_no_trade(
-                reason=str(review["decision"]["reason"]),
-                next_action=str(review["decision"]["next_action"]),
-                target_count=int(luna_research_slate.get("target_count") or 0),
-                published_count=int(luna_research_slate.get("published_count") or 0),
-                slate_shortfall_reason=str(
-                    luna_research_slate.get("slate_shortfall_reason") or ""
-                ),
+            else (
+                format_alpha_watch(
+                    signals=slate_publication_rows,
+                    edge_label=_edge_label(selected_signals),
+                    source_summary=source_summary,
+                    blocked_signals=list(review.get("blocked") or []),
+                    generated_at=no_data_generated_at,
+                    target_count=int(luna_research_slate.get("target_count") or 0),
+                    published_count=int(luna_research_slate.get("published_count") or 0),
+                    slate_shortfall_reason=str(
+                        luna_research_slate.get("slate_shortfall_reason") or ""
+                    ),
+                )
+                if not official_no_trade
+                else format_alpha_no_trade(
+                    reason=str(review["decision"]["reason"]),
+                    next_action=str(review["decision"]["next_action"]),
+                    research_signals=slate_publication_rows,
+                    target_count=int(luna_research_slate.get("target_count") or 0),
+                    published_count=int(luna_research_slate.get("published_count") or 0),
+                    slate_shortfall_reason=str(
+                        luna_research_slate.get("slate_shortfall_reason") or ""
+                    ),
+                )
             )
         )
         events = [
             _official_selection_notification_event(
                 no_data_scan_id,
-                "alpha_no_trade",
-                "Dawnstrike Alpha Check",
+                "alpha_no_trade" if official_no_trade else "alpha_morning_watch",
+                "Dawnstrike Alpha Check" if official_no_trade else "Dawnstrike Alpha Watch",
                 message,
-                selected_signals=[],
+                selected_signals=selected_signals,
+                research_signals=slate_publication_rows,
             )
         ]
+        no_data_no_trade_row = (
+            _build_no_trade_historical_signal(
+                scan_id=no_data_scan_id,
+                generated_at=no_data_generated_at,
+                reason=str(publication_decision["reason"]),
+                source_summary=source_summary,
+                candidate_count=int(source_summary.get("candidate_count") or 0),
+            )
+            if official_no_trade
+            else None
+        )
         frozen_cohort_retry = _govern_frozen_official_cohort_retry(
             store,
             scan_id=no_data_scan_id,
-            selected_signals=[no_data_no_trade_row],
-            decision=dict(review["decision"]),
+            selected_signals=selected_signals
+            or ([no_data_no_trade_row] if no_data_no_trade_row is not None else []),
+            decision=publication_decision,
             selected_at=no_data_generated_at,
             event=events[0],
         )
@@ -387,25 +519,49 @@ def alpha_cycle(
             selected_rows, selection_stats = _persist_official_selections(
                 store,
                 scan_id=no_data_scan_id,
-                selected_signals=[no_data_no_trade_row],
-                decision=dict(review["decision"]),
+                selected_signals=selected_signals
+                or ([no_data_no_trade_row] if no_data_no_trade_row is not None else []),
+                decision=publication_decision,
                 selected_at=no_data_generated_at,
                 event=events[0],
+                slate=luna_research_slate if frozen_slate_nonempty else None,
             )
-            record_no_trade_historical_signal(
-                store,
-                scan_id=no_data_scan_id,
-                generated_at=no_data_generated_at,
-                reason=str(review["decision"]["reason"]),
-                source_summary=source_summary,
-                candidate_count=int(source_summary.get("candidate_count") or 0),
-            )
+            if official_no_trade:
+                record_no_trade_historical_signal(
+                    store,
+                    scan_id=no_data_scan_id,
+                    generated_at=no_data_generated_at,
+                    reason=str(publication_decision["reason"]),
+                    source_summary=source_summary,
+                    candidate_count=int(source_summary.get("candidate_count") or 0),
+                )
             selection_scan_id = no_data_scan_id
+            selection_selected_at = no_data_generated_at
         else:
             events = [frozen_cohort_retry["event"]]
             selected_rows = list(frozen_cohort_retry["selections"])
             selection_stats = dict(frozen_cohort_retry["stats"])
             selection_scan_id = str(frozen_cohort_retry["scan_id"])
+            selection_selected_at = str(frozen_cohort_retry["selected_at"])
+        radar_selection_rows, radar_selection_stats = _persist_research_radar_selections(
+            store,
+            scan_id=selection_scan_id,
+            radar=frozen_slate_rows if frozen_slate_nonempty else [],
+            slate=luna_research_slate,
+            selected_at=selection_selected_at,
+            event=events[0],
+        )
+        official_signal_ids = {
+            str(row.get("signal_id") or "") for row in selected_rows
+        }
+        delivery_selection_rows = [
+            *selected_rows,
+            *[
+                row
+                for row in radar_selection_rows
+                if str(row.get("signal_id") or "") not in official_signal_ids
+            ],
+        ]
         preexisting_notification_keys = _existing_notification_keys(
             store,
             events=events,
@@ -414,12 +570,31 @@ def alpha_cycle(
         source_contract_args: dict[str, Any] = {
             "scan_id": no_data_scan_id,
             "generated_at": no_data_generated_at,
-            "ranked_count": 0,
-            "signals": [],
-            "review": review,
+            "ranked_count": len(slate_publication_rows),
+            "signals": slate_publication_rows,
+            "review": publication_review,
             "source_summary": source_summary,
             "enrichment_summary": None,
+            "receipt_verifier": receipt_verifier,
         }
+        canonical_contract_path = output_dir / "alpha_run_contract.json"
+        prior_canonical_contract = (
+            canonical_contract_path.read_bytes() if canonical_contract_path.exists() else None
+        )
+        retry_contract_artifact = (
+            "alpha_run_contract_retry_attempt.json"
+            if prior_canonical_contract is not None
+            else "alpha_run_contract.json"
+        )
+        cycle_artifact_path = output_dir / "alpha_cycle.json"
+        prior_cycle_artifact = (
+            cycle_artifact_path.read_bytes() if cycle_artifact_path.exists() else None
+        )
+        retry_cycle_artifact = (
+            "alpha_cycle_retry_attempt.json"
+            if prior_cycle_artifact is not None
+            else "alpha_cycle.json"
+        )
         _persist_run_contract(
             output_dir,
             **source_contract_args,
@@ -427,6 +602,7 @@ def alpha_cycle(
             notification_channel=notify,
             notification_dry_run=dry_run,
             notification_status_override="pending",
+            artifact_name=retry_contract_artifact,
         )
         try:
             notification_stats = _dispatch(
@@ -438,7 +614,7 @@ def alpha_cycle(
         except Exception:
             _persist_notification_delivery_memberships(
                 store,
-                selections=selected_rows,
+                selections=delivery_selection_rows,
                 events=events,
                 notify=notify,
                 preexisting_notification_keys=preexisting_notification_keys,
@@ -450,11 +626,12 @@ def alpha_cycle(
                 notification_channel=notify,
                 notification_dry_run=dry_run,
                 notification_status_override="delivery_failed",
+                artifact_name=retry_contract_artifact,
             )
             raise
         notification_deliveries = _persist_notification_delivery_memberships(
             store,
-            selections=selected_rows,
+            selections=delivery_selection_rows,
             events=events,
             notify=notify,
             preexisting_notification_keys=preexisting_notification_keys,
@@ -465,6 +642,7 @@ def alpha_cycle(
             notification_stats=notification_stats,
             notification_channel=notify,
             notification_dry_run=dry_run,
+            artifact_name=retry_contract_artifact,
         )
         _link_notification_events(
             store,
@@ -476,12 +654,14 @@ def alpha_cycle(
             notification_deliveries=notification_deliveries,
         )
         no_data_result: dict[str, Any] = {
-            "status": "no_trade",
+            "status": "source_failed_retry" if frozen_slate_nonempty else "no_trade",
             "run_type": cycle_name,
             "scan_id": no_data_scan_id,
             "source_summary": source_summary,
-            "review": review,
+            "review": publication_review,
             "selection_stats": selection_stats,
+            "research_radar": radar_selection_rows,
+            "research_radar_selection_stats": radar_selection_stats,
             "notification_stats": notification_stats,
             "notification_deliveries": notification_deliveries,
             "run_contract": run_contract.to_dict(),
@@ -491,7 +671,7 @@ def alpha_cycle(
         }
         if session_gate is not None:
             no_data_result["session_gate"] = session_gate.to_dict()
-        _write_json(output_dir / "alpha_cycle.json", no_data_result)
+        _write_json(output_dir / retry_cycle_artifact, no_data_result)
         return no_data_result
 
     scanner_config = load_config(
@@ -2124,6 +2304,7 @@ def _persist_run_contract(
     notification_dry_run: bool,
     notification_status_override: str = "",
     receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
+    artifact_name: str = "alpha_run_contract.json",
 ) -> AlphaRunContract:
     contract = build_alpha_run_contract(
         scan_id=scan_id,
@@ -2139,7 +2320,7 @@ def _persist_run_contract(
         notification_status_override=notification_status_override,
         receipt_verifier=receipt_verifier,
     )
-    _write_json(output_dir / "alpha_run_contract.json", contract.to_dict())
+    _write_json(output_dir / artifact_name, contract.to_dict())
     return contract
 
 

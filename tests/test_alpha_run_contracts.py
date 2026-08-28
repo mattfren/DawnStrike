@@ -1,14 +1,21 @@
 import pytest
 
 from intraday_scanner.alpha.run_contracts import build_alpha_run_contract
-from intraday_scanner.services import luna_research_slate_service as slate_service
+from intraday_scanner.config import load_config
+from intraday_scanner.decisioning.condition_registry import registry_for_strategy
+from intraday_scanner.services.alpha_cycle_service import (
+    _apply_strategy_decision_receipts,
+    _attach_authenticated_alpaca_structure,
+    _build_modeled_cost_receipt,
+    _signal_payload,
+)
 from intraday_scanner.services.luna_research_slate_service import (
     AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
 )
-from intraday_scanner.services.strategy_decision_service import StrategyDecisionService
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from tests.test_luna_structural_tier_producer import _production_row
 
 
 def _contract(*, enrichment, watchlist=None):
@@ -48,6 +55,7 @@ def _frozen_contract_inputs():
         scan_id="scan-frozen",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
     )
+    assert slate["published_count"] == 1, slate
     publication_rows = apply_publication_semantics(
         list(slate["rows"]),
         slate=slate,
@@ -66,9 +74,11 @@ def _frozen_contract_inputs():
 
 def _build_frozen_contract(*, publication_rows, receipt_verifier=None, frozen_inputs=None):
     signal, slate, _, lineage = frozen_inputs or _frozen_contract_inputs()
+    market_date = str(slate["market_date"])
+    ticker = str(signal["ticker"])
     return build_alpha_run_contract(
         scan_id="scan-frozen",
-        generated_at="2026-08-27T12:01:00+00:00",
+        generated_at=f"{market_date}T12:01:00+00:00",
         ranked_count=1,
         signals=[signal],
         review={"decision": {"reason": "No clean edge."}, "watchlist": []},
@@ -81,7 +91,7 @@ def _build_frozen_contract(*, publication_rows, receipt_verifier=None, frozen_in
         enrichment_summary={
             "status": "complete",
             "selected_count": 1,
-            "selected_symbols": ["FROZEN"],
+            "selected_symbols": [ticker],
             "verified_count": 1,
         },
         notification_stats={},
@@ -111,92 +121,83 @@ def test_contract_labels_legacy_pre_watcher_alert_count_separately_from_tier_thr
 
 
 def test_contract_preserves_tier_two_only_with_authenticated_receipt_resolver(
-    monkeypatch, tmp_path
+    tmp_path, monkeypatch
 ):
-    signal = {
-        "ticker": "FROZEN",
-        "signal_id": "signal-frozen",
-        "strategy_id": "ts_momentum_sma_atr",
-        "strategy_version": "v1.0",
-        "market_date": "2026-08-27",
-        "entry_reference": 10.0,
-        "stop": 9.0,
-        "target": 12.0,
-        "reward_risk_ratio": 2.0,
-        "alpha_score": 10,
-        "universe_lane": "mover",
-    }
-    receipt = StrategyDecisionService(
-        code_sha="a" * 40,
-        source_identity="sanitized-fixture",
-    ).build_receipt(signal, decision_at="2026-08-27T12:00:00+00:00")
+    signal = _attach_authenticated_alpaca_structure(
+        _production_row(), decision_at="2026-08-26T13:30:00+00:00"
+    )
     signal.update(
         {
-            "receipt_id": receipt.receipt_id,
-            "receipt_hash_sha256": receipt.receipt_hash_sha256,
-            "strategy_decision_receipt": receipt.to_dict(),
-            "strategy_receipt_construction_status": "COMPLETE",
-            "strategy_receipt_persistence_status": "PERSISTED",
-            "strategy_receipt_tier": receipt.pick_tier.value,
-            "strategy_receipt_research_pick_eligible": receipt.research_pick_eligible,
-            "strategy_receipt_paper_entry_eligible": receipt.paper_entry_eligible,
-            "research_only": True,
-            "broker_execution_enabled": False,
+            "signal_id": "signal-frozen",
+            "alpha_score": 10,
+            "universe_lane": "mover",
+            "evidence_lane": "mover",
+            "source_count": 1,
+            "source_quality_status": "VERIFIED",
+            "freshness_status": "FRESH",
+            "halt_status": "CLEAR",
+            "sec_risk_status": "CLEAR",
+            "corporate_action_status": "CLEAR",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
         }
     )
+    signal.update({spec.condition_id: True for spec in registry_for_strategy("alphaops_v5")})
+    signal = _signal_payload(signal, "scan-frozen", "2026-08-26T13:30:00+00:00", 1)
+    signal["modeled_cost_receipt"] = _build_modeled_cost_receipt(signal)
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "a" * 40)
     store = SQLiteScanStore(tmp_path / "run-contract-receipts.sqlite")
-    assert store.persist_strategy_decision_receipt(receipt) is True
+    _apply_strategy_decision_receipts(
+        [signal],
+        store=store,
+        config=load_config(
+            strategy_evidence_enabled=True,
+            strategy_evidence_shadow_only=True,
+            alert_score_threshold=0,
+        ),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "sanitized-fixture"},
+    )
+    assert signal["strategy_receipt_research_pick_eligible"] is True
     resolver = AuthenticatedStrategyReceiptResolver.from_store(
-        store, market_date="2026-08-27", strategy_id="ts_momentum_sma_atr"
+        store, market_date="2026-08-26", strategy_id="alphaops_v5"
     )
     slate = build_ranked_research_slate(
         [signal],
-        generated_at="2026-08-27T12:00:00+00:00",
-        market_date="2026-08-27",
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
         scan_id="scan-frozen",
         lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
     )
-    frozen_inputs = (signal, slate, [], {
-        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
-        "slate_id": slate["slate_id"],
-        "slate_content_hash_sha256": slate["content_hash_sha256"],
-        "frozen_source_scan_id": "scan-frozen",
-        "current_scan_id": "scan-frozen",
-        "reuse_status": "CURRENT_SCAN",
-    })
-
-    monkeypatch.setattr(
-        slate_service,
-        "_plan_qualified",
-        lambda row, *, receipt_verifier: (
-            type(receipt_verifier) is AuthenticatedStrategyReceiptResolver
-            and receipt_verifier.verify(row)
-        ),
-    )
-    monkeypatch.setattr(
-        slate_service,
-        "_alertable",
-        lambda row, *, require_watcher_proof: False,
-    )
-    tier_two_rows = apply_publication_semantics(
+    publication_rows = apply_publication_semantics(
         list(slate["rows"]),
         slate=slate,
         coverage={"lanes": slate["lane_statuses"]},
         receipt_verifier=resolver,
     )
-    assert tier_two_rows[0]["publication_tier"] == "PAPER_PLAN_QUALIFIED"
-
+    assert publication_rows[0]["publication_tier"] == "PAPER_PLAN_QUALIFIED"
+    frozen_inputs = (
+        signal,
+        slate,
+        publication_rows,
+        {
+            "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+            "slate_id": slate["slate_id"],
+            "slate_content_hash_sha256": slate["content_hash_sha256"],
+            "frozen_source_scan_id": "scan-frozen",
+            "current_scan_id": "scan-frozen",
+            "reuse_status": "CURRENT_SCAN",
+        },
+    )
     contract = _build_frozen_contract(
-        publication_rows=tier_two_rows,
+        publication_rows=publication_rows,
         receipt_verifier=resolver,
         frozen_inputs=frozen_inputs,
     )
     assert contract.paper_plan_qualified_count == 1
     with pytest.raises(ValueError, match="exact authenticated frozen-slate"):
-        _build_frozen_contract(
-            publication_rows=tier_two_rows,
-            frozen_inputs=frozen_inputs,
-        )
+        _build_frozen_contract(publication_rows=publication_rows, frozen_inputs=frozen_inputs)
+
 
 
 @pytest.mark.parametrize(
