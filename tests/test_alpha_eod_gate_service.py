@@ -192,7 +192,7 @@ def _selection(*, ticker: str, decision: str) -> dict[str, object]:
         f"{DAY}T12:00:00-04:00"
     )
     is_sentinel_ticker = ticker == "NO_TRADE"
-    return {
+    row = {
         "selection_id": f"selection-{ticker}",
         "scan_id": "scan-eod-gate",
         "signal_id": (
@@ -214,6 +214,10 @@ def _selection(*, ticker: str, decision: str) -> dict[str, object]:
         ),
         "body_sha256": "eod-gate-body",
     }
+    # Frozen membership hashes bind the exact persisted selection envelope;
+    # model the storage fallback used when no richer signal payload exists.
+    row["payload_json"] = dict(row)
+    return row
 
 
 def _persist_outcome(
