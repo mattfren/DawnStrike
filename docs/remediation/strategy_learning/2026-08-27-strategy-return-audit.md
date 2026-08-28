@@ -44,12 +44,19 @@ date and ticker agree with its V6 decision, and each V6 decision retains its ori
 
 The report exposed a schema-expression gap: the legacy child tables declare only
 `historical_signals.signal_id` as their SQLite parent, while governed V6 shadow children use the
-separate immutable decision ledger. The existing 40 rows were left byte-for-byte unchanged. The
-candidate now validates the polymorphic parent at every signal-outcome/event write boundary,
-accepting only an exact historical signal or V6 shadow decision, requiring exact day/ticker for
-outcomes, rejecting ambiguous dual parents, and preserving atomic rollback. A raw SQLite
-single-parent report must therefore be interpreted with this domain-aware lineage check; it is not
-permission to delete, relink, or promote the V6 evidence.
+separate immutable decision ledger and Scenario children use an exact
+`scenario_signal_links` -> `scenario_decisions` contract. The existing 40 rows were left
+byte-for-byte unchanged. A second read-only audit found zero persisted Scenario links or Scenario
+outcomes, so no legacy Scenario state needed mutation or exception handling.
+
+The candidate now validates the polymorphic parent at every signal-outcome/event write boundary,
+including the atomic trade-watcher lifecycle path. Non-Scenario children require exactly one
+historical or V6 parent. A `scenario:<decision_id>` child requires one exact forward Scenario
+decision/link, matching day, ticker, strategy, version, cohort, research-only, and broker-disabled
+truth; its intentional historical mirror is accepted only when the mirror agrees. Historical-only
+Scenario spoofing, duplicate links, cross-domain collisions, event/intent signal swaps, and partial
+batch writes fail closed. A raw SQLite single-parent report must therefore be interpreted with this
+domain-aware lineage check; it is not permission to delete, relink, or promote the V6 evidence.
 
 `Mean return` below is the arithmetic mean of `trade_return_pct` for closed rows. `PF` is gross
 positive net P&L divided by absolute gross negative net P&L. `Ex-best` removes the single best
