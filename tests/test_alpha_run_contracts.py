@@ -3,9 +3,12 @@ import pytest
 from intraday_scanner.alpha.run_contracts import build_alpha_run_contract
 from intraday_scanner.services import luna_research_slate_service as slate_service
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
 )
+from intraday_scanner.services.strategy_decision_service import StrategyDecisionService
+from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
 def _contract(*, enrichment, watchlist=None):
@@ -108,20 +111,66 @@ def test_contract_labels_legacy_pre_watcher_alert_count_separately_from_tier_thr
 
 
 def test_contract_preserves_tier_two_only_with_authenticated_receipt_resolver(
-    monkeypatch,
+    monkeypatch, tmp_path
 ):
-    frozen_inputs = _frozen_contract_inputs()
-    _, slate, _, _ = frozen_inputs
-
-    def authenticated_receipt_resolver(row):
-        return row.get("signal_id") == "signal-frozen"
+    signal = {
+        "ticker": "FROZEN",
+        "signal_id": "signal-frozen",
+        "strategy_id": "ts_momentum_sma_atr",
+        "strategy_version": "v1.0",
+        "market_date": "2026-08-27",
+        "entry_reference": 10.0,
+        "stop": 9.0,
+        "target": 12.0,
+        "reward_risk_ratio": 2.0,
+        "alpha_score": 10,
+        "universe_lane": "mover",
+    }
+    receipt = StrategyDecisionService(
+        code_sha="a" * 40,
+        source_identity="sanitized-fixture",
+    ).build_receipt(signal, decision_at="2026-08-27T12:00:00+00:00")
+    signal.update(
+        {
+            "receipt_id": receipt.receipt_id,
+            "receipt_hash_sha256": receipt.receipt_hash_sha256,
+            "strategy_decision_receipt": receipt.to_dict(),
+            "strategy_receipt_construction_status": "COMPLETE",
+            "strategy_receipt_persistence_status": "PERSISTED",
+            "strategy_receipt_tier": receipt.pick_tier.value,
+            "strategy_receipt_research_pick_eligible": receipt.research_pick_eligible,
+            "strategy_receipt_paper_entry_eligible": receipt.paper_entry_eligible,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+    )
+    store = SQLiteScanStore(tmp_path / "run-contract-receipts.sqlite")
+    assert store.persist_strategy_decision_receipt(receipt) is True
+    resolver = AuthenticatedStrategyReceiptResolver.from_store(
+        store, market_date="2026-08-27", strategy_id="ts_momentum_sma_atr"
+    )
+    slate = build_ranked_research_slate(
+        [signal],
+        generated_at="2026-08-27T12:00:00+00:00",
+        market_date="2026-08-27",
+        scan_id="scan-frozen",
+        lane_statuses={"mover": {"data_eligible": True, "promotion_limited": False}},
+    )
+    frozen_inputs = (signal, slate, [], {
+        "schema_version": "dawnstrike.luna.frozen_slate_selection_lineage.v1",
+        "slate_id": slate["slate_id"],
+        "slate_content_hash_sha256": slate["content_hash_sha256"],
+        "frozen_source_scan_id": "scan-frozen",
+        "current_scan_id": "scan-frozen",
+        "reuse_status": "CURRENT_SCAN",
+    })
 
     monkeypatch.setattr(
         slate_service,
         "_plan_qualified",
         lambda row, *, receipt_verifier: (
-            receipt_verifier is authenticated_receipt_resolver
-            and receipt_verifier(row)
+            type(receipt_verifier) is AuthenticatedStrategyReceiptResolver
+            and receipt_verifier.verify(row)
         ),
     )
     monkeypatch.setattr(
@@ -133,13 +182,13 @@ def test_contract_preserves_tier_two_only_with_authenticated_receipt_resolver(
         list(slate["rows"]),
         slate=slate,
         coverage={"lanes": slate["lane_statuses"]},
-        receipt_verifier=authenticated_receipt_resolver,
+        receipt_verifier=resolver,
     )
     assert tier_two_rows[0]["publication_tier"] == "PAPER_PLAN_QUALIFIED"
 
     contract = _build_frozen_contract(
         publication_rows=tier_two_rows,
-        receipt_verifier=authenticated_receipt_resolver,
+        receipt_verifier=resolver,
         frozen_inputs=frozen_inputs,
     )
     assert contract.paper_plan_qualified_count == 1

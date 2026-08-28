@@ -7,7 +7,6 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -86,6 +85,7 @@ from intraday_scanner.services.luna_core_universe_service import (
     write_snapshot_rows,
 )
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
     official_publication_rows,
@@ -1716,7 +1716,7 @@ def _official_monitor_signals(
     signals: list[dict[str, Any]],
     selections: list[dict[str, Any]],
     *,
-    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Rehydrate the exact official cohort, including governed scan retries."""
 
@@ -2069,7 +2069,7 @@ def _persist_run_contract(
     notification_channel: str,
     notification_dry_run: bool,
     notification_status_override: str = "",
-    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> AlphaRunContract:
     contract = build_alpha_run_contract(
         scan_id=scan_id,
@@ -4414,33 +4414,14 @@ def _persisted_strategy_receipt_verifier(
     store: SQLiteScanStore,
     *,
     market_date: str,
-) -> Callable[[dict[str, Any]], bool]:
+) -> AuthenticatedStrategyReceiptResolver:
     """Resolve receipt envelopes against immutable storage before promotion."""
 
-    persisted = {
-        str(item.get("receipt_id") or ""): item
-        for item in store.load_strategy_decision_receipts(
-            market_date=market_date,
-            strategy_id="alphaops_v5",
-            limit=5_000,
-        )
-        if str(item.get("receipt_id") or "")
-    }
-
-    def verify(row: dict[str, Any]) -> bool:
-        payload = row.get("strategy_decision_receipt")
-        if not isinstance(payload, dict):
-            return False
-        receipt_id = str(payload.get("receipt_id") or "")
-        stored = persisted.get(receipt_id)
-        if stored is None:
-            return False
-        try:
-            return canonical_json(stored) == canonical_json(payload)
-        except (TypeError, ValueError):
-            return False
-
-    return verify
+    return AuthenticatedStrategyReceiptResolver.from_store(
+        store,
+        market_date=market_date,
+        strategy_id="alphaops_v5",
+    )
 
 
 def _dispatch(

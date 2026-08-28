@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 from intraday_scanner.alpha.alpha_model import ALPHA_MODEL_VERSION
 from intraday_scanner.alpha.data_eligibility import evaluate_premarket_coverage
 from intraday_scanner.services.luna_research_slate_service import (
+    AuthenticatedStrategyReceiptResolver,
     apply_publication_semantics,
     build_ranked_research_slate,
     official_publication_rows,
@@ -118,7 +118,7 @@ def build_alpha_run_contract(
     notification_channel: str = "unknown",
     notification_dry_run: bool = False,
     notification_status_override: str = "",
-    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> AlphaRunContract:
     decision = dict(review.get("decision") or {})
     diagnostics = dict(review.get("selection_diagnostics") or {})

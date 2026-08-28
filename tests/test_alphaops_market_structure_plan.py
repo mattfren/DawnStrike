@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from dataclasses import replace
 
@@ -28,6 +29,7 @@ from intraday_scanner.services.alpha_cycle_service import (
 )
 from intraday_scanner.services.luna_research_slate_service import (
     TIER1,
+    _plan_qualified,
     apply_publication_semantics,
     build_ranked_research_slate,
 )
@@ -165,6 +167,64 @@ def test_v2_receipt_binds_plan_and_market_structure_observations(tmp_path, monke
     plan_replaced["alphaops_market_structure_plan"]["plan_hash_sha256"] = "0" * 64
     plan_replaced["plan_hash_sha256"] = "0" * 64
     assert not validate_strategy_receipt_envelope(plan_replaced)
+
+
+def test_publication_receipt_binding_requires_exact_persisted_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DAWNSTRIKE_CODE_SHA", "b" * 40)
+    source = _signal()
+    source.update({item.condition_id: True for item in registry_for_strategy("alphaops_v5")})
+    payload = _signal_payload(source, "scan-exact-receipt", "2026-08-26T13:30:00+00:00", 1)
+    store = SQLiteScanStore(tmp_path / "exact-receipt.sqlite")
+    _apply_strategy_decision_receipts(
+        [payload],
+        store=store,
+        config=load_config(strategy_evidence_enabled=True, strategy_evidence_shadow_only=True),
+        decision_at="2026-08-26T13:30:00+00:00",
+        source_summary={"source_identity": "completed-market-feed"},
+    )
+    resolver = _persisted_strategy_receipt_verifier(store, market_date="2026-08-26")
+
+    assert resolver.verify(payload)
+    assert not _plan_qualified(payload, receipt_verifier=lambda _row: True)
+
+    forged_hash = deepcopy(payload)
+    forged_hash["strategy_decision_receipt"]["receipt_hash_sha256"] = "0" * 64
+    assert not resolver.verify(forged_hash)
+
+    payload_drift = deepcopy(payload)
+    payload_drift["strategy_decision_receipt"]["paper_entry_eligible"] = False
+    payload_drift["strategy_receipt_paper_entry_eligible"] = False
+    payload_drift["paper_entry_eligible"] = False
+    drift_body = {
+        key: value
+        for key, value in payload_drift["strategy_decision_receipt"].items()
+        if key not in {"receipt_hash_sha256", "receipt_id"}
+    }
+    payload_drift["strategy_decision_receipt"]["receipt_hash_sha256"] = hashlib.sha256(
+        canonical_json(drift_body).encode("utf-8")
+    ).hexdigest()
+    payload_drift["strategy_decision_receipt"]["receipt_id"] = (
+        "sdr-" + payload_drift["strategy_decision_receipt"]["receipt_hash_sha256"][:24]
+    )
+    payload_drift["receipt_hash_sha256"] = payload_drift["strategy_decision_receipt"][
+        "receipt_hash_sha256"
+    ]
+    payload_drift["receipt_id"] = payload_drift["strategy_decision_receipt"]["receipt_id"]
+    assert not resolver.verify(payload_drift)
+
+    cross_symbol = deepcopy(payload)
+    cross_symbol["ticker"] = "OTHER"
+    assert not resolver.verify(cross_symbol)
+
+    cross_plan = deepcopy(payload)
+    cross_plan["alphaops_market_structure_plan"]["target"] = 13.0
+    assert not resolver.verify(cross_plan)
+
+    cross_strategy = deepcopy(payload)
+    cross_strategy["strategy_id"] = "other_strategy"
+    assert not resolver.verify(cross_strategy)
 
 
 def test_structural_target_requires_raw_level_and_non_risk_derivation() -> None:

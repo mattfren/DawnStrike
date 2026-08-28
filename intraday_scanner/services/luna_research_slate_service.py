@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,103 @@ TIER2_WAITING = "WAITING_CURRENT_CHECKS"
 TIER3 = "ALERTABLE_PAPER_ENTRY"
 WAITING_EXECUTION_COSTS = "WAITING_EXECUTION_COSTS"
 EASTERN = ZoneInfo("America/New_York")
+
+
+class AuthenticatedStrategyReceiptResolver:
+    """Resolve only receipts loaded from the immutable strategy receipt store.
+
+    Publication receives this narrow resolver contract from the cycle service;
+    an arbitrary callback must never be able to turn self-asserted receipt
+    fields into a Tier 2/3 publication.  The resolver also rechecks the
+    canonical envelope and its row bindings before comparing the exact stored
+    receipt payload.
+    """
+
+    __slots__ = ("_market_date", "_strategy_id", "_persisted")
+
+    _TOKEN = object()
+
+    def __init__(
+        self,
+        *,
+        store: Any,
+        market_date: str,
+        strategy_id: str,
+        _token: object,
+    ) -> None:
+        if _token is not self._TOKEN:
+            raise TypeError("strategy receipt resolvers must be created by from_store")
+        from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+        if type(store) is not SQLiteScanStore:
+            raise TypeError("strategy receipt resolver requires SQLiteScanStore")
+        self._market_date = str(market_date)
+        self._strategy_id = str(strategy_id)
+        persisted = {
+            str(item.get("receipt_id") or ""): item
+            for item in store.load_strategy_decision_receipts(
+                market_date=self._market_date,
+                strategy_id=self._strategy_id,
+                limit=5_000,
+            )
+            if str(item.get("receipt_id") or "")
+        }
+        self._persisted = {
+            str(receipt_id): dict(payload)
+            for receipt_id, payload in persisted.items()
+            if str(receipt_id)
+        }
+
+    @classmethod
+    def from_store(
+        cls,
+        store: Any,
+        *,
+        market_date: str,
+        strategy_id: str = "alphaops_v5",
+    ) -> AuthenticatedStrategyReceiptResolver:
+        """Create a resolver from the concrete immutable SQLite receipt API."""
+
+        from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+        if type(store) is not SQLiteScanStore:
+            raise TypeError("strategy receipt resolver requires SQLiteScanStore")
+        return cls(
+            store=store,
+            market_date=market_date,
+            strategy_id=strategy_id,
+            _token=cls._TOKEN,
+        )
+
+    def verify(self, row: dict[str, Any]) -> bool:
+        from intraday_scanner.alpha.alert_gate import validate_strategy_receipt_envelope
+        from intraday_scanner.decisioning.contracts import canonical_json
+
+        payload = row.get("strategy_decision_receipt")
+        if not isinstance(payload, dict):
+            return False
+        if str(payload.get("market_date") or "") != self._market_date:
+            return False
+        if str(row.get("market_date") or self._market_date) != self._market_date:
+            return False
+        if str(payload.get("strategy_id") or "") != self._strategy_id:
+            return False
+        if not validate_strategy_receipt_envelope(row):
+            return False
+        receipt_id = str(payload.get("receipt_id") or "")
+        stored = self._persisted.get(receipt_id)
+        if stored is None:
+            return False
+        try:
+            # The persisted API returns the StrategyDecisionReceipt's exact
+            # canonical serialization. Requiring canonical equality here
+            # binds every receipt field, including plan and eligibility.
+            return canonical_json(stored) == canonical_json(payload)
+        except (TypeError, ValueError):
+            return False
+
+    def __call__(self, row: dict[str, Any]) -> bool:
+        return self.verify(row)
 
 
 def build_ranked_research_slate(
@@ -133,7 +230,7 @@ def apply_publication_semantics(
     slate: dict[str, Any] | None = None,
     coverage: dict[str, Any] | None = None,
     require_watcher_proof: bool = False,
-    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Annotate rows with Tier 1/2/3 fields without changing legacy classification."""
 
@@ -690,7 +787,7 @@ def _safety_blockers(row: dict[str, Any]) -> list[str]:
 def _plan_qualified(
     row: dict[str, Any],
     *,
-    receipt_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> bool:
     market_plan = row.get("alphaops_market_structure_plan")
     if not isinstance(market_plan, dict) or not _immutable_plan_provenance(
@@ -752,8 +849,8 @@ def _plan_qualified(
 
     if (
         not validate_strategy_receipt_envelope(row)
-        or receipt_verifier is None
-        or not receipt_verifier(row)
+        or type(receipt_verifier) is not AuthenticatedStrategyReceiptResolver
+        or not receipt_verifier.verify(row)
     ):
         return False
     entry = _number(row.get("entry_trigger") or row.get("entry_watch_level") or row.get("entry"))
@@ -1675,6 +1772,7 @@ def _slate_content_hash(slate: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "AuthenticatedStrategyReceiptResolver",
     "TIER1",
     "TIER2",
     "TIER2_WAITING",
