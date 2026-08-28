@@ -69,7 +69,10 @@ def daily_orchestration_status(
     latest_stages = _latest_stage_attempts(scoped_stages)
     recorded = set(latest_stages)
     heartbeat = _read_heartbeat(Path(state_root) / "heartbeats" / f"{market_date[:10]}.json")
-    stale = _heartbeat_stale(heartbeat, current, heartbeat_ttl_minutes)
+    stale = _heartbeat_stale(heartbeat, current, heartbeat_ttl_minutes) and not (
+        str((latest_run or {}).get("status") or "") == "COMPLETE"
+        and bool((latest_run or {}).get("completed_at"))
+    )
     missing = [stage for stage in DAILY_STAGE_ORDER if stage not in recorded]
     failed = [
         latest_stages[name]
