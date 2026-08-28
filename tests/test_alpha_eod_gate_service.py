@@ -227,6 +227,26 @@ def _persist_outcome(
     ticker: str,
     source_coverage_complete: bool = True,
 ) -> None:
+    # Child outcome rows must be bound to an exact governed historical signal.
+    # This fixture intentionally uses both the selected ID and an adversarial
+    # non-selected ID, so seed each as a legitimate parent before persisting.
+    store.persist_historical_signals(
+        [
+            {
+                "signal_id": signal_id,
+                "scan_id": "scan-eod-gate",
+                "alpha_signal_id": signal_id,
+                "generated_at": f"{DAY}T12:00:00Z",
+                "market_date": DAY,
+                "ticker": ticker,
+                "signal_label": "CLEAN EDGE",
+                "risk_flags_json": [],
+                "avoid_reasons_json": [],
+                "raw_payload_json": {"fixture": "eod-gate-parent"},
+            }
+        ],
+        replace=False,
+    )
     store.persist_signal_outcomes(
         [
             {
