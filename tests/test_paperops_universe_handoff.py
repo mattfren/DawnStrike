@@ -194,6 +194,64 @@ def test_handoff_source_mutation_is_fail_closed(tmp_path: Path) -> None:
         load_universe_handoff(path, market_date=MARKET_DATE)
 
 
+def test_self_consistent_forged_union_membership_and_coverage_are_rejected_by_loader_and_consumer(
+    tmp_path: Path,
+) -> None:
+    morning = _morning_root(tmp_path)
+    handoff_path = morning / "paperops_universe_handoff.json"
+    build_universe_handoff(morning, MARKET_DATE, output_path=handoff_path)
+
+    forged = json.loads(handoff_path.read_text(encoding="utf-8"))
+    forged["universe_symbols"] = ["ZZZZ"]
+    forged["symbols"] = ["ZZZZ"]
+    forged["members"] = [
+        {
+            "symbol": "ZZZZ",
+            "lanes": ["mover"],
+            "lane": "mover",
+            "index_memberships": [],
+            "sources": ["forged"],
+            "member_lineage": {"source_identity": "forged", "market_date": MARKET_DATE},
+        }
+    ]
+    forged["coverage"] = {
+        "status": "PARTIAL",
+        "core_membership_count": 0,
+        "core_included_count": 0,
+        "mover_declared_count": 1,
+        "mover_included_count": 1,
+        "union_count": 1,
+        "overlap_count": 0,
+        "shortfall_reasons": ["forged"],
+    }
+    unhashed = {
+        key: value
+        for key, value in forged.items()
+        if key not in {"content_hash_sha256", "content_hash", "handoff_id", "universe_id"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    forged["content_hash_sha256"] = digest
+    forged["content_hash"] = digest
+    forged["handoff_id"] = "paperops-universe-" + digest[:24]
+    forged["universe_id"] = "paperops-pit-universe-" + digest[:24]
+    handoff_path.write_text(json.dumps(forged, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError, match="semantic binding"):
+        load_universe_handoff(handoff_path, market_date=MARKET_DATE, require_production=True)
+
+    paths = paper_ops_engine.PaperOpsPaths.create(tmp_path / "paper_ops")
+    with pytest.raises(UniverseHandoffError, match="semantic binding"):
+        paper_ops_engine._run_config_with_universe_handoff(
+            paths,
+            run_date=date.fromisoformat(MARKET_DATE),
+            mode=PaperRunMode.FORWARD,
+            universe_handoff_path=handoff_path,
+            scheduled_production=True,
+        )
+
+
 def test_handoff_stale_morning_cycle_is_fail_closed(tmp_path: Path) -> None:
     root = _morning_root(tmp_path)
     cycle_path = root / "alpha_cycle.json"

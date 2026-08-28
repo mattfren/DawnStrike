@@ -214,6 +214,8 @@ def load_universe_handoff(
     actual_date = _date_text(payload.get("market_date"))
     if actual_date is None or (expected_date is not None and actual_date != expected_date):
         raise UniverseHandoffError("universe handoff market date conflicts")
+    if require_production and not verify_sources:
+        raise UniverseHandoffError("production universe handoff requires source verification")
     claimed = str(payload.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed) or claimed != _handoff_hash(payload):
         raise UniverseHandoffError("universe handoff content hash is invalid")
@@ -271,6 +273,30 @@ def load_universe_handoff(
             digest = str(artifact.get("sha256") or "").lower()
             if not _SHA_PATTERN.fullmatch(digest) or _sha256_file(artifact_path) != digest:
                 raise UniverseHandoffError("universe handoff source artifact hash mismatch")
+
+        # The handoff's content hash authenticates the bytes of the handoff,
+        # but it does not by itself authenticate the meaning of derived fields
+        # such as the union, member lanes, and coverage.  Rebuild the contract
+        # from the exact hashed Morning inputs and compare the complete
+        # unhashed semantic body.  This closes the self-consistent-forgery
+        # case where an attacker replaces those fields and recomputes every
+        # handoff digest and identity alias.
+        expected = build_universe_handoff(handoff_path.parent, actual_date)
+        expected_artifacts = expected.get("source_artifacts")
+        if artifacts != expected_artifacts:
+            raise UniverseHandoffError("universe handoff source artifact manifest is invalid")
+        identity_fields = {
+            "content_hash_sha256",
+            "content_hash",
+            "handoff_id",
+            "universe_id",
+        }
+        expected_body = {
+            key: value for key, value in expected.items() if key not in identity_fields
+        }
+        actual_body = {key: value for key, value in payload.items() if key not in identity_fields}
+        if actual_body != expected_body:
+            raise UniverseHandoffError("universe handoff semantic binding is invalid")
     return payload
 
 
