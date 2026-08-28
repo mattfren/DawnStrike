@@ -41,8 +41,8 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         "enrichment_status": "verified",
         "enrichment_is_complete": True,
         "enrichment_was_fallback": False,
-        "enrichment_observed_at": "2026-08-26T13:00:00+00:00",
-        "enrichment_bar_completed_at": "2026-08-26T13:01:00+00:00",
+        "enrichment_observed_at": "2026-08-26T13:25:00+00:00",
+        "enrichment_bar_completed_at": "2026-08-26T13:26:00+00:00",
         "prior_daily_high": 12.0,
         "prior_daily_high_observed_at": "2026-08-25T00:00:00+00:00",
         "prior_daily_high_completed_at": "2026-08-26T00:00:00+00:00",
@@ -57,7 +57,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         "bars": [
             {
                 "ticker": "AAA",
-                "timestamp": "2026-08-26T13:00:00+00:00",
+                "timestamp": "2026-08-26T13:25:00+00:00",
                 "high": 10.0,
                 "low": 9.0,
                 "close": 9.5,
@@ -81,19 +81,24 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         "previous_close": 8.0,
         "latest_price": 9.5,
         "premarket_volume": 1000,
-        "observed_at": "2026-08-26T13:00:00+00:00",
-        "bar_completed_at": "2026-08-26T13:01:00+00:00",
+        "observed_at": "2026-08-26T13:25:00+00:00",
+        "bar_completed_at": "2026-08-26T13:26:00+00:00",
         "is_complete": True,
         "bar_count": 1,
-        "age_seconds": 30,
+        "age_seconds": 240,
         "source": "alpaca_market_data_iex",
         "source_url": "https://data.alpaca.markets/v2/stocks/bars",
+        "failure_reason": "",
         "prior_daily_high": 12.0,
         "prior_daily_high_observed_at": "2026-08-25T00:00:00+00:00",
         "prior_daily_high_completed_at": "2026-08-26T00:00:00+00:00",
         "prior_daily_high_completion_semantics": "availability_boundary",
         "prior_daily_high_source": "alpaca_market_data_iex",
         "prior_daily_high_source_url": "https://data.alpaca.markets/v2/stocks/bars",
+        "prior_daily_high_source_hash": _hash(prior_raw),
+        "prior_daily_high_raw_payload_json": prior_raw_json,
+        "premarket_raw_payload_json": premarket_raw_json,
+        "premarket_source_hash_sha256": _hash(premarket_raw),
     }
     observation_json = json.dumps(observation, sort_keys=True, separators=(",", ":"))
     row.update(
@@ -123,6 +128,9 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
             "source_confidence": 92,
             "source_count": 3,
             "source_quality_status": "verified",
+            "freshness_status": "FRESH",
+            "input_status": "VERIFIED",
+            "evidence_status": "VERIFIED",
             "stale_data_flag": False,
             "float_shares": 8_000_000,
             "float_status": "verified",
@@ -149,6 +157,7 @@ def _row(*, portfolio_account_id: str, row_account_id: str = "") -> dict[str, ob
         generated_at=decision_at,
         market_date="2026-08-26",
         scan_id="scan-account-binding",
+        require_safety=True,
     )
     signal.update(
         {

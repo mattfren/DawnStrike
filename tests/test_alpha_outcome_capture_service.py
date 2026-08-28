@@ -1537,7 +1537,7 @@ def test_selection_timestamp_supersedes_untrusted_signal_generated_at(
     naive_store = SQLiteScanStore(naive_db)
     _persist_selected_signals(
         naive_store,
-        [{**_v5_signal(), "generated_at": f"{DAY}T10:00:00"}],
+        [{**_v5_signal(), "_selected_at": f"{DAY}T10:00:00"}],
     )
     with pytest.raises(SnapshotValidationError, match="selected_at is not canonical UTC"):
         capture_sourced_alpha_outcomes(

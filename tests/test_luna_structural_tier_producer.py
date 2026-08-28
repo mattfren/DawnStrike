@@ -12,6 +12,7 @@ import pytest
 import intraday_scanner.services.luna_research_slate_service as luna_slate_module
 import intraday_scanner.services.price_observation_service as price_observation_module
 import intraday_scanner.services.trade_watcher_service as trade_watcher_module
+from intraday_scanner.alpha.episode_identity import build_episode_identity
 from intraday_scanner.alpha.plan_constructor import NO_VALID_PLAN, construct_alphaops_v5_plan
 from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
@@ -1657,6 +1658,7 @@ def test_short_policy_and_paper_lifecycle_is_direction_aware(tmp_path) -> None:
             "strategy_version": "dawnstrike-alphaops-v4",
         }
     )
+    lifecycle_signal.update(build_episode_identity(lifecycle_signal).to_dict())
     entry = _entry_decision(
         lifecycle_signal,
         observation,
