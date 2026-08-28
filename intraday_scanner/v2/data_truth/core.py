@@ -944,7 +944,7 @@ def _complete_or_verify_snapshot_directory(
             + ", ".join(sorted(unexpected))
         )
     for relative_path, actual_path in actual_files.items():
-        if actual_path.read_bytes() != expected_files[relative_path]:
+        if not _file_matches_bytes(actual_path, expected_files[relative_path]):
             raise ValueError(f"DataTruth immutable artifact conflict: {actual_path}")
     for relative_path in sorted(set(expected_files) - set(actual_files)):
         _write_immutable_bytes(
@@ -962,7 +962,7 @@ def _assert_snapshot_directory_bytes(
     if set(actual_files) != set(expected_files):
         raise ValueError("DataTruth snapshot staging inventory is incomplete")
     for relative_path, actual_path in actual_files.items():
-        if actual_path.read_bytes() != expected_files[relative_path]:
+        if not _file_matches_bytes(actual_path, expected_files[relative_path]):
             raise ValueError(f"DataTruth snapshot staging byte mismatch: {relative_path}")
 
 
@@ -1013,8 +1013,21 @@ def _write_immutable_bytes(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
     except FileExistsError:
-        if not path.is_file() or path.read_bytes() != content:
+        if not _file_matches_bytes(path, content):
             raise ValueError(f"DataTruth immutable artifact conflict: {path}") from None
+
+
+def _file_matches_bytes(path: Path, expected: bytes) -> bool:
+    """Compare immutable content without allocating from untrusted file size."""
+
+    try:
+        return (
+            path.is_file()
+            and path.stat().st_size == len(expected)
+            and _sha256(path) == _sha256_bytes(expected)
+        )
+    except OSError:
+        return False
 
 
 def _write_mutable_bytes(path: Path, content: bytes) -> None:
