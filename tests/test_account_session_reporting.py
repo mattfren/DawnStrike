@@ -32,7 +32,7 @@ def _account(account_id: str = "paper-total") -> dict[str, object]:
 
 
 def _session(day: str, status: str = "CLOSED") -> dict[str, object]:
-    return {"session_id": f"session-{day}", "market_date": day, "status": status}
+    return {"session_id": f"XNYS:{day}:regular", "market_date": day, "status": status}
 
 
 def _seed_expected(path, sessions: list[dict[str, object]]) -> None:
@@ -72,7 +72,7 @@ def _no_trade_receipt(
         "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "market_date": day,
-        "session_id": f"session-{day}",
+        "session_id": f"XNYS:{day}:regular",
         "run_id": f"run-{day}",
         "status": "FINALIZED",
         "decision": "NO_TRADE",
@@ -95,7 +95,7 @@ def _no_trade_receipt(
         identity=NoTradeIdentity(
             account_id=account_id,
             market_date=day,
-            session_id=f"session-{day}",
+            session_id=f"XNYS:{day}:regular",
             run_id=f"run-{day}",
             strategy_id=strategy_id,
             strategy_version=strategy_version,
@@ -114,7 +114,7 @@ def _fill_truth(path: Path, day: str, account_id: str = "paper-total"):
         "strategy_version": "v5.1",
         "symbol": "NOVA",
         "market_date": day,
-        "session_id": f"session-{day}",
+        "session_id": f"XNYS:{day}:regular",
         "run_id": f"run-{day}",
         "fill_id": f"fill-{day}",
         "order_id": f"order-{day}",
@@ -154,7 +154,7 @@ def _fill_truth(path: Path, day: str, account_id: str = "paper-total"):
             strategy_version="v5.1",
             symbol="NOVA",
             run_id=f"run-{day}",
-            session_id=f"session-{day}",
+            session_id=f"XNYS:{day}:regular",
             fill_id=f"fill-{day}",
         ),
     )

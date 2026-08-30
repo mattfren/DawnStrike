@@ -30,7 +30,12 @@ from intraday_scanner.alpha.commit_bridge import (
     NoTradeIdentity,
 )
 from intraday_scanner.decisioning.contracts import canonical_json
-from intraday_scanner.market_calendar import MARKET_TIMEZONE, MarketSessionDecision, market_session
+from intraday_scanner.market_calendar import (
+    MARKET_TIMEZONE,
+    MarketSessionDecision,
+    canonical_regular_session_id,
+    market_session,
+)
 from intraday_scanner.performance.canonical_account_ledger import (
     CanonicalAccountLedger,
     LedgerConflictError,
@@ -65,7 +70,7 @@ def _calendar_row(decision: MarketSessionDecision) -> dict[str, Any]:
     calendar_payload = decision.to_dict()
     calendar_hash = _hash(calendar_payload)
     return {
-        "session_id": f"XNYS:{decision.market_date}",
+        "session_id": canonical_regular_session_id(decision.market_date),
         "market_date": decision.market_date,
         "exchange": "NYSE",
         "session_open_utc": _utc_session_timestamp(day, decision.open_time_et),

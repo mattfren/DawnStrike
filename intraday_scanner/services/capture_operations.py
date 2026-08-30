@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from intraday_scanner.market_calendar import market_session
+from intraday_scanner.market_calendar import canonical_regular_session_id, market_session
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -247,7 +247,7 @@ def _validate_session(value: dict[str, Any]) -> tuple[datetime, datetime, dict[s
         )
     if market_date not in session_id:
         raise CapturePlanError("exchange_session_id does not identify market_date")
-    canonical_session_id = f"XNYS:{market_date}:regular"
+    canonical_session_id = canonical_regular_session_id(market_date)
     if session_id != canonical_session_id:
         raise CapturePlanError(
             "expected session must use the full canonical regular-session identity"

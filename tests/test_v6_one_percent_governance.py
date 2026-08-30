@@ -179,8 +179,8 @@ def test_interval_purge_removes_overlapping_label_rows() -> None:
 
 def test_expected_calendar_rejects_forged_no_trade_and_preserves_missing() -> None:
     expected = [
-        {"session_id": "XNYS:2026-01-01", "market_date": "2026-01-01"},
-        {"session_id": "XNYS:2026-01-02", "market_date": "2026-01-02"},
+        {"session_id": "XNYS:2026-01-01:regular", "market_date": "2026-01-01"},
+        {"session_id": "XNYS:2026-01-02:regular", "market_date": "2026-01-02"},
     ]
     result = evaluate_expected_account_sessions(
         expected_sessions=expected,
@@ -188,6 +188,7 @@ def test_expected_calendar_rejects_forged_no_trade_and_preserves_missing() -> No
             {
                 "account_id": "paper",
                 "market_date": "2026-01-01",
+                "session_id": "XNYS:2026-01-01:regular",
                 "status": "NO_TRADE",
                 "no_trade": True,
                 "authoritative_receipt": {"receipt_id": "r1"},

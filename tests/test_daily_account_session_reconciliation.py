@@ -49,7 +49,7 @@ def _no_trade(path: Path, *, calendar_hash: str, account_id: str = "paper-total"
         "strategy_id": "aggregate",
         "strategy_version": "aggregate.v1",
         "market_date": "2026-08-28",
-        "session_id": "XNYS:2026-08-28",
+        "session_id": "XNYS:2026-08-28:regular",
         "run_id": "run-2026-08-28",
         "status": "FINALIZED",
         "decision": "NO_TRADE",
@@ -73,6 +73,7 @@ def test_reconciliation_materializes_calendar_once_and_waits_without_account(tmp
     first = reconcile_daily_account_sessions(path, market_date="2026-08-28", release_sha=CODE_SHA)
     second = reconcile_daily_account_sessions(path, market_date="2026-08-28", release_sha=CODE_SHA)
 
+    assert first["expected_session"]["session_id"] == "XNYS:2026-08-28:regular"
     assert first["status"] == "MISSING"
     assert first["reason"] == "paper_account_missing"
     assert first["expected_session_inserted"] is True
