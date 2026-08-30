@@ -177,7 +177,7 @@ def test_interval_purge_removes_overlapping_label_rows() -> None:
     assert any("overlap" in fold["purged_training_decision_ids"] for fold in folds)
 
 
-def test_expected_calendar_missing_and_authoritative_no_trade_block() -> None:
+def test_expected_calendar_rejects_forged_no_trade_and_preserves_missing() -> None:
     expected = [
         {"session_id": "XNYS:2026-01-01", "market_date": "2026-01-01"},
         {"session_id": "XNYS:2026-01-02", "market_date": "2026-01-02"},
@@ -196,5 +196,7 @@ def test_expected_calendar_missing_and_authoritative_no_trade_block() -> None:
         account_id="paper",
     )
     assert result["status"] == "NOT_EVALUABLE_ACCOUNT_SESSION_COMPLETENESS"
-    assert result["rows"][0]["net_return"] == "0"
+    assert result["rows"][0]["status"] == "MISSING"
+    assert result["rows"][0]["net_return"] is None
+    assert result["rows"][0]["reasons"] == ["authoritative_no_trade_receipt_missing"]
     assert result["rows"][1]["net_return"] is None
