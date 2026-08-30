@@ -6100,7 +6100,11 @@ class SQLiteScanStore:
         payload = dict(receipt)
         receipt_id = str(payload.get("receipt_id") or "").strip()
         declared_hash = str(payload.get("receipt_hash_sha256") or "").strip().lower()
-        if not receipt_id or len(declared_hash) != 64:
+        if (
+            not receipt_id
+            or len(declared_hash) != 64
+            or payload.get("receipt_hash_sha256") != declared_hash
+        ):
             raise StorageError("committed FillTruth receipt identity is incomplete")
         unsigned = {
             key: value for key, value in payload.items() if key != "receipt_hash_sha256"
@@ -6121,6 +6125,7 @@ class SQLiteScanStore:
             "source_artifact_hash_sha256",
             "code_sha",
             "frozen_window",
+            "created_at",
         )
         if any(not str(payload.get(key) or "").strip() for key in required):
             raise StorageError("committed FillTruth receipt is missing required fields")
@@ -6154,7 +6159,7 @@ class SQLiteScanStore:
             str(payload["code_sha"]),
             str(payload["frozen_window"]),
             payload_json,
-            str(payload.get("created_at") or datetime.now(UTC).isoformat()),
+            str(payload["created_at"]),
             1,
             0,
         )
