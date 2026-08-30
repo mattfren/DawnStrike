@@ -400,6 +400,16 @@ def test_complete_capture_rejects_partial_endpoint(tmp_path: Path) -> None:
         IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
 
 
+def test_complete_capture_rejects_partial_symbol_coverage(tmp_path: Path) -> None:
+    request, receipt = _complete_receipt(tmp_path)
+    changed = _resign_receipt(receipt)
+    changed["coverage"][0]["status"] = "PARTIAL_MISSING_INTERVALS"
+    changed = _resign_receipt(changed)
+
+    with pytest.raises(StorageError, match="incomplete symbol coverage"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
+
+
 def test_complete_capture_rejects_empty_artifact_identity(tmp_path: Path) -> None:
     request, receipt = _complete_receipt(tmp_path)
     changed = _resign_receipt(receipt)

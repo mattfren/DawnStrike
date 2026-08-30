@@ -11457,6 +11457,10 @@ def _validate_intraday_capture_run_receipt(
         if len(covered_symbols) != len(symbols) or set(covered_symbols) != set(symbols):
             raise StorageError("intraday capture COMPLETE coverage symbols do not match run")
         for row in coverage:
+            if str(row.get("status") or "") != "COMPLETE":
+                raise StorageError(
+                    "intraday capture COMPLETE contains incomplete symbol coverage"
+                )
             for endpoint_row in row["endpoint_coverage"]:
                 endpoint = str(endpoint_row.get("endpoint") or "")
                 status = str(endpoint_row.get("status") or "")
