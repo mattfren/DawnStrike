@@ -11,9 +11,12 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
+import uuid
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +38,7 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
+PRICE_OBSERVATION_BUNDLE_SCHEMA_VERSION = "dawnstrike.price_observation_bundle.v1"
 
 
 @dataclass(frozen=True)
@@ -55,8 +59,17 @@ def collect_price_observations(
     max_age_seconds: int = 360,
     persist: bool = True,
     config: ScannerConfig | None = None,
+    observation_bundle_path: str | Path | None = None,
+    cycle_id: str | None = None,
+    bundle_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Collect and optionally persist latest usable prices for targets."""
+    """Collect and optionally persist latest usable prices for targets.
+
+    ``observation_bundle_path`` provides the scheduled five-minute monitor
+    boundary.  The first reader writes one content-addressed, immutable bundle;
+    later readers reuse that exact bars/quotes payload instead of fetching at a
+    second instant.  Without the option this remains the standalone CLI path.
+    """
 
     if max_age_seconds <= 0:
         raise SnapshotValidationError("max_age_seconds must be positive.")
@@ -73,8 +86,43 @@ def collect_price_observations(
     at = parse_requested_at(requested_at, market_date=market_date)
     request_market_date = market_date or at.astimezone(EASTERN).date().isoformat()
     targets = _price_targets(store, tickers=tickers, market_date=request_market_date)
+    resolved_cycle_id = str(cycle_id or _five_minute_cycle_id(at)).strip()
+    resolved_bundle_path = observation_bundle_path or bundle_path
+    if (
+        observation_bundle_path
+        and bundle_path
+        and Path(observation_bundle_path) != Path(bundle_path)
+    ):
+        raise SnapshotValidationError("observation_bundle_path and bundle_path disagree.")
+    bundle_file = Path(resolved_bundle_path) if resolved_bundle_path else None
+    if bundle_file is not None and bundle_file.exists():
+        bundle = _load_observation_bundle(bundle_file)
+        observations = _observations_from_bundle(
+            bundle,
+            targets=targets,
+            source=resolved_source,
+            max_age_seconds=max_age_seconds,
+            cycle_id=resolved_cycle_id,
+            consumer_requested_at=at,
+        )
+        if persist:
+            assert store is not None
+            persisted = _persist_price_observations(store, observations, replace=True)
+        else:
+            persisted = {"inserted": 0, "skipped": 0, "row_count": len(observations)}
+        usable_count = sum(1 for row in observations if row.get("is_usable"))
+        return _price_observation_result(
+            observations=observations,
+            source=resolved_source,
+            requested_at=_iso_utc(at),
+            market_date=request_market_date,
+            persisted=persisted,
+            target_count=len(targets),
+            bundle=bundle,
+            usable_count=usable_count,
+        )
     if not targets:
-        return {
+        result = {
             "status": "no_targets",
             "source": resolved_source,
             "requested_at": _iso_utc(at),
@@ -86,6 +134,17 @@ def collect_price_observations(
             "observations": [],
             "message": "No tickers or saved signals were available for price observation.",
         }
+        if bundle_file is not None:
+            bundle = _make_observation_bundle(
+                cycle_id=resolved_cycle_id,
+                requested_at=_iso_utc(at),
+                source=resolved_source,
+                max_age_seconds=max_age_seconds,
+                observations=[],
+            )
+            _write_observation_bundle(bundle_file, bundle)
+            result["bundle"] = _bundle_summary(bundle, reused=False)
+        return result
     bars = _load_bars(
         source=resolved_source,
         targets=targets,
@@ -113,6 +172,26 @@ def collect_price_observations(
         )
         for target in targets
     ]
+    bundle = _make_observation_bundle(
+        cycle_id=resolved_cycle_id,
+        requested_at=_iso_utc(at),
+        source=resolved_source,
+        max_age_seconds=max_age_seconds,
+        observations=observations,
+    )
+    if bundle_file is not None:
+        _write_observation_bundle(bundle_file, bundle)
+        # Attach the immutable bundle identity to rows written to SQLite as
+        # well.  The identity is added after hashing so the bundle hash never
+        # recursively depends on itself.
+        observations = _observations_from_bundle(
+            bundle,
+            targets=targets,
+            source=resolved_source,
+            max_age_seconds=max_age_seconds,
+            cycle_id=resolved_cycle_id,
+            consumer_requested_at=at,
+        )
     if persist:
         assert store is not None
         persisted = _persist_price_observations(store, observations, replace=True)
@@ -120,7 +199,7 @@ def collect_price_observations(
         persisted = {"inserted": 0, "skipped": 0, "row_count": len(observations)}
     usable_count = sum(1 for row in observations if row.get("is_usable"))
     rejected_count = len(observations) - usable_count
-    return {
+    result = {
         "status": "ok" if usable_count else "no_usable_prices",
         "source": resolved_source,
         "requested_at": _iso_utc(at),
@@ -133,6 +212,246 @@ def collect_price_observations(
         "no_lookahead": True,
         "note": "Only minute bars completed at or before requested_at are eligible.",
     }
+    if bundle_file is not None:
+        result["bundle"] = _bundle_summary(bundle, reused=False)
+    return result
+
+
+def _five_minute_cycle_id(value: datetime) -> str:
+    """Return a stable UTC identity shared by the two scheduled monitor jobs."""
+
+    normalized = value.astimezone(UTC).replace(second=0, microsecond=0)
+    normalized = normalized.replace(minute=(normalized.minute // 5) * 5)
+    return normalized.strftime("%Y%m%dT%H%MZ")
+
+
+def _price_observation_result(
+    *,
+    observations: list[dict[str, Any]],
+    source: str,
+    requested_at: str,
+    market_date: str,
+    persisted: dict[str, int],
+    target_count: int,
+    bundle: dict[str, Any],
+    usable_count: int,
+) -> dict[str, Any]:
+    rejected_count = len(observations) - usable_count
+    return {
+        "status": "ok" if usable_count else "no_usable_prices",
+        "source": source,
+        "requested_at": requested_at,
+        "market_date": market_date,
+        "target_count": target_count,
+        "usable_count": usable_count,
+        "rejected_count": rejected_count,
+        "persisted": persisted,
+        "observations": observations,
+        "no_lookahead": True,
+        "bundle": _bundle_summary(bundle, reused=True),
+        "note": "Only minute bars completed at or before requested_at are eligible.",
+    }
+
+
+def _make_observation_bundle(
+    *,
+    cycle_id: str,
+    requested_at: str,
+    source: str,
+    max_age_seconds: int,
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PRICE_OBSERVATION_BUNDLE_SCHEMA_VERSION,
+        "cycle_id": cycle_id,
+        "requested_at": requested_at,
+        "source": source,
+        "max_age_seconds": max_age_seconds,
+        "target_tickers": sorted(
+            {str(row.get("ticker") or "").upper() for row in observations if row.get("ticker")}
+        ),
+        "observations": observations,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "no_lookahead": True,
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    return {
+        **payload,
+        "bundle_id": f"price-bundle-{content_hash[:24]}",
+        "content_hash_sha256": content_hash,
+    }
+
+
+def _bundle_summary(bundle: dict[str, Any], *, reused: bool) -> dict[str, Any]:
+    return {
+        "schema_version": bundle.get("schema_version"),
+        "bundle_id": bundle.get("bundle_id"),
+        "content_hash_sha256": bundle.get("content_hash_sha256"),
+        "cycle_id": bundle.get("cycle_id"),
+        "requested_at": bundle.get("requested_at"),
+        "source": bundle.get("source"),
+        "target_tickers": list(bundle.get("target_tickers") or []),
+        "observation_count": len(bundle.get("observations") or []),
+        "reused": reused,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _load_observation_bundle(path: Path) -> dict[str, Any]:
+    try:
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SnapshotValidationError(f"Price observation bundle is unreadable: {path}") from exc
+    if not isinstance(bundle, dict):
+        raise SnapshotValidationError("Price observation bundle must be a JSON object.")
+    expected = str(bundle.get("content_hash_sha256") or "").lower()
+    payload = {
+        key: value
+        for key, value in bundle.items()
+        if key not in {"bundle_id", "content_hash_sha256"}
+    }
+    actual = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    if (
+        bundle.get("schema_version") != PRICE_OBSERVATION_BUNDLE_SCHEMA_VERSION
+        or not expected
+        or expected != actual
+        or str(bundle.get("bundle_id") or "") != f"price-bundle-{actual[:24]}"
+        or not isinstance(bundle.get("observations"), list)
+        or bundle.get("research_only") is not True
+        or bundle.get("broker_execution_enabled") is not False
+    ):
+        raise SnapshotValidationError(
+            "Price observation bundle content hash or safety contract is invalid."
+        )
+    return bundle
+
+
+def _observations_from_bundle(
+    bundle: dict[str, Any],
+    *,
+    targets: list[PriceTarget],
+    source: str,
+    max_age_seconds: int,
+    cycle_id: str,
+    consumer_requested_at: datetime,
+) -> list[dict[str, Any]]:
+    if str(bundle.get("source") or "") != source:
+        raise SnapshotValidationError(
+            "Price observation bundle source does not match this monitor cycle."
+        )
+    if str(bundle.get("cycle_id") or "") != cycle_id:
+        raise SnapshotValidationError(
+            "Price observation bundle belongs to a different five-minute cycle."
+        )
+    if int(bundle.get("max_age_seconds") or 0) > max_age_seconds:
+        raise SnapshotValidationError(
+            "Price observation bundle max-age is wider than this request."
+        )
+    try:
+        bundle_requested_at = _parse_datetime(str(bundle.get("requested_at") or ""))
+    except ValueError as exc:
+        raise SnapshotValidationError("Price observation bundle requested_at is invalid.") from exc
+    if bundle_requested_at > consumer_requested_at:
+        raise SnapshotValidationError(
+            "Price observation bundle is from the future of this consumer."
+        )
+    by_ticker = {
+        str(row.get("ticker") or "").upper(): dict(row)
+        for row in bundle.get("observations") or []
+        if isinstance(row, dict) and str(row.get("ticker") or "").strip()
+    }
+    wanted = [target.ticker for target in targets]
+    missing = sorted(set(wanted) - set(by_ticker))
+    if missing:
+        raise SnapshotValidationError(
+            "Price observation bundle has no immutable observation for: " + ", ".join(missing)
+        )
+    target_by_ticker = {target.ticker: target for target in targets}
+    observations = [deepcopy(by_ticker[ticker]) for ticker in wanted]
+    consumer_iso = _iso_utc(consumer_requested_at)
+    for row in observations:
+        target = target_by_ticker[str(row.get("ticker") or "").upper()]
+        frozen_observation_id = str(row.get("observation_id") or "")
+        row["observation_id"] = _observation_id(target, source, consumer_iso)
+        row["signal_id"] = target.signal_id
+        row["requested_at"] = consumer_iso
+        if row.get("is_usable"):
+            try:
+                completed_at = _parse_datetime(str(row.get("bar_completed_at") or ""))
+            except ValueError as exc:
+                raise SnapshotValidationError(
+                    f"Price observation bundle has invalid bar time for {row.get('ticker')}."
+                ) from exc
+            bar_age = (consumer_requested_at - completed_at).total_seconds()
+            if bar_age < 0 or bar_age > max_age_seconds:
+                raise SnapshotValidationError(
+                    f"Price observation bundle contains stale bar evidence for {row.get('ticker')}."
+                )
+            row["freshness_seconds"] = int(bar_age)
+            quote_status = str(row.get("quote_status") or "")
+            if quote_status == "USABLE":
+                try:
+                    quote_at = _parse_datetime(str(row.get("quote_observed_at") or ""))
+                except ValueError as exc:
+                    raise SnapshotValidationError(
+                        f"Price observation bundle has invalid quote time for {row.get('ticker')}."
+                    ) from exc
+                quote_age = (consumer_requested_at - quote_at).total_seconds()
+                if quote_age < 0 or quote_age > max_age_seconds:
+                    raise SnapshotValidationError(
+                        "Price observation bundle contains stale quote evidence for "
+                        f"{row.get('ticker')}."
+                    )
+                row["quote_freshness_seconds"] = quote_age
+        row["bundle_id"] = bundle.get("bundle_id")
+        row["bundle_content_hash_sha256"] = bundle.get("content_hash_sha256")
+        row["cycle_id"] = bundle.get("cycle_id")
+        row["bundle_observation_id"] = frozen_observation_id
+        payload = row.get("payload_json")
+        if isinstance(payload, dict):
+            payload.update(
+                {
+                    "observation_id": row["observation_id"],
+                    "signal_id": row["signal_id"],
+                    "requested_at": consumer_iso,
+                    "bundle_id": bundle.get("bundle_id"),
+                    "bundle_content_hash_sha256": bundle.get("content_hash_sha256"),
+                    "cycle_id": bundle.get("cycle_id"),
+                    "bundle_observation_id": frozen_observation_id,
+                }
+            )
+            if row.get("freshness_seconds") is not None:
+                payload["freshness_seconds"] = row["freshness_seconds"]
+            if row.get("quote_freshness_seconds") is not None:
+                payload["quote_freshness_seconds"] = row["quote_freshness_seconds"]
+    return observations
+
+
+def _write_observation_bundle(path: Path, bundle: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(bundle, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            existing = _load_observation_bundle(path)
+            if existing.get("content_hash_sha256") != bundle.get("content_hash_sha256"):
+                raise SnapshotValidationError(
+                    "Price observation bundle path is already bound to different content."
+                ) from None
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def parse_requested_at(value: str | None, *, market_date: str | None = None) -> datetime:
@@ -421,7 +740,15 @@ def _observation_from_bars(
     is_complete = bar_completed_at <= requested_at
     safe_bar = _safe_bar_payload(bar)
     source_bar_hash = canonical_hash(safe_bar)
-    output = {
+    payload_json: dict[str, Any] = {
+        "bar": safe_bar,
+        "bar_completed_at": completed_iso,
+        "is_complete": is_complete,
+        "source_bar_hash_sha256": source_bar_hash,
+        "no_lookahead": True,
+        "price_rule": "latest minute bar with completion <= requested_at",
+    }
+    output: dict[str, Any] = {
         "observation_id": _observation_id(target, source, requested_iso),
         "signal_id": target.signal_id,
         "market_date": market_date,
@@ -442,14 +769,7 @@ def _observation_from_bars(
         "tolerance_seconds": max_age_seconds,
         "is_usable": is_complete,
         "created_at": created_at,
-        "payload_json": {
-            "bar": safe_bar,
-            "bar_completed_at": completed_iso,
-            "is_complete": is_complete,
-            "source_bar_hash_sha256": source_bar_hash,
-            "no_lookahead": True,
-            "price_rule": "latest minute bar with completion <= requested_at",
-        },
+        "payload_json": payload_json,
     }
     validated_quote = _validated_quote(
         quote, ticker=target.ticker, requested_at=requested_at, max_age_seconds=max_age_seconds

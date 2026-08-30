@@ -348,6 +348,8 @@ def _validate_generic_frozen_plan(plan: Mapping[str, Any]) -> None:
     for name, keys in aliases.items():
         value = next((levels.get(key) for key in keys if levels.get(key) is not None), None)
         try:
+            if value is None:
+                raise TypeError("frozen level is missing")
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise EpisodeIdentityError(

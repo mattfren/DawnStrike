@@ -14,7 +14,9 @@ import json
 import math
 import re
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,25 @@ CONCLUSIVE_STATUSES = {
     "not_triggered",
     "captured_ineligible",
 }
+# A capture can be missing without being a permanent statement about the
+# episode.  These statuses describe source availability/coverage and may be
+# retried with a later bounded provider attempt.  Evidence-contract defects
+# remain authoritative-terminal and must not be repaired by inventing market
+# data.
+RECOVERABLE_CAPTURE_MISSING_STATUSES = frozenset(
+    {
+        "ineligible_provider_error",
+        "ineligible_no_regular_session_bars",
+        "ineligible_no_post_recommendation_bars",
+        "ineligible_incomplete_source_bars",
+        "ineligible_missing_start_bar",
+        "ineligible_missing_final_bar",
+        "ineligible_bar_gap",
+        "ineligible_bar_count_mismatch",
+        "ineligible_stale_close",
+        "ineligible_missing_benchmark",
+    }
+)
 FUTURE_EVIDENCE_SCHEMA_VERSION = "dawnstrike.future_evidence_receipt.v1"
 
 FetchChart = Callable[..., dict[str, Any]]
@@ -155,6 +176,7 @@ def capture_sourced_alpha_outcomes(
     fetcher: FetchChart | None = None,
     fallback_fetcher: FetchNormalizedBars | None = None,
     provider_attempt_limit: int | None = None,
+    outcome_fetch_workers: int = 4,
 ) -> dict[str, Any]:
     """Capture regular-session outcomes through a bounded market-data chain.
 
@@ -167,6 +189,8 @@ def capture_sourced_alpha_outcomes(
 
     if max_close_staleness_seconds <= 0:
         raise SnapshotValidationError("max_close_staleness_seconds must be positive.")
+    if int(outcome_fetch_workers) <= 0:
+        raise SnapshotValidationError("outcome_fetch_workers must be positive.")
     at = parse_requested_at(requested_at, market_date=market_date)
     resolved_date = market_date or at.astimezone(EASTERN).date().isoformat()
     strategy_id, strategy_version = alphaops_strategy_contract(f"{resolved_date}T12:00:00-04:00")
@@ -218,9 +242,7 @@ def capture_sourced_alpha_outcomes(
     radar_selections = (
         [
             row
-            for row in store.load_signal_selections(
-                cohort="research_radar", limit=50_000
-            )
+            for row in store.load_signal_selections(cohort="research_radar", limit=50_000)
             if str(row.get("selected_at") or "")[:10] == resolved_date
         ]
         if persist
@@ -429,6 +451,11 @@ def capture_sourced_alpha_outcomes(
         return {**summary, "outcomes": [], "diagnostics": diagnostics, "out_dir": str(output_dir)}
 
     scanner_config = config or load_config()
+    # The outcome service owns retry sequencing and records each bounded
+    # attempt.  Provider helpers also have historical retry loops; force those
+    # helpers to make one request so EOD cannot silently multiply attempts
+    # (and therefore timeouts) into a nested retry tree.
+    provider_config = dataclass_replace(scanner_config, request_retries=1)
     chart_fetcher = fetcher or fetch_yahoo_chart
     attempt_limit = min(
         3,
@@ -442,19 +469,23 @@ def capture_sourced_alpha_outcomes(
     bars_by_ticker: dict[str, list[OutcomeBar]] = {}
     source_evidence_by_ticker: dict[str, dict[str, Any]] = {}
     errors_by_ticker: dict[str, str] = {}
-    signal_tickers = sorted({
-        str(row.get("ticker") or "").upper()
-        for row in [*pending, *radar_selections]
-        if str(row.get("ticker") or "").strip()
-    })
+    signal_tickers = sorted(
+        {
+            str(row.get("ticker") or "").upper()
+            for row in [*pending, *radar_selections]
+            if str(row.get("ticker") or "").strip()
+        }
+    )
     requested_tickers = [*signal_tickers]
     for benchmark in (PRIMARY_BENCHMARK, SECONDARY_BENCHMARK):
         if benchmark not in requested_tickers:
             requested_tickers.append(benchmark)
-    for ticker in requested_tickers:
+    def fetch_ticker(
+        ticker: str,
+    ) -> tuple[str, list[OutcomeBar], dict[str, Any], list[dict[str, Any]], str]:
         bars, evidence, requests, error = _fetch_outcome_bars(
             ticker,
-            scanner_config,
+            provider_config,
             session=session,
             requested_at=at,
             captured_at=captured_at,
@@ -462,12 +493,29 @@ def capture_sourced_alpha_outcomes(
             fallback_fetcher=fallback_fetcher,
             attempt_limit=attempt_limit,
         )
-        source_requests.extend(requests)
-        bars_by_ticker[ticker] = bars
-        source_bars[ticker] = [bar.to_dict() for bar in bars]
-        source_evidence_by_ticker[ticker] = evidence
-        if error and ticker in signal_tickers and not bars:
-            errors_by_ticker[ticker] = error
+        return ticker, bars, evidence, requests, error
+
+    # ``executor.map`` retains input order even when provider requests finish
+    # out of order.  Each ticker has isolated result state; only the bounded
+    # read-only provider calls run concurrently, while receipt assembly below
+    # remains deterministic and fail-closed.
+    if requested_tickers:
+        worker_count = min(max(1, int(outcome_fetch_workers)), 4, len(requested_tickers))
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="alpha-outcome"
+        ) as executor:
+            # ``map`` retains input order even when provider requests finish
+            # out of order.  Receipt assembly therefore remains byte/order
+            # deterministic while read-only provider calls are bounded.
+            for ticker, bars, evidence, requests, error in executor.map(
+                fetch_ticker, requested_tickers
+            ):
+                source_requests.extend(requests)
+                bars_by_ticker[ticker] = bars
+                source_bars[ticker] = [bar.to_dict() for bar in bars]
+                source_evidence_by_ticker[ticker] = evidence
+                if error and ticker in signal_tickers and not bars:
+                    errors_by_ticker[ticker] = error
 
     entry_intents: dict[str, dict[str, Any]] = {}
     raw_entry_intents: dict[str, list[dict[str, Any]]] = {}
@@ -536,6 +584,14 @@ def capture_sourced_alpha_outcomes(
     outcomes: list[dict[str, Any]] = []
     deferred_revision_candidates: list[dict[str, Any]] = []
     capture_attempts: list[dict[str, Any]] = []
+    capture_attempt_history: dict[str, list[dict[str, Any]]] = {}
+    for prior_attempt in store.load_outcome_capture_attempts(
+        market_date=resolved_date,
+        limit=50_000,
+    ):
+        capture_attempt_history.setdefault(str(prior_attempt.get("signal_id") or ""), []).append(
+            prior_attempt
+        )
     for signal in pending:
         ticker = str(signal.get("ticker") or "").upper()
         if ticker in errors_by_ticker:
@@ -545,15 +601,22 @@ def capture_sourced_alpha_outcomes(
                 errors_by_ticker[ticker],
             )
             diagnostics.append(diagnostic)
+            attempt = _capture_attempt(
+                signal,
+                diagnostic,
+                market_date=resolved_date,
+                captured_at=captured_at,
+                requested_at=at,
+                source_evidence=source_evidence_by_ticker.get(ticker, {}),
+                source_requests=source_requests,
+            )
             capture_attempts.append(
-                _capture_attempt(
-                    signal,
-                    diagnostic,
-                    market_date=resolved_date,
-                    captured_at=captured_at,
-                    requested_at=at,
-                    source_evidence=source_evidence_by_ticker.get(ticker, {}),
-                    source_requests=source_requests,
+                _bind_capture_attempt_lineage(
+                    attempt,
+                    [
+                        *capture_attempt_history.get(str(signal.get("signal_id") or ""), []),
+                        *capture_attempts,
+                    ],
                 )
             )
             continue
@@ -602,16 +665,23 @@ def capture_sourced_alpha_outcomes(
         else:
             diagnostic = _diagnostic_from_outcome(outcome)
         diagnostics.append(diagnostic)
+        attempt = _capture_attempt(
+            signal,
+            diagnostic,
+            market_date=resolved_date,
+            captured_at=captured_at,
+            requested_at=at,
+            source_evidence=source_evidence_by_ticker.get(ticker, {}),
+            source_requests=source_requests,
+            outcome=outcome,
+        )
         capture_attempts.append(
-            _capture_attempt(
-                signal,
-                diagnostic,
-                market_date=resolved_date,
-                captured_at=captured_at,
-                requested_at=at,
-                source_evidence=source_evidence_by_ticker.get(ticker, {}),
-                source_requests=source_requests,
-                outcome=outcome,
+            _bind_capture_attempt_lineage(
+                attempt,
+                [
+                    *capture_attempt_history.get(signal_id, []),
+                    *capture_attempts,
+                ],
             )
         )
         if conclusive and signal_id not in legacy_existing:
@@ -1316,9 +1386,7 @@ def _derive_research_selection_outcome(
     computed_bar_hash = _bars_hash(bars)
     source_bar_hash = declared_bar_hash or computed_bar_hash
     source_bar_payload = [bar.to_dict() for bar in bars]
-    source_artifact_identity = str(
-        source_evidence.get("source_artifact_identity") or ""
-    ).strip()
+    source_artifact_identity = str(source_evidence.get("source_artifact_identity") or "").strip()
     raw_lineage = source_evidence.get("source_lineage") or []
     lineage_rows = []
     if isinstance(raw_lineage, list):
@@ -1343,15 +1411,11 @@ def _derive_research_selection_outcome(
                     "error",
                 ):
                     canonical_item.pop(key, None)
-                identity = json.dumps(
-                    canonical_item, sort_keys=True, separators=(",", ":")
-                )
+                identity = json.dumps(canonical_item, sort_keys=True, separators=(",", ":"))
                 if identity not in seen_lineage:
                     lineage_rows.append(canonical_item)
                     seen_lineage.add(identity)
-        lineage_rows.sort(
-            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
-        )
+        lineage_rows.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
     base: dict[str, Any] = {
         "selection_id": selection_id,
         "signal_id": signal_id,
@@ -1395,9 +1459,7 @@ def _derive_research_selection_outcome(
         for item in lineage_rows
     )
     lineage_sources = {
-        str(item.get("source") or "").strip()
-        for item in lineage_rows
-        if isinstance(item, Mapping)
+        str(item.get("source") or "").strip() for item in lineage_rows if isinstance(item, Mapping)
     }
     source_binding = {
         "provider": str(source_evidence.get("source") or "").strip(),
@@ -1441,14 +1503,10 @@ def _derive_research_selection_outcome(
             _expected_provider_request_contract,
         )
 
-        expected_full_count = int(
-            (session.closed_at - session.opened_at).total_seconds() // 60
-        )
+        expected_full_count = int((session.closed_at - session.opened_at).total_seconds() // 60)
         expected_full_start = _iso_utc(session.opened_at)
         expected_full_end = _iso_utc(session.closed_at - timedelta(minutes=1))
-        expected_maximum_gap = (
-            0 if expected_full_count == 1 else MAX_BAR_GAP_SECONDS
-        )
+        expected_maximum_gap = 0 if expected_full_count == 1 else MAX_BAR_GAP_SECONDS
         selected_request = _expected_provider_request_contract(
             provider=str(source_binding["provider"]),
             ticker=ticker,
@@ -1478,8 +1536,7 @@ def _derive_research_selection_outcome(
                 str(item.get("ticker") or "").upper() != ticker
                 or not re.fullmatch(r"[0-9a-f]{64}", item_hash)
                 or item.get("request_contract") != expected_request
-                or str(item.get("source_artifact_identity") or "")
-                != expected_artifact
+                or str(item.get("source_artifact_identity") or "") != expected_artifact
                 or str(item.get("status") or "").lower() != "ok"
                 or item.get("source_coverage_complete") is not True
                 or str(item.get("coverage_status") or "").lower() != "complete"
@@ -1501,8 +1558,7 @@ def _derive_research_selection_outcome(
                 selected_lineage_count += 1
                 if (
                     item_hash != source_bar_hash
-                    or str(item.get("source_artifact_identity") or "")
-                    != source_artifact_identity
+                    or str(item.get("source_artifact_identity") or "") != source_artifact_identity
                 ):
                     raise SnapshotValidationError(
                         "selected provider lineage conflicts with source binding"
@@ -1510,21 +1566,19 @@ def _derive_research_selection_outcome(
         reconciliation = source_binding["independent_reconciliation"]
         if not isinstance(reconciliation, Mapping):
             raise SnapshotValidationError("provider reconciliation is absent")
-        lineage_source_names = sorted(
-            {str(item.get("source") or "") for item in lineage_rows}
-        )
+        lineage_source_names = sorted({str(item.get("source") or "") for item in lineage_rows})
         reconciliation_status = str(reconciliation.get("status") or "")
         if (
             selected_lineage_count < 1
-            or reconciliation.get("independent_source_count")
-            != len(lineage_source_names)
+            or reconciliation.get("independent_source_count") != len(lineage_source_names)
             or reconciliation_status == "DISAGREEMENT"
         ):
             raise SnapshotValidationError("provider reconciliation is not learning-safe")
         if len(lineage_source_names) < 2:
-            if reconciliation_status != "NOT_AVAILABLE" or reconciliation.get(
-                "agreement"
-            ) is not None:
+            if (
+                reconciliation_status != "NOT_AVAILABLE"
+                or reconciliation.get("agreement") is not None
+            ):
                 raise SnapshotValidationError("provider reconciliation availability mismatch")
         elif (
             reconciliation_status != "PASSED"
@@ -1548,8 +1602,7 @@ def _derive_research_selection_outcome(
             f"{BAR_INTERVAL}:{source_bar_hash}"
         )
         and source_evidence.get("source_conflict") is not True
-        and str(source_evidence.get("independent_reconciliation_status") or "")
-        != "DISAGREEMENT"
+        and str(source_evidence.get("independent_reconciliation_status") or "") != "DISAGREEMENT"
     )
     try:
         from intraday_scanner.services.research_episode_outcome_service import (
@@ -1563,83 +1616,92 @@ def _derive_research_selection_outcome(
             contributor_receipt_verifier=contributor_receipt_verifier,
         )
     except (SnapshotValidationError, TypeError, ValueError) as exc:
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": f"frozen selection lineage is invalid: {exc}",
-        })
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": f"frozen selection lineage is invalid: {exc}",
+            }
+        )
         return base
     selection_id = str(frozen_identity["selection_id"])
     signal_id = str(selection.get("signal_id") or "").strip()
     ticker = str(frozen_identity["ticker"]).upper()
     selected_at = str(frozen_identity["selected_at"])
     selected_dt = _parse_datetime(selected_at)
-    base.update({
-        "selection_id": selection_id,
-        "signal_id": signal_id,
-        "ticker": ticker,
-        "market_date": str(frozen_identity["market_date"]),
-        "selected_at": selected_at,
-        "episode_id": str(frozen_identity["episode_id"]),
-        "slate_id": str(frozen_identity["slate_id"]),
-        "slate_content_hash_sha256": str(
-            frozen_identity["slate_content_hash_sha256"]
-        ),
-    })
+    base.update(
+        {
+            "selection_id": selection_id,
+            "signal_id": signal_id,
+            "ticker": ticker,
+            "market_date": str(frozen_identity["market_date"]),
+            "selected_at": selected_at,
+            "episode_id": str(frozen_identity["episode_id"]),
+            "slate_id": str(frozen_identity["slate_id"]),
+            "slate_content_hash_sha256": str(frozen_identity["slate_content_hash_sha256"]),
+        }
+    )
     if selected_dt is None:
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": "selection timestamp is invalid",
-        })
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": "selection timestamp is invalid",
+            }
+        )
         return base
     if not bars:
-        base.update({
-            "outcome_status": "MISSING",
-            "learning_eligible": False,
-            "outcome_reason": "no current sourced bars are available",
-        })
+        base.update(
+            {
+                "outcome_status": "MISSING",
+                "learning_eligible": False,
+                "outcome_reason": "no current sourced bars are available",
+            }
+        )
         return base
-    if (
-        not source_binding_valid
-        or declared_bar_hash != computed_bar_hash
-    ):
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": (
-                "source provider/artifact/request/reconciliation lineage or "
-                "canonical bars hash is invalid"
-            ),
-        })
+    if not source_binding_valid or declared_bar_hash != computed_bar_hash:
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": (
+                    "source provider/artifact/request/reconciliation lineage or "
+                    "canonical bars hash is invalid"
+                ),
+            }
+        )
         return base
     first_eligible_at = max(session.opened_at, _ceil_minute(selected_dt))
     eligible_bars = [
-        bar
-        for bar in bars
-        if first_eligible_at <= bar.observed_at < session.closed_at
+        bar for bar in bars if first_eligible_at <= bar.observed_at < session.closed_at
     ]
     complete_bars = [bar for bar in eligible_bars if _research_bar_complete(bar)]
     if not complete_bars:
-        base.update({
-            "outcome_status": "MISSING",
-            "learning_eligible": False,
-            "outcome_reason": "no complete sourced selection observation is available",
-        })
+        base.update(
+            {
+                "outcome_status": "MISSING",
+                "learning_eligible": False,
+                "outcome_reason": "no complete sourced selection observation is available",
+            }
+        )
         return base
     if any(bar.observed_at > requested_at.astimezone(UTC) for bar in complete_bars):
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": "sourced selection bars exceed the outcome cutoff",
-        })
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": "sourced selection bars exceed the outcome cutoff",
+            }
+        )
         return base
     if len(complete_bars) != len(eligible_bars):
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": "sourced selection window contains incomplete OHLC bars",
-        })
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": "sourced selection window contains incomplete OHLC bars",
+            }
+        )
         return base
     coverage = _validate_bar_coverage(
         complete_bars,
@@ -1648,29 +1710,33 @@ def _derive_research_selection_outcome(
     )
     base.update(coverage.to_dict())
     malformed = _malformed_ohlc_detail(complete_bars)
-    if not coverage.is_complete or malformed or source_evidence.get(
-        "source_coverage_complete"
-    ) is not True:
-        base.update({
-            "outcome_status": "INELIGIBLE",
-            "learning_eligible": False,
-            "outcome_reason": malformed
-            or coverage.detail
-            or "sourced selection coverage is incomplete",
-        })
+    if (
+        not coverage.is_complete
+        or malformed
+        or source_evidence.get("source_coverage_complete") is not True
+    ):
+        base.update(
+            {
+                "outcome_status": "INELIGIBLE",
+                "learning_eligible": False,
+                "outcome_reason": malformed
+                or coverage.detail
+                or "sourced selection coverage is incomplete",
+            }
+        )
         return base
     reference = complete_bars[0]
     reference_price = float(reference.close)
     subsequent_bars = complete_bars[1:]
-    high = max((float(bar.high) for bar in subsequent_bars), default=None)
-    low = min((float(bar.low) for bar in subsequent_bars), default=None)
+    high_values = [float(bar.high) for bar in subsequent_bars if bar.high is not None]
+    low_values = [float(bar.low) for bar in subsequent_bars if bar.low is not None]
+    high = max(high_values, default=None)
+    low = min(low_values, default=None)
     close = float(subsequent_bars[-1].close) if subsequent_bars else None
     metrics = {
         "reference_at": _iso_utc(reference.observed_at),
         "reference_price": reference_price,
-        "close_at": (
-            _iso_utc(subsequent_bars[-1].observed_at) if subsequent_bars else None
-        ),
+        "close_at": (_iso_utc(subsequent_bars[-1].observed_at) if subsequent_bars else None),
         "close_price": close,
         "high_after_reference": high,
         "low_after_reference": low,
@@ -1680,17 +1746,15 @@ def _derive_research_selection_outcome(
             else None
         ),
         "mae_pct": (
-            round((low - reference_price) / reference_price * 100.0, 6)
-            if low is not None
-            else None
+            round((low - reference_price) / reference_price * 100.0, 6) if low is not None else None
         ),
         "path_status": (
             "NO_SUBSEQUENT_OBSERVATION"
             if not subsequent_bars
             else "POSITIVE_CLOSE"
-            if close > reference_price
+            if close is not None and close > reference_price
             else "NEGATIVE_CLOSE"
-            if close < reference_price
+            if close is not None and close < reference_price
             else "FLAT_CLOSE"
         ),
         "bar_count": len(subsequent_bars),
@@ -1734,37 +1798,45 @@ def _derive_research_selection_outcome(
         "metrics": metrics,
         "source_bar_hash_sha256": source_bar_hash,
     }
-    base.update({
-        "source_authenticated": bool(
-            source_binding_valid
-        ),
-        "source_observation_id": (
-            f"selection-observation:{selection_id}:{_iso_utc(reference.observed_at)}"
-        ),
-        "source_observation_hash_sha256": reference_hash,
-        "source_observation_payload": observation_payload,
-        "source_path_id": path_id,
-        "source_path_hash_sha256": path_hash,
-        "source_path_payload": path_payload,
-        "source_cutoff": _iso_utc(requested_at),
-        "source_binding": source_binding,
-        "outcome_artifact_id": f"selection-outcome:{selection_id}:{metric_hash[:24]}",
-        "outcome_artifact_hash_sha256": metric_hash,
-        "selection_outcome_metrics": metrics,
-        "outcome_status": "COMPLETE_SOURCED" if subsequent_bars else "MISSING",
-        "learning_eligible": bool(subsequent_bars),
-        "outcome_reason": (
-            "complete sourced selection observation window"
-            if subsequent_bars
-            else "reference observation has no strictly subsequent path bar"
-        ),
-    })
+    base.update(
+        {
+            "source_authenticated": bool(source_binding_valid),
+            "source_observation_id": (
+                f"selection-observation:{selection_id}:{_iso_utc(reference.observed_at)}"
+            ),
+            "source_observation_hash_sha256": reference_hash,
+            "source_observation_payload": observation_payload,
+            "source_path_id": path_id,
+            "source_path_hash_sha256": path_hash,
+            "source_path_payload": path_payload,
+            "source_cutoff": _iso_utc(requested_at),
+            "source_binding": source_binding,
+            "outcome_artifact_id": f"selection-outcome:{selection_id}:{metric_hash[:24]}",
+            "outcome_artifact_hash_sha256": metric_hash,
+            "selection_outcome_metrics": metrics,
+            "outcome_status": "COMPLETE_SOURCED" if subsequent_bars else "MISSING",
+            "learning_eligible": bool(subsequent_bars),
+            "outcome_reason": (
+                "complete sourced selection observation window"
+                if subsequent_bars
+                else "reference observation has no strictly subsequent path bar"
+            ),
+        }
+    )
     return base
 
 
 def _research_bar_complete(bar: OutcomeBar) -> bool:
+    open_value = bar.open
+    high_value = bar.high
+    low_value = bar.low
+    close_value = bar.close
+    if any(value is None for value in (open_value, high_value, low_value, close_value)):
+        return False
     try:
-        values = tuple(float(value) for value in (bar.open, bar.high, bar.low, bar.close))
+        if open_value is None or high_value is None or low_value is None or close_value is None:
+            return False
+        values = tuple(float(value) for value in (open_value, high_value, low_value, close_value))
     except (TypeError, ValueError):
         return False
     if not all(math.isfinite(value) and value > 0 for value in values):
@@ -3064,6 +3136,8 @@ def _capture_attempt(
     source_evidence: dict[str, Any],
     source_requests: list[dict[str, Any]],
     outcome: dict[str, Any] | None = None,
+    supersedes_attempt_id: str = "",
+    attempt_number: int = 1,
 ) -> dict[str, Any]:
     signal_id = str(signal.get("signal_id") or "")
     ticker = str(signal.get("ticker") or "").upper()
@@ -3074,6 +3148,10 @@ def _capture_attempt(
         or ""
     )
     attribution_missing = bool(outcome is not None and outcome.get("attribution_complete") is False)
+    missing_classification = _capture_missing_classification(
+        outcome_status,
+        attribution_missing=attribution_missing,
+    )
     terminal_missing = outcome_status.startswith("ineligible_") or attribution_missing
     status = "terminal_missing" if terminal_missing else "resolved"
     relevant_requests = [
@@ -3106,7 +3184,23 @@ def _capture_attempt(
         "market_date": market_date,
         "ticker": ticker,
         "status": status,
+        # ``terminal`` is retained for the existing storage contract.  A
+        # recoverable row is terminal for this bounded attempt, but not an
+        # authoritative terminal truth claim; consumers should use the
+        # explicit classification below.
         "terminal": True,
+        "missing_classification": missing_classification,
+        "missing_state": missing_classification,
+        "capture_status": (
+            "resolved"
+            if missing_classification == "resolved"
+            else f"{missing_classification}_missing"
+        ),
+        "authoritative_terminal": missing_classification == "authoritative_terminal",
+        "retryable": missing_classification == "recoverable",
+        "attempt_number": max(1, int(attempt_number)),
+        "supersedes_attempt_id": str(supersedes_attempt_id or ""),
+        "parent_attempt_id": str(supersedes_attempt_id or ""),
         "learning_eligible": bool((outcome or {}).get("learning_eligible")),
         "provider_chain": relevant_requests,
         "source_refs": source_refs,
@@ -3135,6 +3229,69 @@ def _capture_attempt(
     return payload
 
 
+def _capture_missing_classification(
+    outcome_status: str,
+    *,
+    attribution_missing: bool = False,
+) -> str:
+    """Classify missing capture evidence without changing legacy statuses."""
+
+    if not outcome_status.startswith("ineligible_") and not attribution_missing:
+        return "resolved"
+    if outcome_status in RECOVERABLE_CAPTURE_MISSING_STATUSES or attribution_missing:
+        return "recoverable"
+    return "authoritative_terminal"
+
+
+def _bind_capture_attempt_lineage(
+    attempt: dict[str, Any],
+    prior_attempts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach additive retry/supersession metadata to a new immutable row."""
+
+    attempt_id = str(attempt.get("attempt_id") or "")
+    signal_id = str(attempt.get("signal_id") or "")
+    prior = [
+        row
+        for row in prior_attempts
+        if str(row.get("signal_id") or "") == signal_id
+        and str(row.get("attempt_id") or "")
+        and str(row.get("attempt_id") or "") != attempt_id
+    ]
+    prior.sort(
+        key=lambda row: (str(row.get("attempted_at") or ""), str(row.get("attempt_id") or ""))
+    )
+    predecessor = prior[-1] if prior else None
+    predecessor_id = str((predecessor or {}).get("attempt_id") or "")
+    attempt_number = int((predecessor or {}).get("attempt_number") or 0) + 1
+    lineage = {
+        "signal_id": signal_id,
+        "attempt_id": attempt_id,
+        "supersedes_attempt_id": predecessor_id,
+        "attempt_number": attempt_number,
+    }
+    lineage_hash = _canonical_payload_hash(lineage)
+    attempt.update(
+        {
+            "attempt_number": attempt_number,
+            "supersedes_attempt_id": predecessor_id,
+            "parent_attempt_id": predecessor_id,
+            "lineage_hash_sha256": lineage_hash,
+        }
+    )
+    payload = dict(attempt.get("payload_json") or attempt)
+    payload.update(
+        {
+            "attempt_number": attempt_number,
+            "supersedes_attempt_id": predecessor_id,
+            "parent_attempt_id": predecessor_id,
+            "lineage_hash_sha256": lineage_hash,
+        }
+    )
+    attempt["payload_json"] = payload
+    return attempt
+
+
 def _summary(
     *,
     status: str,
@@ -3159,12 +3316,20 @@ def _summary(
     terminal_missing_count = sum(
         1 for row in attempts if str(row.get("status") or "") == "terminal_missing"
     )
+    recoverable_missing_count = sum(
+        1 for row in attempts if row.get("missing_classification") == "recoverable"
+    )
+    authoritative_terminal_count = sum(
+        1 for row in attempts if row.get("missing_classification") == "authoritative_terminal"
+    )
     operator_alert = (
         {
             "severity": "error",
             "event_type": "required_eod_outcome_capture_failed",
             "market_date": market_date,
             "terminal_missing_count": terminal_missing_count,
+            "recoverable_missing_count": recoverable_missing_count,
+            "authoritative_terminal_count": authoritative_terminal_count,
             "message": (
                 f"{terminal_missing_count} required outcome capture(s) exhausted "
                 "their bounded provider chain. Readiness must remain degraded."
@@ -3196,6 +3361,8 @@ def _summary(
         "capture_attempts": {
             "row_count": len(attempts),
             "terminal_missing_count": terminal_missing_count,
+            "recoverable_missing_count": recoverable_missing_count,
+            "authoritative_terminal_count": authoritative_terminal_count,
             "persistence": capture_attempt_persistence
             or {"inserted": 0, "skipped": 0, "row_count": len(attempts)},
         },

@@ -36,6 +36,7 @@ from intraday_scanner.services.alpha_cycle_service import (
     _persist_research_radar_selections,
     _radar_monitor_signals,
     _research_radar,
+    _shared_monitor_bundle_tickers,
     alpha_monitor,
 )
 from intraday_scanner.services.luna_research_slate_service import (
@@ -49,6 +50,31 @@ from intraday_scanner.services.source_reliability_service import build_source_re
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 FIXTURE_CONFIG = Path("tests/fixtures/web_sources_fixture.yaml")
+
+
+def test_shared_monitor_bundle_union_includes_active_and_carry_tickers() -> None:
+    class BundleStore:
+        def load_paper_positions(self, *, status, limit):
+            assert status == "OPEN"
+            assert limit == 50_000
+            return [{"ticker": "CARRY"}, {"ticker": "ACTIVE"}]
+
+        def load_signal_selections(self, *, limit):
+            assert limit == 50_000
+            return [
+                {"ticker": "SESSION", "selected_at": "2026-06-22T13:00:00Z", "decision": "watch"},
+                {
+                    "ticker": "NO_TRADE",
+                    "selected_at": "2026-06-22T13:00:00Z",
+                    "decision": "no_trade",
+                },
+            ]
+
+    assert _shared_monitor_bundle_tickers(
+        BundleStore(),
+        active_signals=[{"ticker": "ACTIVE"}],
+        market_date="2026-06-22",
+    ) == ["ACTIVE", "CARRY", "SESSION"]
 
 
 def _candidate(**overrides):
@@ -292,13 +318,25 @@ def test_source_reliability_changes_alpha_score():
         weak,
         scan_id="scan-1",
         timestamp="now",
-        source_reliability={"fixture_public_table": {"reliability_score": 20}},
+        source_reliability={
+            "fixture_public_table": {
+                "reliability_score": 20,
+                "outcome_count": 1,
+                "outcome_evidence_status": "authenticated",
+            }
+        },
     )
     strong_vector = build_feature_vector(
         strong,
         scan_id="scan-1",
         timestamp="now",
-        source_reliability={"fixture_public_table": {"reliability_score": 95}},
+        source_reliability={
+            "fixture_public_table": {
+                "reliability_score": 95,
+                "outcome_count": 1,
+                "outcome_evidence_status": "authenticated",
+            }
+        },
     )
 
     weak_score = AlphaModel().score_candidates([weak], [weak_vector], real_shadow_days=7)[0]
@@ -371,7 +409,14 @@ def test_source_reliability_and_setup_memory_update():
                 }
             ]
         },
-        outcomes=[{"source": "fixture_public_table", "winner_close": True}],
+        outcomes=[
+            {
+                "source": "fixture_public_table",
+                "winner_close": True,
+                "authenticated_outcome": True,
+                "outcome_id": "outcome-fixture-1",
+            }
+        ],
     )
     memory = build_setup_memory([
         {"setup_key": "grade:A", "high_after_entry_return": 10, "low_after_entry_drawdown": -2},

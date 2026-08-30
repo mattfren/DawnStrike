@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 import intraday_scanner.services.price_observation_service as price_service
 from intraday_scanner.cli import main
 from intraday_scanner.dashboard.data_loader import build_operator_today_model
-from intraday_scanner.errors import DataProviderError
+from intraday_scanner.errors import DataProviderError, SnapshotValidationError
 from intraday_scanner.services.price_observation_service import collect_price_observations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -398,6 +399,227 @@ def test_saved_signal_targets_skip_no_trade_and_dedupe_yahoo_requests(
     assert calls == ["NOVA"]
     assert result["target_count"] == 1
     assert result["usable_count"] == 1
+
+
+def test_five_minute_observation_bundle_reuses_one_provider_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_path = tmp_path / "monitor-bundle.json"
+    calls: list[str] = []
+
+    def fake_fetch(symbol, config):
+        calls.append(symbol)
+        return {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1782134940],
+                        "indicators": {"quote": [{"close": [10.25]}]},
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(price_service, "_fetch_yahoo_chart", fake_fetch)
+    first = collect_price_observations(
+        db_path=tmp_path / "unused.sqlite",
+        source="yahoo",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:30:00-04:00",
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=False,
+    )
+
+    def provider_must_not_be_called(symbol, config):
+        raise AssertionError(f"provider refetched {symbol}")
+
+    monkeypatch.setattr(price_service, "_fetch_yahoo_chart", provider_must_not_be_called)
+    second = collect_price_observations(
+        db_path=tmp_path / "unused.sqlite",
+        source="yahoo",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:30:00-04:00",
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=False,
+    )
+
+    assert calls == ["NOVA"]
+    assert first["bundle"]["content_hash_sha256"] == second["bundle"]["content_hash_sha256"]
+    assert second["bundle"]["reused"] is True
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert payload["research_only"] is True
+    assert payload["broker_execution_enabled"] is False
+
+
+def test_observation_bundle_tamper_fails_closed(tmp_path: Path) -> None:
+    bundle_path = tmp_path / "monitor-bundle.json"
+    bars = _write_minute_bars(
+        tmp_path / "bars.csv",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-06-22T09:34:00-04:00",
+                "open": "10",
+                "high": "10.2",
+                "low": "9.9",
+                "close": "10",
+                "volume": "1000",
+            }
+        ],
+    )
+    collect_price_observations(
+        db_path=tmp_path / "unused.sqlite",
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:35:00-04:00",
+        minute_bars=bars,
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1335Z",
+        persist=False,
+    )
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    payload["observations"][0]["price"] = 999.0
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SnapshotValidationError, match="content hash"):
+        collect_price_observations(
+            db_path=tmp_path / "unused.sqlite",
+            source="csv",
+            tickers=["NOVA"],
+            market_date="2026-06-22",
+            requested_at="2026-06-22T09:35:00-04:00",
+            minute_bars=bars,
+            observation_bundle_path=bundle_path,
+            cycle_id="20260622T1335Z",
+            persist=False,
+        )
+
+
+def test_observation_bundle_revalidates_age_at_later_consumer(
+    tmp_path: Path,
+) -> None:
+    bundle_path = tmp_path / "monitor-bundle.json"
+    bars = _write_minute_bars(
+        tmp_path / "bars.csv",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-06-22T09:29:00-04:00",
+                "open": "10",
+                "high": "10.2",
+                "low": "9.9",
+                "close": "10",
+                "volume": "1000",
+            }
+        ],
+    )
+    first = collect_price_observations(
+        db_path=tmp_path / "unused.sqlite",
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:30:00-04:00",
+        minute_bars=bars,
+        max_age_seconds=360,
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=False,
+    )
+    assert first["usable_count"] == 1
+
+    at_boundary = collect_price_observations(
+        db_path=tmp_path / "unused.sqlite",
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:36:00-04:00",
+        minute_bars=tmp_path / "not-read.csv",
+        max_age_seconds=360,
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=False,
+    )
+    assert at_boundary["usable_count"] == 1
+    assert at_boundary["observations"][0]["freshness_seconds"] == 360
+
+    with pytest.raises(SnapshotValidationError, match="stale bar evidence"):
+        collect_price_observations(
+            db_path=tmp_path / "unused.sqlite",
+            source="csv",
+            tickers=["NOVA"],
+            market_date="2026-06-22",
+            requested_at="2026-06-22T09:36:01-04:00",
+            minute_bars=tmp_path / "not-read.csv",
+            max_age_seconds=360,
+            observation_bundle_path=bundle_path,
+            cycle_id="20260622T1330Z",
+            persist=False,
+        )
+
+
+def test_later_bundle_consumer_gets_distinct_immutable_observation_identity(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "scanner.sqlite"
+    bundle_path = tmp_path / "monitor-bundle.json"
+    bars = _write_minute_bars(
+        tmp_path / "bars.csv",
+        [
+            {
+                "ticker": "NOVA",
+                "timestamp": "2026-06-22T09:29:00-04:00",
+                "open": "10",
+                "high": "10.2",
+                "low": "9.9",
+                "close": "10",
+                "volume": "1000",
+            }
+        ],
+    )
+    first = collect_price_observations(
+        db_path=db_path,
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:30:00-04:00",
+        minute_bars=bars,
+        max_age_seconds=360,
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=True,
+    )
+    before = bundle_path.read_bytes()
+    second = collect_price_observations(
+        db_path=db_path,
+        source="csv",
+        tickers=["NOVA"],
+        market_date="2026-06-22",
+        requested_at="2026-06-22T09:31:00-04:00",
+        minute_bars=tmp_path / "not-read.csv",
+        max_age_seconds=360,
+        observation_bundle_path=bundle_path,
+        cycle_id="20260622T1330Z",
+        persist=True,
+    )
+    rows = SQLiteScanStore(db_path, read_only=True).load_price_observations()
+
+    assert bundle_path.read_bytes() == before
+    assert first["observations"][0]["observation_id"] != second["observations"][0]["observation_id"]
+    assert len(rows) == 2
+    assert {row["observation_id"] for row in rows} == {
+        first["observations"][0]["observation_id"],
+        second["observations"][0]["observation_id"],
+    }
+    assert rows[1]["requested_at"] in {
+        "2026-06-22T13:30:00+00:00",
+        "2026-06-22T13:31:00+00:00",
+    }
 
 
 def test_cli_price_observe_alpaca_missing_secrets_fails_without_leaking_values(

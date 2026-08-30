@@ -57,7 +57,15 @@ class AlphaModel:
             execution = _execution_score(row, features)
             expected_edge = _expected_edge_score(calibration, setup_memory.get(setup_key))
             source_reliability = _float(features.get("source_reliability_score"), 50.0)
-            source_adjustment = _source_reliability_adjustment(source_reliability)
+            source_outcome_count = _float(features.get("source_outcome_count"), 0.0)
+            source_evidence_status = str(
+                features.get("source_outcome_evidence_status") or "collection_only"
+            ).lower()
+            source_adjustment = _source_reliability_adjustment(
+                source_reliability,
+                outcome_count=int(source_outcome_count or 0),
+                evidence_status=source_evidence_status,
+            )
             alpha = (
                 (base_score * 0.34)
                 + (explosive * 0.20)
@@ -82,6 +90,8 @@ class AlphaModel:
                 "execution_score": round(execution, 2),
                 "source_reliability_score": round(source_reliability, 2),
                 "source_reliability_adjustment": round(source_adjustment, 2),
+                "source_outcome_count": int(source_outcome_count or 0),
+                "source_outcome_evidence_status": source_evidence_status,
                 "risk_adjusted_score": round(risk_adjusted, 2),
                 "ml_status": ml_state["status"],
                 "ml_score": round(float(ml_score), 2) if ml_score is not None else None,
@@ -199,7 +209,21 @@ def _execution_score(row: dict[str, Any], features: dict[str, Any]) -> float:
     return max(0.0, min(100.0, score))
 
 
-def _source_reliability_adjustment(score: float) -> float:
+def _source_reliability_adjustment(
+    score: float,
+    *,
+    outcome_count: int = 0,
+    evidence_status: str = "collection_only",
+) -> float:
+    """Apply source reliability only after authenticated outcomes exist.
+
+    Extraction/normalization health remains available as diagnostics, but it
+    is not an alpha prior.  The defaults intentionally fail closed for callers
+    that do not provide outcome evidence metadata.
+    """
+
+    if outcome_count <= 0 or evidence_status != "authenticated":
+        return 0.0
     if score < 35:
         return -8.0
     if score > 80:

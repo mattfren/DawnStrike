@@ -6,6 +6,39 @@ from pathlib import Path
 from scripts.verify_public_artifact import verify
 
 
+def _v6_fixture() -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.alphaops_v6.public_status.v1",
+        "strategy_version": "dawnstrike-alphaops-v6-shadow",
+        "decision_count": 0,
+        "tracked_count": 0,
+        "outcome_count": 0,
+        "learning_eligible_outcome_count": 0,
+        "latest_model_run": None,
+        "latest_evaluation": None,
+        "latest_drift": None,
+        "operational_freshness": {
+            "latest_daily_monitor": None,
+            "latest_weekly_training": None,
+        },
+        "latest_promotion_review": None,
+        "prediction_evidence_gate": {"passed": False},
+        "failure_attribution": {},
+        "account_comparison": None,
+        "decision_replay": [],
+        "promotion_readiness": {
+            "status": "NOT_ELIGIBLE_FOR_PROMOTION",
+            "automatic_promotion": False,
+            "performance_status": "WAITING_FOR_FORWARD_EVIDENCE",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
+        "missing_truth_is_zero": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
 def test_artifact_gate_reports_bounded_public_payload(tmp_path: Path) -> None:
     result = verify(tmp_path / "missing-public")
     assert result["status"] == "FAIL"
@@ -36,7 +69,7 @@ def _write_publishable_fixture(
         "assets/dawnstrike.css": b"body {}",
         "assets/dawnstrike.js": b"console.log('fixture')",
         "data/performance.json": b'{"rows":[]}',
-        "data/v6-learning.json": b'{"performance_status":"WAITING_FOR_FORWARD_EVIDENCE"}',
+        "data/v6-learning.json": json.dumps(_v6_fixture(), sort_keys=True).encode(),
         "data/scenarios.json": b'{"records":[],"performance":[]}',
     }
     for name, payload in required.items():
@@ -132,7 +165,29 @@ def _write_publishable_fixture(
         ),
         encoding="utf-8",
     )
-    (root / "release-manifest.json").write_text("{}", encoding="utf-8")
+    v6_hash = hashlib.sha256((root / "data/v6-learning.json").read_bytes()).hexdigest()
+    build_sha = hashlib.sha256(
+        f"clean-sha:{publication_set_hash}:{opportunity_hash}:{v6_hash}:2026-08-28".encode()
+    ).hexdigest()
+    build_id = build_sha[:20]
+    readiness_payload = {
+        "status": readiness_status,
+        "http_status": readiness_http_status,
+        "snapshot_status": snapshot_status,
+        "market_date": "2026-08-28",
+        "live_trading_enabled": False,
+        "research_only": True,
+        "safety_status": "verified",
+        "v6_learning_sha256": v6_hash,
+        "build_id": build_id,
+        "deployed_build_sha": build_sha,
+    }
+    (root / "readiness.json").write_text(json.dumps(readiness_payload), encoding="utf-8")
+    (root / "release-manifest.json").write_text(
+        json.dumps({"build_sha": build_sha, "v6_learning_sha256": v6_hash}),
+        encoding="utf-8",
+    )
+    required["readiness.json"] = (root / "readiness.json").read_bytes()
     required.update(
         {
             "data/calendar.json": calendar.read_bytes(),
@@ -160,7 +215,10 @@ def _write_publishable_fixture(
             {
                 "source_sha": "clean-sha",
                 "source_clean": True,
-                "build_id": "fixture-build",
+                "build_id": build_id,
+                "build_sha": build_sha,
+                "market_date": "2026-08-28",
+                "v6_learning_sha256": v6_hash,
                 "data_hash_sha256": snapshot_hash,
                 "publication_set_sha256": publication_set_hash,
                 "opportunity_projection_sha256": opportunity_hash,

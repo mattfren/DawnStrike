@@ -118,6 +118,8 @@ def test_weekly_receipt_rejects_skipped_finalize_stages(tmp_path) -> None:
 
     result = verify(db_path, market_date, release_sha)
 
-    assert result["run_status"] == "COMPLETE"
+    # Recording only SKIPPED_NOT_APPLICABLE stages leaves the daily run in
+    # that explicit terminal status; the Finalize gate still rejects it.
+    assert result["run_status"] == "SKIPPED_NOT_APPLICABLE"
     assert result["ready"] is False
     assert result["missing_or_failed_finalize_stages"] == list(FINALIZE_STAGES)

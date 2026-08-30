@@ -341,7 +341,7 @@ def build_ranked_research_slate(
         declared_code_sha = next(iter(receipt_code_shas))
     if receipt_code_shas and receipt_code_shas != {declared_code_sha}:
         raise ValueError("ranked research slate receipt code SHA does not match producer")
-    payload = {
+    payload: dict[str, Any] = {
         "schema_version": RANKED_RESEARCH_SLATE_V2,
         "generated_at": generated,
         "market_date": slate_market_date,
@@ -852,7 +852,16 @@ def validate_ranked_research_slate(
     )
     if any(type(value) is not int for value in count_values):
         raise ValueError("ranked research slate counts are invalid")
-    published_count, ranked_count, target_count = count_values
+    published_count_value, ranked_count_value, target_count_value = count_values
+    if (
+        type(published_count_value) is not int
+        or type(ranked_count_value) is not int
+        or type(target_count_value) is not int
+    ):
+        raise ValueError("ranked research slate counts are invalid")
+    published_count = published_count_value
+    ranked_count = ranked_count_value
+    target_count = target_count_value
     if (
         published_count != len(rows)
         or ranked_count != len(rows)
@@ -1213,21 +1222,21 @@ def _strategy_contributor_projection_valid(row: dict[str, Any]) -> bool:
         source_signal_id = str(contributor.get("source_signal_id") or "").strip()
         receipt_id = str(contributor.get("receipt_id") or "").strip()
         key = (strategy_id, source_signal_id)
-        typed = receipt_by_id.get(receipt_id)
+        typed_receipt = receipt_by_id.get(receipt_id)
         if (
             not strategy_id
             or not strategy_version
             or not source_signal_id
             or key in contributor_keys
-            or typed is None
+            or typed_receipt is None
             or receipt_id in referenced
             or str(contributor.get("receipt_hash_sha256") or "").lower()
-            != typed.receipt_hash_sha256
+            != typed_receipt.receipt_hash_sha256
             or str(contributor.get("receipt_status") or "").upper() != "COMPLETE"
-            or typed.strategy_id != strategy_id
-            or typed.strategy_version != strategy_version
-            or typed.symbol != ticker
-            or (market_date and typed.market_date != market_date)
+            or typed_receipt.strategy_id != strategy_id
+            or typed_receipt.strategy_version != strategy_version
+            or typed_receipt.symbol != ticker
+            or (market_date and typed_receipt.market_date != market_date)
         ):
             return False
         embedded = contributor.get("decision_receipt")
@@ -1235,12 +1244,12 @@ def _strategy_contributor_projection_valid(row: dict[str, Any]) -> bool:
             if not isinstance(embedded, dict):
                 return False
             try:
-                if canonical_json(embedded) != canonical_json(typed.to_dict()):
+                if canonical_json(embedded) != canonical_json(typed_receipt.to_dict()):
                     return False
             except (TypeError, ValueError):
                 return False
         try:
-            input_payload = json.loads(typed.input_payload_json)
+            input_payload = json.loads(typed_receipt.input_payload_json)
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
         if not isinstance(input_payload, dict):
@@ -1267,9 +1276,9 @@ def _strategy_contributor_projection_valid(row: dict[str, Any]) -> bool:
             or isinstance(contributor_score, bool)
             or not isinstance(contributor_score, (int, float))
             or not math.isfinite(contributor_score)
-            or contributor_score != typed.final_score
-            or contributor.get("research_pick_eligible") is not typed.research_pick_eligible
-            or contributor.get("paper_entry_eligible") is not typed.paper_entry_eligible
+            or contributor_score != typed_receipt.final_score
+            or contributor.get("research_pick_eligible") is not typed_receipt.research_pick_eligible
+            or contributor.get("paper_entry_eligible") is not typed_receipt.paper_entry_eligible
         ):
             return False
         contributor_keys.add(key)
@@ -1505,10 +1514,12 @@ def _plan_qualified(
     )
     if not valid_geometry:
         return False
+    if entry is None or stop is None or target is None:
+        return False
     if abs(entry - stop) / entry > 0.15:
         return False
     cost_receipt = row.get("modeled_cost_receipt") or row.get("execution_cost_receipt")
-    if not _valid_modeled_cost_receipt(row, plan_hash):
+    if not isinstance(cost_receipt, dict) or not _valid_modeled_cost_receipt(row, plan_hash):
         return False
     qualification_rr = _number(cost_receipt.get("after_cost_reward_risk"))
     return (
@@ -1655,6 +1666,8 @@ def _watcher_current(
         or str(proof.get("ticker") or proof.get("symbol") or "").upper() != ticker
     ):
         return False
+    if not isinstance(plan, dict):
+        return False
     if not _source_bound_plan_observations(
         row,
         plan,
@@ -1779,6 +1792,7 @@ def _watcher_current(
             )
         )
     )
+    bar_freshness_seconds = _number(quote.get("bar_freshness_seconds"))
     if (
         str(quote.get("schema_version") or "") != "dawnstrike.alphaops.quote_receipt.v1"
         or str(quote.get("status") or "").upper() != "USABLE"
@@ -1823,8 +1837,8 @@ def _watcher_current(
                 "buy" if plan_direction == "long" else "sell",
             }
         )
-        or _number(quote.get("bar_freshness_seconds")) is None
-        or _number(quote.get("bar_freshness_seconds")) < 0
+        or bar_freshness_seconds is None
+        or bar_freshness_seconds < 0
     ):
         return False
     portfolio = proof["portfolio_receipt"]

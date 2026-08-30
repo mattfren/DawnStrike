@@ -16,6 +16,7 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 DAY = "2026-06-20"
 SIGNAL_TIME = f"{DAY}T13:30:00+00:00"
 FIXTURE_CONFIG = Path("tests/fixtures/web_sources_fixture.yaml")
+CURRENT_CYCLE_CODE_SHA = "a" * 40
 
 
 def test_alpha_cycle_creates_historical_signal_and_links_notification(tmp_path: Path) -> None:
@@ -34,6 +35,8 @@ def test_alpha_cycle_creates_historical_signal_and_links_notification(tmp_path: 
                 str(out_dir),
                 "--notify",
                 "console",
+                "--code-sha",
+                CURRENT_CYCLE_CODE_SHA,
             ]
         )
         == 0
@@ -50,6 +53,10 @@ def test_alpha_cycle_creates_historical_signal_and_links_notification(tmp_path: 
     assert signals[0]["telegram_event_key"]
     assert any(row["event_type"] == "NO_CLEAN_EDGE_CREATED" for row in events)
     assert any(row["event_type"] == "TELEGRAM_SENT" for row in events)
+    run_contract = (out_dir / "alpha_run_contract.json").read_text(encoding="utf-8")
+    assert f'"code_sha": "{CURRENT_CYCLE_CODE_SHA}"' in run_contract
+    slate = (out_dir / "ranked_research_slate.json").read_text(encoding="utf-8")
+    assert f'"producer_code_sha": "{CURRENT_CYCLE_CODE_SHA}"' in slate
 
 
 def test_no_trade_historical_signal_creates_no_trade_calendar_day(tmp_path: Path) -> None:

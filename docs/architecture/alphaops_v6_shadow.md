@@ -48,3 +48,15 @@ may emit a research-only competition receipt. Every Python process uses
 SHA-256 hashes, a timing receipt, and the native exit code.
 
 The public Research surface receives a bounded `data/v6-learning.json` projection. It displays the evidence count and promotion threshold but never exposes database paths, runtime roots, raw input paths, or secrets.
+
+The static public build identity is byte-bound before publication. The exact
+formula is:
+
+```text
+build_sha = SHA256(UTF-8(source_sha + ":" + publication_set_sha256 + ":" + opportunity_projection_sha256 + ":" + v6_learning_sha256 + ":" + market_date))
+build_id = build_sha[:20]
+```
+
+`v6_learning_sha256` is the SHA-256 of the exact packaged
+`data/v6-learning.json` bytes. Readiness and release manifests carry the same
+hash; a V6-only byte change therefore produces a different build identity.

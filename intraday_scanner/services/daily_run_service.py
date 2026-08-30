@@ -268,13 +268,30 @@ def upstream_readiness(
         if stage in latest
         and str(latest[stage].get("status") or "") not in SUCCESS_STATUSES
     ]
+    terminal_not_applicable = (
+        not missing
+        and not failed
+        and all(
+            str(latest[stage].get("status") or "") == "SKIPPED_NOT_APPLICABLE"
+            for stage in required_stages
+        )
+    )
     return {
-        "status": "READY" if not missing and not failed else "DEGRADED",
+        "status": (
+            "SKIPPED_NOT_APPLICABLE"
+            if terminal_not_applicable
+            else "READY"
+            if not missing and not failed
+            else "DEGRADED"
+        ),
         "run_id": run_id,
         "required_stages": list(required_stages),
         "missing_stages": missing,
         "failed_stages": failed,
-        "ready": not missing and not failed,
+        "ready": not missing and not failed and not terminal_not_applicable,
+        "terminal_state": (
+            "SKIPPED_NOT_APPLICABLE" if terminal_not_applicable else None
+        ),
     }
 
 
@@ -334,11 +351,17 @@ def _run_status(stages: list[dict[str, Any]]) -> str:
         for row in latest.values()
     ):
         return "DEGRADED"
-    if all(
+    required_complete = all(
         stage in latest
         and str(latest[stage].get("status") or "") in SUCCESS_STATUSES
         for stage in REQUIRED_FULL_CHAIN_STAGES
-    ):
+    )
+    if required_complete:
+        if all(
+            str(latest[stage].get("status") or "") == "SKIPPED_NOT_APPLICABLE"
+            for stage in REQUIRED_FULL_CHAIN_STAGES
+        ):
+            return "SKIPPED_NOT_APPLICABLE"
         return "COMPLETE"
     return "IN_PROGRESS"
 
@@ -417,6 +440,7 @@ def release_manifest_payload(
     schema_version: int,
     data_watermark: str | None,
     artifact_hashes: dict[str, str],
+    v6_learning_sha256: str | None = None,
 ) -> dict[str, Any]:
     # This manifest is published with the static site.  The runtime and state
     # paths remain in the private daily ledger, but publishing those absolute
@@ -427,6 +451,7 @@ def release_manifest_payload(
         "schema_version": "dawnstrike.release_manifest.v1",
         "source_sha": source_sha,
         "build_sha": build_sha,
+        "v6_learning_sha256": v6_learning_sha256,
         "deployment_boundary": "configured_runtime_and_durable_state",
         "deployment_boundary_sha256": hashlib.sha256(
             f"{runtime}\n{durable_state}".encode()

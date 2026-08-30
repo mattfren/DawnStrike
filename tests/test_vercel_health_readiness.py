@@ -4,6 +4,8 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from test_luna_artifact_readiness_cycle5 import _valid_v6
+
 
 def test_minimal_health_and_readiness_modules_import_without_scanner_runtime() -> None:
     import api.health as health
@@ -36,6 +38,9 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     public_root = tmp_path / "public"
     data_root = public_root / "data"
     data_root.mkdir(parents=True)
+    (data_root / "v6-learning.json").write_text(
+        json.dumps(_valid_v6(), sort_keys=True), encoding="utf-8"
+    )
     payload = b'{"rows":[]}'
     snapshot = data_root / "performance.json"
     snapshot.write_bytes(payload)
@@ -151,12 +156,26 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fixture")
         required_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    v6_hash = hashlib.sha256((data_root / "v6-learning.json").read_bytes()).hexdigest()
+    build_sha = hashlib.sha256(
+        f"abc123:{publication_set_hash}:{opportunity_hash}:{v6_hash}:{current_market_date}".encode()
+    ).hexdigest()
+    (public_root / "release-manifest.json").write_text(
+        json.dumps({"build_sha": build_sha, "v6_learning_sha256": v6_hash}),
+        encoding="utf-8",
+    )
+    required_hashes["release-manifest.json"] = hashlib.sha256(
+        (public_root / "release-manifest.json").read_bytes()
+    ).hexdigest()
     build_manifest = public_root / "build-manifest.json"
     build_manifest.write_text(
         json.dumps(
             {
                 "source_sha": "abc123",
-                "build_id": "build123",
+                "build_id": build_sha[:20],
+                "build_sha": build_sha,
+                "market_date": current_market_date,
+                "v6_learning_sha256": v6_hash,
                     "source_clean": True,
                     "data_hash_sha256": snapshot_hash,
                     "publication_set_sha256": publication_set_hash,
@@ -174,6 +193,9 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
         "live_trading_enabled": False,
         "research_only": True,
         "safety_status": "verified",
+        "v6_learning_sha256": v6_hash,
+        "build_id": build_sha[:20],
+        "deployed_build_sha": build_sha,
         "calendar_freshness": calendar_freshness,
     }
     monkeypatch.setattr(readiness, "PUBLIC_ROOT", public_root)
@@ -189,6 +211,8 @@ def test_readiness_accepts_complete_hash_consistent_public_state(
     monkeypatch.setattr(readiness, "OPPORTUNITY_MANIFEST_PATH", opportunity_manifest)
     monkeypatch.setattr(readiness, "PUBLICATION_SET_PATH", publication_set)
     monkeypatch.setattr(readiness, "BUILD_MANIFEST_PATH", build_manifest)
+    monkeypatch.setattr(readiness, "V6_LEARNING_PATH", data_root / "v6-learning.json")
+    monkeypatch.setattr(readiness, "RELEASE_MANIFEST_PATH", public_root / "release-manifest.json")
     assert readiness._validate_public_state(readiness_payload) == []
 
 

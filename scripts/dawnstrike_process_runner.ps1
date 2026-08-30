@@ -1,15 +1,38 @@
 Set-StrictMode -Version Latest
 
+# Every scheduled child is launched through the native Job Object runner.  A
+# PowerShell process tree is not a sufficient ownership boundary on Windows:
+# detached Python/Node descendants can outlive the wrapper after a timeout.
+# Keep this import local so interactive callers get the same kill-on-close
+# contract without needing to know about the implementation helper.
+if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
+    . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
+}
+
 function Invoke-DawnstrikeNativeProcess {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter()][string[]]$ArgumentList = @(),
         [Parameter(Mandatory = $true)][string]$LogRoot,
-        [Parameter(Mandatory = $true)][string]$LogName
+        [Parameter(Mandatory = $true)][string]$LogName,
+        [Parameter()][ValidateRange(0, 86400)][int]$TimeoutSeconds = 0,
+        [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5
     )
 
     $startedAt = (Get-Date).ToUniversalTime()
+    if ($TimeoutSeconds -eq 0) {
+        # Match the child deadline to the scheduled stage while retaining one
+        # native tree-kill contract for every invocation.
+        $TimeoutSeconds = switch -Regex ($LogName) {
+            "(?i)monitor|trade_watch|scenario" { 180; break }
+            "(?i)weekly|training" { 10800; break }
+            "(?i)finalize" { 10800; break }
+            "(?i)eod|paperops" { 7200; break }
+            "(?i)morning|universe" { 3600; break }
+            default { 900 }
+        }
+    }
     New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
     $safeName = $LogName -replace "[^A-Za-z0-9._-]", "_"
     $stdoutPath = Join-Path $LogRoot "$safeName.stdout.log"
@@ -17,6 +40,8 @@ function Invoke-DawnstrikeNativeProcess {
     $receiptPath = Join-Path $LogRoot "$safeName.receipt.json"
     $exitCode = 127
     $startError = $null
+    $timedOut = $false
+    $activeJobMembersAfterCleanup = $null
     $previousErrorActionPreference = $ErrorActionPreference
 
     try {
@@ -26,17 +51,41 @@ function Invoke-DawnstrikeNativeProcess {
         # is falsely recorded as a process-start failure with exit code 127.
         # Resolve the executable while errors still terminate, then allow the
         # native process to complete and trust its real exit code.
-        $null = Get-Command $FilePath -ErrorAction Stop
+        $resolved = (Get-Command $FilePath -ErrorAction Stop).Path
         $ErrorActionPreference = "Continue"
-        # Direct redirection preserves the native process exit code.  Do not put
-        # this invocation in a PowerShell pipeline: `$LASTEXITCODE` would then
-        # describe Tee-Object rather than the Python process on Windows PS 5.1.
-        & $FilePath @ArgumentList 1> $stdoutPath 2> $stderrPath
-        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        # Native runner owns the complete process tree and enforces the
+        # deadline.  Do not use PowerShell redirection/pipelines here: those
+        # wrappers can outlive the child and obscure its real exit status.
+        # The retired wrapper used ``$exitCode = if ($null -eq $LASTEXITCODE)``;
+        # the Job Object result now supplies the authoritative native code.
+        $result = Invoke-DawnstrikeJobProcess `
+            -FilePath $resolved `
+            -ArgumentList $ArgumentList `
+            -WorkingDirectory (Get-Location).Path `
+            -Label $LogName `
+            -TimeoutSeconds $TimeoutSeconds `
+            -OutputDrainTimeoutSeconds $OutputDrainTimeoutSeconds
+        $exitCode = [int]$result.ExitCode
+        $activeJobMembersAfterCleanup = [int]$result.ActiveJobMembersAfterCleanup
+        [System.IO.File]::WriteAllText($stdoutPath, [string]$result.Stdout, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($stderrPath, [string]$result.Stderr, [System.Text.UTF8Encoding]::new($false))
     }
     catch {
         $startError = $_.Exception.Message
-        Set-Content -LiteralPath $stderrPath -Value $startError -Encoding UTF8
+        $timedOut = $startError -match "(?i)timed out after"
+        if ($timedOut) {
+            # 124 is reserved for deadline termination and cannot be confused
+            # with a child application's non-zero exit code.
+            $exitCode = 124
+            $cleanupMatch = [regex]::Match(
+                $startError,
+                "(?i)active_job_members_after_cleanup=(\d+)"
+            )
+            if ($cleanupMatch.Success) {
+                $activeJobMembersAfterCleanup = [int]$cleanupMatch.Groups[1].Value
+            }
+        }
+        [System.IO.File]::WriteAllText($stderrPath, $startError, [System.Text.UTF8Encoding]::new($false))
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -57,6 +106,10 @@ function Invoke-DawnstrikeNativeProcess {
         completed_at = $completedAt.ToString("o")
         duration_ms = [math]::Round(($completedAt - $startedAt).TotalMilliseconds)
         exit_code = $exitCode
+        timeout_seconds = $TimeoutSeconds
+        timed_out = $timedOut
+        active_job_members_after_cleanup = $activeJobMembersAfterCleanup
+        timeout_cleanup_confirmed = ($timedOut -and $activeJobMembersAfterCleanup -eq 0)
         stdout_path = $stdoutPath
         stderr_path = $stderrPath
         stdout_sha256 = $stdoutHash

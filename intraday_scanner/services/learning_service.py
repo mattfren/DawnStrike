@@ -13,7 +13,14 @@ from intraday_scanner.alpha.fill_truth import (
 from intraday_scanner.alpha.performance_truth import build_truth_report
 from intraday_scanner.alpha.setup_memory import build_setup_memory
 from intraday_scanner.models import utc_now_iso
-from intraday_scanner.services.source_reliability_service import reliability_score
+from intraday_scanner.services.source_reliability_service import (
+    _authenticated_outcome,
+    _authenticated_outcome_snapshot,
+    _authenticated_snapshot_hash,
+    _identity_set_hash,
+    _outcome_identity,
+    reliability_score,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 HISTORICAL_ALPHAOPS_STRATEGY_IDS = ("alphaops_v4", "alphaops_v5")
@@ -165,9 +172,14 @@ def run_alpha_learning(store: SQLiteScanStore) -> dict[str, Any]:
 def load_production_alpha_learning_labels(
     store: SQLiteScanStore,
     *,
-    limit: int = 5000,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return only the canonical labels allowed to influence Alpha production."""
+    """Return the complete canonical label set allowed to influence Alpha.
+
+    A bounded limit remains available to diagnostic callers, but production
+    learning defaults to an uncapped read so cumulative source aggregates do
+    not combine a rolling sample with historical counters.
+    """
 
     return [
         row
@@ -661,24 +673,71 @@ def _source_reliability_from_labels(
 ) -> list[dict[str, Any]]:
     if not previous:
         return []
+    snapshot, conflict_ids, conflict_sources, unidentified_count = _authenticated_outcome_snapshot(
+        labels
+    )
+    snapshot_hash = _authenticated_snapshot_hash(labels)
+    global_snapshot_complete = not conflict_ids and unidentified_count == 0
     rows: list[dict[str, Any]] = []
     for source, prior in previous.items():
-        source_labels = [
-            row for row in labels if str(row.get("source") or "").lower() == source.lower()
-        ]
-        outcome_count = len(source_labels)
-        winner_count = sum(1 for row in source_labels if row.get("winner_close") is True)
+        source_labels = {
+            identity: winner
+            for identity, (row_source, winner) in snapshot.items()
+            if row_source == source.lower() and identity not in conflict_ids
+        }
+        source_unidentified_count = sum(
+            1
+            for row in labels
+            if str(row.get("source") or "").strip().lower() == source.lower()
+            and _authenticated_outcome(row)
+            and not _outcome_identity(row)
+        )
+        source_conflicting_identity_count = sum(
+            1
+            for identity in conflict_ids
+            if source.lower() in conflict_sources.get(identity, set())
+        )
+        outcome_identities = sorted(source_labels)
+        winner_identities = sorted(
+            identity for identity, winner in source_labels.items() if winner
+        )
+        outcome_count = len(outcome_identities)
+        winner_count = len(winner_identities)
         rows_returned = int(prior.get("rows_returned") or 0)
         rows_normalized = int(prior.get("rows_normalized") or 0)
         rows_rejected = int(prior.get("rows_rejected") or 0)
         stale_count = int(prior.get("stale_count") or 0)
         missing_count = int(prior.get("missing_critical_count") or 0)
+        clean_prior = {
+            key: value
+            for key, value in prior.items()
+            if key not in {"outcome_identities", "outcome_winner_identities"}
+        }
         rows.append({
-            **prior,
+            **clean_prior,
             "source": source,
             "updated_at": updated_at,
             "outcome_count": outcome_count,
             "winner_count": winner_count,
+            "outcome_identity_set_hash_sha256": _identity_set_hash(outcome_identities),
+            "outcome_snapshot_hash_sha256": snapshot_hash,
+            "outcome_snapshot_status": (
+                "quarantined_conflicting_identity"
+                if conflict_ids
+                else "degraded_unidentified_authenticated_outcome"
+                if unidentified_count
+                else "complete_authenticated_snapshot"
+            ),
+            "outcome_conflicting_identity_count": source_conflicting_identity_count,
+            "unidentified_authenticated_outcome_count": source_unidentified_count,
+            "authenticated_snapshot_conflicting_identity_count": len(conflict_ids),
+            "authenticated_snapshot_unidentified_count": unidentified_count,
+            "outcome_evidence_status": (
+                "authenticated"
+                if global_snapshot_complete and outcome_count
+                else "collection_only"
+            ),
+            "alpha_adjustment_eligible": global_snapshot_complete and outcome_count > 0,
             "reliability_score": reliability_score(
                 rows_returned=rows_returned,
                 rows_normalized=rows_normalized,
@@ -687,6 +746,10 @@ def _source_reliability_from_labels(
                 missing_critical_count=missing_count,
                 outcome_count=outcome_count,
                 winner_count=winner_count,
+                outcome_evidence_complete=global_snapshot_complete,
+                universe_filter_rejected=int(
+                    prior.get("universe_filter_rejected_count") or 0
+                ),
             ),
         })
     return rows

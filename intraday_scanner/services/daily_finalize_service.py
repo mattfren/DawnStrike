@@ -8,14 +8,23 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.errors import (
+    ConfigError,
+    DataProviderError,
+    MarketCalendarCoverageError,
+    SnapshotValidationError,
+    StorageError,
+)
+from intraday_scanner.market_calendar import market_session
 from intraday_scanner.performance.calendar_snapshot import write_public_calendar
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
 from intraday_scanner.services.daily_run_service import (
+    DAILY_STAGE_ORDER,
     FAILURE_STATUSES,
     SUCCESS_STATUSES,
     record_daily_stage,
@@ -41,6 +50,7 @@ DAILY_STAGE_NAMES = (
     "production_promotion",
     "readiness",
 )
+_DAILY_LEDGER_STAGES = DAILY_STAGE_ORDER
 
 _NON_BLOCKING_RECONCILIATION_WARNING_CODES = frozenset(
     {
@@ -93,6 +103,36 @@ class DailyFinalizeService:
         try:
             self._log_event("run_started", run_id=run_id, market_date=market_date)
             self._record_run(run_id, market_date, "IN_PROGRESS", "lock_acquired", now=now)
+            try:
+                session = _resolve_finalize_session(market_date)
+            except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"
+                self._record_run(
+                    run_id,
+                    market_date,
+                    "FAILED",
+                    "calendar_validation",
+                    now=now,
+                    retry_count=0,
+                    failure_reason=reason,
+                )
+                self._log_event(
+                    "run_failed",
+                    run_id=run_id,
+                    market_date=market_date,
+                    reason=reason,
+                    retryable=False,
+                )
+                return self._failure(
+                    market_date, run_id, reason, http_status=503
+                )
+            if not session.is_trading_day:
+                return self._run_not_applicable(
+                    market_date=market_date,
+                    run_id=run_id,
+                    session=session,
+                    now=now,
+                )
             last_error: str | None = None
             for attempt in range(retry_limit + 1):
                 try:
@@ -319,6 +359,42 @@ class DailyFinalizeService:
                     self._cleanup_staging(
                         self.output_root / f".publish-{run_id}-{attempt}"
                     )
+                    retryable = _is_retryable_finalize_error(exc)
+                    try:
+                        self._record_shared_stage(
+                            market_date=market_date,
+                            stage_name="canonical_performance",
+                            status="FAILED",
+                            exit_code=2,
+                            error_code=(
+                                "transient_finalize_failure"
+                                if retryable
+                                else "terminal_finalize_failure"
+                            ),
+                            error_detail=last_error,
+                            payload={
+                                "retryable": retryable,
+                                "attempt": attempt,
+                            },
+                            observed_at=now,
+                        )
+                    except Exception as evidence_exc:  # pragma: no cover - storage failure path
+                        self._log_event(
+                            "failure_evidence_persist_failed",
+                            run_id=run_id,
+                            market_date=market_date,
+                            reason=f"{type(evidence_exc).__name__}: {evidence_exc}",
+                        )
+                    self._log_event(
+                        "run_attempt_failed",
+                        run_id=run_id,
+                        market_date=market_date,
+                        attempt=attempt,
+                        retryable=retryable,
+                        reason=last_error,
+                    )
+                    if not retryable:
+                        break
                     if attempt < retry_limit and retry_delay_seconds > 0:
                         time.sleep(retry_delay_seconds)
             self._record_run(
@@ -337,11 +413,157 @@ class DailyFinalizeService:
                 reason=last_error or "finalize_failed",
             )
             return self._failure(
-                market_date, run_id, last_error or "finalize_failed", http_status=503
+                market_date,
+                run_id,
+                last_error or "finalize_failed",
+                http_status=503,
+                retry_count=attempt,
             )
         finally:
             if acquired and self.lock_path.exists():
                 self.lock_path.unlink()
+
+    def _run_not_applicable(
+        self,
+        *,
+        market_date: str,
+        run_id: str,
+        session: Any,
+        now: str | None,
+    ) -> dict[str, Any]:
+        """Persist a closed/non-session terminal observation without fabricating data."""
+
+        observed_at = now or _utc_now()
+        funnel = _no_trade_funnel(session)
+        stage_rows: list[dict[str, Any]] = []
+        optional_stages = {
+            "indeterminate_research",
+            "scenario_intelligence",
+            "scenario_finalization",
+            "alpha_learning",
+            "paperops_forward",
+        }
+        for stage_name in _DAILY_LEDGER_STAGES:
+            stage_rows.append(
+                self._record_shared_stage(
+                    market_date=market_date,
+                    stage_name=stage_name,
+                    status="SKIPPED_NOT_APPLICABLE",
+                    exit_code=0,
+                    required=stage_name not in optional_stages,
+                    error_code="market_closed",
+                    error_detail=(
+                        f"No scheduled equity session: {session.reason}."
+                    ),
+                    payload={
+                        "terminal_state": "SKIPPED_NOT_APPLICABLE",
+                        "market_session": session.to_dict(),
+                        "no_trade_funnel": funnel,
+                    },
+                    observed_at=observed_at,
+                )
+            )
+            # Optional stages remain explicitly not required in the shared
+            # ledger, while required stages still prove the full chain was
+            # considered and intentionally skipped.
+            if stage_name in optional_stages:
+                stage_rows[-1]["required"] = False
+
+        try:
+            from intraday_scanner.services.daily_orchestrator_service import write_heartbeat
+
+            heartbeat_at = _parse_observed_at(observed_at)
+            write_heartbeat(
+                state_root=self.state_root,
+                market_date=market_date,
+                stage="readiness",
+                run_id=run_id,
+                status="SKIPPED_NOT_APPLICABLE",
+                now=heartbeat_at,
+            )
+        except (OSError, ValueError):
+            self._log_event(
+                "terminal_heartbeat_failed",
+                run_id=run_id,
+                market_date=market_date,
+                reason="could not persist non-session terminal heartbeat",
+            )
+
+        terminal_manifest = {
+            "schema_version": "dawnstrike.daily_stage_manifest.v1",
+            "generated_at": observed_at,
+            "input_hash_sha256": None,
+            "output_hash_sha256": None,
+            "retry_count": 0,
+            "terminal_state": "SKIPPED_NOT_APPLICABLE",
+            "market_session": session.to_dict(),
+            "no_trade_funnel": funnel,
+            "stages": [
+                {
+                    "stage": stage_name,
+                    "stage_version": "dawnstrike-daily-not-applicable-v1",
+                    "status": "SKIPPED_NOT_APPLICABLE",
+                    "domain_status": "SKIPPED_NOT_APPLICABLE",
+                    "input_hash_sha256": None,
+                    "output_hash_sha256": None,
+                    "started_at": observed_at,
+                    "completed_at": observed_at,
+                    "attempt_count": 1,
+                    "warnings": None,
+                    "error": None,
+                    "next_action": "Wait for the next scheduled market session.",
+                }
+                for stage_name in DAILY_STAGE_NAMES
+            ],
+            "readiness": {
+                "status": "not_applicable",
+                "http_status": 503,
+                "market_date": market_date,
+                "terminal_state": "SKIPPED_NOT_APPLICABLE",
+                "market_session": session.to_dict(),
+                "no_trade_funnel": funnel,
+                "return_pct": None,
+                "gross_return_pct": None,
+                "net_pnl": None,
+                "picks": None,
+                "research_only": True,
+                "live_trading_enabled": False,
+            },
+            "artifacts": [],
+            "research_only": True,
+            "live_trading_enabled": False,
+        }
+        _atomic_write_json(self.output_root / "stage-manifest.json", terminal_manifest)
+        readiness = terminal_manifest["readiness"]
+        _atomic_write_json(self.output_root / "readiness.json", readiness)
+        self._record_run(
+            run_id,
+            market_date,
+            "SKIPPED_NOT_APPLICABLE",
+            "readiness",
+            now=observed_at,
+            retry_count=0,
+            failure_reason=f"market_closed:{session.reason}",
+        )
+        self._log_event(
+            "run_completed",
+            run_id=run_id,
+            market_date=market_date,
+            status="SKIPPED_NOT_APPLICABLE",
+            retry_count=0,
+            terminal_state="SKIPPED_NOT_APPLICABLE",
+        )
+        return {
+            "run_id": run_id,
+            "market_date": market_date,
+            "status": "SKIPPED_NOT_APPLICABLE",
+            "retry_count": 0,
+            "readiness": readiness,
+            "stage_manifest": terminal_manifest,
+            "daily_run": stage_rows[-1] if stage_rows else None,
+            "upstream_status": "not_applicable",
+            "no_trade_funnel": funnel,
+        }
 
     def _acquire_lock(self, run_id: str) -> bool:
         """Acquire a bounded lock and recover only a provably stale lock."""
@@ -610,6 +832,7 @@ class DailyFinalizeService:
         stage_name: str,
         status: str,
         exit_code: int,
+        required: bool = True,
         output_hash: str | None = None,
         source_data_watermark: str | None = None,
         error_code: str | None = None,
@@ -625,6 +848,7 @@ class DailyFinalizeService:
             runtime_root=self.runtime_root,
             state_root=self.state_root,
             release_sha=self.release_sha,
+            required=required,
             exit_code=exit_code,
             output_hash_sha256=output_hash,
             source_data_watermark=source_data_watermark,
@@ -1036,19 +1260,35 @@ class DailyFinalizeService:
                     retry_count,
                     failure_reason,
                     json.dumps(
-                        {"run_id": run_id, "stage": stage, "status": status}, sort_keys=True
+                        {
+                            "run_id": run_id,
+                            "stage": stage,
+                            "status": status,
+                            "retry_count": retry_count,
+                            "failure_reason": failure_reason,
+                        },
+                        sort_keys=True,
                     ),
                 ),
             )
 
     def _failure(
-        self, market_date: str, run_id: str, reason: str, *, http_status: int
+        self,
+        market_date: str,
+        run_id: str,
+        reason: str,
+        *,
+        http_status: int,
+        retry_count: int = 0,
     ) -> dict[str, Any]:
         payload = {
             "run_id": run_id,
             "market_date": market_date,
             "status": "FAILED",
             "reason": reason,
+            "terminal_state": "FAILED",
+            "error_detail": reason,
+            "retry_count": retry_count,
             "readiness": {"status": "not_ready", "http_status": http_status},
         }
         _atomic_write_json(self.output_root / "readiness.json", payload["readiness"])
@@ -1090,6 +1330,91 @@ def _publication_pair_hash(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _resolve_finalize_session(market_date: str) -> Any:
+    """Resolve a strict ISO market date before any retryable work begins."""
+
+    try:
+        value = date.fromisoformat(str(market_date).strip())
+    except (TypeError, ValueError) as exc:
+        raise SnapshotValidationError("market_date must be an ISO calendar date") from exc
+    return market_session(value)
+
+
+def _parse_observed_at(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("observed_at must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("observed_at must include a timezone")
+    return parsed
+
+
+def _no_trade_funnel(session: Any) -> dict[str, Any]:
+    return {
+        "status": "NO_TRADE",
+        "reason": f"market_closed:{session.reason}",
+        "market_session_status": session.status.value,
+        "candidate_count": 0,
+        "selected_count": 0,
+        "delivered_count": 0,
+        "paper_fill_count": 0,
+        "return_pct": None,
+        "gross_return_pct": None,
+        "net_pnl": None,
+        "picks": None,
+        "missing_truth_is_zero": False,
+    }
+
+
+def _is_retryable_finalize_error(exc: BaseException) -> bool:
+    """Retry only errors with an explicit, observable transient signature."""
+
+    if getattr(exc, "retryable", False) is True:
+        return True
+    # Configuration, lineage, storage, validation, and calendar failures are
+    # terminal.  In particular, a generic provider error is not retryable
+    # unless its message explicitly identifies a transient transport state.
+    if isinstance(
+        exc,
+        (
+            ConfigError,
+            SnapshotValidationError,
+            StorageError,
+            MarketCalendarCoverageError,
+            ValueError,
+            AssertionError,
+        ),
+    ):
+        return False
+    message = str(exc).lower()
+    transient_markers = (
+        "temporarily unavailable",
+        "temporary failure",
+        "transient",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "service unavailable",
+        "rate limit",
+        "too many requests",
+        "try again",
+    )
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, sqlite3.OperationalError):
+        return any(
+            marker in message
+            for marker in ("locked", "busy", "temporarily unavailable")
+        )
+    if isinstance(exc, DataProviderError):
+        return any(marker in message for marker in transient_markers)
+    return isinstance(exc, RuntimeError) and any(
+        marker in message for marker in transient_markers
+    )
 
 
 def _stage_status(domain_status: str) -> str:

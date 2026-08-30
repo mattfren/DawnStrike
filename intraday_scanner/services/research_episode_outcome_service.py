@@ -1343,8 +1343,12 @@ def _validate_research_episode_outcome_bridge(
         raise SnapshotValidationError("research outcome bar interval is not governed")
     canonical_bars = _validate_source_bar_payload(row, bar_hash=bar_hash)
     try:
-        maximum_gap = float(row.get("coverage_maximum_gap_seconds"))
-        allowed_gap = float(row.get("coverage_allowed_gap_seconds"))
+        maximum_gap_raw = row.get("coverage_maximum_gap_seconds")
+        allowed_gap_raw = row.get("coverage_allowed_gap_seconds")
+        if maximum_gap_raw is None or allowed_gap_raw is None:
+            raise TypeError("coverage gap is missing")
+        maximum_gap = float(maximum_gap_raw)
+        allowed_gap = float(allowed_gap_raw)
     except (TypeError, ValueError) as exc:
         raise SnapshotValidationError("research outcome gap proof is invalid") from exc
     if maximum_gap < 0 or allowed_gap < 0 or maximum_gap > allowed_gap:
@@ -1379,7 +1383,11 @@ def _validate_research_episode_outcome_bridge(
     if close_at is not None and close_at > cutoff_dt:
         raise SnapshotValidationError("research outcome path exceeds cutoff")
     try:
-        if float(observation_payload.get("close")) != float(metrics.get("reference_price")):
+        observation_close = observation_payload.get("close")
+        reference_price = metrics.get("reference_price")
+        if observation_close is None or reference_price is None:
+            raise TypeError("reference price is missing")
+        if float(observation_close) != float(reference_price):
             raise SnapshotValidationError("research outcome reference price binding mismatch")
     except (TypeError, ValueError) as exc:
         raise SnapshotValidationError("research outcome reference price is invalid") from exc

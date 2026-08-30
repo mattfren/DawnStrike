@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -144,6 +144,11 @@ from intraday_scanner.services.historical_ingestion_service import (
 from intraday_scanner.services.indeterminate_research_service import (
     run_indeterminate_research,
 )
+from intraday_scanner.services.managed_learning_queue_service import (
+    LearningQueuePolicy,
+    LearningQueueValidationError,
+    produce_managed_learning_queue,
+)
 from intraday_scanner.services.mover_discovery_service import (
     provider_count_payload,
     record_provider_counts,
@@ -195,9 +200,16 @@ from intraday_scanner.services.screener_automation import (
     normalize_screener_file,
     watch_screener_inbox,
 )
-from intraday_scanner.services.setup_monitor import run_setup_monitor
+from intraday_scanner.services.setup_monitor import (
+    monitor_interval_gap_receipt,
+    run_setup_monitor,
+)
 from intraday_scanner.services.strategy_challenger_backtest_service import (
     run_strategy_challenger_backtest,
+)
+from intraday_scanner.services.strategy_challenger_evaluation_service import (
+    StrategyChallengerEvidenceError,
+    run_strategy_challenger_weekly_adapter,
 )
 from intraday_scanner.services.trade_watcher_service import run_trade_watcher
 from intraday_scanner.services.tuning_service import run_strategy_tuning, write_tuning_outputs
@@ -512,6 +524,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_monitor_parser.add_argument("--notify", default="console")
     alpha_monitor_parser.add_argument("--dry-run", action="store_true")
+    alpha_monitor_parser.add_argument(
+        "--observation-bundle",
+        default=None,
+        help="Immutable five-minute bars/quotes bundle shared with trade-watch",
+    )
+    alpha_monitor_parser.add_argument("--cycle-id", default=None)
 
     alpha_outcomes_parser = subparsers.add_parser(
         "alpha-outcomes", help="Label saved AlphaOps signals from manual outcomes"
@@ -583,6 +601,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     alpha_v6_daily_monitor_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_daily_monitor_parser.add_argument("--market-date", default=None)
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--reference-window", default=None,
+        help="Optional JSON object or path containing a frozen reference drift window",
+    )
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--recent-window", default=None,
+        help="Optional JSON object or path containing a frozen recent drift window",
+    )
 
     daily_strategy_learning_parser = subparsers.add_parser(
         "strategy-learning-daily",
@@ -618,6 +644,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    managed_learning_queue_parser = subparsers.add_parser(
+        "managed-learning-queue",
+        help="Produce the private post-commit managed learning queue",
+    )
+    managed_learning_queue_parser.add_argument(
+        "--approved-root",
+        required=True,
+        help="Explicit root containing committed daily-learning receipt/proposal pairs",
+    )
+    managed_learning_queue_parser.add_argument("--out-root", required=True)
+    managed_learning_queue_parser.add_argument("--calendar", required=True)
+    managed_learning_queue_parser.add_argument("--as-of-market-date", default=None)
+
     strategy_challenger_backtest_parser = subparsers.add_parser(
         "strategy-challenger-backtest",
         help="Compare all catalog strategies and research challengers on verified DataTruth",
@@ -627,6 +666,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     strategy_challenger_backtest_parser.add_argument("--code-sha", required=True)
     strategy_challenger_backtest_parser.add_argument("--out", required=True)
 
+    strategy_challenger_weekly_parser = subparsers.add_parser(
+        "strategy-challenger-evaluate-weekly",
+        help="Write one immutable, evidence-bound weekly challenger receipt",
+    )
+    strategy_challenger_weekly_parser.add_argument("--db-path", required=True)
+    strategy_challenger_weekly_parser.add_argument("--state-root", required=True)
+    strategy_challenger_weekly_parser.add_argument("--market-date", required=True)
+    strategy_challenger_weekly_parser.add_argument("--code-sha", required=True)
+    strategy_challenger_weekly_parser.add_argument(
+        "--out-root",
+        default=None,
+        help="Optional approved output root; evidence is always read from --state-root",
+    )
+
     alpha_v6_train_weekly_parser = subparsers.add_parser(
         "alpha-v6-train-weekly",
         help="Run the separately scheduled V6 refit and all-family OOF evaluation",
@@ -634,6 +687,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_train_weekly_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_train_weekly_parser.add_argument("--code-sha", default="unresolved-local-sha")
     alpha_v6_train_weekly_parser.add_argument("--market-date", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--reference-window", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--recent-window", default=None)
 
     alpha_v6_register_experiment_parser = subparsers.add_parser(
         "alpha-v6-register-experiment",
@@ -649,6 +704,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_holdout_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_holdout_parser.add_argument("--experiment-id", required=True)
     alpha_v6_holdout_parser.add_argument("--as-of", required=True)
+    alpha_v6_holdout_parser.add_argument(
+        "--model-run-id",
+        default=None,
+        help="Exact frozen model run to bind into the immutable holdout receipt",
+    )
 
     alpha_v6_attribution_parser = subparsers.add_parser(
         "alpha-v6-attribution",
@@ -1020,11 +1080,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     monitor_loop.add_argument("--symbols", default=None, help="Comma-separated symbols")
     monitor_loop.add_argument("--universe-file", default=None)
     monitor_loop.add_argument("--interval-seconds", type=int, default=300)
+    monitor_loop.add_argument(
+        "--market-date", default=None, help="Explicit America/New_York market date for gap receipts"
+    )
+    monitor_loop.add_argument("--schedule-id", default="alphaops-monitor-5m")
+    monitor_loop.add_argument(
+        "--persist-interval-gaps",
+        action="store_true",
+        help="Opt in to release-bound scheduled interval-gap receipts",
+    )
+    monitor_loop.add_argument(
+        "--release-sha", default=None, help="Exact lowercase runtime SHA for persisted gap receipts"
+    )
     monitor_loop.add_argument("--max-iterations", type=int, default=None)
     monitor_loop.add_argument(
         "--news-provider", choices=["none", "auto", "newsapi", "finnhub"], default="none"
     )
     monitor_loop.add_argument("--sec-rss", action="store_true")
+
+    monitor_gap = subparsers.add_parser(
+        "monitor-gap", help="Persist one idempotent missed monitor interval receipt"
+    )
+    monitor_gap.add_argument("--db-path", default=None)
+    monitor_gap.add_argument("--expected-at", required=True)
+    monitor_gap.add_argument("--observed-at", required=True)
+    monitor_gap.add_argument("--interval-seconds", type=int, required=True)
+    monitor_gap.add_argument("--market-date", required=True)
+    monitor_gap.add_argument("--run-id", default=None)
+    monitor_gap.add_argument("--schedule-id", default="alphaops-monitor-5m")
+    monitor_gap.add_argument("--release-sha", required=True)
 
     monitor_open = subparsers.add_parser("monitor-open", help="Run 1-minute market-open monitoring")
     monitor_open.add_argument("--snapshot", default="sample_data/premarket_snapshot_sample.csv")
@@ -1036,6 +1120,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     monitor_open.add_argument("--symbols", default=None, help="Comma-separated symbols")
     monitor_open.add_argument("--universe-file", default=None)
     monitor_open.add_argument("--interval-seconds", type=int, default=60)
+    monitor_open.add_argument(
+        "--market-date", default=None, help="Explicit America/New_York market date for gap receipts"
+    )
+    monitor_open.add_argument("--schedule-id", default="monitor-open-1m")
+    monitor_open.add_argument(
+        "--persist-interval-gaps",
+        action="store_true",
+        help="Opt in to release-bound scheduled interval-gap receipts",
+    )
+    monitor_open.add_argument(
+        "--release-sha", default=None, help="Exact lowercase runtime SHA for persisted gap receipts"
+    )
     monitor_open.add_argument("--max-iterations", type=int, default=1)
     monitor_open.add_argument("--continuous", action="store_true")
     monitor_open.add_argument(
@@ -1109,6 +1205,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch.add_argument("--at", default=None)
     trade_watch.add_argument("--max-age-seconds", type=int, default=360)
     trade_watch.add_argument("--expected-code-sha", default=None)
+    trade_watch.add_argument("--observation-bundle", default=None)
+    trade_watch.add_argument("--cycle-id", default=None)
     trade_watch.add_argument("--notify", default="console")
     trade_watch.add_argument("--dry-run", action="store_true")
     trade_watch.add_argument("--notional-per-trade", type=float, default=1000.0)
@@ -1146,6 +1244,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     trade_watch_loop.add_argument("--at", default=None)
     trade_watch_loop.add_argument("--max-age-seconds", type=int, default=360)
     trade_watch_loop.add_argument("--expected-code-sha", default=None)
+    trade_watch_loop.add_argument("--observation-bundle", default=None)
+    trade_watch_loop.add_argument("--cycle-id", default=None)
     trade_watch_loop.add_argument("--notify", default="console")
     trade_watch_loop.add_argument("--dry-run", action="store_true")
     trade_watch_loop.add_argument("--notional-per-trade", type=float, default=1000.0)
@@ -1298,8 +1398,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_v6_daily_monitor(args)
         if args.command == "strategy-learning-daily":
             return _run_strategy_learning_daily(args)
+        if args.command == "managed-learning-queue":
+            return _run_managed_learning_queue(args)
         if args.command == "strategy-challenger-backtest":
             return _run_strategy_challenger_backtest(args)
+        if args.command == "strategy-challenger-evaluate-weekly":
+            return _run_strategy_challenger_weekly(args)
         if args.command == "alpha-v6-train-weekly":
             return _run_alpha_v6_train_weekly(args)
         if args.command == "alpha-v6-register-experiment":
@@ -1412,6 +1516,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_monitor_setups(args)
         if args.command == "monitor-loop":
             return _run_monitor_loop(args)
+        if args.command == "monitor-gap":
+            return _run_monitor_gap(args)
         if args.command == "monitor-open":
             return _run_monitor_open(args)
         if args.command == "notify-test":
@@ -1445,7 +1551,13 @@ def main(argv: list[str] | None = None) -> int:
             return _run_release_doctor(dashboard_doctor(args.db_path, args.root))
         parser.error("Unknown command")
         return 2
-    except (ConfigError, DataProviderError, SnapshotValidationError, StorageError) as exc:
+    except (
+        ConfigError,
+        DataProviderError,
+        SnapshotValidationError,
+        StorageError,
+        StrategyChallengerEvidenceError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except IntradayScannerError as exc:
@@ -1854,6 +1966,8 @@ def _run_alpha_monitor(args: argparse.Namespace) -> int:
         db_path=args.db_path,
         notify=args.notify,
         dry_run=args.dry_run,
+        observation_bundle_path=getattr(args, "observation_bundle", None),
+        cycle_id=getattr(args, "cycle_id", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1906,9 +2020,31 @@ def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
-    result = run_alpha_v6_daily_monitor(SQLiteScanStore(args.db_path), market_date=args.market_date)
+    result = run_alpha_v6_daily_monitor(
+        SQLiteScanStore(args.db_path),
+        market_date=args.market_date,
+        reference_window=_read_v6_window(getattr(args, "reference_window", None)),
+        recent_window=_read_v6_window(getattr(args, "recent_window", None)),
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _read_v6_window(value: str | None) -> dict[str, Any] | None:
+    if not value:
+        return None
+    try:
+        candidate = Path(value)
+        raw = candidate.read_text(encoding="utf-8") if candidate.is_file() else value
+    except OSError:
+        raw = value
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SnapshotValidationError("V6 drift window must be valid JSON or a JSON file") from exc
+    if not isinstance(parsed, dict):
+        raise SnapshotValidationError("V6 drift window must be a JSON object")
+    return parsed
 
 
 def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
@@ -1955,6 +2091,25 @@ def _run_strategy_learning_daily(args: argparse.Namespace) -> int:
         raise SnapshotValidationError(f"strategy-learning validation failed: {exc}") from exc
     except OSError as exc:
         raise SnapshotValidationError(f"strategy-learning source cannot be read: {exc}") from exc
+
+
+def _run_managed_learning_queue(args: argparse.Namespace) -> int:
+    calendar_path = Path(args.calendar)
+    if calendar_path.is_symlink() or not calendar_path.is_file():
+        raise SnapshotValidationError("managed-learning calendar must be a regular file")
+    try:
+        calendar = json.loads(calendar_path.read_text(encoding="utf-8"))
+        result = produce_managed_learning_queue(
+            args.approved_root,
+            args.out_root,
+            calendar=calendar,
+            as_of_market_date=args.as_of_market_date,
+            policy=LearningQueuePolicy(),
+        )
+    except (OSError, json.JSONDecodeError, LearningQueueValidationError) as exc:
+        raise SnapshotValidationError(f"managed-learning queue failed closed: {exc}") from exc
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0 if result.get("status") == "COMPLETE" else 2
 
 
 def _run_strategy_learning_daily_unlocked(args: argparse.Namespace) -> int:
@@ -2090,7 +2245,7 @@ def _canonical_input_bytes(value: Any) -> bytes:
         or hasattr(value, "expected_selection_count")
         or hasattr(value, "expected_contributor_count")
     ):
-        identity = {
+        identity: dict[str, Any] = {
             "accepted": list(value),
             "invalid_identities": list(getattr(value, "invalid_identities", ())),
             "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
@@ -2335,6 +2490,12 @@ def _parse_learning_timestamp(value: Any) -> datetime | None:
 
 class _FrozenLearningBatch(tuple):
     """Restored immutable input batch with retained rejection diagnostics."""
+
+    invalid_reasons: dict[str, int]
+    invalid_count: int
+    invalid_identities: tuple[str, ...]
+    expected_selection_count: int
+    expected_contributor_count: int
 
     def __new__(
         cls,
@@ -2857,7 +3018,7 @@ def _load_or_freeze_strategy_learning_evidence(
 def _external_input_identity(value: Sequence[Mapping[str, Any]] | None) -> Any:
     if value is None:
         return None
-    identity = {
+    identity: dict[str, Any] = {
         "accepted": [dict(item) for item in value],
         "invalid_identities": list(getattr(value, "invalid_identities", ())),
         "invalid_reasons": dict(getattr(value, "invalid_reasons", {})),
@@ -3031,7 +3192,7 @@ def _acquire_strategy_learning_evidence(args: argparse.Namespace) -> dict[str, A
                     "PaperOps read-only materializer hash conflicts with immutable input bytes"
                 )
             adapter_generation = getattr(paper_ops_rows, "read_only_input_generation", None)
-            paper_generation = describe_trade_blotter_readonly_inputs(paper_root)
+            paper_generation = dict(describe_trade_blotter_readonly_inputs(paper_root))
             if (
                 isinstance(adapter_generation, Mapping)
                 and "files" in adapter_generation
@@ -3836,22 +3997,22 @@ def _restore_learning_batch(
                 _validate_persisted_research_bridge,
             )
 
-            restored_item = _persisted_research_bridge(payload, envelope=dict(envelope))
-            cutoff_at = _parse_learning_timestamp(cutoff)
-            if cutoff_at is None:
+            restored_bridge = _persisted_research_bridge(payload, envelope=dict(envelope))
+            bridge_cutoff_at = _parse_learning_timestamp(cutoff)
+            if bridge_cutoff_at is None:
                 raise SnapshotValidationError(
                     "daily-learning research bridge restore cutoff is malformed"
                 )
             valid, reason = _validate_persisted_research_bridge(
-                restored_item,
+                restored_bridge,
                 market_date=market_date,
-                cutoff=cutoff_at,
+                cutoff=bridge_cutoff_at,
             )
             if not valid:
                 raise SnapshotValidationError(
                     f"daily-learning research bridge restore failed: {reason}"
                 )
-            restored.append(restored_item)
+            restored.append(restored_bridge)
         else:
             restored.append(payload)
     return _FrozenLearningBatch(
@@ -3960,9 +4121,26 @@ def _run_strategy_challenger_backtest(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "complete" else 1
 
 
+def _run_strategy_challenger_weekly(args: argparse.Namespace) -> int:
+    result = run_strategy_challenger_weekly_adapter(
+        db_path=args.db_path,
+        state_root=args.state_root,
+        market_date=args.market_date,
+        code_sha=args.code_sha,
+        out_root=args.out_root,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    # Honest evidence absence is a completed, explicitly non-evaluable result.
+    return 0 if str(result.get("status") or "").startswith("NOT_EVALUABLE") else 1
+
+
 def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
     result = run_alpha_v6_weekly_training(
-        SQLiteScanStore(args.db_path), code_sha=args.code_sha, market_date=args.market_date
+        SQLiteScanStore(args.db_path),
+        code_sha=args.code_sha,
+        market_date=args.market_date,
+        reference_window=_read_v6_window(getattr(args, "reference_window", None)),
+        recent_window=_read_v6_window(getattr(args, "recent_window", None)),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -3994,6 +4172,17 @@ def _run_alpha_v6_register_experiment(args: argparse.Namespace) -> int:
         holdout_start=str(payload["holdout_start"]),
         stop_condition=str(payload["stop_condition"]),
         promotion_requirements=list(payload["promotion_requirements"]),
+        training_dates=payload.get("training_dates"),
+        validation_dates=payload.get("validation_dates"),
+        holdout_dates=payload.get("holdout_dates"),
+        holdout_end=payload.get("holdout_end"),
+        validation_end=payload.get("validation_end"),
+        data_hash_sha256=payload.get("data_hash_sha256"),
+        source_hash_sha256=payload.get("source_hash_sha256"),
+        code_sha=payload.get("code_sha"),
+        window_hash_sha256=payload.get("window_hash_sha256"),
+        v5_comparison_hash_sha256=payload.get("v5_comparison_hash_sha256"),
+        input_hash_sha256=payload.get("input_hash_sha256"),
     )
     persisted = SQLiteScanStore(args.db_path).persist_alpha_v6_experiments([experiment])
     result = {
@@ -4010,6 +4199,7 @@ def _run_alpha_v6_evaluate_holdout(args: argparse.Namespace) -> int:
         SQLiteScanStore(args.db_path),
         experiment_id=args.experiment_id,
         as_of_date=args.as_of,
+        model_run_id=args.model_run_id,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") in {"HOLDOUT_RECORDED", "ALREADY_EVALUATED_IMMUTABLE"} else 2
@@ -4136,7 +4326,7 @@ def _run_daily_orchestrator_status(args: argparse.Namespace) -> int:
         heartbeat_ttl_minutes=args.heartbeat_ttl_minutes,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result.get("status") == "HEALTHY" else 2
+    return 0 if result.get("status") in {"HEALTHY", "SKIPPED_NOT_APPLICABLE"} else 2
 
 
 def _run_alpha_status(args: argparse.Namespace) -> int:
@@ -4573,18 +4763,99 @@ def _run_monitor_setups(args: argparse.Namespace) -> int:
 def _run_monitor_loop(args: argparse.Namespace) -> int:
     interval_seconds = max(1, int(args.interval_seconds))
     iterations = 0
+    # Keep a wall-clock schedule separate from the work duration.  If a
+    # provider or process stalls, every elapsed slot is recorded explicitly;
+    # no missing slot is turned into a market-data result.
+    next_due = datetime.now(UTC)
     try:
         while True:
             status = _run_monitor_setups(args)
             if status != 0:
                 return status
             iterations += 1
+            next_due += timedelta(seconds=interval_seconds)
+            observed_at = datetime.now(UTC)
+            _persist_monitor_interval_gaps(args, next_due, observed_at, interval_seconds)
+            # Keep the newest overdue slot as the next work item.  Older
+            # slots are receipts only once a complete interval has elapsed;
+            # the newest slot is run immediately instead of being skipped.
+            while next_due + timedelta(seconds=interval_seconds) <= observed_at:
+                next_due += timedelta(seconds=interval_seconds)
             if args.max_iterations is not None and iterations >= int(args.max_iterations):
                 return 0
-            time.sleep(interval_seconds)
+            time.sleep(max(0.0, (next_due - datetime.now(UTC)).total_seconds()))
     except KeyboardInterrupt:
         print("Monitor loop stopped.")
         return 0
+
+
+def _run_monitor_gap(args: argparse.Namespace) -> int:
+    if int(args.interval_seconds) <= 0:
+        raise SnapshotValidationError("monitor gap interval must be positive")
+    config = load_config(database_path=Path(args.db_path) if args.db_path else None)
+    store = SQLiteScanStore(config.database_path)
+    receipt = monitor_interval_gap_receipt(
+        expected_at=args.expected_at,
+        observed_at=args.observed_at,
+        interval_seconds=int(args.interval_seconds),
+        market_date=args.market_date,
+        run_id=args.run_id,
+        schedule_id=args.schedule_id,
+        release_sha=args.release_sha,
+    )
+    stats = store.persist_monitor_interval_gap_receipts([receipt])
+    print(json.dumps({"receipt": receipt, "persistence": stats}, sort_keys=True))
+    return 0
+
+
+def _persist_monitor_interval_gaps(
+    args: argparse.Namespace,
+    first_due: datetime,
+    observed_at: datetime,
+    interval_seconds: int,
+) -> int:
+    """Persist all slots missed before ``observed_at`` with stable identities."""
+
+    if not bool(getattr(args, "persist", False)):
+        return 0
+    # Manual/sample monitor runs persist their normal monitor output but do
+    # not claim schedule coverage.  Gap receipts are an explicit lineage mode
+    # and require all release/date/schedule fields below.
+    if not bool(getattr(args, "persist_interval_gaps", False)):
+        return 0
+    release_sha = str(getattr(args, "release_sha", "") or "")
+    if not release_sha:
+        raise SnapshotValidationError(
+            "persisted monitor interval gap persistence requires --release-sha "
+            "with the exact runtime HEAD"
+        )
+    market_date = str(getattr(args, "market_date", "") or "")
+    if not market_date:
+        raise SnapshotValidationError(
+            "persisted monitor interval gap persistence requires explicit --market-date"
+        )
+    schedule_id = str(getattr(args, "schedule_id", "") or "")
+    if not schedule_id:
+        raise SnapshotValidationError("persisted monitor interval gaps require --schedule-id")
+    config = load_config(database_path=Path(args.db_path) if args.db_path else None)
+    store = SQLiteScanStore(config.database_path)
+    receipts: list[dict[str, Any]] = []
+    due = first_due
+    while due + timedelta(seconds=interval_seconds) <= observed_at:
+        receipts.append(
+            monitor_interval_gap_receipt(
+                expected_at=due.isoformat(),
+                observed_at=observed_at.isoformat(),
+                interval_seconds=interval_seconds,
+                release_sha=release_sha,
+                market_date=market_date,
+                schedule_id=schedule_id,
+            )
+        )
+        due += timedelta(seconds=interval_seconds)
+    if not receipts:
+        return 0
+    return int(store.persist_monitor_interval_gap_receipts(receipts)["inserted"])
 
 
 def _run_monitor_open(args: argparse.Namespace) -> int:
@@ -4816,6 +5087,8 @@ def _trade_watch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "notify_blocked": args.notify_blocked,
         "include_scenarios": args.include_scenarios,
         "expected_code_sha": getattr(args, "expected_code_sha", None),
+        "observation_bundle_path": getattr(args, "observation_bundle", None),
+        "cycle_id": getattr(args, "cycle_id", None),
     }
 
 

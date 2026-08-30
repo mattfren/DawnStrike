@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from intraday_scanner.alpha.v6.contracts import canonical_hash
 from intraday_scanner.alpha.v6.registry import register_experiment
 from intraday_scanner.services.alpha_v6_holdout_service import (
     evaluate_registered_holdout,
@@ -16,24 +17,85 @@ from tests._alpha_path_truth import (
 )
 
 
-def test_holdout_rejects_pre_start_and_records_one_tagged_two_arm_evaluation(tmp_path) -> None:
-    store = SQLiteScanStore(tmp_path / "v6.sqlite")
+def _complete_experiment(holdout_dates: list[str], model_run_id: str) -> dict[str, object]:
+    training = ["2026-07-30", "2026-07-31"]
+    validation = ["2026-08-10", "2026-08-11"]
+    windows = {
+        "training": {
+            "start": training[0],
+            "end": training[-1],
+            "cutoff": training[-1],
+            "market_dates": training,
+        },
+        "validation": {
+            "start": validation[0],
+            "end": validation[-1],
+            "market_dates": validation,
+        },
+        "untouched_holdout": {
+            "start": holdout_dates[0],
+            "end": holdout_dates[-1],
+            "market_dates": holdout_dates,
+        },
+    }
     experiment = register_experiment(
         hypothesis="Tighter spread filter reduces tail loss.",
-        training_cutoff="2026-08-01",
+        training_cutoff=training[-1],
         baseline_config={"max_spread_bps": 200},
         candidate_config={"max_spread_bps": 150},
-        validation_start="2026-08-10",
-        holdout_start="2026-09-01",
+        validation_start=validation[0],
+        holdout_start=holdout_dates[0],
         stop_condition="Quarantine after source failure.",
         promotion_requirements=["manual approval"],
+        training_dates=training,
+        validation_dates=validation,
+        holdout_dates=holdout_dates,
+        validation_end=validation[-1],
+        holdout_end=holdout_dates[-1],
+        data_hash_sha256="a" * 64,
+        source_hash_sha256="b" * 64,
+        code_sha="c" * 40,
+        window_hash_sha256=canonical_hash(windows),
+        input_hash_sha256="d" * 64,
+        v5_comparison_hash_sha256="e" * 64,
     )
+    experiment["model_run_id"] = model_run_id
+    return experiment
+
+
+def _persist_model_run(
+    store: SQLiteScanStore, experiment: dict[str, object], model_run_id: str
+) -> None:
+    store.persist_alpha_v6_model_run(
+        {
+            "model_run_id": model_run_id,
+            "model_version": "v6-test",
+            "trained_at": "2026-08-12T00:00:00+00:00",
+            "training_cutoff": experiment["training_cutoff"],
+            "status": "COMPLETE",
+            "training_input_hash_sha256": experiment["input_hash_sha256"],
+            "experiment_id": experiment["experiment_id"],
+            "configuration_hash_sha256": experiment["configuration_hash_sha256"],
+            "source_lineage_hash_sha256": experiment["source_hash_sha256"],
+            "code_sha": experiment["code_sha"],
+            "evaluation_window": experiment["frozen_windows"],
+        }
+    )
+
+
+def test_holdout_rejects_pre_start_and_records_one_tagged_two_arm_evaluation(tmp_path) -> None:
+    store = SQLiteScanStore(tmp_path / "v6.sqlite")
+    holdout_dates = [(date(2026, 9, 1) + timedelta(days=index)).isoformat() for index in range(5)]
+    model_run_id = "v6m-holdout-first"
+    experiment = _complete_experiment(holdout_dates, model_run_id)
     store.persist_alpha_v6_experiments([experiment])
+    _persist_model_run(store, experiment, model_run_id)
 
     pre_holdout = evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-08-31",
+        as_of_date="2026-08-31T18:00:00-05:00",
+        model_run_id=model_run_id,
     )
 
     assert pre_holdout["status"] == "PRE_HOLDOUT_EVALUATION_REJECTED"
@@ -80,7 +142,8 @@ def test_holdout_rejects_pre_start_and_records_one_tagged_two_arm_evaluation(tmp
     recorded = evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-09-10",
+        as_of_date="2026-09-10T21:00:00-05:00",
+        model_run_id=model_run_id,
     )
 
     assert recorded["status"] == "HOLDOUT_RECORDED"
@@ -99,23 +162,18 @@ def test_holdout_rejects_pre_start_and_records_one_tagged_two_arm_evaluation(tmp
     assert evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-09-10",
+        as_of_date="2026-09-10T21:00:00-05:00",
+        model_run_id=model_run_id,
     )["status"] == "ALREADY_EVALUATED_IMMUTABLE"
 
 
 def test_holdout_never_retrofits_untagged_history_into_an_experiment(tmp_path) -> None:
     store = SQLiteScanStore(tmp_path / "v6.sqlite")
-    experiment = register_experiment(
-        hypothesis="Tighter spread filter reduces tail loss.",
-        training_cutoff="2026-08-01",
-        baseline_config={"max_spread_bps": 200},
-        candidate_config={"max_spread_bps": 150},
-        validation_start="2026-08-10",
-        holdout_start="2026-09-01",
-        stop_condition="Quarantine after source failure.",
-        promotion_requirements=["manual approval"],
-    )
+    holdout_dates = ["2026-09-01", "2026-09-02"]
+    model_run_id = "v6m-holdout-untagged"
+    experiment = _complete_experiment(holdout_dates, model_run_id)
     store.persist_alpha_v6_experiments([experiment])
+    _persist_model_run(store, experiment, model_run_id)
     store.persist_alpha_v6_decisions(
         [
             {
@@ -155,7 +213,8 @@ def test_holdout_never_retrofits_untagged_history_into_an_experiment(tmp_path) -
     result = evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-09-10",
+        as_of_date="2026-09-10T21:00:00-05:00",
+        model_run_id=model_run_id,
     )
 
     assert result["status"] == "NOT_EVALUABLE_INSUFFICIENT_PROSPECTIVE_HOLDOUT_EVIDENCE"
@@ -167,17 +226,11 @@ def test_holdout_quarantines_legacy_boolean_outcomes_without_current_contract(
     tmp_path,
 ) -> None:
     store = SQLiteScanStore(tmp_path / "v6.sqlite")
-    experiment = register_experiment(
-        hypothesis="Legacy booleans cannot enter holdout truth.",
-        training_cutoff="2026-08-01",
-        baseline_config={"max_spread_bps": 200},
-        candidate_config={"max_spread_bps": 150},
-        validation_start="2026-08-10",
-        holdout_start="2026-09-01",
-        stop_condition="Quarantine incomplete evidence.",
-        promotion_requirements=["manual approval"],
-    )
+    holdout_dates = [(date(2026, 9, 1) + timedelta(days=index)).isoformat() for index in range(60)]
+    model_run_id = "v6m-holdout-legacy"
+    experiment = _complete_experiment(holdout_dates, model_run_id)
     store.persist_alpha_v6_experiments([experiment])
+    _persist_model_run(store, experiment, model_run_id)
     decisions = []
     outcomes = []
     start = date(2026, 9, 1)
@@ -230,7 +283,8 @@ def test_holdout_quarantines_legacy_boolean_outcomes_without_current_contract(
     result = evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-12-31",
+        as_of_date="2026-12-31T21:00:00-05:00",
+        model_run_id=model_run_id,
     )
 
     assert result["status"] == "NOT_EVALUABLE_INSUFFICIENT_PROSPECTIVE_HOLDOUT_EVIDENCE"
@@ -241,17 +295,11 @@ def test_holdout_quarantines_legacy_boolean_outcomes_without_current_contract(
 
 def test_holdout_rejects_authentic_retro_only_current_truth(tmp_path) -> None:
     store = SQLiteScanStore(tmp_path / "v6.sqlite")
-    experiment = register_experiment(
-        hypothesis="Retrospective truth never becomes untouched holdout truth.",
-        training_cutoff="2026-08-01",
-        baseline_config={"max_spread_bps": 200},
-        candidate_config={"max_spread_bps": 150},
-        validation_start="2026-08-10",
-        holdout_start="2026-09-01",
-        stop_condition="Quarantine retrospective rows.",
-        promotion_requirements=["manual approval"],
-    )
+    holdout_dates = [(date(2026, 9, 1) + timedelta(days=index)).isoformat() for index in range(10)]
+    model_run_id = "v6m-holdout-retro"
+    experiment = _complete_experiment(holdout_dates, model_run_id)
     store.persist_alpha_v6_experiments([experiment])
+    _persist_model_run(store, experiment, model_run_id)
     decisions = []
     outcomes = []
     for arm, config_hash in (
@@ -290,7 +338,8 @@ def test_holdout_rejects_authentic_retro_only_current_truth(tmp_path) -> None:
     result = evaluate_registered_holdout(
         store,
         experiment_id=experiment["experiment_id"],
-        as_of_date="2026-09-30",
+        as_of_date="2026-09-30T21:00:00-05:00",
+        model_run_id=model_run_id,
     )
 
     assert result["status"] == "NOT_EVALUABLE_INSUFFICIENT_PROSPECTIVE_HOLDOUT_EVIDENCE"

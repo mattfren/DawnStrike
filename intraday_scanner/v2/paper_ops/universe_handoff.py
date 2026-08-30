@@ -94,6 +94,8 @@ def build_universe_handoff(
     cycle_source_summary = cycle.get("source_summary")
     core_only_recovery = _is_core_only_recovery(cycle_source_summary, source_summary)
     snapshot_summary = cycle_source_summary if core_only_recovery else source_summary
+    if not isinstance(snapshot_summary, dict):
+        raise UniverseHandoffError("alpha cycle source summary snapshot is malformed")
     source_snapshot = _resolve_source_path(
         root,
         str(snapshot_summary.get("snapshot_path") or ""),
@@ -598,7 +600,7 @@ def _is_core_only_recovery(cycle_summary: Any, standalone: dict[str, Any]) -> bo
         and str(cycle_summary.get("snapshot_path") or "")
         .strip()
         .endswith("core_recovery_snapshot.csv")
-        and str(cycle_summary.get("failed_mover_snapshot_path") or "").strip()
+        and bool(str(cycle_summary.get("failed_mover_snapshot_path") or "").strip())
     )
 
 
@@ -831,11 +833,14 @@ def _validate_core_contract(
                 raise UniverseHandoffError("core universe canonical member root is not trusted")
             trusted_symbol_hash = str(trusted.get("canonical_symbol_set_hash_sha256") or "").lower()
             if trusted_symbol_hash:
-                trusted_symbols = [
+                trusted_symbols_raw = [
                     row.get("symbol")
                     for row in members
                     if isinstance(row, dict) and index in (row.get("index_memberships") or [])
                 ]
+                if not all(isinstance(value, str) for value in trusted_symbols_raw):
+                    raise UniverseHandoffError("core universe canonical symbol root is malformed")
+                trusted_symbols = [value for value in trusted_symbols_raw if isinstance(value, str)]
                 if _canonical_symbol_set_hash(trusted_symbols, index) != trusted_symbol_hash:
                     raise UniverseHandoffError("core universe canonical symbol root is not trusted")
             trusted_rows = [
@@ -887,7 +892,10 @@ def _validate_core_contract(
         raw_expected_count = verdict.get("expected_count")
         try:
             expected_count = int(raw_expected_count) if raw_expected_count is not None else None
-            observed_count = int(verdict.get("observed_unique_count"))
+            raw_observed_count = verdict.get("observed_unique_count")
+            if raw_observed_count is None:
+                raise ValueError("observed count is missing")
+            observed_count = int(raw_observed_count)
         except (TypeError, ValueError) as exc:
             raise UniverseHandoffError("core universe index counts are invalid") from exc
         if (expected_count is not None and expected_count < 0) or observed_count < 0:

@@ -910,10 +910,10 @@ def _build_core_universe_contract_legacy(
     index_verdicts: dict[str, dict[str, Any]] = {}
     for index in CORE_INDEXES:
         expected = index_expected[index]
-        observed = len(index_symbols[index])
-        has_index = index in index_seen or observed > 0
-        count_complete = (expected is not None and observed == expected) or (
-            expected is None and index in index_declared_complete and observed > 0
+        observed_count = len(index_symbols[index])
+        has_index = index in index_seen or observed_count > 0
+        count_complete = (expected is not None and observed_count == expected) or (
+            expected is None and index in index_declared_complete and observed_count > 0
         )
         freshness = "STALE" if stale else "FRESH" if observed_dates else "UNKNOWN"
         index_complete = (
@@ -922,7 +922,7 @@ def _build_core_universe_contract_legacy(
         index_verdicts[index] = {
             "status": "READY" if index_complete else "DATA_UNAVAILABLE",
             "expected_count": expected,
-            "observed_unique_count": observed,
+            "observed_unique_count": observed_count,
             "count_verdict": "PASS" if count_complete else "FAIL",
             "completeness_basis": "declared_source_complete"
             if expected is None and count_complete
@@ -945,7 +945,7 @@ def _build_core_universe_contract_legacy(
         if completeness_verdict == "COMPLETE" and freshness_verdict == "FRESH"
         else "DATA_UNAVAILABLE"
     )
-    content = {
+    content: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "effective_date": effective_text,
         "observed_at": observed_text,
@@ -1594,8 +1594,12 @@ def _classify_core_snapshot_batch(
             # that absence as zero without turning the provider observation
             # into an asserted zero-valued gap.
             try:
-                price = float(row.get("premarket_price"))
-                previous_close = float(row.get("previous_close"))
+                price_value = row.get("premarket_price")
+                previous_close_value = row.get("previous_close")
+                price = float(price_value) if price_value is not None else 0.0
+                previous_close = (
+                    float(previous_close_value) if previous_close_value is not None else 0.0
+                )
             except (TypeError, ValueError):
                 price = 0.0
                 previous_close = 0.0
@@ -2810,6 +2814,7 @@ def _validate_source_binding(
         and len(artifact_bytes) != 1
     ):
         return binding, [*errors, "source_binding_artifact_count_not_trusted"]
+    derived_effective: str | None = None
     try:
         if index_name == "S&P 500":
             derived_members, derived_effective, holdings_attestation = (
@@ -2869,9 +2874,12 @@ def _validate_source_binding(
                 errors.append("source_binding_declared_member_set_mismatch")
         elif index_name == "Nasdaq-100":
             if root.get("transformation_id") == "nasdaq-ndx-sod-weightings-parser-v1":
+                parser_effective_date = effective_date or root_effective
+                if parser_effective_date is None:
+                    return binding, [*errors, "source_binding_effective_date_not_trusted"]
                 derived_members, workbook_attestation = (
                     _parse_nasdaq_sod_weightings_xlsx_with_attestation(
-                        artifact_bytes[0], effective_date=effective_date or root_effective
+                        artifact_bytes[0], effective_date=parser_effective_date
                     )
                 )
                 binding["workbook_attestation"] = workbook_attestation
@@ -3266,11 +3274,11 @@ def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
     symbols: list[str] = []
     row_number = header + 1
     while True:
-        values = rows.get(row_number)
-        if values is None:
+        row_values = rows.get(row_number)
+        if row_values is None:
             raise ValueError("Nasdaq SOD member rows are not contiguous")
-        company = values.get("A", "").strip()
-        symbol = canonical_symbol(values.get("B", ""))
+        company = row_values.get("A", "").strip()
+        symbol = canonical_symbol(row_values.get("B", ""))
         if not company and not symbol:
             break
         if not company or not symbol or not _SYMBOL_PATTERN.fullmatch(symbol):

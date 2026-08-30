@@ -678,11 +678,11 @@ def _validate_prior_session_bindings(
         for row in pick_payloads
         if isinstance(row, dict) and str(row.get("pick_id") or "")
     }
-    event_by_id = {
-        str(event.get("payload", {}).get("pick_id") or ""): event
-        for event in events
-        if isinstance(event.get("payload"), dict)
-    }
+    event_by_id: dict[str, dict[str, Any]] = {}
+    for event in events:
+        event_payload = event.get("payload")
+        if isinstance(event_payload, dict):
+            event_by_id[str(event_payload.get("pick_id") or "")] = event
     accepted_rows: list[dict[str, Any]] = []
     run_ids: set[str] = set()
     snapshots: set[str] = set()
@@ -697,10 +697,13 @@ def _validate_prior_session_bindings(
         if str(row.get("series_role") or "") != "champion":
             continue
         pick_id = str(row.get("signal_id") or "")
-        event = event_by_id.get(pick_id)
-        if event is None or not isinstance(event.get("payload"), dict):
+        matched_event = event_by_id.get(pick_id)
+        if matched_event is None or not isinstance(matched_event.get("payload"), dict):
             raise ValueError(f"accepted blotter row lacks exact ledger pick {pick_id}")
-        payload = dict(event["payload"])
+        event_payload = matched_event.get("payload")
+        if not isinstance(event_payload, dict):
+            raise ValueError(f"accepted blotter row lacks exact ledger pick {pick_id}")
+        payload = dict(event_payload)
         if pick_by_id.get(str(payload.get("pick_id") or "")) != payload:
             raise ValueError(f"accepted pick projection conflicts for {pick_id}")
         source_policy = str(payload.get("execution_policy_version") or "")
@@ -718,12 +721,12 @@ def _validate_prior_session_bindings(
             "target",
         ):
             if field == "symbol":
-                expected = str(payload.get(field) or "").upper()
-                actual = str(row.get(field) or "").upper()
+                expected_value: object = str(payload.get(field) or "").upper()
+                actual_value: object = str(row.get(field) or "").upper()
             else:
-                expected = payload.get(field)
-                actual = row.get(field)
-            if expected != actual:
+                expected_value = payload.get(field)
+                actual_value = row.get(field)
+            if expected_value != actual_value:
                 raise ValueError(f"blotter lineage conflicts for {pick_id}: {field}")
         run_id = str(payload.get("run_id") or "")
         manifest_path = paths.manifests / f"{engine._safe_filename(run_id)}.json"
@@ -1175,7 +1178,10 @@ def _current_freshness_limit_seconds(row: Mapping[str, Any]) -> int:
         "premarket_enrichment_max_age_seconds",
     ):
         try:
-            value = int(row.get(key))
+            raw_value = row.get(key)
+            if raw_value is None:
+                raise TypeError("missing freshness value")
+            value = int(raw_value)
         except (TypeError, ValueError):
             continue
         if value > 0:
@@ -1185,7 +1191,10 @@ def _current_freshness_limit_seconds(row: Mapping[str, Any]) -> int:
         if not isinstance(nested, Mapping):
             continue
         try:
-            value = int(nested.get("max_age_seconds"))
+            raw_value = nested.get("max_age_seconds")
+            if raw_value is None:
+                raise TypeError("missing nested freshness value")
+            value = int(raw_value)
         except (TypeError, ValueError):
             continue
         if value > 0:

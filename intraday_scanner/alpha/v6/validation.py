@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
+from datetime import date
 from statistics import mean, pstdev
 from typing import Any
 
@@ -171,9 +172,23 @@ def evaluate_return_predictions(
     losses = [(value, weight) for value, weight in zip(realized, weights, strict=True) if value < 0]
     gross_win = sum(value * weight for value, weight in wins)
     gross_loss = abs(sum(value * weight for value, weight in losses))
-    drawdowns = _drawdowns(realized)
-    concentration = _concentration(realized, weights)
-    conditional_value_at_risk = _conditional_value_at_risk(realized, weights)
+    # Risk is a property of the account/session equity curve, not of the
+    # number of trade rows emitted during a session.  Collapse rows into one
+    # deterministic allocation/account-weighted return per market date before
+    # calculating path-dependent or annualized risk statistics.
+    daily_returns_by_date = aggregate_daily_returns(usable)
+    daily_returns = [daily_returns_by_date[day][0] for day in sorted(daily_returns_by_date)]
+    # Allocation is already incorporated into each account-day return. Risk
+    # observations are calendar sessions, so do not weight a session again by
+    # its invested fraction (which would distort PF/downside for cash days).
+    daily_observation_weights = [1.0] * len(daily_returns)
+    drawdowns = _drawdowns(daily_returns)
+    concentration = _concentration(daily_returns, daily_observation_weights)
+    conditional_value_at_risk = _conditional_value_at_risk(
+        daily_returns, daily_observation_weights
+    )
+    daily_profit_factor = _profit_factor(daily_returns, daily_observation_weights)
+    daily_weighting = daily_weighting_status(usable)
     top_count = max(1, len(pairs) // 10)
     top_indices = sorted(range(len(pairs)), key=lambda index: pairs[index][0], reverse=True)[
         :top_count
@@ -185,10 +200,10 @@ def evaluate_return_predictions(
     stress_15 = _slippage_stress(usable, multiplier=1.5)
     stress_20 = _slippage_stress(usable, multiplier=2.0)
     bootstrap = _cluster_bootstrap_expectancy(usable, sample_count=bootstrap_samples, seed=6_001)
-    sharpe = _annualized_observation_sharpe(realized)
+    sharpe = _annualized_observation_sharpe(daily_returns)
     adjusted_sharpe = _multiple_testing_adjusted_sharpe(
         sharpe,
-        sample_size=len(realized),
+        sample_size=len(daily_returns),
         trial_count=max(1, max(_int(row.get("experiment_trial_count"), 1) for row in usable)),
     )
     no_lookahead = all(
@@ -203,12 +218,26 @@ def evaluate_return_predictions(
         "status": "EVALUABLE",
         "sample_size": len(pairs),
         "market_date_count": len({str(row.get("market_date") or "") for row in usable}),
+        "risk_observation_unit": "market_date",
+        "risk_observation_count": len(daily_returns),
+        "allocation_account_weighting": (
+            "account_weighted_return_per_market_date_cash_retained"
+        ),
+        "risk_series_status": daily_weighting["status"],
+        "risk_series_promotion_eligible": daily_weighting["promotion_eligible"],
         "after_cost_expectancy_pct": round(weighted_expectancy, 6),
         "benchmark_excess_return_pct": round(weighted_expectancy, 6),
-        "profit_factor": round(gross_win / gross_loss, 6) if gross_loss else None,
+        # Promotion-grade PF is a portfolio/session statistic.  Keep row-level
+        # weighted gains/losses only for the research diagnostic below.
+        "profit_factor": daily_profit_factor,
+        "row_weighted_profit_factor_diagnostic": (
+            round(gross_win / gross_loss, 6) if gross_loss else None
+        ),
         "maximum_drawdown_pct": round(min(drawdowns), 6),
         "conditional_value_at_risk_95_pct": conditional_value_at_risk,
-        "downside_deviation_pct": _downside_deviation(realized, weights),
+        "downside_deviation_pct": _downside_deviation(
+            daily_returns, daily_observation_weights
+        ),
         "gain_loss_concentration_pct": round(concentration, 6),
         "turnover_observations_per_session": round(
             len(usable) / max(1, len({str(row.get("market_date") or "") for row in usable})),
@@ -245,9 +274,17 @@ def _empty() -> dict[str, Any]:
         "status": "NOT_EVALUABLE",
         "sample_size": 0,
         "market_date_count": 0,
+        "risk_observation_unit": "market_date",
+        "risk_observation_count": 0,
+        "allocation_account_weighting": (
+            "account_weighted_return_per_market_date_cash_retained"
+        ),
+        "risk_series_status": "NOT_EVALUABLE",
+        "risk_series_promotion_eligible": False,
         "after_cost_expectancy_pct": None,
         "benchmark_excess_return_pct": None,
         "profit_factor": None,
+        "row_weighted_profit_factor_diagnostic": None,
         "maximum_drawdown_pct": None,
         "conditional_value_at_risk_95_pct": None,
         "downside_deviation_pct": None,
@@ -287,12 +324,163 @@ def _drawdowns(values: list[float]) -> list[float]:
     return output
 
 
+def aggregate_daily_returns(
+    rows: list[dict[str, Any]],
+) -> dict[str, tuple[float, float]]:
+    """Aggregate realized returns to one deterministic account-day observation.
+
+    The first tuple element is the account-day return and the second is its
+    effective weight. Explicit account fractions are *not* renormalized: an
+    allocation below one leaves the remainder in cash at zero return. Rows
+    without allocation truth use a normalized equal/relative-weight
+    diagnostic, which is marked non-promotion-eligible by
+    :func:`daily_weighting_status`. Grouping and sorted dates make this
+    invariant to row insertion/permutation order.
+    """
+
+    grouped: dict[str, list[tuple[float, float, bool]]] = defaultdict(list)
+    for row in rows:
+        date = str(row.get("market_date") or "")[:10]
+        value = _number(
+            row.get("realized_net_excess_return_pct")
+            if row.get("realized_net_excess_return_pct") is not None
+            else row.get("net_excess_return_pct")
+        )
+        weight, explicit = _allocation_account_weight(row)
+        if date and value is not None and weight is not None and weight >= 0.0:
+            grouped[date].append((value, weight, explicit))
+    output: dict[str, tuple[float, float]] = {}
+    for date in sorted(grouped):
+        values = grouped[date]
+        total_weight = sum(weight for _, weight, _ in values)
+        if total_weight > 0.0:
+            if all(explicit for _, _, explicit in values):
+                # Explicit account fractions leave any unallocated balance as
+                # cash with a zero return; do not renormalize invested weight.
+                daily_return = sum(value * weight for value, weight, _ in values)
+            else:
+                daily_return = sum(value * weight for value, weight, _ in values) / total_weight
+            output[date] = (round(daily_return, 12), total_weight)
+    return output
+
+
+def daily_weighting_status(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Classify whether a daily risk series has authenticated account weights."""
+
+    explicit_count = 0
+    invalid_count = 0
+    for row in rows:
+        weight, explicit = _allocation_account_weight(row)
+        if explicit:
+            explicit_count += 1
+        if weight is None or weight < 0.0:
+            invalid_count += 1
+    valid_dates = all(_valid_market_date(row.get("market_date")) for row in rows)
+    if not rows or invalid_count or not valid_dates:
+        status = "INVALID_ALLOCATION_TRUTH"
+    elif explicit_count == 0:
+        status = "EQUAL_WEIGHT_RESEARCH_DIAGNOSTIC"
+    elif explicit_count != len(rows):
+        status = "PARTIAL_ALLOCATION_TRUTH"
+    else:
+        by_date: dict[str, float] = defaultdict(float)
+        for row in rows:
+            weight, _ = _allocation_account_weight(row)
+            if weight is not None:
+                by_date[str(row.get("market_date") or "")[:10]] += weight
+        if any(total <= 0.0 for total in by_date.values()):
+            status = "ZERO_ALLOCATION_ACCOUNT_DAY"
+        elif all(total <= 1.0 + 1e-9 for total in by_date.values()):
+            status = "AUTHENTIC_ACCOUNT_WEIGHTED"
+        else:
+            status = "OVERALLOCATED_ACCOUNT_TRUTH"
+    return {
+        "status": status,
+        "explicit_weighted_row_count": explicit_count,
+        "invalid_weighted_row_count": invalid_count,
+        "promotion_eligible": status == "AUTHENTIC_ACCOUNT_WEIGHTED",
+    }
+
+
+def _allocation_account_weight(row: dict[str, Any]) -> tuple[float | None, bool]:
+    def parse_weight(value: float | None, *, percent: bool) -> float | None:
+        if value is None:
+            return None
+        normalized = value / 100.0 if percent else value
+        # Weights are fractions of account capital, never arbitrary relative
+        # row weights. Reject over-100% inputs instead of inflating returns.
+        return normalized if 0.0 <= normalized <= 1.0 else None
+
+    def first_number(keys: tuple[str, ...]) -> tuple[float | None, bool, str | None]:
+        for key in keys:
+            if key in row:
+                value = _number(row.get(key))
+                return value, True, key
+        return None, False, None
+
+    allocation, allocation_present, allocation_key = first_number(
+        (
+            "allocation_weight",
+            "portfolio_allocation_weight",
+            "position_weight",
+            "capital_weight",
+            "allocation_pct",
+            "allocation",
+        )
+    )
+    account, account_present, account_key = first_number(
+        ("account_weight", "account_allocation_weight", "account_weight_pct")
+    )
+    if allocation_present:
+        allocation_value = parse_weight(
+            allocation,
+            percent=allocation_key == "allocation_pct",
+        )
+        if allocation_value is None:
+            return None, True
+    else:
+        allocation_value = None
+    if account_present:
+        account_value = parse_weight(
+            account,
+            percent=account_key == "account_weight_pct",
+        )
+        if account_value is None:
+            return None, True
+    else:
+        account_value = None
+    if allocation_value is None and account_value is None:
+        return 1.0, False
+    if allocation_value is None:
+        return account_value, True
+    if account_value is None:
+        return allocation_value, True
+    return allocation_value * account_value, True
+
+
+def _valid_market_date(value: object) -> bool:
+    text = str(value or "")[:10]
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return len(text) == 10
+
+
 def _downside_deviation(values: list[float], weights: list[float]) -> float | None:
     denominator = sum(weights)
     if not denominator:
         return None
     value = sum(weight * min(0.0, item) ** 2 for item, weight in zip(values, weights, strict=True))
     return round((value / denominator) ** 0.5, 6)
+
+
+def _profit_factor(values: list[float], weights: list[float]) -> float | None:
+    gains = sum(value * weight for value, weight in zip(values, weights, strict=True) if value > 0)
+    losses = abs(
+        sum(value * weight for value, weight in zip(values, weights, strict=True) if value < 0)
+    )
+    return round(gains / losses, 6) if losses else None
 
 
 def _concentration(values: list[float], weights: list[float]) -> float:
@@ -489,4 +677,9 @@ def _round(value: float | None) -> float | None:
     return round(value, 6) if value is not None and math.isfinite(value) else None
 
 
-__all__ = ["evaluate_return_predictions", "expanding_purged_splits"]
+__all__ = [
+    "aggregate_daily_returns",
+    "daily_weighting_status",
+    "evaluate_return_predictions",
+    "expanding_purged_splits",
+]

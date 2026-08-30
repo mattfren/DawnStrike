@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from intraday_scanner.services.daily_finalize_service import DailyFinalizeService
 from intraday_scanner.services.daily_orchestrator_service import (
     daily_orchestration_status,
     write_heartbeat,
@@ -139,3 +140,30 @@ def test_daily_orchestrator_does_not_require_live_heartbeat_after_complete_run(
     assert status["missing_stages"] == []
     assert status["heartbeat_stale"] is False
     assert status["status"] == "HEALTHY"
+
+
+def test_daily_orchestrator_interprets_closed_terminal_run_without_readiness(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 29, 21, 0, tzinfo=timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    result = DailyFinalizeService(
+        state / "state.sqlite",
+        state / "public",
+        runtime_root=tmp_path,
+        state_root=state,
+        release_sha="b" * 40,
+    ).run(market_date="2026-08-29", now="2026-08-29T21:00:00+00:00")
+
+    status = daily_orchestration_status(
+        SQLiteScanStore(state / "state.sqlite"),
+        market_date="2026-08-29",
+        state_root=state,
+        now=now,
+    )
+
+    assert result["readiness"]["status"] == "not_applicable"
+    assert status["status"] == "SKIPPED_NOT_APPLICABLE"
+    assert status["terminal_state"] == "SKIPPED_NOT_APPLICABLE"
+    assert status["heartbeat_stale"] is False

@@ -135,13 +135,25 @@ def main(argv: list[str] | None = None) -> int:
     opportunity_projection_hash = str(
         opportunity_projection_manifest.get("payload_sha256") or ""
     )
-    build_sha = hashlib.sha256(
-        (
-            f"{source.get('source_sha')}:{publication_set_hash}:"
-            f"{opportunity_projection_hash}:{market_date}"
-        ).encode()
-    ).hexdigest()
+    # V6 is a first-class immutable input to the public identity.  Write and
+    # hash it before deriving build_sha so a V6-only byte change cannot retain
+    # the identity of an older artifact.
+    v6_path = output_root / "data" / "v6-learning.json"
+    v6_path.parent.mkdir(parents=True, exist_ok=True)
+    v6_bytes = json.dumps(
+        v6_public_status(SQLiteScanStore(db_path)), sort_keys=True, indent=2
+    ).encode("utf-8")
+    v6_path.write_bytes(v6_bytes)
+    v6_learning_hash = hashlib.sha256(v6_bytes).hexdigest()
+    build_sha = _build_sha(
+        source_sha=str(source.get("source_sha") or ""),
+        publication_set_sha256=publication_set_hash,
+        opportunity_projection_sha256=opportunity_projection_hash,
+        v6_learning_sha256=v6_learning_hash,
+        market_date=market_date,
+    )
     build_id = build_sha[:20]
+    readiness["v6_learning_sha256"] = v6_learning_hash
     scheduler = scheduler_doctor(root, state_root=state_root)
     readiness["scheduler"] = _public_scheduler_status(scheduler)
     readiness["next_scheduled_run"] = scheduler.get("next_scheduled_run")
@@ -151,12 +163,6 @@ def main(argv: list[str] | None = None) -> int:
     result["readiness"] = readiness
     (output_root / "readiness.json").write_text(
         json.dumps(readiness, sort_keys=True, indent=2, default=str),
-        encoding="utf-8",
-    )
-    v6_path = output_root / "data" / "v6-learning.json"
-    v6_path.parent.mkdir(parents=True, exist_ok=True)
-    v6_path.write_text(
-        json.dumps(v6_public_status(SQLiteScanStore(db_path)), sort_keys=True, indent=2),
         encoding="utf-8",
     )
     notification = _record_build_notification(
@@ -188,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         schema_version=_database_schema_version(db_path),
         data_watermark=str(readiness.get("source_data_watermark") or market_date),
         artifact_hashes=artifact_hashes,
+        v6_learning_sha256=v6_learning_hash,
     )
     (output_root / "release-manifest.json").write_text(
         json.dumps(release_manifest, sort_keys=True, indent=2),
@@ -206,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 "data_hash_sha256": performance_hash,
                 "publication_set_sha256": publication_set_hash,
                 "opportunity_projection_sha256": opportunity_projection_hash,
+                "v6_learning_sha256": v6_learning_hash,
                 "release_manifest_sha256": release_manifest.get("release_manifest_sha256"),
                 "market_date": market_date,
                 "generated_at": generated_at,
@@ -377,6 +385,23 @@ def _file_hashes(root: Path, *, exclude: set[str]) -> dict[str, str]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and str(path.relative_to(root)).replace("\\", "/") not in exclude
     }
+
+
+def _build_sha(
+    *,
+    source_sha: str,
+    publication_set_sha256: str,
+    opportunity_projection_sha256: str,
+    v6_learning_sha256: str,
+    market_date: str,
+) -> str:
+    """Return the documented byte-lineage identity for a public build."""
+
+    formula = (
+        f"{source_sha}:{publication_set_sha256}:{opportunity_projection_sha256}:"
+        f"{v6_learning_sha256}:{market_date}"
+    )
+    return hashlib.sha256(formula.encode("utf-8")).hexdigest()
 
 
 def _database_schema_version(db_path: Path) -> int:

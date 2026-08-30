@@ -317,7 +317,7 @@ def attribute_strategy_misses(
     benchmarks, benchmark_hashes, benchmark_conflicts = _benchmark_index(included)
 
     attributed: list[StrategyMissAttributionRow] = []
-    seen_lifecycles: set[tuple[str, str, str]] = set()
+    seen_lifecycles: set[tuple[str, str, str, str, str]] = set()
     for row in included:
         # A portfolio observation can contain both closed and open positions.
         # Expand only explicit child lifecycle evidence; never allocate an
@@ -498,6 +498,10 @@ def load_strategy_decision_receipts_readonly(
     # quarantined rows without accepting them as evidence.  The payloads are
     # private authenticated envelopes, not ordinary JSON mappings.
     class _ReceiptBatch(tuple):
+        invalid_reasons: dict[str, int]
+        invalid_count: int
+        invalid_identities: tuple[str, ...]
+
         def __new__(cls, values, *, invalid_reasons):
             result = super().__new__(cls, values)
             result.invalid_reasons = dict(sorted(invalid_reasons.items()))
@@ -720,6 +724,10 @@ def load_alpha_v6_decisions_readonly(
         if missing_columns:
 
             class _LegacyV6Batch(tuple):
+                invalid_count: int
+                invalid_reasons: dict[str, int]
+                invalid_identities: tuple[str, ...]
+
                 invalid_count = len(missing_columns)
                 invalid_reasons = {
                     f"column_missing_{column}": 1 for column in missing_columns
@@ -809,6 +817,10 @@ def load_alpha_v6_decisions_readonly(
         }
 
     class _V6Batch(tuple):
+        invalid_reasons: dict[str, int]
+        invalid_count: int
+        invalid_identities: tuple[str, ...]
+
         def __new__(cls, values, *, invalid_reasons):
             result = super().__new__(cls, values)
             result.invalid_reasons = dict(sorted(Counter(invalid_reasons).items()))
@@ -1092,7 +1104,12 @@ def load_strategy_learning_database_snapshot_readonly(
                     )
                 )
                 if topology_valid:
-                    bridge_values.append(r2 if r2 is not None else base)
+                    if r2 is not None:
+                        bridge_values.append(r2)
+                    elif base is not None:
+                        bridge_values.append(base)
+                    else:
+                        raise AssertionError("valid bridge topology has no base row")
                     continue
                 reason = "bridge_revision_topology_invalid"
                 bridge_invalid_reasons[reason] = (

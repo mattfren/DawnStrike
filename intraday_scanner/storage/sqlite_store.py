@@ -25,6 +25,7 @@ from intraday_scanner.scenario.contracts import (
     SCENARIO_STRATEGY_ID,
     canonical_hash,
 )
+from intraday_scanner.services.setup_monitor import validate_monitor_interval_gap_receipt
 from intraday_scanner.sql_safety import quote_sql_identifier, quote_sql_identifiers
 from intraday_scanner.storage.read_only import connect_read_only
 from intraday_scanner.storage.test_isolation import assert_test_database_isolated
@@ -64,15 +65,31 @@ class SQLiteScanStore:
         assert_test_database_isolated(db_path)
         self.db_path = Path(db_path)
         self.read_only = read_only
+        # Store methods historically called initialize() defensively before
+        # every operation.  Keep that compatibility, but do not replay the
+        # full DDL/migration suite for every read/write.  The marker is checked
+        # with a read-only query so an external schema-version change still
+        # invalidates this process-local cache.
+        self._initialized_schema_version: int | None = None
+        self._read_only_checked = False
 
     def initialize(self) -> None:
         if self.read_only:
+            if self._read_only_checked:
+                return
             with self._connect() as connection:
                 connection.execute("SELECT 1")
+            self._read_only_checked = True
             return
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as connection:
+                current_version = _read_schema_version_marker(connection)
+                if (
+                    self._initialized_schema_version is not None
+                    and current_version == self._initialized_schema_version
+                ):
+                    return
                 connection.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS scan_runs (
@@ -178,6 +195,35 @@ class SQLiteScanStore:
                         created_at TEXT NOT NULL,
                         payload_json TEXT NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS idx_monitor_events_created_at
+                    ON monitor_events(created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_monitor_events_ticker_created
+                    ON monitor_events(ticker, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_monitor_events_type_created
+                    ON monitor_events(event_type, created_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_setup_monitor_checks_checked_at
+                    ON setup_monitor_checks(checked_at DESC, id DESC);
+                    CREATE INDEX IF NOT EXISTS idx_setup_monitor_checks_status_checked
+                    ON setup_monitor_checks(status, checked_at DESC, id DESC);
+                    CREATE TABLE IF NOT EXISTS monitor_interval_gaps (
+                        gap_id TEXT PRIMARY KEY,
+                        run_id TEXT,
+                        market_date TEXT NOT NULL,
+                        schedule_id TEXT NOT NULL,
+                        schedule_version TEXT NOT NULL,
+                        release_sha TEXT NOT NULL,
+                        expected_at TEXT NOT NULL,
+                        observed_at TEXT NOT NULL,
+                        interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+                        status TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        receipt_sha256 TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(schedule_id, expected_at, interval_seconds)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_monitor_interval_gaps_date
+                    ON monitor_interval_gaps(market_date, expected_at);
                     CREATE TABLE IF NOT EXISTS monitor_publication_receipts (
                         receipt_id TEXT PRIMARY KEY,
                         market_date TEXT NOT NULL,
@@ -1095,6 +1141,7 @@ class SQLiteScanStore:
                 from intraday_scanner.storage.migrations import run_migrations
 
                 run_migrations(connection)
+                self._initialized_schema_version = _read_schema_version_marker(connection)
         except sqlite3.Error as exc:
             raise StorageError(f"Could not initialize SQLite store: {exc}") from exc
 
@@ -1374,6 +1421,8 @@ class SQLiteScanStore:
             raise StorageError(f"Could not persist monitor events: {exc}") from exc
 
     def load_recent_monitor_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
         self.initialize()
         try:
             with self._connect() as connection:
@@ -1390,6 +1439,214 @@ class SQLiteScanStore:
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load monitor events: {exc}") from exc
+
+    def load_recent_monitor_event_projection(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Load dashboard-safe event fields without hydrating payload blobs."""
+
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT id, run_id, ticker, event_type, severity, created_at
+                    FROM monitor_events
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load monitor event projection: {exc}") from exc
+
+    def count_monitor_events(self, *, event_type: str | None = None) -> int:
+        """Count monitor events using indexed scalar columns only."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                if event_type:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM monitor_events WHERE event_type = ?",
+                        (str(event_type),),
+                    ).fetchone()
+                else:
+                    row = connection.execute("SELECT COUNT(*) FROM monitor_events").fetchone()
+                return int(row[0] if row else 0)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not count monitor events: {exc}") from exc
+
+    def persist_monitor_interval_gap_receipts(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> dict[str, int]:
+        """Persist missed monitor slots idempotently, without market data."""
+
+        self.initialize()
+        inserted = 0
+        reused = 0
+        try:
+            with self._connect() as connection:
+                for row in rows:
+                    validate_monitor_interval_gap_receipt(row)
+                    gap_id = str(row.get("gap_id") or "")
+                    expected_at = str(row.get("expected_at") or "")
+                    interval_seconds = int(row.get("interval_seconds") or 0)
+                    if not gap_id or not expected_at:
+                        raise StorageError("monitor gap receipt identity is required")
+                    if interval_seconds <= 0:
+                        raise ValueError("monitor gap interval_seconds must be positive")
+                    payload = json.dumps(dict(row), sort_keys=True)
+                    existing = connection.execute(
+                        """
+                        SELECT gap_id, payload_json
+                        FROM monitor_interval_gaps
+                        WHERE schedule_id = ? AND expected_at = ? AND interval_seconds = ?
+                        """,
+                        (
+                            str(row.get("schedule_id") or "alphaops-monitor-5m"),
+                            expected_at,
+                            interval_seconds,
+                        ),
+                    ).fetchone()
+                    if existing is not None:
+                        # ``expected_at`` is the logical slot identity.  A
+                        # repeated observation may be recorded later with a
+                        # different observed_at, but must never rewrite the
+                        # first immutable receipt.
+                        if str(existing[0]) != gap_id:
+                            raise StorageError("monitor gap receipt identity collision")
+                        existing_payload = json.loads(str(existing[1]))
+                        mutable = {"observed_at", "run_id", "receipt_sha256"}
+                        for field, value in row.items():
+                            if field not in mutable and existing_payload.get(field) != value:
+                                raise StorageError("monitor gap immutable field collision")
+                        reused += 1
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO monitor_interval_gaps
+                        (gap_id, run_id, market_date, schedule_id, schedule_version,
+                         release_sha, expected_at, observed_at, interval_seconds, status,
+                         reason, receipt_sha256, payload_json, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            gap_id,
+                            str(row.get("run_id") or ""),
+                            str(row.get("market_date") or ""),
+                            str(row.get("schedule_id") or "alphaops-monitor-5m"),
+                            str(row.get("schedule_version") or ""),
+                            str(row.get("release_sha") or ""),
+                            expected_at,
+                            str(row.get("observed_at") or ""),
+                            interval_seconds,
+                            str(row.get("status") or "MISSED_INTERVAL"),
+                            str(row.get("reason") or "monitor_interval_not_observed"),
+                            str(row.get("receipt_sha256") or ""),
+                            payload,
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    )
+                    inserted += 1
+            return {"inserted": inserted, "reused": reused, "count": inserted + reused}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist monitor interval gap receipts: {exc}") from exc
+
+    def load_monitor_interval_gap_receipts(
+        self, *, market_date: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if market_date:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM monitor_interval_gaps
+                        WHERE market_date = ? ORDER BY expected_at ASC LIMIT ?
+                        """,
+                        (str(market_date)[:10], int(limit)),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM monitor_interval_gaps
+                        ORDER BY expected_at ASC LIMIT ?
+                        """,
+                        (int(limit),),
+                    ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load monitor interval gap receipts: {exc}") from exc
+
+    def load_monitor_interval_gap_projection(
+        self, *, market_date: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Load gap audit identity/status fields without payload hydration."""
+
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                fields = (
+                    "gap_id, run_id, market_date, schedule_id, schedule_version, "
+                    "release_sha, expected_at, observed_at, interval_seconds, status, "
+                    "reason, receipt_sha256"
+                )
+                if market_date:
+                    rows = connection.execute(
+                        f"SELECT {fields} FROM monitor_interval_gaps "
+                        "WHERE market_date = ? ORDER BY expected_at ASC LIMIT ?",
+                        (str(market_date)[:10], int(limit)),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        f"SELECT {fields} FROM monitor_interval_gaps "
+                        "ORDER BY expected_at ASC LIMIT ?",
+                        (int(limit),),
+                    ).fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load monitor interval gap projection: {exc}") from exc
+
+    def count_monitor_interval_gaps(
+        self, *, market_date: str | None = None, schedule_id: str | None = None
+    ) -> int:
+        """Count durable gap receipts using indexed identity columns only."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                if market_date and schedule_id:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM monitor_interval_gaps "
+                        "WHERE market_date = ? AND schedule_id = ?",
+                        (str(market_date)[:10], str(schedule_id)),
+                    ).fetchone()
+                elif market_date:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM monitor_interval_gaps WHERE market_date = ?",
+                        (str(market_date)[:10],),
+                    ).fetchone()
+                elif schedule_id:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM monitor_interval_gaps WHERE schedule_id = ?",
+                        (str(schedule_id),),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM monitor_interval_gaps"
+                    ).fetchone()
+                return int(row[0] if row else 0)
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not count monitor interval gaps: {exc}") from exc
 
     def persist_monitor_publication_receipts(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Persist immutable watcher publication receipts without touching the slate."""
@@ -1493,6 +1750,8 @@ class SQLiteScanStore:
             raise StorageError(f"Could not load monitor publication receipts: {exc}") from exc
 
     def load_latest_monitor_checks(self, limit: int = 100) -> list[dict[str, Any]]:
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
         self.initialize()
         try:
             with self._connect() as connection:
@@ -1501,7 +1760,7 @@ class SQLiteScanStore:
                     """
                     SELECT checked_at
                     FROM setup_monitor_checks
-                    ORDER BY checked_at DESC
+                    ORDER BY checked_at DESC, id DESC
                     LIMIT 1
                     """
                 ).fetchone()
@@ -1521,7 +1780,8 @@ class SQLiteScanStore:
                             WHEN 'invalidated' THEN 4
                             ELSE 5
                         END,
-                        ticker ASC
+                        ticker ASC,
+                        id ASC
                     LIMIT ?
                     """,
                     (str(latest["checked_at"]), limit),
@@ -1529,6 +1789,62 @@ class SQLiteScanStore:
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load setup monitor checks: {exc}") from exc
+
+    def load_latest_monitor_check_projection(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Load the latest check batch without decoding full row payloads."""
+
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                latest = connection.execute(
+                    "SELECT checked_at FROM setup_monitor_checks "
+                    "ORDER BY checked_at DESC, id DESC LIMIT 1"
+                ).fetchone()
+                if latest is None:
+                    return []
+                rows = connection.execute(
+                    """
+                    SELECT id, run_id, ticker, status, checked_at
+                    FROM setup_monitor_checks
+                    WHERE checked_at = ?
+                    ORDER BY CASE status
+                        WHEN 'confirming' THEN 0 WHEN 'watching' THEN 1
+                        WHEN 'extended' THEN 2 WHEN 'fading' THEN 3
+                        WHEN 'invalidated' THEN 4 ELSE 5 END, ticker ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (str(latest["checked_at"]), int(limit)),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load monitor check projection: {exc}") from exc
+
+    def count_latest_monitor_checks(self) -> dict[str, int]:
+        """Return latest monitor status counts without payload hydration."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                latest = connection.execute(
+                    "SELECT checked_at FROM setup_monitor_checks "
+                    "ORDER BY checked_at DESC, id DESC LIMIT 1"
+                ).fetchone()
+                if latest is None:
+                    return {}
+                rows = connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM setup_monitor_checks WHERE checked_at = ?
+                    GROUP BY status ORDER BY status ASC
+                    """,
+                    (str(latest[0]),),
+                ).fetchall()
+                return {str(row[0]): int(row[1]) for row in rows}
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not count latest monitor checks: {exc}") from exc
 
     def has_notification(self, event_key: str) -> bool:
         self.initialize()
@@ -2189,7 +2505,7 @@ class SQLiteScanStore:
                 links_by_signal: dict[str, list[dict[str, Any]]] = {}
                 for row in joined:
                     signal_id = str(row["link_signal_id"] or "")
-                    decision = None
+                    decision: dict[str, Any] | None = None
                     if row["decision_id"] is not None:
                         decision = {
                             "decision_id": str(row["decision_id"] or ""),
@@ -4149,20 +4465,26 @@ class SQLiteScanStore:
                 f"Could not replace AlphaOps production outcome labels: {exc}"
             ) from exc
 
-    def load_alpha_outcome_labels(self, limit: int = 5000) -> list[dict[str, Any]]:
+    def load_alpha_outcome_labels(
+        self,
+        limit: int | None = 5000,
+        *,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         self.initialize()
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
-                rows = connection.execute(
-                    """
+                query = """
                     SELECT payload_json
                     FROM alpha_outcome_labels
                     ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
+                """
+                params: tuple[int, ...] = ()
+                if limit is not None:
+                    query += " LIMIT ? OFFSET ?"
+                    params = (max(0, int(limit)), max(0, int(offset)))
+                rows = connection.execute(query, params).fetchall()
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load AlphaOps outcome labels: {exc}") from exc
@@ -6806,7 +7128,7 @@ class SQLiteScanStore:
         *,
         market_date: str | None = None,
         action: str | None = None,
-        limit: int = 50_000,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         self.initialize()
         clauses: list[str] = []
@@ -6820,12 +7142,22 @@ class SQLiteScanStore:
         query = "SELECT payload_json FROM alpha_v6_decisions"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY decision_at ASC, decision_id ASC LIMIT ?"
-        params.append(limit)
+        query += " ORDER BY decision_at ASC, decision_id ASC"
+        if limit is not None:
+            if limit < 1:
+                raise ValueError("V6 decision limit must be positive when provided")
+            # Fetch one sentinel row so an explicit bounded read can never be
+            # mistaken for a complete V6 evidence set.
+            query += " LIMIT ?"
+            params.append(limit + 1)
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(query, params).fetchall()
+                if limit is not None and len(rows) > limit:
+                    raise StorageError(
+                        "V6 decision load truncated; omit limit or paginate explicitly"
+                    )
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 decisions: {exc}") from exc
@@ -6884,19 +7216,28 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist V6 outcomes: {exc}") from exc
 
-    def load_alpha_v6_outcomes(self, limit: int = 50_000) -> list[dict[str, Any]]:
+    def load_alpha_v6_outcomes(self, limit: int | None = None) -> list[dict[str, Any]]:
         self.initialize()
+        if limit is not None and limit < 1:
+            raise ValueError("V6 outcome limit must be positive when provided")
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
-                rows = connection.execute(
-                    """
-                    SELECT payload_json FROM alpha_v6_outcomes
-                    ORDER BY market_date ASC, observed_at ASC, outcome_id ASC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
+                query = (
+                    "SELECT payload_json FROM alpha_v6_outcomes "
+                    "ORDER BY market_date ASC, observed_at ASC, outcome_id ASC"
+                )
+                params: tuple[Any, ...] = ()
+                if limit is not None:
+                    # Fetch a sentinel to fail closed rather than silently
+                    # dropping newer rows from a promotion/evaluation input.
+                    query += " LIMIT ?"
+                    params = (limit + 1,)
+                rows = connection.execute(query, params).fetchall()
+                if limit is not None and len(rows) > limit:
+                    raise StorageError(
+                        "V6 outcome load truncated; omit limit or paginate explicitly"
+                    )
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 outcomes: {exc}") from exc
@@ -6941,6 +7282,20 @@ class SQLiteScanStore:
                 return [json.loads(str(row["payload_json"])) for row in rows]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 model runs: {exc}") from exc
+
+    def load_alpha_v6_model_run(self, model_run_id: str) -> dict[str, Any] | None:
+        """Load one model run by its indexed immutable identifier."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_model_runs WHERE model_run_id = ?",
+                    (model_run_id,),
+                ).fetchone()
+                return json.loads(str(row[0])) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 model run: {exc}") from exc
 
     def persist_alpha_v6_evaluation(self, row: dict[str, Any]) -> bool:
         self.initialize()
@@ -6998,13 +7353,72 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load account comparison: {exc}") from exc
 
+    def load_account_performance_comparisons(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Load a bounded newest-first comparison window for exact-lineage search."""
+
+        self.initialize()
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM account_performance_comparisons
+                    ORDER BY calculated_at DESC, comparison_id DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load account comparisons: {exc}") from exc
+
+    def load_account_performance_comparisons_for_lineage(
+        self, *, model_run_id: str, experiment_id: str
+    ) -> list[dict[str, Any]]:
+        """Load only comparison receipts matching the persisted lineage keys."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM account_performance_comparisons
+                    WHERE json_extract(payload_json, '$.model_run_id') = ?
+                      AND json_extract(payload_json, '$.experiment_id') = ?
+                    ORDER BY calculated_at DESC, comparison_id DESC LIMIT 2
+                    """,
+                    (model_run_id, experiment_id),
+                ).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load exact account comparisons: {exc}") from exc
+
     def persist_alpha_v6_experiments(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         self.initialize()
         inserted = 0
         skipped = 0
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 for row in rows:
+                    identity = str(row.get("experiment_id") or "")
+                    if not identity:
+                        raise StorageError("V6 experiment identity is required")
+                    payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                    existing = connection.execute(
+                        "SELECT payload_json FROM alpha_v6_experiments WHERE experiment_id = ?",
+                        (identity,),
+                    ).fetchone()
+                    if existing is not None:
+                        prior = _json_value(existing[0])
+                        if not isinstance(prior, dict) or _immutable_semantics(
+                            prior
+                        ) != _immutable_semantics(row):
+                            raise StorageError(f"immutable V6 experiment conflict: {identity}")
+                        skipped += 1
+                        continue
                     cursor = connection.execute(
                         """
                         INSERT OR IGNORE INTO alpha_v6_experiments
@@ -7012,16 +7426,25 @@ class SQLiteScanStore:
                         VALUES (?, ?, ?, ?, ?)
                         """,
                         (
-                            str(row.get("experiment_id") or ""),
+                            identity,
                             str(row.get("created_at") or ""),
                             str(row.get("status") or ""),
                             str(row.get("hypothesis") or ""),
-                            json.dumps(row, sort_keys=True),
+                            payload_json,
                         ),
                     )
                     if cursor.rowcount:
                         inserted += 1
                     else:
+                        raced = connection.execute(
+                            "SELECT payload_json FROM alpha_v6_experiments WHERE experiment_id = ?",
+                            (identity,),
+                        ).fetchone()
+                        prior = _json_value(raced[0]) if raced is not None else None
+                        if not isinstance(prior, dict) or _immutable_semantics(
+                            prior
+                        ) != _immutable_semantics(row):
+                            raise StorageError(f"immutable V6 experiment conflict: {identity}")
                         skipped += 1
             return {"inserted": inserted, "skipped": skipped}
         except sqlite3.Error as exc:
@@ -7031,12 +7454,53 @@ class SQLiteScanStore:
         self.initialize()
         return self._load_v6_payload_rows("alpha_v6_experiments", "created_at", limit=limit)
 
+    def load_alpha_v6_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        """Load one experiment by its primary identifier."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_experiments WHERE experiment_id = ?",
+                    (experiment_id,),
+                ).fetchone()
+                return json.loads(str(row[0])) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 experiment: {exc}") from exc
+
     def persist_alpha_v6_holdout_evaluation(self, row: dict[str, Any]) -> bool:
         """Persist once per experiment; a second evaluation is rejected by UNIQUE."""
 
         self.initialize()
         try:
             with self._connect() as connection:
+                identity = str(row.get("experiment_id") or "")
+                if not identity:
+                    raise StorageError("V6 holdout experiment identity is required")
+                expected_receipt_hash = canonical_hash(
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"receipt_hash_sha256", "created_at"}
+                    }
+                )
+                if str(row.get("receipt_hash_sha256") or "") != expected_receipt_hash:
+                    raise StorageError("V6 holdout receipt hash is missing or invalid")
+                payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_holdout_evaluations WHERE experiment_id = ?",
+                    (identity,),
+                ).fetchone()
+                if existing is not None:
+                    prior = _json_value(existing[0])
+                    prior_semantics = (
+                        _immutable_semantics(prior) if isinstance(prior, dict) else None
+                    )
+                    candidate_semantics = _immutable_semantics(row)
+                    if prior_semantics != candidate_semantics:
+                        raise StorageError(f"immutable V6 holdout evaluation conflict: {identity}")
+                    return False
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO alpha_v6_holdout_evaluations
@@ -7050,10 +7514,21 @@ class SQLiteScanStore:
                         str(row.get("evaluated_at") or ""),
                         str(row.get("status") or ""),
                         str(row.get("evidence_hash_sha256") or ""),
-                        json.dumps(row, sort_keys=True),
+                        payload_json,
                     ),
                 )
-                return bool(cursor.rowcount)
+                if cursor.rowcount:
+                    return True
+                raced = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_holdout_evaluations WHERE experiment_id = ?",
+                    (identity,),
+                ).fetchone()
+                prior = _json_value(raced[0]) if raced is not None else None
+                if not isinstance(prior, dict) or _immutable_semantics(
+                    prior
+                ) != _immutable_semantics(row):
+                    raise StorageError(f"immutable V6 holdout evaluation conflict: {identity}")
+                return False
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist V6 holdout evaluation: {exc}") from exc
 
@@ -7062,6 +7537,20 @@ class SQLiteScanStore:
         return self._load_v6_payload_rows(
             "alpha_v6_holdout_evaluations", "evaluated_at", limit=limit
         )
+
+    def load_alpha_v6_holdout_evaluation(self, experiment_id: str) -> dict[str, Any] | None:
+        """Load the immutable holdout receipt by its unique experiment id."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM alpha_v6_holdout_evaluations WHERE experiment_id = ?",
+                    (experiment_id,),
+                ).fetchone()
+                return json.loads(str(row[0])) if row is not None else None
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 holdout evaluation: {exc}") from exc
 
     def persist_alpha_v6_labels(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Append immutable V6 label-family receipts."""
@@ -7457,18 +7946,47 @@ class SQLiteScanStore:
         names_sql = quote_sql_identifiers(names, allowed=allowed_columns)
         placeholders = ", ".join("?" for _ in names)
         values: list[Any] = [str(row.get(identity_field) or "")]
+        if not values[0]:
+            raise StorageError(f"Immutable {table} identity is required")
         for column in columns:
             value = row.get(column)
             values.append(1 if column == "approved" and value is True else value)
-        values.append(json.dumps(row, sort_keys=True))
+        payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                identity_sql = quote_sql_identifier(
+                    identity_field, allowed=allowed_columns
+                )
+                existing = connection.execute(
+                    f"SELECT payload_json FROM {table_sql} WHERE {identity_sql} = ?",  # nosec B608
+                    (values[0],),
+                ).fetchone()
+                if existing is not None:
+                    prior = _json_value(existing[0])
+                    if not isinstance(prior, dict) or _immutable_semantics(
+                        prior
+                    ) != _immutable_semantics(row):
+                        raise StorageError(f"Immutable {table} identity conflict: {values[0]}")
+                    return False
+                values.append(payload_json)
                 cursor = connection.execute(
                     # Table and columns are allowlisted; placeholders contain only question marks.
                     f"INSERT OR IGNORE INTO {table_sql} ({names_sql}) VALUES ({placeholders})",
                     values,
                 )
-                return bool(cursor.rowcount)
+                if cursor.rowcount:
+                    return True
+                raced = connection.execute(
+                    f"SELECT payload_json FROM {table_sql} WHERE {identity_sql} = ?",  # nosec B608
+                    (values[0],),
+                ).fetchone()
+                prior = _json_value(raced[0]) if raced is not None else None
+                if not isinstance(prior, dict) or _immutable_semantics(
+                    prior
+                ) != _immutable_semantics(row):
+                    raise StorageError(f"Immutable {table} identity conflict: {values[0]}")
+                return False
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist V6 payload in {table}: {exc}") from exc
 
@@ -8692,8 +9210,7 @@ class SQLiteScanStore:
                             or not isinstance(embedded_receipt, Mapping)
                             or str(authoritative_receipt[0]).lower()
                             != str(row.get("receipt_hash_sha256") or "").lower()
-                            or str(authoritative_receipt[1])
-                            != str(row.get("strategy_id") or "")
+                            or str(authoritative_receipt[1]) != str(row.get("strategy_id") or "")
                             or str(authoritative_receipt[2])
                             != str(row.get("strategy_version") or "")
                             or str(authoritative_receipt[3]).upper()
@@ -8721,11 +9238,9 @@ class SQLiteScanStore:
                         (bridge_id,),
                     ).fetchone()
                     if existing is not None:
-                        if (
-                            str(existing[0]) != bridge_hash
-                            or comparable_payload(str(existing[1]))
-                            != comparable_payload(payload_json)
-                        ):
+                        if str(existing[0]) != bridge_hash or comparable_payload(
+                            str(existing[1])
+                        ) != comparable_payload(payload_json):
                             raise StorageError(
                                 "research outcome bridge identity/payload mismatch: " + bridge_id
                             )
@@ -8739,13 +9254,9 @@ class SQLiteScanStore:
                     ).fetchone()
                     if logical_existing is not None:
                         existing_payload = json.loads(str(logical_existing[2]))
-                        existing_status = str(
-                            existing_payload.get("outcome_status") or ""
-                        ).upper()
+                        existing_status = str(existing_payload.get("outcome_status") or "").upper()
                         incoming_status = str(
-                            row.get("source_outcome_status")
-                            or row.get("outcome_status")
-                            or ""
+                            row.get("source_outcome_status") or row.get("outcome_status") or ""
                         ).upper()
                         # A transient missing capture is retained as an
                         # immutable diagnostic, while the first recovered
@@ -8787,14 +9298,11 @@ class SQLiteScanStore:
                                     "to_logical_key": logical_key,
                                 }
                             )
-                            payload_json = json.dumps(
-                                row, sort_keys=True, separators=(",", ":")
-                            )
+                            payload_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
                             try:
                                 from intraday_scanner.services import (
                                     research_episode_outcome_service,
                                 )
-
                                 persisted_validator = (
                                     research_episode_outcome_service
                                     ._validate_persisted_research_episode_outcome_bridge
@@ -8802,8 +9310,7 @@ class SQLiteScanStore:
                                 persisted_validator(row)
                             except (SnapshotValidationError, TypeError, ValueError) as exc:
                                 raise StorageError(
-                                    "research outcome producer proof is invalid: "
-                                    + str(exc)
+                                    "research outcome producer proof is invalid: " + str(exc)
                                 ) from exc
                             logical_existing = connection.execute(
                                 "SELECT bridge_id, bridge_hash_sha256, payload_json "
@@ -8918,8 +9425,7 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 return [
-                    json.loads(str(row[0]))
-                    for row in connection.execute(query, params).fetchall()
+                    json.loads(str(row[0])) for row in connection.execute(query, params).fetchall()
                 ]
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load research outcome bridges: {exc}") from exc
@@ -8933,6 +9439,31 @@ class SQLiteScanStore:
         """Open this database without allowing the caller to mutate it."""
 
         return connect_read_only(self.db_path)
+
+
+def _read_schema_version_marker(connection: sqlite3.Connection) -> int | None:
+    """Read the migration marker without creating or changing any schema.
+
+    This intentionally does not call ``migrations.get_schema_version`` because
+    that helper creates ``schema_version`` when it is absent.  A marker probe
+    is used only to invalidate the process-local initialization cache; the
+    normal migration runner remains the authority for fresh and legacy stores.
+    """
+
+    table = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_version'
+        LIMIT 1
+        """
+    ).fetchone()
+    if table is None:
+        return None
+    row = connection.execute(
+        "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    return int(row[0]) if row is not None and row[0] is not None else 0
 
 
 def _assert_applied_backfeed_allowed(
@@ -9097,8 +9628,11 @@ def _hydrate_contributor_projection(target: dict[str, Any], source: Mapping[str,
         normalized.append(normalized_item)
         contributor_ids.append(strategy_id)
     if "strategy_contributor_count" in source:
+        declared_count_value = source.get("strategy_contributor_count")
         try:
-            declared_count = int(source.get("strategy_contributor_count"))
+            if declared_count_value is None:
+                raise TypeError("historical signal contributor count is missing")
+            declared_count = int(declared_count_value)
         except (TypeError, ValueError) as exc:
             raise StorageError("historical signal contributor count is invalid") from exc
         if declared_count != len(normalized):
@@ -9702,6 +10236,9 @@ def _validate_signal_parent_rows(
                 link_strategy_id,
                 link_strategy_version,
             ) = next(iter(scenario_entries))
+            decision_entry = _float_or_none(decision_entry_trigger)
+            decision_stop = _float_or_none(decision_invalidation_level)
+            decision_target = _float_or_none(decision_target_1)
             contract_matches = (
                 bool(expected_decision_id)
                 and bool(expected_date[:10])
@@ -9714,14 +10251,14 @@ def _validate_signal_parent_rows(
                 and decision_broker_execution_enabled == "0"
                 and decision_direction == "bullish"
                 and decision_action == "ENTER_LONG"
-                and _float_or_none(decision_entry_trigger) is not None
-                and _float_or_none(decision_invalidation_level) is not None
-                and _float_or_none(decision_target_1) is not None
+                and decision_entry is not None
+                and decision_stop is not None
+                and decision_target is not None
                 and (
-                    _float_or_none(decision_entry_trigger)
-                    > _float_or_none(decision_invalidation_level)
+                    decision_entry
+                    > decision_stop
                     > 0
-                    and _float_or_none(decision_target_1) > _float_or_none(decision_entry_trigger)
+                    and decision_target > decision_entry
                 )
                 and link_cohort == decision_cohort
                 and link_strategy_id == SCENARIO_STRATEGY_ID

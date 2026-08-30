@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,6 +12,7 @@ ALPHAOPS_V6_STRATEGY_VERSION = "dawnstrike-alphaops-v6-shadow"
 ALPHAOPS_V6_MODEL_VERSION = "dawnstrike-alphaops-v6-research-suite-v2"
 V6_COST_MODEL_VERSION = "dawnstrike-alphaops-v6-conservative-cost-v1"
 FEATURE_SCHEMA_VERSION = "dawnstrike-alphaops-v6-feature-schema-v1"
+FEATURE_SCHEMA_V2 = "dawnstrike-alphaops-v6-feature-schema-v2"
 LABEL_SCHEMA_VERSION = "dawnstrike-alphaops-v6-label-schema-v2"
 DATASET_SCHEMA_VERSION = "dawnstrike-alphaops-v6-dataset-v2"
 ALLOWED_DECISION_ACTIONS = frozenset(
@@ -28,6 +30,14 @@ def canonical_hash(value: object) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def is_valid_sha256(value: object) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", str(value or "")))
+
+
+def is_valid_code_sha(value: object) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", str(value or "")))
 
 
 def utc_now() -> str:
@@ -124,6 +134,7 @@ __all__ = [
     "ALPHAOPS_V6_STRATEGY_VERSION",
     "DATASET_SCHEMA_VERSION",
     "FEATURE_SCHEMA_VERSION",
+    "FEATURE_SCHEMA_V2",
     "LABEL_SCHEMA_VERSION",
     "V6_COST_MODEL_VERSION",
     "canonical_hash",

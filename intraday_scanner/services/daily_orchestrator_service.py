@@ -69,8 +69,9 @@ def daily_orchestration_status(
     latest_stages = _latest_stage_attempts(scoped_stages)
     recorded = set(latest_stages)
     heartbeat = _read_heartbeat(Path(state_root) / "heartbeats" / f"{market_date[:10]}.json")
+    terminal_status = str((latest_run or {}).get("status") or "")
     stale = _heartbeat_stale(heartbeat, current, heartbeat_ttl_minutes) and not (
-        str((latest_run or {}).get("status") or "") == "COMPLETE"
+        terminal_status in {"COMPLETE", "SKIPPED_NOT_APPLICABLE"}
         and bool((latest_run or {}).get("completed_at"))
     )
     missing = [stage for stage in DAILY_STAGE_ORDER if stage not in recorded]
@@ -81,7 +82,9 @@ def daily_orchestration_status(
         in {"FAILED", "DEGRADED", "TERMINAL_MISSING"}
     ]
     status = "HEALTHY"
-    if failed:
+    if terminal_status == "SKIPPED_NOT_APPLICABLE" and not failed:
+        status = "SKIPPED_NOT_APPLICABLE"
+    elif failed:
         status = "FAILED_STAGE_RECORDED"
     elif stale:
         status = "STALE_HEARTBEAT"
@@ -97,6 +100,11 @@ def daily_orchestration_status(
         "failed_stages": failed,
         "heartbeat": heartbeat,
         "heartbeat_stale": stale,
+        "terminal_state": (
+            "SKIPPED_NOT_APPLICABLE"
+            if terminal_status == "SKIPPED_NOT_APPLICABLE"
+            else None
+        ),
         "next_action": _next_action(status),
         "research_only": True,
         "broker_execution_enabled": False,

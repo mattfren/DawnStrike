@@ -16,6 +16,7 @@ from statistics import mean, median
 from typing import Any
 
 from intraday_scanner.performance.paper_ops import load_paper_ops
+from intraday_scanner.services.outcome_capture_contract import classify_missing_capture
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 ALPHA_STRATEGIES = frozenset({"alphaops_v4", "alphaops_v5"})
@@ -186,8 +187,12 @@ def build_alpha_attribution_report(
         ),
     }
     terminal_missing = [
-        row for row in attempts if str(row.get("status") or "") == "terminal_missing"
+        row for row in attempts if _attempt_missing_classification(row) == "authoritative_terminal"
     ]
+    recoverable_missing = [
+        row for row in attempts if _attempt_missing_classification(row) == "recoverable"
+    ]
+    unresolved_missing = [*terminal_missing, *recoverable_missing]
     report: dict[str, Any] = {
         "schema_version": "dawnstrike.alpha_attribution.v1",
         "attribution_version": ATTRIBUTION_VERSION,
@@ -219,11 +224,13 @@ def build_alpha_attribution_report(
         "diagnostic_attribution": diagnostic_attribution,
         "outcome_coverage": {
             "attempt_count": len(attempts),
-            "resolved_count": len(attempts) - len(terminal_missing),
+            "resolved_count": len(attempts) - len(unresolved_missing),
             "terminal_missing_count": len(terminal_missing),
+            "authoritative_terminal_count": len(terminal_missing),
+            "recoverable_missing_count": len(recoverable_missing),
             "coverage_pct": (
                 round(
-                    ((len(attempts) - len(terminal_missing)) / len(attempts)) * 100.0,
+                    ((len(attempts) - len(unresolved_missing)) / len(attempts)) * 100.0,
                     4,
                 )
                 if attempts
@@ -272,13 +279,16 @@ def build_trade_attribution_cases(
     for trade in trades:
         if not _is_reconciled_closed_trade(trade):
             continue
-        case_id = "tac-" + _hash(
-            {
-                "trade_id": trade.get("trade_id"),
-                "reconciliation_status": trade.get("reconciliation_status"),
-                "source_lineage_hash_sha256": trade.get("source_lineage_hash_sha256"),
-            }
-        )[:28]
+        case_id = (
+            "tac-"
+            + _hash(
+                {
+                    "trade_id": trade.get("trade_id"),
+                    "reconciliation_status": trade.get("reconciliation_status"),
+                    "source_lineage_hash_sha256": trade.get("source_lineage_hash_sha256"),
+                }
+            )[:28]
+        )
         setup = _setup_factor(case_id, trade, generated_at=generated_at)
         execution = _execution_factor(case_id, trade, generated_at=generated_at)
         distribution = _factor(
@@ -288,9 +298,7 @@ def build_trade_attribution_cases(
             {
                 "after_cost_return_pct": _number(trade.get("net_return_pct")),
                 "expected_return_pct": _number(trade.get("expected_return_pct")),
-                "outcome_reconciliation_quality": trade.get(
-                    "outcome_reconciliation_quality"
-                ),
+                "outcome_reconciliation_quality": trade.get("outcome_reconciliation_quality"),
             },
             generated_at=generated_at,
             missing_fields=["predeclared_model_distribution_evidence"],
@@ -395,8 +403,7 @@ def _setup_factor(case_id: str, trade: dict[str, Any], *, generated_at: str) -> 
             "ATR is excluded."
         ),
         counterfactual_policy=(
-            "No parameter change from one trade; require preregistered aggregate OOS "
-            "evidence."
+            "No parameter change from one trade; require preregistered aggregate OOS evidence."
         ),
     )
 
@@ -1029,14 +1036,24 @@ def _historical_outcome_quality(trade: dict[str, Any]) -> str:
 def _v6_outcome_quality(outcome: dict[str, Any]) -> str:
     status = _category(outcome.get("outcome_status"), missing="missing_outcome")
     if status in {"terminal_missing", "missing_outcome"}:
+        if _attempt_missing_classification(outcome) == "recoverable":
+            return "unattributed_recoverable_missing_evidence"
         return "unattributed_insufficient_evidence"
     return f"reconciled_{status}"
+
+
+_attempt_missing_classification = classify_missing_capture
 
 
 def _sampled_reject_regret(sampled_reject: bool, outcome: dict[str, Any]) -> str:
     if not sampled_reject:
         return "not_applicable_not_sampled_reject"
-    if str(outcome.get("outcome_status") or "").upper() == "TERMINAL_MISSING":
+    if (
+        str(outcome.get("outcome_status") or "").upper() == "TERMINAL_MISSING"
+        and _attempt_missing_classification(outcome) != "resolved"
+    ):
+        if _attempt_missing_classification(outcome) == "recoverable":
+            return "sampled_reject_recoverable_missing_evidence"
         return "unattributed_insufficient_evidence"
     value = _number(outcome.get("net_excess_return_pct"))
     if value is None:
@@ -1076,8 +1093,15 @@ def _daily_row(
         or str(row.get("ticker") or "").upper() == "NO_TRADE"
         for row in day_selections
     )
-    missing = sum(1 for row in day_attempts if str(row.get("status") or "") == "terminal_missing")
-    if missing:
+    terminal_missing = sum(
+        1
+        for row in day_attempts
+        if _attempt_missing_classification(row) == "authoritative_terminal"
+    )
+    recoverable_missing = sum(
+        1 for row in day_attempts if _attempt_missing_classification(row) == "recoverable"
+    )
+    if terminal_missing or recoverable_missing:
         status = "MISSING"
     elif day_trades:
         status = "COMPLETE"
@@ -1093,7 +1117,9 @@ def _daily_row(
         "status": status,
         "selection_count": len(day_selections),
         "evaluation_count": len(day_evaluations),
-        "terminal_missing_count": missing,
+        "terminal_missing_count": terminal_missing,
+        "authoritative_terminal_count": terminal_missing,
+        "recoverable_missing_count": recoverable_missing,
         **summary,
     }
 

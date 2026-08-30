@@ -54,6 +54,8 @@ LEGACY_CANDIDATE_SEMANTICS_CONTRACT = "legacy_module_bound_v1"
 SCOPED_CANDIDATE_SEMANTICS_CONTRACT = "scoped_candidate_semantics_v2"
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,80}$")
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_CODE_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 
 def initialize_shadow_registry(
@@ -1638,6 +1640,7 @@ def _freeze_registration(
     registration: JsonDict = {
         "schema_version": REGISTERED_CHALLENGER_SCHEMA,
         "challenger_id": challenger_id,
+        "experiment_id": str(raw.get("experiment_id") or challenger_id),
         "strategy_id": strategy_id,
         "champion_strategy_version": champion[0],
         "champion_strategy_semantics_fingerprint": champion[2],
@@ -1654,6 +1657,47 @@ def _freeze_registration(
         "automatic_promotion_enabled": False,
         "broker_execution_allowed": False,
     }
+    evaluation_window = _freeze_evaluation_window(raw)
+    if evaluation_window is not None:
+        registration["evaluation_window"] = evaluation_window
+        derived_window_hash = _sha256(evaluation_window)
+        supplied_window_hash = raw.get("window_hash_sha256")
+        if supplied_window_hash is not None and (
+            not _SHA256_HEX.fullmatch(str(supplied_window_hash))
+            or str(supplied_window_hash) != derived_window_hash
+        ):
+            raise ValueError("shadow registration window_hash_sha256 does not match frozen window")
+        registration["window_hash_sha256"] = derived_window_hash
+        for field in (
+            "data_hash_sha256",
+            "source_hash_sha256",
+            "code_sha",
+            "config_hash_sha256",
+            "input_hash_sha256",
+            "v5_comparison_hash_sha256",
+        ):
+            value = raw.get(field)
+            valid = _CODE_SHA if field == "code_sha" else _SHA256_HEX
+            if value is not None and not valid.fullmatch(str(value)):
+                raise ValueError(f"shadow registration {field} is malformed")
+            if value is not None:
+                registration[field] = str(value)
+    registration["experiment_lineage_status"] = (
+        "FROZEN_EVALUABLE"
+        if evaluation_window is not None
+        and all(
+            registration.get(field)
+            for field in (
+                "data_hash_sha256",
+                "source_hash_sha256",
+                "code_sha",
+                "config_hash_sha256",
+                "input_hash_sha256",
+                "v5_comparison_hash_sha256",
+            )
+        )
+        else "NOT_EVALUABLE_MISSING_LINEAGE"
+    )
     if candidate_semantics_contract == SCOPED_CANDIDATE_SEMANTICS_CONTRACT:
         registration["candidate_semantics_contract"] = candidate_semantics_contract
     elif candidate_semantics_contract != LEGACY_CANDIDATE_SEMANTICS_CONTRACT:
@@ -1708,7 +1752,78 @@ def _registration_template(output_root: Path) -> JsonDict:
                 "min_parent_score": 0.0,
             },
         },
+        "evaluation_window": {
+            "training": {
+                "start": "REPLACE_WITH_DATE",
+                "end": "REPLACE_WITH_DATE",
+                "market_dates": [],
+            },
+            "validation": {
+                "start": "REPLACE_WITH_DATE",
+                "end": "REPLACE_WITH_DATE",
+                "market_dates": [],
+            },
+            "untouched_holdout": {
+                "start": "REPLACE_WITH_DATE",
+                "end": "REPLACE_WITH_DATE",
+                "market_dates": [],
+            },
+        },
     }
+
+
+def _freeze_evaluation_window(raw: JsonDict) -> JsonDict | None:
+    """Normalize an optional immutable train/validation/holdout contract."""
+    value = raw.get("evaluation_window")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("shadow evaluation_window must be an object")
+    required = ("training", "validation", "untouched_holdout")
+    if any(not isinstance(value.get(name), dict) for name in required):
+        raise ValueError("shadow evaluation_window must contain all frozen partitions")
+    output: JsonDict = {}
+    for name in required:
+        row = value[name]
+        raw_dates = [str(item) for item in (row.get("market_dates") or [])]
+        if any(not _valid_iso_date(item) for item in raw_dates):
+            raise ValueError(f"shadow {name} evaluation window contains a non-ISO date")
+        if len(set(raw_dates)) != len(raw_dates):
+            raise ValueError(f"shadow {name} evaluation window contains duplicate dates")
+        dates = sorted(raw_dates)
+        start = str(row.get("start") or row.get("cutoff") or "")
+        end = str(row.get("end") or row.get("cutoff") or "")
+        if (
+            not dates
+            or not start
+            or not end
+            or not _valid_iso_date(start)
+            or not _valid_iso_date(end)
+        ):
+            raise ValueError(f"shadow {name} evaluation window is malformed")
+        if start > end or any(item < start or item > end for item in dates):
+            raise ValueError(f"shadow {name} evaluation dates fall outside its frozen bounds")
+        output[name] = {"start": start, "end": end, "market_dates": dates}
+    if not (
+        output["training"]["end"] < output["validation"]["start"]
+        and output["validation"]["end"] < output["untouched_holdout"]["start"]
+    ):
+        raise ValueError("shadow evaluation windows must be chronological and disjoint")
+    all_dates = [item for row in output.values() for item in row["market_dates"]]
+    if len(set(all_dates)) != len(all_dates):
+        raise ValueError("shadow evaluation partitions must have disjoint market dates")
+    return output
+
+
+def _valid_iso_date(value: str) -> bool:
+    """Accept only calendar dates that exist, in canonical ISO form."""
+
+    if not _ISO_DATE.fullmatch(value):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
 
 
 def _normalize_implementation(raw: JsonDict) -> JsonDict:
@@ -1970,6 +2085,7 @@ def _scoped_candidate_semantics_fingerprint(
 def _logic_artifact_sha256(registration: JsonDict) -> str:
     fields: tuple[str, ...] = (
         "challenger_id",
+        "experiment_id",
         "strategy_id",
         "champion_strategy_version",
         "champion_strategy_semantics_fingerprint",
@@ -1984,6 +2100,15 @@ def _logic_artifact_sha256(registration: JsonDict) -> str:
         "research_only",
         "automatic_promotion_enabled",
         "broker_execution_allowed",
+        "evaluation_window",
+        "window_hash_sha256",
+        "data_hash_sha256",
+        "source_hash_sha256",
+        "code_sha",
+        "config_hash_sha256",
+        "input_hash_sha256",
+        "v5_comparison_hash_sha256",
+        "experiment_lineage_status",
     )
     if "candidate_semantics_contract" in registration:
         fields = (*fields, "candidate_semantics_contract")

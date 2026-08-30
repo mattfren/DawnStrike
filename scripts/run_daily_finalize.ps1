@@ -19,13 +19,13 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot (Join-Path $state "logs")
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
 $outputPath = Join-Path $runtime "build\public"
 $resultPath = Join-Path $state "outputs\daily_finalize\$MarketDate\daily-finalize-result.json"
 $deploymentResult = Join-Path $runtime "build\daily-deployment-result.json"
 $logRoot = Join-Path $state "logs"
-$marketDateWasExplicit = $PSBoundParameters.ContainsKey("MarketDate")
 
 if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
     throw "Dawnstrike durable state database not found: $dbPath"
@@ -53,22 +53,88 @@ if ($heartbeat.exit_code -ne 0) {
 
 Push-Location $runtime
 try {
-    if (-not $marketDateWasExplicit) {
-        $calendar = Invoke-DawnstrikeNativeProcess `
-            -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.services.market_calendar", "--date", $MarketDate) `
-            -LogRoot $logRoot `
-            -LogName "daily_finalize_calendar-$MarketDate"
-        $calendarExit = $calendar.exit_code
-        if ($calendarExit -eq 10) {
-            Write-Output (
-                "Skipping non-market date $MarketDate; no publication was attempted."
+    $calendar = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("-m", "intraday_scanner.services.market_calendar", "--date", $MarketDate) `
+        -LogRoot $logRoot `
+        -LogName "daily_finalize_calendar-$MarketDate"
+    $calendarExit = $calendar.exit_code
+    if ($calendarExit -eq 10) {
+        # A closed/holiday date is a successful terminal observation, not a
+        # missing run. Persist every DAG stage and a terminal heartbeat so
+        # status tooling can distinguish it from a stale or failed weekday.
+        $terminalStartedAt = (Get-Date).ToUniversalTime().ToString("o")
+        $closedFunnelPath = Join-Path $state "outputs\daily_finalize\$MarketDate\non-session-terminal.json"
+        $closedFunnel = [ordered]@{
+            schema_version = "dawnstrike.daily_no_trade_funnel.v1"
+            terminal_state = "SKIPPED_NOT_APPLICABLE"
+            status = "NO_TRADE"
+            reason = "market_closed"
+            candidate_count = 0
+            selected_count = 0
+            delivered_count = 0
+            paper_fill_count = 0
+            return_pct = $null
+            gross_return_pct = $null
+            net_pnl = $null
+            picks = $null
+            missing_truth_is_zero = $false
+            research_only = $true
+            live_trading_enabled = $false
+        }
+        $closedFunnelJson = $closedFunnel | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText(
+            $closedFunnelPath,
+            $closedFunnelJson,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        $closedStages = @(
+            "morning_collection", "ranking_delivery", "indeterminate_research",
+            "intraday_monitor", "scenario_intelligence", "scenario_finalization",
+            "eod_outcome_capture", "paper_reconciliation", "alpha_learning",
+            "paperops_forward", "canonical_performance", "calendar_build",
+            "publication", "readiness"
+        )
+        foreach ($stageName in $closedStages) {
+            $optional = @(
+                "indeterminate_research", "scenario_intelligence",
+                "scenario_finalization", "alpha_learning", "paperops_forward"
+            ) -contains $stageName
+            $stageArguments = @(
+                "scripts\record_daily_stage.py", "--db-path", $dbPath,
+                "--market-date", $MarketDate, "--stage", $stageName,
+                "--status", "SKIPPED_NOT_APPLICABLE", "--runtime-root", $runtime,
+                "--state-root", $state, "--release-sha", $releaseSha,
+                "--exit-code", "0", "--started-at", $terminalStartedAt,
+                "--result-file", $closedFunnelPath,
+                "--error-code", "market_closed",
+                "--error-detail", "No scheduled equity session; no-trade funnel is explicit and returns remain null."
             )
-            exit 0
+            if ($optional) { $stageArguments += "--not-required" }
+            $stageReceipt = Invoke-DawnstrikeNativeProcess `
+                -FilePath "py.exe" `
+                -ArgumentList $stageArguments `
+                -LogRoot $logRoot `
+                -LogName "daily_finalize_closed_stage-$stageName-$MarketDate"
+            if ($stageReceipt.exit_code -ne 0) {
+                throw "Could not persist closed-market stage $stageName."
+            }
         }
-        if ($calendarExit -ne 0) {
-            throw "Market calendar failed with exit code $calendarExit"
+        $terminalHeartbeat = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "daily-heartbeat", "--state-root", $state, "--runtime-root", $runtime, "--market-date", $MarketDate, "--stage", "readiness", "--status", "SKIPPED_NOT_APPLICABLE", "--release-sha", $releaseSha) `
+            -LogRoot $logRoot `
+            -LogName "daily_finalize_terminal_heartbeat-$MarketDate"
+        if ($terminalHeartbeat.exit_code -ne 0) {
+            throw "Could not persist closed-market terminal heartbeat."
         }
+        Write-Output (
+            "Closed/non-session date $MarketDate recorded as SKIPPED_NOT_APPLICABLE; no publication was attempted."
+        )
+        exit 0
+    }
+    if ($calendarExit -ne 0) {
+        throw "Market calendar failed with exit code $calendarExit"
     }
 
     if ($env:DAWNSTRIKE_SCENARIO_INTELLIGENCE_ENABLED -match '^(?i:true|1|yes|y)$') {

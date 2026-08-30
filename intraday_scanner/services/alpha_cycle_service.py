@@ -57,7 +57,6 @@ from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_summary,
     format_alpha_watch,
 )
-from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.csv_provider import CsvSnapshotProvider
 from intraday_scanner.providers.nasdaq_halt_provider import (
     attach_halt_status,
@@ -245,6 +244,14 @@ def alpha_cycle(
         return skipped_result
     store = SQLiteScanStore(db_path)
     store.initialize()
+    # The mover and core lanes intentionally share this process' provider
+    # identity and pacing budget.  Keep acquisition serialized until a
+    # process-wide lane limiter and receipt coordinator exist: overlapping
+    # children could consume the same Alpaca quota concurrently, reorder the
+    # point-in-time batch receipts, and race the artifact promotion boundary.
+    # ``cycle_decision_at`` remains the one frozen observation instant for both
+    # lanes; this is the governed max-concurrency=1 contract, not an implicit
+    # fallback to wall-clock timestamps.
     collection = web_auto_collect(
         config_path=config_path,
         db_path=db_path,
@@ -333,7 +340,7 @@ def alpha_cycle(
         review = review_alpha_signals([], source_summary=source_summary)
         no_data_scan_id = f"{cycle_name}:source_failure:{cycle_decision_timestamp[:10]}"
         no_data_generated_at = cycle_decision_timestamp
-        no_data_no_trade_row = _build_no_trade_historical_signal(
+        no_data_no_trade_row: dict[str, Any] | None = _build_no_trade_historical_signal(
             scan_id=no_data_scan_id,
             generated_at=no_data_generated_at,
             reason=str(review["decision"]["reason"]),
@@ -728,7 +735,7 @@ def alpha_cycle(
         scanner_config = _alphaops_scanner_config(scanner_config)
     if core_only_recovery:
         scanner_config = scanner_config.with_overrides(min_gap_pct=0.0, ideal_gap_low_pct=1.0)
-    core_discovery = (
+    core_discovery: dict[str, Any] = (
         core_discovery_recovery
         if core_discovery_recovery is not None
         else discover_core_universe_rows(
@@ -1574,6 +1581,8 @@ def alpha_monitor(
     dry_run: bool = False,
     current_prices: dict[str, float] | None = None,
     as_of: datetime | None = None,
+    observation_bundle_path: str | Path | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, Any]:
     session_gate = _scheduled_session_gate(notify=notify, as_of=as_of)
     if session_gate is not None:
@@ -1823,14 +1832,23 @@ def alpha_monitor(
     ]
     price_observation: dict[str, Any] | None = None
     current_quotes: dict[str, dict[str, Any]] | None = None
-    if current_prices is None and active_signals:
+    observation_tickers = [str(row.get("ticker") or "") for row in active_signals]
+    if observation_bundle_path:
+        observation_tickers = _shared_monitor_bundle_tickers(
+            store,
+            active_signals=active_signals,
+            market_date=required_market_date,
+        )
+    if current_prices is None and observation_tickers:
         try:
             price_observation = collect_price_observations(
                 db_path=db_path,
                 source="alpaca",
-                tickers=[str(row.get("ticker") or "") for row in active_signals],
+                tickers=observation_tickers,
                 max_age_seconds=360,
                 persist=False,
+                observation_bundle_path=observation_bundle_path,
+                cycle_id=cycle_id,
             )
         except DataProviderError:
             if not dry_run:
@@ -1847,26 +1865,33 @@ def alpha_monitor(
             current_price = _positive_finite_price(row.get("current_price"))
             if row.get("is_usable") and current_price is not None:
                 current_prices[str(row.get("ticker") or "").upper()] = current_price
-        try:
-            live_config = load_config(database_path=Path(db_path))
-            quote_provider = AlpacaProvider(live_config)
-            quote_provider.validate_credentials()
-            quote_rows = quote_provider.get_latest_quotes(
-                [str(row.get("ticker") or "") for row in active_signals],
-                live_config,
-            )
-            current_quotes = {
-                ticker: {
-                    **row,
-                    "is_usable": _live_quote_is_usable(row, as_of=as_of),
-                }
-                for ticker, row in quote_rows.items()
+        # Bars and quotes are captured by one price-observation call.  Reusing
+        # those validated quote fields here prevents Alpha Monitor from
+        # refetching a second instant that Trade Watch cannot reproduce.
+        current_quotes = {}
+        quote_reference = as_of
+        if quote_reference is None and price_observation.get("requested_at"):
+            try:
+                quote_reference = datetime.fromisoformat(
+                    str(price_observation["requested_at"]).replace("Z", "+00:00")
+                )
+            except ValueError:
+                quote_reference = None
+        for row in price_observation.get("observations", []):
+            if str(row.get("quote_status") or "") != "USABLE":
+                continue
+            ticker = str(row.get("ticker") or "").upper()
+            quote = {
+                "ticker": ticker,
+                "bid": row.get("quote_bid"),
+                "ask": row.get("quote_ask"),
+                "timestamp": row.get("quote_observed_at"),
+                "source": row.get("quote_source"),
+                "source_hash_sha256": row.get("quote_source_hash_sha256"),
+                "is_usable": True,
             }
-        except DataProviderError as exc:
-            current_quotes = {}
-            if price_observation is not None:
-                price_observation["quote_status"] = "provider_unavailable"
-                price_observation["quote_error"] = str(exc)
+            quote["is_usable"] = _live_quote_is_usable(quote, as_of=quote_reference)
+            current_quotes[ticker] = quote
     if not active_signals:
         result: dict[str, Any] = {
             "status": "no_active_watchlist",
@@ -1931,6 +1956,40 @@ def alpha_monitor(
         result["session_gate"] = session_gate.to_dict()
     result["selection_evidence_status"] = selection_evidence_status
     return result
+
+
+def _shared_monitor_bundle_tickers(
+    store: SQLiteScanStore,
+    *,
+    active_signals: list[dict[str, Any]],
+    market_date: str,
+) -> list[str]:
+    """Resolve the complete deterministic target union before one bundle fetch.
+
+    Trade Watch also evaluates today's exact selections and any open paper
+    positions carried from earlier sessions.  Include that union in the Alpha
+    Monitor's initial request so a bundle is never incrementally extended at a
+    second provider instant.
+    """
+
+    tickers = {
+        str(row.get("ticker") or "").upper()
+        for row in active_signals
+        if str(row.get("ticker") or "").strip()
+    }
+    for row in store.load_paper_positions(status="OPEN", limit=50_000):
+        ticker = str(row.get("ticker") or "").upper().strip()
+        if ticker:
+            tickers.add(ticker)
+    for row in store.load_signal_selections(limit=50_000):
+        if str(row.get("selected_at") or "")[:10] != market_date:
+            continue
+        if str(row.get("decision") or "").lower() == "no_trade":
+            continue
+        ticker = str(row.get("ticker") or "").upper().strip()
+        if ticker and ticker != "NO_TRADE":
+            tickers.add(ticker)
+    return sorted(tickers)
 
 
 def _monitor_event_key(scan_id: str, result: dict[str, Any]) -> str:
@@ -2123,24 +2182,25 @@ def _radar_monitor_signals(
         if not signal_id:
             raise SnapshotValidationError("Research slate selection is missing signal identity.")
         selection_payload = dict(selection.get("payload_json") or {})
-        radar_signal = dict(selection_payload.get("signal") or {})
+        radar_signal: dict[str, Any] = dict(selection_payload.get("signal") or {})
         selection_scan_id = str(selection.get("scan_id") or "")
         source_scan_id = str(selection.get("source_scan_id") or "")
         cross_scan = bool(source_scan_id and source_scan_id != selection_scan_id)
+        signal: dict[str, Any]
         if cross_scan:
-            radar_signal = _validated_frozen_radar_signal(
+            validated_radar_signal = _validated_frozen_radar_signal(
                 selection,
                 production=production,
                 contributor_receipt_verifier=contributor_receipt_verifier,
             )
-            if radar_signal is None:
+            if validated_radar_signal is None:
                 raise SnapshotValidationError(
                     "Persisted research slate selection has invalid governed frozen-slate lineage."
                 )
-            signal = radar_signal
+            signal = validated_radar_signal
         else:
-            signal = signal_by_id.get(signal_id)
-            if signal is None:
+            existing_signal = signal_by_id.get(signal_id)
+            if existing_signal is None:
                 if not radar_signal:
                     continue
                 validated = _validated_frozen_radar_signal(
@@ -2151,6 +2211,8 @@ def _radar_monitor_signals(
                 if validated is None:
                     continue
                 signal = validated
+            else:
+                signal = existing_signal
         target = _number(radar_signal.get("radar_target") or signal.get("research_radar_target"))
         monitored.append(
             {
@@ -3385,12 +3447,13 @@ def _attach_authenticated_alpaca_structure(
                 raw_premarket.get("requested_at") if isinstance(raw_premarket, dict) else None
             )
             decision_dt = _parse_structure_time(decision_at)
-            bar_times = [
+            raw_bar_times: list[datetime | None] = [
                 _parse_structure_time(item.get("timestamp"))
                 for item in raw_bars or []
                 if isinstance(item, dict)
             ]
-            valid_bar_times = all(item is not None for item in bar_times)
+            valid_bar_times = all(item is not None for item in raw_bar_times)
+            bar_times: list[datetime] = [item for item in raw_bar_times if item is not None]
             ordered_bar_times = bool(bar_times) and all(
                 left < right for left, right in zip(bar_times, bar_times[1:], strict=False)
             )
@@ -3402,21 +3465,25 @@ def _attach_authenticated_alpaca_structure(
                 and (item.astimezone(EASTERN).hour, item.astimezone(EASTERN).minute) < (9, 30)
                 for item in bar_times
             )
-            complete_by_request = bool(requested_dt) and all(
-                item is not None and item + timedelta(minutes=1) <= requested_dt
-                for item in bar_times
-            )
+            if requested_dt is None:
+                complete_by_request = False
+            else:
+                complete_by_request = all(
+                    item + timedelta(minutes=1) <= requested_dt for item in bar_times
+                )
             latest_matches_aggregate = bool(bar_times) and (
                 bar_times[-1] == _parse_structure_time(observed)
                 and bar_times[-1] + timedelta(minutes=1) == _parse_structure_time(completed)
             )
-            high_values = [
+            raw_high_values = [
                 _number(item.get("high")) for item in raw_bars or [] if isinstance(item, dict)
             ]
-            low_values = [
+            raw_low_values = [
                 _number(item.get("low")) for item in raw_bars or [] if isinstance(item, dict)
             ]
-            premarket_reconciles = (
+            high_values = [value for value in raw_high_values if value is not None]
+            low_values = [value for value in raw_low_values if value is not None]
+            premarket_reconciles = bool(
                 _valid_sha256(premarket_hash)
                 and hashlib.sha256(canonical_premarket.encode("utf-8")).hexdigest()
                 == premarket_hash
@@ -3439,9 +3506,11 @@ def _attach_authenticated_alpaca_structure(
                     for item in raw_bars
                     if isinstance(item, dict)
                 )
-                and high_values
-                and low_values
-                and all(value is not None and value > 0 for value in high_values + low_values)
+                and bool(high_values)
+                and bool(low_values)
+                and len(high_values) == len(raw_high_values)
+                and len(low_values) == len(raw_low_values)
+                and all(value > 0 for value in high_values + low_values)
                 and high == max(high_values)
                 and low == min(low_values)
             )
@@ -3479,16 +3548,17 @@ def _attach_authenticated_alpaca_structure(
                 if isinstance(parsed_prior_raw, dict)
                 else None
             )
-            prior_raw_reconciles = (
-                isinstance(parsed_prior_raw, dict)
-                and str(parsed_prior_raw.get("ticker") or "").upper()
-                == str(output.get("ticker") or output.get("symbol") or "").upper()
-                and str(parsed_prior_raw.get("timestamp") or "") == prior_observed
-                and raw_high is not None
-                and abs(raw_high - prior_high) <= 1e-9
-                and raw_bar_high is not None
-                and abs(raw_bar_high - prior_high) <= 1e-9
-            )
+            if prior_high is not None:
+                prior_raw_reconciles = (
+                    isinstance(parsed_prior_raw, dict)
+                    and str(parsed_prior_raw.get("ticker") or "").upper()
+                    == str(output.get("ticker") or output.get("symbol") or "").upper()
+                    and str(parsed_prior_raw.get("timestamp") or "") == prior_observed
+                    and raw_high is not None
+                    and abs(raw_high - prior_high) <= 1e-9
+                    and raw_bar_high is not None
+                    and abs(raw_bar_high - prior_high) <= 1e-9
+                )
         except (TypeError, ValueError, json.JSONDecodeError):
             prior_raw_hash_ok = False
     authenticated = (
@@ -3600,7 +3670,7 @@ def _strict_structure_observation(
     *,
     ticker: str,
     role: str,
-    value: float,
+    value: float | None,
     observed_at: str,
     completed_at: str,
     source: str,

@@ -8,11 +8,15 @@ levels created by the scanner.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.models import SnapshotRow, utc_now_iso
@@ -62,6 +66,173 @@ STATUS_CONFIDENCE_ADJUSTMENT = {
     "invalidated": -70.0,
     "missing": -100.0,
 }
+EASTERN = ZoneInfo("America/New_York")
+MONITOR_GAP_SCHEMA_VERSION = "dawnstrike.monitor_interval_gap.v2"
+MONITOR_SCHEDULE_VERSION = "v1"
+DEFAULT_MONITOR_SCHEDULE_ID = "alphaops-monitor-5m"
+_SHA256_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def monitor_interval_gap_receipt(
+    *,
+    expected_at: str,
+    observed_at: str,
+    interval_seconds: int,
+    run_id: str | None = None,
+    market_date: str | None = None,
+    schedule_id: str = DEFAULT_MONITOR_SCHEDULE_ID,
+    release_sha: str | None = None,
+    reason: str = "monitor_interval_not_observed",
+) -> dict[str, Any]:
+    """Build an immutable receipt for one missed monitor slot.
+
+    This records an observation gap only.  It intentionally contains no
+    prices, candidates, counts, or inferred market result, so a skipped cycle
+    can never be mistaken for a no-opportunity market result.
+    """
+
+    interval = int(interval_seconds)
+    if interval <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if release_sha is None or not _SHA256_RE.fullmatch(str(release_sha)):
+        raise ValueError("release_sha must be an exact lowercase 40-character SHA")
+    expected = _canonical_monitor_time(expected_at)
+    observed = _canonical_monitor_time(observed_at)
+    expected_dt = datetime.fromisoformat(expected)
+    observed_dt = datetime.fromisoformat(observed)
+    if observed_dt <= expected_dt:
+        raise ValueError("observed_at must be after expected_at")
+    if (observed_dt - expected_dt).total_seconds() < interval:
+        raise ValueError("monitor gap observation must be at least one interval late")
+    resolved_market_date = str(market_date or expected_dt.astimezone(EASTERN).date())
+    if expected_dt.astimezone(EASTERN).date().isoformat() != resolved_market_date:
+        raise ValueError("monitor gap market_date does not match expected_at")
+    resolved_schedule_id = str(schedule_id or DEFAULT_MONITOR_SCHEDULE_ID)
+    identity = "|".join(
+        (
+            resolved_schedule_id,
+            MONITOR_SCHEDULE_VERSION,
+            resolved_market_date,
+            expected,
+            str(interval),
+            str(release_sha),
+        )
+    )
+    gap_id = "monitor-gap:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    payload = {
+        "schema_version": MONITOR_GAP_SCHEMA_VERSION,
+        "gap_id": gap_id,
+        "run_id": str(run_id or ""),
+        "schedule_id": resolved_schedule_id,
+        "schedule_version": MONITOR_SCHEDULE_VERSION,
+        "release_sha": str(release_sha),
+        "market_date": resolved_market_date,
+        "expected_at": expected,
+        "observed_at": observed,
+        "interval_seconds": interval,
+        "status": "MISSED_INTERVAL",
+        "reason": str(reason or "monitor_interval_not_observed"),
+        "market_data_available": False,
+        "missing_is_not_zero": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    payload["receipt_sha256"] = _monitor_gap_receipt_hash(payload)
+    validate_monitor_interval_gap_receipt(payload)
+    return payload
+
+
+def validate_monitor_interval_gap_receipt(row: Mapping[str, Any]) -> None:
+    """Reject non-canonical or non-research-only gap receipts before storage."""
+
+    required = {
+        "schema_version",
+        "gap_id",
+        "run_id",
+        "schedule_id",
+        "schedule_version",
+        "release_sha",
+        "market_date",
+        "expected_at",
+        "observed_at",
+        "interval_seconds",
+        "status",
+        "reason",
+        "market_data_available",
+        "missing_is_not_zero",
+        "research_only",
+        "broker_execution_enabled",
+        "receipt_sha256",
+    }
+    if set(row) != required:
+        raise ValueError("monitor gap receipt fields are not canonical")
+    if row["schema_version"] != MONITOR_GAP_SCHEMA_VERSION:
+        raise ValueError("monitor gap receipt schema is invalid")
+    release_sha = str(row["release_sha"])
+    if not _SHA256_RE.fullmatch(release_sha):
+        raise ValueError("monitor gap release_sha must be lowercase full SHA")
+    if not str(row["schedule_id"]).strip() or row["schedule_version"] != MONITOR_SCHEDULE_VERSION:
+        raise ValueError("monitor gap schedule contract is invalid")
+    if row["status"] != "MISSED_INTERVAL" or row["reason"] != "monitor_interval_not_observed":
+        raise ValueError("monitor gap status or reason is not canonical")
+    if row["market_data_available"] is not False or row["missing_is_not_zero"] is not True:
+        raise ValueError("monitor gap market-data flags are invalid")
+    if row["research_only"] is not True or row["broker_execution_enabled"] is not False:
+        raise ValueError("monitor gap execution flags are invalid")
+    try:
+        interval = int(row["interval_seconds"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("monitor gap interval is invalid") from exc
+    if interval <= 0 or str(row["interval_seconds"]) != str(interval):
+        raise ValueError("monitor gap interval must be a positive canonical integer")
+    market_date = str(row["market_date"])
+    try:
+        parsed_date = datetime.strptime(market_date, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("monitor gap market_date is invalid") from exc
+    if parsed_date.isoformat() != market_date:
+        raise ValueError("monitor gap market_date is not canonical")
+    expected = _canonical_monitor_time(str(row["expected_at"]))
+    observed = _canonical_monitor_time(str(row["observed_at"]))
+    if expected != row["expected_at"] or observed != row["observed_at"]:
+        raise ValueError("monitor gap timestamps are not canonical")
+    expected_dt = datetime.fromisoformat(expected)
+    observed_dt = datetime.fromisoformat(observed)
+    if observed_dt <= expected_dt or (observed_dt - expected_dt).total_seconds() < interval:
+        raise ValueError("monitor gap observation is not a complete interval late")
+    if expected_dt.astimezone(EASTERN).date().isoformat() != market_date:
+        raise ValueError("monitor gap expected_at does not match market_date")
+    identity = "|".join(
+        (
+            str(row["schedule_id"]),
+            str(row["schedule_version"]),
+            market_date,
+            expected,
+            str(interval),
+            release_sha,
+        )
+    )
+    expected_gap_id = "monitor-gap:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    if row["gap_id"] != expected_gap_id:
+        raise ValueError("monitor gap identity hash is invalid")
+    if row["receipt_sha256"] != _monitor_gap_receipt_hash(row):
+        raise ValueError("monitor gap receipt self-hash is invalid")
+
+
+def _monitor_gap_receipt_hash(row: Mapping[str, Any]) -> str:
+    unsigned = {key: value for key, value in row.items() if key != "receipt_sha256"}
+    encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _canonical_monitor_time(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"monitor timestamp is invalid: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("monitor timestamp must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 def run_setup_monitor(

@@ -341,11 +341,14 @@ def describe_trade_blotter_readonly_inputs(output_root: Path) -> dict[str, objec
             }
         )
     ledger = next((item for item in files if item["path"] == "ledger/paper_ledger.jsonl"), None)
+    ledger_size: object = ledger.get("size") if ledger else 0
+    if not isinstance(ledger_size, (int, float, str, bytes, bytearray)):
+        raise ValueError("PaperOps ledger size is malformed")
     return {
         "root": str(root),
         "files": files,
         "ledger_head_sha256": ledger.get("sha256") if ledger else None,
-        "ledger_size": int(ledger.get("size") or 0) if ledger else 0,
+        "ledger_size": int(ledger_size or 0),
     }
 
 

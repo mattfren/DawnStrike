@@ -687,7 +687,7 @@ function Invoke-DawnstrikeJobProcess {
         [Parameter()][string[]]$ArgumentList = @(),
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 3600)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
         [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5,
         [Parameter()][hashtable]$EnvironmentOverrides = @{}
     )

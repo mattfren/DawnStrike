@@ -22,6 +22,7 @@ from intraday_scanner.alpha.v6_shadow import (
     strict_walk_forward_evaluation,
 )
 from intraday_scanner.performance.account_comparison import public_account_comparison
+from intraday_scanner.services.outcome_capture_contract import classify_missing_capture
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -40,16 +41,13 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
         )
     ]
     existing_rows = store.load_alpha_v6_outcomes()
-    decision_by_id = {
-        str(row.get("decision_id") or ""): row for row in decisions
-    }
+    decision_by_id = {str(row.get("decision_id") or ""): row for row in decisions}
     existing = {str(row.get("decision_id") or "") for row in existing_rows}
     blocked_legacy = sum(
         1
         for row in existing_rows
         if (
-            (decision := decision_by_id.get(str(row.get("decision_id") or "")))
-            is not None
+            (decision := decision_by_id.get(str(row.get("decision_id") or ""))) is not None
             and classify_canonical_return_truth(row, decision=decision)
             not in {
                 CURRENT_RETURN_TRUTH,
@@ -58,9 +56,7 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
             }
         )
     )
-    pending = [
-        row for row in decisions if str(row.get("decision_id") or "") not in existing
-    ]
+    pending = [row for row in decisions if str(row.get("decision_id") or "") not in existing]
     all_sources = store.load_signal_outcomes(limit=50_000)
     sources_by_signal: dict[str, list[dict[str, Any]]] = {}
     for source in all_sources:
@@ -98,9 +94,7 @@ def synchronize_v6_outcomes(store: SQLiteScanStore) -> dict[str, Any]:
         if current:
             safe_sources.append(current[0])
     generatable = [
-        row
-        for row in pending
-        if str(row.get("decision_id") or "") not in blocked_decision_ids
+        row for row in pending if str(row.get("decision_id") or "") not in blocked_decision_ids
     ]
     generated = build_v6_outcomes(
         decisions=generatable,
@@ -235,8 +229,7 @@ def v6_public_status(store: SQLiteScanStore) -> dict[str, Any]:
         "learning_eligible_outcome_count": sum(
             1
             for row in outcomes
-            if row.get("learning_eligible") is True
-            and has_authenticated_committed_fill_truth(row)
+            if row.get("learning_eligible") is True and has_authenticated_committed_fill_truth(row)
         ),
         "latest_model_run": _public_model_run(model_runs[0]) if model_runs else None,
         "latest_evaluation": (_public_evaluation(latest_evaluation) if latest_evaluation else None),
@@ -285,11 +278,24 @@ def _public_prediction_evidence_gate(
     intervals = data.get("interval_coverage")
     calibration_data = calibration if isinstance(calibration, dict) else {}
     interval_data = intervals if isinstance(intervals, dict) else {}
+    model_run_id = str(data.get("model_run_id") or "")
     checks = {
         "purged_evaluation_evaluable": data.get("status") == "EVALUABLE",
         "no_lookahead": data.get("no_lookahead") is True,
-        "activation_calibration_evaluable": calibration_data.get("status") == "EVALUABLE",
-        "prediction_intervals_evaluable": interval_data.get("status") == "EVALUABLE",
+        "activation_calibration_evaluable": bool(
+            calibration_data.get("status") == "EVALUABLE"
+            and calibration_data.get("display_eligible") is True
+        ),
+        "prediction_intervals_evaluable": bool(
+            interval_data.get("status") == "EVALUABLE"
+            and interval_data.get("display_eligible") is True
+        ),
+        "calibration_model_run_exact": bool(
+            model_run_id and calibration_data.get("model_run_id") == model_run_id
+        ),
+        "interval_model_run_exact": bool(
+            model_run_id and interval_data.get("model_run_id") == model_run_id
+        ),
     }
     return {
         "passed": all(checks.values()),
@@ -363,6 +369,8 @@ def _public_failure_attribution(report: dict[str, Any]) -> dict[str, Any]:
                         "outcome_count",
                         "eligible_return_count",
                         "terminal_missing_count",
+                        "authoritative_terminal_count",
+                        "recoverable_missing_count",
                         "activation_count",
                         "not_triggered_count",
                         "mean_net_excess_return_pct",
@@ -537,13 +545,19 @@ def _cohort_summary(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         and has_authenticated_committed_fill_truth(row)
         and _number(row.get("net_excess_return_pct")) is not None
     ]
+    authoritative_terminal_count = sum(
+        1 for row in rows if _capture_missing_classification(row) == "authoritative_terminal"
+    )
+    recoverable_missing_count = sum(
+        1 for row in rows if _capture_missing_classification(row) == "recoverable"
+    )
     return {
         "group": key,
         "outcome_count": len(rows),
         "eligible_return_count": len(values),
-        "terminal_missing_count": sum(
-            1 for row in rows if row.get("outcome_status") == "TERMINAL_MISSING"
-        ),
+        "terminal_missing_count": authoritative_terminal_count,
+        "authoritative_terminal_count": authoritative_terminal_count,
+        "recoverable_missing_count": recoverable_missing_count,
         "activation_count": sum(1 for row in rows if row.get("activation_status") == "ACTIVATED"),
         "not_triggered_count": sum(
             1 for row in rows if row.get("activation_status") == "NOT_TRIGGERED"
@@ -557,6 +571,9 @@ def _cohort_summary(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _public_cohort_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if key != "eligible_returns"}
+
+
+_capture_missing_classification = classify_missing_capture
 
 
 def _source_quality_key(record: dict[str, Any]) -> str:
@@ -665,7 +682,17 @@ def _failure_modes(records: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "data_quality": {
             "terminal_missing_count": sum(
-                1 for row in records if row.get("outcome_status") == "TERMINAL_MISSING"
+                1
+                for row in records
+                if _capture_missing_classification(row) == "authoritative_terminal"
+            ),
+            "authoritative_terminal_count": sum(
+                1
+                for row in records
+                if _capture_missing_classification(row) == "authoritative_terminal"
+            ),
+            "recoverable_missing_count": sum(
+                1 for row in records if _capture_missing_classification(row) == "recoverable"
             ),
             "sourced_complete_count": sum(
                 1 for row in records if row.get("outcome_status") == "COMPLETE_SOURCED"

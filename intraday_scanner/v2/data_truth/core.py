@@ -1340,19 +1340,18 @@ def _resolve_public_yahoo_source(
         )
 
         try:
-            fetch_kwargs: dict[str, object] = {"cache_dir": local_cache}
-            if symbols is not None:
-                fetch_kwargs.update(
-                    {
-                        "symbols": symbols,
-                        "required_bar_date": required_bar_date,
-                        "max_workers": fetch_max_workers,
-                        "max_requests_per_second": fetch_max_requests_per_second,
-                        "time_budget_seconds": fetch_time_budget_seconds,
-                        "minimum_history_bars": minimum_history_bars,
-                    }
+            if symbols is None:
+                fetched = fetch_yahoo_chart_daily_dataset(cache_dir=local_cache)
+            else:
+                fetched = fetch_yahoo_chart_daily_dataset(
+                    symbols=symbols,
+                    cache_dir=local_cache,
+                    required_bar_date=required_bar_date,
+                    max_workers=fetch_max_workers,
+                    max_requests_per_second=fetch_max_requests_per_second,
+                    time_budget_seconds=fetch_time_budget_seconds,
+                    minimum_history_bars=minimum_history_bars,
                 )
-            fetched = fetch_yahoo_chart_daily_dataset(**fetch_kwargs)
             fetch_warnings = tuple(fetched.warnings)
             if symbols is not None:
                 requested_symbols = tuple(
@@ -1690,8 +1689,10 @@ def _source_refs_from_cache(
                 meta = first_result.get("meta", {}) if isinstance(first_result, dict) else {}
                 if meta.get("symbol") != provider_symbol:
                     continue
-                bars, _warnings = _bars_from_payload(symbol, payload)
-                if _bar_fingerprint(bars) == _bar_fingerprint(selected.bars_by_symbol[symbol]):
+                fetched_bars, _warnings = _bars_from_payload(symbol, payload)
+                if _bar_fingerprint(fetched_bars) == _bar_fingerprint(
+                    selected.bars_by_symbol[symbol]
+                ):
                     matches.append(path)
             except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 continue

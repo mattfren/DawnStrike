@@ -2315,6 +2315,7 @@ def _canonical_source_observation_receipt(
     quote_bid = _number(payload.get("quote_bid"))
     quote_ask = _number(payload.get("quote_ask"))
     quote_freshness = _number(payload.get("quote_freshness_seconds"))
+    quote_source_hash = _hash_payload(quote_raw)
     if not (
         isinstance(quote_raw, Mapping)
         and isinstance(raw_quote, Mapping)
@@ -2336,7 +2337,8 @@ def _canonical_source_observation_receipt(
         and 0 <= quote_freshness <= tolerance
         and payload.get("quote_status") == "USABLE"
         and str(payload.get("quote_source") or "").startswith("alpaca_market_data_")
-        and _secure_equal(payload.get("quote_source_hash_sha256"), _hash_payload(quote_raw))
+        and quote_source_hash is not None
+        and _secure_equal(payload.get("quote_source_hash_sha256"), quote_source_hash)
     ):
         raise ValueError("price observation quote truth is invalid")
     observation_id = columns.get("observation_id")

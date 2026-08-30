@@ -31,7 +31,6 @@ if (
 }
 $stagePublic = Join-Path $stage "public"
 $functionPublic = Join-Path $stage "api\public"
-$functionData = Join-Path $functionPublic "data"
 
 if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json") -PathType Leaf)) {
     throw "Build the public artifact before staging it."
@@ -39,66 +38,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json")
 if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $stagePublic, $functionData | Out-Null
+New-Item -ItemType Directory -Force -Path $stagePublic, $functionPublic | Out-Null
 Copy-Item -Path (Join-Path $publicSource "*") -Destination $stagePublic -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "readiness.json") -Destination $functionPublic -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "build-manifest.json") -Destination $functionPublic -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json") -Destination (Join-Path $functionData "performance-snapshot.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\performance.json.manifest.json") -Destination (Join-Path $functionData "performance-snapshot-manifest.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\calendar.json") -Destination (Join-Path $functionData "calendar.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\calendar.json.manifest.json") -Destination (Join-Path $functionData "calendar.json.manifest.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\scenarios.json") -Destination (Join-Path $functionData "scenarios.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\scenarios.json.manifest.json") -Destination (Join-Path $functionData "scenarios.json.manifest.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\opportunity-projection.json") -Destination (Join-Path $functionData "opportunity-projection.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\opportunity-projection.json.manifest.json") -Destination (Join-Path $functionData "opportunity-projection.json.manifest.json") -Force
-Copy-Item -LiteralPath (Join-Path $publicSource "data\publication-set.json") -Destination (Join-Path $functionData "publication-set.json") -Force
+Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\health.py") -Destination (Join-Path $stage "api\health.py") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\readiness.py") -Destination (Join-Path $stage "api\readiness.py") -Force
 Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\public_state.py") -Destination (Join-Path $stage "api\public_state.py") -Force
 
-$snapshotBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\performance.json"))
-$calendarBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\calendar.json"))
-$scenarioBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\scenarios.json"))
-$opportunityBytes = [System.IO.File]::ReadAllBytes((Join-Path $publicSource "data\opportunity-projection.json"))
-function Read-RawJsonObject {
-    param([string]$Path)
-
-    $raw = [System.IO.File]::ReadAllText($Path).Trim()
-    # Parse only for validation; return the original text so PowerShell's
-    # DateTime coercion cannot rewrite UTC timestamps or alter hashed state.
-    $parsed = ConvertFrom-Json -InputObject $raw
-    if ($null -eq $parsed -or $parsed -isnot [pscustomobject]) {
-        throw "Expected a JSON object: $Path"
-    }
-    return $raw
-}
-
-function ConvertTo-JsonString {
-    param([string]$Value)
-
-    return ($Value | ConvertTo-Json -Compress)
-}
-
-# Keep the generated JSON text byte-for-byte semantic. Read-RawJsonObject parses
-# only for validation and returns the original text, so ISO timestamps and
-# manifest values remain identical to the hashed static artifacts.
-$stateParts = @(
-    '"readiness":' + (Read-RawJsonObject (Join-Path $publicSource "readiness.json"))
-    '"snapshot_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\performance.json.manifest.json"))
-    '"build_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "build-manifest.json"))
-    '"snapshot_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($snapshotBytes)))
-    '"calendar_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\calendar.json.manifest.json"))
-    '"calendar_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($calendarBytes)))
-    '"scenario_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\scenarios.json.manifest.json"))
-    '"scenario_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($scenarioBytes)))
-    '"opportunity_manifest":' + (Read-RawJsonObject (Join-Path $publicSource "data\opportunity-projection.json.manifest.json"))
-    '"opportunity_b64":' + (ConvertTo-JsonString ([Convert]::ToBase64String($opportunityBytes)))
-    '"publication_set":' + (Read-RawJsonObject (Join-Path $publicSource "data\publication-set.json"))
-    '"static_file_hashes_verified":true'
-)
-$stateJson = '{' + ($stateParts -join ',') + '}'
-$pythonString = $stateJson | ConvertTo-Json -Compress
-$stateModule = "import json`n`nPUBLIC_STATE = json.loads($pythonString)`n"
+# The API reads the exact packaged files under api/public.  Keep this module
+# metadata-only: embedding snapshots or manifests creates duplicate sources of
+# truth and can let a stale caller/environment state shadow packaged bytes.
+$stateModule = "PUBLIC_STATE = {'static_file_hashes_verified': True}`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $stage "api\public_state.py"), $stateModule, $utf8NoBom)
 

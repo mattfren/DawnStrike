@@ -622,6 +622,7 @@ def test_cli_monitor_open_can_use_provider_backed_snapshots(monkeypatch, tmp_pat
     assert "monitor:" in captured.out
     assert health[0]["provider"] == "alpaca"
     assert "loaded live monitor snapshot" in health[0]["detail"]
+    assert SQLiteScanStore(db_path).count_monitor_interval_gaps() == 0
 
 
 def test_cli_production_workflow_aliases_use_sample_mode(tmp_path, capsys):
@@ -664,6 +665,7 @@ def test_cli_production_workflow_aliases_use_sample_mode(tmp_path, capsys):
         )
         == 0
     )
+    assert SQLiteScanStore(db_path).count_monitor_interval_gaps() == 0
     assert (monitor_out / "setup_monitor_checks.csv").exists()
 
     assert (

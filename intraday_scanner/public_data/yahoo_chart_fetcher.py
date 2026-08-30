@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import json
 import math
@@ -475,11 +476,16 @@ def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
                         ) from None
                     time.sleep(0.01)
         else:  # pragma: no cover - exercised on POSIX CI only
-            import fcntl
+            fcntl_module = importlib.import_module("fcntl")
+            flock = getattr(fcntl_module, "flock", None)
+            lock_ex = getattr(fcntl_module, "LOCK_EX", None)
+            lock_nb = getattr(fcntl_module, "LOCK_NB", None)
+            if not callable(flock) or not isinstance(lock_ex, int) or not isinstance(lock_nb, int):
+                raise OSError("POSIX file locking is unavailable")
 
             while True:
                 try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    flock(handle.fileno(), lock_ex | lock_nb)
                     break
                 except BlockingIOError:
                     if deadline is not None and time.monotonic() >= deadline:
@@ -513,7 +519,12 @@ def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             else:  # pragma: no cover - exercised on POSIX CI only
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl_module = importlib.import_module("fcntl")
+                flock = getattr(fcntl_module, "flock", None)
+                lock_un = getattr(fcntl_module, "LOCK_UN", None)
+                if not callable(flock) or not isinstance(lock_un, int):
+                    raise OSError("POSIX file locking is unavailable")
+                flock(handle.fileno(), lock_un)
 
 
 def _fetch_symbol(

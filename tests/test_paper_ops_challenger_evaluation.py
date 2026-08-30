@@ -11,10 +11,12 @@ from intraday_scanner.v2.paper_ops import engine as paper_engine
 from intraday_scanner.v2.paper_ops.challenger_evaluation import (
     ChallengerEvaluationConfig,
     evaluate_paperops_challengers,
+    verify_evaluation_receipt,
 )
 from intraday_scanner.v2.paper_ops.shadow_runner import (
     REGISTRATION_EVENT_SCHEMA,
     SHADOW_MANIFEST_SCHEMA,
+    _freeze_evaluation_window,
     _freeze_registration,
     _sha256,
 )
@@ -265,6 +267,227 @@ def test_same_day_registration_passes_operationally_without_candidate_evidence(
     assert not list(root.glob("manifests/shadow_*.json"))
     assert not list(root.glob("exports/shadow_strategy_decisions_*.json"))
     assert not list((root / "state").glob("shadow/**/*.json"))
+    assert not list((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+    assert result["evaluation_receipts"][0]["terminal"] is False
+
+
+def test_each_registered_experiment_gets_one_self_hashed_receipt_and_retry_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    _seed_candidate_evidence(root, _dates(6))
+
+    first = evaluate_paperops_challengers(output_root=root)
+    receipt_paths = list(
+        (root / "reports" / "challenger_evaluation_receipts").glob("*.json")
+    )
+    assert len(receipt_paths) == 1
+    receipt = read_json(receipt_paths[0], {})
+    assert isinstance(receipt, dict)
+    assert verify_evaluation_receipt(receipt, output_root=root) == ()
+    receipt_bytes = receipt_paths[0].read_bytes()
+    ledger = read_jsonl(root / "reports" / "challenger_evaluation_receipts.jsonl")
+    assert len(ledger) == 1
+
+    second = evaluate_paperops_challengers(output_root=root)
+    assert second["evaluation_receipts"] == first["evaluation_receipts"]
+    assert receipt_paths[0].read_bytes() == receipt_bytes
+    assert len(read_jsonl(root / "reports" / "challenger_evaluation_receipts.jsonl")) == 1
+
+
+def test_receipt_is_deferred_until_holdout_matures_then_terminal_retry_is_stable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(6)
+    _seed_candidate_evidence(root, dates)
+    latest_report = root / "reports" / "daily" / f"forward_{dates[-1]}.json"
+    latest_bytes = latest_report.read_bytes()
+    latest_report.unlink()
+
+    early = evaluate_paperops_challengers(output_root=root)
+    assert early["evaluation_receipts"][0]["terminal"] is False
+    assert early["evaluation_receipts"][0]["metrics"] is None
+    assert not list((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+
+    latest_report.write_bytes(latest_bytes)
+    terminal = evaluate_paperops_challengers(output_root=root)
+    receipt_path = next((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+    receipt_bytes = receipt_path.read_bytes()
+    assert terminal["evaluation_receipts"][0]["terminal"] is True
+    assert verify_evaluation_receipt(read_json(receipt_path, {}), output_root=root) == ()
+
+    repeated = evaluate_paperops_challengers(output_root=root)
+    assert repeated["evaluation_receipts"] == terminal["evaluation_receipts"]
+    assert receipt_path.read_bytes() == receipt_bytes
+
+
+def test_unrelated_later_report_does_not_mature_missing_frozen_date(tmp_path: Path) -> None:
+    root = tmp_path / "paper"
+    dates = _dates(6)
+    _seed_candidate_evidence(root, dates)
+    missing_report = root / "reports" / "daily" / f"forward_{dates[-2]}.json"
+    missing_bytes = missing_report.read_bytes()
+    missing_report.unlink()
+    write_json(
+        root / "reports" / "daily" / "forward_2026-01-20.json",
+        {
+            "date": "2026-01-20",
+            "mode": "forward",
+            "run_id": "unrelated-run",
+            "data_snapshot_id": "unrelated-snapshot",
+            "provider_status": "passed",
+            "stats": {"phase": "close", "closes": 0},
+        },
+    )
+
+    early = evaluate_paperops_challengers(output_root=root)
+    assert early["evaluation_receipts"][0]["terminal"] is False
+    assert not list((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+
+    missing_report.write_bytes(missing_bytes)
+    terminal = evaluate_paperops_challengers(output_root=root)
+    assert terminal["evaluation_receipts"][0]["terminal"] is True
+    assert len(list((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))) == 1
+
+
+def test_aggregate_identity_and_receipt_manifest_are_root_independent(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    for root in (first_root, second_root):
+        _seed_candidate_evidence(root, _dates(6))
+    first = evaluate_paperops_challengers(output_root=first_root)
+    second = evaluate_paperops_challengers(output_root=second_root)
+    assert first["evaluation_id"] == second["evaluation_id"]
+    assert first["evaluation_receipts"][0]["path"].startswith("reports/")
+    assert str(first_root) not in first["evaluation_receipts"][0]["path"]
+
+
+def test_multi_experiment_evaluation_writes_independently_verifiable_receipts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "paper"
+    _seed_candidate_evidence(root, _dates(6))
+    registry_path = root / "state" / "strategy_challenger_registry.json"
+    registry = read_json(registry_path, {})
+    assert isinstance(registry, dict)
+    first = registry["challengers"][0]
+    assert isinstance(first, dict)
+    second = _freeze_registration(
+        {
+            "schema_version": SHADOW_MANIFEST_SCHEMA,
+            "challenger_id": first["challenger_id"],
+            "experiment_id": "ts_momentum_sma_atr_experiment_two",
+            "strategy_id": first["strategy_id"],
+            "champion_strategy_version": first["champion_strategy_version"],
+            "candidate_strategy_version": "v3.0",
+            "execution_policy_version": first["execution_policy_version"],
+            "status": "shadow",
+            "frozen_at": first["frozen_at"],
+            "hypothesis": "A separate frozen experiment remains independently receipted.",
+            "evaluation_window": first["evaluation_window"],
+            "data_hash_sha256": "1" * 64,
+            "source_hash_sha256": "2" * 64,
+            "code_sha": "3" * 40,
+            "config_hash_sha256": "4" * 64,
+            "input_hash_sha256": "5" * 64,
+            "v5_comparison_hash_sha256": "6" * 64,
+            "implementation": first["implementation"],
+        },
+        root,
+        registered_at=first["registered_at"],
+    )
+    registry["challengers"] = [first, second]
+    write_json(registry_path, registry)
+    append_jsonl_unique(
+        root / "state" / "shadow_registration_ledger.jsonl",
+        [
+            {
+                "schema_version": REGISTRATION_EVENT_SCHEMA,
+                "event_type": "shadow_challenger_registered",
+                "registration_event_id": second["registration_id"],
+                "registered_at": second["registered_at"],
+                "registration": second,
+            }
+        ],
+        "registration_event_id",
+    )
+
+    result = evaluate_paperops_challengers(output_root=root)
+    receipt_paths = list(
+        (root / "reports" / "challenger_evaluation_receipts").glob("*.json")
+    )
+    assert len(receipt_paths) == 2
+    assert len(read_jsonl(root / "reports" / "challenger_evaluation_receipts.jsonl")) == 2
+    assert all(
+        verify_evaluation_receipt(read_json(path, {}), output_root=root) == ()
+        for path in receipt_paths
+    )
+    assert {item["experiment_id"] for item in result["evaluation_receipts"]} == {
+        first["experiment_id"],
+        second["experiment_id"],
+    }
+
+
+def test_receipt_tampering_and_cross_experiment_swap_fail_closed(tmp_path: Path) -> None:
+    root = tmp_path / "paper"
+    _seed_candidate_evidence(root, _dates(6))
+    evaluate_paperops_challengers(output_root=root)
+    receipt_path = next((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+    receipt = read_json(receipt_path, {})
+    assert isinstance(receipt, dict)
+
+    altered = dict(receipt)
+    altered["experiment_id"] = "other-experiment"
+    altered["evaluation_receipt_id"] = hashlib.sha256(
+        json.dumps(
+            {"experiment_id": "other-experiment"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    altered["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in altered.items() if key != "receipt_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    assert "proposal experiment identity mismatch" in " | ".join(
+        verify_evaluation_receipt(altered)
+    )
+    swapped = dict(receipt)
+    swapped["evaluation_window"] = {"training": {}, "validation": {}, "untouched_holdout": {}}
+    assert "frozen window mismatch" in " | ".join(verify_evaluation_receipt(swapped))
+
+
+def test_changed_retry_conflicts_and_aggregate_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "paper"
+    _seed_candidate_evidence(root, _dates(6))
+    evaluate_paperops_challengers(output_root=root)
+    receipt_path = next((root / "reports" / "challenger_evaluation_receipts").glob("*.json"))
+    receipt = read_json(receipt_path, {})
+    assert isinstance(receipt, dict)
+    receipt["proposal"] = {"tampered": True}
+    write_json(receipt_path, receipt)
+
+    retried = evaluate_paperops_challengers(output_root=root)
+    assert retried["status"] == "failed"
+    assert any("evaluation receipt conflict" in item for item in retried["operational_blockers"])
+
+
+def test_frozen_window_rejects_impossible_calendar_dates() -> None:
+    window = {
+        "training": {"start": "2026-02-27", "end": "2026-02-30", "market_dates": ["2026-02-30"]},
+        "validation": {"start": "2026-03-02", "end": "2026-03-03", "market_dates": ["2026-03-02"]},
+        "untouched_holdout": {
+            "start": "2026-03-04",
+            "end": "2026-03-05",
+            "market_dates": ["2026-03-04"],
+        },
+    }
+    with pytest.raises(ValueError, match="non-ISO date|malformed"):
+        _freeze_evaluation_window({"evaluation_window": window})
 
 
 def test_missing_cost_and_decision_truth_are_excluded_with_exact_reasons(
@@ -669,6 +892,27 @@ def _seed_candidate_evidence(
         },
     )
     challenger_id = f"{strategy_id}_shadow_v2"
+    holdout_count = min(max(2, (len(dates) + 3) // 4), max(1, len(dates) - 1))
+    validation_dates = dates[:-holdout_count]
+    holdout_dates = dates[-holdout_count:]
+    training_dates = ["2025-12-29", "2025-12-30"]
+    evaluation_window = {
+        "training": {
+            "start": training_dates[0],
+            "end": training_dates[-1],
+            "market_dates": training_dates,
+        },
+        "validation": {
+            "start": validation_dates[0],
+            "end": validation_dates[-1],
+            "market_dates": validation_dates,
+        },
+        "untouched_holdout": {
+            "start": holdout_dates[0],
+            "end": holdout_dates[-1],
+            "market_dates": holdout_dates,
+        },
+    }
     registration = _freeze_registration(
         {
             "schema_version": SHADOW_MANIFEST_SCHEMA,
@@ -680,6 +924,13 @@ def _seed_candidate_evidence(
             "status": "shadow",
             "frozen_at": "2026-01-01T00:00:00Z",
             "hypothesis": "Frozen fixture candidate improves net after-cost expectancy.",
+            "evaluation_window": evaluation_window,
+            "data_hash_sha256": "a" * 64,
+            "source_hash_sha256": "b" * 64,
+            "code_sha": "c" * 40,
+            "config_hash_sha256": "d" * 64,
+            "input_hash_sha256": "e" * 64,
+            "v5_comparison_hash_sha256": "f" * 64,
             "implementation": {
                 "kind": "parent_signal_filter_v1",
                 "parameters": {
@@ -1117,6 +1368,29 @@ def _seed_same_day_registration_without_candidate_artifacts(
             "status": "shadow",
             "frozen_at": f"{session_date}T00:00:00Z",
             "hypothesis": "Same-day registration must create no eligible evidence.",
+            "evaluation_window": {
+                "training": {
+                    "start": "2025-12-29",
+                    "end": "2025-12-30",
+                    "market_dates": ["2025-12-29", "2025-12-30"],
+                },
+                "validation": {
+                    "start": "2025-12-31",
+                    "end": "2026-01-01",
+                    "market_dates": ["2025-12-31", "2026-01-01"],
+                },
+                "untouched_holdout": {
+                    "start": session_date,
+                    "end": session_date,
+                    "market_dates": [session_date],
+                },
+            },
+            "data_hash_sha256": "a" * 64,
+            "source_hash_sha256": "b" * 64,
+            "code_sha": "c" * 40,
+            "config_hash_sha256": "d" * 64,
+            "input_hash_sha256": "e" * 64,
+            "v5_comparison_hash_sha256": "f" * 64,
             "implementation": {
                 "kind": "parent_signal_filter_v1",
                 "parameters": {

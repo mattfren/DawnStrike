@@ -13,7 +13,12 @@ from typing import Any
 
 from intraday_scanner.alpha.fill_truth import MISSING_COMMITTED_FILL_TRUTH
 from intraday_scanner.alpha.v6.calibration import calibration_report, interval_coverage
-from intraday_scanner.alpha.v6.contracts import canonical_hash, utc_now
+from intraday_scanner.alpha.v6.contracts import (
+    canonical_hash,
+    is_valid_code_sha,
+    is_valid_sha256,
+    utc_now,
+)
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
 from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
 from intraday_scanner.alpha.v6.drift import build_drift_report
@@ -62,7 +67,11 @@ MODEL_COMPETITION_CONTRACT = {
 
 
 def run_alpha_v6_daily_monitor(
-    store: SQLiteScanStore, *, market_date: str | None = None
+    store: SQLiteScanStore,
+    *,
+    market_date: str | None = None,
+    reference_window: dict[str, Any] | None = None,
+    recent_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist daily outcome, label, dataset, and drift evidence without refitting.
 
@@ -93,11 +102,13 @@ def run_alpha_v6_daily_monitor(
         "generated_count": len(labels),
         "persistence": label_stats,
         "quarantined_return_count": quarantined_return_count,
-        "quarantine_reason": (
-            MISSING_COMMITTED_FILL_TRUTH if quarantined_return_count else None
-        ),
+        "quarantine_reason": (MISSING_COMMITTED_FILL_TRUTH if quarantined_return_count else None),
     }
-    drift = _drift(decisions)
+    drift = _drift(
+        decisions,
+        reference_window=reference_window,
+        recent_window=recent_window,
+    )
     drift_inserted = store.persist_alpha_v6_drift_report(drift)
     receipt = _operational_receipt(
         receipt_kind="daily_monitor",
@@ -132,10 +143,17 @@ def run_alpha_v6_weekly_training(
     *,
     code_sha: str = "unresolved-local-sha",
     market_date: str | None = None,
+    reference_window: dict[str, Any] | None = None,
+    recent_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the separately scheduled V6 refit and all-family OOF evaluation."""
 
-    daily_monitor = run_alpha_v6_daily_monitor(store, market_date=market_date)
+    daily_monitor = run_alpha_v6_daily_monitor(
+        store,
+        market_date=market_date,
+        reference_window=reference_window,
+        recent_window=recent_window,
+    )
     decisions = store.load_alpha_v6_decisions()
     outcomes = store.load_alpha_v6_outcomes()
     persisted_labels = store.load_alpha_v6_labels()
@@ -177,8 +195,18 @@ def run_alpha_v6_weekly_training(
     baseline_evaluation_rows = [
         row for row in evaluation_rows if row.get("model_family") == "regularized_baselines"
     ]
-    calibration = calibration_report(baseline_evaluation_rows)
-    intervals = interval_coverage(baseline_evaluation_rows)
+    calibration = {
+        **calibration_report(baseline_evaluation_rows),
+        "model_run_id": training["model_run_id"],
+    }
+    intervals = {
+        **interval_coverage(baseline_evaluation_rows),
+        "model_run_id": training["model_run_id"],
+    }
+    holdout_evidence = _holdout_evidence_for_model(
+        store, model_run_id=str(training["model_run_id"])
+    )
+    comparison_to_v5 = _comparison_to_v5_evidence(store, model_run_id=str(training["model_run_id"]))
     evaluation = {
         "model_run_id": training["model_run_id"],
         "evaluated_at": utc_now(),
@@ -196,10 +224,8 @@ def run_alpha_v6_weekly_training(
         "no_lookahead": bool(
             predictions and all(row.get("no_lookahead") is True for row in predictions)
         ),
-        "untouched_holdout": {
-            "status": "NOT_EVALUATED_NO_REGISTERED_FROZEN_HOLDOUT",
-            "evaluated_once": False,
-        },
+        "untouched_holdout": holdout_evidence,
+        "comparison_to_v5": comparison_to_v5,
         "research_only": True,
         "broker_execution_enabled": False,
     }
@@ -336,34 +362,32 @@ def _evaluation_rows(
                     "interval_upper_pct": family_prediction.get("interval_upper_pct"),
                     "estimated_round_trip_cost_bps": source.get("estimated_round_trip_cost_bps"),
                     "inverse_probability_weight": source.get("inverse_probability_weight"),
+                    "allocation_weight": source.get(
+                        "allocation_weight", outcome.get("allocation_weight")
+                    ),
+                    "account_weight": source.get("account_weight", outcome.get("account_weight")),
+                    "portfolio_allocation_weight": source.get(
+                        "portfolio_allocation_weight",
+                        outcome.get("portfolio_allocation_weight"),
+                    ),
                     "setup_key": source.get("setup_key"),
                     "regime_key": source.get("regime_key"),
                     "source_key": source.get("source_key"),
                     "liquidity_bucket": source.get("liquidity_bucket"),
                     "catalyst_bucket": source.get("catalyst_bucket"),
                     "catalyst_feature_block": source.get("catalyst_feature_block"),
-                    "source_artifact_hash_sha256": source.get(
-                        "source_artifact_hash_sha256"
-                    ),
+                    "source_artifact_hash_sha256": source.get("source_artifact_hash_sha256"),
                     "source_artifact_hashes": source.get("source_artifact_hashes"),
                     "path_replay_id": source.get("path_replay_id"),
                     "benchmark_hash_sha256": source.get("benchmark_hash_sha256"),
-                    "observed_cost_model_identity": source.get(
-                        "observed_cost_model_identity"
-                    ),
-                    "modeled_cost_model_identity": source.get(
-                        "modeled_cost_model_identity"
-                    ),
+                    "observed_cost_model_identity": source.get("observed_cost_model_identity"),
+                    "modeled_cost_model_identity": source.get("modeled_cost_model_identity"),
                     "evidence_cohort": source.get("evidence_cohort"),
-                    "evidence_lineage_hash_sha256": source.get(
-                        "evidence_lineage_hash_sha256"
-                    ),
+                    "evidence_lineage_hash_sha256": source.get("evidence_lineage_hash_sha256"),
                     "retrospective_research_eligible": source.get(
                         "retrospective_research_eligible"
                     ),
-                    "prospective_promotion_eligible": source.get(
-                        "prospective_promotion_eligible"
-                    ),
+                    "prospective_promotion_eligible": source.get("prospective_promotion_eligible"),
                     "activation_label": (
                         1
                         if outcome.get("activation_status") == "ACTIVATED"
@@ -374,6 +398,379 @@ def _evaluation_rows(
                 }
             )
     return rows
+
+
+def _holdout_evidence_for_model(store: SQLiteScanStore, *, model_run_id: str) -> dict[str, Any]:
+    """Project one immutable holdout receipt only when it binds this model run."""
+
+    receipt_loader = getattr(store, "load_alpha_v6_holdout_evaluation", None)
+    model_loader = getattr(store, "load_alpha_v6_model_run", None)
+    model_run = (
+        model_loader(model_run_id)
+        if callable(model_loader)
+        else next(
+            (
+                row
+                for row in store.load_alpha_v6_model_runs(limit=100)
+                if str(row.get("model_run_id") or "") == model_run_id
+            ),
+            {},
+        )
+    )
+    model_experiment_id = str(model_run.get("experiment_id") or "")
+    experiment_loader = getattr(store, "load_alpha_v6_experiment", None)
+    experiment = (
+        experiment_loader(model_experiment_id)
+        if callable(experiment_loader) and model_experiment_id
+        else next(
+            (
+                row
+                for row in store.load_alpha_v6_experiments(limit=100)
+                if str(row.get("experiment_id") or "") == model_experiment_id
+            ),
+            {},
+        )
+    )
+    if callable(receipt_loader) and model_experiment_id:
+        exact_receipt = receipt_loader(model_experiment_id)
+        receipts = [exact_receipt] if exact_receipt else []
+    else:
+        receipts = store.load_alpha_v6_holdout_evaluations(limit=100)
+    for receipt in receipts:
+        if _holdout_receipt_binding_is_exact(
+            receipt,
+            model_run_id=model_run_id,
+            model_run=model_run,
+            experiment=experiment,
+        ):
+            evidence = receipt.get("evidence")
+            evidence_data = evidence if isinstance(evidence, dict) else {}
+            return {
+                **receipt,
+                "model_run_id": model_run_id,
+                "after_cost_expectancy_pct": evidence_data.get("after_cost_expectancy_pct"),
+            }
+    if receipts:
+        latest = receipts[0]
+        return {
+            "status": "HOLDOUT_RECEIPT_MODEL_RUN_MISMATCH",
+            "evaluated_once": False,
+            "experiment_id": latest.get("experiment_id"),
+            "holdout_evaluation_id": latest.get("holdout_evaluation_id"),
+            "configuration_hash_sha256": latest.get("configuration_hash_sha256"),
+            "evidence_hash_sha256": latest.get("evidence_hash_sha256"),
+            "evidence": latest.get("evidence"),
+        }
+    return {
+        "status": "NOT_EVALUATED_NO_REGISTERED_FROZEN_HOLDOUT",
+        "evaluated_once": False,
+    }
+
+
+def _holdout_receipt_binding_is_exact(
+    receipt: dict[str, Any],
+    *,
+    model_run_id: str,
+    model_run: dict[str, Any],
+    experiment: dict[str, Any],
+) -> bool:
+    _, model_blockers = _model_experiment_lineage(model_run, experiment)
+    if model_blockers:
+        return False
+    evidence = receipt.get("evidence")
+    evidence_data = evidence if isinstance(evidence, dict) else {}
+    experiment_id = str(experiment.get("experiment_id") or "")
+    configuration_hash = str(experiment.get("configuration_hash_sha256") or "")
+    source_hash = str(
+        model_run.get("source_lineage_hash_sha256") or model_run.get("dataset_hash_sha256") or ""
+    )
+    code_sha = str(model_run.get("code_sha") or "")
+    expected_window = {
+        "training_cutoff": model_run.get("training_cutoff"),
+        "validation_start": experiment.get("validation_start"),
+        "untouched_holdout_start": experiment.get("untouched_holdout_start"),
+    }
+    if isinstance(experiment.get("frozen_windows"), dict):
+        expected_window = experiment["frozen_windows"]
+    persisted_window = model_run.get("evaluation_window")
+    evaluation_window = persisted_window if isinstance(persisted_window, dict) else {}
+    evidence_hash = str(receipt.get("evidence_hash_sha256") or "")
+    expected_binding = canonical_hash(
+        {
+            "model_run_id": model_run_id,
+            "experiment_id": experiment_id,
+            "configuration_hash_sha256": configuration_hash,
+            "source_lineage_hash_sha256": source_hash,
+            "code_sha": code_sha,
+            "evaluation_window": evaluation_window,
+            "data_hash_sha256": evidence_data.get("data_hash_sha256"),
+            "source_hash_sha256": evidence_data.get("source_hash_sha256"),
+            "evidence_hash_sha256": evidence_hash,
+        }
+    )
+    return bool(
+        not model_blockers
+        and model_run
+        and experiment_id
+        and configuration_hash
+        and source_hash
+        and code_sha
+        and str(model_run.get("experiment_id") or "") == experiment_id
+        and str(model_run.get("configuration_hash_sha256") or "") == configuration_hash
+        and evaluation_window == expected_window
+        and receipt.get("evaluated_once") is True
+        and str(receipt.get("model_run_id") or "") == model_run_id
+        and str(receipt.get("experiment_id") or "") == experiment_id
+        and str(receipt.get("configuration_hash_sha256") or "") == configuration_hash
+        and evidence_data.get("model_run_id") == model_run_id
+        and evidence_data.get("experiment_id") == experiment_id
+        and evidence_data.get("configuration_hash_sha256") == configuration_hash
+        and evidence_data.get("source_lineage_hash_sha256") == source_hash
+        and evidence_data.get("code_sha") == code_sha
+        and evidence_data.get("evaluation_window") == expected_window
+        and evidence_data
+        and is_valid_sha256(evidence_hash)
+        and evidence_hash == canonical_hash(evidence_data)
+        and str(receipt.get("model_binding_hash_sha256") or "") == expected_binding
+    )
+
+
+def _model_experiment_lineage(
+    model_run: dict[str, Any], experiment: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate persisted model identity/config/source/window against an experiment."""
+
+    expected_experiment_id = str(experiment.get("experiment_id") or "")
+    expected_configuration = str(experiment.get("configuration_hash_sha256") or "")
+    model_experiment_id = str(model_run.get("experiment_id") or "")
+    model_configuration = str(model_run.get("configuration_hash_sha256") or "")
+    source_hash = str(
+        model_run.get("source_lineage_hash_sha256") or model_run.get("dataset_hash_sha256") or ""
+    )
+    expected_window = {
+        "training_cutoff": experiment.get("training_cutoff"),
+        "validation_start": experiment.get("validation_start"),
+        "untouched_holdout_start": experiment.get("untouched_holdout_start"),
+    }
+    if isinstance(experiment.get("frozen_windows"), dict):
+        expected_window = experiment["frozen_windows"]
+    persisted_window = model_run.get("evaluation_window")
+    blockers: list[str] = []
+    if not model_run:
+        blockers.append("model_run_not_persisted")
+    if model_experiment_id != expected_experiment_id:
+        blockers.append("model_experiment_id_mismatch")
+    if not is_valid_sha256(expected_configuration) or not is_valid_sha256(model_configuration):
+        blockers.append("model_configuration_hash_invalid")
+    elif model_configuration != expected_configuration:
+        blockers.append("model_configuration_hash_mismatch")
+    if not is_valid_sha256(source_hash):
+        blockers.append("model_source_lineage_missing")
+    if not is_valid_code_sha(model_run.get("code_sha")):
+        blockers.append("model_code_sha_missing")
+    if model_run.get("training_cutoff") != experiment.get("training_cutoff"):
+        blockers.append("model_training_cutoff_mismatch")
+    if not isinstance(persisted_window, dict) or persisted_window != expected_window:
+        blockers.append("model_evaluation_window_mismatch")
+    return {
+        "experiment_id": expected_experiment_id,
+        "configuration_hash_sha256": expected_configuration,
+        "source_lineage_hash_sha256": source_hash,
+        "code_sha": str(model_run.get("code_sha") or ""),
+        "evaluation_window": expected_window,
+    }, blockers
+
+
+def _comparison_to_v5_evidence(store: SQLiteScanStore, *, model_run_id: str) -> dict[str, Any]:
+    """Accept only a persisted comparison already bound to this candidate.
+
+    Account comparison rows are authoritative evidence.  This reader may
+    project their metrics, but it must not create lineage or model-binding
+    hashes around an otherwise unrelated latest row.
+    """
+
+    model_loader = getattr(store, "load_alpha_v6_model_run", None)
+    model_run = (
+        model_loader(model_run_id)
+        if callable(model_loader)
+        else next(
+            (
+                row
+                for row in store.load_alpha_v6_model_runs(limit=100)
+                if str(row.get("model_run_id") or "") == model_run_id
+            ),
+            {},
+        )
+    )
+    model_experiment_id = str(model_run.get("experiment_id") or "")
+    comparison_loader = getattr(store, "load_account_performance_comparisons", None)
+    exact_comparison_loader = getattr(
+        store, "load_account_performance_comparisons_for_lineage", None
+    )
+    if callable(exact_comparison_loader) and model_experiment_id:
+        comparisons = exact_comparison_loader(
+            model_run_id=model_run_id, experiment_id=model_experiment_id
+        )
+    elif callable(comparison_loader):
+        comparisons = comparison_loader(limit=100)
+    else:
+        latest = store.load_latest_account_performance_comparison()
+        comparisons = [latest] if latest else []
+    comparison_experiment_id = str(comparisons[0].get("experiment_id") or "") if comparisons else ""
+    expected_experiment_id = model_experiment_id or comparison_experiment_id
+    experiment_loader = getattr(store, "load_alpha_v6_experiment", None)
+    if callable(experiment_loader) and expected_experiment_id:
+        exact_experiment = experiment_loader(expected_experiment_id)
+        experiments = [exact_experiment] if exact_experiment else []
+    else:
+        experiments = store.load_alpha_v6_experiments(limit=100)
+    experiment: dict[str, Any] = next(
+        (
+            row
+            for row in experiments
+            if str(row.get("experiment_id") or "") == expected_experiment_id
+        ),
+        {},
+    )
+    matching_comparisons = [
+        row
+        for row in comparisons
+        if str(row.get("model_run_id") or "") == model_run_id
+        and str(row.get("experiment_id") or "") == expected_experiment_id
+    ]
+    if len(matching_comparisons) > 2:
+        return {
+            "status": "COMPARISON_LINEAGE_AMBIGUOUS",
+            "promotion_eligible": False,
+            "lineage_blockers": ["multiple_exact_comparison_receipts"],
+        }
+    if len(matching_comparisons) == 2:
+        fingerprints = {canonical_hash(row) for row in matching_comparisons}
+        if len(fingerprints) != 1:
+            return {
+                "status": "COMPARISON_LINEAGE_AMBIGUOUS",
+                "promotion_eligible": False,
+                "lineage_blockers": ["conflicting_exact_comparison_receipts"],
+            }
+    comparison = (
+        matching_comparisons[0] if matching_comparisons else (comparisons[0] if comparisons else {})
+    )
+    if not comparison:
+        return {
+            "status": "NOT_AVAILABLE_NO_AUTHORITATIVE_ACCOUNT_COMPARISON",
+            "promotion_eligible": False,
+        }
+    comparison_experiment_id = str(comparison.get("experiment_id") or "")
+    _, model_lineage_blockers = _model_experiment_lineage(model_run, experiment)
+    expected_configuration_hash = str(experiment.get("configuration_hash_sha256") or "")
+    expected_code_sha = str(model_run.get("code_sha") or "")
+    expected_source_hash = str(
+        model_run.get("source_lineage_hash_sha256") or model_run.get("dataset_hash_sha256") or ""
+    )
+    expected_window = {
+        "training_cutoff": model_run.get("training_cutoff"),
+        "validation_start": experiment.get("validation_start"),
+        "untouched_holdout_start": experiment.get("untouched_holdout_start"),
+    }
+    if isinstance(experiment.get("frozen_windows"), dict):
+        expected_window = experiment["frozen_windows"]
+    persisted_window = comparison.get("evaluation_window")
+    persisted_window_data = persisted_window if isinstance(persisted_window, dict) else {}
+    persisted_source_hash = str(
+        comparison.get("source_lineage_hash_sha256") or comparison.get("source_hash_sha256") or ""
+    )
+    persisted_binding_hash = str(
+        comparison.get("model_binding_hash_sha256") or comparison.get("binding_hash_sha256") or ""
+    )
+    comparison_id = str(comparison.get("comparison_id") or "")
+    input_hash = str(comparison.get("input_hash_sha256") or "")
+    metrics_value = comparison.get("series_metrics")
+    metric_data: dict[str, Any] = metrics_value if isinstance(metrics_value, dict) else {}
+    metrics_hash = canonical_hash(metric_data) if metric_data else ""
+    persisted_metrics_hash = str(comparison.get("comparison_metrics_hash_sha256") or "")
+    lineage_blockers: list[str] = []
+    lineage_blockers.extend(model_lineage_blockers)
+    if not expected_experiment_id:
+        lineage_blockers.append("candidate_experiment_missing")
+    if not model_experiment_id:
+        lineage_blockers.append("candidate_model_experiment_missing")
+    if (
+        model_experiment_id
+        and comparison_experiment_id
+        and model_experiment_id != comparison_experiment_id
+    ):
+        lineage_blockers.append("model_experiment_id_mismatch")
+    if not is_valid_sha256(expected_configuration_hash):
+        lineage_blockers.append("candidate_configuration_hash_missing")
+    if not is_valid_code_sha(expected_code_sha):
+        lineage_blockers.append("candidate_code_sha_missing")
+    if not is_valid_sha256(expected_source_hash):
+        lineage_blockers.append("candidate_source_hash_missing")
+    if str(comparison.get("model_run_id") or "") != model_run_id:
+        lineage_blockers.append("model_run_id_mismatch")
+    if str(comparison.get("experiment_id") or "") != expected_experiment_id:
+        lineage_blockers.append("experiment_id_mismatch")
+    if str(comparison.get("configuration_hash_sha256") or "") != expected_configuration_hash:
+        lineage_blockers.append("configuration_hash_mismatch")
+    if str(comparison.get("code_sha") or "") != expected_code_sha:
+        lineage_blockers.append("code_sha_mismatch")
+    if not is_valid_sha256(persisted_source_hash) or persisted_source_hash != expected_source_hash:
+        lineage_blockers.append("source_lineage_hash_mismatch_or_missing")
+    if persisted_window_data != expected_window:
+        lineage_blockers.append("evaluation_window_mismatch_or_missing")
+    if not comparison_id:
+        lineage_blockers.append("comparison_id_missing")
+    if not input_hash:
+        lineage_blockers.append("comparison_input_hash_missing")
+    if (
+        not is_valid_sha256(input_hash)
+        or not is_valid_sha256(persisted_metrics_hash)
+        or not metrics_hash
+        or persisted_metrics_hash != metrics_hash
+    ):
+        lineage_blockers.append("comparison_metrics_hash_mismatch_or_missing")
+    expected_binding_hash = canonical_hash(
+        {
+            "model_run_id": model_run_id,
+            "experiment_id": expected_experiment_id,
+            "configuration_hash_sha256": expected_configuration_hash,
+            "source_lineage_hash_sha256": expected_source_hash,
+            "code_sha": expected_code_sha,
+            "evaluation_window": expected_window,
+            "comparison_id": comparison_id,
+            "input_hash_sha256": input_hash,
+            "comparison_metrics_hash_sha256": metrics_hash,
+        }
+    )
+    if persisted_binding_hash != expected_binding_hash:
+        lineage_blockers.append("model_binding_hash_mismatch_or_missing")
+    if lineage_blockers:
+        return {
+            "status": "COMPARISON_LINEAGE_MISSING_OR_MISMATCHED",
+            "promotion_eligible": False,
+            "lineage_blockers": lineage_blockers,
+        }
+
+    v5_value = metric_data.get("v5")
+    v6_value = metric_data.get("v6")
+    v5: dict[str, Any] = v5_value if isinstance(v5_value, dict) else {}
+    v6: dict[str, Any] = v6_value if isinstance(v6_value, dict) else {}
+    v5_expectancy = _number(v5.get("expectancy_pct"))
+    v6_expectancy = _number(v6.get("expectancy_pct"))
+    objective_delta = (
+        round(v6_expectancy - v5_expectancy, 6)
+        if v5_expectancy is not None and v6_expectancy is not None
+        else None
+    )
+    return {
+        **comparison,
+        "comparison_id": comparison_id,
+        "input_hash_sha256": input_hash,
+        "objective_delta_pct": objective_delta,
+        "promotion_eligible": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
 
 
 def _family_evaluation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -737,15 +1134,96 @@ def _multiple_testing_metric_worsened(candidate: dict[str, Any], baseline: dict[
     )
 
 
-def _drift(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+def _drift(
+    decisions: list[dict[str, Any]],
+    *,
+    reference_window: dict[str, Any] | None,
+    recent_window: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build drift from caller-frozen, non-overlapping date windows.
+
+    The caller owns the frozen market-date cohorts. This monitor never selects
+    a midpoint or a latest-percentile slice from the observed rows.
+    """
+    if reference_window is None or recent_window is None:
+        return build_drift_report(
+            baseline_rows=[],
+            current_rows=[],
+            config={"window_policy": "caller_frozen_disjoint_exact"},
+            minimum_observations=20,
+            minimum_market_sessions=5,
+        )
     by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for decision in decisions:
-        by_date[str(decision.get("market_date") or "")[:10]].append(decision)
-    dates = sorted(date for date in by_date if date)
-    midpoint = len(dates) // 2
-    baseline = [row for date in dates[:midpoint] for row in by_date[date]]
-    current = [row for date in dates[midpoint:] for row in by_date[date]]
-    return build_drift_report(baseline_rows=baseline, current_rows=current)
+        by_date[str(decision.get("market_date") or "")].append(decision)
+    reference_dates = [str(value) for value in reference_window.get("market_dates") or []]
+    recent_dates = [str(value) for value in recent_window.get("market_dates") or []]
+    if not reference_dates or not recent_dates:
+        return build_drift_report(
+            baseline_rows=[],
+            current_rows=[],
+            config={"window_policy": "caller_frozen_disjoint_exact"},
+            minimum_observations=20,
+            minimum_market_sessions=5,
+        )
+    baseline = [row for market_date in reference_dates for row in by_date[market_date]]
+    current = [row for market_date in recent_dates for row in by_date[market_date]]
+    config = {
+        "reference_sessions": len(reference_dates),
+        "recent_sessions": len(recent_dates),
+        "dimensions": "v6-drift-v2",
+        "warning_threshold": 0.10,
+        "quarantine_threshold": 0.25,
+        "window_policy": "caller_frozen_disjoint_exact",
+    }
+    source_values = sorted(
+        {
+            str(row.get("source_lineage_hash_sha256") or row.get("source") or "")
+            for row in [*baseline, *current]
+        }
+    )
+    source_values = [value for value in source_values if value]
+    if not source_values:
+        raise ValueError("V6 drift requires exact source lineage across observations")
+    code_values = {
+        str(row.get("code_sha") or "")
+        for row in [*baseline, *current]
+        if row.get("code_sha")
+    }
+    if len(code_values) != 1:
+        raise ValueError("V6 drift requires one exact code SHA across observations")
+    window = {
+        "reference": {
+            "start": reference_dates[0],
+            "end": reference_dates[-1],
+            "market_dates": reference_dates,
+        },
+        "recent": {
+            "start": recent_dates[0],
+            "end": recent_dates[-1],
+            "market_dates": recent_dates,
+        },
+    }
+    return build_drift_report(
+        baseline_rows=baseline,
+        current_rows=current,
+        reference_window=reference_window,
+        recent_window=recent_window,
+        config=config,
+        source={"lineage_hashes": source_values},
+        config_hash_sha256=canonical_hash(config),
+        source_hash_sha256=canonical_hash({"lineage_hashes": source_values}),
+        window_hash_sha256=canonical_hash(window),
+        input_hash_sha256=canonical_hash(
+            {
+                "reference": sorted(baseline, key=canonical_hash),
+                "recent": sorted(current, key=canonical_hash),
+            }
+        ),
+        code_sha=next(iter(code_values)),
+        minimum_observations=20,
+        minimum_market_sessions=5,
+    )
 
 
 def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -789,7 +1267,7 @@ def _operational_receipt(
         "evaluation_id": evaluation_id,
     }
     input_hash = canonical_hash(content)
-    return {
+    receipt = {
         **content,
         "receipt_id": "v6op-" + input_hash[:28],
         "created_at": utc_now(),
@@ -798,6 +1276,14 @@ def _operational_receipt(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    receipt["receipt_hash_sha256"] = canonical_hash(
+        {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"receipt_hash_sha256", "created_at"}
+        }
+    )
+    return receipt
 
 
 __all__ = [

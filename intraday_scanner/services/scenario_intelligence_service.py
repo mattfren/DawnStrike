@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import random
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +15,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from intraday_scanner.ai.scenario_claim_extractor import extract_claims, extraction_input_hash
+from intraday_scanner.alpha.cycle3_experiments import (
+    Cycle3EvidenceHashes,
+    build_scenario_prefilter_observation_receipt,
+)
 from intraday_scanner.config import ScannerConfig, load_config
 from intraday_scanner.errors import DataProviderError
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
@@ -32,6 +38,12 @@ from intraday_scanner.scenario.lifecycle import refresh_scenario_lifecycle_links
 from intraday_scanner.scenario.point_in_time import (
     completed_minute_bar_at,
     parse_aware_timestamp,
+)
+from intraday_scanner.scenario.prefilter import (
+    SCENARIO_PREFILTER_POLICY_VERSION,
+    ScenarioPrefilterResult,
+    prefilter_implementation_hash_sha256,
+    prefilter_scenario_articles,
 )
 from intraday_scanner.services.trade_watcher_service import MODE_PAPER, run_trade_watcher
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -105,15 +117,19 @@ def run_scenario_cycle(
         cohort = SCENARIO_FORWARD_COHORT
     now = now or utc_now_iso()
     market_date = now[:10]
-    store = SQLiteScanStore(db_path)
-    store.initialize()
-    _register_scenario_policy(store, config)
+    # Dry runs may read cached facts, but must not initialize/migrate/register
+    # policy or persist any scenario data.
+    store = SQLiteScanStore(db_path, read_only=dry_run)
+    if not (dry_run and not Path(db_path).is_file()):
+        store.initialize()
+    if not dry_run:
+        _register_scenario_policy(store, config)
     run_id = "scenario_" + uuid.uuid4().hex
     started_at = utc_now_iso()
     wanted_symbols = _resolve_symbols(store, symbols=symbols, market_date=market_date)
     provider = news_provider or AlpacaNewsProvider(config)
     try:
-        articles = provider.get_articles(
+        fetched_articles = provider.get_articles(
             wanted_symbols,
             since=since,
             until=until,
@@ -121,7 +137,9 @@ def run_scenario_cycle(
             limit=config.scenario_openai_max_articles_per_run,
         )
         if not dry_run:
-            store.persist_scenario_news_items([article.as_dict() for article in articles])
+            store.persist_scenario_news_items([article.as_dict() for article in fetched_articles])
+        prefilter = prefilter_scenario_articles(fetched_articles, decision_at=now)
+        articles = list(prefilter.eligible_articles)
         if price_contexts is None and not historical:
             price_contexts = _live_price_contexts(config, wanted_symbols, as_of=now)
         decisions: list[dict[str, Any]] = []
@@ -170,6 +188,13 @@ def run_scenario_cycle(
                     and not dry_run
                 ):
                     materialized.append(_materialize_decision(store, decision_payload))
+        prefilter_receipt = _build_prefilter_receipt(
+            fetched_articles=fetched_articles,
+            prefilter=prefilter,
+            decisions=decisions,
+            decision_at=now,
+            market_date=market_date,
+        )
         watcher = None
         if materialized and not dry_run:
             watcher = run_trade_watcher(
@@ -191,7 +216,10 @@ def run_scenario_cycle(
             "market_date": market_date,
             "cohort": cohort,
             "symbol_count": len(wanted_symbols),
-            "article_count": len(articles),
+            "article_count": len(fetched_articles),
+            "eligible_article_count": len(articles),
+            "prefilter_counts": prefilter.counts,
+            "prefilter_observation_receipt": prefilter_receipt,
             "cached_extraction_count": cached_count,
             "model_request_count": model_request_count,
             "ai_role": "schema_validated_factual_claim_extraction_only",
@@ -893,11 +921,13 @@ def _extraction_for_article(
     dry_run: bool,
 ) -> tuple[ScenarioExtraction, bool]:
     input_hash = extraction_input_hash(article, max_article_chars=config.scenario_article_max_chars)
-    cached = store.load_scenario_extraction(
-        article_id=article.article_id,
-        model=config.scenario_openai_model,
-        input_hash_sha256=input_hash,
-    )
+    cached = None
+    if not (dry_run and not store.db_path.is_file()):
+        cached = store.load_scenario_extraction(
+            article_id=article.article_id,
+            model=config.scenario_openai_model,
+            input_hash_sha256=input_hash,
+        )
     if cached:
         payload = dict(cached)
         payload.pop("input_hash_sha256", None)
@@ -931,6 +961,126 @@ def _extraction_for_article(
     if not dry_run:
         store.persist_scenario_extractions([extraction.as_dict()])
     return extraction, False
+
+
+def _build_prefilter_receipt(
+    *,
+    fetched_articles: list[ScenarioNewsArticle],
+    prefilter: ScenarioPrefilterResult,
+    decisions: list[dict[str, Any]],
+    decision_at: str,
+    market_date: str,
+) -> dict[str, Any] | None:
+    """Build a hash-bound prospective receipt for every non-trade observation."""
+
+    parsed = parse_aware_timestamp(decision_at)
+    if parsed is None:
+        return None
+    article_payloads = sorted(
+        (_canonical_article_payload(article) for article in fetched_articles),
+        key=_canonical_sort_key,
+    )
+    source_hash = canonical_hash(article_payloads)
+    window_hash = canonical_hash(
+        {
+            "decision_at": decision_at,
+            "market_date": market_date,
+            "policy_version": SCENARIO_PREFILTER_POLICY_VERSION,
+        }
+    )
+    code_hash = _prefilter_code_hash()
+    observations: list[Mapping[str, Any]] = sorted(
+        (
+            _canonical_observation_payload(item.as_dict() | {"market_date": market_date})
+            for item in prefilter.observations
+        ),
+        key=_canonical_sort_key,
+    )
+    # Engine outcomes are also observations, but ENTER_LONG is intentionally
+    # absent: it belongs only to the existing deterministic paper lifecycle.
+    canonical_decisions = [_canonical_decision_payload(decision) for decision in decisions]
+    for decision in decisions:
+        action = str(decision.get("action") or "").upper()
+        if action not in {"ABSTAIN", "WATCH", "AVOID"}:
+            continue
+        ticker = str(decision.get("ticker") or "").strip().upper()
+        candidate_id = canonical_hash(
+            {
+                "article_id": decision.get("article_id"),
+                "ticker": ticker,
+                "decision_id": decision.get("decision_id"),
+                "policy_version": SCENARIO_PREFILTER_POLICY_VERSION,
+            }
+        )[:32]
+        observations.append(
+            {
+                "candidate_id": candidate_id,
+                "decision_id": str(decision.get("decision_id") or ""),
+                "decision_at": decision.get("decision_at") or decision_at,
+                "market_date": market_date,
+                "observation_policy": SCENARIO_PREFILTER_POLICY_VERSION,
+                "prefilter_decision": action,
+                "reason_codes": sorted(decision.get("reason_codes") or []),
+                "source_lineage_hash_sha256": decision.get("source_lineage_hash_sha256") or "",
+            }
+        )
+    observations.sort(key=_canonical_sort_key)
+    canonical_decisions.sort(key=_canonical_sort_key)
+    evidence_hash = canonical_hash(
+        {
+            "articles": article_payloads,
+            "observations": observations,
+            "decisions": canonical_decisions,
+        }
+    )
+    evidence = Cycle3EvidenceHashes(
+        source_hash_sha256=source_hash,
+        config_hash_sha256=prefilter.config_hash_sha256,
+        code_sha=code_hash,
+        window_hash_sha256=window_hash,
+        evidence_hash_sha256=evidence_hash,
+    )
+    return build_scenario_prefilter_observation_receipt(
+        market_date=market_date,
+        observations=observations,
+        evidence=evidence,
+        scenario_config_hash_sha256=prefilter.config_hash_sha256,
+        observation_policy_config=prefilter.config,
+        observation_policy_config_hash_sha256=prefilter.config_hash_sha256,
+    )
+
+
+def _prefilter_code_hash() -> str:
+    """Bind receipts to full prefilter/helper source bytes, not one function."""
+
+    return prefilter_implementation_hash_sha256()
+
+
+def _canonical_sort_key(value: Any) -> str:
+    """Match canonical_hash's JSON normalization for order-independent lists."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _canonical_article_payload(article: ScenarioNewsArticle) -> dict[str, Any]:
+    payload = article.as_dict(include_content=True)
+    payload["symbols"] = sorted(payload.get("symbols") or [])
+    return payload
+
+
+def _canonical_observation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    output = dict(payload)
+    if isinstance(output.get("reason_codes"), list):
+        output["reason_codes"] = sorted(output["reason_codes"])
+    return output
+
+
+def _canonical_decision_payload(decision: dict[str, Any]) -> dict[str, Any]:
+    output = dict(decision)
+    for key in ("reason_codes", "uncertainty_flags", "dependencies", "unresolved_unknowns"):
+        if isinstance(output.get(key), list):
+            output[key] = sorted(output[key], key=_canonical_sort_key)
+    return output
 
 
 def _live_price_contexts(

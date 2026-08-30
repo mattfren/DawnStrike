@@ -12,6 +12,7 @@ from intraday_scanner.dashboard.operator_data_service import (
     calculate_missing_outcome_status,
     canonical_missing_outcome_rows,
 )
+from intraday_scanner.services.outcome_capture_contract import classify_missing_capture
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -42,31 +43,44 @@ def outcome_gap_report(
             {
                 **row,
                 "capture_status": (
-                    attempt.get("status") if attempt else "not_attempted"
+                    attempt.get("capture_status") or attempt.get("status")
+                    if attempt
+                    else "not_attempted"
+                ),
+                "legacy_capture_status": attempt.get("status") if attempt else None,
+                "missing_classification": (
+                    _attempt_missing_classification(attempt) if attempt else "not_attempted"
+                ),
+                "retryable": (
+                    _attempt_missing_classification(attempt) == "recoverable" if attempt else False
+                ),
+                "authoritative_terminal": (
+                    _attempt_missing_classification(attempt) == "authoritative_terminal"
+                    if attempt
+                    else False
                 ),
                 "terminal": (
-                    bool(attempt.get("terminal")) if attempt else False
+                    _attempt_missing_classification(attempt) == "authoritative_terminal"
+                    if attempt
+                    else False
                 ),
                 "learning_eligible": False,
                 "provider_chain": (
-                    attempt.get("provider_chain")
-                    or attempt.get("provider_chain_json")
+                    attempt.get("provider_chain") or attempt.get("provider_chain_json")
                     if attempt
                     else []
                 ),
-                "attempted_at": (
-                    attempt.get("attempted_at") if attempt else None
-                ),
-                "error_code": (
-                    attempt.get("error_code") if attempt else None
-                ),
-                "error_detail": (
-                    attempt.get("error_detail") if attempt else None
-                ),
+                "attempted_at": (attempt.get("attempted_at") if attempt else None),
+                "error_code": (attempt.get("error_code") if attempt else None),
+                "error_detail": (attempt.get("error_detail") if attempt else None),
             }
         )
-    terminal_missing = sum(
-        1 for row in gaps if row.get("terminal") is True
+    terminal_missing = sum(1 for row in gaps if row.get("authoritative_terminal") is True)
+    recoverable_missing = sum(
+        1 for row in gaps if row.get("missing_classification") == "recoverable"
+    )
+    not_attempted = sum(
+        1 for row in gaps if row.get("missing_classification") == "not_attempted"
     )
     status = (
         "NO_ELIGIBLE"
@@ -87,7 +101,10 @@ def outcome_gap_report(
         "complete_outcome_count": summary.get("audited_count", 0),
         "missing_outcome_count": len(gaps),
         "terminal_missing_count": terminal_missing,
-        "retryable_missing_count": len(gaps) - terminal_missing,
+        "authoritative_terminal_count": terminal_missing,
+        "recoverable_missing_count": recoverable_missing,
+        "not_attempted_count": not_attempted,
+        "retryable_missing_count": recoverable_missing + not_attempted,
         "learning_eligible_missing_count": 0,
         "missing_truth_is_zero": False,
         "gaps": gaps,
@@ -119,6 +136,9 @@ def _latest_attempts(
         ):
             latest[signal_id] = row
     return latest
+
+
+_attempt_missing_classification = classify_missing_capture
 
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:

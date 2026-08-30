@@ -144,6 +144,14 @@ def _source_quality(
     source_reliability_prior = _float(
         row.get("source_reliability_prior"), _float(reliability.get("reliability_score"), 50.0)
     )
+    # A collection score is descriptive until at least one authenticated
+    # outcome exists.  Preserve the count/evidence state in the vector so the
+    # model cannot accidentally turn normalization quality into an alpha prior.
+    source_outcome_count = _float(reliability.get("outcome_count"))
+    source_outcome_evidence_status = _text(
+        reliability.get("outcome_evidence_status"),
+        "collection_only" if not source_outcome_count else "authenticated",
+    )
     reconciliation_confidence_score = _float(
         row.get("reconciliation_confidence_score")
     )
@@ -187,6 +195,12 @@ def _source_quality(
         ),
         "source_rows_normalized": _float(source_summary.get("rows_normalized"), 0.0),
         "source_reliability_score": _float(reliability.get("reliability_score"), 50.0),
+        "source_outcome_count": source_outcome_count or 0.0,
+        "source_outcome_evidence_status": source_outcome_evidence_status,
+        "source_alpha_adjustment_eligible": bool(
+            source_outcome_count is not None and source_outcome_count > 0
+            and source_outcome_evidence_status == "authenticated"
+        ),
     }
 
 

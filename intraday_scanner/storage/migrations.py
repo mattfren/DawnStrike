@@ -62,6 +62,37 @@ def run_migrations(connection: sqlite3.Connection) -> int:
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
             continue
+        if target_version == 35:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='monitor_interval_gaps'"
+            ).fetchone()
+            schedule_index_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_monitor_interval_gaps_schedule'"
+            ).fetchone()
+            monitor_events_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='monitor_events'"
+            ).fetchone()
+            event_index_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_monitor_events_type_created'"
+            ).fetchone()
+            gap_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(monitor_interval_gaps)"
+                ).fetchall()
+            }
+            if (
+                table_exists is None
+                or schedule_index_exists is None
+                or (monitor_events_exists is not None and event_index_exists is None)
+                or not {"schedule_version", "release_sha", "receipt_sha256"} <= gap_columns
+            ):
+                migration(connection)
+            # This is an additive operational sidecar; preserve the legacy
+            # schema marker consumed by governed opportunity contracts.
+            continue
         if target_version in {31, 32, 33, 34}:
             missing_tables = {
                 name
@@ -2548,6 +2579,75 @@ def _migration_034_research_episode_outcome_bridge_logical_key(
         connection.execute(f"RELEASE {savepoint}")
 
 
+def _migration_035_monitor_interval_gap_receipts(connection: sqlite3.Connection) -> None:
+    """Add immutable, schedule-scoped receipts for missed monitor slots."""
+
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "monitor_events" in existing_tables:
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monitor_events_type_created
+            ON monitor_events(event_type, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_monitor_events_created_at
+            ON monitor_events(created_at DESC, id DESC);
+            """
+        )
+    if "setup_monitor_checks" in existing_tables:
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_setup_monitor_checks_checked_at
+            ON setup_monitor_checks(checked_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_setup_monitor_checks_status_checked
+            ON setup_monitor_checks(status, checked_at DESC, id DESC);
+            """
+        )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS monitor_interval_gaps (
+            gap_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            market_date TEXT NOT NULL,
+            schedule_id TEXT NOT NULL,
+            schedule_version TEXT NOT NULL,
+            release_sha TEXT NOT NULL,
+            expected_at TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            receipt_sha256 TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(schedule_id, expected_at, interval_seconds)
+        );
+        CREATE INDEX IF NOT EXISTS idx_monitor_interval_gaps_date
+        ON monitor_interval_gaps(market_date, expected_at);
+        CREATE INDEX IF NOT EXISTS idx_monitor_interval_gaps_schedule
+        ON monitor_interval_gaps(schedule_id, expected_at, interval_seconds);
+        """
+    )
+    _add_column_if_missing(
+        connection,
+        "monitor_interval_gaps",
+        "schedule_version TEXT NOT NULL DEFAULT 'v1'",
+    )
+    _add_column_if_missing(
+        connection,
+        "monitor_interval_gaps",
+        "release_sha TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column_if_missing(
+        connection,
+        "monitor_interval_gaps",
+        "receipt_sha256 TEXT NOT NULL DEFAULT ''",
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection, table: str, column_definition: str
 ) -> None:
@@ -2592,4 +2692,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (32, _migration_032_v6_decision_availability),
     (33, _migration_033_research_episode_outcome_bridges),
     (34, _migration_034_research_episode_outcome_bridge_logical_key),
+    # Additive sidecar migration: legacy opportunity rows still validate their
+    # own historical schema markers, so this does not rewrite those markers.
+    (35, _migration_035_monitor_interval_gap_receipts),
 )

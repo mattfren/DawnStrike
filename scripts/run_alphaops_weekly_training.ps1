@@ -64,6 +64,26 @@ try {
         exit $training.exit_code
     }
 
+    # Weekly challenger evaluation is a receipt-only, fail-closed adapter. It
+    # derives evidence from the fixed state-root contract and may complete as
+    # NOT_EVALUABLE while the private CommitBridge FillTruth producer is absent.
+    # It receives no caller-supplied eligibility booleans or retrospective data.
+    $challenger = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @(
+            "-m", "intraday_scanner.cli", "strategy-challenger-evaluate-weekly",
+            "--db-path", $dbPath,
+            "--state-root", $state,
+            "--market-date", $MarketDate,
+            "--code-sha", $releaseSha,
+            "--out-root", $outputRoot
+        ) `
+        -LogRoot $logRoot `
+        -LogName "strategy_challenger_weekly_evaluation-$MarketDate"
+    if ($challenger.exit_code -ne 0) {
+        exit $challenger.exit_code
+    }
+
     $packet = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
         -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-research-packet", "--db-path", $dbPath, "--code-sha", $releaseSha, "--out-dir", $outputRoot) `

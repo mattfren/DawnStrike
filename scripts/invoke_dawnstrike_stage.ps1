@@ -18,20 +18,13 @@ function Enter-DawnstrikeDailyRunLock {
     $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes
-        $ownerActive = $false
-        try {
-            $existingPayload = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
-            $ownerProcess = Get-Process -Id ([int]$existingPayload.process_id) -ErrorAction SilentlyContinue
-            if ($ownerProcess) {
-                $acquiredAt = [DateTimeOffset]::Parse([string]$existingPayload.acquired_at).UtcDateTime
-                # A reused PID belongs to a process that started after this lock.
-                $ownerActive = $ownerProcess.StartTime.ToUniversalTime() -le $acquiredAt.AddSeconds(5)
-            }
-        }
-        catch {
-            $ownerActive = $false
-        }
-        if (-not $ownerActive -or $age -ge $StaleAfterMinutes) {
+        $ownerActive = Test-DawnstrikeLockOwnerActive -LockPath $lockPath
+        # Wall-clock age is diagnostic only.  A long-running owner must never
+        # be evicted merely because it crossed StaleAfterMinutes; doing so
+        # permits two daily runs to mutate the same research ledger.  Recovery
+        # is allowed only when PID/start-time proof says the owner is dead (or
+        # the payload cannot prove any owner exists).
+        if (-not $ownerActive) {
             $stalePath = "$lockPath.stale.$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))"
             Move-Item -LiteralPath $lockPath -Destination $stalePath -ErrorAction Stop
         } else {
@@ -45,11 +38,12 @@ function Enter-DawnstrikeDailyRunLock {
     }
     $lockToken = [guid]::NewGuid().ToString("N")
     $payload = [ordered]@{
-        schema_version = "dawnstrike.daily_run_lock.v2"
+        schema_version = "dawnstrike.daily_run_lock.v3"
         market_date = $MarketDate
         owner = $Owner
         acquired_at = [DateTime]::UtcNow.ToString("o")
         process_id = $PID
+        process_started_at_utc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
         lock_token = $lockToken
     } | ConvertTo-Json -Depth 3
     try {
@@ -79,6 +73,48 @@ function Enter-DawnstrikeDailyRunLock {
         reason = "acquired"
         age_minutes = 0
         lock_token = $lockToken
+    }
+}
+
+function Test-DawnstrikeLockOwnerActive {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LockPath)
+
+    try {
+        $lockItem = Get-Item -LiteralPath $LockPath -ErrorAction Stop
+        if (($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $false
+        }
+        $payload = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $processId = 0
+        if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
+            return $false
+        }
+        $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $ownerProcess) { return $false }
+        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
+        $startedProperty = $payload.PSObject.Properties["process_started_at_utc"]
+        if ($null -ne $startedProperty -and -not [string]::IsNullOrWhiteSpace([string]$startedProperty.Value)) {
+            # A reused PID has a different creation time.  Compare exact
+            # process start identity rather than mutable lock-file age.
+            $recordedStart = [DateTimeOffset]::Parse([string]$startedProperty.Value).ToUniversalTime()
+            return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
+        }
+        # v2 locks (dawnstrike.daily_run_lock.v2) predate the exact
+        # process-start field.  Retain the old
+        # acquired_at relationship for compatibility, but never age-evict a
+        # live PID.  A process that started after acquired_at is a reused PID;
+        # an unparseable acquired_at is ambiguous and therefore fail-closed.
+        try {
+            $acquiredAt = [DateTimeOffset]::Parse([string]$payload.acquired_at).ToUniversalTime()
+            return $processStarted.UtcDateTime.Ticks -le $acquiredAt.UtcDateTime.AddTicks([TimeSpan]::TicksPerSecond * 5).Ticks
+        }
+        catch {
+            return $true
+        }
+    }
+    catch {
+        return $false
     }
 }
 

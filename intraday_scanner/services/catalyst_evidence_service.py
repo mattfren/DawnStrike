@@ -6,6 +6,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from intraday_scanner.alpha.v6.contracts import canonical_hash
 from intraday_scanner.providers.sec_edgar_provider import classify_filing_research_feature
 from intraday_scanner.storage.catalyst_evidence_store import CatalystEvidenceStore
 
@@ -32,19 +33,26 @@ def build_catalyst_evidence_event(
     content: str,
     published_at: str | None,
     first_seen_at: str,
+    available_at: str | None = None,
     decision_at: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one immutable event and explicitly classify decision-time availability."""
 
     source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    available = _is_available(published_at or first_seen_at, decision_at)
+    available_timestamp = available_at or first_seen_at
+    available = _is_available(
+        published_at,
+        first_seen_at=first_seen_at,
+        available_at=available_timestamp,
+        decision_at=decision_at,
+    )
     event_type = _event_type(content)
     payload_value = dict(payload or {})
     event_id = hashlib.sha256(f"{symbol.upper()}:{source_kind}:{source_hash}".encode()).hexdigest()[
         :32
     ]
-    return {
+    event = {
         "event_id": event_id,
         "symbol": symbol.upper(),
         "source_kind": source_kind,
@@ -52,6 +60,7 @@ def build_catalyst_evidence_event(
         "source_content_hash_sha256": source_hash,
         "published_at": published_at,
         "first_seen_at": first_seen_at,
+        "available_at": available_timestamp,
         "available_at_decision": available,
         "decision_at": decision_at,
         "event_type": event_type,
@@ -69,6 +78,19 @@ def build_catalyst_evidence_event(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    # Bind both the immutable event payload and its source identity.  The
+    # decision-time join verifies these hashes before admitting an event.
+    event["source_lineage_hash_sha256"] = canonical_hash(
+        {
+            "source_kind": source_kind,
+            "canonical_url": canonical_url,
+            "source_content_hash_sha256": source_hash,
+        }
+    )
+    event["event_payload_hash_sha256"] = canonical_hash(
+        {key: value for key, value in event.items() if key != "created_at"}
+    )
+    return event
 
 
 def build_news_catalyst_events(
@@ -85,7 +107,15 @@ def build_news_catalyst_events(
                 str(item.get(key) or "") for key in ("headline", "summary", "content")
             ),
             published_at=str(item.get("published_at") or "") or None,
-            first_seen_at=str(item.get("first_seen_at") or datetime.now(timezone.utc).isoformat()),
+            # Provider adapters should supply first_seen_at/available_at.  If
+            # both are absent, use the local ingest clock; publisher time is
+            # never treated as observation time.
+            first_seen_at=str(
+                item.get("first_seen_at")
+                or item.get("available_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
+            available_at=str(item.get("available_at") or "") or None,
             decision_at=decision_at,
             payload=item,
         )
@@ -121,6 +151,13 @@ def build_filing_catalyst_event(
     )
     feature = classify_filing_research_feature(filing, facts, decision_at=decision_at)
     event["payload"]["research_feature"] = feature
+    event["event_payload_hash_sha256"] = canonical_hash(
+        {
+            key: value
+            for key, value in event.items()
+            if key not in {"created_at", "event_payload_hash_sha256", "event_self_hash_sha256"}
+        }
+    )
     return event, feature
 
 
@@ -146,12 +183,26 @@ def ingest_catalyst_evidence(
     }
 
 
-def _is_available(published_at: str, decision_at: str | None) -> bool:
+def _is_available(
+    published_at: str | None,
+    *,
+    first_seen_at: str,
+    available_at: str,
+    decision_at: str | None,
+) -> bool:
     if not decision_at:
         return False
-    published = _parse_datetime(published_at)
+    published = _parse_datetime(published_at) if published_at else None
+    first_seen = _parse_datetime(first_seen_at)
+    available = _parse_datetime(available_at)
     decision = _parse_datetime(decision_at)
-    return published is not None and decision is not None and published <= decision
+    if first_seen is None or available is None or decision is None:
+        return False
+    if published is not None and published > first_seen:
+        return False
+    if available < first_seen:
+        return False
+    return first_seen <= decision and available <= decision
 
 
 def _parse_datetime(value: str) -> datetime | None:
@@ -159,7 +210,7 @@ def _parse_datetime(value: str) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    return None if parsed.tzinfo is None else parsed
 
 
 def _event_type(content: str) -> str:

@@ -174,6 +174,12 @@ grade:<grade>|gap:<bucket>|volume:<bucket>|catalyst:<category>
 It stores sample size, average return, median return, win rate, and outlier
 dependency. AlphaOps uses this only as evidence grows.
 
+Collection-only reliability is descriptive evidence, not an outcome prior. A
+source row with `outcome_count=0` has `outcome_evidence_status=collection_only`
+and contributes a neutral (`0`) Alpha adjustment. Intentional universe policy
+rejections (for example, unsupported exchange or non-tradable assets) remain
+counted but are tracked separately from data-quality rejects.
+
 ## Before 20 Real Days
 
 Before 20 audited real market days:

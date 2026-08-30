@@ -220,7 +220,7 @@ class ScenarioNewsArticle:
             {
                 "provider": self.provider,
                 "article_id": self.article_id,
-                "symbols": self.symbols,
+                "symbols": tuple(sorted(self.symbols)),
                 "source": self.source,
                 "source_url": self.source_url,
                 "created_at": self.created_at,
@@ -231,7 +231,7 @@ class ScenarioNewsArticle:
 
     def as_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         payload = asdict(self)
-        payload["symbols"] = list(self.symbols)
+        payload["symbols"] = sorted(self.symbols)
         payload["source_tier"] = self.tier
         payload["content_hash_sha256"] = self.content_hash_sha256
         payload["source_lineage_hash_sha256"] = self.source_lineage_hash_sha256

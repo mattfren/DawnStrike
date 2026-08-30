@@ -267,6 +267,11 @@ def _dataset_row(
         ),
         "inclusion_probability": _inclusion_probability(decision),
         "inverse_probability_weight": _inverse_probability_weight(decision),
+        # Optional account-allocation inputs are carried through as evidence
+        # when present; absent values retain the unit-weight research default.
+        "allocation_weight": decision.get("allocation_weight"),
+        "account_weight": decision.get("account_weight"),
+        "portfolio_allocation_weight": decision.get("portfolio_allocation_weight"),
         "simulated_fill_label": _label_value(families.get("simulated_fill_feasibility")),
         "source_artifact_hash_sha256": lineage["source_artifact_hash_sha256"],
         "source_artifact_hashes": lineage["source_artifact_hashes"],

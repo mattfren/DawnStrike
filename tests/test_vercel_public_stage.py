@@ -45,20 +45,18 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "dependencies = []" in script
     assert "api/public/**" in script
     assert '$functionPublic = Join-Path $stage "api\\public"' in script
-    assert "performance-snapshot.json" in script
-    assert "performance-snapshot-manifest.json" in script
-    assert "scenarios.json.manifest.json" in script
-    assert "scenario_b64" in script
-    assert "opportunity-projection.json.manifest.json" in script
-    assert "opportunity_b64" in script
-    assert '"static_file_hashes_verified":true' in script
+    assert 'Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic' in script
+    assert "performance-snapshot.json" not in script
+    assert "performance-snapshot-manifest.json" not in script
+    assert "scenarios.json.manifest.json" not in script
+    assert "scenario_b64" not in script
+    assert "opportunity-projection.json.manifest.json" not in script
+    assert "opportunity_b64" not in script
+    assert "snapshot_b64" not in script
+    assert "calendar_b64" not in script
+    assert "static_file_hashes_verified" in script
     assert "api\\public_state.py" in script
-    assert "function Read-RawJsonObject" in script
-    assert "ConvertFrom-Json -InputObject $raw" in script
-    assert "return the original text" in script
     assert "System.Text.Json" not in script
-    assert "$stateJson = '{' + ($stateParts -join ',') + '}'" in script
-    assert "ISO timestamps and" in script
     assert "StageRoot must resolve inside the project build directory" in script
     assert "StageRoot must not overlap the source public artifact" in script
     assert "[System.IO.Path]::GetFullPath($stageCandidate)" in script

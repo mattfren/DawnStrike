@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from intraday_scanner.errors import ConfigError
 from intraday_scanner.services.daily_finalize_service import (
     DailyFinalizeService,
     _reconciliation_gate,
@@ -123,6 +124,51 @@ def test_finalize_exposes_failed_shared_upstream_stage(
     run = result["readiness"]["daily_run"]["run"]
     assert run["failed_stage"] == "eod_outcome_capture"
     assert run["failure_reason"] == "No sourced close."
+
+
+def test_finalize_does_not_retry_terminal_configuration_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = 0
+
+    def invalid_configuration(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ConfigError("provider configuration is invalid")
+
+    monkeypatch.setattr(
+        "intraday_scanner.services.daily_finalize_service.CanonicalPerformanceService.reconcile",
+        invalid_configuration,
+    )
+    result = DailyFinalizeService(tmp_path / "terminal.sqlite", tmp_path / "public").run(
+        market_date="2026-07-29", retry_limit=5
+    )
+
+    assert calls == 1
+    assert result["status"] == "FAILED"
+    assert result["retry_count"] == 0
+    assert "ConfigError" in result["error_detail"]
+
+
+def test_finalize_closed_session_records_terminal_no_trade_without_zero_truth(
+    tmp_path: Path,
+) -> None:
+    result = DailyFinalizeService(
+        tmp_path / "closed.sqlite",
+        tmp_path / "public",
+        runtime_root=tmp_path,
+        state_root=tmp_path,
+        release_sha="a" * 40,
+    ).run(market_date="2026-08-29", now="2026-08-29T21:00:00+00:00")
+
+    assert result["status"] == "SKIPPED_NOT_APPLICABLE"
+    assert result["daily_run"]["run"]["status"] == "SKIPPED_NOT_APPLICABLE"
+    funnel = result["no_trade_funnel"]
+    assert funnel["status"] == "NO_TRADE"
+    assert funnel["return_pct"] is None
+    assert funnel["net_pnl"] is None
+    assert funnel["picks"] is None
+    assert result["stage_manifest"]["artifacts"] == []
 
 
 def test_reconciliation_gate_allows_only_declared_historical_warnings() -> None:

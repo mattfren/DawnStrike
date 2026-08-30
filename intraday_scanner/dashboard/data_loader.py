@@ -136,7 +136,12 @@ def load_sqlite(db_path: str | Path) -> dict[str, Any]:
     latest["signal_return_attribution"] = store.load_signal_return_attribution(limit=500)
     latest["daily_signal_performance"] = store.load_daily_signal_performance(limit=500)
     latest["recent_alerts"] = store.load_recent_alerts()
-    latest["monitor_events"] = store.load_recent_monitor_events()
+    # The public dashboard only needs event identity/severity/timestamp.  Keep
+    # payload blobs out of this history-wide hot path; detail views can still
+    # request the legacy payload-bearing method explicitly.
+    latest["monitor_events"] = store.load_recent_monitor_event_projection()
+    latest["monitor_interval_gaps"] = store.load_monitor_interval_gap_projection()
+    latest["monitor_interval_gap_count"] = store.count_monitor_interval_gaps()
     latest["recommendation_history"] = store.load_recommendation_theses()
     latest["audit_trades"] = store.load_paper_audit_trades()
     calendar_start, calendar_end = _default_calendar_range(db_path)

@@ -269,7 +269,9 @@ def format_alpha_watch(
     # must validate as the strict production artifact; an invalid schema may
     # not fall through to self-asserted publication tiers/counts.
     has_authoritative_slate = isinstance(raw_slate, dict)
-    slate = dict(raw_slate) if has_authoritative_slate else {}
+    slate: dict[str, Any] = {}
+    if isinstance(raw_slate, dict):
+        slate = {key: value for key, value in raw_slate.items()}
     frozen_publication_rows = source_summary.get("ranked_research_publication_rows")
     authoritative_publication_rows: list[dict[str, Any]] = []
     authoritative_slate_valid = False

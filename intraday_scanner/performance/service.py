@@ -741,28 +741,36 @@ class CanonicalPerformanceService:
         *,
         market_date: str | None,
     ) -> None:
-        if market_date:
-            dates = {row.market_date for row in rows}
-            dates.add(market_date)
-            for day in dates:
-                connection.execute(
-                    "DELETE FROM portfolio_performance_rows WHERE market_date = ?", (day,)
-                )
-                connection.execute(
-                    "DELETE FROM performance_reconciliation_issues WHERE market_date = ?", (day,)
-                )
-                connection.execute(
-                    "DELETE FROM portfolio_daily_performance WHERE market_date = ?", (day,)
-                )
-        else:
-            # The daily publisher performs a full rebuild. Clearing the
-            # canonical read model first prevents stale rows surviving when
-            # raw inputs are empty or an upstream table disappears.
-            connection.execute("DELETE FROM portfolio_performance_rows")
-            connection.execute("DELETE FROM performance_reconciliation_issues")
-            connection.execute("DELETE FROM portfolio_daily_performance")
-        for row in rows:
-            connection.execute(
+        # Keep the full-rebuild/delete-first contract, but make the generated
+        # rows one bounded write batch per table.  The savepoint is important
+        # for callers that reuse a connection after a rejected/conflicting
+        # batch: no prefix of a batch may survive an INSERT failure.
+        connection.execute("SAVEPOINT canonical_performance_persist")
+        try:
+            if market_date:
+                dates = {row.market_date for row in rows}
+                dates.add(market_date)
+                for day in dates:
+                    connection.execute(
+                        "DELETE FROM portfolio_performance_rows WHERE market_date = ?", (day,)
+                    )
+                    connection.execute(
+                        "DELETE FROM performance_reconciliation_issues "
+                        "WHERE market_date = ?",
+                        (day,),
+                    )
+                    connection.execute(
+                        "DELETE FROM portfolio_daily_performance WHERE market_date = ?", (day,)
+                    )
+            else:
+                # The daily publisher performs a full rebuild. Clearing the
+                # canonical read model first prevents stale rows surviving when
+                # raw inputs are empty or an upstream table disappears.
+                connection.execute("DELETE FROM portfolio_performance_rows")
+                connection.execute("DELETE FROM performance_reconciliation_issues")
+                connection.execute("DELETE FROM portfolio_daily_performance")
+
+            connection.executemany(
                 """
                 INSERT INTO portfolio_performance_rows (
                     record_id, market_date, ticker, cohort, strategy_id, strategy_version,
@@ -779,44 +787,9 @@ class CanonicalPerformanceService:
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
-                (
-                    row.record_id,
-                    row.market_date,
-                    row.ticker,
-                    row.cohort.value,
-                    row.strategy_id,
-                    row.strategy_version,
-                    row.signal_id,
-                    row.rank,
-                    row.record_status.value,
-                    row.entry_price,
-                    row.exit_price,
-                    row.quantity,
-                    row.notional_cents,
-                    row.gross_pnl_cents,
-                    row.gross_return_pct,
-                    row.fees_cents,
-                    row.slippage_cents,
-                    row.net_pnl_cents,
-                    row.return_pct,
-                    row.benchmark_return_pct,
-                    row.excess_return_pct,
-                    json.dumps(list(row.source_refs), sort_keys=True),
-                    row.source_hash_sha256,
-                    row.input_hash_sha256,
-                    row.observed_at,
-                    row.reconciled_at,
-                    row.quarantine_reason,
-                    row.execution_policy_version,
-                    row.trade_count,
-                    row.open_position_count,
-                    row.unrealized_pnl_cents,
-                    row.record_type,
-                    json.dumps(row.to_dict(), sort_keys=True),
-                ),
+                [_performance_row_params(row) for row in rows],
             )
-        for daily_row in daily:
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO portfolio_daily_performance (
                     performance_id, market_date, cohort, strategy_id, strategy_version,
@@ -848,15 +821,9 @@ class CanonicalPerformanceService:
                     :evidence_state, :coverage_json, :source_refs_json, :payload_json
                 )
                 """,
-                {
-                    **daily_row,
-                    "coverage_json": json.dumps(daily_row["coverage"], sort_keys=True),
-                    "source_refs_json": json.dumps(daily_row["source_refs"], sort_keys=True),
-                    "payload_json": json.dumps(daily_row, sort_keys=True),
-                },
+                [_daily_row_params(daily_row) for daily_row in daily],
             )
-        for issue in issues:
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO performance_reconciliation_issues
                 (
@@ -865,17 +832,75 @@ class CanonicalPerformanceService:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    issue["issue_id"],
-                    issue.get("record_id"),
-                    issue["market_date"],
-                    issue["severity"],
-                    issue["issue_code"],
-                    issue["message"],
-                    issue["created_at"],
-                    json.dumps(issue, sort_keys=True),
-                ),
+                [_issue_params(issue) for issue in issues],
             )
+            connection.execute("RELEASE SAVEPOINT canonical_performance_persist")
+        except BaseException:
+            connection.execute("ROLLBACK TO SAVEPOINT canonical_performance_persist")
+            connection.execute("RELEASE SAVEPOINT canonical_performance_persist")
+            raise
+
+
+def _performance_row_params(row: PerformanceRow) -> tuple[Any, ...]:
+    """Return the legacy row binding in its original column order."""
+
+    return (
+        row.record_id,
+        row.market_date,
+        row.ticker,
+        row.cohort.value,
+        row.strategy_id,
+        row.strategy_version,
+        row.signal_id,
+        row.rank,
+        row.record_status.value,
+        row.entry_price,
+        row.exit_price,
+        row.quantity,
+        row.notional_cents,
+        row.gross_pnl_cents,
+        row.gross_return_pct,
+        row.fees_cents,
+        row.slippage_cents,
+        row.net_pnl_cents,
+        row.return_pct,
+        row.benchmark_return_pct,
+        row.excess_return_pct,
+        json.dumps(list(row.source_refs), sort_keys=True),
+        row.source_hash_sha256,
+        row.input_hash_sha256,
+        row.observed_at,
+        row.reconciled_at,
+        row.quarantine_reason,
+        row.execution_policy_version,
+        row.trade_count,
+        row.open_position_count,
+        row.unrealized_pnl_cents,
+        row.record_type,
+        json.dumps(row.to_dict(), sort_keys=True),
+    )
+
+
+def _daily_row_params(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "coverage_json": json.dumps(row["coverage"], sort_keys=True),
+        "source_refs_json": json.dumps(row["source_refs"], sort_keys=True),
+        "payload_json": json.dumps(row, sort_keys=True),
+    }
+
+
+def _issue_params(issue: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        issue["issue_id"],
+        issue.get("record_id"),
+        issue["market_date"],
+        issue["severity"],
+        issue["issue_code"],
+        issue["message"],
+        issue["created_at"],
+        json.dumps(issue, sort_keys=True),
+    )
 
 
 def _without_canonical_trade_duplicates(

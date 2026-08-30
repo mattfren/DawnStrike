@@ -320,40 +320,42 @@ def persist_v5_account_ledger(
         "DELETE FROM paper_account_daily_ledger WHERE account_id = ?",
         (ALPHAOPS_V5_ACCOUNT_ID,),
     )
-    for row in rows:
-        connection.execute(
-            """
-            INSERT INTO paper_account_daily_ledger
-            (ledger_id, account_id, market_date, cohort, strategy_id, strategy_version,
-             execution_policy_version, cost_model_version, status, evidence_state,
-             beginning_equity_cents, external_flow_cents, realized_gross_pnl_cents,
-             fees_cents, slippage_cents, realized_net_pnl_cents,
-             unrealized_pnl_change_cents, cash_cents, position_market_value_cents,
-             ending_equity_cents, market_benchmark_return_pct,
-             cash_benchmark_return_pct, gross_return_pct, net_return_pct,
-             excess_return_pct, accounting_delta_cents, trade_count,
-             open_position_count, source_refs_json, source_hash_sha256,
-             input_hash_sha256, calculated_at, payload_json)
-            VALUES
-            (:ledger_id, :account_id, :market_date, :cohort, :strategy_id,
-             :strategy_version, :execution_policy_version, :cost_model_version,
-             :status, :evidence_state, :beginning_equity_cents,
-             :external_flow_cents, :realized_gross_pnl_cents, :fees_cents,
-             :slippage_cents, :realized_net_pnl_cents,
-             :unrealized_pnl_change_cents, :cash_cents,
-             :position_market_value_cents, :ending_equity_cents,
-             :market_benchmark_return_pct, :cash_benchmark_return_pct,
-             :gross_return_pct, :net_return_pct, :excess_return_pct,
-             :accounting_delta_cents, :trade_count, :open_position_count,
-             :source_refs_json, :source_hash_sha256, :input_hash_sha256,
-             :calculated_at, :payload_json)
-            """,
+    connection.executemany(
+        """
+        INSERT INTO paper_account_daily_ledger
+        (ledger_id, account_id, market_date, cohort, strategy_id, strategy_version,
+         execution_policy_version, cost_model_version, status, evidence_state,
+         beginning_equity_cents, external_flow_cents, realized_gross_pnl_cents,
+         fees_cents, slippage_cents, realized_net_pnl_cents,
+         unrealized_pnl_change_cents, cash_cents, position_market_value_cents,
+         ending_equity_cents, market_benchmark_return_pct,
+         cash_benchmark_return_pct, gross_return_pct, net_return_pct,
+         excess_return_pct, accounting_delta_cents, trade_count,
+         open_position_count, source_refs_json, source_hash_sha256,
+         input_hash_sha256, calculated_at, payload_json)
+        VALUES
+        (:ledger_id, :account_id, :market_date, :cohort, :strategy_id,
+         :strategy_version, :execution_policy_version, :cost_model_version,
+         :status, :evidence_state, :beginning_equity_cents,
+         :external_flow_cents, :realized_gross_pnl_cents, :fees_cents,
+         :slippage_cents, :realized_net_pnl_cents,
+         :unrealized_pnl_change_cents, :cash_cents,
+         :position_market_value_cents, :ending_equity_cents,
+         :market_benchmark_return_pct, :cash_benchmark_return_pct,
+         :gross_return_pct, :net_return_pct, :excess_return_pct,
+         :accounting_delta_cents, :trade_count, :open_position_count,
+         :source_refs_json, :source_hash_sha256, :input_hash_sha256,
+         :calculated_at, :payload_json)
+        """,
+        [
             {
                 **row,
                 "source_refs_json": json.dumps(row["source_refs"], sort_keys=True),
                 "payload_json": json.dumps(row, sort_keys=True),
-            },
-        )
+            }
+            for row in rows
+        ],
+    )
 
 
 def ledger_equity_observations(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -520,7 +520,7 @@ def _observe_alpaca_tickers(
             config,
         )
         snapshots = active_provider.get_premarket_snapshot(tickers, config)
-        prior_daily_highs = {}
+        prior_daily_highs: dict[str, dict[str, Any]] = {}
         prior_reader = getattr(active_provider, "get_previous_daily_highs", None)
         if callable(prior_reader):
             market_date = _as_utc(requested_at).astimezone(EASTERN).date().isoformat()
@@ -1181,23 +1181,34 @@ def _alpaca_raw_binding_valid(
     ] if isinstance(raw_bars, list) else []
     session_start, session_end = _premarket_session_bounds({}, requested_at)
     requested_epoch = int(_as_utc(requested_at).timestamp())
-    latest_epoch = max(bar_epochs) if bar_epochs and all(bar_epochs) else None
+    complete_bar_epochs = [epoch for epoch in bar_epochs if epoch is not None]
+    latest_epoch = (
+        max(complete_bar_epochs)
+        if complete_bar_epochs
+        and len(complete_bar_epochs) == len(bar_epochs)
+        and all(complete_bar_epochs)
+        else None
+    )
+    complete_high_values = [value for value in high_values if value is not None]
+    complete_low_values = [value for value in low_values if value is not None]
+    all_high_values_present = len(complete_high_values) == len(high_values)
+    all_low_values_present = len(complete_low_values) == len(low_values)
     aggregate_matches = (
         latest_epoch is not None
         and latest_epoch == _bar_epoch(observation.observed_at)
         and bool(high_values)
         and bool(low_values)
-        and all(
-            value is not None and value > 0 for value in high_values + low_values
-        )
+        and all_high_values_present
+        and all_low_values_present
+        and all(value > 0 for value in complete_high_values + complete_low_values)
         and observation.premarket_high is not None
         and observation.premarket_low is not None
-        and abs(max(high_values) - observation.premarket_high) <= 1e-9
-        and abs(min(low_values) - observation.premarket_low) <= 1e-9
+        and abs(max(complete_high_values) - observation.premarket_high) <= 1e-9
+        and abs(min(complete_low_values) - observation.premarket_low) <= 1e-9
         and all(
             session_start <= epoch < session_end
             and epoch + ONE_MINUTE_SECONDS <= requested_epoch
-            for epoch in bar_epochs
+            for epoch in complete_bar_epochs
         )
     )
     return (

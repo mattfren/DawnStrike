@@ -26,6 +26,7 @@ from intraday_scanner.services.scenario_intelligence_service import (
     scenario_doctor,
     scenario_public_snapshot,
 )
+from intraday_scanner.storage import migrations
 from intraday_scanner.storage.read_only import connect_read_only
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts.verify_daily_finalize_receipt import verify as verify_daily_finalize_receipt
@@ -203,6 +204,37 @@ def test_read_only_store_does_not_initialize_or_persist(tmp_path: Path) -> None:
             [{"ticker": "TEST", "event_type": "test", "severity": "info", "created_at": "now"}]
         )
     assert _sha256(path) == before
+
+
+def test_store_initializes_once_and_rechecks_external_schema_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.sqlite"
+    calls = 0
+    real_runner = migrations.run_migrations
+
+    def counted_runner(connection):
+        nonlocal calls
+        calls += 1
+        return real_runner(connection)
+
+    monkeypatch.setattr(migrations, "run_migrations", counted_runner)
+    store = SQLiteScanStore(path)
+    store.initialize()
+    store.initialize()
+    assert calls == 1
+
+    # A separate process can legitimately move the marker during a long-lived
+    # worker.  The next method call must invalidate the cache and reconcile it.
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE schema_version SET version = 29")
+    store.initialize()
+    assert calls == 2
+    with connect_read_only(path) as connection:
+        assert connection.execute(
+            "SELECT version FROM schema_version"
+        ).fetchone()[0] == 30
 
 
 def test_scenario_doctor_preserves_schema_21_fixture_without_registration(tmp_path: Path) -> None:

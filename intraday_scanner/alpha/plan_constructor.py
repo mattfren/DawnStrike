@@ -212,13 +212,15 @@ def construct_alphaops_v5_plan(
     if decision_at is not None and _parse_timestamp(decision_at) is None:
         return _invalid(normalized_direction, "decision_time_invalid")
     declared = signal.get("market_structure_observations") or signal.get("plan_observations")
-    observations: dict[str, Any] = dict(declared) if isinstance(declared, Mapping) else {}
+    plan_observations: dict[str, Any] = (
+        dict(declared) if isinstance(declared, Mapping) else {}
+    )
     target_candidates = signal.get("target_observations") or signal.get("target_candidates")
     if isinstance(target_candidates, (list, tuple)):
-        observations.setdefault("target_candidates", target_candidates)
+        plan_observations.setdefault("target_candidates", target_candidates)
 
-    declared_entry = observations.get("entry")
-    declared_stop = observations.get("stop")
+    declared_entry = plan_observations.get("entry")
+    declared_stop = plan_observations.get("stop")
     entry_observation = (
         declared_entry
         if isinstance(declared_entry, Mapping)
@@ -264,7 +266,7 @@ def construct_alphaops_v5_plan(
     legs: dict[str, PlanObservation] = {}
     for role in ("entry", "stop"):
         leg = _observation_for(
-            role, values[role], observations.get(role), signal, decision_at=decision_at
+            role, values[role], plan_observations.get(role), signal, decision_at=decision_at
         )
         if leg is None:
             return _invalid(normalized_direction, f"{role}_observation_incomplete")
@@ -272,7 +274,7 @@ def construct_alphaops_v5_plan(
             return _invalid(normalized_direction, f"{role}_observation_level_mismatch")
         legs[role] = leg
 
-    candidates = _target_candidates(signal, observations, target_value, target_basis)
+    candidates = _target_candidates(signal, plan_observations, target_value, target_basis)
     selected: PlanObservation | None = None
     selected_basis = ""
     for _index, candidate in enumerate(candidates):
@@ -525,8 +527,8 @@ def _validate_alphaops_v5_plan(
         for role in ("entry", "stop", "target")
     ):
         raise ValueError("plan freeze precedes a completed observation")
-    for role, expected in (("entry", entry), ("stop", stop), ("target", target)):
-        if _strict_number(by_role[role]["value"]) != expected:
+    for role, expected_level in (("entry", entry), ("stop", stop), ("target", target)):
+        if _strict_number(by_role[role]["value"]) != expected_level:
             raise ValueError(f"{role} level does not match its observation")
 
 

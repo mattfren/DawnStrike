@@ -337,10 +337,10 @@ class AttributionReportAnalyzer:
         if strategy.status not in {"benchmark", "baseline"}:
             grouped: dict[str, dict[str, Any]] = {}
             for summary in summaries:
-                eligibility = summary.get("eligibility")
+                eligibility_detail = summary.get("eligibility")
                 eligible_count = (
-                    int(eligibility.get("eligible_count") or 0)
-                    if isinstance(eligibility, Mapping)
+                    int(eligibility_detail.get("eligible_count") or 0)
+                    if isinstance(eligibility_detail, Mapping)
                     else 0
                 )
                 hypotheses = summary.get("remediation_hypotheses", ())
@@ -2080,26 +2080,24 @@ def _apply_research_episode_outcomes(
         if receipt_id in ambiguous_receipts:
             result.append(receipt)
             continue
-        bridge = by_receipt.get(receipt_id)
-        if bridge is not None and bridge.get("learning_eligible") is not True:
-            bridge = None
-        if bridge is None:
+        bridge_candidate = by_receipt.get(receipt_id)
+        if bridge_candidate is None or bridge_candidate.get("learning_eligible") is not True:
             result.append(receipt)
             continue
         result.append(
             {
                 **dict(receipt),
                 "outcome_state": str(
-                    bridge.get("selection_outcome")
+                    bridge_candidate.get("selection_outcome")
                     or (
-                        (bridge.get("selection_outcome_metrics") or {}).get("path_status")
-                        if isinstance(bridge.get("selection_outcome_metrics"), Mapping)
+                        (bridge_candidate.get("selection_outcome_metrics") or {}).get("path_status")
+                        if isinstance(bridge_candidate.get("selection_outcome_metrics"), Mapping)
                         else None
                     )
-                    or bridge.get("outcome_state")
+                    or bridge_candidate.get("outcome_state")
                     or "MISSING"
                 ),
-                "selection_outcome_bridge_id": bridge.get("bridge_id"),
+                "selection_outcome_bridge_id": bridge_candidate.get("bridge_id"),
             }
         )
     return tuple(result)
@@ -2158,20 +2156,20 @@ def _bridge_learning_summary(
         )
     ]
     candidates: dict[str, list[Mapping[str, Any]]] = {}
-    for item in usable:
-        receipt_id = str(item.get("receipt_id") or "")
-        if receipt_id and item.get("learning_eligible") is True:
-            candidates.setdefault(receipt_id, []).append(item)
+    for bridge_item in usable:
+        receipt_id = str(bridge_item.get("receipt_id") or "")
+        if receipt_id and bridge_item.get("learning_eligible") is True:
+            candidates.setdefault(receipt_id, []).append(bridge_item)
     deduped = {
         receipt_id: items[0]
         for receipt_id, items in candidates.items()
         if len(items) == 1
     }
     strategy_metrics: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in deduped.values():
+    for metric_item in deduped.values():
         key = (
-            str(item.get("strategy_id") or "UNKNOWN"),
-            str(item.get("strategy_version") or "UNKNOWN"),
+            str(metric_item.get("strategy_id") or "UNKNOWN"),
+            str(metric_item.get("strategy_version") or "UNKNOWN"),
         )
         row = strategy_metrics.setdefault(
             key,
@@ -2190,16 +2188,16 @@ def _bridge_learning_summary(
         )
         row["eligible_episode_count"] += 1
         status = str(
-            item.get("selection_outcome")
+            metric_item.get("selection_outcome")
             or (
-                (item.get("selection_outcome_metrics") or {}).get("path_status")
-                if isinstance(item.get("selection_outcome_metrics"), Mapping)
+                (metric_item.get("selection_outcome_metrics") or {}).get("path_status")
+                if isinstance(metric_item.get("selection_outcome_metrics"), Mapping)
                 else None
             )
             or "MISSING"
         ).upper()
         row["path_status_counts"][status] = row["path_status_counts"].get(status, 0) + 1
-        metrics = item.get("selection_outcome_metrics")
+        metrics = metric_item.get("selection_outcome_metrics")
         if not isinstance(metrics, Mapping):
             continue
         for metric_key, sum_key, count_key in (
@@ -2207,14 +2205,20 @@ def _bridge_learning_summary(
             ("mae_pct", "mae_pct_sum", "mae_pct_count"),
         ):
             try:
-                value = float(metrics.get(metric_key))
+                raw_value = metrics.get(metric_key)
+                if raw_value is None:
+                    continue
+                value = float(raw_value)
             except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
                 row[sum_key] += value
                 row[count_key] += 1
         try:
-            close_change = float(metrics.get("direction_adjusted_close_change_pct"))
+            raw_close_change = metrics.get("direction_adjusted_close_change_pct")
+            if raw_close_change is None:
+                continue
+            close_change = float(raw_close_change)
         except (TypeError, ValueError):
             continue
         if math.isfinite(close_change):
@@ -2341,6 +2345,20 @@ def _bridge_learning_summary(
     }
 
 
+def build_managed_learning_queue(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Deterministic private queue entry point for committed daily proposals.
+
+    Kept as a lazy import so the queue cannot alter this learner's existing
+    commit-manifest protocol or introduce a module import cycle.
+    """
+
+    from intraday_scanner.services.managed_learning_queue_service import (
+        build_managed_learning_queue as _build_managed_learning_queue,
+    )
+
+    return _build_managed_learning_queue(*args, **kwargs)
+
+
 __all__ = [
     "DAILY_LEARNING_SCHEMA",
     "PROPOSAL_SCHEMA",
@@ -2350,6 +2368,7 @@ __all__ = [
     "MappingEvidenceAnalyzer",
     "StrategyEvidenceAnalyzer",
     "EXPECTED_ALPHAOPS_DECISION_RECEIPT_IDENTITIES",
+    "build_managed_learning_queue",
     "run_daily_strategy_learning",
 ]
 

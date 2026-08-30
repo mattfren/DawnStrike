@@ -10,6 +10,30 @@ import re
 from pathlib import Path
 
 MAX_SNAPSHOT_BYTES = 250 * 1024
+V6_SCHEMA_VERSION = "dawnstrike.alphaops_v6.public_status.v1"
+V6_TOP_LEVEL_KEYS = frozenset(
+    {
+        "schema_version",
+        "strategy_version",
+        "decision_count",
+        "tracked_count",
+        "outcome_count",
+        "learning_eligible_outcome_count",
+        "latest_model_run",
+        "latest_evaluation",
+        "latest_drift",
+        "operational_freshness",
+        "latest_promotion_review",
+        "prediction_evidence_gate",
+        "failure_attribution",
+        "account_comparison",
+        "decision_replay",
+        "promotion_readiness",
+        "missing_truth_is_zero",
+        "research_only",
+        "broker_execution_enabled",
+    }
+)
 REQUIRED_FILES = (
     "index.html",
     "favicon.svg",
@@ -76,6 +100,7 @@ def verify(
     scenarios_manifest_path = root / "data" / "scenarios.json.manifest.json"
     opportunity_path = root / "data" / "opportunity-projection.json"
     opportunity_manifest_path = root / "data" / "opportunity-projection.json.manifest.json"
+    v6_path = root / "data" / "v6-learning.json"
     snapshot: dict[str, object] = {}
     manifest: dict[str, object] = {}
     build_manifest: dict[str, object] = {}
@@ -84,6 +109,7 @@ def verify(
     scenarios_manifest: dict[str, object] = {}
     opportunity: dict[str, object] = {}
     opportunity_manifest: dict[str, object] = {}
+    v6_hash = ""
     snapshot_row_count = 0
     compressed_byte_count: int | None = None
     if snapshot_path.is_file():
@@ -200,6 +226,18 @@ def verify(
                 errors.append("opportunity_manifest_state_mismatch")
             if opportunity_manifest.get("row_count") != opportunity.get("row_count"):
                 errors.append("opportunity_manifest_row_count_mismatch")
+    if v6_path.is_file():
+        v6_bytes = v6_path.read_bytes()
+        v6_hash = hashlib.sha256(v6_bytes).hexdigest()
+        try:
+            parsed_v6 = json.loads(v6_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            errors.append("v6_learning_unreadable")
+        else:
+            if not isinstance(parsed_v6, dict):
+                errors.append("v6_learning_payload_invalid")
+            else:
+                errors.extend(_v6_contract_failures(parsed_v6))
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
         if not build_manifest.get("source_sha"):
@@ -220,6 +258,33 @@ def verify(
             opportunity_manifest.get("payload_sha256")
         ):
             errors.append("build_opportunity_projection_hash_mismatch")
+        if build_manifest.get("v6_learning_sha256") != v6_hash:
+            errors.append("build_v6_learning_hash_mismatch")
+        expected_build_sha = _build_sha(
+            source_sha=str(build_manifest.get("source_sha") or ""),
+            publication_set_sha256=str(build_manifest.get("publication_set_sha256") or ""),
+            opportunity_projection_sha256=str(
+                build_manifest.get("opportunity_projection_sha256") or ""
+            ),
+            v6_learning_sha256=v6_hash,
+            market_date=str(build_manifest.get("market_date") or ""),
+        )
+        if build_manifest.get("build_sha") != expected_build_sha:
+            errors.append("build_sha_formula_mismatch")
+        if build_manifest.get("build_id") != expected_build_sha[:20]:
+            errors.append("build_id_formula_mismatch")
+    release_manifest_path = root / "release-manifest.json"
+    if release_manifest_path.is_file():
+        try:
+            release_manifest = json.loads(release_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            release_manifest = {}
+            errors.append("release_manifest_unreadable")
+        if isinstance(release_manifest, dict):
+            if release_manifest.get("build_sha") != build_manifest.get("build_sha"):
+                errors.append("release_build_sha_mismatch")
+            if release_manifest.get("v6_learning_sha256") != v6_hash:
+                errors.append("release_v6_learning_hash_mismatch")
         recorded_hashes = build_manifest.get("file_hashes")
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")
@@ -253,6 +318,12 @@ def verify(
         )
         if not readiness_is_ready and not readiness_is_approved_degraded:
             errors.append("readiness_not_publishable")
+        if readiness.get("v6_learning_sha256") != v6_hash:
+            errors.append("readiness_v6_learning_hash_mismatch")
+        if readiness.get("build_id") != build_manifest.get("build_id"):
+            errors.append("readiness_build_id_mismatch")
+        if readiness.get("deployed_build_sha") != build_manifest.get("build_sha"):
+            errors.append("readiness_build_sha_mismatch")
 
     result = {
         "status": "PASS" if not errors else "FAIL",
@@ -278,6 +349,116 @@ def verify(
         ),
     }
     return result
+
+
+def _build_sha(
+    *,
+    source_sha: str,
+    publication_set_sha256: str,
+    opportunity_projection_sha256: str,
+    v6_learning_sha256: str,
+    market_date: str,
+) -> str:
+    """Independently recompute the exact documented public-build formula."""
+
+    formula = (
+        f"{source_sha}:{publication_set_sha256}:{opportunity_projection_sha256}:"
+        f"{v6_learning_sha256}:{market_date}"
+    )
+    return hashlib.sha256(formula.encode("utf-8")).hexdigest()
+
+
+def _v6_contract_failures(payload: dict[str, object]) -> list[str]:
+    """Validate the exact safe projection emitted by ``v6_public_status``."""
+
+    failures: list[str] = []
+    keys = frozenset(payload)
+    for name in sorted(V6_TOP_LEVEL_KEYS - keys):
+        failures.append(f"v6_field_missing:{name}")
+    for name in sorted(keys - V6_TOP_LEVEL_KEYS):
+        failures.append(f"v6_field_unexpected:{name}")
+    if payload.get("schema_version") != V6_SCHEMA_VERSION:
+        failures.append("v6_schema_version_invalid")
+    if payload.get("strategy_version") != "dawnstrike-alphaops-v6-shadow":
+        failures.append("v6_strategy_version_invalid")
+    for name in (
+        "decision_count",
+        "tracked_count",
+        "outcome_count",
+        "learning_eligible_outcome_count",
+    ):
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            failures.append(f"v6_{name}_invalid")
+    if not isinstance(payload.get("decision_replay"), list):
+        failures.append("v6_decision_replay_invalid")
+    if not isinstance(payload.get("operational_freshness"), dict):
+        failures.append("v6_operational_freshness_invalid")
+    if not isinstance(payload.get("prediction_evidence_gate"), dict):
+        failures.append("v6_prediction_evidence_gate_invalid")
+    if not isinstance(payload.get("failure_attribution"), dict):
+        failures.append("v6_failure_attribution_invalid")
+    if not isinstance(payload.get("promotion_readiness"), dict):
+        failures.append("v6_promotion_readiness_invalid")
+    for name in (
+        "latest_model_run", "latest_evaluation", "latest_drift",
+        "latest_promotion_review", "account_comparison",
+    ):
+        if payload.get(name) is not None and not isinstance(payload.get(name), dict):
+            failures.append(f"v6_{name}_invalid")
+    if payload.get("missing_truth_is_zero") is not False:
+        failures.append("v6_missing_truth_is_zero_invalid")
+    if payload.get("research_only") is not True:
+        failures.append("v6_research_only_invalid")
+    if payload.get("broker_execution_enabled") is not False:
+        failures.append("v6_broker_execution_invalid")
+    failures.extend(_v6_safety_flag_failures(payload))
+    promotion = payload.get("promotion_readiness")
+    if isinstance(promotion, dict):
+        if promotion.get("automatic_promotion") is not False:
+            failures.append("v6_automatic_promotion_invalid")
+        if promotion.get("research_only") is not True:
+            failures.append("v6_promotion_research_only_invalid")
+        if promotion.get("broker_execution_enabled") is not False:
+            failures.append("v6_promotion_broker_execution_invalid")
+        if promotion.get("status") not in {
+            "NOT_ELIGIBLE_FOR_PROMOTION",
+            "ELIGIBLE_FOR_MANUAL_REVIEW",
+            "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION",
+        }:
+            failures.append("v6_promotion_status_invalid")
+        if promotion.get("performance_status") not in {
+            "WAITING_FOR_FORWARD_EVIDENCE",
+            "ELIGIBLE_FOR_MANUAL_REVIEW",
+        }:
+            failures.append("v6_performance_status_invalid")
+    return failures
+
+
+def _v6_safety_flag_failures(value: object, path: str = "v6") -> list[str]:
+    """Reject unsafe flags anywhere in the bounded projection."""
+
+    failures: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}"
+            if key in {"research_only"} and item is not True:
+                failures.append(f"{child}_invalid")
+            if (
+                key
+                in {
+                    "broker_execution_enabled",
+                    "live_trading_enabled",
+                    "order_execution_enabled",
+                }
+                and item is not False
+            ):
+                failures.append(f"{child}_invalid")
+            failures.extend(_v6_safety_flag_failures(item, child))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            failures.extend(_v6_safety_flag_failures(item, f"{path}[{index}]"))
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -11,6 +11,8 @@ import csv
 import hashlib
 import json
 import math
+import os
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
@@ -21,6 +23,7 @@ from intraday_scanner.v2.paper_ops.observer_safety import PaperOpsObserverBlocke
 from intraday_scanner.v2.paper_ops.source_bar_truth import verify_source_bar_truth
 from intraday_scanner.v2.paper_ops.storage import (
     append_jsonl_unique,
+    exclusive_file_lock,
     read_json,
     read_jsonl,
     write_csv,
@@ -30,6 +33,8 @@ from intraday_scanner.v2.paper_ops.storage import (
 JsonDict = dict[str, Any]
 
 _SCHEMA_VERSION = "v2.paper_ops_challenger_evaluation.v1"
+_EVALUATION_RECEIPT_SCHEMA = "v2.paper_ops_challenger_evaluation_receipt.v1"
+_EVALUATION_RECEIPT_DIRECTORY = "challenger_evaluation_receipts"
 _CHALLENGER_REGISTRY_SCHEMA = "v2.paper_ops_challenger_registry.v1"
 _OPERATOR_PROCESS_SCHEMA = "v2.paper_ops_operator_promotion_process.v1"
 _REFERENCE_IDS = {
@@ -237,7 +242,9 @@ def evaluate_paperops_challengers(
         if strategy_id
     )
 
-    evidence_cache: dict[tuple[_SeriesKey, str | None, str | None], _SeriesEvidence] = {}
+    evidence_cache: dict[
+        tuple[_SeriesKey, str | None, str | None, str | None], _SeriesEvidence
+    ] = {}
 
     def evidence(
         key: _SeriesKey,
@@ -249,7 +256,12 @@ def evaluate_paperops_challengers(
             if candidate_registration
             else None
         )
-        cache_key = (key, frozen_after, challenger_id)
+        experiment_id = (
+            str(candidate_registration.get("experiment_id") or "")
+            if candidate_registration
+            else None
+        )
+        cache_key = (key, frozen_after, challenger_id, experiment_id)
         if cache_key not in evidence_cache:
             series_expected_dates = expected_dates
             if candidate_registration is None:
@@ -259,6 +271,37 @@ def evaluate_paperops_challengers(
                     for session_date in expected_dates
                     if inception is not None and session_date >= inception
                 )
+            else:
+                frozen_window = candidate_registration.get("evaluation_window")
+                validation = (
+                    frozen_window.get("validation")
+                    if isinstance(frozen_window, dict)
+                    else None
+                )
+                holdout = (
+                    frozen_window.get("untouched_holdout")
+                    if isinstance(frozen_window, dict)
+                    else None
+                )
+                if (
+                    not isinstance(validation, dict)
+                    or not validation.get("market_dates")
+                    or not isinstance(holdout, dict)
+                    or not holdout.get("market_dates")
+                ):
+                    series_expected_dates = ()
+                else:
+                    series_expected_dates = tuple(
+                        sorted(
+                            {
+                                str(item)
+                                for item in (
+                                    *validation["market_dates"],
+                                    *holdout["market_dates"],
+                                )
+                            }
+                        )
+                    )
             evidence_cache[cache_key] = _series_evidence(
                 output_root=output_root,
                 key=key,
@@ -279,7 +322,10 @@ def evaluate_paperops_challengers(
     for champion in champions:
         registrations = sorted(
             registered_by_strategy.get(champion.strategy_id, []),
-            key=lambda row: str(row.get("challenger_id") or ""),
+            key=lambda row: (
+                str(row.get("experiment_id") or ""),
+                str(row.get("challenger_id") or ""),
+            ),
         )
         if not registrations:
             champion_evidence = evidence(champion, None)
@@ -298,6 +344,7 @@ def evaluate_paperops_challengers(
                 _evaluate_registration(
                     output_root=output_root,
                     champion=champion,
+                    experiment_id=str(registration.get("experiment_id") or "") or None,
                     registration=registration,
                     get_evidence=evidence,
                     calendar_index=calendar_index,
@@ -310,10 +357,27 @@ def evaluate_paperops_challengers(
 
     ignored_series = _unregistered_series(calendar_index, champions, challengers)
     warnings.extend(f"unregistered forward series ignored: {item}" for item in ignored_series)
-    proposals.sort(key=lambda row: (str(row["strategy_id"]), str(row.get("challenger_id") or "")))
+    proposals.sort(
+        key=lambda row: (
+            str(row["strategy_id"]),
+            str(row.get("experiment_id") or ""),
+            str(row.get("challenger_id") or ""),
+        )
+    )
 
     evidence_as_of = max(expected_dates, default=None)
     proposal_integrity_reasons = _proposal_integrity_reasons(proposals)
+    duplicate_experiment_ids = _duplicate_experiment_ids(challengers)
+    duplicate_experiment_reasons = _duplicate_experiment_reasons(duplicate_experiment_ids)
+    receipt_manifest, receipt_conflict_reasons = _evaluation_receipts(
+        output_root=output_root,
+        reports=reports,
+        challengers=challengers,
+        proposals=proposals,
+        evidence_as_of=evidence_as_of,
+        completed_report_dates=tuple(sorted(completed_reports)),
+        duplicate_experiment_ids=duplicate_experiment_ids,
+    )
     operational_reasons = [
         *truth_reasons,
         *blotter_reasons,
@@ -322,6 +386,8 @@ def evaluate_paperops_challengers(
         *challenger_warnings,
         *unknown_registration_reasons,
         *proposal_integrity_reasons,
+        *duplicate_experiment_reasons,
+        *receipt_conflict_reasons,
     ]
     if not champions:
         operational_reasons.append("no exact champion strategies are registered")
@@ -348,6 +414,7 @@ def evaluate_paperops_challengers(
         "verified_trade_blotter_sha256": (
             _stable_digest(blotter_rows) if not blotter_reasons else None
         ),
+        "evaluation_receipts": receipt_manifest,
         "proposals": proposals,
         "warnings": sorted(dict.fromkeys(warnings)),
     }
@@ -388,6 +455,451 @@ def _proposal_integrity_reasons(proposals: list[JsonDict]) -> tuple[str, ...]:
                         reasons.append(
                             f"{series} evidence integrity failed on {session_date}: {text}"
                         )
+    return tuple(sorted(dict.fromkeys(reasons)))
+
+
+def _duplicate_experiment_ids(registrations: list[JsonDict]) -> tuple[str, ...]:
+    by_id: dict[str, int] = {}
+    for registration in registrations:
+        experiment_id = str(registration.get("experiment_id") or "").strip()
+        if experiment_id:
+            by_id[experiment_id] = by_id.get(experiment_id, 0) + 1
+    return tuple(experiment_id for experiment_id, count in sorted(by_id.items()) if count > 1)
+
+
+def _duplicate_experiment_reasons(experiment_ids: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        "duplicate registered experiment_id cannot receive one immutable receipt: "
+        f"{experiment_id}"
+        for experiment_id in experiment_ids
+    )
+
+
+def _frozen_holdout_end(registration: JsonDict) -> str | None:
+    window = registration.get("evaluation_window")
+    holdout = window.get("untouched_holdout") if isinstance(window, dict) else None
+    dates = holdout.get("market_dates") if isinstance(holdout, dict) else None
+    if not isinstance(dates, list) or not dates:
+        return None
+    normalized = sorted(str(item) for item in dates)
+    return normalized[-1] if all(_valid_calendar_date(item) for item in normalized) else None
+
+
+def _frozen_evaluation_dates(registration: JsonDict) -> tuple[str, ...]:
+    window = registration.get("evaluation_window")
+    if not isinstance(window, dict):
+        return ()
+    dates: list[str] = []
+    for partition in ("validation", "untouched_holdout"):
+        row = window.get(partition)
+        values = row.get("market_dates") if isinstance(row, dict) else None
+        if not isinstance(values, list):
+            return ()
+        dates.extend(str(item) for item in values)
+    return tuple(sorted(set(dates)))
+
+
+def _valid_calendar_date(value: str) -> bool:
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _registration_market_date(registration: JsonDict, field: str) -> str | None:
+    value = str(registration.get(field) or "")
+    session_date = value.partition("T")[0]
+    return session_date if _valid_calendar_date(session_date) else None
+
+
+def _experiment_evidence_input_sha256(
+    *,
+    experiment_id: str,
+    registration_id: str,
+    window_hash_sha256: object,
+    source_lineage: JsonDict,
+    code_lineage: JsonDict,
+    champion_evidence_sha256: object,
+    candidate_evidence_sha256: object,
+) -> str:
+    return _stable_digest(
+        {
+            "experiment_id": experiment_id,
+            "registration_id": registration_id,
+            "window_hash_sha256": window_hash_sha256,
+            "source_lineage": source_lineage,
+            "code_lineage": code_lineage,
+            "champion_evidence_sha256": champion_evidence_sha256,
+            "candidate_evidence_sha256": candidate_evidence_sha256,
+        }
+    )
+
+
+def _evaluation_receipts(
+    *,
+    output_root: Path,
+    reports: Path,
+    challengers: list[JsonDict],
+    proposals: list[JsonDict],
+    evidence_as_of: str | None,
+    completed_report_dates: tuple[str, ...],
+    duplicate_experiment_ids: tuple[str, ...],
+) -> tuple[list[JsonDict], tuple[str, ...]]:
+    """Persist exactly one immutable, self-hashed receipt for each experiment.
+
+    The aggregate evaluation remains a compatibility envelope.  Receipt identity is
+    deliberately derived only from the registered experiment ID, so a retry with a
+    changed registration, window, lineage, or result cannot create a second receipt.
+    """
+
+    proposal_by_identity = {
+        (
+            str(proposal.get("experiment_id") or ""),
+            str(proposal.get("challenger_id") or ""),
+        ): proposal
+        for proposal in proposals
+        if str(proposal.get("challenger_id") or "")
+    }
+    duplicate_ids = set(duplicate_experiment_ids)
+    manifest: list[JsonDict] = []
+    conflicts: list[str] = []
+    for registration in challengers:
+        experiment_id = str(registration.get("experiment_id") or "").strip()
+        challenger_id = str(registration.get("challenger_id") or "").strip()
+        if not experiment_id or experiment_id in duplicate_ids:
+            continue
+        holdout_end = _frozen_holdout_end(registration)
+        frozen_dates = _frozen_evaluation_dates(registration)
+        frozen_date = _registration_market_date(registration, "frozen_at")
+        registered_date = _registration_market_date(registration, "registered_at")
+        eligible_after = (
+            max(frozen_date, registered_date)
+            if frozen_date is not None and registered_date is not None
+            else None
+        )
+        if (
+            holdout_end is None
+            or evidence_as_of is None
+            or evidence_as_of < holdout_end
+            or eligible_after is None
+            or evidence_as_of <= eligible_after
+            or not frozen_dates
+            or not set(frozen_dates).issubset(completed_report_dates)
+        ):
+            existing_path = reports / _EVALUATION_RECEIPT_DIRECTORY / (
+                f"{_stable_digest({'experiment_id': experiment_id})}.json"
+            )
+            manifest.append(
+                {
+                    "experiment_id": experiment_id,
+                    "challenger_id": challenger_id,
+                    "evaluation_receipt_id": _stable_digest(
+                        {"experiment_id": experiment_id}
+                    ),
+                    "receipt_hash_sha256": None,
+                    "path": existing_path.relative_to(output_root).as_posix(),
+                    "status": "NOT_EVALUABLE",
+                    "metrics": None,
+                    "terminal": False,
+                }
+            )
+            continue
+        proposal = proposal_by_identity.get((experiment_id, challenger_id))
+        if proposal is None:
+            conflicts.append(
+                f"evaluation receipt cannot bind missing challenger proposal: {challenger_id}"
+            )
+            continue
+        receipt_id = _stable_digest({"experiment_id": experiment_id})
+        receipt: JsonDict = {
+            "schema_version": _EVALUATION_RECEIPT_SCHEMA,
+            "evaluation_receipt_id": receipt_id,
+            "receipt_id": receipt_id,
+            "experiment_id": experiment_id,
+            "challenger_id": challenger_id,
+            "registration_id": registration.get("registration_id"),
+            "registration": registration,
+            "evaluation_window": registration.get("evaluation_window"),
+            "window_hash_sha256": registration.get("window_hash_sha256"),
+            "source_lineage": {
+                field: registration.get(field)
+                for field in (
+                    "data_hash_sha256",
+                    "source_hash_sha256",
+                    "config_hash_sha256",
+                    "input_hash_sha256",
+                    "v5_comparison_hash_sha256",
+                )
+            },
+            "code_lineage": {
+                field: registration.get(field)
+                for field in (
+                    "code_sha",
+                    "implementation_source_sha256",
+                    "parent_logic_sha256",
+                    "logic_artifact_sha256",
+                    "champion_strategy_semantics_fingerprint",
+                    "candidate_strategy_semantics_fingerprint",
+                )
+            },
+            "evidence_lineage": {
+                "evidence_as_of": holdout_end,
+                "champion_evidence_sha256": proposal.get("champion_evidence_sha256"),
+                "candidate_evidence_sha256": proposal.get("candidate_evidence_sha256"),
+            },
+            "status": (
+                "NOT_EVALUABLE"
+                if registration.get("experiment_lineage_status") != "FROZEN_EVALUABLE"
+                or proposal.get("evidence_blockers")
+                else "EVALUABLE"
+            ),
+            "metrics": (
+                None
+                if registration.get("experiment_lineage_status") != "FROZEN_EVALUABLE"
+                or proposal.get("evidence_blockers")
+                else {
+                    "champion": proposal.get("champion_metrics"),
+                    "candidate": proposal.get("candidate_metrics"),
+                    "comparison": proposal.get("comparison"),
+                }
+            ),
+            "proposal": proposal,
+            "research_only": True,
+            "automatic_promotion_enabled": False,
+            "broker_execution_allowed": False,
+            "missing_evidence_is_null": True,
+        }
+        evidence_lineage = _dict(receipt["evidence_lineage"])
+        evidence_lineage["experiment_evidence_input_sha256"] = (
+            _experiment_evidence_input_sha256(
+                experiment_id=experiment_id,
+                registration_id=str(registration.get("registration_id") or ""),
+                window_hash_sha256=registration.get("window_hash_sha256"),
+                source_lineage=_dict(receipt["source_lineage"]),
+                code_lineage=_dict(receipt["code_lineage"]),
+                champion_evidence_sha256=proposal.get("champion_evidence_sha256"),
+                candidate_evidence_sha256=proposal.get("candidate_evidence_sha256"),
+            )
+        )
+        receipt["evidence_lineage"] = evidence_lineage
+        receipt["receipt_hash_sha256"] = _stable_digest(
+            {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+        )
+        path = reports / _EVALUATION_RECEIPT_DIRECTORY / f"{receipt_id}.json"
+        try:
+            relative_path = path.relative_to(output_root).as_posix()
+        except ValueError:
+            relative_path = path.as_posix()
+        try:
+            _persist_evaluation_receipt(path, receipt)
+            append_jsonl_unique(
+                reports / f"{_EVALUATION_RECEIPT_DIRECTORY}.jsonl",
+                [receipt],
+                "evaluation_receipt_id",
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            conflicts.append(
+                f"evaluation receipt conflict for experiment {experiment_id}: {exc}"
+            )
+            try:
+                existing = read_json(path, {})
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                existing = {}
+            if isinstance(existing, dict):
+                manifest.append(
+                    {
+                        "experiment_id": experiment_id,
+                        "challenger_id": challenger_id,
+                        "evaluation_receipt_id": receipt_id,
+                        "receipt_hash_sha256": existing.get("receipt_hash_sha256"),
+                        "path": relative_path,
+                        "status": existing.get("status"),
+                    }
+                )
+        else:
+            manifest.append(
+                {
+                    "experiment_id": experiment_id,
+                    "challenger_id": challenger_id,
+                    "evaluation_receipt_id": receipt_id,
+                    "receipt_hash_sha256": receipt["receipt_hash_sha256"],
+                    "path": relative_path,
+                    "status": receipt["status"],
+                    "terminal": True,
+                }
+            )
+    return manifest, tuple(sorted(dict.fromkeys(conflicts)))
+
+
+def _persist_evaluation_receipt(path: Path, receipt: JsonDict) -> bool:
+    """Atomically create an immutable receipt, or accept an identical retry."""
+
+    expected = _stable_digest(
+        {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+    )
+    if receipt.get("receipt_hash_sha256") != expected:
+        raise ValueError("evaluation receipt self-hash is missing or invalid")
+    encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with exclusive_file_lock(lock_path):
+        if path.exists():
+            if path.read_text(encoding="utf-8") != encoded:
+                raise ValueError(f"immutable evaluation receipt changed: {path}")
+            return True
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary_name, path)
+            except FileExistsError:
+                if path.read_text(encoding="utf-8") != encoded:
+                    raise ValueError(f"immutable evaluation receipt changed: {path}") from None
+                return True
+            return False
+        finally:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+
+def verify_evaluation_receipt(
+    receipt: JsonDict,
+    *,
+    output_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Verify receipt identity, self-hash, and frozen registration lineage."""
+
+    reasons: list[str] = []
+    if receipt.get("schema_version") != _EVALUATION_RECEIPT_SCHEMA:
+        reasons.append("evaluation receipt schema is unsupported")
+    experiment_id = str(receipt.get("experiment_id") or "").strip()
+    if not experiment_id:
+        reasons.append("evaluation receipt experiment_id is missing")
+    expected_id = _stable_digest({"experiment_id": experiment_id}) if experiment_id else ""
+    if receipt.get("evaluation_receipt_id") != expected_id:
+        reasons.append("evaluation receipt identity does not match experiment_id")
+    if receipt.get("receipt_id") != expected_id:
+        reasons.append("evaluation receipt receipt_id does not match experiment_id")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+    if receipt.get("receipt_hash_sha256") != _stable_digest(unsigned):
+        reasons.append("evaluation receipt self-hash does not match content")
+    registration = receipt.get("registration")
+    if not isinstance(registration, dict):
+        reasons.append("evaluation receipt registration is missing")
+        return tuple(sorted(dict.fromkeys(reasons)))
+    if registration.get("experiment_id") != experiment_id:
+        reasons.append("evaluation receipt experiment registration mismatch")
+    if receipt.get("challenger_id") != registration.get("challenger_id"):
+        reasons.append("evaluation receipt challenger identity mismatch")
+    if receipt.get("registration_id") != registration.get("registration_id"):
+        reasons.append("evaluation receipt registration_id mismatch")
+    try:
+        from intraday_scanner.v2.paper_ops.shadow_runner import _registration_id
+
+        if registration.get("registration_id") != _registration_id(registration):
+            reasons.append("evaluation receipt registration identity is invalid")
+    except (TypeError, ValueError):
+        reasons.append("evaluation receipt registration identity cannot be verified")
+    if receipt.get("evaluation_window") != registration.get("evaluation_window"):
+        reasons.append("evaluation receipt frozen window mismatch")
+    if receipt.get("window_hash_sha256") != registration.get("window_hash_sha256"):
+        reasons.append("evaluation receipt window hash mismatch")
+    if receipt.get("window_hash_sha256") != _stable_digest(registration.get("evaluation_window")):
+        reasons.append("evaluation receipt window hash does not match frozen window")
+    expected_source_lineage = {
+        field: registration.get(field)
+        for field in (
+            "data_hash_sha256",
+            "source_hash_sha256",
+            "config_hash_sha256",
+            "input_hash_sha256",
+            "v5_comparison_hash_sha256",
+        )
+    }
+    expected_code_lineage = {
+        field: registration.get(field)
+        for field in (
+            "code_sha",
+            "implementation_source_sha256",
+            "parent_logic_sha256",
+            "logic_artifact_sha256",
+            "champion_strategy_semantics_fingerprint",
+            "candidate_strategy_semantics_fingerprint",
+        )
+    }
+    if receipt.get("source_lineage") != expected_source_lineage:
+        reasons.append("evaluation receipt source lineage mismatch")
+    if receipt.get("code_lineage") != expected_code_lineage:
+        reasons.append("evaluation receipt code lineage mismatch")
+    if receipt.get("research_only") is not True:
+        reasons.append("evaluation receipt is not research-only")
+    if receipt.get("automatic_promotion_enabled") is not False:
+        reasons.append("evaluation receipt enables automatic promotion")
+    if receipt.get("broker_execution_allowed") is not False:
+        reasons.append("evaluation receipt enables broker execution")
+    proposal = receipt.get("proposal")
+    if not isinstance(proposal, dict):
+        reasons.append("evaluation receipt proposal is missing")
+    else:
+        if proposal.get("experiment_id") != experiment_id:
+            reasons.append("evaluation receipt proposal experiment identity mismatch")
+        if proposal.get("challenger_id") != receipt.get("challenger_id"):
+            reasons.append("evaluation receipt proposal challenger identity mismatch")
+        if proposal.get("registration_id") != receipt.get("registration_id"):
+            reasons.append("evaluation receipt proposal registration identity mismatch")
+        if proposal.get("champion_evidence_sha256") != _dict(
+            receipt.get("evidence_lineage")
+        ).get("champion_evidence_sha256"):
+            reasons.append("evaluation receipt proposal champion evidence mismatch")
+        if proposal.get("candidate_evidence_sha256") != _dict(
+            receipt.get("evidence_lineage")
+        ).get("candidate_evidence_sha256"):
+            reasons.append("evaluation receipt proposal candidate evidence mismatch")
+        evidence_lineage = _dict(receipt.get("evidence_lineage"))
+        expected_evidence_input = _experiment_evidence_input_sha256(
+            experiment_id=experiment_id,
+            registration_id=str(registration.get("registration_id") or ""),
+            window_hash_sha256=receipt.get("window_hash_sha256"),
+            source_lineage=_dict(receipt.get("source_lineage")),
+            code_lineage=_dict(receipt.get("code_lineage")),
+            champion_evidence_sha256=proposal.get("champion_evidence_sha256"),
+            candidate_evidence_sha256=proposal.get("candidate_evidence_sha256"),
+        )
+        if evidence_lineage.get("experiment_evidence_input_sha256") != expected_evidence_input:
+            reasons.append("evaluation receipt experiment evidence input hash mismatch")
+        expected_status = (
+            "NOT_EVALUABLE"
+            if registration.get("experiment_lineage_status") != "FROZEN_EVALUABLE"
+            or proposal.get("evidence_blockers")
+            else "EVALUABLE"
+        )
+        if receipt.get("status") != expected_status:
+            reasons.append("evaluation receipt status does not match proposal evidence")
+        expected_metrics = (
+            None
+            if expected_status == "NOT_EVALUABLE"
+            else {
+                "champion": proposal.get("champion_metrics"),
+                "candidate": proposal.get("candidate_metrics"),
+                "comparison": proposal.get("comparison"),
+            }
+        )
+        if receipt.get("metrics") != expected_metrics:
+            reasons.append("evaluation receipt metrics do not match proposal status")
+    if output_root is not None:
+        try:
+            from intraday_scanner.v2.paper_ops.shadow_runner import verify_registration_integrity
+
+            reasons.extend(verify_registration_integrity(registration, output_root=output_root))
+        except (OSError, TypeError, ValueError) as exc:
+            reasons.append(f"evaluation receipt registration verification failed: {exc}")
     return tuple(sorted(dict.fromkeys(reasons)))
 
 
@@ -759,7 +1271,10 @@ def _series_evidence(
     exclusions: dict[str, tuple[str, ...]] = {}
     for session_date in scoped_dates:
         reasons = [*global_truth_reasons, *blotter_reasons]
-        report = completed_reports[session_date]
+        report = completed_reports.get(session_date)
+        if report is None:
+            exclusions[session_date] = ("completed close report is missing",)
+            continue
         rows = calendar_index.get((session_date, key), [])
         if len(rows) != 1:
             reasons.append(
@@ -1255,6 +1770,7 @@ def _evaluate_registration(
     *,
     output_root: Path,
     champion: _SeriesKey,
+    experiment_id: str | None,
     registration: JsonDict,
     get_evidence: Any,
     calendar_index: dict[tuple[str, _SeriesKey], list[JsonDict]],
@@ -1283,6 +1799,8 @@ def _evaluate_registration(
     if registration_reasons:
         return _proposal_base(
             champion=champion,
+            experiment_id=experiment_id,
+            registration_id=str(registration.get("registration_id") or "") or None,
             challenger_id=challenger_id or None,
             candidate=candidate,
             status="invalid_challenger_registration",
@@ -1316,6 +1834,27 @@ def _evaluate_registration(
             & set(candidate_evidence.expected_dates)
         )
     )
+    frozen_window = registration.get("evaluation_window")
+    validation_window = (
+        frozen_window.get("validation")
+        if isinstance(frozen_window, dict)
+        else None
+    )
+    holdout_window = (
+        frozen_window.get("untouched_holdout")
+        if isinstance(frozen_window, dict)
+        else None
+    )
+    validation_dates = (
+        {str(item) for item in validation_window.get("market_dates", [])}
+        if isinstance(validation_window, dict)
+        else set()
+    )
+    holdout_dates = (
+        {str(item) for item in holdout_window.get("market_dates", [])}
+        if isinstance(holdout_window, dict)
+        else set()
+    )
     champion_aligned = tuple(champion_by_date[item] for item in aligned_dates)
     candidate_aligned = tuple(candidate_by_date[item] for item in aligned_dates)
     champion_metrics = _metrics(
@@ -1335,6 +1874,10 @@ def _evaluate_registration(
         calendar_index,
         completed_reports,
         config,
+        research_dates=tuple(
+            item for item in aligned_dates if item in validation_dates
+        ),
+        holdout_dates=tuple(item for item in aligned_dates if item in holdout_dates),
     )
 
     evidence_blockers = _evidence_blockers(
@@ -1371,6 +1914,8 @@ def _evaluate_registration(
     }
     return _proposal_base(
         champion=champion,
+        experiment_id=experiment_id,
+        registration_id=str(registration.get("registration_id") or "") or None,
         challenger_id=challenger_id,
         candidate=candidate,
         status=status,
@@ -1431,14 +1976,37 @@ def _registration_reasons(
         reasons.append("challenger must use a distinct frozen strategy version")
     if registration.get("execution_policy_version") != champion.execution_policy_version:
         reasons.append("challenger execution policy must match champion for direct comparison")
-    frozen = str(registration.get("frozen_at") or "")[:10]
-    registered = str(registration.get("registered_at") or "")[:10]
+    if registration.get("experiment_lineage_status") != "FROZEN_EVALUABLE":
+        reasons.append(
+            "challenger registration is not evaluable: frozen experiment lineage is incomplete"
+        )
+    frozen_window = registration.get("evaluation_window")
+    if not isinstance(frozen_window, dict) or not isinstance(
+        frozen_window.get("untouched_holdout"), dict
+    ):
+        reasons.append("challenger registration is missing an exact untouched holdout window")
+    else:
+        try:
+            from intraday_scanner.v2.paper_ops.shadow_runner import _freeze_evaluation_window
+
+            normalized_window = _freeze_evaluation_window(
+                {"evaluation_window": frozen_window}
+            )
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"challenger registration frozen window is invalid: {exc}")
+        else:
+            if normalized_window != frozen_window:
+                reasons.append("challenger registration frozen window is not canonical")
+            if registration.get("window_hash_sha256") != _stable_digest(frozen_window):
+                reasons.append("challenger registration window hash does not match frozen window")
+    frozen = str(registration.get("frozen_at") or "")
+    registered = str(registration.get("registered_at") or "")
     try:
-        date.fromisoformat(frozen)
+        date.fromisoformat(frozen.partition("T")[0])
     except ValueError:
         reasons.append("challenger frozen_at date is invalid")
     try:
-        date.fromisoformat(registered)
+        date.fromisoformat(registered.partition("T")[0])
     except ValueError:
         reasons.append("challenger registered_at date is invalid")
     artifact_hash = str(registration.get("logic_artifact_sha256") or "")
@@ -1594,17 +2162,17 @@ def _comparison(
     calendar_index: dict[tuple[str, _SeriesKey], list[JsonDict]],
     completed_reports: dict[str, JsonDict],
     config: ChallengerEvaluationConfig,
+    *,
+    research_dates: tuple[str, ...] | None = None,
+    holdout_dates: tuple[str, ...] | None = None,
 ) -> JsonDict:
-    holdout_count = max(
-        config.min_holdout_sessions,
-        math.ceil(len(aligned_dates) * config.holdout_fraction),
+    # Holdout membership is frozen at registration and supplied through the
+    # exact candidate evidence cohort. Never reselect a latest percentage or
+    # inspect appended rows on evaluation retries.
+    research_dates = tuple(research_dates or ())
+    holdout_dates = tuple(
+        aligned_dates if holdout_dates is None else holdout_dates
     )
-    if holdout_count >= len(aligned_dates):
-        research_dates: tuple[str, ...] = ()
-        holdout_dates = aligned_dates
-    else:
-        research_dates = aligned_dates[:-holdout_count]
-        holdout_dates = aligned_dates[-holdout_count:]
     by_champion = {row.session_date: row for row in champion}
     by_candidate = {row.session_date: row for row in candidate}
     fold_size = config.min_sessions_per_fold
@@ -1855,6 +2423,8 @@ def _performance_blockers(
 def _proposal_base(
     *,
     champion: _SeriesKey,
+    experiment_id: str | None = None,
+    registration_id: str | None = None,
     challenger_id: str | None,
     candidate: _SeriesKey | None,
     status: str,
@@ -1876,6 +2446,8 @@ def _proposal_base(
 ) -> JsonDict:
     core = {
         "strategy_id": champion.strategy_id,
+        "experiment_id": experiment_id,
+        "registration_id": registration_id,
         "challenger_id": challenger_id,
         "champion": champion.to_dict(),
         "candidate": candidate.to_dict() if candidate else None,
@@ -1969,6 +2541,7 @@ def _write_artifacts(reports: Path, payload: JsonDict) -> dict[str, str]:
     fields = (
         "proposal_id",
         "strategy_id",
+        "experiment_id",
         "challenger_id",
         "evaluation_status",
         "champion_strategy_version",
@@ -1997,6 +2570,10 @@ def _write_artifacts(reports: Path, payload: JsonDict) -> dict[str, str]:
         "csv": str(csv_path),
         "markdown": str(markdown_path),
         "history_jsonl": str(reports / "challenger_evaluation_history.jsonl"),
+        "evaluation_receipts_jsonl": str(
+            reports / f"{_EVALUATION_RECEIPT_DIRECTORY}.jsonl"
+        ),
+        "evaluation_receipts_directory": str(reports / _EVALUATION_RECEIPT_DIRECTORY),
     }
 
 
@@ -2009,6 +2586,7 @@ def _csv_proposal(row: JsonDict) -> JsonDict:
     return {
         "proposal_id": row["proposal_id"],
         "strategy_id": row["strategy_id"],
+        "experiment_id": row.get("experiment_id"),
         "challenger_id": row.get("challenger_id"),
         "evaluation_status": row["evaluation_status"],
         "champion_strategy_version": champion.get("strategy_version"),

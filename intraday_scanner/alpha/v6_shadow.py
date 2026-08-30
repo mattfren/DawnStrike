@@ -31,12 +31,19 @@ from intraday_scanner.alpha.v6.contracts import (
     ALPHAOPS_V6_STRATEGY_VERSION,
     FEATURE_SCHEMA_VERSION,
     V6_COST_MODEL_VERSION,
+    is_valid_code_sha,
+    is_valid_sha256,
 )
 from intraday_scanner.alpha.v6.training import predict_from_frozen_model_run
+from intraday_scanner.alpha.v6.validation import (
+    aggregate_daily_returns,
+    daily_weighting_status,
+)
 from intraday_scanner.services.benchmark_service import (
     alphaops_v6_benchmark_policy,
     benchmark_coverage,
 )
+from intraday_scanner.services.outcome_capture_contract import classify_missing_capture
 
 MIN_TRAINING_OUTCOMES = 30
 MIN_GROUP_OUTCOMES = 12
@@ -399,9 +406,17 @@ def promotion_readiness(
         if tracked
         else None
     )
-    profit_factor = _profit_factor(returns)
-    maximum_drawdown = _maximum_drawdown(returns)
-    concentration = _return_concentration(returns)
+    daily_returns_by_date = aggregate_daily_returns(valid)
+    daily_returns = [
+        daily_returns_by_date[day][0] for day in sorted(daily_returns_by_date)
+    ]
+    daily_weighting = daily_weighting_status(valid)
+    # Allocation is already reflected in each account-day return; risk
+    # observations are sessions and are not weighted again by invested cash.
+    daily_observation_weights = [1.0] * len(daily_returns)
+    profit_factor = _profit_factor(daily_returns, daily_observation_weights)
+    maximum_drawdown = _maximum_drawdown(daily_returns)
+    concentration = _return_concentration(daily_returns, daily_observation_weights)
     bootstrap_lower = _bootstrap_lower_bound(valid)
     stressed_expectancy = _stressed_expectancy(valid, multiplier=1.5)
     evaluation_data = evaluation or {}
@@ -411,6 +426,12 @@ def promotion_readiness(
     holdout_data = holdout if isinstance(holdout, dict) else {}
     comparison = evaluation_data.get("comparison_to_v5")
     comparison_data = comparison if isinstance(comparison, dict) else {}
+    holdout_binding_valid = _holdout_binding_is_exact(
+        holdout_data, model_run_id=evaluation_data.get("model_run_id")
+    )
+    comparison_binding_valid = _comparison_binding_is_exact(
+        comparison_data, model_run_id=evaluation_data.get("model_run_id")
+    )
     criteria = {
         "minimum_forward_sessions": len(sessions) >= MIN_FORWARD_SESSIONS,
         "minimum_closed_paper_trades": len(returns) >= MIN_FORWARD_CLOSED_TRADES,
@@ -434,6 +455,9 @@ def promotion_readiness(
         "gain_loss_concentration_no_more_than_25_pct": bool(
             concentration is not None and concentration <= 25.0
         ),
+        "authentic_account_weighted_risk_series": bool(
+            daily_returns and daily_weighting["promotion_eligible"]
+        ),
         "positive_purged_walk_forward": bool(
             metrics.get("status") == "EVALUABLE"
             and _number(metrics.get("after_cost_expectancy_pct")) is not None
@@ -441,7 +465,8 @@ def promotion_readiness(
             and evaluation_data.get("no_lookahead") is True
         ),
         "positive_untouched_holdout": bool(
-            holdout_data.get("evaluated_once") is True
+            holdout_binding_valid
+            and holdout_data.get("evaluated_once") is True
             and _number(holdout_data.get("after_cost_expectancy_pct")) is not None
             and float(holdout_data["after_cost_expectancy_pct"]) > 0
         ),
@@ -454,9 +479,12 @@ def promotion_readiness(
             and all(row.get("no_lookahead") is True for row in valid)
         ),
         "challenger_beats_frozen_v5_objective": bool(
-            _number(comparison_data.get("objective_delta_pct")) is not None
+            comparison_binding_valid
+            and _number(comparison_data.get("objective_delta_pct")) is not None
             and float(comparison_data["objective_delta_pct"]) > 0
         ),
+        "untouched_holdout_receipt_exactly_bound": holdout_binding_valid,
+        "comparison_to_v5_receipt_exactly_bound": comparison_binding_valid,
         "manual_operator_approval_recorded": manual_operator_approval,
         "primary_benchmark_coverage_complete": benchmark["primary_complete"],
         "secondary_benchmark_coverage_complete": benchmark["secondary_complete"],
@@ -473,6 +501,15 @@ def promotion_readiness(
     }
     technically_ready = all(technical_criteria.values())
     approved = technically_ready and manual_operator_approval
+    promotion_blockers = []
+    if not holdout_binding_valid:
+        promotion_blockers.append("untouched_holdout_receipt_missing_or_hash_mismatch")
+    if not comparison_binding_valid:
+        promotion_blockers.append("comparison_to_v5_receipt_missing_or_hash_mismatch")
+    if not daily_weighting["promotion_eligible"]:
+        promotion_blockers.append(
+            "allocation_or_account_weight_truth_missing_or_invalid"
+        )
     return {
         "status": (
             "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION"
@@ -483,8 +520,13 @@ def promotion_readiness(
         ),
         "automatic_promotion": False,
         "criteria": criteria,
+        "promotion_blockers": promotion_blockers,
         "forward_session_count": len(sessions),
         "closed_paper_trade_count": len(returns),
+        "risk_observation_unit": "market_date",
+        "risk_observation_count": len(daily_returns),
+        "risk_series_status": daily_weighting["status"],
+        "risk_series_promotion_eligible": daily_weighting["promotion_eligible"],
         "eligible_outcome_coverage_pct": _round(outcome_coverage_pct),
         "mean_net_excess_return_pct": _round(mean(returns)) if returns else None,
         "tail_loss_pct": _round(tail),
@@ -504,9 +546,20 @@ def promotion_readiness(
     }
 
 
-def _profit_factor(values: list[float]) -> float | None:
-    gains = sum(value for value in values if value > 0)
-    losses = abs(sum(value for value in values if value < 0))
+def _profit_factor(values: list[float], weights: list[float] | None = None) -> float | None:
+    effective_weights = weights if weights is not None else [1.0] * len(values)
+    gains = sum(
+        value * weight
+        for value, weight in zip(values, effective_weights, strict=True)
+        if value > 0
+    )
+    losses = abs(
+        sum(
+            value * weight
+            for value, weight in zip(values, effective_weights, strict=True)
+            if value < 0
+        )
+    )
     return gains / losses if losses else None
 
 
@@ -523,11 +576,145 @@ def _maximum_drawdown(values: list[float]) -> float | None:
     return worst
 
 
-def _return_concentration(values: list[float]) -> float | None:
+def _return_concentration(
+    values: list[float], weights: list[float] | None = None
+) -> float | None:
     if not values:
         return None
-    denominator = sum(abs(value) for value in values)
-    return 100.0 * max(abs(value) for value in values) / denominator if denominator else 100.0
+    effective_weights = weights if weights is not None else [1.0] * len(values)
+    contributions = [
+        abs(value * weight)
+        for value, weight in zip(values, effective_weights, strict=True)
+    ]
+    denominator = sum(contributions)
+    return 100.0 * max(contributions) / denominator if denominator else 100.0
+
+
+def _holdout_binding_is_exact(
+    holdout: dict[str, Any], *, model_run_id: object
+) -> bool:
+    """Require an immutable holdout receipt to bind experiment/model/evidence."""
+
+    evidence = holdout.get("evidence")
+    evidence_data = evidence if isinstance(evidence, dict) else {}
+    experiment_id = str(holdout.get("experiment_id") or "")
+    bound_model = str(holdout.get("model_run_id") or evidence_data.get("model_run_id") or "")
+    configured_hash = str(holdout.get("configuration_hash_sha256") or "")
+    evidence_experiment_id = str(evidence_data.get("experiment_id") or "")
+    evidence_configuration_hash = str(
+        evidence_data.get("configuration_hash_sha256") or ""
+    )
+    source_lineage_hash = str(
+        evidence_data.get("source_lineage_hash_sha256")
+        or evidence_data.get("source_hash_sha256")
+        or ""
+    )
+    code_sha = str(evidence_data.get("code_sha") or "")
+    evaluation_window = evidence_data.get("evaluation_window")
+    window_data = evaluation_window if isinstance(evaluation_window, dict) else {}
+    evidence_hash = str(holdout.get("evidence_hash_sha256") or "")
+    declared_binding = str(
+        holdout.get("model_binding_hash_sha256")
+        or holdout.get("binding_hash_sha256")
+        or ""
+    )
+    expected_binding = _hash(
+        {
+            "model_run_id": bound_model,
+            "experiment_id": evidence_experiment_id,
+            "configuration_hash_sha256": evidence_configuration_hash,
+            "source_lineage_hash_sha256": source_lineage_hash,
+            "code_sha": code_sha,
+            "evaluation_window": window_data,
+            "data_hash_sha256": evidence_data.get("data_hash_sha256"),
+            "source_hash_sha256": evidence_data.get("source_hash_sha256"),
+            "evidence_hash_sha256": evidence_hash,
+        }
+    )
+    return bool(
+        holdout.get("evaluated_once") is True
+        and str(holdout.get("holdout_evaluation_id") or "")
+        and experiment_id
+        and bound_model
+        and str(model_run_id or "") == bound_model
+        and configured_hash
+        and is_valid_sha256(configured_hash)
+        and evidence_experiment_id == experiment_id
+        and evidence_configuration_hash == configured_hash
+        and source_lineage_hash
+        and is_valid_sha256(evidence_configuration_hash)
+        and is_valid_sha256(source_lineage_hash)
+        and code_sha
+        and is_valid_code_sha(code_sha)
+        and is_valid_sha256(evidence_hash)
+        and window_data
+        and evidence_data
+        and evidence_hash == _hash(evidence_data)
+        and declared_binding == expected_binding
+    )
+
+
+def _comparison_binding_is_exact(
+    comparison: dict[str, Any], *, model_run_id: object
+) -> bool:
+    """Require a persisted V5 comparison receipt with complete lineage."""
+
+    comparison_id = str(comparison.get("comparison_id") or "")
+    input_hash = str(comparison.get("input_hash_sha256") or "")
+    bound_model = str(comparison.get("model_run_id") or "")
+    experiment_id = str(comparison.get("experiment_id") or "")
+    configuration_hash = str(comparison.get("configuration_hash_sha256") or "")
+    source_hash = str(
+        comparison.get("source_lineage_hash_sha256")
+        or comparison.get("source_hash_sha256")
+        or ""
+    )
+    code_sha = str(comparison.get("code_sha") or "")
+    evaluation_window = comparison.get("evaluation_window")
+    window_data = evaluation_window if isinstance(evaluation_window, dict) else {}
+    declared_binding = str(
+        comparison.get("model_binding_hash_sha256")
+        or comparison.get("binding_hash_sha256")
+        or ""
+    )
+    metrics = comparison.get("series_metrics")
+    metrics_hash = _hash(metrics) if isinstance(metrics, dict) else ""
+    persisted_metrics_hash = str(
+        comparison.get("comparison_metrics_hash_sha256") or ""
+    )
+    expected_binding = _hash(
+        {
+            "model_run_id": bound_model,
+            "experiment_id": experiment_id,
+            "configuration_hash_sha256": configuration_hash,
+            "source_lineage_hash_sha256": source_hash,
+            "code_sha": code_sha,
+            "evaluation_window": window_data,
+            "comparison_id": comparison_id,
+            "input_hash_sha256": input_hash,
+            "comparison_metrics_hash_sha256": metrics_hash,
+        }
+    )
+    return bool(
+        comparison.get("status") == "COMPLETE_ACCOUNT_LEVEL_COMPARISON"
+        and comparison_id
+        and input_hash
+        and bound_model
+        and str(model_run_id or "") == bound_model
+        and experiment_id
+        and configuration_hash
+        and is_valid_sha256(configuration_hash)
+        and source_hash
+        and is_valid_sha256(source_hash)
+        and code_sha
+        and is_valid_code_sha(code_sha)
+        and window_data
+        and persisted_metrics_hash == metrics_hash
+        and is_valid_sha256(persisted_metrics_hash)
+        and is_valid_sha256(input_hash)
+        and isinstance(metrics, dict)
+        and declared_binding == expected_binding
+    )
 
 
 def _bootstrap_lower_bound(rows: list[dict[str, Any]]) -> float | None:
@@ -572,6 +759,7 @@ def _v6_outcome_from_source(
     attempt: dict[str, Any] | None,
 ) -> dict[str, Any]:
     source_or_attempt = source or attempt or {}
+    missing_classification = _capture_missing_classification(source_or_attempt)
     fill_truth_present = has_authenticated_committed_fill_truth(source_or_attempt)
     observed_at = str(
         (source or attempt or {}).get("captured_at")
@@ -629,6 +817,9 @@ def _v6_outcome_from_source(
             source_or_attempt.get("outcome_status")
             or (attempt or {}).get("status")
         ),
+        "missing_classification": missing_classification,
+        "authoritative_terminal": missing_classification == "authoritative_terminal",
+        "retryable_missing": missing_classification == "recoverable",
         "missing_truth_is_zero": False,
         "research_only": True,
         "broker_execution_enabled": False,
@@ -640,6 +831,9 @@ def _v6_outcome_from_source(
             "outcome_status": payload["outcome_status"],
         })[:28]
     return payload
+
+
+_capture_missing_classification = classify_missing_capture
 
 
 def _safety_vetoes(

@@ -13,6 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+from intraday_scanner.alpha.v6.contracts import is_valid_code_sha, is_valid_sha256
 from intraday_scanner.performance.contracts import safe_float, stable_hash
 
 ACCOUNT_COMPARISON_VERSION = "dawnstrike.account-comparison.v1"
@@ -27,6 +28,7 @@ def build_account_comparison(
     v6_ledger: Iterable[dict[str, Any]],
     benchmark_rows: Iterable[dict[str, Any]],
     calculated_at: str,
+    model_lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one date-aligned comparison or a precise non-publishable receipt.
 
@@ -147,11 +149,48 @@ def build_account_comparison(
             "schema_version": ACCOUNT_COMPARISON_VERSION,
         }
     )
-    return {
+    result = {
         **content,
         "input_hash_sha256": input_hash,
         "comparison_id": "acmp-" + stable_hash({**content, "input_hash": input_hash})[:28],
     }
+    # A comparison can be promotion evidence only when its producer supplies
+    # an explicit, immutable candidate lineage. Ordinary account reports stay
+    # valid research diagnostics but deliberately omit this binding.
+    if model_lineage:
+        required = (
+            "model_run_id",
+            "experiment_id",
+            "configuration_hash_sha256",
+            "source_lineage_hash_sha256",
+            "code_sha",
+            "evaluation_window",
+        )
+        if (
+            all(model_lineage.get(key) for key in required)
+            and is_valid_sha256(model_lineage.get("configuration_hash_sha256"))
+            and is_valid_sha256(model_lineage.get("source_lineage_hash_sha256"))
+            and is_valid_code_sha(model_lineage.get("code_sha"))
+            and isinstance(model_lineage.get("evaluation_window"), dict)
+        ):
+            result.update({key: model_lineage[key] for key in required})
+            result["comparison_metrics_hash_sha256"] = stable_hash(metrics)
+            result["model_binding_hash_sha256"] = stable_hash(
+                {
+                    "model_run_id": result["model_run_id"],
+                    "experiment_id": result["experiment_id"],
+                    "configuration_hash_sha256": result["configuration_hash_sha256"],
+                    "source_lineage_hash_sha256": result["source_lineage_hash_sha256"],
+                    "code_sha": result["code_sha"],
+                    "evaluation_window": result["evaluation_window"],
+                    "comparison_id": result["comparison_id"],
+                    "input_hash_sha256": result["input_hash_sha256"],
+                    "comparison_metrics_hash_sha256": result[
+                        "comparison_metrics_hash_sha256"
+                    ],
+                }
+            )
+    return result
 
 
 def public_account_comparison(report: dict[str, Any] | None) -> dict[str, Any] | None:

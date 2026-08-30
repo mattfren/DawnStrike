@@ -120,6 +120,8 @@ def run_trade_watcher(
     include_scenarios: bool = False,
     config: ScannerConfig | None = None,
     expected_code_sha: str | None = None,
+    observation_bundle_path: str | Path | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one watch cycle and optionally create paper trade fills."""
 
@@ -244,6 +246,8 @@ def run_trade_watcher(
         max_age_seconds=max_age_seconds,
         persist=True,
         config=scanner_config,
+        observation_bundle_path=observation_bundle_path,
+        cycle_id=cycle_id,
     )
     observations = list(price_result.get("observations") or [])
     prior_entry_signal_ids = {
@@ -2421,6 +2425,8 @@ def _build_watcher_current_proof(
     # geometry-only short must never produce a Tier 3 current proof.
     if isinstance(plan, dict) and str(plan.get("direction") or "").lower() == "short":
         return None
+    if not isinstance(plan, dict):
+        return None
     try:
         plan_valid = isinstance(plan, dict) and validate_alphaops_v5_plan(
             plan, expected_ticker=ticker
@@ -2758,6 +2764,7 @@ def _price_summary(result: dict[str, Any]) -> dict[str, Any]:
         "usable_count": result.get("usable_count"),
         "rejected_count": result.get("rejected_count"),
         "no_lookahead": result.get("no_lookahead", True),
+        "bundle": result.get("bundle"),
     }
 
 

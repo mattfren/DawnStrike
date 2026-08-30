@@ -707,6 +707,31 @@ def test_frozen_slate_retry_rejects_cross_release_code_sha(tmp_path) -> None:
         )
 
 
+def test_frozen_slate_retry_accepts_exact_current_cycle_code_sha(tmp_path) -> None:
+    current_cycle_sha = "a" * 40
+    slate = build_ranked_research_slate(
+        [],
+        target=1,
+        generated_at="2026-08-26T13:30:00+00:00",
+        market_date="2026-08-26",
+        scan_id="scan-release-a",
+        require_safety=True,
+        producer_code_sha=current_cycle_sha,
+    )
+    slate_path = persist_ranked_research_slate(
+        slate,
+        tmp_path / "ranked_research_slate.json",
+    )
+
+    loaded = _load_frozen_luna_slate(
+        slate_path,
+        market_date="2026-08-26",
+        expected_code_sha=current_cycle_sha,
+    )
+
+    assert loaded["producer_code_sha"] == current_cycle_sha
+
+
 @pytest.mark.parametrize("hostile_count", [True, 1.0, "1"])
 @pytest.mark.parametrize(
     "count_field",
