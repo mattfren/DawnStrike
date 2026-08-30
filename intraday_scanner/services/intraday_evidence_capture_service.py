@@ -15,7 +15,8 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from intraday_scanner.v2.data_truth.intraday import (
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _VALID_MODES = {"forward_observed", "retrospective_research"}
 _ENDPOINTS = {
     "bars": "get_bars_page",
@@ -78,7 +80,11 @@ class CaptureRequest:
             raise CaptureContractError("at least one symbol is required")
         if any(not symbol or symbol != symbol.upper() for symbol in self.symbols):
             raise CaptureContractError("symbols must be non-empty uppercase identifiers")
-        if not self.market_date or len(self.market_date) != 10:
+        try:
+            parsed_market_date = date.fromisoformat(self.market_date)
+        except ValueError as exc:
+            raise CaptureContractError("market_date must be an ISO date") from exc
+        if parsed_market_date.isoformat() != self.market_date:
             raise CaptureContractError("market_date must be an ISO date")
         if not self.exchange_session_id.strip():
             raise CaptureContractError("exchange_session_id is required")
@@ -86,12 +92,22 @@ class CaptureRequest:
         _require_utc(self.request_end, "request_end")
         if self.request_end <= self.request_start:
             raise CaptureContractError("request_end must be after request_start")
-        if not self.code_sha.strip():
-            raise CaptureContractError("code_sha is required")
-        if not self.source_config_hash.strip():
-            raise CaptureContractError("source_config_hash is required")
+        if not _GIT_OID.fullmatch(self.code_sha):
+            raise CaptureContractError("code_sha must be an exact lowercase Git object id")
+        if not _SHA256.fullmatch(self.source_config_hash):
+            raise CaptureContractError("source_config_hash must be a lowercase SHA-256")
         if not isinstance(self.operator_entitlement_metadata, dict):
             raise CaptureContractError("operator entitlement metadata must be an object")
+        entitlement = str(self.operator_entitlement_metadata.get("entitlement") or "").strip()
+        proof_id = str(
+            self.operator_entitlement_metadata.get("receipt")
+            or self.operator_entitlement_metadata.get("proof_id")
+            or ""
+        ).strip()
+        if not entitlement or not proof_id:
+            raise CaptureContractError(
+                "operator entitlement metadata requires entitlement and receipt/proof_id"
+            )
 
 
 @dataclass
@@ -163,6 +179,14 @@ class IntradayEvidenceCaptureService:
                         endpoint=endpoint,
                         state=endpoint_state,
                         store=store,
+                        checkpoint=partial(
+                            _persist_endpoint_checkpoint,
+                            state_path,
+                            state,
+                            symbol_state,
+                            endpoint,
+                            endpoint_state,
+                        ),
                     )
                 except SourceConflictError as exc:
                     endpoint_state.status = IntradayCoverageStatus.SOURCE_CONFLICT.value
@@ -246,12 +270,23 @@ class IntradayEvidenceCaptureService:
         endpoint: str,
         state: _EndpointState,
         store: IntradayEvidenceStore,
+        checkpoint: Callable[[], None],
     ) -> None:
         fetch = getattr(self.provider, _ENDPOINTS[endpoint])
+        _validate_checkpoint_pages(
+            state.pages,
+            provider=request.provider,
+            feed=request.feed,
+            endpoint=endpoint,
+        )
         page_token = state.next_page_token
-        previous_cursor = None
+        if state.pages and page_token != state.pages[-1].get("cursor_out"):
+            raise CaptureContractError("capture checkpoint next cursor changed")
+        if not state.pages and page_token is not None:
+            raise CaptureContractError("capture checkpoint has a cursor without pages")
+        previous_page_hash = None
         if state.pages:
-            previous_cursor = state.pages[-1].get("cursor_out")
+            previous_page_hash = state.pages[-1].get("raw_payload_hash_sha256")
         for page_number in range(len(state.pages), self.config.historical_intraday_max_pages):
             page = self._fetch_page(
                 fetch,
@@ -280,7 +315,7 @@ class IntradayEvidenceCaptureService:
                 "request_id": page.request_id,
                 "raw_payload_hash_sha256": page_hash,
                 "item_count": len(page.items),
-                "previous_page_hash_sha256": previous_cursor,
+                "previous_page_hash_sha256": previous_page_hash,
             }
             page_dir = run_dir / "pages" / symbol / endpoint
             page_path = page_dir / f"page-{page_number:06d}.json"
@@ -322,9 +357,10 @@ class IntradayEvidenceCaptureService:
                 manifest.normalized_artifact_hash_sha256
             )
             state.pages.append(page_record)
-            previous_cursor = page_hash
+            previous_page_hash = page_hash
             page_token = cursor_out
             state.next_page_token = page_token
+            checkpoint()
             if page_token is None:
                 state.complete = True
                 state.status = (
@@ -586,6 +622,18 @@ def _endpoint_to_dict(state: _EndpointState) -> dict[str, Any]:
     }
 
 
+def _persist_endpoint_checkpoint(
+    state_path: Path,
+    state: dict[str, Any],
+    symbol_state: dict[str, Any],
+    endpoint: str,
+    endpoint_state: _EndpointState,
+) -> None:
+    symbol_state[endpoint] = _endpoint_to_dict(endpoint_state)
+    state["updated_at"] = _now().isoformat()
+    _atomic_json_write(state_path, state)
+
+
 def _read_page_items(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for page in pages:
@@ -600,6 +648,49 @@ def _read_page_items(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             raise CaptureContractError(f"page artifact has invalid normalized items: {path}")
         result.extend(item for item in payload["items"] if isinstance(item, dict))
     return result
+
+
+def _validate_checkpoint_pages(
+    pages: list[dict[str, Any]],
+    *,
+    provider: str,
+    feed: str,
+    endpoint: str,
+) -> None:
+    """Reject a resumed cursor chain whose durable page evidence changed."""
+
+    previous_hash: str | None = None
+    previous_cursor: str | None = None
+    for expected_number, page in enumerate(pages):
+        if page.get("page_number") != expected_number:
+            raise CaptureContractError("capture checkpoint page sequence is not contiguous")
+        if (
+            page.get("provider") != provider
+            or page.get("feed") != feed
+            or page.get("endpoint") != endpoint
+        ):
+            raise CaptureContractError("capture checkpoint provider/feed identity changed")
+        if page.get("cursor_in") != previous_cursor:
+            raise CaptureContractError("capture checkpoint cursor chain changed")
+        page_hash = str(page.get("raw_payload_hash_sha256") or "")
+        if not _SHA256.fullmatch(page_hash):
+            raise CaptureContractError("capture checkpoint page hash is invalid")
+        if page.get("previous_page_hash_sha256") != previous_hash:
+            raise CaptureContractError("capture checkpoint page hash chain changed")
+        path_value = str(page.get("page_path") or "")
+        if not path_value:
+            raise CaptureContractError("capture checkpoint page artifact is missing")
+        try:
+            envelope = json.loads(Path(path_value).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CaptureContractError("capture checkpoint page artifact is unreadable") from exc
+        if not isinstance(envelope, dict):
+            raise CaptureContractError("capture checkpoint page artifact is invalid")
+        stored_artifact_hash = str(page.get("raw_artifact_hash_sha256") or "")
+        if _sha256(_canonical_json(envelope)) != stored_artifact_hash:
+            raise CaptureContractError("capture checkpoint page artifact hash changed")
+        previous_hash = page_hash
+        previous_cursor = page.get("cursor_out")
 
 
 def _timestamp(item: dict[str, Any]) -> datetime | None:
@@ -636,6 +727,8 @@ def _overall_status(coverage: list[dict[str, Any]]) -> str:
     statuses = {str(row.get("status")) for row in coverage}
     if statuses == {IntradayCoverageStatus.COMPLETE.value}:
         return IntradayCoverageStatus.COMPLETE.value
+    if len(statuses) == 1:
+        return next(iter(statuses))
     if statuses and statuses <= {
         IntradayCoverageStatus.NO_DATA.value,
         IntradayCoverageStatus.COMPLETE.value,
