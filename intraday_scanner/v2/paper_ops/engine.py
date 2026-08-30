@@ -2394,10 +2394,12 @@ def _order_entry_block_reason(
     management_only: bool | None = None,
     all_accounts: tuple[StrategyPaperAccount, ...] | None = None,
 ) -> str | None:
-    if all_accounts is None:
-        # Keep the helper safe for direct callers and legacy validators: no
-        # entry path may silently omit the centralized portfolio authority.
-        all_accounts = (account,)
+    # Actual ENTER/CHECK producers supply the complete account tuple and are
+    # always governed by the centralized portfolio authority. Transaction
+    # coherence validators intentionally omit it: old immutable journals do
+    # not contain a versioned portfolio-risk receipt and must be checked under
+    # their persisted per-strategy execution contract, not retroactively
+    # re-adjudicated against today's aggregate policy.
     if management_only is None:
         management_only = config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
     if management_only:
