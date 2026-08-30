@@ -2573,6 +2573,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
             intent_id TEXT,
             position_id TEXT,
             order_id TEXT,
+            side TEXT,
             market_date TEXT NOT NULL,
             execution_status TEXT NOT NULL CHECK (execution_status IN (
                 'PENDING', 'PARTIAL', 'FILLED', 'REJECTED', 'CANCELLED',
@@ -2602,6 +2603,34 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         ON committed_fill_truth_receipts(account_id, market_date, receipt_id);
         CREATE INDEX IF NOT EXISTS idx_committed_fill_truth_experiment
         ON committed_fill_truth_receipts(experiment_id, arm_id, market_date);
+
+        CREATE TABLE IF NOT EXISTS no_trade_session_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            account_id TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            experiment_id TEXT,
+            arm_id TEXT,
+            market_date TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'FINALIZED'),
+            decision TEXT NOT NULL CHECK (decision = 'NO_TRADE'),
+            no_entry INTEGER NOT NULL CHECK (no_entry = 1),
+            source_artifact_hash_sha256 TEXT NOT NULL,
+            source_config_hash_sha256 TEXT NOT NULL,
+            calendar_source_hash_sha256 TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_no_trade_session_receipts_identity
+        ON no_trade_session_receipts(account_id, market_date, session_id, run_id);
 
         CREATE TABLE IF NOT EXISTS experiment_trial_ledger (
             trial_id TEXT PRIMARY KEY,
@@ -2655,6 +2684,14 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         BEFORE DELETE ON committed_fill_truth_receipts BEGIN
             SELECT RAISE(ABORT, 'committed_fill_truth_receipts is append-only');
         END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_update
+        BEFORE UPDATE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_delete
+        BEFORE DELETE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
         CREATE TRIGGER IF NOT EXISTS experiment_trial_ledger_no_update
         BEFORE UPDATE ON experiment_trial_ledger BEGIN
             SELECT RAISE(ABORT, 'experiment_trial_ledger is append-only');
@@ -2677,6 +2714,13 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
             "arm_id TEXT",
             "evidence_mode TEXT NOT NULL DEFAULT 'forward_observed'",
             "lineage_sha256 TEXT",
+            "target_shortfall_pct REAL",
+            "target_excess_pct REAL",
+            "spread_cost_cents INTEGER",
+            "slippage_cost_cents INTEGER",
+            "fees_cents INTEGER",
+            "regulatory_cost_cents INTEGER",
+            "borrow_cost_cents INTEGER",
         ):
             _add_column_if_missing(connection, "paper_account_daily_ledger", column)
         connection.executescript(
@@ -2687,6 +2731,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
             ON paper_account_daily_ledger(expected_session_id, market_date);
             """
         )
+    _add_column_if_missing(connection, "committed_fill_truth_receipts", "side TEXT")
 
 
 def _migration_032_v6_decision_availability(connection: sqlite3.Connection) -> None:

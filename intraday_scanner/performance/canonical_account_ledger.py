@@ -22,10 +22,16 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from intraday_scanner.alpha.commit_bridge import (
+    AuthenticatedFillTruth,
+    AuthenticatedNoTradeReceipt,
+    has_authenticated_fill_truth,
+    has_authenticated_no_trade_receipt,
+)
 from intraday_scanner.performance.account_contract import TARGET_NET_RETURN_PCT
 from intraday_scanner.storage.migrations import run_migrations
 
@@ -73,8 +79,10 @@ class CanonicalAccountLedger:
 
     Input rows are intentionally mapping-based to make this boundary usable by
     V5, V6, historical replay, and forward capture without coupling accounting
-    to any single strategy table.  Trade rows must carry ``fill_truth`` (or
-    ``fill_truth_authenticated=True``) to be considered realized evidence.
+    to any single strategy table. Trade rows must carry an intact
+    ``AuthenticatedFillTruth`` object in ``fill_truth`` to be considered
+    realized evidence; caller booleans and arbitrary JSON mappings are never
+    authoritative.
     """
 
     def __init__(
@@ -113,7 +121,7 @@ class CanonicalAccountLedger:
         trade_rows = _normalize_rows(trades)
         position_rows = _normalize_rows(positions)
         mark_rows = _normalize_rows(marks)
-        receipt_rows = _normalize_rows(no_trade_receipts)
+        receipt_rows = _normalize_receipts(no_trade_receipts)
         flow_rows = _normalize_rows(external_flows)
         _reject_conflicting_ids(trade_rows, "trade_id")
         _reject_conflicting_ids(position_rows, "position_id")
@@ -243,7 +251,8 @@ class CanonicalAccountLedger:
                       strategy_version, execution_policy_version, cost_model_version,
                       status, evidence_state, beginning_equity_cents,
                       external_flow_cents, realized_gross_pnl_cents, fees_cents,
-                      slippage_cents, realized_net_pnl_cents,
+                      slippage_cents, spread_cost_cents, regulatory_cost_cents,
+                      borrow_cost_cents, realized_net_pnl_cents,
                       unrealized_pnl_change_cents, cash_cents,
                       position_market_value_cents, ending_equity_cents,
                       market_benchmark_return_pct, cash_benchmark_return_pct,
@@ -258,7 +267,8 @@ class CanonicalAccountLedger:
                       :strategy_version, :execution_policy_version, :cost_model_version,
                       :status, :evidence_state, :beginning_equity_cents,
                       :external_flow_cents, :realized_gross_pnl_cents, :fees_cents,
-                      :slippage_cents, :realized_net_pnl_cents,
+                      :slippage_cents, :spread_cost_cents, :regulatory_cost_cents,
+                      :borrow_cost_cents, :realized_net_pnl_cents,
                       :unrealized_pnl_change_cents, :cash_cents,
                       :position_market_value_cents, :ending_equity_cents,
                       :market_benchmark_return_pct, :cash_benchmark_return_pct,
@@ -283,6 +293,9 @@ class CanonicalAccountLedger:
                       realized_gross_pnl_cents = excluded.realized_gross_pnl_cents,
                       fees_cents = excluded.fees_cents,
                       slippage_cents = excluded.slippage_cents,
+                      spread_cost_cents = excluded.spread_cost_cents,
+                      regulatory_cost_cents = excluded.regulatory_cost_cents,
+                      borrow_cost_cents = excluded.borrow_cost_cents,
                       realized_net_pnl_cents = excluded.realized_net_pnl_cents,
                       unrealized_pnl_change_cents = excluded.unrealized_pnl_change_cents,
                       cash_cents = excluded.cash_cents,
@@ -352,7 +365,7 @@ class CanonicalAccountLedger:
         day_trades: list[dict[str, Any]],
         day_positions: list[dict[str, Any]],
         day_marks: list[dict[str, Any]],
-        day_receipts: list[dict[str, Any]],
+        day_receipts: list[AuthenticatedNoTradeReceipt],
         day_flows: list[dict[str, Any]],
         beginning: int | None,
         input_hash: str,
@@ -465,50 +478,47 @@ class CanonicalAccountLedger:
             )
         flow = 0 if flows is None else flows
         no_trade = _authoritative_receipt_for(
-            day_receipts, account_id, str(session["session_id"]), str(session["market_date"])
+            day_receipts,
+            account_id,
+            str(session["session_id"]),
+            str(session["market_date"]),
+            strategy_id,
+            strategy_version,
+            (account or {}).get("experiment_id"),
+            (account or {}).get("arm_id"),
         )
         open_positions = _open_positions(day_positions)
         authenticated_trades = [item for item in day_trades if _trade_authenticated(item)]
         incomplete_trades = bool(day_trades) and len(authenticated_trades) != len(day_trades)
-        gross = _sum_int(authenticated_trades, "gross_pnl_cents", "gross_pnl")
-        fees = _sum_int(authenticated_trades, "fees_cents", "fees")
-        slippage = _sum_int(
-            authenticated_trades, "slippage_cents", "slippage_cost_cents", "slippage_cost"
+        identity_mismatch = any(
+            not _trade_identity_matches(
+                item,
+                account_id,
+                str(session["market_date"]),
+                strategy_id,
+                strategy_version,
+                str(session["session_id"]),
+                (account or {}).get("experiment_id"),
+                (account or {}).get("arm_id"),
+            )
+            for item in authenticated_trades
         )
-        net = _sum_int(authenticated_trades, "net_pnl_cents", "net_pnl")
-        # Algebraic completion is valid only when all cost components needed
-        # for that identity are present; unknown values remain partial.
-        if (
-            authenticated_trades
-            and net is None
-            and gross is not None
-            and fees is not None
-            and slippage is not None
-        ):
-            net = gross - fees - slippage
-        if (
-            authenticated_trades
-            and gross is None
-            and net is not None
-            and fees is not None
-            and slippage is not None
-        ):
-            gross = net + fees + slippage
-        if authenticated_trades and any(value is None for value in (gross, fees, slippage, net)):
+        if identity_mismatch:
+            return self._degraded_row(
+                base, beginning, "fill_truth_identity_mismatch", day_trades, day_positions
+            )
+        financials = [_trade_financials(item) for item in authenticated_trades]
+        if authenticated_trades and any(item is None for item in financials):
             return self._degraded_row(
                 base, beginning, "fill_truth_financials_incomplete", day_trades, day_positions
             )
-        if (
-            authenticated_trades
-            and gross is not None
-            and fees is not None
-            and slippage is not None
-            and net is not None
-            and gross - fees - slippage != net
-        ):
-            return self._degraded_row(
-                base, beginning, "fill_truth_cost_identity_mismatch", day_trades, day_positions
-            )
+        gross = sum((item["gross"] for item in financials if item), 0)
+        spread = sum((item["spread"] for item in financials if item), 0)
+        slippage = sum((item["slippage"] for item in financials if item), 0)
+        fees = sum((item["fees"] for item in financials if item), 0)
+        regulatory = sum((item["regulatory"] for item in financials if item), 0)
+        borrow = sum((item["borrow"] for item in financials if item), 0)
+        net = gross - spread - slippage - fees - regulatory - borrow
         unrealized = _sum_int(day_marks, "unrealized_pnl_change_cents", "unrealized_pnl_change")
         if day_marks and unrealized is None:
             return self._degraded_row(
@@ -531,7 +541,7 @@ class CanonicalAccountLedger:
                     day_trades,
                     day_positions,
                 )
-            gross = fees = slippage = net = unrealized = 0
+            gross = spread = fees = slippage = regulatory = borrow = net = unrealized = 0
             ending = beginning if beginning is not None else None
             status = "AUTHENTICATED_NO_TRADE"
             state = "no_trade"
@@ -580,12 +590,18 @@ class CanonicalAccountLedger:
             )
         )
         target_shortfall = (
-            round(max(0.0, self.target_return_pct - net_return), 8)
+            None
+            if status == "AUTHENTICATED_NO_TRADE"
+            else round(max(0.0, self.target_return_pct - net_return), 8)
             if net_return is not None
             else None
         )
         target_excess = (
-            round(net_return - self.target_return_pct, 8) if net_return is not None else None
+            None
+            if status == "AUTHENTICATED_NO_TRADE"
+            else round(net_return - self.target_return_pct, 8)
+            if net_return is not None
+            else None
         )
         next_equity = ending if ending is not None else beginning
         return (
@@ -599,8 +615,11 @@ class CanonicalAccountLedger:
                 "beginning_equity_cents": beginning,
                 "external_flow_cents": flow,
                 "realized_gross_pnl_cents": gross,
+                "spread_cost_cents": spread,
                 "fees_cents": fees,
                 "slippage_cents": slippage,
+                "regulatory_cost_cents": regulatory,
+                "borrow_cost_cents": borrow,
                 "realized_net_pnl_cents": net,
                 "unrealized_pnl_change_cents": unrealized,
                 "cash_cents": ending if not open_positions else None,
@@ -750,8 +769,8 @@ def _normalize_sessions(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
         if not day or not session_id:
             raise LedgerEvidenceError("expected sessions require market_date and session_id")
         old = seen.get(day)
-        if old and old != session_id:
-            raise LedgerConflictError(f"multiple expected sessions for {day}")
+        if old:
+            raise LedgerConflictError(f"duplicate expected session date: {day}")
         seen[day] = session_id
         item["market_date"] = day
         item["session_id"] = session_id
@@ -763,12 +782,24 @@ def _normalize_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return sorted((dict(row) for row in rows), key=_canonical_json)
 
 
-def _group_date(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    output: dict[str, list[dict[str, Any]]] = {}
+def _normalize_receipts(rows: Iterable[object]) -> list[AuthenticatedNoTradeReceipt]:
+    receipts = list(rows)
+    if any(not has_authenticated_no_trade_receipt(row) for row in receipts):
+        # Keep the rejection fail-closed and deterministic. The caller may
+        # still inspect a MISSING/PARTIAL row for the affected session, but an
+        # untrusted mapping can never become a zero-return receipt.
+        return []
+    return sorted(
+        (cast(AuthenticatedNoTradeReceipt, row) for row in receipts), key=_canonical_json
+    )
+
+
+def _group_date(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[Any]]:
+    output: dict[str, list[Any]] = {}
     for row in rows:
         day = str(row.get("market_date") or row.get("date") or "")[:10]
         if day:
-            output.setdefault(day, []).append(dict(row))
+            output.setdefault(day, []).append(row)
     return output
 
 
@@ -785,49 +816,132 @@ def _reject_conflicting_ids(rows: Sequence[Mapping[str, Any]], key: str) -> None
         identities[value] = normalized
 
 
-def _trade_authenticated(row: Mapping[str, Any]) -> bool:
-    if row.get("fill_truth_authenticated") is True:
-        return True
-    fill_truth = row.get("fill_truth")
-    if isinstance(fill_truth, Mapping):
-        return bool(
-            fill_truth.get("authenticated") is True
-            or fill_truth.get("status") in {"AUTHENTICATED", "COMMITTED", "FILLED", "CLOSED"}
+def _trade_authenticated(row: Mapping[str, Any]) -> AuthenticatedFillTruth | None:
+    value = row.get("fill_truth")
+    return value if has_authenticated_fill_truth(value) else None
+
+
+def _trade_identity_matches(
+    row: Mapping[str, Any],
+    account_id: str,
+    day: str,
+    strategy_id: str,
+    strategy_version: str,
+    session_id: str,
+    experiment_id: Any,
+    arm_id: Any,
+) -> bool:
+    fill = _trade_authenticated(row)
+    if fill is None:
+        return False
+    expected = {
+        "account_id": account_id,
+        "market_date": day,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "session_id": session_id,
+        "experiment_id": experiment_id,
+        "arm_id": arm_id,
+    }
+    for field, wanted in expected.items():
+        actual = fill.get(field)
+        if wanted is None:
+            if actual not in (None, ""):
+                return False
+            continue
+        if actual is None:
+            return False
+        matches = (
+            str(actual)[:10] == str(wanted)
+            if field == "market_date"
+            else str(actual) == str(wanted)
         )
-    return False
+        if not matches:
+            return False
+    return True
+
+
+def _trade_financials(row: Mapping[str, Any]) -> dict[str, int] | None:
+    fill = _trade_authenticated(row)
+    if fill is None:
+        return None
+    required = ("side", "quantity", "entry_price", "exit_price")
+    if any(fill.get(key) is None for key in required):
+        return None
+    side = str(fill.get("side") or "").strip().lower()
+    if side in {"buy", "long", "b"}:
+        direction = Decimal("1")
+    elif side in {"sell", "short", "s"}:
+        direction = Decimal("-1")
+    else:
+        return None
+    try:
+        quantity = Decimal(str(fill.get("quantity")))
+        entry = Decimal(str(fill.get("entry_price")))
+        exit = Decimal(str(fill.get("exit_price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not all(value.is_finite() for value in (quantity, entry, exit)) or quantity <= 0:
+        return None
+    costs: dict[str, int] = {}
+    for name in ("spread", "slippage", "fees", "regulatory", "borrow"):
+        key = f"{name}_cost_cents" if name not in {"fees"} else "fees_cents"
+        if fill.get(key) is None:
+            return None
+        value = _int_value(fill.get(key))
+        if value is None or value < 0:
+            return None
+        costs[name] = value
+    gross = ((exit - entry) * quantity * direction * Decimal("100")).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+    return {"gross": int(gross), **costs}
 
 
 def _authoritative_receipt_for(
-    rows: Iterable[Mapping[str, Any]], account_id: str, session_id: str, day: str
-) -> dict[str, Any] | None:
-    found: dict[str, Any] | None = None
+    rows: Iterable[AuthenticatedNoTradeReceipt],
+    account_id: str,
+    session_id: str,
+    day: str,
+    strategy_id: str,
+    strategy_version: str,
+    experiment_id: Any,
+    arm_id: Any,
+) -> AuthenticatedNoTradeReceipt | None:
+    found: AuthenticatedNoTradeReceipt | None = None
     for row in rows:
-        receipt_id = str(row.get("receipt_id") or row.get("id") or "").strip()
-        if not receipt_id or row.get("authoritative") is False:
+        if not has_authenticated_no_trade_receipt(row):
             continue
-        if row.get("account_id") and str(row.get("account_id")) != account_id:
-            continue
-        if row.get("market_date") and str(row.get("market_date"))[:10] != day:
-            continue
-        if row.get("session_id") and str(row.get("session_id")) != session_id:
-            continue
-        if str(row.get("status") or "").upper() in {"UNTRUSTED", "CONFLICT", "QUARANTINED"}:
+        identity = {
+            "account_id": account_id,
+            "market_date": day,
+            "session_id": session_id,
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "experiment_id": experiment_id,
+            "arm_id": arm_id,
+        }
+        if any(
+            (
+                str(row.get(field) or "")[:10] != str(wanted)
+                if field == "market_date"
+                else str(row.get(field) or "") != str(wanted)
+            )
+            if wanted is not None
+            else row.get(field) not in (None, "")
+            for field, wanted in identity.items()
+        ):
             continue
         if found is not None and _canonical_json(found) != _canonical_json(row):
             raise LedgerConflictError(f"conflicting no-trade receipts for {account_id}/{day}")
-        found = dict(row)
+        found = row
     return found
 
 
 def _has_conflicting_no_trade(
     trades: Iterable[Mapping[str, Any]], receipts: Iterable[Mapping[str, Any]]
 ) -> bool:
-    return bool(list(trades)) and any(
-        str(row.get("decision") or row.get("status") or "").upper()
-        in {"NO_TRADE", "EXPLICIT_NO_TRADE"}
-        or str(row.get("ticker") or "").upper() == "NO_TRADE"
-        for row in receipts
-    )
+    return bool(list(trades)) and any(has_authenticated_no_trade_receipt(row) for row in receipts)
 
 
 def _open_positions(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -878,8 +992,11 @@ def _empty_financials() -> dict[str, Any]:
         "beginning_equity_cents": None,
         "external_flow_cents": None,
         "realized_gross_pnl_cents": None,
+        "spread_cost_cents": None,
         "fees_cents": None,
         "slippage_cents": None,
+        "regulatory_cost_cents": None,
+        "borrow_cost_cents": None,
         "realized_net_pnl_cents": None,
         "unrealized_pnl_change_cents": None,
         "cash_cents": None,
@@ -895,7 +1012,15 @@ def _empty_financials() -> dict[str, Any]:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _hash(value: Any) -> str:

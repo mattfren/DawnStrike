@@ -84,6 +84,19 @@ class IntradayEvidenceStore:
 
         return self._sqlite_store.load_committed_fill_truth_receipt(receipt_id)
 
+    def persist_no_trade_session_receipt(self, receipt: dict[str, Any]) -> bool:
+        """Persist one immutable finalized no-entry session receipt."""
+
+        return self._sqlite_store.persist_no_trade_session_receipt(receipt)
+
+    def load_no_trade_session_receipt_record(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        return self._sqlite_store.load_no_trade_session_receipt_record(receipt_id)
+
+    def load_no_trade_session_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        return self._sqlite_store.load_no_trade_session_receipt(receipt_id)
+
     def store_artifact(
         self,
         *,

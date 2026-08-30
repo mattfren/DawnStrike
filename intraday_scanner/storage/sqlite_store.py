@@ -6089,9 +6089,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist paper trade fills: {exc}") from exc
 
-    def persist_committed_fill_truth_receipt(
-        self, receipt: Mapping[str, Any]
-    ) -> bool:
+    def persist_committed_fill_truth_receipt(self, receipt: Mapping[str, Any]) -> bool:
         """Append one canonical, research-only committed FillTruth receipt.
 
         This is deliberately a narrow storage primitive.  CommitBridge owns
@@ -6111,9 +6109,7 @@ class SQLiteScanStore:
             or payload.get("receipt_hash_sha256") != declared_hash
         ):
             raise StorageError("committed FillTruth receipt identity is incomplete")
-        unsigned = {
-            key: value for key, value in payload.items() if key != "receipt_hash_sha256"
-        }
+        unsigned = {key: value for key, value in payload.items() if key != "receipt_hash_sha256"}
         computed_hash = hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
         if declared_hash != computed_hash:
             raise StorageError("committed FillTruth receipt hash mismatch")
@@ -6148,6 +6144,7 @@ class SQLiteScanStore:
             payload.get("intent_id"),
             payload.get("position_id"),
             payload.get("order_id"),
+            payload.get("side"),
             str(payload["market_date"]),
             str(payload["execution_status"]),
             payload.get("entry_at"),
@@ -6176,7 +6173,7 @@ class SQLiteScanStore:
                     INSERT OR IGNORE INTO committed_fill_truth_receipts (
                         receipt_id, receipt_hash_sha256, account_id, strategy_id,
                         strategy_version, experiment_id, arm_id, decision_id,
-                        selection_id, intent_id, position_id, order_id, market_date,
+                        selection_id, intent_id, position_id, order_id, side, market_date,
                         execution_status, entry_at, exit_at, quantity, entry_price,
                         exit_price, spread_cost_cents, slippage_cost_cents, fees_cents,
                         regulatory_cost_cents, borrow_cost_cents,
@@ -6184,7 +6181,7 @@ class SQLiteScanStore:
                         payload_json, created_at, research_only,
                         broker_execution_enabled
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -6195,17 +6192,132 @@ class SQLiteScanStore:
                 ).fetchone()
                 if row is None or str(row[0]) != declared_hash or str(row[1]) != payload_json:
                     raise StorageError("committed FillTruth receipt identity/payload mismatch")
-                return bool(connection.execute(
-                    "SELECT changes()"
-                ).fetchone()[0])
+                return bool(connection.execute("SELECT changes()").fetchone()[0])
         except StorageError:
             raise
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist committed FillTruth receipt: {exc}") from exc
 
-    def load_committed_fill_truth_receipt_record(
-        self, receipt_id: str
-    ) -> dict[str, Any] | None:
+    def persist_no_trade_session_receipt(self, receipt: Mapping[str, Any]) -> bool:
+        """Append one finalized, research-only no-entry session receipt."""
+
+        if not isinstance(receipt, Mapping):
+            raise StorageError("no-trade receipt must be an object")
+        payload = dict(receipt)
+        receipt_id = str(payload.get("receipt_id") or "").strip()
+        declared_hash = str(payload.get("receipt_hash_sha256") or "").strip().lower()
+        if not receipt_id or len(declared_hash) != 64:
+            raise StorageError("no-trade receipt identity is incomplete")
+        unsigned = {key: value for key, value in payload.items() if key != "receipt_hash_sha256"}
+        computed_hash = hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
+        if declared_hash != computed_hash:
+            raise StorageError("no-trade receipt hash mismatch")
+        if (
+            payload.get("research_only") is not True
+            or payload.get("broker_execution_enabled") is not False
+        ):
+            raise StorageError("no-trade receipt must be research-only")
+        required = (
+            "account_id",
+            "strategy_id",
+            "strategy_version",
+            "market_date",
+            "session_id",
+            "run_id",
+            "status",
+            "decision",
+            "source_artifact_hash_sha256",
+            "source_config_hash_sha256",
+            "calendar_source_hash_sha256",
+            "code_sha",
+            "created_at",
+        )
+        if any(not str(payload.get(key) or "").strip() for key in required):
+            raise StorageError("no-trade receipt is missing required fields")
+        if payload.get("status") != "FINALIZED" or payload.get("decision") != "NO_TRADE":
+            raise StorageError("no-trade receipt must be terminal FINALIZED/NO_TRADE")
+        if payload.get("no_entry") is not True:
+            raise StorageError("no-trade receipt must assert no_entry")
+        payload_json = canonical_json(payload)
+        values = (
+            receipt_id,
+            declared_hash,
+            str(payload["account_id"]),
+            str(payload["strategy_id"]),
+            str(payload["strategy_version"]),
+            payload.get("experiment_id"),
+            payload.get("arm_id"),
+            str(payload["market_date"]),
+            str(payload["session_id"]),
+            str(payload["run_id"]),
+            "FINALIZED",
+            "NO_TRADE",
+            1,
+            str(payload["source_artifact_hash_sha256"]),
+            str(payload["source_config_hash_sha256"]),
+            str(payload["calendar_source_hash_sha256"]),
+            str(payload["code_sha"]),
+            payload_json,
+            str(payload["created_at"]),
+            1,
+            0,
+        )
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO no_trade_session_receipts (
+                      receipt_id, receipt_hash_sha256, account_id, strategy_id,
+                      strategy_version, experiment_id, arm_id, market_date, session_id,
+                      run_id, status, decision, no_entry, source_artifact_hash_sha256,
+                      source_config_hash_sha256, calendar_source_hash_sha256, code_sha,
+                      payload_json, created_at, research_only, broker_execution_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                row = connection.execute(
+                    "SELECT receipt_hash_sha256, payload_json FROM no_trade_session_receipts "
+                    "WHERE receipt_id = ?",
+                    (receipt_id,),
+                ).fetchone()
+                if row is None or str(row[0]) != declared_hash or str(row[1]) != payload_json:
+                    raise StorageError("no-trade receipt identity/payload mismatch")
+                return bool(connection.execute("SELECT changes()").fetchone()[0])
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist no-trade receipt: {exc}") from exc
+
+    def load_no_trade_session_receipt_record(self, receipt_id: str) -> dict[str, Any] | None:
+        """Load raw no-trade columns and payload for bridge verification."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    "SELECT * FROM no_trade_session_receipts WHERE receipt_id = ?",
+                    (str(receipt_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                columns = {key: row[key] for key in row.keys() if key != "payload_json"}
+                return {
+                    "columns": columns,
+                    "payload": _json_value(row["payload_json"], default=None),
+                    "payload_json": row["payload_json"],
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load no-trade receipt: {exc}") from exc
+
+    def load_no_trade_session_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        record = self.load_no_trade_session_receipt_record(receipt_id)
+        payload = record.get("payload") if record is not None else None
+        return payload if isinstance(payload, dict) else None
+
+    def load_committed_fill_truth_receipt_record(self, receipt_id: str) -> dict[str, Any] | None:
         """Load raw columns plus payload without merging untrusted JSON over columns."""
 
         self.initialize()
@@ -6218,9 +6330,7 @@ class SQLiteScanStore:
                 ).fetchone()
                 if row is None:
                     return None
-                columns = {
-                    key: row[key] for key in row.keys() if key != "payload_json"
-                }
+                columns = {key: row[key] for key in row.keys() if key != "payload_json"}
                 payload = _json_value(row["payload_json"], default=None)
                 return {
                     "columns": columns,
@@ -6230,9 +6340,7 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load committed FillTruth receipt: {exc}") from exc
 
-    def load_committed_fill_truth_receipt(
-        self, receipt_id: str
-    ) -> dict[str, Any] | None:
+    def load_committed_fill_truth_receipt(self, receipt_id: str) -> dict[str, Any] | None:
         """Load one committed FillTruth payload for diagnostic callers."""
 
         record = self.load_committed_fill_truth_receipt_record(receipt_id)

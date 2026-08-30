@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from decimal import Decimal
 
 import pytest
 
+from intraday_scanner.alpha.commit_bridge import _mint_authenticated_no_trade
+from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.performance.account_contract import (
     AccountSessionStatus,
     AccountSessionTarget,
@@ -48,12 +51,27 @@ def test_no_trade_requires_authoritative_receipt() -> None:
     assert missing.status is AccountSessionStatus.MISSING
     assert missing.net_return is None
 
+    receipt = {
+        "receipt_id": "session-receipt-1",
+        "account_id": "account",
+        "strategy_id": "strategy",
+        "strategy_version": "v1",
+        "market_date": "2026-08-31",
+        "session_id": "XNYS:2026-08-31",
+        "run_id": "run-1",
+        "status": "FINALIZED",
+        "decision": "NO_TRADE",
+        "no_entry": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    receipt["receipt_hash_sha256"] = hashlib.sha256(canonical_json(receipt).encode()).hexdigest()
     observed = validate_account_session(
         expected_session=True,
         beginning_equity_cents=100_000,
         ending_equity_cents=100_000,
         no_trade=True,
-        authoritative_receipt={"receipt_id": "session-receipt-1"},
+        authoritative_receipt=_mint_authenticated_no_trade(receipt),
     )
     assert observed.status is AccountSessionStatus.NO_TRADE
     assert observed.net_return == Decimal("0")
@@ -107,9 +125,7 @@ def test_migration_31_sidecar_is_additive_idempotent_and_append_only() -> None:
         assert get_schema_version(connection) == 30
         tables = {
             str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert {
             "expected_market_sessions",
@@ -163,6 +179,5 @@ def test_account_sidecar_is_not_skipped_for_a_preexisting_marker_31_store() -> N
         connection.execute("INSERT INTO schema_version VALUES (31, '2026-08-30T00:00:00+00:00')")
         assert run_migrations(connection) == 31
         assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'expected_market_sessions'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'expected_market_sessions'"
         ).fetchone() == (1,)

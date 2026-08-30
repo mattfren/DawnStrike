@@ -13,6 +13,10 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from intraday_scanner.alpha.commit_bridge import (
+    has_authenticated_no_trade_receipt,
+)
+
 ACCOUNT_SESSION_CONTRACT_VERSION = "dawnstrike.account_session_target.v1"
 TARGET_NET_RETURN = Decimal("0.01")
 TARGET_NET_RETURN_PCT = Decimal("1.00")
@@ -86,16 +90,9 @@ def account_session_return_pct(
 
 
 def _receipt_is_authoritative(receipt: Any) -> bool:
-    if not isinstance(receipt, dict):
-        return False
-    receipt_id = str(receipt.get("receipt_id") or receipt.get("id") or "").strip()
-    if not receipt_id:
-        return False
-    if receipt.get("authoritative") is False:
-        return False
-    if receipt.get("status") in {"UNTRUSTED", "CONFLICT", "QUARANTINED"}:
-        return False
-    return bool(receipt.get("authoritative", True))
+    """Only store-mediated typed receipts can authorize NO_TRADE."""
+
+    return has_authenticated_no_trade_receipt(receipt)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +127,7 @@ def validate_account_session(
     beginning_equity_cents: int | Decimal | str | None,
     ending_equity_cents: int | Decimal | str | None,
     external_flow_cents: int | Decimal | str | None = 0,
-    authoritative_receipt: dict[str, Any] | None = None,
+    authoritative_receipt: object | None = None,
     no_trade: bool = False,
     pending: bool = False,
     degraded: bool = False,
