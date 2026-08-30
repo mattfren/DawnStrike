@@ -65,6 +65,25 @@ class IntradayEvidenceStore:
     def initialize(self) -> None:
         self._sqlite_store.initialize()
 
+    def persist_committed_fill_truth_receipt(self, receipt: dict[str, Any]) -> bool:
+        """Persist one immutable committed FillTruth envelope."""
+
+        return self._sqlite_store.persist_committed_fill_truth_receipt(receipt)
+
+    def load_committed_fill_truth_receipt_record(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load an unmerged receipt record for CommitBridge validation."""
+
+        return self._sqlite_store.load_committed_fill_truth_receipt_record(receipt_id)
+
+    def load_committed_fill_truth_receipt(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load the canonical committed FillTruth payload."""
+
+        return self._sqlite_store.load_committed_fill_truth_receipt(receipt_id)
+
     def store_artifact(
         self,
         *,
