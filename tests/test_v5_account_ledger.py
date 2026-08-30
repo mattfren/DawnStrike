@@ -11,6 +11,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_ID,
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
+from intraday_scanner.performance.account_ledger import persist_v5_account_ledger
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.storage.migrations import run_migrations
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
@@ -55,6 +56,63 @@ def test_v5_account_ledger_enforces_equity_identity_and_account_return(
             "SELECT opening_equity_cents FROM paper_accounts WHERE account_id = ?",
             (ALPHAOPS_V5_ACCOUNT_ID,),
         ).fetchone() == (10_000_000,)
+
+
+def test_legacy_v5_rebuild_preserves_canonical_session_partition(tmp_path: Path) -> None:
+    db_path = tmp_path / "v5-preserves-canonical.sqlite"
+    _initialize(db_path)
+    row = {
+        "ledger_id": "legacy-row",
+        "account_id": ALPHAOPS_V5_ACCOUNT_ID,
+        "market_date": DAY,
+        "cohort": "official_forward_paper",
+        "strategy_id": ALPHAOPS_V5_STRATEGY_ID,
+        "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
+        "execution_policy_version": ALPHAOPS_V5_POLICY_VERSION,
+        "cost_model_version": ALPHAOPS_V5_COST_MODEL_VERSION,
+        "status": "MISSING",
+        "evidence_state": "missing",
+        "beginning_equity_cents": None,
+        "external_flow_cents": None,
+        "realized_gross_pnl_cents": None,
+        "fees_cents": None,
+        "slippage_cents": None,
+        "realized_net_pnl_cents": None,
+        "unrealized_pnl_change_cents": None,
+        "cash_cents": None,
+        "position_market_value_cents": None,
+        "ending_equity_cents": None,
+        "market_benchmark_return_pct": None,
+        "cash_benchmark_return_pct": None,
+        "gross_return_pct": None,
+        "net_return_pct": None,
+        "excess_return_pct": None,
+        "accounting_delta_cents": None,
+        "trade_count": 0,
+        "open_position_count": 0,
+        "source_refs": [],
+        "source_hash_sha256": "a" * 64,
+        "input_hash_sha256": "b" * 64,
+        "calculated_at": f"{DAY}T21:00:00+00:00",
+    }
+    with sqlite3.connect(db_path) as connection:
+        persist_v5_account_ledger(
+            connection, [row], calculated_at=f"{DAY}T21:00:00+00:00"
+        )
+        connection.execute(
+            "UPDATE paper_account_daily_ledger SET expected_session_id = ?, "
+            "source_hash_sha256 = ? WHERE account_id = ? AND market_date = ?",
+            ("canonical-session", "c" * 64, ALPHAOPS_V5_ACCOUNT_ID, DAY),
+        )
+        persist_v5_account_ledger(
+            connection, [row], calculated_at=f"{DAY}T22:00:00+00:00"
+        )
+        preserved = connection.execute(
+            "SELECT expected_session_id, source_hash_sha256 "
+            "FROM paper_account_daily_ledger WHERE account_id = ? AND market_date = ?",
+            (ALPHAOPS_V5_ACCOUNT_ID, DAY),
+        ).fetchone()
+    assert preserved == ("canonical-session", "c" * 64)
 
 
 def test_v5_explicit_no_trade_is_observed_zero_not_missing(tmp_path: Path) -> None:

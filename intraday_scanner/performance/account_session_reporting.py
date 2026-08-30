@@ -65,7 +65,9 @@ def build_account_session_report(
     try:
         with connect_read_only(path, row_factory=sqlite3.Row) as connection:
             expected = _expected_sessions(connection, market_date, window_days)
-            ledger = _ledger_rows(connection, market_date, window_days, account_id)
+            ledger, unsafe_ledger_count = _ledger_rows(
+                connection, market_date, window_days, account_id
+            )
     except (OSError, StorageError, sqlite3.Error):
         return {**base, **_empty_report("WAITING_FOR_CANONICAL_ACCOUNT_LEDGER")}
 
@@ -77,11 +79,17 @@ def build_account_session_report(
             "expected_calendar_hash_sha256": _hash([]),
         }
     if not ledger:
+        status = (
+            "WAITING_FOR_AUTHENTICATED_FILL_TRUTH"
+            if unsafe_ledger_count
+            else "WAITING_FOR_CANONICAL_ACCOUNT_LEDGER"
+        )
         return {
             **base,
-            **_empty_report("WAITING_FOR_CANONICAL_ACCOUNT_LEDGER"),
+            **_empty_report(status),
             "expected_session_count": len(expected),
             "expected_calendar_hash_sha256": _hash(expected),
+            "unsafe_ledger_count": unsafe_ledger_count,
         }
 
     grouped: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -157,8 +165,15 @@ def build_account_session_report(
             "by_version": by_version,
             "research_only": RESEARCH_ONLY,
             "broker_execution_enabled": BROKER_EXECUTION_ENABLED,
+            "unsafe_ledger_count": unsafe_ledger_count,
         }
     )
+    if unsafe_ledger_count:
+        # An unsafe account contract must never be hidden by a complete-looking
+        # safe subset.  Keep safe series available for diagnosis, but block the
+        # aggregate report until every contributing account is research-only
+        # and broker-disabled in persisted truth.
+        report["status"] = "WAITING_FOR_AUTHENTICATED_FILL_TRUTH"
     return report
 
 
@@ -196,6 +211,7 @@ def public_account_session_report(report: dict[str, Any] | None) -> dict[str, An
         "by_version",
         "research_only",
         "broker_execution_enabled",
+        "unsafe_ledger_count",
     }
     output = {key: report.get(key) for key in allowed if key in report}
     output["series"] = [
@@ -238,18 +254,26 @@ def _ledger_rows(
     market_date: str | None,
     window_days: int,
     account_id: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     rows = connection.execute(
-        """SELECT * FROM paper_account_daily_ledger
-            WHERE (? IS NULL OR market_date <= ?)
-              AND (? IS NULL OR account_id = ?)
-            ORDER BY market_date ASC, account_id ASC, ledger_id ASC""",
+        """SELECT ledger.*, account.research_only AS account_research_only,
+                  account.broker_execution_enabled AS account_broker_execution_enabled
+             FROM paper_account_daily_ledger AS ledger
+             LEFT JOIN paper_accounts AS account
+               ON account.account_id = ledger.account_id
+            WHERE (? IS NULL OR ledger.market_date <= ?)
+              AND (? IS NULL OR ledger.account_id = ?)
+            ORDER BY ledger.market_date ASC, ledger.account_id ASC, ledger.ledger_id ASC""",
         (market_date, market_date, account_id, account_id),
     ).fetchall()
     values = [dict(row) for row in rows]
-    if len(values) <= window_days:
-        return values
-    return values[-window_days:]
+    safe = [
+        row
+        for row in values
+        if row.get("account_research_only") == 1
+        and row.get("account_broker_execution_enabled") == 0
+    ]
+    return safe, len(values) - len(safe)
 
 
 def _series_report(
@@ -295,6 +319,8 @@ def _series_report(
             return_values.append(value)
     if len(return_values) != len(expected_ids):
         incomplete = True
+        if status == "COMPLETE":
+            status = "WAITING_FOR_AUTHENTICATED_FILL_TRUTH"
     compound = None
     geometric = None
     if not incomplete and return_values:
@@ -396,6 +422,7 @@ def _empty_report(status: str) -> dict[str, Any]:
         "input_hash_sha256": _hash({"status": status}),
         "series": [],
         "by_version": {},
+        "unsafe_ledger_count": 0,
         "research_only": RESEARCH_ONLY,
         "broker_execution_enabled": BROKER_EXECUTION_ENABLED,
     }
