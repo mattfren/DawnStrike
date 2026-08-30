@@ -12,7 +12,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from intraday_scanner.market_calendar import MARKET_TIMEZONE, market_session
+from intraday_scanner.market_calendar import (
+    MARKET_TIMEZONE,
+    canonical_regular_session_id,
+    market_session,
+)
 
 
 def main() -> int:
@@ -129,7 +133,7 @@ def build_expected_session(market_date: date) -> dict[str, Any] | None:
         "schema_version": "dawnstrike.expected_capture_session.v1",
         "exchange": "XNYS",
         "market_date": market_date.isoformat(),
-        "exchange_session_id": f"XNYS:{market_date.isoformat()}:regular",
+        "exchange_session_id": canonical_regular_session_id(market_date),
         "calendar_id": decision.calendar_id,
         "calendar_status": decision.status.value,
         "calendar_reason": decision.reason,

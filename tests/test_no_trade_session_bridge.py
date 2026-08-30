@@ -26,7 +26,7 @@ def _receipt() -> dict[str, object]:
         "experiment_id": "exp-1",
         "arm_id": "control",
         "market_date": "2026-08-28",
-        "session_id": "XNYS:2026-08-28",
+        "session_id": "XNYS:2026-08-28:regular",
         "run_id": "run-1",
         "status": "FINALIZED",
         "decision": "NO_TRADE",
@@ -58,7 +58,7 @@ def test_no_trade_bridge_requires_exact_persisted_identity(tmp_path: Path) -> No
     identity = NoTradeIdentity(
         account_id="paper-total",
         market_date="2026-08-28",
-        session_id="XNYS:2026-08-28",
+        session_id="XNYS:2026-08-28:regular",
         run_id="run-1",
         strategy_id="aggregate",
         strategy_version="aggregate.v1",
@@ -111,3 +111,14 @@ def test_no_trade_storage_is_append_only_and_hash_bound(tmp_path: Path) -> None:
                 "DELETE FROM no_trade_session_receipts WHERE receipt_id = ?",
                 (receipt["receipt_id"],),
             )
+
+
+def test_no_trade_storage_rejects_legacy_session_identity(tmp_path: Path) -> None:
+    receipt = _receipt()
+    receipt["session_id"] = "XNYS:2026-08-28"
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+    receipt["receipt_hash_sha256"] = hashlib.sha256(
+        canonical_json(unsigned).encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(StorageError, match="session_id is not canonical"):
+        SQLiteScanStore(tmp_path / "session.sqlite").persist_no_trade_session_receipt(receipt)

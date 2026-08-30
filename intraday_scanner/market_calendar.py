@@ -165,6 +165,19 @@ def market_session(value: date) -> MarketSessionDecision:
     return _decision(value, MarketSessionStatus.OPEN, "regular_session")
 
 
+def canonical_regular_session_id(value: date | str) -> str:
+    """Return the one canonical identity for a full XNYS regular session."""
+
+    raw = value.isoformat() if isinstance(value, date) else str(value).strip()
+    try:
+        market_date = date.fromisoformat(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("market_date must be ISO YYYY-MM-DD") from exc
+    if market_date.isoformat() != raw:
+        raise ValueError("market_date must be ISO YYYY-MM-DD")
+    return f"XNYS:{raw}:regular"
+
+
 def session_for_timestamp(value: datetime | None = None) -> MarketSessionDecision:
     """Resolve a timestamp to its New York market date and scheduled session."""
 

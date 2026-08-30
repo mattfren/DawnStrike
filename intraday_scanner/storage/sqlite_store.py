@@ -23,6 +23,7 @@ from intraday_scanner.decisioning.contracts import (
     parse_strategy_decision_receipt,
 )
 from intraday_scanner.errors import SnapshotValidationError, StorageError
+from intraday_scanner.market_calendar import canonical_regular_session_id
 from intraday_scanner.models import ScanResult
 from intraday_scanner.scenario.contracts import (
     SCENARIO_FEATURE_SCHEMA_VERSION,
@@ -6252,6 +6253,12 @@ class SQLiteScanStore:
         )
         if any(not str(payload.get(key) or "").strip() for key in required):
             raise StorageError("no-trade receipt is missing required fields")
+        try:
+            canonical_session_id = canonical_regular_session_id(str(payload["market_date"]))
+        except ValueError as exc:
+            raise StorageError("no-trade receipt market_date is invalid") from exc
+        if str(payload["session_id"]) != canonical_session_id:
+            raise StorageError("no-trade receipt session_id is not canonical")
         if payload.get("status") != "FINALIZED" or payload.get("decision") != "NO_TRADE":
             raise StorageError("no-trade receipt must be terminal FINALIZED/NO_TRADE")
         if payload.get("no_entry") is not True:

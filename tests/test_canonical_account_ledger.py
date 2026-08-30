@@ -30,7 +30,7 @@ def _account() -> dict[str, object]:
 def _session(day: str, session_id: str | None = None, **extra: object) -> dict[str, object]:
     return {
         "market_date": day,
-        "session_id": session_id or f"session-{day}",
+        "session_id": session_id or f"XNYS:{day}:regular",
         "status": "CLOSED",
         **extra,
     }
@@ -43,7 +43,7 @@ def _trade(trade_id: str, day: str, **extra: object) -> dict[str, object]:
         "strategy_id": "aggregate",
         "strategy_version": "aggregate.v1",
         "market_date": day,
-        "session_id": f"session-{day}",
+        "session_id": f"XNYS:{day}:regular",
         "symbol": "SPY",
         "run_id": f"run-{trade_id}",
         "fill_id": f"fill-{trade_id}",
@@ -78,7 +78,7 @@ def _no_trade(day: str) -> object:
         "strategy_id": "aggregate",
         "strategy_version": "aggregate.v1",
         "market_date": day,
-        "session_id": f"session-{day}",
+        "session_id": f"XNYS:{day}:regular",
         "run_id": f"run-{day}",
         "status": "FINALIZED",
         "decision": "NO_TRADE",
