@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.market_calendar import canonical_regular_session_id
 from intraday_scanner.providers.base import HistoricalIntradayProvider, IntradayPage
 from intraday_scanner.storage.intraday_evidence_store import (
     IntradayEvidenceStore,
@@ -88,6 +89,14 @@ class CaptureRequest:
             raise CaptureContractError("market_date must be an ISO date")
         if not self.exchange_session_id.strip():
             raise CaptureContractError("exchange_session_id is required")
+        try:
+            canonical_session_id = canonical_regular_session_id(self.market_date)
+        except ValueError as exc:
+            raise CaptureContractError(str(exc)) from exc
+        if self.exchange_session_id != canonical_session_id:
+            raise CaptureContractError(
+                "exchange_session_id must be canonical XNYS:<market_date>:regular"
+            )
         _require_utc(self.request_start, "request_start")
         _require_utc(self.request_end, "request_end")
         if self.request_end <= self.request_start:

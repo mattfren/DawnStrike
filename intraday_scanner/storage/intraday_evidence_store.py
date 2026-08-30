@@ -18,6 +18,7 @@ from intraday_scanner.alpha.path_replay import (
     canonical_path_return_eligible,
 )
 from intraday_scanner.errors import StorageError
+from intraday_scanner.market_calendar import canonical_regular_session_id
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from intraday_scanner.v2.data_truth.intraday import (
     IntradayArtifactManifest,
@@ -155,6 +156,15 @@ class IntradayEvidenceStore:
         if not retention_allowed:
             raise RetentionNotPermittedError(
                 "intraday artifact retention is not permitted for this source"
+            )
+        try:
+            canonical_session_id = canonical_regular_session_id(market_date)
+        except ValueError as exc:
+            raise EvidenceStoreError(str(exc)) from exc
+        if exchange_session_id != canonical_session_id:
+            raise EvidenceStoreError(
+                "intraday artifact exchange_session_id must be canonical "
+                "XNYS:<market_date>:regular"
             )
         self.initialize()
         _require_utc(request_start, "request_start")

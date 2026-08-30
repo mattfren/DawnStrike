@@ -11388,6 +11388,14 @@ def _validate_intraday_capture_run_receipt(
     feed = str(payload["feed"]).strip()
     if str(payload["source_identity"]).strip() != f"{provider}:{feed}":
         raise StorageError("intraday capture run source_identity does not match provider/feed")
+    try:
+        canonical_session_id = canonical_regular_session_id(str(payload["market_date"]))
+    except ValueError as exc:
+        raise StorageError(str(exc)) from exc
+    if str(payload["session_id"]) != canonical_session_id:
+        raise StorageError(
+            "intraday capture run session_id must be canonical XNYS:<market_date>:regular"
+        )
     for key in ("request_start", "request_end", "started_at", "created_at"):
         try:
             timestamp = datetime.fromisoformat(str(payload[key]).replace("Z", "+00:00"))
@@ -11437,6 +11445,27 @@ def _validate_intraday_capture_run_receipt(
                 raise StorageError(
                     "intraday capture run complete endpoint lacks artifact identity"
                 )
+    if payload.get("status") == "COMPLETE":
+        symbols = payload.get("symbols")
+        if not isinstance(symbols, list) or not symbols or any(
+            not isinstance(symbol, str) or not symbol.strip() for symbol in symbols
+        ) or len(set(symbols)) != len(symbols):
+            raise StorageError("intraday capture COMPLETE symbols are missing or invalid")
+        covered_symbols = [
+            str(row.get("symbol") or "") for row in coverage if isinstance(row, Mapping)
+        ]
+        if len(covered_symbols) != len(symbols) or set(covered_symbols) != set(symbols):
+            raise StorageError("intraday capture COMPLETE coverage symbols do not match run")
+        for row in coverage:
+            for endpoint_row in row["endpoint_coverage"]:
+                endpoint = str(endpoint_row.get("endpoint") or "")
+                status = str(endpoint_row.get("status") or "")
+                if status != "COMPLETE" and not (
+                    endpoint == "corporate_actions" and status == "NO_DATA"
+                ):
+                    raise StorageError(
+                        "intraday capture COMPLETE contains incomplete endpoint coverage"
+                    )
     artifact_identity = payload.get("artifact_identity")
     if not isinstance(artifact_identity, Mapping):
         raise StorageError("intraday capture run artifact identity is missing")
@@ -11446,6 +11475,12 @@ def _validate_intraday_capture_run_receipt(
         raise StorageError("intraday capture run artifact identity is incomplete")
     if artifact_hash != _canonical_sha256({"items": artifact_items}):
         raise StorageError("intraday capture run artifact identity hash mismatch")
+    if payload.get("status") == "COMPLETE" and not artifact_items:
+        raise StorageError("intraday capture COMPLETE artifact identity is empty")
+    if payload.get("status") == "COMPLETE":
+        for key in ("raw_artifact_hash_sha256", "normalized_artifact_hash_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get(key) or "")):
+                raise StorageError(f"intraday capture COMPLETE {key} is missing")
     for key in ("raw_artifact_hash_sha256", "normalized_artifact_hash_sha256"):
         value = payload.get(key)
         if value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)):
@@ -11532,13 +11567,13 @@ def _validate_intraday_capture_artifacts(
 
     for manifest_id, endpoint, symbol, raw_hash, normalized_hash in expected:
         row = connection.execute(
-            "SELECT payload_json FROM intraday_artifact_manifests "
+            "SELECT code_sha, payload_json FROM intraday_artifact_manifests "
             "WHERE artifact_manifest_id = ?",
             (manifest_id,),
         ).fetchone()
         if row is None:
             raise StorageError(f"intraday capture artifact manifest does not exist: {manifest_id}")
-        manifest = _json_value(row[0], default=None)
+        manifest = _json_value(row[1], default=None)
         if not isinstance(manifest, Mapping):
             raise StorageError(f"intraday capture artifact manifest is invalid: {manifest_id}")
         expected_identity = {
@@ -11560,6 +11595,20 @@ def _validate_intraday_capture_artifacts(
         ):
             raise StorageError(
                 "intraday capture artifact manifest is not bound to endpoint: "
+                f"{manifest_id}"
+            )
+        if str(row[0]) != str(payload["code_sha"]) or str(
+            manifest.get("code_sha") or ""
+        ) != str(payload["code_sha"]):
+            raise StorageError(
+                f"intraday capture artifact manifest code_sha is not bound: {manifest_id}"
+            )
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, Mapping) or str(
+            metadata.get("source_config_hash") or ""
+        ) != str(payload["source_config_hash"]):
+            raise StorageError(
+                "intraday capture artifact manifest source_config_hash is not bound: "
                 f"{manifest_id}"
             )
 

@@ -63,7 +63,7 @@ def _request(tmp_path: Path) -> CaptureRequest:
         evidence_mode="retrospective_research",
         symbols=("NOVA",),
         market_date="2026-08-07",
-        exchange_session_id="NYSE-2026-08-07",
+        exchange_session_id="XNYS:2026-08-07:regular",
         request_start=datetime(2026, 8, 7, 13, 30, tzinfo=UTC),
         request_end=datetime(2026, 8, 7, 20, tzinfo=UTC),
         db_path=tmp_path / "capture.sqlite",
@@ -291,6 +291,63 @@ def _resign_capture_receipt(receipt: dict, *, artifact_item: dict) -> dict:
     return changed
 
 
+def _resign_receipt(receipt: dict) -> dict:
+    changed = json.loads(json.dumps(receipt))
+    items = changed["artifact_identity"]["items"]
+    changed["artifact_identity"]["sha256"] = hashlib.sha256(
+        json.dumps({"items": items}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if items:
+        changed["raw_artifact_hash_sha256"] = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "endpoint": item["endpoint"],
+                        "hash": item["raw_artifact_hash_sha256"],
+                        "symbol": item["symbol"],
+                    }
+                    for item in items
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        changed["normalized_artifact_hash_sha256"] = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "endpoint": item["endpoint"],
+                        "hash": item["normalized_artifact_hash_sha256"],
+                        "symbol": item["symbol"],
+                    }
+                    for item in items
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    else:
+        changed["raw_artifact_hash_sha256"] = None
+        changed["normalized_artifact_hash_sha256"] = None
+    changed["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in changed.items() if key != "receipt_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return changed
+
+
+def _complete_receipt(tmp_path: Path) -> tuple[CaptureRequest, dict]:
+    request = _request(tmp_path)
+    receipt = IntradayEvidenceCaptureService(
+        _FakeProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    return request, receipt
+
+
 def test_capture_run_rejects_nonexistent_manifest_even_with_valid_receipt_hash(
     tmp_path: Path,
 ) -> None:
@@ -321,6 +378,63 @@ def test_capture_run_rejects_artifact_identity_with_wrong_endpoint(tmp_path: Pat
         IntradayEvidenceStore(request.db_path).persist_capture_run(
             _resign_capture_receipt(receipt, artifact_item=item)
         )
+
+
+def test_complete_capture_rejects_omitted_symbol(tmp_path: Path) -> None:
+    request, receipt = _complete_receipt(tmp_path)
+    changed = _resign_receipt(receipt)
+    changed.pop("symbols")
+    changed = _resign_receipt(changed)
+
+    with pytest.raises(StorageError, match="symbols are missing or invalid"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
+
+
+def test_complete_capture_rejects_partial_endpoint(tmp_path: Path) -> None:
+    request, receipt = _complete_receipt(tmp_path)
+    changed = _resign_receipt(receipt)
+    changed["coverage"][0]["endpoint_coverage"][0]["status"] = "PARTIAL_MISSING_INTERVALS"
+    changed = _resign_receipt(changed)
+
+    with pytest.raises(StorageError, match="incomplete endpoint coverage"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
+
+
+def test_complete_capture_rejects_empty_artifact_identity(tmp_path: Path) -> None:
+    request, receipt = _complete_receipt(tmp_path)
+    changed = _resign_receipt(receipt)
+    changed["artifact_identity"]["items"] = []
+    changed = _resign_receipt(changed)
+
+    with pytest.raises(StorageError, match="artifact identity is empty"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("code_sha", "7" * 40, "code_sha is not bound"),
+        ("source_config_hash", "8" * 64, "source_config_hash is not bound"),
+    ],
+)
+def test_capture_rejects_manifest_lineage_mismatch(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    request, receipt = _complete_receipt(tmp_path)
+    changed = _resign_receipt(receipt)
+    changed[field] = value
+    changed = _resign_receipt(changed)
+
+    with pytest.raises(StorageError, match=message):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
+
+
+def test_capture_request_rejects_noncanonical_session_identity(tmp_path: Path) -> None:
+    request = CaptureRequest(
+        **{**_request(tmp_path).__dict__, "exchange_session_id": "NYSE-2026-08-07"}
+    )
+    with pytest.raises(ValueError, match="canonical XNYS"):
+        request.validate()
 
 
 def test_capture_rejects_tampered_checkpoint_page_artifact(tmp_path: Path) -> None:
