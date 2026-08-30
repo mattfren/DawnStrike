@@ -24,6 +24,7 @@ function Invoke-DawnstrikeRuntimeRollback {
 
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
     $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
+    $safeBackupRoot = Resolve-DawnstrikeActivationRoot $BackupRoot "BackupRoot"
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $receiptPath = (Resolve-Path -LiteralPath $ActivationReceipt -ErrorAction Stop).Path
     $approvedReceiptRoot = [System.IO.Path]::GetFullPath(
@@ -114,6 +115,16 @@ function Invoke-DawnstrikeRuntimeRollback {
         if ($current.tree -ne $previousTree) {
             throw "Rollback receipt exists but the runtime tree does not match."
         }
+        $currentOrigin = Get-DawnstrikeGitValue `
+            $gitPath `
+            $runtime `
+            @("remote", "get-url", "origin") `
+            "Existing rollback origin verification" `
+            $ProcessTimeoutSeconds
+        Assert-DawnstrikeSafeOrigin $currentOrigin
+        if ((Get-DawnstrikeSha256Text $currentOrigin) -ne [string]$existing.runtime_origin_sha256) {
+            throw "Rollback receipt exists but the runtime origin does not match."
+        }
         $existingTasks = Get-DawnstrikeTaskContract $runtime $state
         if (
             $existingTasks.task_contract_sha256 -ne [string]$existing.task_contract_sha256 -or
@@ -134,7 +145,7 @@ function Invoke-DawnstrikeRuntimeRollback {
         $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
             -Receipt $existing `
             -StateRoot $state `
-            -BackupRoot $BackupRoot `
+            -BackupRoot $safeBackupRoot `
             -ToolRoot $contract `
             -GitPath $gitPath `
             -PythonPath $pythonPath `
@@ -333,7 +344,7 @@ function Invoke-DawnstrikeRuntimeRollback {
         $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
             -Receipt $activation `
             -StateRoot $state `
-            -BackupRoot $BackupRoot `
+            -BackupRoot $safeBackupRoot `
             -ToolRoot $contract `
             -GitPath $gitPath `
             -PythonPath $pythonPath `

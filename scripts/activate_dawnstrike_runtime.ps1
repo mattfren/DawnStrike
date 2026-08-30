@@ -75,6 +75,76 @@ function Resolve-DawnstrikeActivationRoot {
     return $item.FullName.TrimEnd('\')
 }
 
+function Get-DawnstrikeFutureActivationRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($Path -notmatch '^[A-Za-z]:\\') {
+        throw "$Label must be an absolute drive-qualified directory."
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($pathRoot)) {
+        throw "$Label does not have a valid filesystem root."
+    }
+    if ($fullPath.Length -gt $pathRoot.Length) {
+        $fullPath = $fullPath.TrimEnd('\')
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $cursor = $fullPath
+    while (-not (Test-Path -LiteralPath $cursor -PathType Container)) {
+        $missing.Add($cursor)
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "$Label parent directory does not exist."
+        }
+        $cursor = $parent.TrimEnd('\')
+    }
+    $null = Resolve-DawnstrikeActivationRoot $cursor $Label
+    return $fullPath
+}
+
+function Ensure-DawnstrikeActivationRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $fullPath = Get-DawnstrikeFutureActivationRoot $Path $Label
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+        New-Item -ItemType Directory -Path $fullPath -ErrorAction Stop | Out-Null
+    }
+    return Resolve-DawnstrikeActivationRoot $fullPath $Label
+}
+
+function Assert-DawnstrikeRootIsolation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$OtherPaths,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($Path -notmatch '^[A-Za-z]:\\') {
+        throw "$Label must be an absolute drive-qualified directory."
+    }
+    $candidate = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') + '\'
+    foreach ($otherPath in $OtherPaths) {
+        $other = [System.IO.Path]::GetFullPath($otherPath).TrimEnd('\') + '\'
+        if (
+            [string]::Equals($candidate, $other, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidate.StartsWith($other, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $other.StartsWith($candidate, [System.StringComparison]::OrdinalIgnoreCase)
+        ) {
+            throw "$Label must be separate from candidate, runtime, and state roots."
+        }
+    }
+}
+
 function Assert-DawnstrikeSafeOrigin {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Origin)
@@ -854,6 +924,13 @@ function Invoke-DawnstrikeRuntimeActivation {
     $candidate = Resolve-DawnstrikeActivationRoot $CandidateRoot "CandidateRoot"
     $runtime = Resolve-DawnstrikeActivationRoot $RuntimeRoot "RuntimeRoot"
     $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
+    Assert-DawnstrikeRootIsolation $BackupRoot @($candidate, $runtime, $state) "BackupRoot"
+    $backupRoot = if ($PreflightOnly) {
+        Get-DawnstrikeFutureActivationRoot $BackupRoot "BackupRoot"
+    }
+    else {
+        Ensure-DawnstrikeActivationRoot $BackupRoot "BackupRoot"
+    }
     $toolRoot = Resolve-DawnstrikeActivationRoot (Join-Path $PSScriptRoot "..") "ToolRoot"
     if (-not [string]::Equals(
         $candidate,
@@ -940,7 +1017,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                     $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
                         -Receipt $receipt `
                         -StateRoot $state `
-                        -BackupRoot $BackupRoot `
+                        -BackupRoot $backupRoot `
                         -ToolRoot $candidate `
                         -GitPath $gitPath `
                         -PythonPath $pythonPath `
@@ -1023,7 +1100,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
             -Receipt $existing `
             -StateRoot $state `
-            -BackupRoot $BackupRoot `
+            -BackupRoot $backupRoot `
             -ToolRoot $candidate `
             -GitPath $gitPath `
             -PythonPath $pythonPath `
@@ -1107,7 +1184,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -FilePath $pythonPath `
                 -ArgumentList @(
                     (Join-Path $candidate "scripts\state_disaster_recovery.py"),
-                    "backup", "--source-db", $dbPath, "--backup-root", $BackupRoot,
+                    "backup", "--source-db", $dbPath, "--backup-root", $backupRoot,
                     "--state-root", $state, "--retention", [string]$BackupRetention,
                     "--source-sha", $runtimeContract.head, "--backup-id", $backupId
                 ) `
@@ -1230,7 +1307,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
                 -Receipt $receiptPayload `
                 -StateRoot $state `
-                -BackupRoot $BackupRoot `
+                -BackupRoot $backupRoot `
                 -ToolRoot $candidate `
                 -GitPath $gitPath `
                 -PythonPath $pythonPath `

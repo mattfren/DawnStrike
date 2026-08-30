@@ -478,6 +478,53 @@ $blocked | ConvertTo-Json -Compress
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_backup_root_validation_is_absolute_isolated_and_drive_root_safe() -> None:
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    command = rf"""
+. '{script}'
+$result = [ordered]@{{}}
+try {{
+    Ensure-DawnstrikeActivationRoot 'relative-backups' 'BackupRoot' | Out-Null
+    $result.relative = 'FAIL'
+}}
+catch {{ $result.relative = 'BLOCKED' }}
+try {{
+    Ensure-DawnstrikeActivationRoot 'C:\\' 'BackupRoot' | Out-Null
+    $result.drive_root = 'PASS'
+}}
+catch {{ $result.drive_root = 'FAIL' }}
+try {{
+    Assert-DawnstrikeRootIsolation `
+        'C:\\r\\dawnstrike-state\\nested' @('C:\\r\\dawnstrike-state') 'BackupRoot'
+    $result.contained = 'FAIL'
+}}
+catch {{ $result.contained = 'BLOCKED' }}
+$future = Join-Path $env:TEMP ('activation-future-' + $PID)
+try {{
+    $futurePath = Get-DawnstrikeFutureActivationRoot $future 'BackupRoot'
+    $result.future = -not (Test-Path -LiteralPath $futurePath)
+}}
+catch {{ $result.future = $false }}
+$result | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "relative": "BLOCKED",
+        "drive_root": "PASS",
+        "contained": "BLOCKED",
+        "future": True,
+    }
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     tmp_path: Path,
 ) -> None:
