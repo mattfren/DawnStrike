@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from intraday_scanner.config import ScannerConfig
 from intraday_scanner.providers.base import IntradayPage
 from intraday_scanner.services.intraday_evidence_capture_service import (
@@ -65,7 +67,7 @@ def _request(tmp_path: Path) -> CaptureRequest:
         evidence_root=tmp_path / "evidence",
         run_root=tmp_path / "runs",
         code_sha="6b00a7cfacad2e9017d6579c8e7baae7d639561d",
-        source_config_hash="config-hash",
+        source_config_hash="c" * 64,
         operator_entitlement_metadata={"entitlement": "test-sip", "receipt": "op-1"},
     )
 
@@ -85,7 +87,7 @@ def test_capture_walks_pages_and_writes_immutable_receipt(tmp_path: Path) -> Non
     assert len(run_files) == 1
     payload = json.loads(run_files[0].read_text(encoding="utf-8"))
     assert payload["evidence_mode"] == "retrospective_research"
-    assert payload["source_config_hash"] == "config-hash"
+    assert payload["source_config_hash"] == "c" * 64
     assert payload["operator_entitlement_metadata"]["entitlement"] == "test-sip"
     assert receipt["coverage"][0]["source_metadata"]["retention_status"] == "retained"
 
@@ -98,7 +100,7 @@ def test_capture_resumes_from_checkpoint_without_refetching_first_page(tmp_path:
         ScannerConfig(request_retries=1, historical_intraday_max_pages=1),
     )
     first_receipt = service.capture(request)
-    assert first_receipt["status"] == "PARTIAL"
+    assert first_receipt["status"] == "PARTIAL_MISSING_INTERVALS"
     assert first.calls == [None]
 
     second = _FakeProvider()
@@ -108,3 +110,73 @@ def test_capture_resumes_from_checkpoint_without_refetching_first_page(tmp_path:
     ).capture(request)
     assert second_receipt["status"] == "COMPLETE"
     assert second.calls == ["next"]
+    page_two = next((tmp_path / "runs").rglob("page-000001.json"))
+    assert json.loads(page_two.read_text(encoding="utf-8"))[
+        "previous_page_hash_sha256"
+    ] == "a" * 64
+
+
+class _InterruptingProvider(_FakeProvider):
+    def get_bars_page(self, symbols, start, end, config, *, page_token=None):
+        if page_token == "next":
+            raise KeyboardInterrupt
+        return super().get_bars_page(
+            symbols,
+            start,
+            end,
+            config,
+            page_token=page_token,
+        )
+
+
+def test_capture_checkpoints_each_page_before_process_interruption(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        IntradayEvidenceCaptureService(
+            _InterruptingProvider(),
+            ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+        ).capture(request)
+
+    resumed = _FakeProvider()
+    receipt = IntradayEvidenceCaptureService(
+        resumed,
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    assert receipt["status"] == "COMPLETE"
+    assert resumed.calls == ["next"]
+
+
+def test_capture_rejects_tampered_checkpoint_page_artifact(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    first = _FakeProvider()
+    IntradayEvidenceCaptureService(
+        first,
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=1),
+    ).capture(request)
+    page_one = next((tmp_path / "runs").rglob("page-000000.json"))
+    envelope = json.loads(page_one.read_text(encoding="utf-8"))
+    envelope["items"][0]["c"] = 999
+    page_one.write_text(json.dumps(envelope), encoding="utf-8")
+
+    resumed = _FakeProvider()
+    receipt = IntradayEvidenceCaptureService(
+        resumed,
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    assert receipt["status"] == "HASH_MISMATCH"
+    assert resumed.calls == []
+
+
+def test_capture_requires_exact_source_and_entitlement_identity(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    invalid_hash = CaptureRequest(
+        **{**request.__dict__, "source_config_hash": "config-hash"}
+    )
+    with pytest.raises(ValueError, match="source_config_hash"):
+        invalid_hash.validate()
+
+    invalid_entitlement = CaptureRequest(
+        **{**request.__dict__, "operator_entitlement_metadata": {"entitlement": "sip"}}
+    )
+    with pytest.raises(ValueError, match="receipt/proof_id"):
+        invalid_entitlement.validate()
