@@ -63,10 +63,7 @@ def write_public_snapshot(
     input_hash = _input_hash(payload)
     effective_date = market_date or _latest_date(payload)
     status = _snapshot_status(payload, effective_date)
-    generated_at = (
-        generated_at
-        or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    )
+    generated_at = generated_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     manifest = {
         "schema_version": "dawnstrike.public_snapshot_manifest.v1",
         "manifest_id": hashlib.sha256(
@@ -148,6 +145,10 @@ def write_public_snapshot(
 
 def _input_hash(payload: dict[str, Any]) -> str:
     hashes = [str(row.get("input_hash_sha256") or "") for row in payload.get("daily") or []]
+    account_session = payload.get("account_session")
+    if isinstance(account_session, dict):
+        hashes.append(str(account_session.get("input_hash_sha256") or ""))
+        hashes.append(str(account_session.get("expected_calendar_hash_sha256") or ""))
     return hashlib.sha256(json.dumps(sorted(hashes), separators=(",", ":")).encode()).hexdigest()
 
 
@@ -164,16 +165,13 @@ def _latest_date(payload: dict[str, Any]) -> str:
 
 def _snapshot_status(payload: dict[str, Any], effective_date: str) -> str:
     daily = [
-        row for row in (payload.get("daily") or [])
+        row
+        for row in (payload.get("daily") or [])
         if str(row.get("market_date") or "") == effective_date
     ]
     if not daily:
         return "no_data"
-    official = [
-        row
-        for row in daily
-        if str(row.get("cohort") or "") == "official_forward_paper"
-    ]
+    official = [row for row in daily if str(row.get("cohort") or "") == "official_forward_paper"]
     readiness_rows = official or daily
     if any(str(row.get("status")) == "DEGRADED" for row in readiness_rows):
         return "degraded"

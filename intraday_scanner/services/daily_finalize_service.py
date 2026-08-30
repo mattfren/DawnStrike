@@ -20,6 +20,9 @@ from intraday_scanner.errors import (
     StorageError,
 )
 from intraday_scanner.market_calendar import market_session
+from intraday_scanner.performance.account_session_reporting import (
+    build_account_session_report,
+)
 from intraday_scanner.performance.calendar_snapshot import write_public_calendar
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
@@ -77,9 +80,7 @@ class DailyFinalizeService:
         self.db_path = Path(db_path)
         self.output_root = Path(output_root)
         self.paper_ops_root = Path(paper_ops_root) if paper_ops_root is not None else None
-        self.runtime_root = Path(
-            runtime_root or Path(__file__).resolve().parents[2]
-        ).resolve()
+        self.runtime_root = Path(runtime_root or Path(__file__).resolve().parents[2]).resolve()
         self.state_root = Path(state_root or self.db_path.parent).resolve()
         self.release_sha = release_sha or resolve_release_sha(self.runtime_root)
         self.lock_path = self.output_root / ".daily-finalize.lock"
@@ -123,9 +124,7 @@ class DailyFinalizeService:
                     reason=reason,
                     retryable=False,
                 )
-                return self._failure(
-                    market_date, run_id, reason, http_status=503
-                )
+                return self._failure(market_date, run_id, reason, http_status=503)
             if not session.is_trading_day:
                 return self._run_not_applicable(
                     market_date=market_date,
@@ -139,9 +138,7 @@ class DailyFinalizeService:
                     # Rebuild the canonical read model from all raw history.
                     # The run date scopes the publication/readiness record; it
                     # must not delete prior canonical days.
-                    upstream_status, upstream_stages = self._read_upstream_stages(
-                        market_date
-                    )
+                    upstream_status, upstream_stages = self._read_upstream_stages(market_date)
                     result = CanonicalPerformanceService(
                         self.db_path,
                         paper_ops_root=self.paper_ops_root,
@@ -149,6 +146,14 @@ class DailyFinalizeService:
                         as_of_market_date=market_date,
                         persist=True,
                         now=now,
+                    )
+                    # Account-session reporting is an observer-only sidecar.
+                    # It must not change the legacy publication gate until a
+                    # canonical account ledger is actually present.
+                    account_session_report = build_account_session_report(
+                        self.db_path,
+                        market_date=market_date,
+                        code_sha=self.release_sha,
                     )
                     reconciliation_gate = _reconciliation_gate(
                         result,
@@ -196,15 +201,10 @@ class DailyFinalizeService:
                     self._record_shared_stage(
                         market_date=market_date,
                         stage_name="calendar_build",
-                        status=_daily_stage_status(
-                            calendar_publication["manifest"].get("status")
-                        ),
+                        status=_daily_stage_status(calendar_publication["manifest"].get("status")),
                         exit_code=0,
                         output_hash=str(
-                            calendar_publication["manifest"].get(
-                                "payload_sha256"
-                            )
-                            or ""
+                            calendar_publication["manifest"].get("payload_sha256") or ""
                         )
                         or None,
                         source_data_watermark=market_date,
@@ -227,9 +227,7 @@ class DailyFinalizeService:
                         stage_name="publication",
                         status="COMPLETE",
                         exit_code=0,
-                        output_hash=str(
-                            publication_set.get("publication_set_sha256") or ""
-                        )
+                        output_hash=str(publication_set.get("publication_set_sha256") or "")
                         or None,
                         source_data_watermark=market_date,
                         payload=publication_set,
@@ -244,24 +242,18 @@ class DailyFinalizeService:
                         market_date,
                         upstream_status,
                         reconciliation_gate=reconciliation_gate,
+                        account_session_report=account_session_report,
                         publication_timestamp=now,
                     )
                     readiness_stage_status = (
-                        "COMPLETE"
-                        if readiness.get("status") == "ready"
-                        else "DEGRADED"
+                        "COMPLETE" if readiness.get("status") == "ready" else "DEGRADED"
                     )
                     daily_snapshot = self._record_shared_stage(
                         market_date=market_date,
                         stage_name="readiness",
                         status=readiness_stage_status,
-                        exit_code=(
-                            0 if readiness_stage_status == "COMPLETE" else 2
-                        ),
-                        output_hash=str(
-                            readiness.get("publication_set_sha256") or ""
-                        )
-                        or None,
+                        exit_code=(0 if readiness_stage_status == "COMPLETE" else 2),
+                        output_hash=str(readiness.get("publication_set_sha256") or "") or None,
                         source_data_watermark=market_date,
                         error_code=(
                             None
@@ -277,13 +269,9 @@ class DailyFinalizeService:
                         observed_at=now,
                     )
                     readiness["daily_run"] = _public_daily_run(daily_snapshot)
-                    readiness["last_attempted_run"] = (
-                        readiness["daily_run"].get("run")
-                    )
-                    readiness["last_fully_successful_run"] = (
-                        readiness["daily_run"].get(
-                            "last_fully_successful_run"
-                        )
+                    readiness["last_attempted_run"] = readiness["daily_run"].get("run")
+                    readiness["last_fully_successful_run"] = readiness["daily_run"].get(
+                        "last_fully_successful_run"
                     )
                     readiness["source_data_watermark"] = market_date
                     _atomic_write_json(
@@ -300,13 +288,10 @@ class DailyFinalizeService:
                         attempt,
                         reconciliation_gate=reconciliation_gate,
                         upstream_stages=upstream_stages,
+                        account_session_report=account_session_report,
                         generated_at=now,
                     )
-                    status = (
-                        "COMPLETE"
-                        if readiness.get("status") == "ready"
-                        else "DEGRADED"
-                    )
+                    status = "COMPLETE" if readiness.get("status") == "ready" else "DEGRADED"
                     self._record_run(
                         run_id,
                         market_date,
@@ -345,20 +330,17 @@ class DailyFinalizeService:
                             "issue_count": result.get("issue_count"),
                             "input_hash_sha256": result.get("input_hash_sha256"),
                             "coverage": _coverage_summary(result.get("daily"), market_date),
-                            "paper_ops": _paper_ops_summary(
-                                result.get("paper_ops_reconciliation")
-                            ),
+                            "paper_ops": _paper_ops_summary(result.get("paper_ops_reconciliation")),
                             "gate": reconciliation_gate,
                         },
+                        "account_session_report": account_session_report,
                         "upstream_status": upstream_status,
                     }
                 except (
                     Exception
                 ) as exc:  # pragma: no cover - exercised by failure integration tests
                     last_error = f"{type(exc).__name__}: {exc}"
-                    self._cleanup_staging(
-                        self.output_root / f".publish-{run_id}-{attempt}"
-                    )
+                    self._cleanup_staging(self.output_root / f".publish-{run_id}-{attempt}")
                     retryable = _is_retryable_finalize_error(exc)
                     try:
                         self._record_shared_stage(
@@ -452,9 +434,7 @@ class DailyFinalizeService:
                     exit_code=0,
                     required=stage_name not in optional_stages,
                     error_code="market_closed",
-                    error_detail=(
-                        f"No scheduled equity session: {session.reason}."
-                    ),
+                    error_detail=(f"No scheduled equity session: {session.reason}."),
                     payload={
                         "terminal_state": "SKIPPED_NOT_APPLICABLE",
                         "market_session": session.to_dict(),
@@ -594,9 +574,7 @@ class DailyFinalizeService:
 
     def _log_event(self, event: str, **payload: object) -> None:
         record = {"event": event, "at": _utc_now(), **payload}
-        with (self.output_root / "daily-finalize.jsonl").open(
-            "a", encoding="utf-8"
-        ) as handle:
+        with (self.output_root / "daily-finalize.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
     @staticmethod
@@ -659,9 +637,7 @@ class DailyFinalizeService:
             staged.update(
                 {
                     "scenarios.json": Path(scenario_publication["snapshot_path"]),
-                    "scenarios.json.manifest.json": Path(
-                        scenario_publication["manifest_path"]
-                    ),
+                    "scenarios.json.manifest.json": Path(scenario_publication["manifest_path"]),
                 }
             )
         if any(not path.is_file() or path.parent != staging_root for path in staged.values()):
@@ -671,13 +647,9 @@ class DailyFinalizeService:
         for name, source in staged.items():
             source.replace(destination / name)
         publication["snapshot_path"] = str(destination / "performance.json")
-        publication["manifest_path"] = str(
-            destination / "performance.json.manifest.json"
-        )
+        publication["manifest_path"] = str(destination / "performance.json.manifest.json")
         calendar_publication["calendar_path"] = str(destination / "calendar.json")
-        calendar_publication["manifest_path"] = str(
-            destination / "calendar.json.manifest.json"
-        )
+        calendar_publication["manifest_path"] = str(destination / "calendar.json.manifest.json")
         if scenario_publication is not None:
             scenario_publication["snapshot_path"] = str(destination / "scenarios.json")
             scenario_publication["manifest_path"] = str(
@@ -698,9 +670,7 @@ class DailyFinalizeService:
         scenario_manifest: dict[str, Any] | None = None
         if scenario_publication is not None:
             scenario_manifest = scenario_publication["manifest"]
-            publication_set["scenario_payload_sha256"] = scenario_manifest.get(
-                "payload_sha256"
-            )
+            publication_set["scenario_payload_sha256"] = scenario_manifest.get("payload_sha256")
             publication_set["scenario_manifest_sha256"] = hashlib.sha256(
                 Path(scenario_publication["manifest_path"]).read_bytes()
             ).hexdigest()
@@ -743,12 +713,11 @@ class DailyFinalizeService:
         market_date: str,
         upstream_status: str = "not_recorded",
         reconciliation_gate: dict[str, Any] | None = None,
+        account_session_report: dict[str, Any] | None = None,
         publication_timestamp: str | None = None,
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
-        calendar_status = str(
-            calendar_publication["manifest"].get("status") or "degraded"
-        )
+        calendar_status = str(calendar_publication["manifest"].get("status") or "degraded")
         calendar_freshness = calendar_publication["manifest"].get("freshness")
         if not isinstance(calendar_freshness, dict):
             calendar_freshness = {
@@ -790,9 +759,7 @@ class DailyFinalizeService:
             "reconciliation_gate": gate,
             "input_hash_sha256": reconciliation.get("input_hash_sha256"),
             "payload_sha256": publication["manifest"].get("payload_sha256"),
-            "calendar_payload_sha256": calendar_publication["manifest"].get(
-                "payload_sha256"
-            ),
+            "calendar_payload_sha256": calendar_publication["manifest"].get("payload_sha256"),
             "calendar_freshness": calendar_freshness,
             "authoritative_as_of_market_date": calendar_freshness.get(
                 "authoritative_as_of_market_date"
@@ -805,6 +772,7 @@ class DailyFinalizeService:
                 reconciliation.get("daily"),
                 market_date,
             ),
+            "account_session_report": account_session_report,
             "publication_timestamp": publication_timestamp or _utc_now(),
             "live_trading_enabled": False,
             "research_only": True,
@@ -863,9 +831,7 @@ class DailyFinalizeService:
 
         return self._read_upstream_stages(market_date)[0]
 
-    def _read_upstream_stages(
-        self, market_date: str
-    ) -> tuple[str, dict[str, str]]:
+    def _read_upstream_stages(self, market_date: str) -> tuple[str, dict[str, str]]:
         """Read one dated upstream receipt and its stage statuses.
 
         The receipt is written by the owned AlphaOps runner after the upstream
@@ -886,10 +852,7 @@ class DailyFinalizeService:
             "eod_outcome_capture",
             "paper_reconciliation",
         }
-        if any(
-            str(row.get("stage_name") or "") in upstream_names
-            for row in shared_rows
-        ):
+        if any(str(row.get("stage_name") or "") in upstream_names for row in shared_rows):
             shared = upstream_readiness(store, run_id=shared_id)
             latest = _latest_shared_stage_statuses(shared_rows)
             legacy_map = {
@@ -901,9 +864,7 @@ class DailyFinalizeService:
                 "outcome_capture": "eod_outcome_capture",
             }
             stage_map = {
-                legacy_name: _legacy_stage_status(
-                    latest.get(shared_name)
-                )
+                legacy_name: _legacy_stage_status(latest.get(shared_name))
                 for legacy_name, shared_name in legacy_map.items()
             }
             return (
@@ -945,11 +906,15 @@ class DailyFinalizeService:
                 return "failed", {}
             normalized = str(status or payload.get("status") or "").lower()
             stages = payload.get("stages")
-            stage_map = {
-                str(item.get("stage")): str(item.get("status") or "")
-                for item in stages
-                if isinstance(item, dict) and item.get("stage")
-            } if isinstance(stages, list) else {}
+            stage_map = (
+                {
+                    str(item.get("stage")): str(item.get("status") or "")
+                    for item in stages
+                    if isinstance(item, dict) and item.get("stage")
+                }
+                if isinstance(stages, list)
+                else {}
+            )
             if normalized in {"complete", "completed", "success", "ok", "passed", "ready"}:
                 return "complete", stage_map
             return "failed", stage_map
@@ -966,14 +931,13 @@ class DailyFinalizeService:
         retry_count: int,
         reconciliation_gate: dict[str, Any] | None = None,
         upstream_stages: dict[str, str] | None = None,
+        account_session_report: dict[str, Any] | None = None,
         generated_at: str | None = None,
     ) -> dict[str, Any]:
         input_hash = reconciliation.get("input_hash_sha256")
         canonical_output_hash = reconciliation.get("output_hash_sha256")
         performance_output_hash = publication["manifest"].get("payload_sha256")
-        calendar_output_hash = calendar_publication["manifest"].get(
-            "payload_sha256"
-        )
+        calendar_output_hash = calendar_publication["manifest"].get("payload_sha256")
         output_hash = publication_set.get("publication_set_sha256")
         upstream_status = str(readiness.get("upstream_status") or "not_recorded")
         raw_reconciliation_status = str(reconciliation.get("status") or "NO_DATA")
@@ -984,9 +948,7 @@ class DailyFinalizeService:
             else raw_reconciliation_status
         )
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
-        calendar_status = str(
-            calendar_publication["manifest"].get("status") or "degraded"
-        )
+        calendar_status = str(calendar_publication["manifest"].get("status") or "degraded")
         readiness_status = str(readiness.get("status") or "not_ready")
         generated_at = generated_at or _utc_now()
         upstream_stages = upstream_stages or {}
@@ -1111,9 +1073,7 @@ class DailyFinalizeService:
                         "complete",
                         "dawnstrike-scenarios-public-v1",
                         input_hash=input_hash,
-                        output_hash=scenario_publication["manifest"].get(
-                            "payload_sha256"
-                        ),
+                        output_hash=scenario_publication["manifest"].get("payload_sha256"),
                         retry_count=retry_count,
                         generated_at=generated_at,
                         next_action=(
@@ -1169,6 +1129,7 @@ class DailyFinalizeService:
             "retry_count": retry_count,
             "stages": stages,
             "readiness": readiness,
+            "account_session_report": account_session_report,
             "artifacts": [
                 "data/performance.json",
                 "data/performance.json.manifest.json",
@@ -1312,9 +1273,7 @@ def _publication_pair_hash(
 ) -> str:
     payload = {
         "market_date": performance_manifest.get("market_date"),
-        "canonical_input_hash_sha256": performance_manifest.get(
-            "input_hash_sha256"
-        ),
+        "canonical_input_hash_sha256": performance_manifest.get("input_hash_sha256"),
         "performance_payload_sha256": performance_manifest.get("payload_sha256"),
         "calendar_payload_sha256": calendar_manifest.get("payload_sha256"),
         "performance_manifest_id": performance_manifest.get("manifest_id"),
@@ -1406,15 +1365,10 @@ def _is_retryable_finalize_error(exc: BaseException) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
     if isinstance(exc, sqlite3.OperationalError):
-        return any(
-            marker in message
-            for marker in ("locked", "busy", "temporarily unavailable")
-        )
+        return any(marker in message for marker in ("locked", "busy", "temporarily unavailable"))
     if isinstance(exc, DataProviderError):
         return any(marker in message for marker in transient_markers)
-    return isinstance(exc, RuntimeError) and any(
-        marker in message for marker in transient_markers
-    )
+    return isinstance(exc, RuntimeError) and any(marker in message for marker in transient_markers)
 
 
 def _stage_status(domain_status: str) -> str:
@@ -1458,14 +1412,9 @@ def _latest_shared_stage_statuses(
     for row in rows:
         stage = str(row.get("stage_name") or "")
         prior = latest.get(stage)
-        if prior is None or int(row.get("attempt_no") or 0) >= int(
-            prior.get("attempt_no") or 0
-        ):
+        if prior is None or int(row.get("attempt_no") or 0) >= int(prior.get("attempt_no") or 0):
             latest[stage] = row
-    return {
-        stage: str(row.get("status") or "")
-        for stage, row in latest.items()
-    }
+    return {stage: str(row.get("status") or "") for stage, row in latest.items()}
 
 
 def _legacy_stage_status(value: str | None) -> str:
@@ -1479,14 +1428,9 @@ def _legacy_stage_status(value: str | None) -> str:
 def _legacy_receipt_release_sha(payload: dict[str, Any]) -> str | None:
     """Resolve the one explicit SHA identity accepted from legacy receipts."""
 
-    declared = [
-        payload[field]
-        for field in _LEGACY_RELEASE_SHA_FIELDS
-        if field in payload
-    ]
+    declared = [payload[field] for field in _LEGACY_RELEASE_SHA_FIELDS if field in payload]
     if not declared or any(
-        not isinstance(value, str) or _FULL_GIT_SHA.fullmatch(value) is None
-        for value in declared
+        not isinstance(value, str) or _FULL_GIT_SHA.fullmatch(value) is None for value in declared
     ):
         return None
     if len(set(declared)) != 1:
@@ -1624,9 +1568,7 @@ def _reconciliation_gate(
     ready = not unique_blocking
     return {
         "status": (
-            "ready_with_warnings"
-            if ready and warnings
-            else "complete" if ready else "blocked"
+            "ready_with_warnings" if ready and warnings else "complete" if ready else "blocked"
         ),
         "ready": ready,
         "warning_codes": sorted(warning_counts),
@@ -1685,8 +1627,7 @@ def _safety_is_verified(value: object) -> bool:
         return False
     required = ("source_quality", "halt_status", "corporate_action_status", "liquidity_evidence")
     return all(
-        isinstance(value.get(key), dict)
-        and value[key].get("state") == "verified"
+        isinstance(value.get(key), dict) and value[key].get("state") == "verified"
         for key in required
     )
 

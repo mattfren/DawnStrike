@@ -36,6 +36,9 @@ from intraday_scanner.notifiers import (
 from intraday_scanner.notifiers.base import NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.paper_audit import main as paper_audit_main
+from intraday_scanner.performance.account_session_reporting import (
+    build_account_session_report,
+)
 from intraday_scanner.performance.cli import main as performance_reconcile_main
 from intraday_scanner.performance.strategy_miss_attribution import (
     attribute_strategy_misses,
@@ -796,6 +799,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     daily_status_parser.add_argument("--market-date", required=True)
     daily_status_parser.add_argument("--heartbeat-ttl-minutes", type=int, default=30)
 
+    account_session_parser = subparsers.add_parser(
+        "account-session-report",
+        help="Report canonical account/session evidence and target status",
+    )
+    account_session_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    account_session_parser.add_argument("--market-date", default=None)
+    account_session_parser.add_argument("--account-id", default=None)
+    account_session_parser.add_argument("--window-days", type=int, default=30)
+    account_session_parser.add_argument("--code-sha", default=None)
+    account_session_parser.add_argument("--experiment-id", default=None)
+    account_session_parser.add_argument("--arm-id", default=None)
+
     alpha_status_parser = subparsers.add_parser(
         "alpha-status", help="Print AlphaOps persistence and evidence status"
     )
@@ -1432,6 +1447,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_daily_heartbeat(args)
         if args.command == "daily-orchestrator-status":
             return _run_daily_orchestrator_status(args)
+        if args.command == "account-session-report":
+            return _run_account_session_report(args)
         if args.command == "alpha-status":
             return _run_alpha_status(args)
         if args.command == "alpha-doctor":
@@ -4360,6 +4377,20 @@ def _run_daily_orchestrator_status(args: argparse.Namespace) -> int:
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") in {"HEALTHY", "SKIPPED_NOT_APPLICABLE"} else 2
+
+
+def _run_account_session_report(args: argparse.Namespace) -> int:
+    result = build_account_session_report(
+        args.db_path,
+        market_date=args.market_date,
+        account_id=args.account_id,
+        window_days=args.window_days,
+        code_sha=args.code_sha,
+        experiment_id=args.experiment_id,
+        arm_id=args.arm_id,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "COMPLETE" else 2
 
 
 def _run_alpha_status(args: argparse.Namespace) -> int:

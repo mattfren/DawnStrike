@@ -24,6 +24,10 @@ from intraday_scanner.performance.account_ledger import (
     ledger_equity_observations,
     persist_v5_account_ledger,
 )
+from intraday_scanner.performance.account_session_reporting import (
+    build_account_session_report,
+    public_account_session_report,
+)
 from intraday_scanner.performance.contracts import (
     Cohort,
     PerformanceRow,
@@ -113,14 +117,14 @@ class CanonicalPerformanceService:
                 *self._research_rows(
                     inputs["signals"], inputs["outcomes"], benchmark, calculated_at
                 ),
-                    *self._strategy_trade_rows(
-                        inputs["strategy_trades"],
-                        inputs["positions"],
-                        inputs["fills"],
-                        inputs["intents"],
-                        benchmark,
-                        calculated_at,
-                    ),
+                *self._strategy_trade_rows(
+                    inputs["strategy_trades"],
+                    inputs["positions"],
+                    inputs["fills"],
+                    inputs["intents"],
+                    benchmark,
+                    calculated_at,
+                ),
                 *self._paper_ops_rows(inputs["paper_ops"]["rows"], benchmark, calculated_at),
                 *_account_observation_rows(ledger, calculated_at),
             ]
@@ -284,6 +288,11 @@ class CanonicalPerformanceService:
                 as_of=as_of,
                 daily_rows=daily_rows,
             )
+        account_session_report = build_account_session_report(
+            self.db_path,
+            market_date=as_of,
+            window_days=days,
+        )
         return {
             "schema_version": "dawnstrike.public_performance.v1",
             "generated_at": generated_at or _utc_now(),
@@ -298,6 +307,7 @@ class CanonicalPerformanceService:
             "account_comparison": public_account_comparison(
                 _json_object(comparison_row["payload_json"]) if comparison_row else None
             ),
+            "account_session": public_account_session_report(account_session_report),
             "limits": {"days": days, "row_limit": row_limit},
         }
 
@@ -403,8 +413,7 @@ class CanonicalPerformanceService:
             )
             if status in {"CLOSED", "REALIZED", "COMPLETE"}:
                 if _is_reconciliation_derived(raw, payload) or any(
-                    _is_reconciliation_derived(fill, _payload(fill))
-                    for fill in position_fills
+                    _is_reconciliation_derived(fill, _payload(fill)) for fill in position_fills
                 ):
                     quarantine_reason = quarantine_reason or (
                         "reconciliation_derived_fill_truth_not_publishable"
@@ -601,9 +610,7 @@ class CanonicalPerformanceService:
             entry = safe_float(raw.get("entry_fill_price"))
             exit_price = safe_float(raw.get("exit_fill_price"))
             quantity = safe_float(raw.get("quantity"))
-            committed = _trade_is_complete(
-                raw, positions=positions, fills=fills, intents=intents
-            )
+            committed = _trade_is_complete(raw, positions=positions, fills=fills, intents=intents)
             status = RecordStatus.REALIZED if committed else RecordStatus.UNREALIZED
             if not str(raw.get("trade_id") or "") or not market_date or not ticker:
                 status = RecordStatus.QUARANTINED
@@ -755,8 +762,7 @@ class CanonicalPerformanceService:
                         "DELETE FROM portfolio_performance_rows WHERE market_date = ?", (day,)
                     )
                     connection.execute(
-                        "DELETE FROM performance_reconciliation_issues "
-                        "WHERE market_date = ?",
+                        "DELETE FROM performance_reconciliation_issues WHERE market_date = ?",
                         (day,),
                     )
                     connection.execute(
@@ -1371,9 +1377,7 @@ def _aggregate_daily(
                     if explicit_no_trade and fees is not None and slippage is not None
                     else (
                         "reported_not_reconciled"
-                        if has_portfolio_observation
-                        and fees is not None
-                        and slippage is not None
+                        if has_portfolio_observation and fees is not None and slippage is not None
                         else (
                             "complete"
                             if fees is not None and slippage is not None
