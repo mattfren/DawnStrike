@@ -25,6 +25,12 @@ from intraday_scanner.market_calendar import (
     next_session_after_registration,
     registration_coverage_inception_date,
 )
+from intraday_scanner.risk import (
+    PortfolioOrderProposal,
+    PortfolioRiskLimits,
+    PortfolioRiskSnapshot,
+    evaluate_portfolio_risk,
+)
 from intraday_scanner.v2.backtest import BacktestResult
 from intraday_scanner.v2.data import MarketBar, MarketDataset
 from intraday_scanner.v2.data.synthetic import build_synthetic_ohlcv_dataset
@@ -620,6 +626,7 @@ def enter(
                 config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
                 and mode is PaperRunMode.FORWARD
             ),
+            all_accounts=tuple(accounts.values()),
         )
         if reason is not None:
             blocked.append(_blocked_order_payload(order, reason, run))
@@ -815,6 +822,7 @@ def check(
                 config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
                 and mode is PaperRunMode.FORWARD
             ),
+            all_accounts=tuple(accounts.values()),
         )
         if reason is not None:
             blocked_orders.append(_blocked_order_payload(order, reason, run, source_bar=fill_bar))
@@ -2294,6 +2302,7 @@ def _fill_entry_block_reason(
     config: PaperOpsConfig,
     daily_closed_net: float,
     management_only: bool | None = None,
+    all_accounts: tuple[StrategyPaperAccount, ...] | None = None,
 ) -> str | None:
     if management_only is None:
         management_only = config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
@@ -2350,6 +2359,7 @@ def _fill_entry_block_reason(
         candidate_max_loss=actual_risk,
         candidate_notional=fill.fill_price * fill.quantity,
         management_only=management_only,
+        all_accounts=all_accounts,
     )
 
 
@@ -2382,7 +2392,12 @@ def _order_entry_block_reason(
     candidate_max_loss: float | None = None,
     candidate_notional: float | None = None,
     management_only: bool | None = None,
+    all_accounts: tuple[StrategyPaperAccount, ...] | None = None,
 ) -> str | None:
+    if all_accounts is None:
+        # Keep the helper safe for direct callers and legacy validators: no
+        # entry path may silently omit the centralized portfolio authority.
+        all_accounts = (account,)
     if management_only is None:
         management_only = config.execution_policy_version == LEGACY_PAPER_EXECUTION_POLICY_VERSION
     if management_only:
@@ -2443,7 +2458,84 @@ def _order_entry_block_reason(
     daily_loss_limit = max(account.current_equity, 0.0) * config.max_daily_loss_pct
     if daily_closed_net <= -daily_loss_limit and daily_closed_net < 0:
         return "max_daily_loss"
+    if all_accounts is not None:
+        portfolio_reason = _portfolio_order_block_reason(
+            order,
+            position_rows=position_rows,
+            pending_rows=pending_rows,
+            daily_closed_net=daily_closed_net,
+            all_accounts=all_accounts,
+            config=config,
+        )
+        if portfolio_reason is not None:
+            return portfolio_reason
     return None
+
+
+def _portfolio_order_block_reason(
+    order: PaperOrder,
+    *,
+    position_rows: list[dict[str, object]],
+    pending_rows: list[dict[str, object]],
+    daily_closed_net: float,
+    all_accounts: tuple[StrategyPaperAccount, ...],
+    config: PaperOpsConfig,
+) -> str | None:
+    """Route PaperOps admissions through the aggregate risk authority.
+
+    The legacy per-strategy checks above remain as compatibility diagnostics;
+    this call is the final portfolio-level authority whenever account state is
+    available. No broker execution is involved.
+    """
+
+    equity = sum(max(float(row.current_equity), 0.0) for row in all_accounts)
+    positions = [*position_rows]
+    pending = [*pending_rows]
+    snapshot = PortfolioRiskSnapshot.from_mappings(
+        equity=equity,
+        positions=positions,
+        pending=pending,
+        daily_realized_pnl=daily_closed_net,
+        daily_unrealized_pnl=sum(float(row.unrealized_pnl) for row in all_accounts),
+        peak_equity=max(
+            (float(row.starting_equity) for row in all_accounts),
+            default=equity,
+        ),
+        # The order signal is the causal mark for a historical/paper replay.
+        # Live freshness is enforced by the forward capture path before this
+        # adapter is called.
+        as_of=order.signal_time,
+        metadata_complete=True,
+    )
+    decision = evaluate_portfolio_risk(
+        PortfolioOrderProposal(
+            symbol=order.symbol,
+            side=order.direction,
+            quantity=order.quantity,
+            price=order.entry,
+            stop_price=order.stop,
+            strategy_id=order.strategy_id,
+            price_observed_at=order.signal_time,
+            metadata_complete=True,
+            live_execution_requested=False,
+        ),
+        snapshot,
+        limits=PortfolioRiskLimits(
+            max_gross_exposure_pct=config.max_gross_exposure_pct,
+            max_net_exposure_pct=config.max_gross_exposure_pct,
+            # Immutable replay artifacts retain their historical per-symbol
+            # economics; forward paper proposals use the governed default.
+            max_symbol_exposure_pct=(
+                config.max_gross_exposure_pct
+                if order.mode is PaperRunMode.REPLAY
+                else 0.10
+            ),
+            max_open_risk_pct=config.max_open_risk_pct,
+            max_daily_loss_pct=config.max_daily_loss_pct,
+            max_simultaneous_positions=config.max_concurrent_positions * max(len(all_accounts), 1),
+        ),
+    )
+    return decision.reason_codes[0].lower() if decision.reason_codes else None
 
 
 def _position_gross_exposure(row: dict[str, object]) -> float:
