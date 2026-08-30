@@ -45,6 +45,69 @@ class Eligibility(str, Enum):
     UNKNOWN = "unknown"
 
 
+# This is deliberately a tuple of literal statements rather than formatted
+# SQL. The table set is part of the signed daily-learning source contract.
+_STRATEGY_LEARNING_TABLE_GENERATION_QUERY_CONTRACT: tuple[
+    tuple[str, str, str], ...
+] = (
+    (
+        "portfolio_performance_rows",
+        "SELECT count(*), max(rowid) FROM portfolio_performance_rows",
+        "SELECT count(*) FROM portfolio_performance_rows",
+    ),
+    (
+        "strategy_decision_receipts",
+        "SELECT count(*), max(rowid) FROM strategy_decision_receipts",
+        "SELECT count(*) FROM strategy_decision_receipts",
+    ),
+    (
+        "alpha_v6_decisions",
+        "SELECT count(*), max(rowid) FROM alpha_v6_decisions",
+        "SELECT count(*) FROM alpha_v6_decisions",
+    ),
+    (
+        "research_episode_outcome_bridges",
+        "SELECT count(*), max(rowid) FROM research_episode_outcome_bridges",
+        "SELECT count(*) FROM research_episode_outcome_bridges",
+    ),
+    (
+        "signal_selections",
+        "SELECT count(*), max(rowid) FROM signal_selections",
+        "SELECT count(*) FROM signal_selections",
+    ),
+)
+
+
+def _strategy_learning_table_generations(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Read row bounds for the fixed daily-learning table allowlist."""
+
+    table_generations: dict[str, dict[str, Any]] = {}
+    for table, bounded_query, count_query in (
+        _STRATEGY_LEARNING_TABLE_GENERATION_QUERY_CONTRACT
+    ):
+        if table not in tables:
+            table_generations[table] = {
+                "exists": False,
+                "row_count": 0,
+                "max_rowid": None,
+            }
+            continue
+        try:
+            count, max_rowid = connection.execute(bounded_query).fetchone()
+        except sqlite3.DatabaseError:
+            count = connection.execute(count_query).fetchone()[0]
+            max_rowid = None
+        table_generations[table] = {
+            "exists": True,
+            "row_count": int(count or 0),
+            "max_rowid": int(max_rowid) if max_rowid is not None else None,
+        }
+    return table_generations
+
+
 _HASH_FIELDS = (
     "source_hash_sha256",
     "input_hash_sha256",
@@ -897,33 +960,7 @@ def load_strategy_learning_database_snapshot_readonly(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        table_generations: dict[str, dict[str, Any]] = {}
-        for table in (
-            "portfolio_performance_rows",
-            "strategy_decision_receipts",
-            "alpha_v6_decisions",
-            "research_episode_outcome_bridges",
-            "signal_selections",
-        ):
-            if table not in tables:
-                table_generations[table] = {
-                    "exists": False,
-                    "row_count": 0,
-                    "max_rowid": None,
-                }
-                continue
-            try:
-                count, max_rowid = connection.execute(
-                    f"SELECT count(*), max(rowid) FROM {table}"
-                ).fetchone()
-            except sqlite3.DatabaseError:
-                count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                max_rowid = None
-            table_generations[table] = {
-                "exists": True,
-                "row_count": int(count or 0),
-                "max_rowid": int(max_rowid) if max_rowid is not None else None,
-            }
+        table_generations = _strategy_learning_table_generations(connection, tables)
         rows = (
             load_portfolio_performance_rows_readonly(
                 path, date_cutoff=date_cutoff, _connection=connection

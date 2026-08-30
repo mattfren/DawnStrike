@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import intraday_scanner.cli as cli_module
+import intraday_scanner.performance.strategy_miss_attribution as strategy_module
 from intraday_scanner.cli import _hash_strategy_learning_inputs, _no_evidence_candidates, main
 from intraday_scanner.config import load_config
 from intraday_scanner.performance.strategy_miss_attribution import (
+    _strategy_learning_table_generations,
     attribute_strategy_misses,
     load_alpha_v6_decisions_readonly,
     load_portfolio_performance_rows_readonly,
@@ -522,6 +524,83 @@ def test_database_snapshot_reports_its_actual_transaction_boundary(tmp_path: Pat
         assert reserved["generation"]["transaction"] == (
             "sqlite_existing_query_only_transaction"
         )
+
+
+def test_database_source_boundary_uses_only_literal_allowlisted_tables(tmp_path: Path) -> None:
+    database_path = tmp_path / "hostile-source-boundary.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE portfolio_performance_rows "
+            "(record_id TEXT, market_date TEXT, payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO portfolio_performance_rows VALUES (?, ?, ?)",
+            ("record-1", "2026-08-20", "{}"),
+        )
+        connection.execute(
+            "CREATE TABLE hostile_daily_learning_table "
+            "(record_id TEXT, payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO hostile_daily_learning_table VALUES (?, ?)",
+            ("must-not-be-read", "{}"),
+        )
+        first = cli_module._database_source_boundary(connection, database_path)
+        second = cli_module._database_source_boundary(connection, database_path)
+
+    expected_tables = tuple(
+        table
+        for table, _schema, _ordered, _fallback in (
+            cli_module._DATABASE_SOURCE_BOUNDARY_QUERY_CONTRACT
+        )
+    )
+    assert tuple(first["tables"]) == expected_tables
+    assert first == second
+    assert all(
+        "{" not in query
+        for contract in cli_module._DATABASE_SOURCE_BOUNDARY_QUERY_CONTRACT
+        for query in contract[1:]
+    )
+
+
+def test_learning_generation_bounds_ignore_hostile_tables_and_remain_stable(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "hostile-generation.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        allowlisted = tuple(
+            table
+            for table, _bounded, _count in (
+                strategy_module._STRATEGY_LEARNING_TABLE_GENERATION_QUERY_CONTRACT
+            )
+        )
+        for table in allowlisted:
+            connection.execute(f'CREATE TABLE "{table}" (marker TEXT)')
+        connection.execute(
+            "CREATE TABLE hostile_daily_learning_table (marker TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO hostile_daily_learning_table VALUES (?)",
+            ("must-not-be-read",),
+        )
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        first = _strategy_learning_table_generations(connection, tables)
+        second = _strategy_learning_table_generations(connection, tables)
+
+    assert tuple(first) == allowlisted
+    assert first == second
+    assert all(
+        "{" not in query
+        for _table, *queries in (
+            strategy_module._STRATEGY_LEARNING_TABLE_GENERATION_QUERY_CONTRACT
+        )
+        for query in queries
+    )
 
 
 @pytest.mark.parametrize(

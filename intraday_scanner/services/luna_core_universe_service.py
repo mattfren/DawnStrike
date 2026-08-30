@@ -74,17 +74,27 @@ _NDX_CANONICAL_ZIP_MEMBER_NAMES = (
     "xl/worksheets/sheet1.xml",
 )
 _NDX_CANONICAL_ZIP_MEMBER_HASHES = {
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "[Content_Types].xml": "995c7bc44e933d5ba24f893039d8a84dfcc0a12f2f5a3976e415f8324db0c89b",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "_rels/.rels": "ea5fee20de01f0a4088506a54dc82f632d5cacd5e271b9f348fcea583d818d5b",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "docProps/app.xml": "72afb5a0b44b3e20d04a41957246fd430e702b1841307752f9397411bdbaa2f7",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "docProps/core.xml": "79af568221e1a17b8e59f618591359eb00991d86542a1784e2cd7700ee223d1c",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "docProps/custom.xml": "18d57b34d4d3e2b37bc15406cd59124d2b461d905fe0775466e079611297c77b",
     "xl/_rels/workbook.xml.rels": (
+        # pragma: allowlist nextline secret - deterministic trust-root hash
         "995a125c59b9d23ca13e3b07d920b456ba47eabc42dd3e88dd7867cef1c83799"
     ),
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/sharedStrings.xml": "26c260aa1da7b109d97440724126d9cbf660c7c52a5d007f468c75cd1896e840",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/styles.xml": "26c3e73e2f2ab9946a6e1f0d7128e9a0e8ea49b0448a410a49421844ae619996",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/workbook.xml": "6d246f4609966d5069771e0fd94f102ebe479f63557a7c6b7469f8bdd3bf4ce6",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/worksheets/sheet1.xml": "cf8166d6a12a68c6600c37a497521fa789e9f7e1c869b28b5cb3c3ea07dcb50a",
 }
 _NDX_DYNAMIC_MEMBER_NAMES = {
@@ -99,9 +109,11 @@ _NDX_CANONICAL_STATIC_MEMBER_HASHES = {
     if name not in _NDX_DYNAMIC_MEMBER_NAMES
 }
 _NDX_CANONICAL_ZIP_CONTENT_DIGEST_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "6c8fe9543904412a8ceed93c9554ebad4b64213603e3b1cdccf09ec8ca8a269b"
 )
 _NDX_CANONICAL_MEMBER_SET_HASH_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "c5e8bb1294642e0812f8a8d20f8c015548d41c64bfc6bef0aa0187994828a0ed"
 )
 
@@ -138,20 +150,30 @@ _SPY_CANONICAL_STATIC_MEMBER_NAMES = tuple(
     }
 )
 _SPY_CANONICAL_STATIC_MEMBER_HASHES = {
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "[Content_Types].xml": "f496107ed0a062eeffeb1de799398580569de5d5146075b6d5c888d5303ae49d",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "_rels/.rels": "933a35268fc19adfc9d784bf2c721c43fc36c37328d2a26b38ac0ad4d0fe66c8",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "docMetadata/LabelInfo.xml": "86ce9b2e439e4c175e3d0ee8f115a616fe4ac1008c8b5b044554397b56623b1b",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "docProps/app.xml": "758c9da301ae1bb81c9e2804d2db5e7ef1df524daa283702c7748a2de8453fcd",
     "xl/_rels/workbook.xml.rels": (
+        # pragma: allowlist nextline secret - deterministic trust-root hash
         "c250eb50b40d8d80e4880e576586c6c2bc330ee55bbadb90347112c347d1b621"
     ),
     "xl/printerSettings/printerSettings1.bin": (
+        # pragma: allowlist nextline secret - deterministic trust-root hash
         "79c5035258f390a3257885ad0d5b878ef00e390199ca172ff747653f8ca567e6"
     ),
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/styles.xml": "c618a5f7feb3bc054f6620dd35e07f2c92c32091563fe415cdd173c69302f3e7",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/theme/theme1.xml": "4ea472506d97887770a296ec998c24f5c4c3eb100c72f9d4cdfb13dae2fe6c29",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
     "xl/workbook.xml": "3f02861504a029bb96d8f200bfba51c6cfe14bbd56236ab7017a697a23fdf5f4",
     "xl/worksheets/_rels/sheet1.xml.rels": (
+        # pragma: allowlist nextline secret - deterministic trust-root hash
         "2c4b6ba262b6f12c55a743fb76b5909de0080b6d04bfa9c7f5391952c7bd0852"
     ),
 }
@@ -172,6 +194,7 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "canonical_zip_member_names": _SPY_CANONICAL_ZIP_MEMBER_NAMES,
         "canonical_static_member_hashes": _SPY_CANONICAL_STATIC_MEMBER_HASHES,
         "canonical_symbol_set_hash_sha256": (
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "5b5770ad1b7767aa92a785c3d201fa285b81a4f8ec2f9a1691e9121117d8a41e"
         ),
         "allow_future_same_semantic_set_dates": True,
@@ -192,9 +215,13 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "index": "Nasdaq-100",
         "effective_date": "2026-07-07",
         "raw_artifact_hashes": (
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "a0dd0736856cee1f530350c642102a90d810704eb1071104a33ca88af2e4a4f4",
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "9be80af743d08fbec0e20162cba787b6377231376dfe7b2446ea62577a874e11",
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "b9ca8b7e8004470c79219b6e4800f2a48e319404e6a396804e6d1a2d022abb5b",
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "65138f5503a7e98a58ae5772300d7f5e50c974bef57b530bb6ec5bbd38639156",
         ),
         "transformation_id": "nasdaq-ndx-reconstitution-replay-v1",
@@ -226,6 +253,7 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "source_uri_template": NASDAQ_NDX_SOD_URL_TEMPLATE,
         "source_scope_template": "Official Nasdaq-100 SOD Weightings export for {market_date}",
         "canonical_symbol_set_hash_sha256": (
+            # pragma: allowlist nextline secret - deterministic trust-root hash
             "a0fcb7b66b5efa5e1b2ded8dbc225133c7e1274d66abdb84858b9fe8c6483d30"
         ),
         "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",

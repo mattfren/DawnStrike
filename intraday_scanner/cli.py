@@ -2559,6 +2559,33 @@ def _strategy_learning_source_boundary_path(args: argparse.Namespace) -> Path:
     return _learning_root(args) / "daily_learning_source_boundary.json"
 
 
+# Keep the table-name allowlist and every identifier-bearing statement as
+# immutable literals. Besides making the boundary explicit, this prevents a
+# future refactor from turning this read-only snapshot into identifier SQL.
+_DATABASE_SOURCE_BOUNDARY_QUERY_CONTRACT: tuple[
+    tuple[str, str, str, str], ...
+] = (
+    (
+        "portfolio_performance_rows",
+        "PRAGMA table_info(portfolio_performance_rows)",
+        "SELECT rowid, * FROM portfolio_performance_rows ORDER BY rowid",
+        "SELECT * FROM portfolio_performance_rows",
+    ),
+    (
+        "strategy_decision_receipts",
+        "PRAGMA table_info(strategy_decision_receipts)",
+        "SELECT rowid, * FROM strategy_decision_receipts ORDER BY rowid",
+        "SELECT * FROM strategy_decision_receipts",
+    ),
+    (
+        "alpha_v6_decisions",
+        "PRAGMA table_info(alpha_v6_decisions)",
+        "SELECT rowid, * FROM alpha_v6_decisions ORDER BY rowid",
+        "SELECT * FROM alpha_v6_decisions",
+    ),
+)
+
+
 def _database_source_boundary(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -2573,10 +2600,8 @@ def _database_source_boundary(
         ).fetchall()
     }
     result: dict[str, Any] = {}
-    for table in (
-        "portfolio_performance_rows",
-        "strategy_decision_receipts",
-        "alpha_v6_decisions",
+    for table, schema_query, ordered_rows_query, fallback_rows_query in (
+        _DATABASE_SOURCE_BOUNDARY_QUERY_CONTRACT
     ):
         if table not in tables:
             result[table] = {
@@ -2588,13 +2613,13 @@ def _database_source_boundary(
             }
             continue
         schema_rows = [
-            dict(row) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            dict(row) for row in connection.execute(schema_query).fetchall()
         ]
         try:
-            rows = connection.execute(f"SELECT rowid, * FROM {table} ORDER BY rowid").fetchall()
+            rows = connection.execute(ordered_rows_query).fetchall()
             max_rowid = int(rows[-1][0]) if rows else None
         except sqlite3.DatabaseError:
-            rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+            rows = connection.execute(fallback_rows_query).fetchall()
             max_rowid = None
         row_payload = [dict(row) for row in rows]
         result[table] = {

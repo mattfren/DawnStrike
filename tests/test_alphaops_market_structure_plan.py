@@ -300,6 +300,7 @@ def test_source_url_rejects_non_public_http_provenance() -> None:
         "https://169.254.1.5/market",
         "https://224.0.0.1/market",
         "https://[::1]/market",
+        # pragma: allowlist nextline secret - deliberately fake Basic Auth fixture URL
         "https://user:password@example.test/market",
         "file:///private/market",
     ):

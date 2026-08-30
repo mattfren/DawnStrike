@@ -443,6 +443,7 @@ def _allocation_account_weight(row: dict[str, Any]) -> tuple[float | None, bool]
     if account_present:
         account_value = parse_weight(
             account,
+            # pragma: allowlist nextline secret - schema field name, not credential
             percent=account_key == "account_weight_pct",
         )
         if account_value is None:
