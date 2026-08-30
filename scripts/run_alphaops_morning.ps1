@@ -5,7 +5,10 @@ param(
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [string]$Notify = "telegram",
     [string]$CoreUniverseManifest = "",
-    [string]$PaperOpsRoot = ""
+    [string]$PaperOpsRoot = "",
+    [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
+    [ValidateRange(1, 365)]
+    [int]$BackupRetention = 7
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,6 +78,23 @@ if (-not $dailyLock.acquired) {
     }
     Write-Error "Required AlphaOps morning run blocked by daily lock: $($dailyLock.reason)"
     exit $(if ($recordStageFailed -or -not $lockReceiptWritten) { 2 } else { 3 })
+}
+$backup = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @(
+        (Join-Path $runtime "scripts\state_disaster_recovery.py"),
+        "backup",
+        "--source-db", $dbPath,
+        "--backup-root", $BackupRoot,
+        "--state-root", $state,
+        "--retention", "$BackupRetention",
+        "--source-sha", $releaseSha
+    ) `
+    -LogRoot $logRoot `
+    -LogName "state_backup-$MarketDate"
+if ($backup.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Durable state backup failed; no Morning mutation was permitted."
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `

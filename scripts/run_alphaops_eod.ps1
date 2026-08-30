@@ -4,7 +4,10 @@ param(
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [int]$PaperOpsRetryLimit = 3,
-    [int]$PaperOpsRetryDelaySeconds = 60
+    [int]$PaperOpsRetryDelaySeconds = 60,
+    [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
+    [ValidateRange(1, 365)]
+    [int]$BackupRetention = 7
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +40,23 @@ if (-not $dailyLock.acquired) {
         "Required AlphaOps EOD run blocked by daily lock: $($dailyLock.reason)"
     )
     exit $(if ($receiptWritten) { 3 } else { 2 })
+}
+$backup = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @(
+        (Join-Path $runtime "scripts\state_disaster_recovery.py"),
+        "backup",
+        "--source-db", $dbPath,
+        "--backup-root", $BackupRoot,
+        "--state-root", $state,
+        "--retention", "$BackupRetention",
+        "--source-sha", $releaseSha
+    ) `
+    -LogRoot $logRoot `
+    -LogName "state_backup-$MarketDate"
+if ($backup.exit_code -ne 0) {
+    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+    throw "Durable state backup failed; no EOD mutation was permitted."
 }
 $heartbeat = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
