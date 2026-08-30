@@ -55,7 +55,7 @@ def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
                 "approved_plan": True,
                 "research_only": True,
                 "broker_execution": "disabled",
-                "secret": "never-copy",
+                "secret": "never-copy",  # pragma: allowlist secret - fixture redaction probe
             }
         ),
         encoding="utf-8",

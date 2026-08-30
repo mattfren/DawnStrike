@@ -69,7 +69,7 @@ def _request(tmp_path: Path) -> CaptureRequest:
         db_path=tmp_path / "capture.sqlite",
         evidence_root=tmp_path / "evidence",
         run_root=tmp_path / "runs",
-        code_sha="6b00a7cfacad2e9017d6579c8e7baae7d639561d",
+        code_sha="6b00a7cfacad2e9017d6579c8e7baae7d639561d",  # pragma: allowlist secret
         source_config_hash="c" * 64,
         operator_entitlement_metadata={"entitlement": "test-sip", "receipt": "op-1"},
     )
