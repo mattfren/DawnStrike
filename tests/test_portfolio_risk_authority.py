@@ -51,6 +51,7 @@ def test_multi_strategy_positions_are_aggregated_for_gross_and_net_caps():
             "mark_price": 100,
             "entry_price": 100,
             "stop_price": 99,
+            "price_observed_at": "2026-08-30T14:00:00Z",
         },
         {
             "symbol": "BBB",
@@ -59,6 +60,7 @@ def test_multi_strategy_positions_are_aggregated_for_gross_and_net_caps():
             "mark_price": 100,
             "entry_price": 100,
             "stop_price": 99,
+            "price_observed_at": "2026-08-30T14:00:00Z",
         },
     ]
     decision = evaluate_portfolio_risk(
@@ -99,6 +101,58 @@ def test_unknown_and_stale_inputs_fail_closed():
     assert "PROPOSAL_METADATA_UNKNOWN" in missing_metadata.reason_codes
 
 
+def test_existing_positions_require_real_timely_marks_without_entry_fallback():
+    missing_mark = PortfolioRiskSnapshot.from_mappings(
+        equity=100_000.0,
+        positions=(
+            {
+                "symbol": "HELD",
+                "side": "long",
+                "quantity": 10,
+                "entry_price": 50.0,
+                "stop_price": 49.0,
+                "price_observed_at": "2026-08-30T14:00:00Z",
+            },
+        ),
+        daily_realized_pnl=0.0,
+        daily_unrealized_pnl=0.0,
+        peak_equity=100_000.0,
+        as_of="2026-08-30T14:00:00Z",
+        metadata_complete=True,
+    )
+    decision = evaluate_portfolio_risk(_proposal(), missing_mark)
+    assert "POSITION_PRICE_UNKNOWN" in decision.reason_codes
+
+    stale_mark = PortfolioRiskSnapshot.from_mappings(
+        equity=100_000.0,
+        positions=(
+            {
+                "symbol": "HELD",
+                "side": "long",
+                "quantity": 10,
+                "mark_price": 50.0,
+                "entry_price": 50.0,
+                "stop_price": 49.0,
+                "price_observed_at": "2026-08-30T13:00:00Z",
+            },
+        ),
+        daily_realized_pnl=0.0,
+        daily_unrealized_pnl=0.0,
+        peak_equity=100_000.0,
+        as_of="2026-08-30T14:00:00Z",
+        metadata_complete=True,
+    )
+    assert "STALE_PRICE" in evaluate_portfolio_risk(_proposal(), stale_mark).reason_codes
+
+
+def test_future_price_timestamps_fail_closed():
+    decision = evaluate_portfolio_risk(
+        _proposal(price_observed_at="2026-08-30T14:01:00Z"),
+        _snapshot(),
+    )
+    assert "FUTURE_PRICE_TIMESTAMP" in decision.reason_codes
+
+
 def test_daily_stop_drawdown_and_live_execution_are_hard_blocks():
     decision = evaluate_portfolio_risk(
         _proposal(live_execution_requested=True),
@@ -120,6 +174,7 @@ def test_symbol_and_theme_concentration_are_receipted():
             "entry_price": 100,
             "stop_price": 99,
             "theme": "ai",
+            "price_observed_at": "2026-08-30T14:00:00Z",
         },
     )
     decision = evaluate_portfolio_risk(

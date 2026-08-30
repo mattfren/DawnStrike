@@ -24,15 +24,15 @@ PORTFOLIO_RISK_POLICY_VERSION = "dawnstrike-portfolio-risk-v1"
 class PortfolioRiskLimits:
     """Hard portfolio limits. Percentages are expressed as fractions."""
 
-    max_gross_exposure_pct: float = 1.00
-    max_net_exposure_pct: float = 0.75
+    max_gross_exposure_pct: float = 0.30
+    max_net_exposure_pct: float = 0.30
     max_symbol_exposure_pct: float = 0.10
-    max_sector_exposure_pct: float = 0.25
-    max_theme_exposure_pct: float = 0.35
-    max_open_risk_pct: float = 0.02
-    max_daily_loss_pct: float = 0.015
-    max_drawdown_pct: float = 0.10
-    max_simultaneous_positions: int = 12
+    max_sector_exposure_pct: float = 0.20
+    max_theme_exposure_pct: float = 0.20
+    max_open_risk_pct: float = 0.0075
+    max_daily_loss_pct: float = 0.01
+    max_drawdown_pct: float = 0.08
+    max_simultaneous_positions: int = 3
     max_price_age_seconds: int = 300
     # This is a reporting objective only. It is never consulted by admission.
     daily_return_target_pct: float = 0.01
@@ -77,8 +77,6 @@ class PortfolioPosition:
         side = str(value.get("side") or value.get("direction") or "").strip().lower()
         quantity = _int(value.get("quantity"))
         mark = _number(value.get("mark_price", value.get("last_mark_price")))
-        if mark is None:
-            mark = _number(value.get("entry_price", value.get("entry")))
         return cls(
             symbol=symbol,
             side=side,
@@ -240,6 +238,14 @@ def evaluate_portfolio_risk(
     )
 
     all_positions = (*snapshot.positions, *snapshot.pending)
+    for position in all_positions:
+        _price_age_gate(
+            reasons,
+            observed_at=position.price_observed_at,
+            as_of=now or snapshot.as_of,
+            max_age_seconds=limits.max_price_age_seconds,
+            missing_code="POSITION_PRICE_TIMESTAMP_UNKNOWN",
+        )
     aggregate = _aggregate_positions(all_positions, reasons)
     proposal_notional = None if price is None else abs(price * proposal.quantity)
     proposal_sign = -1.0 if proposal.side in {"short", "sell"} else 1.0
@@ -358,20 +364,27 @@ def _aggregate_positions(
             reasons.append("POSITION_METADATA_UNKNOWN")
         if position.side not in {"long", "short", "buy", "sell"}:
             reasons.append("POSITION_SIDE_UNKNOWN")
-        if position.mark_price is None or not math.isfinite(position.mark_price):
+        mark = _finite_positive(position.mark_price)
+        if mark is None:
             reasons.append("POSITION_PRICE_UNKNOWN")
             continue
-        notional = abs(position.mark_price * position.quantity)
+        notional = abs(mark * position.quantity)
         sign = -1.0 if position.side in {"short", "sell"} else 1.0
         gross += notional
         net += sign * notional
         if position.risk_amount is None:
-            if position.entry_price is None or position.stop_price is None:
+            entry = _finite_positive(position.entry_price)
+            stop = _finite_positive(position.stop_price)
+            if entry is None or stop is None or entry == stop:
                 reasons.append("POSITION_RISK_UNKNOWN")
             else:
-                risk += abs(position.entry_price - position.stop_price) * position.quantity
+                risk += abs(entry - stop) * position.quantity
         else:
-            risk += max(0.0, position.risk_amount)
+            parsed_risk = _number(position.risk_amount)
+            if parsed_risk is None or parsed_risk < 0:
+                reasons.append("POSITION_RISK_UNKNOWN")
+            else:
+                risk += parsed_risk
     return {"gross": gross, "net": net, "risk": risk}
 
 
@@ -436,7 +449,10 @@ def _price_age_gate(
     except (TypeError, ValueError):
         reasons.append(missing_code)
         return
-    if (current - observed).total_seconds() > max_age_seconds:
+    age_seconds = (current - observed).total_seconds()
+    if age_seconds < 0:
+        reasons.append("FUTURE_PRICE_TIMESTAMP")
+    elif age_seconds > max_age_seconds:
         reasons.append("STALE_PRICE")
 
 
