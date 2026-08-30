@@ -18,6 +18,17 @@ from intraday_scanner.v2.strategies.challengers import (
 )
 from intraday_scanner.v2.strategies.combined_catalog import build_strategy_catalog
 from intraday_scanner.v2.strategies.models import Direction, StrategySignal, StrategySpec
+from intraday_scanner.v2.strategies.shadow_intraday import (
+    EMPIRICAL_COST_REQUIRED,
+    SHADOW_PROTOCOL_VERSION,
+    ShadowEvaluation,
+    ShadowSignal,
+    ShadowStrategyConfig,
+    ShadowStrategyRegistry,
+    build_shadow_strategy_registry,
+    evaluate_shadow_event,
+    evaluate_shadow_strategy,
+)
 
 __all__ = [
     "Direction",
@@ -36,4 +47,13 @@ __all__ = [
     "CHALLENGER_VERSION",
     "describe_strategy",
     "evaluate_alphaops_intraday",
+    "EMPIRICAL_COST_REQUIRED",
+    "SHADOW_PROTOCOL_VERSION",
+    "ShadowEvaluation",
+    "ShadowSignal",
+    "ShadowStrategyConfig",
+    "ShadowStrategyRegistry",
+    "build_shadow_strategy_registry",
+    "evaluate_shadow_event",
+    "evaluate_shadow_strategy",
 ]
