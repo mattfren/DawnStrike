@@ -21,6 +21,7 @@ param(
     [string]$Python = "",
     [datetime]$StartAt = (Get-Date).Date.AddDays(1).AddHours(15).AddMinutes(20),
     [switch]$Create,
+    [switch]$InteractiveCurrentUser,
     [pscredential]$RunAsCredential
 )
 
@@ -74,16 +75,31 @@ $preview = [ordered]@{
     broker_execution = "disabled"
 }
 Write-Output ($preview | ConvertTo-Json -Depth 6 -Compress)
+# Registration remains preview-only unless the operator explicitly supplies -Create.
 if (-not $Create) { return }
-if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
-    throw "RunAsCredential is required only when -Create is explicitly supplied."
+if ($InteractiveCurrentUser -and $null -ne $RunAsCredential) {
+    throw "Choose either InteractiveCurrentUser or RunAsCredential, not both."
+}
+if (
+    -not $InteractiveCurrentUser -and
+    ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName))
+) {
+    throw "Create requires InteractiveCurrentUser or RunAsCredential."
 }
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -ne $existing) { throw "Scheduled task already exists; no existing Dawnstrike task was changed: $TaskName" }
-. (Join-Path $RuntimeRoot "scripts\resolve_dawnstrike_task_principal.ps1")
-$principal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
-$password = $RunAsCredential.GetNetworkCredential().Password
 $action = New-ScheduledTaskAction -Execute $Python -Argument $actionArguments -WorkingDirectory $RuntimeRoot
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3)
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $principal -Password $password -RunLevel Limited -Description "Dawnstrike delayed SIP research capture; no broker execution." | Out-Null
+if ($InteractiveCurrentUser) {
+    $currentPrincipal = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ([string]::IsNullOrWhiteSpace($currentPrincipal)) { throw "Current Windows principal is unavailable." }
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $taskPrincipal -Description "Dawnstrike delayed SIP research capture; no broker execution." | Out-Null
+} else {
+    . (Join-Path $RuntimeRoot "scripts\resolve_dawnstrike_task_principal.ps1")
+    $principal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
+    $password = $RunAsCredential.GetNetworkCredential().Password
+    if ([string]::IsNullOrWhiteSpace($password)) { throw "RunAsCredential must contain a non-empty Windows password." }
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $principal -Password $password -RunLevel Limited -Description "Dawnstrike delayed SIP research capture; no broker execution." | Out-Null
+}
 Write-Output "Registered $TaskName without modifying existing Dawnstrike tasks."

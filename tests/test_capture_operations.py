@@ -204,3 +204,7 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert '$pythonPrefix = @("-3.13", "-u")' in registration
     assert '$argumentTokens = @($pythonPrefix + $captureArgs)' in registration
     assert "-u \"{0}\"" not in registration
+    assert "[switch]$InteractiveCurrentUser" in registration
+    assert "New-ScheduledTaskPrincipal" in registration
+    assert "-LogonType Interactive -RunLevel Limited" in registration
+    assert "Choose either InteractiveCurrentUser or RunAsCredential" in registration
