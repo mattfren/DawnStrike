@@ -148,6 +148,7 @@ def run_alpha_v6_weekly_training(
     recent_window: dict[str, Any] | None = None,
     experiment_id: str | None = None,
     arm_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the separately scheduled V6 refit and all-family OOF evaluation."""
 
@@ -183,7 +184,10 @@ def run_alpha_v6_weekly_training(
         else "dawnstrike-alphaops-v6-conservative-cost-v1"
     )
     if require_preregistration and isinstance(experiment, dict):
+        if not str(attempt_id or "").strip():
+            raise ValueError("a retry-stable attempt_id is required for a V6 training attempt")
         trial = build_trial_receipt(
+            attempt_id=str(attempt_id),
             experiment=experiment,
             arm_id=str(arm_id or "candidate"),
             strategy_id="alphaops_v6",
@@ -197,9 +201,12 @@ def run_alpha_v6_weekly_training(
         )
         trial_inserted = store.persist_alpha_v6_trial(trial)
         trial_counts = store.alpha_v6_trial_counts(experiment_id=str(experiment["experiment_id"]))
-        trial["trial_number"] = store.load_alpha_v6_trials(
-            experiment_id=str(experiment["experiment_id"]), limit=1
-        )[0].get("trial_number")
+        persisted_trial = next(
+            row
+            for row in store.load_alpha_v6_trials(experiment_id=str(experiment["experiment_id"]))
+            if row.get("trial_id") == trial.get("trial_id")
+        )
+        trial = persisted_trial
     else:
         trial_inserted = False
         trial_counts = {"global_attempt_count": 0, "experiment_attempt_count": None}

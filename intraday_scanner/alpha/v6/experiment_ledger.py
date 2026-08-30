@@ -17,6 +17,21 @@ from intraday_scanner.alpha.v6.contracts import (
     utc_now,
 )
 
+_TRIAL_CONTENT_FIELDS = (
+    "attempt_id",
+    "experiment_id",
+    "arm_id",
+    "strategy_id",
+    "strategy_version",
+    "configuration_hash_sha256",
+    "feature_set_hash_sha256",
+    "cost_model_version",
+    "validation_window",
+    "code_sha",
+    "source_hash_sha256",
+    "status",
+)
+
 
 def preregistration_blockers(
     experiment: dict[str, Any] | None,
@@ -63,6 +78,7 @@ def preregistration_blockers(
 
 def build_trial_receipt(
     *,
+    attempt_id: str,
     experiment: dict[str, Any] | None,
     arm_id: str,
     strategy_id: str,
@@ -74,9 +90,14 @@ def build_trial_receipt(
     code_sha: str,
     source_hash_sha256: str,
     status: str = "ATTEMPTED",
-    trial_number: int | None = None,
 ) -> dict[str, Any]:
-    """Build an append-only attempt receipt; persistence assigns its number."""
+    """Build an append-only attempt receipt; persistence assigns its number.
+
+    ``attempt_id`` is the retry-stable identity of one actual search attempt.
+    A caller must mint a new identity for every distinct attempt, including a
+    rerun of identical hyperparameters.  Retrying the same crashed operation
+    reuses the same identity and therefore remains idempotent.
+    """
 
     blockers = preregistration_blockers(
         experiment,
@@ -92,11 +113,14 @@ def build_trial_receipt(
         raise ValueError("trial code and source lineage must be valid hashes")
     if status not in {"ATTEMPTED", "COMPLETE", "FAILED", "QUARANTINED"}:
         raise ValueError("invalid experiment trial status")
+    if not str(attempt_id or "").strip():
+        raise ValueError("trial attempt identity is required")
     experiment_data = experiment if isinstance(experiment, dict) else {}
     experiment_id = str(experiment_data.get("experiment_id") or "")
     if not experiment_id:
         raise ValueError("trial experiment identity is required")
     content = {
+        "attempt_id": str(attempt_id).strip(),
         "experiment_id": experiment_id,
         "arm_id": arm_id,
         "strategy_id": strategy_id,
@@ -112,7 +136,7 @@ def build_trial_receipt(
     receipt = {
         **content,
         "trial_id": "v6t-" + canonical_hash(content)[:28],
-        "trial_number": trial_number,
+        "trial_number": None,
         "attempted_at": utc_now(),
         "research_only": True,
         "broker_execution_enabled": False,
@@ -121,6 +145,65 @@ def build_trial_receipt(
         {key: value for key, value in receipt.items() if key != "payload_hash_sha256"}
     )
     return receipt
+
+
+def validate_trial_receipt(
+    receipt: dict[str, Any], *, assigned_number: bool
+) -> list[str]:
+    """Validate identity, ordinal state, and the complete payload hash."""
+
+    blockers: list[str] = []
+    content = {key: receipt.get(key) for key in _TRIAL_CONTENT_FIELDS}
+    if any(value in (None, "") for value in content.values()):
+        blockers.append("trial_content_missing")
+    expected_trial_id = "v6t-" + canonical_hash(content)[:28]
+    if receipt.get("trial_id") != expected_trial_id:
+        blockers.append("trial_identity_mismatch")
+    supplied_hash = receipt.get("payload_hash_sha256")
+    expected_hash = canonical_hash(
+        {key: value for key, value in receipt.items() if key != "payload_hash_sha256"}
+    )
+    if not is_valid_sha256(supplied_hash) or supplied_hash != expected_hash:
+        blockers.append("trial_payload_hash_mismatch")
+    trial_number = receipt.get("trial_number")
+    if assigned_number:
+        if not isinstance(trial_number, int) or isinstance(trial_number, bool) or trial_number < 1:
+            blockers.append("trial_number_missing_or_invalid")
+    elif trial_number is not None:
+        blockers.append("caller_assigned_trial_number_forbidden")
+    if not str(receipt.get("attempted_at") or "").strip():
+        blockers.append("trial_attempted_at_missing")
+    if receipt.get("research_only") is not True:
+        blockers.append("trial_not_research_only")
+    if receipt.get("broker_execution_enabled") is not False:
+        blockers.append("trial_broker_execution_not_disabled")
+    return list(dict.fromkeys(blockers))
+
+
+def assign_trial_number(receipt: dict[str, Any], *, trial_number: int) -> dict[str, Any]:
+    """Bind the store-owned global ordinal into a newly persisted receipt."""
+
+    blockers = validate_trial_receipt(receipt, assigned_number=False)
+    if blockers:
+        raise ValueError("invalid unassigned trial receipt: " + ", ".join(blockers))
+    if not isinstance(trial_number, int) or isinstance(trial_number, bool) or trial_number < 1:
+        raise ValueError("trial number must be a positive integer")
+    assigned = dict(receipt)
+    assigned["trial_number"] = trial_number
+    assigned["payload_hash_sha256"] = canonical_hash(
+        {key: value for key, value in assigned.items() if key != "payload_hash_sha256"}
+    )
+    return assigned
+
+
+def trial_retry_semantics(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Return retry-stable semantics while preserving first-attempt evidence."""
+
+    return {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"attempted_at", "trial_number", "payload_hash_sha256"}
+    }
 
 
 def trial_count_status(
@@ -152,7 +235,10 @@ def trial_count_status(
 
 
 __all__ = [
+    "assign_trial_number",
     "build_trial_receipt",
     "preregistration_blockers",
+    "trial_retry_semantics",
     "trial_count_status",
+    "validate_trial_receipt",
 ]
