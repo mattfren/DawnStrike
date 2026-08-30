@@ -190,9 +190,25 @@ def _build_plan(args: argparse.Namespace) -> CapturePlan:
 def _safe_capture_receipt(
     process: subprocess.CompletedProcess[str], plan: dict[str, Any]
 ) -> dict[str, Any]:
+    inner: dict[str, Any] | None = None
+    for line in reversed(process.stdout.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            inner = candidate
+            break
+    inner_status = str(inner.get("status") or "") if inner else ""
     payload: dict[str, Any] = {
         "schema_version": "dawnstrike.capture_operation_result.v1",
-        "status": "CAPTURE_PROCESS_FAILED" if process.returncode else "CAPTURED",
+        "status": (
+            "CAPTURED"
+            if process.returncode == 0
+            else "CAPTURE_INCOMPLETE"
+            if inner_status in {"PARTIAL", "NO_DATA"}
+            else "CAPTURE_PROCESS_FAILED"
+        ),
         "exit_code": process.returncode,
         "mode": plan["mode"],
         "provider": plan["provider"],
@@ -207,35 +223,28 @@ def _safe_capture_receipt(
         "required_endpoints": plan["required_endpoints"],
         "broker_execution": "disabled",
     }
-    if process.returncode == 0:
-        for line in reversed(process.stdout.splitlines()):
-            try:
-                inner = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(inner, dict):
-                payload.update(
-                    {
-                        key: inner[key]
-                        for key in (
-                            "run_id",
-                            "session_id",
-                            "status",
-                            "coverage",
-                            "state_path",
-                            "started_at",
-                            "completed_at",
-                            "created_at",
-                            "source_identity",
-                            "artifact_identity",
-                            "raw_artifact_hash_sha256",
-                            "normalized_artifact_hash_sha256",
-                            "receipt_hash_sha256",
-                        )
-                        if key in inner
-                    }
+    if inner is not None:
+        payload["capture_status"] = inner_status
+        payload.update(
+            {
+                key: inner[key]
+                for key in (
+                    "run_id",
+                    "session_id",
+                    "coverage",
+                    "state_path",
+                    "started_at",
+                    "completed_at",
+                    "created_at",
+                    "source_identity",
+                    "artifact_identity",
+                    "raw_artifact_hash_sha256",
+                    "normalized_artifact_hash_sha256",
+                    "receipt_hash_sha256",
                 )
-                break
+                if key in inner
+            }
+        )
     return payload
 
 

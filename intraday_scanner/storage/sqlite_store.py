@@ -6349,6 +6349,7 @@ class SQLiteScanStore:
         self.initialize()
         try:
             with self._connect() as connection:
+                _validate_intraday_capture_artifacts(connection, payload)
                 existing = connection.execute(
                     "SELECT payload_json FROM intraday_capture_runs "
                     "WHERE capture_run_id = ?",
@@ -11295,6 +11296,12 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _sha256_canonical_value(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
 def _capture_run_semantics(value: Mapping[str, Any]) -> Any:
     """Return the immutable portion of a capture receipt for retry checks."""
 
@@ -11418,7 +11425,6 @@ def _validate_intraday_capture_run_receipt(
                 raise StorageError("intraday capture run endpoint status is missing")
             if (
                 endpoint_row.get("status") == "COMPLETE"
-                and endpoint_row.get("endpoint") != "corporate_actions"
                 and not str(endpoint_row.get("artifact_manifest_id") or "").strip()
             ):
                 raise StorageError(
@@ -11446,6 +11452,134 @@ def _validate_intraday_capture_run_receipt(
     if declared_hash != _canonical_sha256(unsigned):
         raise StorageError("intraday capture run receipt hash mismatch")
     return payload
+
+
+def _validate_intraday_capture_artifacts(
+    connection: sqlite3.Connection, payload: Mapping[str, Any]
+) -> None:
+    """Bind terminal receipt artifacts to manifests persisted in this DB.
+
+    The receipt is assembled from a mutable checkpoint, so validating only
+    its hashes would allow a forged or unrelated manifest ID to be promoted
+    into the durable capture-run ledger.  Resolve every referenced aggregate
+    inside the same SQLite transaction used for the terminal insert and bind
+    its complete source/session identity and content hashes.
+    """
+
+    provider = str(payload["provider"])
+    feed = str(payload["feed"])
+    market_date = str(payload["market_date"])
+    session_id = str(payload["session_id"])
+    request_start = str(payload["request_start"])
+    request_end = str(payload["request_end"])
+    symbols = {str(symbol) for symbol in payload.get("symbols", [])}
+    expected: list[tuple[str, str, str, str, str]] = []
+    for coverage_row in payload["coverage"]:
+        if not isinstance(coverage_row, Mapping):
+            raise StorageError("intraday capture coverage row is invalid")
+        symbol = str(coverage_row.get("symbol") or "").strip()
+        if not symbol or (symbols and symbol not in symbols):
+            raise StorageError("intraday capture artifact symbol is not in the run")
+        for endpoint_row in coverage_row["endpoint_coverage"]:
+            if not isinstance(endpoint_row, Mapping):
+                raise StorageError("intraday capture endpoint coverage row is invalid")
+            endpoint = str(endpoint_row.get("endpoint") or "").strip()
+            manifest_id = str(endpoint_row.get("artifact_manifest_id") or "").strip()
+            if not manifest_id:
+                if endpoint_row.get("status") == "COMPLETE":
+                    raise StorageError(
+                        "intraday capture complete endpoint lacks artifact identity"
+                    )
+                continue
+            raw_hash = str(endpoint_row.get("raw_artifact_hash_sha256") or "").lower()
+            normalized_hash = str(
+                endpoint_row.get("normalized_artifact_hash_sha256") or ""
+            ).lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", raw_hash) or not re.fullmatch(
+                r"[0-9a-f]{64}", normalized_hash
+            ):
+                raise StorageError("intraday capture artifact hashes are invalid")
+            expected.append((manifest_id, endpoint, symbol, raw_hash, normalized_hash))
+
+    artifact_items = payload["artifact_identity"]["items"]
+    if len(expected) != len(artifact_items):
+        raise StorageError("intraday capture artifact identity does not match endpoint coverage")
+    actual: list[tuple[str, str, str, str, str]] = []
+    for item in artifact_items:
+        if not isinstance(item, Mapping):
+            raise StorageError("intraday capture artifact identity item is invalid")
+        manifest_id = str(item.get("artifact_manifest_id") or "").strip()
+        endpoint = str(item.get("endpoint") or "").strip()
+        symbol = str(item.get("symbol") or "").strip()
+        raw_hash = str(item.get("raw_artifact_hash_sha256") or "").lower()
+        normalized_hash = str(item.get("normalized_artifact_hash_sha256") or "").lower()
+        if not manifest_id or not endpoint or not symbol:
+            raise StorageError("intraday capture artifact identity item is incomplete")
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_hash) or not re.fullmatch(
+            r"[0-9a-f]{64}", normalized_hash
+        ):
+            raise StorageError("intraday capture artifact identity hashes are invalid")
+        actual.append((manifest_id, endpoint, symbol, raw_hash, normalized_hash))
+    if len(set(expected)) != len(expected) or sorted(expected) != sorted(actual):
+        raise StorageError("intraday capture artifact identity does not match endpoint coverage")
+
+    for manifest_id, endpoint, symbol, raw_hash, normalized_hash in expected:
+        row = connection.execute(
+            "SELECT payload_json FROM intraday_artifact_manifests "
+            "WHERE artifact_manifest_id = ?",
+            (manifest_id,),
+        ).fetchone()
+        if row is None:
+            raise StorageError(f"intraday capture artifact manifest does not exist: {manifest_id}")
+        manifest = _json_value(row[0], default=None)
+        if not isinstance(manifest, Mapping):
+            raise StorageError(f"intraday capture artifact manifest is invalid: {manifest_id}")
+        expected_identity = {
+            "artifact_manifest_id": manifest_id,
+            "provider": provider,
+            "feed": feed,
+            "symbol": symbol,
+            "market_date": market_date,
+            "exchange_session_id": session_id,
+            "request_start": request_start,
+            "request_end": request_end,
+            "artifact_kind": f"intraday-{endpoint}-aggregate",
+            "raw_artifact_hash_sha256": raw_hash,
+            "normalized_artifact_hash_sha256": normalized_hash,
+        }
+        if any(
+            str(manifest.get(key) or "") != value
+            for key, value in expected_identity.items()
+        ):
+            raise StorageError(
+                "intraday capture artifact manifest is not bound to endpoint: "
+                f"{manifest_id}"
+            )
+
+    # The top-level aggregate hashes are defined over artifact_identity.items'
+    # canonical order, so derive these projections from ``actual`` rather
+    # than re-sorting by a different key.
+    raw_items = [
+        {"endpoint": endpoint, "hash": raw_hash, "symbol": symbol}
+        for _manifest_id, endpoint, symbol, raw_hash, _normalized_hash in actual
+    ]
+    normalized_items = [
+        {"endpoint": endpoint, "hash": normalized_hash, "symbol": symbol}
+        for _manifest_id, endpoint, symbol, _raw_hash, normalized_hash in actual
+    ]
+    if expected:
+        if _sha256_canonical_value(raw_items) != str(
+            payload.get("raw_artifact_hash_sha256") or ""
+        ):
+            raise StorageError("intraday capture raw artifact aggregate hash mismatch")
+        if _sha256_canonical_value(normalized_items) != str(
+            payload.get("normalized_artifact_hash_sha256") or ""
+        ):
+            raise StorageError("intraday capture normalized artifact aggregate hash mismatch")
+    elif payload.get("raw_artifact_hash_sha256") is not None or payload.get(
+        "normalized_artifact_hash_sha256"
+    ) is not None:
+        raise StorageError("intraday capture empty artifact identity has aggregate hashes")
 
 
 def _entry_admission_rejection(
