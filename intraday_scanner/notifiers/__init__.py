@@ -6,6 +6,7 @@ from intraday_scanner.notifiers.service import (
     audit_summary_events,
     build_notifiers,
     dispatch_events,
+    require_notification_configuration,
     scan_events_from_payload,
 )
 from intraday_scanner.notifiers.windows import WindowsLocalNotifier
@@ -18,5 +19,6 @@ __all__ = [
     "audit_summary_events",
     "build_notifiers",
     "dispatch_events",
+    "require_notification_configuration",
     "scan_events_from_payload",
 ]

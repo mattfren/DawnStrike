@@ -180,7 +180,16 @@ try {
             -LogRoot $logRoot `
             -LogName "alpha_morning-$MarketDate"
         $stageExit = $alphaCycle.exit_code
-        $errorCode = if ($stageExit -eq 0) { "" } else { "alpha_cycle_failed" }
+        $errorCode = if ($stageExit -eq 0) {
+            ""
+        } else {
+            Resolve-DawnstrikeNotificationFailureCode `
+                -ReceiptRoot $outputRoot `
+                -Stage "alpha_cycle" `
+                -MarketDate $MarketDate `
+                -FallbackErrorCode "alpha_cycle_failed" `
+                -ProcessReceipt $alphaCycle
+        }
         if ($stageExit -ne 0) {
             # A failed child is allowed to leave a partial/invalid file. Keep
             # that attempt in the archive, then restore the prior canonical

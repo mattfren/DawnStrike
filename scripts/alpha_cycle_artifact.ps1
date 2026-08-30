@@ -1,3 +1,44 @@
+function Resolve-DawnstrikeNotificationFailureCode {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptRoot,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][string]$FallbackErrorCode,
+        [AllowNull()][object]$ProcessReceipt = $null
+    )
+    $receiptPath = Join-Path $ReceiptRoot "notification-preflight-$Stage-$MarketDate.json"
+    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+        try {
+            $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            if (
+                [string]$receipt.schema_version -ceq "dawnstrike.notification_preflight.v1" -and
+                [string]$receipt.status -ceq "FAILED" -and
+                [string]$receipt.error_code -ceq "notification_credentials_missing" -and
+                [string]$receipt.stage -ceq $Stage -and
+                [string]$receipt.market_date -ceq $MarketDate -and
+                [string]$receipt.channel -ceq "telegram" -and
+                [bool]$receipt.research_only -and
+                -not [bool]$receipt.broker_execution_enabled
+            ) {
+                $recordedAt = [DateTimeOffset]::Parse([string]$receipt.recorded_at)
+                if ($null -ne $ProcessReceipt) {
+                    $startedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.started_at)
+                    $completedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.completed_at)
+                    if ($recordedAt -lt $startedAt -or $recordedAt -gt $completedAt) {
+                        return $FallbackErrorCode
+                    }
+                }
+                return "notification_credentials_missing"
+            }
+        }
+        catch {
+            # Preserve the child failure code when an auxiliary diagnostic is
+            # malformed; the stage itself remains failed closed.
+        }
+    }
+    return $FallbackErrorCode
+}
+
 function Move-DawnstrikePriorAlphaCycleArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactPath,

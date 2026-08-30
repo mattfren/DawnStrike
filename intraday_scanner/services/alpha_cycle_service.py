@@ -8,6 +8,7 @@ import math
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,12 @@ from intraday_scanner.decisioning.contracts import (
     canonical_json,
     parse_strategy_decision_receipt,
 )
-from intraday_scanner.errors import DataProviderError, SnapshotValidationError, StorageError
+from intraday_scanner.errors import (
+    DataProviderError,
+    NotificationError,
+    SnapshotValidationError,
+    StorageError,
+)
 from intraday_scanner.market_calendar import (
     MarketSessionDecision,
     core_session_phase,
@@ -50,6 +56,7 @@ from intraday_scanner.notifiers import (
     NotificationEvent,
     build_notifiers,
     dispatch_events,
+    require_notification_configuration,
 )
 from intraday_scanner.notifiers.telegram_formatter import (
     format_alpha_monitor,
@@ -133,6 +140,7 @@ ALPHAOPS_STRATEGY_ID = LEGACY_ALPHAOPS_STRATEGY_ID
 ALPHAOPS_OFFICIAL_COHORT = "official_telegram"
 ALPHAOPS_RADAR_COHORT = "research_radar"
 ALPHAOPS_RADAR_VERSION = "dawnstrike-research-radar-v1"
+NOTIFICATION_PREFLIGHT_SCHEMA_VERSION = "dawnstrike.notification_preflight.v1"
 _LEGACY_PICK_PATTERN = re.compile(
     r"^\s*\d+\)\s+([A-Z][A-Z0-9.-]{0,11})\s+-\s+Opportunity\b",
     re.MULTILINE,
@@ -141,6 +149,69 @@ _LEGACY_PICK_COUNT_PATTERN = re.compile(
     r"\|\s*(\d+)\s+(?:picks?|names?)\s*\|",
     re.IGNORECASE,
 )
+
+
+def _write_notification_preflight_receipt(
+    *,
+    root: str | Path,
+    stage: str,
+    market_date: str | None,
+    error: NotificationError,
+) -> Path:
+    """Write a nonsecret, atomic receipt for a blocked scheduled stage."""
+
+    safe_market_date = re.sub(r"[^0-9A-Za-z_-]", "_", market_date or "unknown")
+    target = Path(root) / f"notification-preflight-{stage}-{safe_market_date}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": NOTIFICATION_PREFLIGHT_SCHEMA_VERSION,
+        "status": "FAILED",
+        "stage": stage,
+        "error_code": "notification_credentials_missing",
+        "channel": "telegram",
+        "market_date": market_date or None,
+        "missing_fields": list(error.missing_fields),
+        "message": str(error),
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "recorded_at": utc_now_iso(),
+    }
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return target
+
+
+def _require_scheduled_notification_configuration(
+    *,
+    notify: str,
+    db_path: str | Path,
+    dry_run: bool,
+    receipt_root: str | Path,
+    stage: str,
+    market_date: str | None,
+) -> None:
+    config = load_config(
+        database_path=Path(db_path),
+        notifier_channels=notify,
+    )
+    try:
+        require_notification_configuration(config, notify=notify, dry_run=dry_run)
+    except NotificationError as error:
+        _write_notification_preflight_receipt(
+            root=receipt_root,
+            stage=stage,
+            market_date=market_date,
+            error=error,
+        )
+        raise
 
 
 def alpha_morning(
@@ -242,6 +313,18 @@ def alpha_cycle(
         skipped_result["out_dir"] = str(output_dir)
         _write_json(output_dir / "alpha_session_gate.json", skipped_result)
         return skipped_result
+    _require_scheduled_notification_configuration(
+        notify=notify,
+        db_path=db_path,
+        dry_run=dry_run,
+        receipt_root=output_dir,
+        stage=cycle_name,
+        market_date=(
+            session_gate.market_date
+            if session_gate is not None
+            else (cycle_decision_at.date().isoformat() if cycle_decision_at else None)
+        ),
+    )
     store = SQLiteScanStore(db_path)
     store.initialize()
     # The mover and core lanes intentionally share this process' provider
@@ -1600,6 +1683,19 @@ def alpha_monitor(
                 decision=session_gate,
                 phase=phase,
             )
+    monitor_market_date = (
+        session_gate.market_date
+        if session_gate is not None
+        else (as_of.date().isoformat() if as_of is not None else None)
+    )
+    _require_scheduled_notification_configuration(
+        notify=notify,
+        db_path=db_path,
+        dry_run=dry_run,
+        receipt_root=Path(db_path).parent / "receipts",
+        stage="alpha_monitor",
+        market_date=monitor_market_date,
+    )
     store = SQLiteScanStore(db_path)
     latest_attempt_signals = store.load_alpha_signals(limit=25)
     latest_attempt_scan_id = (

@@ -367,7 +367,12 @@ try {
             -LogName "alpha_monitor-$MarketDate"
         if ($monitor.exit_code -ne 0) {
             $exitCode = $monitor.exit_code
-            $errorCode = "alpha_monitor_failed"
+            $errorCode = Resolve-DawnstrikeNotificationFailureCode `
+                -ReceiptRoot (Join-Path $state "receipts") `
+                -Stage "alpha_monitor" `
+                -MarketDate $MarketDate `
+                -FallbackErrorCode "alpha_monitor_failed" `
+                -ProcessReceipt $monitor
         }
     }
     if ($exitCode -eq 0) {

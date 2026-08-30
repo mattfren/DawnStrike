@@ -8,7 +8,7 @@ from typing import Any
 
 from intraday_scanner.alpha.alert_gate import is_alertable_notification_candidate
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.errors import NotificationError
+from intraday_scanner.errors import NotificationConfigurationError, NotificationError
 from intraday_scanner.notifiers.base import BaseNotifier, NotificationEvent
 from intraday_scanner.notifiers.console import ConsoleNotifier
 from intraday_scanner.notifiers.email import EmailNotifier
@@ -41,6 +41,46 @@ def build_notifiers(config: ScannerConfig) -> list[BaseNotifier]:
         else:
             raise NotificationError(f"Unknown notifier channel: {channel}")
     return notifiers
+
+
+def require_notification_configuration(
+    config: ScannerConfig,
+    *,
+    notify: str,
+    dry_run: bool = False,
+) -> None:
+    """Fail closed before durable work when a requested notifier is unusable.
+
+    Scheduled AlphaOps runs use Telegram as the official publication channel.
+    Falling back to console would create an official selection without the
+    Telegram delivery proof required by the paper ledger.  Dry-runs retain
+    their existing console-only behavior because they are explicitly not
+    publication attempts.
+    """
+
+    if dry_run:
+        return
+    channels = {
+        channel.strip().lower()
+        for channel in notify.split(",")
+        if channel.strip()
+    }
+    if "telegram" not in channels:
+        return
+    missing: list[str] = []
+    if not config.telegram_bot_token:
+        missing.append("bot_token")
+    if not config.telegram_chat_id:
+        missing.append("chat_id")
+    if missing:
+        missing_fields = ", ".join(missing)
+        error = NotificationConfigurationError(
+            "NOTIFICATION_PREFLIGHT_FAILED: Telegram publication is unavailable; "
+            f"missing {missing_fields}. No official selection, paper lifecycle, "
+            "or delivery was persisted.",
+            missing_fields=tuple(missing),
+        )
+        raise error
 
 
 def scan_events_from_payload(
