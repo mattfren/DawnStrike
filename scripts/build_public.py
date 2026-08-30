@@ -25,6 +25,7 @@ from intraday_scanner.services.scheduler_doctor_service import scheduler_doctor
 from intraday_scanner.services.v6_learning_service import v6_public_status
 from intraday_scanner.storage.migrations import get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.public_lineage import build_sha as _lineage_build_sha
 from scripts.verify_public_artifact_security import scan_public_artifact
 
 
@@ -222,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
                 "file_hashes": file_hashes,
                 "research_only": True,
                 "live_trading_enabled": False,
+                "broker_execution_enabled": False,
             },
             sort_keys=True,
             indent=2,
@@ -397,11 +399,13 @@ def _build_sha(
 ) -> str:
     """Return the documented byte-lineage identity for a public build."""
 
-    formula = (
-        f"{source_sha}:{publication_set_sha256}:{opportunity_projection_sha256}:"
-        f"{v6_learning_sha256}:{market_date}"
+    return _lineage_build_sha(
+        source_sha=source_sha,
+        publication_set_sha256=publication_set_sha256,
+        opportunity_projection_sha256=opportunity_projection_sha256,
+        v6_learning_sha256=v6_learning_sha256,
+        market_date=market_date,
     )
-    return hashlib.sha256(formula.encode("utf-8")).hexdigest()
 
 
 def _database_schema_version(db_path: Path) -> int:

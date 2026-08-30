@@ -808,6 +808,7 @@ class DailyFinalizeService:
             "publication_timestamp": publication_timestamp or _utc_now(),
             "live_trading_enabled": False,
             "research_only": True,
+            "broker_execution_enabled": False,
             "reason": "complete_or_explicit_no_trade_with_upstream_success_and_safety"
             if status == "ready"
             else "missing_or_degraded_upstream_truth_or_safety",

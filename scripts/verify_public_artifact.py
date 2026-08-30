@@ -9,6 +9,9 @@ import json
 import re
 from pathlib import Path
 
+from scripts.public_lineage import build_sha as _lineage_build_sha
+from scripts.public_lineage import is_lower_hex64
+
 MAX_SNAPSHOT_BYTES = 250 * 1024
 V6_SCHEMA_VERSION = "dawnstrike.alphaops_v6.public_status.v1"
 V6_TOP_LEVEL_KEYS = frozenset(
@@ -163,6 +166,8 @@ def verify(
             "payload_sha256"
         ):
             errors.append("publication_set_calendar_hash_mismatch")
+        if not is_lower_hex64(publication_set.get("publication_set_sha256")):
+            errors.append("publication_set_sha256_invalid")
     if scenarios_manifest_path.is_file():
         scenarios_manifest = json.loads(scenarios_manifest_path.read_text(encoding="utf-8"))
         if scenarios_path.is_file() and (
@@ -226,6 +231,8 @@ def verify(
                 errors.append("opportunity_manifest_state_mismatch")
             if opportunity_manifest.get("row_count") != opportunity.get("row_count"):
                 errors.append("opportunity_manifest_row_count_mismatch")
+        if not is_lower_hex64(opportunity_manifest.get("payload_sha256")):
+            errors.append("opportunity_projection_sha256_invalid")
     if v6_path.is_file():
         v6_bytes = v6_path.read_bytes()
         v6_hash = hashlib.sha256(v6_bytes).hexdigest()
@@ -260,6 +267,12 @@ def verify(
             errors.append("build_opportunity_projection_hash_mismatch")
         if build_manifest.get("v6_learning_sha256") != v6_hash:
             errors.append("build_v6_learning_hash_mismatch")
+        if not is_lower_hex64(v6_hash):
+            errors.append("v6_learning_sha256_invalid")
+        if not is_lower_hex64(build_manifest.get("v6_learning_sha256")):
+            errors.append("build_v6_learning_sha256_invalid")
+        if not is_lower_hex64(build_manifest.get("build_sha")):
+            errors.append("build_sha_invalid")
         expected_build_sha = _build_sha(
             source_sha=str(build_manifest.get("source_sha") or ""),
             publication_set_sha256=str(build_manifest.get("publication_set_sha256") or ""),
@@ -269,10 +282,16 @@ def verify(
             v6_learning_sha256=v6_hash,
             market_date=str(build_manifest.get("market_date") or ""),
         )
-        if build_manifest.get("build_sha") != expected_build_sha:
-            errors.append("build_sha_formula_mismatch")
-        if build_manifest.get("build_id") != expected_build_sha[:20]:
-            errors.append("build_id_formula_mismatch")
+        if (
+            is_lower_hex64(build_manifest.get("publication_set_sha256"))
+            and is_lower_hex64(build_manifest.get("opportunity_projection_sha256"))
+            and is_lower_hex64(v6_hash)
+            and is_lower_hex64(build_manifest.get("build_sha"))
+        ):
+            if build_manifest.get("build_sha") != expected_build_sha:
+                errors.append("build_sha_formula_mismatch")
+            if build_manifest.get("build_id") != expected_build_sha[:20]:
+                errors.append("build_id_formula_mismatch")
     release_manifest_path = root / "release-manifest.json"
     if release_manifest_path.is_file():
         try:
@@ -285,6 +304,8 @@ def verify(
                 errors.append("release_build_sha_mismatch")
             if release_manifest.get("v6_learning_sha256") != v6_hash:
                 errors.append("release_v6_learning_hash_mismatch")
+            if not is_lower_hex64(release_manifest.get("v6_learning_sha256")):
+                errors.append("release_v6_learning_sha256_invalid")
         recorded_hashes = build_manifest.get("file_hashes")
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")
@@ -320,10 +341,19 @@ def verify(
             errors.append("readiness_not_publishable")
         if readiness.get("v6_learning_sha256") != v6_hash:
             errors.append("readiness_v6_learning_hash_mismatch")
+        if not is_lower_hex64(readiness.get("v6_learning_sha256")):
+            errors.append("readiness_v6_learning_sha256_invalid")
         if readiness.get("build_id") != build_manifest.get("build_id"):
             errors.append("readiness_build_id_mismatch")
         if readiness.get("deployed_build_sha") != build_manifest.get("build_sha"):
             errors.append("readiness_build_sha_mismatch")
+        if readiness.get("market_date") != build_manifest.get("market_date"):
+            errors.append("readiness_market_date_mismatch")
+        if expected_source_sha:
+            if readiness.get("research_only") is not True:
+                errors.append("readiness_research_only_missing")
+            if readiness.get("broker_execution_enabled") is not False:
+                errors.append("readiness_broker_execution_enabled")
 
     result = {
         "status": "PASS" if not errors else "FAIL",
@@ -361,11 +391,13 @@ def _build_sha(
 ) -> str:
     """Independently recompute the exact documented public-build formula."""
 
-    formula = (
-        f"{source_sha}:{publication_set_sha256}:{opportunity_projection_sha256}:"
-        f"{v6_learning_sha256}:{market_date}"
+    return _lineage_build_sha(
+        source_sha=source_sha,
+        publication_set_sha256=publication_set_sha256,
+        opportunity_projection_sha256=opportunity_projection_sha256,
+        v6_learning_sha256=v6_learning_sha256,
+        market_date=market_date,
     )
-    return hashlib.sha256(formula.encode("utf-8")).hexdigest()
 
 
 def _v6_contract_failures(payload: dict[str, object]) -> list[str]:

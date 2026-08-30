@@ -231,7 +231,8 @@ def record_daily_stage(
         )
         or prior.get("deployed_source_sha"),
         "deployed_build_sha": (
-            (payload or {}).get("build_id")
+            (payload or {}).get("build_sha")
+            or (payload or {}).get("build_id")
             if stage_name == "publication"
             else None
         )

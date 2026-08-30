@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -60,6 +61,11 @@ REQUIRED_HASHED_FILES = {
 }
 
 _IMMUTABLE_BYTES_CACHE: dict[tuple[object, ...], bytes] = {}
+_LOWER_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_lower_hex64(value: object) -> bool:
+    return isinstance(value, str) and _LOWER_HEX64.fullmatch(value) is not None
 
 
 class handler(BaseHTTPRequestHandler):
@@ -237,6 +243,10 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         != scenario_manifest.get("payload_sha256")
     ):
         failures.append("publication_set_scenario_hash_mismatch")
+    if not is_lower_hex64(publication_set.get("publication_set_sha256")):
+        failures.append("publication_set_sha256_invalid")
+    if not is_lower_hex64(opportunity_manifest.get("payload_sha256")):
+        failures.append("opportunity_projection_sha256_invalid")
     if not build_manifest.get("source_sha"):
         failures.append("source_sha_missing")
     if not build_manifest.get("build_id"):
@@ -255,8 +265,18 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         != opportunity_manifest.get("payload_sha256")
     ):
         failures.append("build_opportunity_projection_hash_mismatch")
+    if not is_lower_hex64(build_manifest.get("publication_set_sha256")):
+        failures.append("build_publication_set_sha256_invalid")
+    if not is_lower_hex64(build_manifest.get("opportunity_projection_sha256")):
+        failures.append("build_opportunity_projection_sha256_invalid")
     if build_manifest.get("v6_learning_sha256") != v6_hash:
         failures.append("build_v6_learning_hash_mismatch")
+    if not is_lower_hex64(v6_hash):
+        failures.append("v6_learning_sha256_invalid")
+    if not is_lower_hex64(build_manifest.get("build_sha")):
+        failures.append("build_sha_invalid")
+    if not is_lower_hex64(build_manifest.get("v6_learning_sha256")):
+        failures.append("build_v6_learning_sha256_invalid")
     expected_build_sha = _build_sha(
         source_sha=str(build_manifest.get("source_sha") or ""),
         publication_set_sha256=str(build_manifest.get("publication_set_sha256") or ""),
@@ -298,14 +318,20 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
         failures.append("pipeline_not_ready")
     if readiness.get("v6_learning_sha256") != v6_hash:
         failures.append("readiness_v6_learning_hash_mismatch")
+    if not is_lower_hex64(readiness.get("v6_learning_sha256")):
+        failures.append("readiness_v6_learning_sha256_invalid")
     if readiness.get("build_id") != build_manifest.get("build_id"):
         failures.append("readiness_build_id_mismatch")
     if readiness.get("deployed_build_sha") != build_manifest.get("build_sha"):
         failures.append("readiness_build_sha_mismatch")
+    if readiness.get("market_date") != build_manifest.get("market_date"):
+        failures.append("readiness_market_date_mismatch")
     if release_manifest.get("build_sha") != build_manifest.get("build_sha"):
         failures.append("release_build_sha_mismatch")
     if release_manifest.get("v6_learning_sha256") != v6_hash:
         failures.append("release_v6_learning_hash_mismatch")
+    if not is_lower_hex64(release_manifest.get("v6_learning_sha256")):
+        failures.append("release_v6_learning_sha256_invalid")
     failures.extend(_freshness_failures(readiness.get("market_date")))
     return list(dict.fromkeys(failures))
 

@@ -156,16 +156,54 @@ function Set-VercelAlias {
         -TimeoutSeconds $VercelCommandTimeoutSeconds
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $hash.Dispose()
+    }
+}
+
+function Assert-LowerHex64 {
+    param([AllowNull()][object]$Value, [string]$Field, [string]$Label)
+    if ($null -eq $Value -or ([string]$Value -cnotmatch '^[0-9a-f]{64}$')) {
+        throw "$Label $Field must be a lowercase 64-hex value."
+    }
+}
+
 function Assert-PublicationState {
     param(
         [object]$Health,
     [object]$Readiness,
     [object]$BuildManifest,
     [string]$ExpectedSourceSha,
+    [object]$ReleaseManifest,
     [string]$Label
 )
     if ($BuildManifest.source_sha -ne $ExpectedSourceSha) {
         throw "$Label build source SHA does not equal the verified runtime HEAD."
+    }
+    if ($BuildManifest.market_date -notmatch '^\d{4}-\d{2}-\d{2}$') {
+        throw "$Label build market date is invalid."
+    }
+    foreach ($field in @(
+        "publication_set_sha256", "opportunity_projection_sha256",
+        "v6_learning_sha256", "build_sha"
+    )) {
+        Assert-LowerHex64 -Value (Get-OptionalJsonProperty -InputObject $BuildManifest -Name $field) `
+            -Field $field -Label $Label
+    }
+    $expectedBuildSha = Get-Sha256Hex `
+        "$($BuildManifest.source_sha):$($BuildManifest.publication_set_sha256):$($BuildManifest.opportunity_projection_sha256):$($BuildManifest.v6_learning_sha256):$($BuildManifest.market_date)"
+    if ($BuildManifest.build_sha -ne $expectedBuildSha) {
+        throw "$Label build SHA does not match the strict five-input V6 formula."
+    }
+    if ($BuildManifest.build_id -ne $expectedBuildSha.Substring(0, 20)) {
+        throw "$Label build ID does not match the strict build SHA."
     }
     if ($Health.status -ne "alive") {
         throw "$Label health is not alive."
@@ -188,8 +226,22 @@ function Assert-PublicationState {
     if ($readinessBuildId -and $readinessBuildId -ne $BuildManifest.build_id) {
         throw "$Label readiness build ID does not match the build manifest."
     }
+    Assert-LowerHex64 -Value (Get-OptionalJsonProperty -InputObject $Readiness -Name "v6_learning_sha256") `
+        -Field "readiness.v6_learning_sha256" -Label $Label
+    if ($Readiness.v6_learning_sha256 -ne $BuildManifest.v6_learning_sha256) {
+        throw "$Label readiness V6 hash does not match the build manifest."
+    }
+    if ($Readiness.market_date -ne $BuildManifest.market_date) {
+        throw "$Label readiness market date does not match the build manifest."
+    }
+    if ($Readiness.research_only -ne $true -or $Readiness.broker_execution_enabled -ne $false) {
+        throw "$Label readiness safety boundary is not research-only with broker execution disabled."
+    }
     if ($Readiness.data_hash_sha256 -ne $BuildManifest.data_hash_sha256) {
         throw "$Label readiness data hash does not match the build manifest."
+    }
+    if ($Readiness.publication_set_sha256 -ne $BuildManifest.publication_set_sha256) {
+        throw "$Label readiness publication-set hash does not match the build manifest."
     }
 
     $ready = $Readiness.status -eq "ready" -and [int]$Readiness.http_status -eq 200
@@ -201,6 +253,15 @@ function Assert-PublicationState {
     )
     if (-not $ready -and -not $approvedDegraded) {
         throw "$Label readiness is neither ready nor approved degraded."
+    }
+    if ($null -ne $ReleaseManifest) {
+        if ($ReleaseManifest.source_sha -ne $BuildManifest.source_sha -or
+            $ReleaseManifest.build_sha -ne $BuildManifest.build_sha -or
+            $ReleaseManifest.v6_learning_sha256 -ne $BuildManifest.v6_learning_sha256) {
+            throw "$Label release manifest does not match the build manifest."
+        }
+        Assert-LowerHex64 -Value $ReleaseManifest.v6_learning_sha256 `
+            -Field "release_manifest.v6_learning_sha256" -Label $Label
     }
 }
 
@@ -261,10 +322,14 @@ $previewReadiness = Invoke-VercelJson `
 $previewManifest = Invoke-VercelJson `
     -Arguments @("curl", "$previewUrl/build-manifest.json") `
     -Label "Preview build manifest"
+$previewReleaseManifest = Invoke-VercelJson `
+    -Arguments @("curl", "$previewUrl/release-manifest.json") `
+    -Label "Preview release manifest"
 Assert-PublicationState `
     -Health $previewHealth `
     -Readiness $previewReadiness `
     -BuildManifest $previewManifest `
+    -ReleaseManifest $previewReleaseManifest `
     -ExpectedSourceSha $expectedSourceSha `
     -Label "Preview"
 
@@ -342,17 +407,28 @@ try {
                         "$promotedUrl/build-manifest.json?verify=$cacheBuster"
                     ) `
                     -Label "Promoted deployment build manifest"
+                $promotedReleaseManifest = Invoke-VercelJson `
+                    -Arguments @(
+                        "curl",
+                        "$promotedUrl/release-manifest.json?verify=$cacheBuster"
+                    ) `
+                    -Label "Promoted deployment release manifest"
                 Assert-PublicationState `
                     -Health $promotedHealth `
                     -Readiness $promotedReadiness `
                     -BuildManifest $promotedManifest `
+                    -ReleaseManifest $promotedReleaseManifest `
                     -ExpectedSourceSha $expectedSourceSha `
                     -Label "Promoted deployment"
                 if (
                     $promotedManifest.source_sha -ne $previewManifest.source_sha -or
                     $promotedManifest.build_id -ne $previewManifest.build_id -or
                     $promotedManifest.data_hash_sha256 -ne
-                    $previewManifest.data_hash_sha256
+                    $previewManifest.data_hash_sha256 -or
+                    $promotedManifest.build_sha -ne $previewManifest.build_sha -or
+                    $promotedManifest.publication_set_sha256 -ne $previewManifest.publication_set_sha256 -or
+                    $promotedManifest.opportunity_projection_sha256 -ne $previewManifest.opportunity_projection_sha256 -or
+                    $promotedManifest.v6_learning_sha256 -ne $previewManifest.v6_learning_sha256
                 ) {
                     throw "Promoted deployment does not match the verified preview."
                 }
@@ -402,17 +478,28 @@ try {
                 $productionManifest = Invoke-VercelJson `
                     -Arguments @("curl", "$ProductionAlias/build-manifest.json?verify=$cacheBuster") `
                     -Label "Production build manifest"
+                $productionReleaseManifest = Invoke-VercelJson `
+                    -Arguments @(
+                        "curl",
+                        "$ProductionAlias/release-manifest.json?verify=$cacheBuster"
+                    ) `
+                    -Label "Production release manifest"
                 Assert-PublicationState `
                     -Health $productionHealth `
                     -Readiness $productionReadiness `
                     -BuildManifest $productionManifest `
+                    -ReleaseManifest $productionReleaseManifest `
                     -ExpectedSourceSha $expectedSourceSha `
                     -Label "Production"
                 if (
                     $productionManifest.source_sha -ne $previewManifest.source_sha -or
                     $productionManifest.build_id -ne $previewManifest.build_id -or
                     $productionManifest.data_hash_sha256 -ne
-                    $previewManifest.data_hash_sha256
+                    $previewManifest.data_hash_sha256 -or
+                    $productionManifest.build_sha -ne $previewManifest.build_sha -or
+                    $productionManifest.publication_set_sha256 -ne $previewManifest.publication_set_sha256 -or
+                    $productionManifest.opportunity_projection_sha256 -ne $previewManifest.opportunity_projection_sha256 -or
+                    $productionManifest.v6_learning_sha256 -ne $previewManifest.v6_learning_sha256
                 ) {
                     throw "Production does not match the verified preview."
                 }
@@ -474,9 +561,12 @@ $result = [ordered]@{
     preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
     source_sha = $previewManifest.source_sha
     build_id = $previewManifest.build_id
+    build_sha = $previewManifest.build_sha
     data_hash_sha256 = $previewManifest.data_hash_sha256
     publication_set_sha256 = $previewManifest.publication_set_sha256
     opportunity_projection_sha256 = $previewManifest.opportunity_projection_sha256
+    v6_learning_sha256 = $previewManifest.v6_learning_sha256
+    release_manifest_sha256 = Get-OptionalJsonProperty -InputObject $previewReleaseManifest -Name "release_manifest_sha256"
     market_date = $previewManifest.market_date
     snapshot_status = $previewReadiness.snapshot_status
     readiness_status = $previewReadiness.status

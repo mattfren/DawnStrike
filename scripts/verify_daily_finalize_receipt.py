@@ -15,6 +15,8 @@ from intraday_scanner.services.daily_run_service import (
     shared_daily_run_id,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.public_lineage import build_sha as _lineage_build_sha
+from scripts.public_lineage import is_lower_hex64
 
 FINALIZE_STAGES = (
     "canonical_performance",
@@ -60,21 +62,55 @@ def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str,
     opportunity_projection_sha = str(
         publication_payload.get("opportunity_projection_sha256") or ""
     )
-    expected_build_id = (
-        hashlib.sha256(
-            (
-                f"{release_sha}:{publication_set_sha}:"
-                f"{opportunity_projection_sha}:{market_date[:10]}"
-            ).encode()
-        ).hexdigest()[:20]
-        if publication_set_sha and opportunity_projection_sha
-        else ""
+    v6_learning_sha = str(publication_payload.get("v6_learning_sha256") or "")
+    expected_build_sha = ""
+    expected_build_id = ""
+    legacy_receipt = False
+    strict_v6_lineage = all(
+        is_lower_hex64(value)
+        for value in (publication_set_sha, opportunity_projection_sha, v6_learning_sha)
     )
+    if strict_v6_lineage:
+        expected_build_sha = _lineage_build_sha(
+            source_sha=release_sha,
+            publication_set_sha256=publication_set_sha,
+            opportunity_projection_sha256=opportunity_projection_sha,
+            v6_learning_sha256=v6_learning_sha,
+            market_date=market_date[:10],
+        )
+        expected_build_id = expected_build_sha[:20]
+    elif (
+        publication_set_sha
+        and opportunity_projection_sha
+        and not v6_learning_sha
+        and not all(
+            is_lower_hex64(value)
+            for value in (publication_set_sha, opportunity_projection_sha)
+        )
+    ):
+        # Receipts written before V6 remain readable as historical evidence.
+        # Any receipt carrying a V6 value must satisfy the strict contract.
+        expected_build_id = hashlib.sha256(
+            f"{release_sha}:{publication_set_sha}:{opportunity_projection_sha}:{market_date[:10]}".encode()
+        ).hexdigest()[:20]
+        legacy_receipt = True
     publication_identity_ready = bool(
         publication_payload.get("status") == "PRODUCTION_VERIFIED"
         and publication_payload.get("promoted") is True
         and publication_payload.get("source_sha") == release_sha
+        and (
+            publication_payload.get("market_date") == market_date[:10]
+            or legacy_receipt
+        )
         and publication_payload.get("build_id") == expected_build_id
+        and (
+            (
+                strict_v6_lineage
+                and publication_payload.get("build_sha") == expected_build_sha
+                and publication_payload.get("v6_learning_sha256") == v6_learning_sha
+            )
+            or (not v6_learning_sha and not strict_v6_lineage)
+        )
         and publication_payload.get("promoted_deployment_id")
         and publication_payload.get("promoted_deployment_id")
         == publication_payload.get("production_deployment_id")
@@ -93,6 +129,8 @@ def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str,
         "run_status": run.get("status"),
         "missing_or_failed_finalize_stages": missing_or_failed,
         "publication_identity_ready": publication_identity_ready,
+        "v6_learning_sha256": v6_learning_sha or None,
+        "expected_build_sha": expected_build_sha or None,
         "expected_build_id": expected_build_id or None,
         "research_only": True,
         "broker_execution_enabled": False,

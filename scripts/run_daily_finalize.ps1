@@ -184,6 +184,24 @@ try {
         exit 0
     }
 
+    # Authorize upload from the local, exact-SHA artifact only after all
+    # non-publication stages and the strict readiness/artifact checks pass.
+    # The publication stage is deliberately excluded because Vercel upload is
+    # the side effect this gate authorizes; post-publication identity is
+    # verified by verify_daily_finalize_receipt.py.
+    $prepublication = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @(
+            "scripts\verify_daily_prepublication.py", "--db-path", $dbPath,
+            "--artifact-root", $outputPath, "--market-date", $MarketDate,
+            "--release-sha", $releaseSha, "--runtime-root", $runtime
+        ) `
+        -LogRoot $logRoot `
+        -LogName "daily_finalize_prepublication-$MarketDate"
+    if ($prepublication.exit_code -ne 0) {
+        throw "Daily prepublication gate blocked Vercel publication."
+    }
+
     try {
         & (Join-Path $runtime "scripts\publish_vercel_public.ps1") `
             -ProjectRoot $runtime `
