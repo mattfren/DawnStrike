@@ -31,6 +31,7 @@ _TRIAL_CONTENT_FIELDS = (
     "source_hash_sha256",
     "status",
 )
+_TRIAL_IDENTITY_FIELDS = ("attempt_id",)
 
 
 def preregistration_blockers(
@@ -135,7 +136,8 @@ def build_trial_receipt(
     }
     receipt = {
         **content,
-        "trial_id": "v6t-" + canonical_hash(content)[:28],
+        "trial_id": "v6t-"
+        + canonical_hash({key: content[key] for key in _TRIAL_IDENTITY_FIELDS})[:28],
         "trial_number": None,
         "attempted_at": utc_now(),
         "research_only": True,
@@ -156,7 +158,9 @@ def validate_trial_receipt(
     content = {key: receipt.get(key) for key in _TRIAL_CONTENT_FIELDS}
     if any(value in (None, "") for value in content.values()):
         blockers.append("trial_content_missing")
-    expected_trial_id = "v6t-" + canonical_hash(content)[:28]
+    expected_trial_id = "v6t-" + canonical_hash(
+        {key: content[key] for key in _TRIAL_IDENTITY_FIELDS}
+    )[:28]
     if receipt.get("trial_id") != expected_trial_id:
         blockers.append("trial_identity_mismatch")
     supplied_hash = receipt.get("payload_hash_sha256")

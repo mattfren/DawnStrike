@@ -123,7 +123,7 @@ class CapturePlan:
             if _under(path, repo):
                 raise CapturePlanError(f"{label} must not be under the repository")
 
-        current_sha = _git_head(repo)
+        current_sha, current_tree_sha = _git_identity(repo)
         if current_sha != self.candidate_sha:
             raise CapturePlanError(
                 f"candidate SHA mismatch: expected {self.candidate_sha}, running {current_sha}"
@@ -157,6 +157,8 @@ class CapturePlan:
             "provider": self.provider,
             "feed": self.feed,
             "candidate_sha": self.candidate_sha,
+            "candidate_tree_sha": current_tree_sha,
+            "candidate_worktree_clean": True,
             "symbols": symbols,
             "symbols_manifest_sha256": self.symbols_manifest_sha256,
             "market_date": session_identity["market_date"],
@@ -173,6 +175,8 @@ class CapturePlan:
             "db_path": str(db),
             "bounded_pages": self.max_pages,
             "bounded_retries": self.retries,
+            "required_endpoints": ["bars", "trades", "quotes", "corporate_actions"],
+            "full_microstructure_requested": True,
             "historical_membership_policy": str(manifest["membership_policy"]),
             "research_only": True,
             "broker_execution": "disabled",
@@ -292,15 +296,34 @@ def _under(path: Path, parent: Path) -> bool:
         return False
 
 
-def _git_head(repo: Path) -> str:
+def _git_identity(repo: Path) -> tuple[str, str]:
     try:
-        return subprocess.run(
+        head = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repo,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        if dirty.strip():
+            raise CapturePlanError("candidate repository worktree is not clean")
+        if not _GIT_OID.fullmatch(head) or not _GIT_OID.fullmatch(tree):
+            raise CapturePlanError("candidate repository identity is invalid")
+        return head, tree
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CapturePlanError("candidate repository SHA is unavailable") from exc
 

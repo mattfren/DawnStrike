@@ -89,6 +89,13 @@ def test_plan_requires_delayed_sip_and_separate_external_roots(tmp_path: Path) -
     assert result["status"] == "READY"
     assert result["symbols"] == ["SPY", "IWM", "QQQ", "DIA", "TLT"]
     assert result["broker_execution"] == "disabled"
+    assert result["required_endpoints"] == [
+        "bars",
+        "trades",
+        "quotes",
+        "corporate_actions",
+    ]
+    assert result["full_microstructure_requested"] is True
     assert result["mode_evidence_root"].endswith("forward_observed")
 
 
@@ -137,10 +144,36 @@ def test_plan_rejects_recent_window(tmp_path: Path) -> None:
         plan.validate(now=datetime(2026, 8, 28, 20, 5, tzinfo=UTC))
 
 
+def test_plan_rejects_dirty_candidate_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "base"],
+        check=True,
+        capture_output=True,
+    )
+    plan_root = tmp_path / "plan"
+    plan_root.mkdir()
+    plan = _plan(plan_root, repo)
+    tracked.write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(CapturePlanError, match="not clean"):
+        plan.validate(now=datetime(2026, 8, 30, 12, tzinfo=UTC))
+
+
 def test_capture_script_is_plan_only_without_execute() -> None:
     script = Path("scripts/capture_intraday_operations.py").read_text(encoding="utf-8")
     registration = Path("scripts/register_intraday_capture_task.ps1").read_text(encoding="utf-8")
     assert "--execute" in script
+    assert "--include-trades" in script
+    assert "--include-quotes" in script
+    assert "--include-corporate-actions" in script
     assert "-Create" in registration
     assert "Register-ScheduledTask" in registration
     assert "feed substitution" in script or "feed must be exactly" in Path(

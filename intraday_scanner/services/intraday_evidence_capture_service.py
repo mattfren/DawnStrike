@@ -208,29 +208,42 @@ class IntradayEvidenceCaptureService:
         for symbol in request.symbols:
             symbol_state = state["symbols"][symbol]
             bars = _state_from_dict(symbol_state.get("bars", {}))
-            optional_statuses = [
-                _state_from_dict(symbol_state[name]).status
-                for name in endpoint_names
-                if name != "bars" and name in symbol_state
-            ]
             status = bars.status or IntradayCoverageStatus.NO_DATA.value
             reason = bars.reason
-            if status == IntradayCoverageStatus.COMPLETE.value and any(
-                value == IntradayCoverageStatus.CORPORATE_ACTION_UNRESOLVED.value
-                for value in optional_statuses
-            ):
-                status = IntradayCoverageStatus.CORPORATE_ACTION_UNRESOLVED.value
-                reason = "corporate-action source was requested but unresolved"
-            coverage.append(
-                self._record_coverage(
-                    request=request,
-                    symbol=symbol,
-                    status=status,
-                    reason=reason,
-                    endpoint_state=bars,
-                    store=store,
-                )
+            endpoint_coverage = _endpoint_coverage(symbol_state, endpoint_names)
+            if status == IntradayCoverageStatus.COMPLETE.value:
+                failures = [
+                    row
+                    for row in endpoint_coverage
+                    if row["status"] != IntradayCoverageStatus.COMPLETE.value
+                    and not (
+                        row["endpoint"] == "corporate_actions"
+                        and row["status"] == IntradayCoverageStatus.NO_DATA.value
+                    )
+                ]
+                if failures:
+                    first = failures[0]
+                    failure_status = str(first["status"])
+                    status = (
+                        failure_status
+                        if failure_status
+                        not in {"", IntradayCoverageStatus.NO_DATA.value}
+                        else IntradayCoverageStatus.PARTIAL_MISSING_INTERVALS.value
+                    )
+                    reason = (
+                        f"required endpoint incomplete: {first['endpoint']}: "
+                        f"{failure_status or 'UNKNOWN'}"
+                    )
+            coverage_row = self._record_coverage(
+                request=request,
+                symbol=symbol,
+                status=status,
+                reason=reason,
+                endpoint_state=bars,
+                store=store,
             )
+            coverage_row["endpoint_coverage"] = endpoint_coverage
+            coverage.append(coverage_row)
 
         overall = _overall_status(coverage)
         state["status"] = overall
@@ -247,6 +260,7 @@ class IntradayEvidenceCaptureService:
             "symbols": list(request.symbols),
             "market_date": request.market_date,
             "exchange_session_id": request.exchange_session_id,
+            "required_endpoints": endpoint_names,
             "request_start": request.request_start.isoformat(),
             "request_end": request.request_end.isoformat(),
             "code_sha": request.code_sha,
@@ -297,6 +311,8 @@ class IntradayEvidenceCaptureService:
             )
             if page.provider != request.provider or page.feed != request.feed:
                 raise CaptureContractError("provider/feed identity changed within capture")
+            if page.endpoint != endpoint:
+                raise CaptureContractError("provider endpoint identity changed within capture")
             page_hash = str(page.raw_payload_hash_sha256 or "")
             if not _SHA256.fullmatch(page_hash):
                 raise CaptureContractError("provider page has no valid raw payload hash")
@@ -550,7 +566,7 @@ class IntradayEvidenceCaptureService:
                         8.0,
                     )
                     self._sleep(delay)
-        raise CaptureContractError(
+        raise RuntimeError(
             f"{endpoint} page failed after bounded retries: {_safe_error(last_error)}"
         ) from last_error
 
@@ -721,6 +737,25 @@ def _provider_failure_status(error: Exception | None) -> str:
     if "hash" in message or "cursor" in message:
         return IntradayCoverageStatus.HASH_MISMATCH.value
     return IntradayCoverageStatus.PARTIAL_MISSING_INTERVALS.value
+
+
+def _endpoint_coverage(
+    symbol_state: dict[str, Any], endpoint_names: list[str]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for endpoint in endpoint_names:
+        state = _state_from_dict(symbol_state.get(endpoint, {}))
+        rows.append(
+            {
+                "endpoint": endpoint,
+                "status": state.status or IntradayCoverageStatus.NO_DATA.value,
+                "reason": state.reason,
+                "page_count": len(state.pages),
+                "item_count": sum(int(page.get("item_count") or 0) for page in state.pages),
+                "artifact_manifest_id": state.artifact_manifest_id,
+            }
+        )
+    return rows
 
 
 def _overall_status(coverage: list[dict[str, Any]]) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -78,6 +79,9 @@ def main() -> int:
         str(metadata_path),
         "--env-file",
         str(plan.env_file),
+        "--include-trades",
+        "--include-quotes",
+        "--include-corporate-actions",
     ]
     env = os.environ.copy()
     env["ALPACA_DATA_FEED"] = "sip"
@@ -85,8 +89,17 @@ def main() -> int:
     env["INTRADAY_REQUEST_RETRIES"] = str(plan.retries)
     result = subprocess.run(command, cwd=plan.repo_root, env=env, capture_output=True, text=True)
     receipt = _safe_capture_receipt(result, prepared)
-    output_path = mode_output / f"capture-{prepared['market_date']}.json"
-    output_path.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    receipt["receipt_identity_sha256"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    output_path = mode_output / (
+        f"capture-{prepared['market_date']}-{receipt['receipt_identity_sha256'][:16]}.json"
+    )
+    try:
+        _write_once_json(output_path, receipt)
+    except RuntimeError as exc:
+        _print_failure(str(exc))
+        return 3
     print(json.dumps(receipt, sort_keys=True))
     return 0 if result.returncode == 0 else 1
 
@@ -157,9 +170,13 @@ def _safe_capture_receipt(
         "provider": plan["provider"],
         "feed": plan["feed"],
         "candidate_sha": plan["candidate_sha"],
+        "candidate_tree_sha": plan["candidate_tree_sha"],
+        "candidate_worktree_clean": plan["candidate_worktree_clean"],
+        "plan_identity_sha256": plan["plan_identity_sha256"],
         "market_date": plan["market_date"],
         "source_config_sha256": plan["source_config_sha256"],
         "entitlement_receipt_sha256": plan["entitlement_receipt_sha256"],
+        "required_endpoints": plan["required_endpoints"],
         "broker_execution": "disabled",
     }
     if process.returncode == 0:
@@ -178,6 +195,19 @@ def _safe_capture_receipt(
                 )
                 break
     return payload
+
+
+def _write_once_json(path: Path, payload: dict[str, Any]) -> None:
+    encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    try:
+        with path.open("xb") as handle:
+            handle.write(encoded)
+        return
+    except FileExistsError:
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != encoded:
+            raise RuntimeError(
+                "capture result receipt identity conflicts with retained evidence"
+            ) from None
 
 
 def _print_failure(reason: str) -> None:

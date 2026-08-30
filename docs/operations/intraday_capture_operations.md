@@ -13,6 +13,10 @@ windows, repository/runtime/state output roots, overlapping evidence roots, and
 unbounded retries/pages. It writes mode-separated resumable runs and only a
 sanitized result receipt. Broker execution is disabled.
 
+Every governed operation requests bars, trades, quotes, and corporate actions.
+Bars-only capture is intentionally not exposed by this wrapper because it
+cannot support spread, latency, execution-cost, halt, or adjustment research.
+
 ## Safe readiness invocation
 
 Run this from the exact candidate runtime. The command is preview-only unless

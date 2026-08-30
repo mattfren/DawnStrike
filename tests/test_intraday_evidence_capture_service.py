@@ -146,6 +146,56 @@ def test_capture_checkpoints_each_page_before_process_interruption(tmp_path: Pat
     assert resumed.calls == ["next"]
 
 
+class _IncompleteMicrostructureProvider(_FakeProvider):
+    def _page(self, endpoint: str, *, items=()):
+        return IntradayPage(
+            provider=self.provider_name,
+            feed=self.feed,
+            endpoint=endpoint,
+            items=items,
+            next_page_token=None,
+            raw_payload_hash_sha256={
+                "trades": "c" * 64,
+                "quotes": "d" * 64,
+                "corporate_actions": "e" * 64,
+            }[endpoint],
+        )
+
+    def get_trades_page(self, *args, **kwargs):
+        return self._page(
+            "trades", items=({"S": "NOVA", "t": "2026-08-07T13:30:01Z", "p": 10},)
+        )
+
+    def get_quotes_page(self, *args, **kwargs):
+        raise RuntimeError("quote history unavailable")
+
+    def get_corporate_actions_page(self, *args, **kwargs):
+        return self._page("corporate_actions")
+
+
+def test_capture_cannot_report_complete_when_required_quotes_are_missing(tmp_path: Path) -> None:
+    request = CaptureRequest(
+        **{
+            **_request(tmp_path).__dict__,
+            "include_trades": True,
+            "include_quotes": True,
+            "include_corporate_actions": True,
+        }
+    )
+    receipt = IntradayEvidenceCaptureService(
+        _IncompleteMicrostructureProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+
+    assert receipt["status"] == "PARTIAL_MISSING_INTERVALS"
+    endpoints = {
+        row["endpoint"]: row for row in receipt["coverage"][0]["endpoint_coverage"]
+    }
+    assert endpoints["trades"]["status"] == "COMPLETE"
+    assert endpoints["quotes"]["status"] == "PARTIAL_MISSING_INTERVALS"
+    assert endpoints["corporate_actions"]["status"] == "NO_DATA"
+
+
 def test_capture_rejects_tampered_checkpoint_page_artifact(tmp_path: Path) -> None:
     request = _request(tmp_path)
     first = _FakeProvider()

@@ -2628,6 +2628,8 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         );
         CREATE INDEX IF NOT EXISTS idx_experiment_trial_ledger_experiment
         ON experiment_trial_ledger(experiment_id, arm_id, trial_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_trial_ledger_attempt
+        ON experiment_trial_ledger(json_extract(payload_json, '$.attempt_id'));
 
         CREATE TRIGGER IF NOT EXISTS expected_market_sessions_no_update
         BEFORE UPDATE ON expected_market_sessions BEGIN

@@ -99,12 +99,41 @@ def test_trial_store_rejects_caller_ordinal_and_tampering(tmp_path) -> None:
         source_hash_sha256="d" * 64,
     )
     forged_ordinal = {**receipt, "trial_number": 99}
-    tampered = {**receipt, "strategy_version": "forged"}
+    tampered = {**receipt, "attempt_id": "forged"}
 
     with pytest.raises(StorageError, match="caller_assigned_trial_number_forbidden"):
         store.persist_alpha_v6_trial(forged_ordinal)
     with pytest.raises(StorageError, match="trial_identity_mismatch"):
         store.persist_alpha_v6_trial(tampered)
+
+
+def test_one_attempt_identity_cannot_mint_a_second_status_row(tmp_path) -> None:
+    store = SQLiteScanStore(tmp_path / "trials.sqlite")
+    experiment = _experiment()
+    common = {
+        "attempt_id": "run-001",
+        "experiment": experiment,
+        "arm_id": "candidate",
+        "strategy_id": "alphaops_v6",
+        "strategy_version": "v6",
+        "configuration_hash_sha256": "a" * 64,
+        "feature_set_hash_sha256": "b" * 64,
+        "cost_model_version": "cost-v1",
+        "validation_window": experiment["frozen_windows"],
+        "code_sha": "c" * 40,
+        "source_hash_sha256": "d" * 64,
+    }
+    attempted = build_trial_receipt(status="ATTEMPTED", **common)
+    failed = build_trial_receipt(status="FAILED", **common)
+
+    assert attempted["trial_id"] == failed["trial_id"]
+    assert store.persist_alpha_v6_trial(attempted) is True
+    with pytest.raises(StorageError, match="immutable V6 trial conflict"):
+        store.persist_alpha_v6_trial(failed)
+    assert store.alpha_v6_trial_counts(experiment_id="v6x-governance") == {
+        "global_attempt_count": 1,
+        "experiment_attempt_count": 1,
+    }
 
 
 def test_trial_count_missing_does_not_become_one() -> None:
