@@ -147,6 +147,21 @@ class CapturePlan:
         proof_id = str(entitlement.get("receipt") or entitlement.get("proof_id") or "").strip()
         if not entitlement_name or not proof_id:
             raise CapturePlanError("entitlement receipt requires entitlement and receipt/proof_id")
+        if entitlement.get("provider") != "alpaca" or entitlement.get("feed") != "sip":
+            raise CapturePlanError("entitlement receipt provider/feed identity mismatch")
+        if entitlement.get("probe_status") != "PASS":
+            raise CapturePlanError("entitlement receipt does not contain a passing endpoint probe")
+        proven_endpoints = set(entitlement.get("proven_endpoints") or [])
+        if not {"bars", "trades", "quotes"}.issubset(proven_endpoints):
+            raise CapturePlanError("entitlement receipt is missing proven market-data endpoints")
+        if entitlement.get("retention_allowed") is not True:
+            raise CapturePlanError("entitlement receipt does not permit private retention")
+        if entitlement.get("approved_plan") is not True:
+            raise CapturePlanError("entitlement receipt is not operator-approved")
+        if entitlement.get("research_only") is not True:
+            raise CapturePlanError("entitlement receipt is not research-only")
+        if entitlement.get("broker_execution") != "disabled":
+            raise CapturePlanError("entitlement receipt does not disable broker execution")
         if source_config is not None and _sha256_file(source_config) != self.source_config_sha256:
             raise CapturePlanError("source config hash mismatch")
 
@@ -197,6 +212,11 @@ class CapturePlan:
             "receipt": receipt_hash,
             "proof_id": receipt_hash,
             "receipt_file_sha256": receipt_hash,
+            "provider": "alpaca",
+            "feed": "sip",
+            "retention_allowed": "true",
+            "research_only": "true",
+            "broker_execution": "disabled",
         }
 
 

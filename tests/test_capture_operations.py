@@ -45,8 +45,16 @@ def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
     entitlement.write_text(
         json.dumps(
             {
-                "entitlement": "alpaca-sip",
+                "entitlement": "alpaca-historical-sip-older-than-15-minutes",
                 "proof_id": "operator-receipt-1",
+                "provider": "alpaca",
+                "feed": "sip",
+                "probe_status": "PASS",
+                "proven_endpoints": ["bars", "trades", "quotes"],
+                "retention_allowed": True,
+                "approved_plan": True,
+                "research_only": True,
+                "broker_execution": "disabled",
                 "secret": "never-copy",
             }
         ),
@@ -164,6 +172,19 @@ def test_plan_rejects_dirty_candidate_worktree(tmp_path: Path) -> None:
     tracked.write_text("dirty\n", encoding="utf-8")
 
     with pytest.raises(CapturePlanError, match="not clean"):
+        plan.validate(now=datetime(2026, 8, 30, 12, tzinfo=UTC))
+
+
+def test_plan_rejects_unproven_entitlement_receipt(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    plan = _plan(tmp_path, repo)
+    plan.entitlement_receipt.write_text(
+        json.dumps({"entitlement": "claimed", "proof_id": "forged"}),
+        encoding="utf-8",
+    )
+    object.__setattr__(plan, "entitlement_receipt_sha256", _sha(plan.entitlement_receipt))
+
+    with pytest.raises(CapturePlanError, match="provider/feed identity"):
         plan.validate(now=datetime(2026, 8, 30, 12, tzinfo=UTC))
 
 
