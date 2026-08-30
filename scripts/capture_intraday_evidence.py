@@ -62,7 +62,22 @@ def main() -> int:
     )
     receipt = IntradayEvidenceCaptureService(provider, config).capture(request)
     print(json.dumps(receipt, sort_keys=True))
-    return 0 if receipt["status"] in {"COMPLETE", "NO_DATA", "PARTIAL"} else 1
+    # A terminal receipt is not the same thing as a successful capture.  The
+    # scheduler must retry or surface incomplete evidence instead of treating
+    # PARTIAL/NO_DATA as success.  Keep distinct codes for the two truthful
+    # terminal outcomes so callers can classify the failure without parsing
+    # logs.
+    return _capture_exit_code(str(receipt.get("status") or ""))
+
+
+def _capture_exit_code(status: str) -> int:
+    if status == "COMPLETE":
+        return 0
+    if status == "PARTIAL":
+        return 20
+    if status == "NO_DATA":
+        return 21
+    return 1
 
 
 def _parser() -> argparse.ArgumentParser:

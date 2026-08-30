@@ -266,6 +266,7 @@ class IntradayEvidenceCaptureService:
                 }
                 for row in coverage
                 for endpoint in row.get("endpoint_coverage", [])
+                if endpoint.get("artifact_manifest_id")
             ],
             key=_canonical_json,
         )

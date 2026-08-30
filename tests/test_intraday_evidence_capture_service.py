@@ -202,6 +202,127 @@ def test_capture_cannot_report_complete_when_required_quotes_are_missing(tmp_pat
     assert endpoints["corporate_actions"]["status"] == "NO_DATA"
 
 
+class _NoCorporateActionProvider(_FakeProvider):
+    def get_corporate_actions_page(self, *args, **kwargs):
+        return IntradayPage(
+            provider=self.provider_name,
+            feed=self.feed,
+            endpoint="corporate_actions",
+            items=(),
+            next_page_token=None,
+            raw_payload_hash_sha256="e" * 64,
+        )
+
+
+def test_corporate_action_no_data_can_coexist_with_complete_run(tmp_path: Path) -> None:
+    request = CaptureRequest(
+        **{**_request(tmp_path).__dict__, "include_corporate_actions": True}
+    )
+    receipt = IntradayEvidenceCaptureService(
+        _NoCorporateActionProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+
+    assert receipt["status"] == "COMPLETE"
+    endpoints = {
+        row["endpoint"]: row for row in receipt["coverage"][0]["endpoint_coverage"]
+    }
+    assert endpoints["bars"]["status"] == "COMPLETE"
+    assert endpoints["corporate_actions"]["status"] == "NO_DATA"
+    assert {item["endpoint"] for item in receipt["artifact_identity"]["items"]} == {
+        "bars",
+        "corporate_actions",
+    }
+
+
+def _resign_capture_receipt(receipt: dict, *, artifact_item: dict) -> dict:
+    changed = json.loads(json.dumps(receipt))
+    endpoint = next(
+        row
+        for row in changed["coverage"][0]["endpoint_coverage"]
+        if row.get("artifact_manifest_id")
+    )
+    endpoint.update(
+        artifact_manifest_id=artifact_item["artifact_manifest_id"],
+        raw_artifact_hash_sha256=artifact_item["raw_artifact_hash_sha256"],
+        normalized_artifact_hash_sha256=artifact_item["normalized_artifact_hash_sha256"],
+    )
+    changed["artifact_identity"]["items"] = [artifact_item]
+    changed["artifact_identity"]["sha256"] = hashlib.sha256(
+        json.dumps(
+            {"items": changed["artifact_identity"]["items"]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    changed["raw_artifact_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "endpoint": artifact_item["endpoint"],
+                    "hash": artifact_item["raw_artifact_hash_sha256"],
+                    "symbol": artifact_item["symbol"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    changed["normalized_artifact_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "endpoint": artifact_item["endpoint"],
+                    "hash": artifact_item["normalized_artifact_hash_sha256"],
+                    "symbol": artifact_item["symbol"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    changed["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in changed.items() if key != "receipt_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return changed
+
+
+def test_capture_run_rejects_nonexistent_manifest_even_with_valid_receipt_hash(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    receipt = IntradayEvidenceCaptureService(
+        _FakeProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    item = dict(receipt["artifact_identity"]["items"][0])
+    item["artifact_manifest_id"] = "f" * 64
+
+    with pytest.raises(StorageError, match="manifest does not exist"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(
+            _resign_capture_receipt(receipt, artifact_item=item)
+        )
+
+
+def test_capture_run_rejects_artifact_identity_with_wrong_endpoint(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    receipt = IntradayEvidenceCaptureService(
+        _FakeProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    item = dict(receipt["artifact_identity"]["items"][0])
+    item["endpoint"] = "trades"
+
+    with pytest.raises(StorageError, match="does not match endpoint coverage"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(
+            _resign_capture_receipt(receipt, artifact_item=item)
+        )
+
+
 def test_capture_rejects_tampered_checkpoint_page_artifact(tmp_path: Path) -> None:
     request = _request(tmp_path)
     first = _FakeProvider()

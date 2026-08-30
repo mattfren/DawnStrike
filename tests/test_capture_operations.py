@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -9,6 +10,24 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
+
+
+def _operations_module():
+    path = Path("scripts/capture_intraday_operations.py").resolve()
+    spec = importlib.util.spec_from_file_location("capture_intraday_operations", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _evidence_module():
+    path = Path("scripts/capture_intraday_evidence.py").resolve()
+    spec = importlib.util.spec_from_file_location("capture_intraday_evidence", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _sha(path: Path) -> str:
@@ -208,3 +227,44 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "New-ScheduledTaskPrincipal" in registration
     assert "-LogonType Interactive -RunLevel Limited" in registration
     assert "Choose either InteractiveCurrentUser or RunAsCredential" in registration
+
+
+def test_inner_capture_exit_codes_only_accept_complete() -> None:
+    module = _evidence_module()
+    assert module._capture_exit_code("COMPLETE") == 0
+    assert module._capture_exit_code("PARTIAL") != 0
+    assert module._capture_exit_code("NO_DATA") != 0
+    assert module._capture_exit_code("PARTIAL") != module._capture_exit_code("NO_DATA")
+    assert module._capture_exit_code("HASH_MISMATCH") != 0
+
+
+def test_outer_operation_retains_terminal_incomplete_receipt() -> None:
+    module = _operations_module()
+    plan = {
+        "mode": "forward_observed",
+        "provider": "alpaca",
+        "feed": "sip",
+        "candidate_sha": "a" * 40,
+        "candidate_tree_sha": "b" * 40,
+        "candidate_worktree_clean": True,
+        "plan_identity_sha256": "c" * 64,
+        "market_date": "2026-08-31",
+        "source_config_sha256": "d" * 64,
+        "entitlement_receipt_sha256": "e" * 64,
+        "required_endpoints": ["bars"],
+    }
+    inner = {
+        "status": "PARTIAL",
+        "run_id": "run-1",
+        "coverage": [{"symbol": "SPY", "status": "PARTIAL"}],
+    }
+    result = module._safe_capture_receipt(
+        subprocess.CompletedProcess(
+            args=["capture"], returncode=20, stdout=json.dumps(inner), stderr=""
+        ),
+        plan,
+    )
+    assert result["status"] == "CAPTURE_INCOMPLETE"
+    assert result["capture_status"] == "PARTIAL"
+    assert result["run_id"] == "run-1"
+    assert result["coverage"] == inner["coverage"]
