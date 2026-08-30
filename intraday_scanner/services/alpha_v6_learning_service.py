@@ -22,6 +22,7 @@ from intraday_scanner.alpha.v6.contracts import (
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
 from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
 from intraday_scanner.alpha.v6.drift import build_drift_report
+from intraday_scanner.alpha.v6.experiment_ledger import build_trial_receipt
 from intraday_scanner.alpha.v6.label_builder import build_label_families
 from intraday_scanner.alpha.v6.registry import promotion_review_packet
 from intraday_scanner.alpha.v6.training import (
@@ -145,6 +146,8 @@ def run_alpha_v6_weekly_training(
     market_date: str | None = None,
     reference_window: dict[str, Any] | None = None,
     recent_window: dict[str, Any] | None = None,
+    experiment_id: str | None = None,
+    arm_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the separately scheduled V6 refit and all-family OOF evaluation."""
 
@@ -159,7 +162,62 @@ def run_alpha_v6_weekly_training(
     persisted_labels = store.load_alpha_v6_labels()
     dataset = build_return_dataset(decisions=decisions, labels=persisted_labels)
     dataset_inserted = store.persist_alpha_v6_dataset(dataset)
-    training = train_shadow_challengers(dataset, code_sha=code_sha)
+    experiment = store.load_alpha_v6_experiment(experiment_id) if experiment_id else None
+    # A small/empty historical set retains the legacy NOT_TRAINED result.  Any
+    # actual fit is governed by a persisted preregistered experiment and arm.
+    require_preregistration = bool(dataset.get("row_count"))
+    configuration_hash = (
+        str(experiment.get("configuration_hash_sha256") or "")
+        if isinstance(experiment, dict)
+        else ""
+    )
+    feature_hash = (
+        str(experiment.get("feature_set_hash_sha256") or "")
+        if isinstance(experiment, dict) and experiment.get("feature_set_hash_sha256")
+        else canonical_hash({"feature_schema_version": dataset.get("feature_schema_version")})
+    )
+    validation_window = experiment.get("frozen_windows") if isinstance(experiment, dict) else None
+    cost_model_version = (
+        str(experiment.get("cost_model_version") or "")
+        if isinstance(experiment, dict) and experiment.get("cost_model_version")
+        else "dawnstrike-alphaops-v6-conservative-cost-v1"
+    )
+    if require_preregistration and isinstance(experiment, dict):
+        trial = build_trial_receipt(
+            experiment=experiment,
+            arm_id=str(arm_id or "candidate"),
+            strategy_id="alphaops_v6",
+            strategy_version="v6",
+            configuration_hash_sha256=configuration_hash,
+            feature_set_hash_sha256=feature_hash,
+            cost_model_version=cost_model_version,
+            validation_window=validation_window if isinstance(validation_window, dict) else {},
+            code_sha=code_sha,
+            source_hash_sha256=str(dataset.get("dataset_hash_sha256") or ""),
+        )
+        trial_inserted = store.persist_alpha_v6_trial(trial)
+        trial_counts = store.alpha_v6_trial_counts(experiment_id=str(experiment["experiment_id"]))
+        trial["trial_number"] = store.load_alpha_v6_trials(
+            experiment_id=str(experiment["experiment_id"]), limit=1
+        )[0].get("trial_number")
+    else:
+        trial_inserted = False
+        trial_counts = {"global_attempt_count": 0, "experiment_attempt_count": None}
+        trial = None
+    training = train_shadow_challengers(
+        dataset,
+        code_sha=code_sha,
+        experiment=experiment,
+        arm_id=arm_id,
+        configuration_hash_sha256=configuration_hash,
+        feature_set_hash_sha256=feature_hash,
+        cost_model_version=cost_model_version,
+        validation_window=validation_window if isinstance(validation_window, dict) else None,
+        require_preregistration=require_preregistration,
+    )
+    training["trial_counts"] = trial_counts
+    training["trial_id"] = trial.get("trial_id") if isinstance(trial, dict) else None
+    training["trial_inserted"] = trial_inserted
     training_inserted = store.persist_alpha_v6_model_run(training)
     artifact = training.get("artifact")
     artifact_inserted = False
@@ -186,7 +244,17 @@ def run_alpha_v6_weekly_training(
     )
     folds = expanding_purged_splits(dataset["rows"])
     evaluation_rows = _evaluation_rows(predictions, outcomes, dataset)
-    family_metrics = _family_evaluation_metrics(evaluation_rows)
+    family_metrics = _family_evaluation_metrics(
+        evaluation_rows,
+        trial_count=(
+            trial_counts.get("global_attempt_count")
+            if isinstance(trial_counts, dict) and trial_counts.get("global_attempt_count")
+            else None
+        ),
+        experiment_trial_count=(
+            trial_counts.get("experiment_attempt_count") if isinstance(trial_counts, dict) else None
+        ),
+    )
     model_competition = select_research_model_family(family_metrics)
     return_metrics = dict(
         family_metrics.get("regularized_baselines", {}).get("full_oof")
@@ -209,6 +277,12 @@ def run_alpha_v6_weekly_training(
     comparison_to_v5 = _comparison_to_v5_evidence(store, model_run_id=str(training["model_run_id"]))
     evaluation = {
         "model_run_id": training["model_run_id"],
+        "experiment_id": training.get("experiment_id"),
+        "arm_id": training.get("arm_id"),
+        "configuration_hash_sha256": training.get("configuration_hash_sha256"),
+        "feature_set_hash_sha256": training.get("feature_set_hash_sha256"),
+        "cost_model_version": training.get("cost_model_version"),
+        "evaluation_window": training.get("evaluation_window"),
         "evaluated_at": utc_now(),
         "status": return_metrics["status"],
         "evaluation_method": "date_grouped_purged_embargoed_expanding_walk_forward",
@@ -773,7 +847,12 @@ def _comparison_to_v5_evidence(store: SQLiteScanStore, *, model_run_id: str) -> 
     }
 
 
-def _family_evaluation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _family_evaluation_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    trial_count: int | None = None,
+    experiment_trial_count: int | None = None,
+) -> dict[str, Any]:
     """Compare model families only on their shared out-of-fold decisions."""
 
     by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -809,8 +888,18 @@ def _family_evaluation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             if (str(row.get("decision_id") or ""), str(row.get("fold_id") or "")) in common_keys
         ]
         output[family] = {
-            "full_oof": evaluate_return_predictions(family_rows),
-            "exact_common_fold_oof": evaluate_return_predictions(exact_rows),
+            "full_oof": evaluate_return_predictions(
+                family_rows,
+                trial_count=trial_count,
+                experiment_trial_count=experiment_trial_count,
+                require_durable_trial_count=True,
+            ),
+            "exact_common_fold_oof": evaluate_return_predictions(
+                exact_rows,
+                trial_count=trial_count,
+                experiment_trial_count=experiment_trial_count,
+                require_durable_trial_count=True,
+            ),
             "exact_common_fold_calibration": calibration_report(exact_rows),
             "exact_common_fold_interval_coverage": interval_coverage(exact_rows),
             "full_oof_prediction_count": len(family_rows),
@@ -1186,9 +1275,7 @@ def _drift(
     if not source_values:
         raise ValueError("V6 drift requires exact source lineage across observations")
     code_values = {
-        str(row.get("code_sha") or "")
-        for row in [*baseline, *current]
-        if row.get("code_sha")
+        str(row.get("code_sha") or "") for row in [*baseline, *current] if row.get("code_sha")
     }
     if len(code_values) != 1:
         raise ValueError("V6 drift requires one exact code SHA across observations")

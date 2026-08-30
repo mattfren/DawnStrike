@@ -7628,6 +7628,144 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not load V6 experiment: {exc}") from exc
 
+    def persist_alpha_v6_trial(self, row: dict[str, Any]) -> bool:
+        """Append one attempted V6 trial and assign its global ordinal atomically."""
+
+        self.initialize()
+        required = (
+            "trial_id",
+            "experiment_id",
+            "arm_id",
+            "strategy_id",
+            "strategy_version",
+            "configuration_hash_sha256",
+            "feature_set_hash_sha256",
+            "cost_model_version",
+            "validation_window",
+            "status",
+            "code_sha",
+            "source_hash_sha256",
+        )
+        if any(not str(row.get(key) or "").strip() for key in required):
+            raise StorageError("V6 trial receipt is missing required preregistration fields")
+        payload = dict(row)
+        payload.setdefault("research_only", True)
+        payload.setdefault("broker_execution_enabled", False)
+        if payload["research_only"] is not True or payload["broker_execution_enabled"] is not False:
+            raise StorageError("V6 trials are research-only and broker-disabled")
+        trial_id = str(payload["trial_id"])
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT payload_json FROM experiment_trial_ledger WHERE trial_id = ?",
+                    (trial_id,),
+                ).fetchone()
+                if existing is not None:
+                    prior = _json_value(existing[0])
+                    if isinstance(prior, dict) and "trial_number" not in payload:
+                        payload["trial_number"] = prior.get("trial_number")
+                    if not isinstance(prior, dict) or _immutable_semantics(
+                        prior
+                    ) != _immutable_semantics(payload):
+                        raise StorageError(f"immutable V6 trial conflict: {trial_id}")
+                    return False
+                next_number = connection.execute(
+                    "SELECT COALESCE(MAX(trial_number), 0) + 1 FROM experiment_trial_ledger"
+                ).fetchone()[0]
+                payload["trial_number"] = int(payload.get("trial_number") or next_number)
+                payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                cursor = connection.execute(
+                    """
+                    INSERT INTO experiment_trial_ledger
+                    (trial_id, trial_number, experiment_id, arm_id, strategy_id,
+                     strategy_version, configuration_hash_sha256, feature_set_hash_sha256,
+                     cost_model_version, validation_window, status, code_sha,
+                     source_hash_sha256, attempted_at, payload_json, research_only,
+                     broker_execution_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+                    """,
+                    (
+                        trial_id,
+                        payload["trial_number"],
+                        str(payload["experiment_id"]),
+                        str(payload["arm_id"]),
+                        str(payload["strategy_id"]),
+                        str(payload["strategy_version"]),
+                        str(payload["configuration_hash_sha256"]),
+                        str(payload["feature_set_hash_sha256"]),
+                        str(payload["cost_model_version"]),
+                        json.dumps(
+                            payload["validation_window"], sort_keys=True, separators=(",", ":")
+                        ),
+                        str(payload["status"]),
+                        str(payload["code_sha"]),
+                        str(payload["source_hash_sha256"]),
+                        str(payload.get("attempted_at") or ""),
+                        payload_json,
+                    ),
+                )
+                return bool(cursor.rowcount)
+        except sqlite3.IntegrityError as exc:
+            raise StorageError(f"Could not append V6 trial: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist V6 trial: {exc}") from exc
+
+    def load_alpha_v6_trials(
+        self, *, experiment_id: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Load immutable trial receipts, newest global ordinal first."""
+
+        self.initialize()
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                if experiment_id:
+                    sql = (
+                        "SELECT payload_json FROM experiment_trial_ledger "
+                        "WHERE experiment_id = ? ORDER BY trial_number DESC"
+                    )
+                    params: tuple[Any, ...] = (experiment_id,)
+                else:
+                    sql = (
+                        "SELECT payload_json FROM experiment_trial_ledger "
+                        "ORDER BY trial_number DESC"
+                    )
+                    params = ()
+                if limit is not None:
+                    sql += " LIMIT ?"
+                    params = (*params, limit)
+                rows = connection.execute(sql, params).fetchall()
+                return [json.loads(str(row["payload_json"])) for row in rows]
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load V6 trials: {exc}") from exc
+
+    def alpha_v6_trial_counts(self, *, experiment_id: str | None = None) -> dict[str, int | None]:
+        """Return durable global/per-experiment counts without a default of one."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                global_count = int(
+                    connection.execute("SELECT COUNT(*) FROM experiment_trial_ledger").fetchone()[0]
+                )
+                experiment_count: int | None = None
+                if experiment_id:
+                    experiment_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM experiment_trial_ledger WHERE experiment_id = ?",
+                            (experiment_id,),
+                        ).fetchone()[0]
+                    )
+                return {
+                    "global_attempt_count": global_count,
+                    "experiment_attempt_count": experiment_count,
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not count V6 trials: {exc}") from exc
+
     def persist_alpha_v6_holdout_evaluation(self, row: dict[str, Any]) -> bool:
         """Persist once per experiment; a second evaluation is rejected by UNIQUE."""
 
@@ -8115,9 +8253,7 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                identity_sql = quote_sql_identifier(
-                    identity_field, allowed=allowed_columns
-                )
+                identity_sql = quote_sql_identifier(identity_field, allowed=allowed_columns)
                 existing = connection.execute(
                     f"SELECT payload_json FROM {table_sql} WHERE {identity_sql} = ?",  # nosec B608
                     (values[0],),
@@ -9463,6 +9599,7 @@ class SQLiteScanStore:
                                 from intraday_scanner.services import (
                                     research_episode_outcome_service,
                                 )
+
                                 persisted_validator = (
                                     research_episode_outcome_service
                                     ._validate_persisted_research_episode_outcome_bridge
@@ -10414,12 +10551,7 @@ def _validate_signal_parent_rows(
                 and decision_entry is not None
                 and decision_stop is not None
                 and decision_target is not None
-                and (
-                    decision_entry
-                    > decision_stop
-                    > 0
-                    and decision_target > decision_entry
-                )
+                and (decision_entry > decision_stop > 0 and decision_target > decision_entry)
                 and link_cohort == decision_cohort
                 and link_strategy_id == SCENARIO_STRATEGY_ID
                 and link_strategy_version == decision_policy_version
