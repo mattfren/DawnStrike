@@ -2489,8 +2489,25 @@ def _portfolio_order_block_reason(
     """
 
     equity = sum(max(float(row.current_equity), 0.0) for row in all_accounts)
-    positions = [*position_rows]
-    pending = [*pending_rows]
+    positions = [dict(row) for row in position_rows]
+    pending = [dict(row) for row in pending_rows]
+    if order.mode is PaperRunMode.REPLAY:
+        # Historical lifecycle bars are the causal marks at signal_time, but
+        # the legacy immutable PaperPosition contract has no last_mark_at
+        # field. Bind that replay clock explicitly without inventing a price.
+        for row in positions:
+            if row.get("last_mark_price") is not None:
+                row.setdefault("price_observed_at", order.signal_time)
+        # A pending replay order has an observed proposed entry rather than a
+        # held-position mark; bind that value only inside the replay adapter.
+        for row in pending:
+            if row.get("mark_price") is None:
+                row["mark_price"] = row.get("entry_price", row.get("entry"))
+            if row.get("mark_price") is not None:
+                row.setdefault(
+                    "price_observed_at",
+                    row.get("signal_time") or order.signal_time,
+                )
     snapshot = PortfolioRiskSnapshot.from_mappings(
         equity=equity,
         positions=positions,
