@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import uuid
 from contextlib import closing
@@ -22,6 +23,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION  # noqa: E402
 
 SCHEMA_VERSION = 1
 DB_NAME = "shadow_real.sqlite"
@@ -105,12 +112,15 @@ def _db_metadata(path: Path, *, read_only: bool) -> dict[str, Any]:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
         ).fetchone()
         if table is None:
-            schema = 0
-        else:
-            row = connection.execute(
-                "SELECT MAX(version) FROM schema_version"
-            ).fetchone()
-            schema = int(row[0] or 0)
+            raise RecoveryValidationError("Dawnstrike schema_version table is missing")
+        row = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        if row is None or row[0] is None:
+            raise RecoveryValidationError("Dawnstrike schema_version table is empty")
+        schema = int(row[0])
+        if schema < 1 or schema > CURRENT_SCHEMA_VERSION:
+            raise RecoveryValidationError(
+                f"unsupported Dawnstrike application schema version: {schema}"
+            )
         return {
             "quick_check": quick_check,
             "schema_version": schema,

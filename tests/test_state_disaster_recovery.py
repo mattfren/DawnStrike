@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION
 from scripts.state_disaster_recovery import (
     RecoveryValidationError,
     create_backup,
@@ -50,6 +51,42 @@ def test_application_schema_is_bound_not_sqlite_user_version(tmp_path: Path) -> 
     assert manifest["source_schema_version"] == 26
     assert manifest["backup_schema_version"] == 26
     assert manifest["source_sqlite_user_version"] == 999
+
+
+def test_valid_sqlite_without_dawnstrike_schema_is_rejected(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = state / "shadow_real.sqlite"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+    with pytest.raises(RecoveryValidationError, match="schema_version table is missing"):
+        create_backup(source, tmp_path / "backups", state_root=state)
+
+
+def test_empty_dawnstrike_schema_is_rejected(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = state / "shadow_real.sqlite"
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)"
+        )
+    with pytest.raises(RecoveryValidationError, match="schema_version table is empty"):
+        create_backup(source, tmp_path / "backups", state_root=state)
+
+
+@pytest.mark.parametrize("version", [0, CURRENT_SCHEMA_VERSION + 1, -1])
+def test_incompatible_dawnstrike_schema_is_rejected(tmp_path: Path, version: int) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = state / "shadow_real.sqlite"
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO schema_version VALUES (?, 'fixture')", (version,))
+    with pytest.raises(RecoveryValidationError, match="unsupported|empty"):
+        create_backup(source, tmp_path / "backups", state_root=state)
 
 
 def test_tamper_and_partial_bundles_fail_closed(tmp_path: Path) -> None:
