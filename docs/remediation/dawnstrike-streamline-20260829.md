@@ -39,6 +39,11 @@ market evidence, or rewriting historical receipts.
   bundle across alpha monitoring and trade watching.
 - [x] SQLite initialization/migration is once per process/schema version while
   cold-start and external-version changes remain correct.
+- [x] Morning and EOD take fail-closed SQLite online backups before mutation;
+  each atomic bundle is held outside the state root, binds the supported
+  Dawnstrike schema and exact release SHA, is independently self-hashed, and
+  never includes credentials. Restore tooling is non-mutating VERIFY/PLAN
+  only, and retention never removes the last known-good bundle.
 - [x] Scheduled children have bounded descendant-killing deadlines, live lock
   owners are not age-evicted, and skipped Monitor intervals are receipted.
 
@@ -105,6 +110,21 @@ market evidence, or rewriting historical receipts.
 - [ ] Monday task definitions are enabled, rooted at the accepted runtime,
   Morning is exactly 08:00 America/Chicago, and no unexpected enabled legacy
   runner exists.
+
+## Current external gates (2026-08-30)
+
+- The prior durable state root was not recoverable from an authentic backup.
+  The replacement database is deliberately schema-only and fail-closed; it
+  contains no reconstructed picks, fills, positions, P&L, returns, or secrets.
+- Both supported Telegram credential pairs are absent. A fresh open-session
+  Morning run therefore fails the required publication boundary instead of
+  falling back to console or claiming delivery. This remains an external
+  Monday blocker until valid credentials are restored without exposing them.
+- Scenario Intelligence remains disabled because no OpenAI key is configured;
+  this is an allowed optional-lane state and does not weaken core readiness.
+- 2026-08-30 is a closed market date. The candidate cannot honestly produce a
+  current-session READY publication receipt or pass the exact-SHA Vercel and
+  runtime-cutover gates on this date.
 
 ## Convergence rule
 
