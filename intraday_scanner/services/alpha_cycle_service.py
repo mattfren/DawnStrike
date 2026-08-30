@@ -40,7 +40,7 @@ from intraday_scanner.decisioning.contracts import (
 )
 from intraday_scanner.errors import (
     DataProviderError,
-    NotificationError,
+    NotificationConfigurationError,
     SnapshotValidationError,
     StorageError,
 )
@@ -156,7 +156,7 @@ def _write_notification_preflight_receipt(
     root: str | Path,
     stage: str,
     market_date: str | None,
-    error: NotificationError,
+    error: NotificationConfigurationError,
 ) -> Path:
     """Write a nonsecret, atomic receipt for a blocked scheduled stage."""
 
@@ -204,7 +204,7 @@ def _require_scheduled_notification_configuration(
     )
     try:
         require_notification_configuration(config, notify=notify, dry_run=dry_run)
-    except NotificationError as error:
+    except NotificationConfigurationError as error:
         _write_notification_preflight_receipt(
             root=receipt_root,
             stage=stage,

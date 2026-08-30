@@ -4,7 +4,7 @@ function Resolve-DawnstrikeNotificationFailureCode {
         [Parameter(Mandatory = $true)][string]$Stage,
         [Parameter(Mandatory = $true)][string]$MarketDate,
         [Parameter(Mandatory = $true)][string]$FallbackErrorCode,
-        [AllowNull()][object]$ProcessReceipt = $null
+        [Parameter(Mandatory = $true)][object]$ProcessReceipt
     )
     $receiptPath = Join-Path $ReceiptRoot "notification-preflight-$Stage-$MarketDate.json"
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
@@ -21,12 +21,10 @@ function Resolve-DawnstrikeNotificationFailureCode {
                 -not [bool]$receipt.broker_execution_enabled
             ) {
                 $recordedAt = [DateTimeOffset]::Parse([string]$receipt.recorded_at)
-                if ($null -ne $ProcessReceipt) {
-                    $startedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.started_at)
-                    $completedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.completed_at)
-                    if ($recordedAt -lt $startedAt -or $recordedAt -gt $completedAt) {
-                        return $FallbackErrorCode
-                    }
+                $startedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.started_at)
+                $completedAt = [DateTimeOffset]::Parse([string]$ProcessReceipt.completed_at)
+                if ($recordedAt -lt $startedAt -or $recordedAt -gt $completedAt) {
+                    return $FallbackErrorCode
                 }
                 return "notification_credentials_missing"
             }

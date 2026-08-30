@@ -102,6 +102,7 @@ def test_scheduled_wrappers_propagate_notification_preflight_stage_code() -> Non
 
     assert "notification-preflight-$Stage-$MarketDate.json" in helper
     assert "notification_credentials_missing" in helper
+    assert "[Parameter(Mandatory = $true)][object]$ProcessReceipt" in helper
     assert "Resolve-DawnstrikeNotificationFailureCode" in morning
     assert "Resolve-DawnstrikeNotificationFailureCode" in monitor
     assert "-ProcessReceipt $alphaCycle" in morning
