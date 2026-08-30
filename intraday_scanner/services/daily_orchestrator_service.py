@@ -6,6 +6,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.performance.account_session_reporting import (
+    build_account_session_report,
+)
 from intraday_scanner.services.daily_run_service import DAILY_STAGE_ORDER
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -90,6 +93,10 @@ def daily_orchestration_status(
         status = "STALE_HEARTBEAT"
     elif missing:
         status = "MISSED_OR_PENDING_STAGES"
+    account_session_report = build_account_session_report(
+        store.db_path,
+        market_date=market_date,
+    )
     return {
         "schema_version": "dawnstrike.daily_orchestrator_status.v1",
         "status": status,
@@ -101,11 +108,10 @@ def daily_orchestration_status(
         "heartbeat": heartbeat,
         "heartbeat_stale": stale,
         "terminal_state": (
-            "SKIPPED_NOT_APPLICABLE"
-            if terminal_status == "SKIPPED_NOT_APPLICABLE"
-            else None
+            "SKIPPED_NOT_APPLICABLE" if terminal_status == "SKIPPED_NOT_APPLICABLE" else None
         ),
         "next_action": _next_action(status),
+        "account_session_report": account_session_report,
         "research_only": True,
         "broker_execution_enabled": False,
     }
