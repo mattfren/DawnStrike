@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,17 @@ TELEGRAM_ENV_ALIASES = (
     "TELEGRAM_CHAT_ID",
     "INTRADAY_TELEGRAM_CHAT_ID",
 )
+
+
+def _powershell_executable() -> str:
+    """Resolve Windows PowerShell first, then PowerShell Core cross-platform."""
+
+    candidates = ("powershell.exe", "pwsh") if os.name == "nt" else ("pwsh", "powershell.exe")
+    for candidate in candidates:
+        executable = shutil.which(candidate)
+        if executable:
+            return executable
+    pytest.skip("PowerShell implementation is not installed")
 
 
 def _clear_telegram_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +180,7 @@ def test_stale_same_date_preflight_receipt_cannot_relabel_current_child_failure(
         "-FallbackErrorCode 'alpha_monitor_failed' -ProcessReceipt $p"
     )
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        [_powershell_executable(), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         check=False,
