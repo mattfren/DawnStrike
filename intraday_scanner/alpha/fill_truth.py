@@ -12,6 +12,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from intraday_scanner.alpha.commit_bridge import (
+    AuthenticatedFillTruth,
+    has_authenticated_fill_truth,
+)
+
 MISSING_COMMITTED_FILL_TRUTH = "committed_point_in_time_fill_truth_required"
 
 
@@ -24,11 +29,11 @@ def has_authenticated_committed_fill_truth(value: Mapping[str, Any] | object) ->
     this boundary, all mappings remain provisional and ineligible.
     """
 
-    del value
-    return False
+    return has_authenticated_fill_truth(value)
 
 
 __all__ = [
     "MISSING_COMMITTED_FILL_TRUTH",
+    "AuthenticatedFillTruth",
     "has_authenticated_committed_fill_truth",
 ]

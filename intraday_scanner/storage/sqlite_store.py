@@ -6084,6 +6084,151 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist paper trade fills: {exc}") from exc
 
+    def persist_committed_fill_truth_receipt(
+        self, receipt: Mapping[str, Any]
+    ) -> bool:
+        """Append one canonical, research-only committed FillTruth receipt.
+
+        This is deliberately a narrow storage primitive.  CommitBridge owns
+        eligibility and identity resolution; storage only enforces the
+        immutable envelope and refuses a receipt whose persisted JSON/hash do
+        not agree.
+        """
+
+        if not isinstance(receipt, Mapping):
+            raise StorageError("committed FillTruth receipt must be an object")
+        payload = dict(receipt)
+        receipt_id = str(payload.get("receipt_id") or "").strip()
+        declared_hash = str(payload.get("receipt_hash_sha256") or "").strip().lower()
+        if not receipt_id or len(declared_hash) != 64:
+            raise StorageError("committed FillTruth receipt identity is incomplete")
+        unsigned = {
+            key: value for key, value in payload.items() if key != "receipt_hash_sha256"
+        }
+        computed_hash = hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
+        if declared_hash != computed_hash:
+            raise StorageError("committed FillTruth receipt hash mismatch")
+        if payload.get("research_only") is not True:
+            raise StorageError("committed FillTruth receipt must be research-only")
+        if payload.get("broker_execution_enabled") is not False:
+            raise StorageError("committed FillTruth receipt cannot enable broker execution")
+        required = (
+            "account_id",
+            "strategy_id",
+            "strategy_version",
+            "market_date",
+            "execution_status",
+            "source_artifact_hash_sha256",
+            "code_sha",
+            "frozen_window",
+        )
+        if any(not str(payload.get(key) or "").strip() for key in required):
+            raise StorageError("committed FillTruth receipt is missing required fields")
+        payload_json = canonical_json(payload)
+        values = (
+            receipt_id,
+            declared_hash,
+            str(payload["account_id"]),
+            str(payload["strategy_id"]),
+            str(payload["strategy_version"]),
+            payload.get("experiment_id"),
+            payload.get("arm_id"),
+            payload.get("decision_id"),
+            payload.get("selection_id"),
+            payload.get("intent_id"),
+            payload.get("position_id"),
+            payload.get("order_id"),
+            str(payload["market_date"]),
+            str(payload["execution_status"]),
+            payload.get("entry_at"),
+            payload.get("exit_at"),
+            _float_or_none(payload.get("quantity")),
+            _float_or_none(payload.get("entry_price")),
+            _float_or_none(payload.get("exit_price")),
+            _int_or_none(payload.get("spread_cost_cents")),
+            _int_or_none(payload.get("slippage_cost_cents")),
+            _int_or_none(payload.get("fees_cents")),
+            _int_or_none(payload.get("regulatory_cost_cents")),
+            _int_or_none(payload.get("borrow_cost_cents")),
+            str(payload["source_artifact_hash_sha256"]),
+            str(payload["code_sha"]),
+            str(payload["frozen_window"]),
+            payload_json,
+            str(payload.get("created_at") or datetime.now(UTC).isoformat()),
+            1,
+            0,
+        )
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO committed_fill_truth_receipts (
+                        receipt_id, receipt_hash_sha256, account_id, strategy_id,
+                        strategy_version, experiment_id, arm_id, decision_id,
+                        selection_id, intent_id, position_id, order_id, market_date,
+                        execution_status, entry_at, exit_at, quantity, entry_price,
+                        exit_price, spread_cost_cents, slippage_cost_cents, fees_cents,
+                        regulatory_cost_cents, borrow_cost_cents,
+                        source_artifact_hash_sha256, code_sha, frozen_window,
+                        payload_json, created_at, research_only,
+                        broker_execution_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                row = connection.execute(
+                    "SELECT receipt_hash_sha256, payload_json FROM committed_fill_truth_receipts "
+                    "WHERE receipt_id = ?",
+                    (receipt_id,),
+                ).fetchone()
+                if row is None or str(row[0]) != declared_hash or str(row[1]) != payload_json:
+                    raise StorageError("committed FillTruth receipt identity/payload mismatch")
+                return bool(connection.execute(
+                    "SELECT changes()"
+                ).fetchone()[0])
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist committed FillTruth receipt: {exc}") from exc
+
+    def load_committed_fill_truth_receipt_record(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load raw columns plus payload without merging untrusted JSON over columns."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    "SELECT * FROM committed_fill_truth_receipts WHERE receipt_id = ?",
+                    (str(receipt_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                columns = {
+                    key: row[key] for key in row.keys() if key != "payload_json"
+                }
+                payload = _json_value(row["payload_json"], default=None)
+                return {
+                    "columns": columns,
+                    "payload": payload,
+                    "payload_json": row["payload_json"],
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load committed FillTruth receipt: {exc}") from exc
+
+    def load_committed_fill_truth_receipt(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load one committed FillTruth payload for diagnostic callers."""
+
+        record = self.load_committed_fill_truth_receipt_record(receipt_id)
+        payload = record.get("payload") if record is not None else None
+        return payload if isinstance(payload, dict) else None
+
     def load_paper_trade_fills(
         self,
         *,
