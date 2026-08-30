@@ -199,9 +199,9 @@ class CanonicalAccountLedger:
     ) -> int:
         """Persist rows idempotently and return the number of rows present.
 
-        Repeating the exact build is a no-op.  A changed input hash replaces
-        only this derived read model after validating the account identity; raw
-        evidence remains append-only in its own tables.
+        Repeating the exact account/date build is a no-op.  Changed evidence
+        replaces only the dates present in ``result`` after validating the
+        session identity; out-of-scope history and raw evidence are preserved.
         """
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,23 +209,25 @@ class CanonicalAccountLedger:
             connection.execute("PRAGMA foreign_keys = ON")
             run_migrations(connection)
             self._ensure_account(connection, result.account_id, account)
-            existing = connection.execute(
-                "SELECT input_hash_sha256, source_hash_sha256 FROM paper_account_daily_ledger "
-                "WHERE account_id = ? LIMIT 1",
-                (result.account_id,),
-            ).fetchone()
-            if existing is not None and str(existing[0]) == result.input_hash_sha256:
-                return int(
-                    connection.execute(
-                        "SELECT count(*) FROM paper_account_daily_ledger WHERE account_id = ?",
-                        (result.account_id,),
-                    ).fetchone()[0]
-                )
-            connection.execute(
-                "DELETE FROM paper_account_daily_ledger WHERE account_id = ?",
-                (result.account_id,),
-            )
             for row in result.rows:
+                existing = connection.execute(
+                    "SELECT expected_session_id, input_hash_sha256, source_hash_sha256 "
+                    "FROM paper_account_daily_ledger WHERE account_id = ? AND market_date = ?",
+                    (result.account_id, row["market_date"]),
+                ).fetchone()
+                if existing is not None and str(existing[0] or "") != str(
+                    row["expected_session_id"] or ""
+                ):
+                    raise LedgerConflictError(
+                        f"{result.account_id}/{row['market_date']}: persisted expected "
+                        "session identity conflicts"
+                    )
+                if (
+                    existing is not None
+                    and str(existing[1]) == str(row["input_hash_sha256"])
+                    and str(existing[2]) == str(row["source_hash_sha256"])
+                ):
+                    continue
                 payload = json.dumps(row, sort_keys=True, separators=(",", ":"))
                 values = dict(row)
                 values.update(
@@ -267,6 +269,45 @@ class CanonicalAccountLedger:
                       :expected_session_id, :experiment_id, :arm_id, :evidence_mode,
                       :lineage_sha256
                     )
+                    ON CONFLICT(account_id, market_date) DO UPDATE SET
+                      ledger_id = excluded.ledger_id,
+                      cohort = excluded.cohort,
+                      strategy_id = excluded.strategy_id,
+                      strategy_version = excluded.strategy_version,
+                      execution_policy_version = excluded.execution_policy_version,
+                      cost_model_version = excluded.cost_model_version,
+                      status = excluded.status,
+                      evidence_state = excluded.evidence_state,
+                      beginning_equity_cents = excluded.beginning_equity_cents,
+                      external_flow_cents = excluded.external_flow_cents,
+                      realized_gross_pnl_cents = excluded.realized_gross_pnl_cents,
+                      fees_cents = excluded.fees_cents,
+                      slippage_cents = excluded.slippage_cents,
+                      realized_net_pnl_cents = excluded.realized_net_pnl_cents,
+                      unrealized_pnl_change_cents = excluded.unrealized_pnl_change_cents,
+                      cash_cents = excluded.cash_cents,
+                      position_market_value_cents = excluded.position_market_value_cents,
+                      ending_equity_cents = excluded.ending_equity_cents,
+                      market_benchmark_return_pct = excluded.market_benchmark_return_pct,
+                      cash_benchmark_return_pct = excluded.cash_benchmark_return_pct,
+                      gross_return_pct = excluded.gross_return_pct,
+                      net_return_pct = excluded.net_return_pct,
+                      excess_return_pct = excluded.excess_return_pct,
+                      accounting_delta_cents = excluded.accounting_delta_cents,
+                      trade_count = excluded.trade_count,
+                      open_position_count = excluded.open_position_count,
+                      source_refs_json = excluded.source_refs_json,
+                      source_hash_sha256 = excluded.source_hash_sha256,
+                      input_hash_sha256 = excluded.input_hash_sha256,
+                      calculated_at = excluded.calculated_at,
+                      payload_json = excluded.payload_json,
+                      target_return_pct = excluded.target_return_pct,
+                      target_status = excluded.target_status,
+                      expected_session_id = excluded.expected_session_id,
+                      experiment_id = excluded.experiment_id,
+                      arm_id = excluded.arm_id,
+                      evidence_mode = excluded.evidence_mode,
+                      lineage_sha256 = excluded.lineage_sha256
                     """,
                     values,
                 )
@@ -457,6 +498,17 @@ class CanonicalAccountLedger:
             return self._degraded_row(
                 base, beginning, "fill_truth_financials_incomplete", day_trades, day_positions
             )
+        if (
+            authenticated_trades
+            and gross is not None
+            and fees is not None
+            and slippage is not None
+            and net is not None
+            and gross - fees - slippage != net
+        ):
+            return self._degraded_row(
+                base, beginning, "fill_truth_cost_identity_mismatch", day_trades, day_positions
+            )
         unrealized = _sum_int(day_marks, "unrealized_pnl_change_cents", "unrealized_pnl_change")
         if day_marks and unrealized is None:
             return self._degraded_row(
@@ -471,6 +523,14 @@ class CanonicalAccountLedger:
             bool(authenticated_trades) and not incomplete_trades and net is not None
         )
         if no_trade is not None and not day_trades and not open_positions:
+            if beginning is None:
+                return self._degraded_row(
+                    base,
+                    beginning,
+                    "no_trade_opening_equity_missing",
+                    day_trades,
+                    day_positions,
+                )
             gross = fees = slippage = net = unrealized = 0
             ending = beginning if beginning is not None else None
             status = "AUTHENTICATED_NO_TRADE"
