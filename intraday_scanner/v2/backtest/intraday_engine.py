@@ -128,7 +128,22 @@ class IntradayBacktestEngine:
         signal_provider: SignalProvider | None = None,
         benchmark_returns: Mapping[str, float] | None = None,
     ) -> IntradayBacktestResult:
-        ordered = sorted(events, key=lambda event: (event.timestamp, event.sequence))
+        # A source sequence is the authoritative ordering when it is present.
+        # Fixtures and some providers omit it (all events then have sequence
+        # zero), so use stable event identity as a deterministic tie-breaker.
+        # This makes simultaneous symbols invariant to the order in which the
+        # caller happened to supply their events without allowing a later
+        # event-clock mark to leak into an earlier event.
+        ordered = sorted(
+            events,
+            key=lambda event: (
+                event.timestamp,
+                event.sequence,
+                event.symbol,
+                event.kind,
+                event.source_artifact_hash_sha256,
+            ),
+        )
         statuses = ["EMPIRICAL_COST_VERIFIED"] if self.settings.empirical_cost_verified else [
             "COST_MODEL_PROVISIONAL",
             "NOT_EVALUABLE_PENDING_EMPIRICAL_COST",
@@ -137,6 +152,11 @@ class IntradayBacktestEngine:
         trades: list[IntradayReplayTrade] = []
         equity_curve: list[IntradayEquityPoint] = []
         positions: dict[str, _OpenPosition] = {}
+        # Marks are advanced only after the corresponding bar has been
+        # processed.  Consequently this map contains exactly the latest mark
+        # that was causally available at the current event-clock instant for
+        # each symbol; it is intentionally sparse when a symbol has no mark.
+        latest_marks: dict[str, float] = {}
         pending: list[_PendingSignal] = []
         history: list[CausalMarketEvent] = []
         previous_timestamp: datetime | None = None
@@ -151,11 +171,19 @@ class IntradayBacktestEngine:
                 # The entry is at this bar's open; its later extrema are valid
                 # causal evidence, with same-bar target/stop ordering explicit.
                 self._close_positions_on_bar(event, positions, trades)
+                close = _number(event.payload.get("close"))
+                if close is not None:
+                    latest_marks[event.symbol] = close
                 equity_curve.append(
                     IntradayEquityPoint(
                         timestamp=event.timestamp,
                         session_id=event.exchange_session_id,
-                        equity=self._mark_to_market(event, positions, trades),
+                        equity=self._mark_to_market(
+                            event,
+                            positions,
+                            trades,
+                            latest_marks,
+                        ),
                         open_positions=len(positions),
                     )
                 )
@@ -186,12 +214,14 @@ class IntradayBacktestEngine:
             history.append(event)
 
         if positions:
+            # Iterating in event-clock order means the final retained bar per
+            # symbol is the latest causal liquidation mark (the previous
+            # reversed-comprehension selected the *first* bar instead).
             last_bars = {
-                event.symbol: event
-                for event in reversed(ordered)
-                if event.kind == "bar"
+                event.symbol: event for event in ordered if event.kind == "bar"
             }
-            for symbol, position in list(positions.items()):
+            for symbol in sorted(positions):
+                position = positions[symbol]
                 last_event = last_bars.get(symbol)
                 if last_event is None:
                     warnings.append(f"{symbol}: open position lacks liquidation bar")
@@ -381,14 +411,25 @@ class IntradayBacktestEngine:
         event: CausalMarketEvent,
         positions: Mapping[str, _OpenPosition],
         trades: Sequence[IntradayReplayTrade],
+        latest_marks: Mapping[str, float] | None = None,
     ) -> float:
         equity = self.settings.initial_equity + sum(trade.net_pnl for trade in trades)
-        if event.symbol in positions:
-            close = _number(event.payload.get("close"))
-            if close is not None:
-                position = positions[event.symbol]
-                direction = 1.0 if position.direction == "long" else -1.0
-                equity += (close - position.raw_entry) * direction * position.quantity
+        if latest_marks is None:
+            # Keep the private helper backwards-compatible for callers that
+            # provide only one event.  The replay path always passes its
+            # sparse causal mark map above.
+            current_close = _number(event.payload.get("close"))
+            latest_marks = (
+                {event.symbol: current_close} if current_close is not None else {}
+            )
+        for symbol, position in positions.items():
+            close = _number(latest_marks.get(symbol))
+            if close is None:
+                # Missing evidence is not a price and must not become a
+                # synthetic zero or an entry-price mark.
+                continue
+            direction = 1.0 if position.direction == "long" else -1.0
+            equity += (close - position.raw_entry) * direction * position.quantity
         return equity
 
 
