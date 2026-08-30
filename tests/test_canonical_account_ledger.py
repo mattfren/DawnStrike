@@ -75,7 +75,7 @@ def test_builds_one_row_per_expected_session_and_preserves_unknowns(tmp_path):
     assert rows[0]["target_shortfall_pct"] == 0.0
     assert rows[1]["status"] == "PARTIAL"
     assert rows[1]["net_return_pct"] is None
-    assert rows[2]["status"] == "AUTHENTICATED_NO_TRADE"
+    assert rows[2]["status"] == "MISSING"
     assert rows[2]["net_return_pct"] is None
     assert rows[3]["status"] == "HALTED"
     assert rows[4]["status"] == "NOT_EXPECTED"
@@ -90,6 +90,27 @@ def test_missing_no_trade_receipt_is_not_zero(tmp_path):
     assert row["ending_equity_cents"] is None
 
 
+def test_authenticated_no_trade_requires_known_equity_and_is_exactly_zero(tmp_path):
+    service = CanonicalAccountLedger(tmp_path / "ledger.sqlite", account_id="paper-total")
+    result = service.build(
+        account=_account(),
+        expected_sessions=[_session("2026-08-25")],
+        no_trade_receipts=[
+            {
+                "receipt_id": "nt-25",
+                "account_id": "paper-total",
+                "market_date": "2026-08-25",
+                "session_id": "session-2026-08-25",
+                "authoritative": True,
+            }
+        ],
+    )
+    row = result.rows[0]
+    assert row["status"] == "AUTHENTICATED_NO_TRADE"
+    assert row["net_return_pct"] == 0.0
+    assert row["target_status"] == "NO_TRADE"
+
+
 def test_aggregates_multiple_strategies_and_idempotent_persistence(tmp_path):
     path = tmp_path / "ledger.sqlite"
     service = CanonicalAccountLedger(path, account_id="paper-total")
@@ -97,8 +118,20 @@ def test_aggregates_multiple_strategies_and_idempotent_persistence(tmp_path):
         "account": _account(),
         "expected_sessions": [_session("2026-08-25")],
         "trades": [
-            _trade("t2", "2026-08-25", net_pnl_cents=250, strategy_id="s2"),
-            _trade("t1", "2026-08-25", net_pnl_cents=750, strategy_id="s1"),
+            _trade(
+                "t2",
+                "2026-08-25",
+                gross_pnl_cents=450,
+                net_pnl_cents=250,
+                strategy_id="s2",
+            ),
+            _trade(
+                "t1",
+                "2026-08-25",
+                gross_pnl_cents=950,
+                net_pnl_cents=750,
+                strategy_id="s1",
+            ),
         ],
     }
     first = service.build(**kwargs)
@@ -140,3 +173,45 @@ def test_explicit_equity_must_match_accounting_identity(tmp_path):
             expected_sessions=[_session("2026-08-25", ending_equity_cents=100_001)],
             trades=[_trade("t1", "2026-08-25")],
         )
+
+
+def test_partial_date_rebuild_preserves_out_of_scope_history(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    service = CanonicalAccountLedger(path, account_id="paper-total")
+    full = service.build(
+        account=_account(),
+        expected_sessions=[_session("2026-08-25"), _session("2026-08-26")],
+        trades=[_trade("t1", "2026-08-25")],
+        no_trade_receipts=[
+            {
+                "receipt_id": "nt-26",
+                "account_id": "paper-total",
+                "market_date": "2026-08-26",
+                "session_id": "session-2026-08-26",
+                "authoritative": True,
+            }
+        ],
+    )
+    assert service.persist(full, account=_account()) == 2
+
+    day_one_only = service.build(
+        account=_account(),
+        expected_sessions=[_session("2026-08-25")],
+        trades=[_trade("t1", "2026-08-25")],
+    )
+    assert service.persist(day_one_only, account=_account()) == 1
+    assert [row["market_date"] for row in service.load()] == [
+        "2026-08-25",
+        "2026-08-26",
+    ]
+
+
+def test_fill_cost_identity_mismatch_is_partial(tmp_path):
+    service = CanonicalAccountLedger(tmp_path / "ledger.sqlite", account_id="paper-total")
+    result = service.build(
+        account=_account(),
+        expected_sessions=[_session("2026-08-25")],
+        trades=[_trade("bad-costs", "2026-08-25", net_pnl_cents=999)],
+    )
+    assert result.rows[0]["status"] == "PARTIAL"
+    assert result.rows[0]["quarantine_reason"] == "fill_truth_cost_identity_mismatch"
