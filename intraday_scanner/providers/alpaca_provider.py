@@ -197,7 +197,10 @@ class AlpacaProvider(MarketDataProvider):
             "region": "us",
             "data_quality": "complete",
             "sort": "asc",
-            "limit": str(config.historical_intraday_page_limit),
+            # Alpaca's corporate-actions endpoint caps a page at 1,000 even
+            # though the stock bars/trades/quotes endpoints accept the larger
+            # intraday page limit used by this capture service.
+            "limit": str(min(config.historical_intraday_page_limit, 1_000)),
         }
         if page_token:
             params["page_token"] = page_token

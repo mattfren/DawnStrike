@@ -112,3 +112,28 @@ def test_alpaca_corporate_actions_use_current_market_data_endpoint(monkeypatch) 
         "forward_splits",
         "cash_dividends",
     }
+
+
+def test_alpaca_corporate_actions_cap_provider_page_limit(monkeypatch) -> None:
+    config = ScannerConfig(
+        alpaca_api_key_id="id",
+        alpaca_api_secret_key="secret",  # pragma: allowlist secret - fixture
+        alpaca_data_feed="sip",
+        historical_intraday_page_limit=10_000,
+    )
+    provider = AlpacaProvider(config)
+    calls: list[dict[str, str]] = []
+
+    def fake_request(path, params, config):
+        calls.append(dict(params))
+        return {}
+
+    monkeypatch.setattr(provider, "_request_json", fake_request)
+    provider.get_corporate_actions_page(
+        ["TST"],
+        "2026-08-28T13:30:00+00:00",
+        "2026-08-28T14:00:00+00:00",
+        config,
+    )
+
+    assert calls[0]["limit"] == "1000"
