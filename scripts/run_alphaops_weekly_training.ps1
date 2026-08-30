@@ -57,7 +57,13 @@ try {
 
     $training = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-train-weekly", "--db-path", $dbPath, "--code-sha", $releaseSha, "--market-date", $MarketDate) `
+        -ArgumentList @(
+            "-m", "intraday_scanner.cli", "alpha-v6-train-weekly",
+            "--db-path", $dbPath,
+            "--code-sha", $releaseSha,
+            "--market-date", $MarketDate,
+            "--attempt-id", "weekly-$MarketDate-$releaseSha"
+        ) `
         -LogRoot $logRoot `
         -LogName "alpha_v6_weekly_training-$MarketDate"
     if ($training.exit_code -ne 0) {

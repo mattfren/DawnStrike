@@ -12,6 +12,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.v6.experiment_ledger import (
+    assign_trial_number,
+    trial_retry_semantics,
+    validate_trial_receipt,
+)
 from intraday_scanner.decisioning.contracts import (
     canonical_json,
     parse_strategy_decision_receipt,
@@ -7653,6 +7658,9 @@ class SQLiteScanStore:
         payload.setdefault("broker_execution_enabled", False)
         if payload["research_only"] is not True or payload["broker_execution_enabled"] is not False:
             raise StorageError("V6 trials are research-only and broker-disabled")
+        receipt_blockers = validate_trial_receipt(payload, assigned_number=False)
+        if receipt_blockers:
+            raise StorageError("invalid V6 trial receipt: " + ", ".join(receipt_blockers))
         trial_id = str(payload["trial_id"])
         try:
             with self._connect() as connection:
@@ -7663,17 +7671,25 @@ class SQLiteScanStore:
                 ).fetchone()
                 if existing is not None:
                     prior = _json_value(existing[0])
-                    if isinstance(prior, dict) and "trial_number" not in payload:
-                        payload["trial_number"] = prior.get("trial_number")
-                    if not isinstance(prior, dict) or _immutable_semantics(
+                    prior_blockers = (
+                        validate_trial_receipt(prior, assigned_number=True)
+                        if isinstance(prior, dict)
+                        else ["stored_trial_payload_invalid"]
+                    )
+                    if prior_blockers:
+                        raise StorageError(
+                            f"stored V6 trial receipt is invalid: {trial_id}: "
+                            + ", ".join(prior_blockers)
+                        )
+                    if not isinstance(prior, dict) or trial_retry_semantics(
                         prior
-                    ) != _immutable_semantics(payload):
+                    ) != trial_retry_semantics(payload):
                         raise StorageError(f"immutable V6 trial conflict: {trial_id}")
                     return False
                 next_number = connection.execute(
                     "SELECT COALESCE(MAX(trial_number), 0) + 1 FROM experiment_trial_ledger"
                 ).fetchone()[0]
-                payload["trial_number"] = int(payload.get("trial_number") or next_number)
+                payload = assign_trial_number(payload, trial_number=int(next_number))
                 payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
                 cursor = connection.execute(
                     """
