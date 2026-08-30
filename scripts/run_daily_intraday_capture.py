@@ -6,7 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +136,11 @@ def build_expected_session(market_date: date) -> dict[str, Any] | None:
         "calendar_published_as_of": decision.calendar_published_as_of,
         "start_utc": start.isoformat(),
         "end_utc": end.isoformat(),
+        # Retain the full calendar session above for denominator identity,
+        # while bounding delayed SIP microstructure capture to the first
+        # regular-open window (or the whole session on an early close).
+        "capture_start_utc": start.isoformat(),
+        "capture_end_utc": min(start + timedelta(minutes=30), end).isoformat(),
         "research_only": True,
         "broker_execution": "disabled",
     }

@@ -24,7 +24,10 @@ def test_daily_session_uses_regular_and_early_close_calendar() -> None:
 
     assert regular["start_utc"] == "2026-08-31T13:30:00+00:00"
     assert regular["end_utc"] == "2026-08-31T20:00:00+00:00"
+    assert regular["exchange_session_id"] == "XNYS:2026-08-31:regular"
+    assert regular["capture_end_utc"] == "2026-08-31T14:00:00+00:00"
     assert early["end_utc"] == "2026-11-27T18:00:00+00:00"
+    assert early["capture_end_utc"] == "2026-11-27T15:00:00+00:00"
     assert early["calendar_status"] == "early_close"
 
 

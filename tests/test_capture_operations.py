@@ -200,3 +200,7 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "feed substitution" in script or "feed must be exactly" in Path(
         "intraday_scanner/services/capture_operations.py"
     ).read_text(encoding="utf-8")
+    assert '$Python = "py.exe"' in registration
+    assert '$pythonPrefix = @("-3.13", "-u")' in registration
+    assert '$argumentTokens = @($pythonPrefix + $captureArgs)' in registration
+    assert "-u \"{0}\"" not in registration

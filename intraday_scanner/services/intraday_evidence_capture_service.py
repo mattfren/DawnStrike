@@ -152,6 +152,8 @@ class IntradayEvidenceCaptureService:
         state_path = run_dir / "capture_run_state.json"
         receipt_path = run_dir / "capture_run_receipt.json"
         state = _load_state(state_path, request, run_id)
+        started_at = str(state.get("started_at") or _now().isoformat())
+        state["started_at"] = started_at
         state["status"] = "RUNNING"
         state["updated_at"] = _now().isoformat()
         _atomic_json_write(state_path, state)
@@ -250,6 +252,45 @@ class IntradayEvidenceCaptureService:
         state["coverage"] = coverage
         state["updated_at"] = _now().isoformat()
         _atomic_json_write(state_path, state)
+        completed_at = _now().isoformat()
+        artifact_items = sorted(
+            [
+                {
+                    "artifact_manifest_id": endpoint.get("artifact_manifest_id"),
+                    "endpoint": endpoint.get("endpoint"),
+                    "normalized_artifact_hash_sha256": endpoint.get(
+                        "normalized_artifact_hash_sha256"
+                    ),
+                    "raw_artifact_hash_sha256": endpoint.get("raw_artifact_hash_sha256"),
+                    "symbol": row.get("symbol"),
+                }
+                for row in coverage
+                for endpoint in row.get("endpoint_coverage", [])
+            ],
+            key=_canonical_json,
+        )
+        artifact_identity = {
+            "items": artifact_items,
+            "sha256": _sha256(_canonical_json({"items": artifact_items})),
+        }
+        raw_artifact_items = [
+            {
+                "endpoint": item["endpoint"],
+                "hash": item["raw_artifact_hash_sha256"],
+                "symbol": item["symbol"],
+            }
+            for item in artifact_items
+            if item.get("raw_artifact_hash_sha256")
+        ]
+        normalized_artifact_items = [
+            {
+                "endpoint": item["endpoint"],
+                "hash": item["normalized_artifact_hash_sha256"],
+                "symbol": item["symbol"],
+            }
+            for item in artifact_items
+            if item.get("normalized_artifact_hash_sha256")
+        ]
         receipt = {
             "schema_version": "dawnstrike.intraday_capture_run.v1",
             "run_id": run_id,
@@ -260,17 +301,46 @@ class IntradayEvidenceCaptureService:
             "symbols": list(request.symbols),
             "market_date": request.market_date,
             "exchange_session_id": request.exchange_session_id,
+            "session_id": request.exchange_session_id,
             "required_endpoints": endpoint_names,
             "request_start": request.request_start.isoformat(),
             "request_end": request.request_end.isoformat(),
             "code_sha": request.code_sha,
             "source_config_hash": request.source_config_hash,
+            "source_identity": f"{request.provider}:{request.feed}",
             "operator_entitlement_metadata": request.operator_entitlement_metadata,
             "coverage": coverage,
+            "artifact_identity": artifact_identity,
+            "raw_artifact_hash_sha256": (
+                _sha256(_canonical_json(raw_artifact_items)) if raw_artifact_items else None
+            ),
+            "normalized_artifact_hash_sha256": (
+                _sha256(_canonical_json(normalized_artifact_items))
+                if normalized_artifact_items
+                else None
+            ),
             "state_path": str(state_path),
-            "created_at": _now().isoformat(),
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "created_at": completed_at,
+            "research_only": True,
+            "broker_execution_enabled": False,
         }
         receipt["receipt_hash_sha256"] = _sha256(_canonical_json(receipt))
+        # The sidecar ledger is append-only and keyed by the deterministic
+        # request run id.  A pagination checkpoint is intentionally not a
+        # terminal run: persisting it would make the later resumed aggregate
+        # an illegal UPDATE.  The checkpoint JSON remains the durable
+        # operation evidence until all requested endpoints are terminal.
+        resumable = any(
+            not _state_from_dict(state["symbols"][symbol].get(endpoint, {})).complete
+            and _state_from_dict(state["symbols"][symbol].get(endpoint, {})).next_page_token
+            is not None
+            for symbol in request.symbols
+            for endpoint in endpoint_names
+        )
+        if not resumable:
+            store.persist_capture_run(receipt)
         _atomic_json_write(receipt_path, receipt)
         return receipt
 
@@ -589,6 +659,7 @@ def _load_state(path: Path, request: CaptureRequest, run_id: str) -> dict[str, A
                     "existing capture checkpoint identity conflicts with request"
                 )
             payload.setdefault("symbols", {})
+            payload.setdefault("started_at", _now().isoformat())
             return payload
         except (OSError, json.JSONDecodeError) as exc:
             raise CaptureContractError("capture checkpoint is unreadable") from exc
@@ -598,6 +669,7 @@ def _load_state(path: Path, request: CaptureRequest, run_id: str) -> dict[str, A
         "request": _request_json(request),
         "status": "PENDING",
         "symbols": {symbol: {} for symbol in request.symbols},
+        "started_at": _now().isoformat(),
         "updated_at": _now().isoformat(),
     }
 
@@ -753,6 +825,8 @@ def _endpoint_coverage(
                 "page_count": len(state.pages),
                 "item_count": sum(int(page.get("item_count") or 0) for page in state.pages),
                 "artifact_manifest_id": state.artifact_manifest_id,
+                "raw_artifact_hash_sha256": state.aggregate_raw_hash or None,
+                "normalized_artifact_hash_sha256": state.aggregate_normalized_hash or None,
             }
         )
     return rows

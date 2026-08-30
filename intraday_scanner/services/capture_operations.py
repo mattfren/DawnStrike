@@ -247,6 +247,11 @@ def _validate_session(value: dict[str, Any]) -> tuple[datetime, datetime, dict[s
         )
     if market_date not in session_id:
         raise CapturePlanError("exchange_session_id does not identify market_date")
+    canonical_session_id = f"XNYS:{market_date}:regular"
+    if session_id != canonical_session_id:
+        raise CapturePlanError(
+            "expected session must use the full canonical regular-session identity"
+        )
     try:
         decision = market_session(datetime.fromisoformat(market_date).date())
     except (ValueError, KeyError) as exc:
@@ -257,13 +262,27 @@ def _validate_session(value: dict[str, Any]) -> tuple[datetime, datetime, dict[s
         raise CapturePlanError("expected session is not an open NYSE market session")
     if value.get("calendar_id") and value["calendar_id"] != decision.calendar_id:
         raise CapturePlanError("expected session calendar identity mismatch")
-    start = _parse_utc(value.get("start_utc") or value.get("request_start"), "start_utc")
-    end = _parse_utc(value.get("end_utc") or value.get("request_end"), "end_utc")
+    session_start = _parse_utc(
+        value.get("start_utc") or value.get("request_start"), "start_utc"
+    )
+    session_end = _parse_utc(
+        value.get("end_utc") or value.get("request_end"), "end_utc"
+    )
+    start = _parse_utc(
+        value.get("capture_start_utc") or session_start.isoformat(),
+        "capture_start_utc",
+    )
+    end = _parse_utc(
+        value.get("capture_end_utc") or session_end.isoformat(),
+        "capture_end_utc",
+    )
     market_zone = ZoneInfo("America/New_York")
     start_date = start.astimezone(market_zone).date().isoformat()
     end_date = end.astimezone(market_zone).date().isoformat()
     if start_date != market_date or end_date != market_date:
         raise CapturePlanError("expected session window does not belong to market_date")
+    if session_start >= session_end or start < session_start or end > session_end:
+        raise CapturePlanError("capture window must be bounded by the full expected session")
     return start, end, {"market_date": market_date, "exchange_session_id": session_id}
 
 

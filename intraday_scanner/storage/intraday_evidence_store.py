@@ -97,6 +97,34 @@ class IntradayEvidenceStore:
     def load_no_trade_session_receipt(self, receipt_id: str) -> dict[str, Any] | None:
         return self._sqlite_store.load_no_trade_session_receipt(receipt_id)
 
+    def persist_capture_run(self, receipt: dict[str, Any]) -> bool:
+        """Append one immutable, hash-bound capture-run receipt."""
+
+        return self._sqlite_store.persist_intraday_capture_run(receipt)
+
+    def persist_expected_market_session(self, session: dict[str, Any]) -> bool:
+        """Append one checked-calendar expected-session denominator."""
+
+        return self._sqlite_store.persist_expected_market_session(session)
+
+    def load_capture_run_record(self, run_id: str) -> dict[str, Any] | None:
+        return self._sqlite_store.load_intraday_capture_run_record(run_id)
+
+    def load_capture_runs(
+        self,
+        *,
+        market_date: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._sqlite_store.load_intraday_capture_runs(
+            market_date=market_date,
+            session_id=session_id,
+            status=status,
+            limit=limit,
+        )
+
     def store_artifact(
         self,
         *,

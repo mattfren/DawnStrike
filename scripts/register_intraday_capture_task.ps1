@@ -31,7 +31,12 @@ foreach ($name in @("SymbolsManifest", "SymbolsManifestSha256", "EntitlementRece
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) { throw "$name is required." }
 }
 if ([string]::IsNullOrWhiteSpace($Python)) {
-    $Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
+    # The active runtime may intentionally have no project-local venv.  Use
+    # the governed launcher and pin the interpreter family explicitly.
+    $Python = "py.exe"
+    $pythonPrefix = @("-3.13", "-u")
+} else {
+    $pythonPrefix = @("-u")
 }
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
@@ -50,7 +55,8 @@ $captureArgs = @(
     "--source-config", $SourceConfig, "--source-config-sha256", $SourceConfigSha256,
     "--env-file", $EnvFile, "--max-pages", "100", "--retries", "3", "--execute"
 )
-$actionArguments = ('-u "{0}" {1}' -f $Python, (($captureArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '))
+$argumentTokens = @($pythonPrefix + $captureArgs)
+$actionArguments = (($argumentTokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartAt.TimeOfDay
 
 $preview = [ordered]@{

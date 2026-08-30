@@ -8,12 +8,15 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.errors import StorageError
 from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
+from intraday_scanner.storage.intraday_evidence_store import IntradayEvidenceStore
 
 
 def main() -> int:
@@ -27,6 +30,31 @@ def main() -> int:
     if not args.execute:
         print(json.dumps(prepared, sort_keys=True))
         return 0
+
+    # The capture plan has already authenticated the checked-in calendar,
+    # exact candidate SHA, and write-once session file.  Populate only the
+    # expected-session denominator here; account/reporting ledgers remain
+    # untouched until a separate authenticated outcome boundary exists.
+    try:
+        expected = json.loads(plan.expected_session.read_text(encoding="utf-8"))
+        IntradayEvidenceStore(prepared["db_path"]).persist_expected_market_session(
+            {
+                "session_id": prepared["exchange_session_id"],
+                "market_date": prepared["market_date"],
+                "exchange": expected["exchange"],
+                "session_open_utc": expected["start_utc"],
+                "session_close_utc": expected["end_utc"],
+                "status": "EXPECTED",
+                "calendar_source": expected.get("calendar_id") or "checked_market_calendar",
+                "calendar_source_hash_sha256": prepared["expected_session_sha256"],
+                "created_at": datetime.now(UTC).isoformat(),
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        )
+    except (OSError, json.JSONDecodeError, KeyError, CapturePlanError, StorageError) as exc:
+        _print_failure(f"expected session denominator persistence failed: {exc}")
+        return 2
 
     mode_run = Path(prepared["mode_run_root"])
     mode_output = Path(prepared["mode_output_root"])
@@ -189,7 +217,21 @@ def _safe_capture_receipt(
                 payload.update(
                     {
                         key: inner[key]
-                        for key in ("run_id", "status", "coverage", "state_path", "created_at")
+                        for key in (
+                            "run_id",
+                            "session_id",
+                            "status",
+                            "coverage",
+                            "state_path",
+                            "started_at",
+                            "completed_at",
+                            "created_at",
+                            "source_identity",
+                            "artifact_identity",
+                            "raw_artifact_hash_sha256",
+                            "normalized_artifact_hash_sha256",
+                            "receipt_hash_sha256",
+                        )
                         if key in inner
                     }
                 )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -80,6 +81,23 @@ FROM monitor_interval_gaps
 ORDER BY expected_at ASC
 LIMIT ?
 """
+
+_CAPTURE_RUN_DB_STATUSES = {
+    "PENDING",
+    "RUNNING",
+    "COMPLETE",
+    "PARTIAL",
+    "FAILED",
+    "SOURCE_CONFLICT",
+    "QUARANTINED",
+}
+_CAPTURE_RUN_VOLATILE_FIELDS = {
+    "completed_at",
+    "created_at",
+    "receipt_hash_sha256",
+    "started_at",
+    "state_path",
+}
 
 
 class SQLiteScanStore:
@@ -6290,6 +6308,241 @@ class SQLiteScanStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Could not persist no-trade receipt: {exc}") from exc
 
+    def persist_intraday_capture_run(self, receipt: Mapping[str, Any]) -> bool:
+        """Append one hash-bound, immutable capture-run receipt.
+
+        Capture checkpoints are mutable files, but the durable run ledger is
+        append-only.  A resumed run therefore writes one terminal aggregate
+        row only after all requested endpoints have a final coverage fact.
+        Replaying the same immutable run is a no-op; changing any evidence,
+        window, source, or status under the same run id is rejected.
+        """
+
+        payload = _validate_intraday_capture_run_receipt(receipt)
+        run_id = str(payload["run_id"])
+        payload_json = canonical_json(payload)
+        db_status = _capture_run_db_status(str(payload["status"]))
+        values = (
+            run_id,
+            str(payload["session_id"]),
+            str(payload["market_date"]),
+            str(payload["evidence_mode"]),
+            str(payload["provider"]),
+            str(payload["feed"]),
+            str(payload["source_identity"]),
+            str(payload["request_start"]),
+            str(payload["request_end"]),
+            str(payload["started_at"]),
+            payload.get("completed_at"),
+            db_status,
+            str(payload["status"]),
+            str(payload["code_sha"]),
+            str(payload["source_config_hash"]),
+            payload.get("raw_artifact_hash_sha256"),
+            payload.get("normalized_artifact_hash_sha256"),
+            str(payload["receipt_hash_sha256"]),
+            payload_json,
+            str(payload["created_at"]),
+            1,
+            0,
+        )
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT payload_json FROM intraday_capture_runs "
+                    "WHERE capture_run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if existing is not None:
+                    prior = _json_value(existing[0], default=None)
+                    if not isinstance(prior, dict) or (
+                        _capture_run_semantics(prior) != _capture_run_semantics(payload)
+                    ):
+                        raise StorageError(
+                            "intraday capture run identity conflicts with prior evidence: "
+                            f"{run_id}"
+                        )
+                    return False
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO intraday_capture_runs (
+                            capture_run_id, session_id, market_date, evidence_mode,
+                            provider, feed, source_identity, requested_start_utc,
+                            requested_end_utc, started_at, completed_at, status,
+                            coverage_status, code_sha, source_config_hash_sha256,
+                            raw_artifact_hash_sha256, normalized_artifact_hash_sha256,
+                            receipt_hash_sha256, payload_json, created_at,
+                            research_only, broker_execution_enabled
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                  ?, ?, ?, ?, ?)
+                        """,
+                        values,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StorageError(
+                        "intraday capture run receipt identity is not unique"
+                    ) from exc
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist intraday capture run: {exc}") from exc
+
+    def persist_expected_market_session(self, session: Mapping[str, Any]) -> bool:
+        """Append one checked-calendar session denominator before capture."""
+
+        if not isinstance(session, Mapping):
+            raise StorageError("expected market session must be an object")
+        payload = dict(session)
+        required = (
+            "session_id",
+            "market_date",
+            "exchange",
+            "session_open_utc",
+            "session_close_utc",
+            "status",
+            "calendar_source",
+            "calendar_source_hash_sha256",
+        )
+        if any(not str(payload.get(key) or "").strip() for key in required):
+            raise StorageError("expected market session is missing required fields")
+        if payload["status"] not in {"EXPECTED", "OPEN", "CLOSED", "CANCELLED", "QUARANTINED"}:
+            raise StorageError("expected market session status is invalid")
+        if payload["session_id"] != f"XNYS:{payload['market_date']}:regular":
+            raise StorageError("expected market session identity is not canonical")
+        if payload["exchange"] not in {"XNYS", "NYSE"}:
+            raise StorageError("expected market session exchange is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(payload["calendar_source_hash_sha256"])):
+            raise StorageError("expected market session calendar hash is invalid")
+        for key in ("session_open_utc", "session_close_utc"):
+            try:
+                parsed = datetime.fromisoformat(str(payload[key]).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise StorageError(f"expected market session {key} is invalid") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+                raise StorageError(f"expected market session {key} must be UTC")
+        if payload.get("research_only") is not True:
+            raise StorageError("expected market session must be research-only")
+        if payload.get("broker_execution_enabled") is not False:
+            raise StorageError("expected market session cannot enable broker execution")
+        payload.setdefault("created_at", datetime.now(UTC).isoformat())
+        payload_json = canonical_json(payload)
+        values = (
+            str(payload["session_id"]),
+            str(payload["market_date"]),
+            str(payload["exchange"]),
+            str(payload["session_open_utc"]),
+            str(payload["session_close_utc"]),
+            str(payload["status"]),
+            str(payload["calendar_source"]),
+            str(payload["calendar_source_hash_sha256"]),
+            str(payload["created_at"]),
+            1,
+            0,
+            payload_json,
+        )
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT payload_json FROM expected_market_sessions WHERE session_id = ?",
+                    (str(payload["session_id"]),),
+                ).fetchone()
+                if existing is not None:
+                    prior = _json_value(existing[0], default=None)
+                    if not isinstance(prior, dict) or _immutable_semantics(
+                        prior
+                    ) != _immutable_semantics(payload):
+                        raise StorageError(
+                            "expected market session identity conflicts with prior truth"
+                        )
+                    return False
+                connection.execute(
+                    """
+                    INSERT INTO expected_market_sessions (
+                      session_id, market_date, exchange, session_open_utc,
+                      session_close_utc, status, calendar_source,
+                      calendar_source_hash_sha256, created_at, research_only,
+                      broker_execution_enabled, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                return True
+        except StorageError:
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise StorageError("expected market session identity is not unique") from exc
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not persist expected market session: {exc}") from exc
+
+    def load_intraday_capture_run_record(
+        self, capture_run_id: str
+    ) -> dict[str, Any] | None:
+        """Load one durable capture run without merging JSON over columns."""
+
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    "SELECT * FROM intraday_capture_runs WHERE capture_run_id = ?",
+                    (str(capture_run_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                columns = {key: row[key] for key in row.keys() if key != "payload_json"}
+                return {
+                    "columns": columns,
+                    "payload": _json_value(row["payload_json"], default=None),
+                    "payload_json": row["payload_json"],
+                }
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load intraday capture run: {exc}") from exc
+
+    def load_intraday_capture_runs(
+        self,
+        *,
+        market_date: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Load retained capture receipts in deterministic creation order."""
+
+        self.initialize()
+        bounded_limit = max(1, min(int(limit), 1000))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if market_date is not None:
+            clauses.append("market_date = ?")
+            params.append(str(market_date))
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(str(session_id))
+        if status is not None:
+            clauses.append("status = ? OR coverage_status = ?")
+            params.extend((str(status), str(status)))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    "SELECT payload_json FROM intraday_capture_runs "
+                    f"{where} ORDER BY created_at ASC, capture_run_id ASC LIMIT ?",
+                    (*params, bounded_limit),
+                ).fetchall()
+                payloads = []
+                for row in rows:
+                    payload = _json_value(row["payload_json"], default=None)
+                    if isinstance(payload, dict):
+                        payloads.append(payload)
+                return payloads
+        except sqlite3.Error as exc:
+            raise StorageError(f"Could not load intraday capture runs: {exc}") from exc
+
     def load_no_trade_session_receipt_record(self, receipt_id: str) -> dict[str, Any] | None:
         """Load raw no-trade columns and payload for bridge verification."""
 
@@ -11040,6 +11293,159 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
+
+
+def _capture_run_semantics(value: Mapping[str, Any]) -> Any:
+    """Return the immutable portion of a capture receipt for retry checks."""
+
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        key: _capture_run_semantics(item) if isinstance(item, Mapping) else [
+            _capture_run_semantics(item) if isinstance(item, Mapping) else item
+            for item in item
+        ] if isinstance(item, list) else item
+        for key, item in sorted(value.items())
+        if key not in _CAPTURE_RUN_VOLATILE_FIELDS
+    }
+
+
+def _capture_run_db_status(status: str) -> str:
+    """Map detailed coverage outcomes to the bounded sidecar status enum."""
+
+    if status in _CAPTURE_RUN_DB_STATUSES:
+        return status
+    if status == "NO_DATA" or status.endswith("_MISSING_INTERVALS"):
+        return "PARTIAL"
+    if status in {"HASH_MISMATCH", "SOURCE_CONFLICT"}:
+        return "SOURCE_CONFLICT"
+    if status in {"ENTITLEMENT_DENIED", "CORPORATE_ACTION_UNRESOLVED"}:
+        return "QUARANTINED"
+    return "FAILED"
+
+
+def _validate_intraday_capture_run_receipt(
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the durable capture-run envelope before SQLite insertion."""
+
+    if not isinstance(receipt, Mapping):
+        raise StorageError("intraday capture run receipt must be an object")
+    payload = dict(receipt)
+    required = (
+        "run_id",
+        "session_id",
+        "market_date",
+        "evidence_mode",
+        "provider",
+        "feed",
+        "source_identity",
+        "request_start",
+        "request_end",
+        "started_at",
+        "code_sha",
+        "source_config_hash",
+        "status",
+        "required_endpoints",
+        "coverage",
+        "artifact_identity",
+        "created_at",
+        "receipt_hash_sha256",
+    )
+    if any(not str(payload.get(key) or "").strip() for key in required if key not in {
+        "required_endpoints",
+        "coverage",
+        "artifact_identity",
+    }):
+        raise StorageError("intraday capture run receipt is missing required fields")
+    if payload.get("research_only") is not True:
+        raise StorageError("intraday capture run must be research-only")
+    if payload.get("broker_execution_enabled") is not False:
+        raise StorageError("intraday capture run cannot enable broker execution")
+    if payload.get("evidence_mode") not in {"forward_observed", "retrospective_research"}:
+        raise StorageError("intraday capture run evidence_mode is invalid")
+    code_sha = str(payload["code_sha"])
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", code_sha):
+        raise StorageError("intraday capture run code_sha is not an exact Git object id")
+    source_config_hash = str(payload["source_config_hash"])
+    if not re.fullmatch(r"[0-9a-f]{64}", source_config_hash):
+        raise StorageError("intraday capture run source_config_hash is not SHA-256")
+    provider = str(payload["provider"]).strip()
+    feed = str(payload["feed"]).strip()
+    if str(payload["source_identity"]).strip() != f"{provider}:{feed}":
+        raise StorageError("intraday capture run source_identity does not match provider/feed")
+    for key in ("request_start", "request_end", "started_at", "created_at"):
+        try:
+            timestamp = datetime.fromisoformat(str(payload[key]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise StorageError(f"intraday capture run {key} is invalid") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(timestamp):
+            raise StorageError(f"intraday capture run {key} must be UTC")
+    if payload.get("completed_at") is not None:
+        try:
+            completed_at = datetime.fromisoformat(
+                str(payload["completed_at"]).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise StorageError("intraday capture run completed_at is invalid") from exc
+        if completed_at.tzinfo is None or completed_at.utcoffset() != UTC.utcoffset(completed_at):
+            raise StorageError("intraday capture run completed_at must be UTC")
+    endpoints = payload.get("required_endpoints")
+    if not isinstance(endpoints, list) or not endpoints or any(
+        not isinstance(endpoint, str) or not endpoint.strip() for endpoint in endpoints
+    ) or len(set(endpoints)) != len(endpoints):
+        raise StorageError("intraday capture run required_endpoints are incomplete")
+    coverage = payload.get("coverage")
+    if not isinstance(coverage, list) or not coverage:
+        raise StorageError("intraday capture run coverage is required")
+    for row in coverage:
+        if not isinstance(row, Mapping):
+            raise StorageError("intraday capture run coverage row is invalid")
+        endpoint_rows = row.get("endpoint_coverage")
+        if not isinstance(endpoint_rows, list):
+            raise StorageError("intraday capture run endpoint coverage is missing")
+        names = [
+            str(item.get("endpoint") or "")
+            for item in endpoint_rows
+            if isinstance(item, Mapping)
+        ]
+        if len(names) != len(endpoints) or set(names) != set(endpoints):
+            raise StorageError("intraday capture run endpoint coverage is incomplete")
+        for endpoint_row in endpoint_rows:
+            if not isinstance(endpoint_row, Mapping) or not str(
+                endpoint_row.get("status") or ""
+            ).strip():
+                raise StorageError("intraday capture run endpoint status is missing")
+            if (
+                endpoint_row.get("status") == "COMPLETE"
+                and endpoint_row.get("endpoint") != "corporate_actions"
+                and not str(endpoint_row.get("artifact_manifest_id") or "").strip()
+            ):
+                raise StorageError(
+                    "intraday capture run complete endpoint lacks artifact identity"
+                )
+    artifact_identity = payload.get("artifact_identity")
+    if not isinstance(artifact_identity, Mapping):
+        raise StorageError("intraday capture run artifact identity is missing")
+    artifact_items = artifact_identity.get("items")
+    artifact_hash = str(artifact_identity.get("sha256") or "").lower()
+    if not isinstance(artifact_items, list) or not re.fullmatch(r"[0-9a-f]{64}", artifact_hash):
+        raise StorageError("intraday capture run artifact identity is incomplete")
+    if artifact_hash != _canonical_sha256({"items": artifact_items}):
+        raise StorageError("intraday capture run artifact identity hash mismatch")
+    for key in ("raw_artifact_hash_sha256", "normalized_artifact_hash_sha256"):
+        value = payload.get(key)
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)):
+            raise StorageError(f"intraday capture run {key} is not SHA-256")
+    declared_hash = str(payload["receipt_hash_sha256"]).lower()
+    if payload.get("receipt_hash_sha256") != declared_hash or not re.fullmatch(
+        r"[0-9a-f]{64}", declared_hash
+    ):
+        raise StorageError("intraday capture run receipt hash is invalid")
+    unsigned = {key: value for key, value in payload.items() if key != "receipt_hash_sha256"}
+    if declared_hash != _canonical_sha256(unsigned):
+        raise StorageError("intraday capture run receipt hash mismatch")
+    return payload
 
 
 def _entry_admission_rejection(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.errors import StorageError
 from intraday_scanner.providers.base import IntradayPage
 from intraday_scanner.services.intraday_evidence_capture_service import (
     CaptureRequest,
     IntradayEvidenceCaptureService,
 )
+from intraday_scanner.storage.intraday_evidence_store import IntradayEvidenceStore
 
 
 class _FakeProvider:
@@ -90,6 +93,9 @@ def test_capture_walks_pages_and_writes_immutable_receipt(tmp_path: Path) -> Non
     assert payload["source_config_hash"] == "c" * 64
     assert payload["operator_entitlement_metadata"]["entitlement"] == "test-sip"
     assert receipt["coverage"][0]["source_metadata"]["retention_status"] == "retained"
+    store = IntradayEvidenceStore(request.db_path)
+    assert store.load_capture_runs() == [receipt]
+    assert store.persist_capture_run(receipt) is False
 
 
 def test_capture_resumes_from_checkpoint_without_refetching_first_page(tmp_path: Path) -> None:
@@ -230,3 +236,22 @@ def test_capture_requires_exact_source_and_entitlement_identity(tmp_path: Path) 
     )
     with pytest.raises(ValueError, match="receipt/proof_id"):
         invalid_entitlement.validate()
+
+
+def test_capture_run_rejects_same_run_id_with_changed_evidence(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    receipt = IntradayEvidenceCaptureService(
+        _FakeProvider(),
+        ScannerConfig(request_retries=1, historical_intraday_max_pages=4),
+    ).capture(request)
+    changed = dict(receipt)
+    changed["status"] = "PARTIAL"
+    changed["receipt_hash_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in changed.items() if key != "receipt_hash_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(StorageError, match="identity conflicts"):
+        IntradayEvidenceStore(request.db_path).persist_capture_run(changed)
