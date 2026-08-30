@@ -9,7 +9,6 @@ import json
 import re
 from pathlib import Path
 
-from scripts.public_lineage import build_sha as _lineage_build_sha
 from scripts.public_lineage import is_lower_hex64
 
 MAX_SNAPSHOT_BYTES = 250 * 1024
@@ -391,13 +390,11 @@ def _build_sha(
 ) -> str:
     """Independently recompute the exact documented public-build formula."""
 
-    return _lineage_build_sha(
-        source_sha=source_sha,
-        publication_set_sha256=publication_set_sha256,
-        opportunity_projection_sha256=opportunity_projection_sha256,
-        v6_learning_sha256=v6_learning_sha256,
-        market_date=market_date,
+    formula = (
+        f"{source_sha}:{publication_set_sha256}:{opportunity_projection_sha256}:"
+        f"{v6_learning_sha256}:{market_date}"
     )
+    return hashlib.sha256(formula.encode("utf-8")).hexdigest()
 
 
 def _v6_contract_failures(payload: dict[str, object]) -> list[str]:

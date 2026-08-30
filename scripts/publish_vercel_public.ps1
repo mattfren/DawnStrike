@@ -16,6 +16,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Promote -and $AllowDegraded) {
+    throw "Production promotion requires readiness HTTP 200; -AllowDegraded cannot be combined with -Promote."
+}
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $expectedSourceSha = (& git.exe -C $resolvedRoot rev-parse HEAD).Trim().ToLowerInvariant()

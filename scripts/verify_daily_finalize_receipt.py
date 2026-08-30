@@ -15,7 +15,6 @@ from intraday_scanner.services.daily_run_service import (
     shared_daily_run_id,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
-from scripts.public_lineage import build_sha as _lineage_build_sha
 from scripts.public_lineage import is_lower_hex64
 
 FINALIZE_STAGES = (
@@ -30,6 +29,7 @@ FINALIZE_SUCCESS_STATUSES = {
     "publication": frozenset({"COMPLETE"}),
     "readiness": frozenset({"COMPLETE"}),
 }
+_V6_IDENTITY_FIELDS = ("build_sha", "market_date", "schema_version", "v6_learning_sha256")
 
 
 def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str, object]:
@@ -71,25 +71,16 @@ def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str,
         for value in (publication_set_sha, opportunity_projection_sha, v6_learning_sha)
     )
     if strict_v6_lineage:
-        expected_build_sha = _lineage_build_sha(
-            source_sha=release_sha,
-            publication_set_sha256=publication_set_sha,
-            opportunity_projection_sha256=opportunity_projection_sha,
-            v6_learning_sha256=v6_learning_sha,
-            market_date=market_date[:10],
-        )
+        expected_build_sha = hashlib.sha256(
+            (
+                f"{release_sha}:{publication_set_sha}:{opportunity_projection_sha}:"
+                f"{v6_learning_sha}:{market_date[:10]}"
+            ).encode()
+        ).hexdigest()
         expected_build_id = expected_build_sha[:20]
-    elif (
-        publication_set_sha
-        and opportunity_projection_sha
-        and not v6_learning_sha
-        and not all(
-            is_lower_hex64(value)
-            for value in (publication_set_sha, opportunity_projection_sha)
-        )
-    ):
-        # Receipts written before V6 remain readable as historical evidence.
-        # Any receipt carrying a V6 value must satisfy the strict contract.
+    elif _is_structurally_pre_v6_receipt(publication_payload):
+        # Only structurally pre-V6 receipts remain readable as historical
+        # evidence.  Any V6-era identity fields force the strict contract.
         expected_build_id = hashlib.sha256(
             f"{release_sha}:{publication_set_sha}:{opportunity_projection_sha}:{market_date[:10]}".encode()
         ).hexdigest()[:20]
@@ -135,6 +126,12 @@ def verify(db_path: str | Path, market_date: str, release_sha: str) -> dict[str,
         "research_only": True,
         "broker_execution_enabled": False,
     }
+
+
+def _is_structurally_pre_v6_receipt(payload: dict[str, object]) -> bool:
+    """Recognize only receipts with no V6-era identity fields at all."""
+
+    return not any(field in payload for field in _V6_IDENTITY_FIELDS)
 
 
 def main() -> int:
