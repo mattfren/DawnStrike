@@ -48,7 +48,9 @@ Enter the Windows account and password that can run Dawnstrike while you are log
 
 Terra must:
 
-1. Merge the verified branch and install the exact merged SHA into `C:\r\dawnstrike-runtime`.
+1. Merge the verified branch and install the exact merged SHA into
+   `C:\r\dawnstrike-runtime` using the fail-closed two-phase procedure in
+   [`runtime_activation_and_rollback.md`](runtime_activation_and_rollback.md).
 2. Build the real source config using your email, Alpaca as primary market data, and Yahoo as independent reconciliation data.
 3. Fetch and register the dated universe.
 4. Register the morning, monitor, EOD, weekly-training, and finalize tasks with your credential.
