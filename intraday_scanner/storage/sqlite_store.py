@@ -58,6 +58,23 @@ _V6_SINGLE_PAYLOAD_COLUMNS = {
         "payload_json",
     },
 }
+_MONITOR_INTERVAL_GAP_PROJECTION_BY_DATE_SQL = """
+SELECT gap_id, run_id, market_date, schedule_id, schedule_version,
+       release_sha, expected_at, observed_at, interval_seconds, status,
+       reason, receipt_sha256
+FROM monitor_interval_gaps
+WHERE market_date = ?
+ORDER BY expected_at ASC
+LIMIT ?
+"""
+_MONITOR_INTERVAL_GAP_PROJECTION_SQL = """
+SELECT gap_id, run_id, market_date, schedule_id, schedule_version,
+       release_sha, expected_at, observed_at, interval_seconds, status,
+       reason, receipt_sha256
+FROM monitor_interval_gaps
+ORDER BY expected_at ASC
+LIMIT ?
+"""
 
 
 class SQLiteScanStore:
@@ -1595,21 +1612,14 @@ class SQLiteScanStore:
         try:
             with self._connect() as connection:
                 connection.row_factory = sqlite3.Row
-                fields = (
-                    "gap_id, run_id, market_date, schedule_id, schedule_version, "
-                    "release_sha, expected_at, observed_at, interval_seconds, status, "
-                    "reason, receipt_sha256"
-                )
                 if market_date:
                     rows = connection.execute(
-                        f"SELECT {fields} FROM monitor_interval_gaps "
-                        "WHERE market_date = ? ORDER BY expected_at ASC LIMIT ?",
+                        _MONITOR_INTERVAL_GAP_PROJECTION_BY_DATE_SQL,
                         (str(market_date)[:10], int(limit)),
                     ).fetchall()
                 else:
                     rows = connection.execute(
-                        f"SELECT {fields} FROM monitor_interval_gaps "
-                        "ORDER BY expected_at ASC LIMIT ?",
+                        _MONITOR_INTERVAL_GAP_PROJECTION_SQL,
                         (int(limit),),
                     ).fetchall()
                 return [dict(row) for row in rows]

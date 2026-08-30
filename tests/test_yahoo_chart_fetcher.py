@@ -57,6 +57,34 @@ def _rate_gate_in_child(cache_dir: str) -> None:
     )
 
 
+def test_windows_file_lock_uses_runtime_msvcrt_capabilities(monkeypatch) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 7
+
+        @staticmethod
+        def locking(file_descriptor: int, mode: int, size: int) -> None:
+            calls.append((file_descriptor, mode, size))
+
+    class FakeHandle:
+        @staticmethod
+        def fileno() -> int:
+            return 42
+
+    monkeypatch.setattr(
+        yahoo_chart_fetcher.importlib,
+        "import_module",
+        lambda name: FakeMsvcrt if name == "msvcrt" else None,
+    )
+
+    yahoo_chart_fetcher._lock_windows_file(FakeHandle(), "LK_NBLCK")
+
+    assert calls == [(42, 7, 1)]
+    with pytest.raises(OSError, match="Windows file locking is unavailable"):
+        yahoo_chart_fetcher._lock_windows_file(FakeHandle(), "LK_UNLCK")
+
+
 def test_yahoo_chart_fetch_retries_transient_symbol_failure(
     tmp_path: Path,
     monkeypatch,

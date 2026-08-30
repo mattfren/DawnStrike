@@ -351,6 +351,48 @@ def test_monitor_gap_receipt_is_idempotent_across_late_observation(tmp_path):
         store.persist_monitor_interval_gap_receipts([conflicting])
 
 
+def test_monitor_gap_projection_has_fixed_order_and_bound_market_date(tmp_path):
+    store = SQLiteScanStore(tmp_path / "monitor.sqlite")
+    receipts = [
+        monitor_interval_gap_receipt(
+            expected_at=f"2026-08-{day:02d}T14:00:00+00:00",
+            observed_at=f"2026-08-{day:02d}T14:06:00+00:00",
+            interval_seconds=300,
+            market_date=f"2026-08-{day:02d}",
+            release_sha=RELEASE_SHA,
+        )
+        for day in (29, 30)
+    ]
+    assert store.persist_monitor_interval_gap_receipts(receipts)["inserted"] == 2
+
+    expected_fields = (
+        "gap_id",
+        "run_id",
+        "market_date",
+        "schedule_id",
+        "schedule_version",
+        "release_sha",
+        "expected_at",
+        "observed_at",
+        "interval_seconds",
+        "status",
+        "reason",
+        "receipt_sha256",
+    )
+    filtered = store.load_monitor_interval_gap_projection(market_date="2026-08-29")
+    assert len(filtered) == 1
+    assert tuple(filtered[0]) == expected_fields
+    assert filtered[0]["market_date"] == "2026-08-29"
+    assert store.load_monitor_interval_gap_projection(market_date="2026-08-30")[0][
+        "market_date"
+    ] == "2026-08-30"
+    # SQL structure is fixed and the caller value remains a bound predicate;
+    # an injection-shaped suffix cannot widen the market-date result set.
+    assert store.load_monitor_interval_gap_projection(
+        market_date="2026-08-29' OR 1=1 --"
+    ) == filtered
+
+
 def test_monitor_gap_requires_exact_release_sha():
     with pytest.raises(ValueError, match="lowercase 40-character SHA"):
         monitor_interval_gap_receipt(

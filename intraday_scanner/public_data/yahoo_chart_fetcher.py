@@ -64,6 +64,17 @@ class _SymbolFetchResult:
     completed_at: float | None = None
 
 
+def _lock_windows_file(handle: Any, mode_name: str) -> None:
+    """Apply a Windows byte-range lock without relying on incomplete stubs."""
+
+    msvcrt_module = importlib.import_module("msvcrt")
+    locking = getattr(msvcrt_module, "locking", None)
+    mode = getattr(msvcrt_module, mode_name, None)
+    if not callable(locking) or not isinstance(mode, int):
+        raise OSError("Windows file locking is unavailable")
+    locking(handle.fileno(), mode, 1)
+
+
 def fetch_yahoo_chart_daily_dataset(
     *,
     symbols: tuple[str, ...] = DEFAULT_YAHOO_CHART_SYMBOLS,
@@ -463,11 +474,9 @@ def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
                 break
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
-
             while True:
                 try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    _lock_windows_file(handle, "LK_NBLCK")
                     break
                 except OSError:
                     if deadline is not None and time.monotonic() >= deadline:
@@ -517,7 +526,7 @@ def _cross_process_rate_lock(cache_root: Path, *, deadline: float | None):
         finally:
             if os.name == "nt":
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                _lock_windows_file(handle, "LK_UNLCK")
             else:  # pragma: no cover - exercised on POSIX CI only
                 fcntl_module = importlib.import_module("fcntl")
                 flock = getattr(fcntl_module, "flock", None)
